@@ -468,7 +468,6 @@ def _write_portfolio_result(layout: StorageLayout, result) -> Path:
                 scope=OutputScope.LOCAL_ONLY,
             ),
             layout=layout,
-            _finalize_memory=True,
         )
 
 

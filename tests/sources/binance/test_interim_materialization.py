@@ -117,21 +117,18 @@ def test_binance_file_discovery_occurs_inside_one_root_policy(
     assert not result.artifact_roots
 
 
-def test_binance_interim_iterator_rejects_competing_root_at_creation() -> None:
+def test_binance_interim_iterator_reuses_active_root_at_creation() -> None:
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(
-            RuntimeError,
-            match="runtime_resource_policy_competing_root",
-        ):
-            interim.iter_interim_frames(
-                data_id="market_bars_1m",
-                input_files=(),
-            )
+        iterator = interim.iter_interim_frames(
+            data_id="market_bars_1m",
+            input_files=(),
+        )
+        assert tuple(iterator) == ()
 
 
-def test_binance_interim_iterator_rejects_unrelated_root_at_delayed_consumption(
+def test_binance_interim_iterator_reuses_active_root_at_delayed_consumption(
 ) -> None:
     iterator = interim.iter_interim_frames(
         data_id="market_bars_1m",
@@ -140,11 +137,7 @@ def test_binance_interim_iterator_rejects_unrelated_root_at_delayed_consumption(
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(
-            RuntimeError,
-            match="runtime_resource_policy_competing_root",
-        ):
-            tuple(iterator)
+        assert tuple(iterator) == ()
 
 
 def test_binance_interim_iterator_keeps_explicit_root_during_delayed_consumption(
@@ -363,7 +356,7 @@ def test_binance_raw_bound_pull_admits_scan_before_record_read(
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
         assert pulls == []
-        assert policy.reserved_memory_bytes == 0
+        assert policy.used_memory_bytes == 0
         lease = policy.lease("test.binance.raw", bound)
         try:
             owned = stream.send(lease)
@@ -394,7 +387,7 @@ def test_binance_raw_output_suspension_has_no_scan_record_duplicate(
         try:
             owned = stream.send(lease)
             assert isinstance(owned, _OwnedValue)
-            assert policy.reserved_memory_bytes == lease.reserved_bytes
+            assert policy.used_memory_bytes == lease.reserved_bytes
         finally:
             stream.close()
             lease.close()

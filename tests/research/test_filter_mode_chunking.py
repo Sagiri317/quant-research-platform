@@ -333,9 +333,12 @@ def test_complete_time_chunks_close_upstream_on_error_and_consumer_close() -> No
 def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import quant_research_platform.research._memory as memory_owner
     from quant_research_platform.research.evaluations import engine as eval_engine
 
     frame = make_filter_mode_frame()
+    first = frame.iloc[:3]
+    second = frame.iloc[3:]
     spec = EvaluationSpec(
         run_id="eval_boundary_over_budget",
         market_id=MarketId("a_share"),
@@ -343,17 +346,25 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=64 * 1024 + 1_000,
+    boundary_payload_bytes = pandas_frame_payload_bytes(first) + (
+        pandas_frame_payload_bytes(second)
     )
+    policy = capture_test_policy(
+        available_memory_bytes=boundary_payload_bytes * 2,
+        explicit_cap_bytes=boundary_payload_bytes,
+    )
+
+    def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise AssertionError("boundary concat ran before admission")
+
+    monkeypatch.setattr(memory_owner.pd, "concat", reject_concat)
 
     with pytest.raises(
         ValueError,
         match="research_time_boundary_payloads_exceed_task_memory_budget",
     ):
         eval_engine.evaluate_signal_frame_chunks(
-            (frame.iloc[:3], frame.iloc[3:]),
+            (first, second),
             spec,
             n_groups=2,
             resource_policy=policy,
@@ -374,12 +385,12 @@ def test_evaluation_output_accumulation_honors_shared_root_headroom() -> None:
         explicit_cap_bytes=1 * 1024 * 1024,
     )
     frame_bytes = pandas_frame_payload_bytes(frame)
-    assert frame_bytes < policy.task_memory_budget_bytes
+    assert frame_bytes < policy.memory_budget_bytes
 
     with runtime_resource_policy_scope(policy):
         with policy.reserve(
             "outer_owner",
-            policy.task_memory_budget_bytes - frame_bytes,
+            policy.memory_budget_bytes - frame_bytes,
         ):
             with pytest.raises(
                 ValueError,

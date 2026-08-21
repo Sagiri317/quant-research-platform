@@ -132,7 +132,7 @@ def _inspect_dataset_session_owned(
     try:
         runtime = _inspection_runtime_metadata(
             context,
-            target_chunk_bytes=resource_policy.remaining_memory_bytes,
+            target_chunk_bytes=resource_policy.available_memory_bytes,
         )
         columns = physical_schema_columns(context.schema)
     except BaseException:
@@ -275,8 +275,8 @@ def _inspection_runtime_metadata(
         str(column): str(role) for column, role in spec["column_roles"].items()
     }
     remaining_headroom = (
-        context.resource_policy.task_memory_budget_bytes
-        - context.resource_policy.reserved_memory_bytes
+        context.resource_policy.memory_budget_bytes
+        - context.resource_policy.used_memory_bytes
     )
     if remaining_headroom <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")

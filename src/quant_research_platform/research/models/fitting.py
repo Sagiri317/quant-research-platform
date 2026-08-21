@@ -406,7 +406,7 @@ def fit_estimator_model_result_from_frames(
                     training,
                     spec,
                     available_bytes=(
-                        None if policy is None else policy.remaining_memory_bytes
+                        None if policy is None else policy.available_memory_bytes
                     ),
                 )
                 if policy is not None:
@@ -750,8 +750,8 @@ def iter_model_work_frames(
         selected_bytes = _selected_frame_payload_bytes(frame, selected)
         policy = current_runtime_resource_policy()
         if policy is not None and (
-            policy.reserved_memory_bytes + selected_bytes
-            > policy.task_memory_budget_bytes
+            policy.used_memory_bytes + selected_bytes
+            > policy.memory_budget_bytes
         ):
             raise ValueError("model_training_working_set_exceeds_task_memory_budget")
         with ExitStack() as reservation:

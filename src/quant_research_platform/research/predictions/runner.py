@@ -588,8 +588,8 @@ def _prediction_train_chunks(
         mask_bytes = index_bytes + len(chunk)
         working_bytes = timestamp_bytes + mask_bytes + pandas_frame_payload_bytes(chunk)
         if policy is not None and (
-            policy.reserved_memory_bytes + working_bytes
-            > policy.task_memory_budget_bytes
+            policy.used_memory_bytes + working_bytes
+            > policy.memory_budget_bytes
         ):
             raise ValueError(
                 "prediction_training_working_set_exceeds_task_memory_budget"
@@ -604,8 +604,8 @@ def _prediction_train_chunks(
         if not train.empty:
             retained_bytes = pandas_frame_payload_bytes(train)
             if policy is not None and (
-                policy.reserved_memory_bytes + retained_bytes
-                > policy.task_memory_budget_bytes
+                policy.used_memory_bytes + retained_bytes
+                > policy.memory_budget_bytes
             ):
                 raise ValueError(
                     "prediction_training_working_set_exceeds_task_memory_budget"

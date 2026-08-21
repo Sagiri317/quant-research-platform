@@ -29,6 +29,7 @@ from quant_research_platform.research.features.transforms import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     _OwnedValue,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -60,47 +61,44 @@ def assemble_research_dataset(
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Path:
     """Assemble one registered research dataset from processed inputs."""
-    with runtime_resource_policy_scope(resource_policy) as policy:
-        return _assemble_research_dataset_with_policy(
+    with runtime_resource_policy_scope(resource_policy):
+        return _assemble_research_dataset_impl(
             layout=layout,
             dataset_catalog=dataset_catalog,
             processed_catalog=processed_catalog,
             dataset_id=dataset_id,
             time_window=time_window,
-            resource_policy=policy,
         )
 
 
-def _assemble_research_dataset_with_policy(
+def _assemble_research_dataset_impl(
     *,
     layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
     processed_catalog: ProcessedDataCatalog,
     dataset_id: str,
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy,
 ) -> Path:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     spec = dataset_catalog.get(dataset_id)
-    policy = resource_policy
     _validate_research_input_specs(spec, processed_catalog)
-    with runtime_resource_policy_scope(policy):
-        with ExitStack() as stack:
-            input_sessions = _open_input_dataset_sessions(
-                layout=layout,
-                dataset_spec=spec,
-                processed_catalog=processed_catalog,
-                time_window=time_window,
-                resource_policy=policy,
-                stack=stack,
-            )
-            return _assemble_research_dataset_from_sessions(
-                layout=layout,
-                spec=spec,
-                processed_catalog=processed_catalog,
-                time_window=time_window,
-                policy=policy,
-                input_sessions=input_sessions,
-            )
+    with ExitStack() as stack:
+        input_sessions = _open_input_dataset_sessions(
+            layout=layout,
+            dataset_spec=spec,
+            processed_catalog=processed_catalog,
+            time_window=time_window,
+            stack=stack,
+        )
+        return _assemble_research_dataset_from_sessions(
+            layout=layout,
+            spec=spec,
+            processed_catalog=processed_catalog,
+            time_window=time_window,
+            input_sessions=input_sessions,
+        )
 
 
 def _assemble_research_dataset_from_sessions(
@@ -109,9 +107,11 @@ def _assemble_research_dataset_from_sessions(
     spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
-    policy: RuntimeResourcePolicy,
     input_sessions: Mapping[str, DatasetSession],
 ) -> Path:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     input_identities = _input_dataset_identities(
         dataset_spec=spec,
         sessions=input_sessions,
@@ -124,7 +124,6 @@ def _assemble_research_dataset_from_sessions(
         processed_catalog=processed_catalog,
         sessions=input_sessions,
         time_window=time_window,
-        resource_policy=policy,
     )
 
     def verify_input_sessions(_receipt: DatasetWriteReceipt) -> None:
@@ -148,14 +147,15 @@ def _iter_joined_processed_chunks(
     processed_catalog: ProcessedDataCatalog,
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[object]:
-    policy = resource_policy
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     base_data_id = _base_input_data_id(dataset_spec)
     producer_bound = max(
         1,
         min(
-            max(1, policy.remaining_memory_bytes // 2),
+            max(1, policy.available_memory_bytes // 2),
             max(1, policy.memory_budget_bytes // 2),
         ),
     )
@@ -164,10 +164,9 @@ def _iter_joined_processed_chunks(
         sessions[base_data_id],
         primary_key=dataset_spec.primary_key,
         time_window=time_window,
-        resource_policy=policy,
         retained_payload_bytes=max(
             0,
-            policy.reserved_memory_bytes - sessions[base_data_id].retained_memory_bytes,
+            policy.used_memory_bytes - sessions[base_data_id].retained_memory_bytes,
         ),
     )
     if not time_keys:
@@ -189,7 +188,6 @@ def _iter_joined_processed_chunks(
             sessions=sessions,
             time_window=chunk_window,
             base_data_id=base_data_id,
-            resource_policy=policy,
         )
         chunk_bytes = _frame_bytes(chunk)
         if chunk_bytes + 256 * 1024 > lease.reserved_bytes:
@@ -226,8 +224,10 @@ def _join_processed_inputs(
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     base_data_id: str | None = None,
-    resource_policy: RuntimeResourcePolicy,
 ) -> pd.DataFrame:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     ordered_input_ids = _ordered_input_data_ids(
         dataset_spec,
         base_data_id=base_data_id,
@@ -248,10 +248,9 @@ def _join_processed_inputs(
                     tuple(assembled.columns) if assembled is not None else ()
                 ),
                 time_window=time_window,
-                resource_policy=resource_policy,
                 retained_payload_bytes=max(
                     0,
-                    resource_policy.reserved_memory_bytes
+                    policy.used_memory_bytes
                     - session.retained_memory_bytes,
                 ),
             )
@@ -259,13 +258,13 @@ def _join_processed_inputs(
             input_state = ExitStack()
             try:
                 input_state.enter_context(
-                    resource_policy.reserve("research.assembly.input", input_bytes)
+                    policy.reserve("research.assembly.input", input_bytes)
                 )
                 if assembled is None:
                     next_base_state = ExitStack()
                     try:
                         next_base_state.enter_context(
-                            resource_policy.reserve(
+                            policy.reserve(
                                 "research.assembly.base_keys",
                                 input_bytes,
                             )
@@ -295,7 +294,7 @@ def _join_processed_inputs(
                 output_state = ExitStack()
                 try:
                     output_state.enter_context(
-                        resource_policy.reserve(
+                        policy.reserve(
                             "research.assembly.merge.output",
                             output_bound,
                         )
@@ -308,7 +307,7 @@ def _join_processed_inputs(
                             len(base_keys) + len(input_frame),  # result masks
                         )
                     )
-                    with resource_policy.reserve(
+                    with policy.reserve(
                         "research.assembly.coverage",
                         coverage_bound,
                     ):
@@ -321,7 +320,7 @@ def _join_processed_inputs(
                     join_index_bytes = (len(assembled) + len(input_frame)) * np.dtype(
                         np.intp
                     ).itemsize
-                    with resource_policy.reserve(
+                    with policy.reserve(
                         "research.assembly.merge.workspace",
                         base_key_bytes + input_bytes + join_index_bytes,
                     ):
@@ -354,7 +353,7 @@ def _join_processed_inputs(
             transformed_state = ExitStack()
             try:
                 transformed_state.enter_context(
-                    resource_policy.reserve(
+                    policy.reserve(
                         "research.assembly.transformed",
                         transformed_bytes,
                     )
@@ -367,7 +366,7 @@ def _join_processed_inputs(
             assembled_state = transformed_state.pop_all()
 
         projection_bound = _frame_bytes(assembled)
-        with resource_policy.reserve(
+        with policy.reserve(
             "research.assembly.projection",
             projection_bound,
         ):
@@ -391,13 +390,14 @@ def _time_keys_from_base_input(
     *,
     primary_key: tuple[str, ...],
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy,
     retained_payload_bytes: int,
 ) -> tuple[pd.Timestamp, ...]:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     session = _research_session_view(
         base_session,
         time_window=time_window,
-        resource_policy=resource_policy,
     )
     try:
         timestamps: set[pd.Timestamp] = set()
@@ -405,9 +405,9 @@ def _time_keys_from_base_input(
         with closing_dataset_iterator(
             iter_dataset_chunks(
                 session,
-                target_chunk_bytes=resource_policy.remaining_memory_bytes,
+                target_chunk_bytes=policy.available_memory_bytes,
                 operation_headroom_bytes=(
-                    resource_policy.task_memory_budget_bytes - retained_payload_bytes
+                    policy.memory_budget_bytes - retained_payload_bytes
                 ),
             )
         ) as chunks:
@@ -511,9 +511,11 @@ def _read_processed_input(
     session: DatasetSession,
     existing_columns: tuple[str, ...],
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy,
     retained_payload_bytes: int,
 ) -> pd.DataFrame:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     columns = _processed_input_columns(
         dataset_spec,
         processed_spec,
@@ -524,14 +526,13 @@ def _read_processed_input(
     view = _research_session_view(
         session,
         time_window=time_window,
-        resource_policy=resource_policy,
     )
     try:
         return materialize_dataset_session(
             view,
-            target_chunk_bytes=resource_policy.remaining_memory_bytes,
+            target_chunk_bytes=policy.available_memory_bytes,
             materialized_budget_bytes=(
-                resource_policy.task_memory_budget_bytes - retained_payload_bytes
+                policy.memory_budget_bytes - retained_payload_bytes
             ),
         )
     finally:
@@ -777,9 +778,11 @@ def _open_input_dataset_sessions(
     dataset_spec: ResearchDatasetSpec,
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy,
     stack: ExitStack,
 ) -> dict[str, DatasetSession]:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     sessions: dict[str, DatasetSession] = {}
     existing_columns: tuple[str, ...] = ()
     for data_id in _ordered_input_data_ids(dataset_spec, base_data_id=None):
@@ -800,7 +803,7 @@ def _open_input_dataset_sessions(
                     root,
                     columns=columns,
                     time_window=time_window,
-                    resource_policy=resource_policy,
+                    resource_policy=policy,
                 ),
             )
         except ValueError as exc:
@@ -818,7 +821,7 @@ def _open_input_dataset_sessions(
             raise
         sessions[data_id] = session
         stack.enter_context(
-            resource_policy.reserve(
+            policy.reserve(
                 f"research.assembly.session.{data_id}",
                 session.retained_memory_bytes,
             )
@@ -831,9 +834,11 @@ def _research_session_view(
     session: DatasetSession,
     *,
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy,
 ) -> DatasetSession:
-    if resource_policy is not session.resource_policy:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
+    if policy is not session.resource_policy:
         raise ValueError("research_session_resource_policy_mismatch")
     parquet_filters = parquet_filters_for_time_window(
         timestamp_column=session.timestamp_column,

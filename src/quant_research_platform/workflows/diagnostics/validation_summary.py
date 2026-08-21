@@ -190,7 +190,7 @@ def _build_validation_summary(
         for root, inspection, error in (result,)
         if error is None and inspection is not None
     ]
-    summary_headroom = resource_policy.remaining_memory_bytes
+    summary_headroom = resource_policy.available_memory_bytes
     if summary_headroom <= 0:
         raise ValueError("validation_summary_payload_exceeds_task_memory_budget")
     summary_bound_bytes = _validation_summary_graph_upper_bound_bytes(

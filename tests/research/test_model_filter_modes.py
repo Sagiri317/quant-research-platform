@@ -580,7 +580,7 @@ def test_linear_matrix_admission_precedes_allocation(
         explicit_cap_bytes=1 * 1024 * 1024,
     )
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("outer_owner", policy.task_memory_budget_bytes):
+        with policy.reserve("outer_owner", policy.memory_budget_bytes):
             with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
                 model_fitting.fit_linear_coefficients_exact(frame, spec)
 
@@ -834,7 +834,7 @@ def test_linear_tsqr_reserves_first_frame_across_second_pull(
         assert ephemeral_refs[0]() is None
         retained = ephemeral_refs[1]()
         assert retained is not None
-        assert policy.reserved_memory_bytes >= original_payload(retained)
+        assert policy.used_memory_bytes >= original_payload(retained)
         del retained
         yield second
         assert len(ephemeral_refs) == 4
@@ -885,7 +885,7 @@ def test_estimator_target_and_model_state_stay_reserved_through_metadata(
             and np.dtype(dtype) == np.dtype("float64")
         ):
             assert (
-                policy.reserved_memory_bytes
+                policy.used_memory_bytes
                 >= len(series) * np.dtype("float64").itemsize
             )
         return original_to_numpy(series, *args, **kwargs)
@@ -899,8 +899,8 @@ def test_estimator_target_and_model_state_stay_reserved_through_metadata(
 
         @property
         def feature_importances_(self) -> np.ndarray:
-            observations.append(policy.reserved_memory_bytes)
-            assert policy.reserved_memory_bytes >= (
+            observations.append(policy.used_memory_bytes)
+            assert policy.used_memory_bytes >= (
                 expected_training_bytes + expected_model_bytes
             )
             return np.array([1.0])

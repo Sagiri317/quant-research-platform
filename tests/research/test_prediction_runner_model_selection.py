@@ -482,7 +482,6 @@ def test_prediction_runner_accepts_equivalent_timezone_representations() -> None
 def test_prediction_lazy_root_waits_for_chunks_and_metadata(monkeypatch) -> None:
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024,
-        rss_bytes=100,
         explicit_cap_bytes=64 * 1024 + 768,
     )
     configured = SimpleNamespace(model_id="model", candidate_model_ids=())
@@ -523,7 +522,6 @@ def test_prediction_lazy_root_waits_for_chunks_and_metadata(monkeypatch) -> None
 def test_prediction_result_explicit_close_owns_operation_root(monkeypatch) -> None:
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024,
-        rss_bytes=100,
         explicit_cap_bytes=64 * 1024 + 768,
     )
     configured = SimpleNamespace(model_id="model", candidate_model_ids=())
@@ -562,7 +560,6 @@ def test_prediction_result_context_preserves_body_primary() -> None:
     closed: list[bool] = []
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024,
-        rss_bytes=100,
         explicit_cap_bytes=64 * 1024 + 768,
     )
     scope = prediction_runner.runtime_resource_policy_scope(policy)

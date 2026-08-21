@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+import quant_research_platform.runtime.resources as runtime_resources
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -26,7 +27,7 @@ from quant_research_platform.interfaces import private_cli
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
+    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import write_dataset
@@ -229,18 +230,18 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
         retained_items,
     ) -> tuple[dict[str, object], int]:
         assert important_null_count_columns == frozenset()
-        assert active_runtime_resource_policy() is resource_policy
+        assert current_runtime_resource_policy() is resource_policy
         observed_policies.append(resource_policy)
-        observed_reserved_bytes.append(resource_policy.reserved_memory_bytes)
+        observed_reserved_bytes.append(resource_policy.used_memory_bytes)
         retained_items.enter_context(
             resource_policy.reserve("schema.inventory.items", 64)
         )
         return {"logical_relative_root": artifact_root.name}, 64
 
     monkeypatch.setattr(
-        RuntimeResourcePolicy,
-        "capture",
-        staticmethod(lambda **_kwargs: capture_policy()),
+        runtime_resources,
+        "_capture_runtime_resource_policy",
+        lambda **_kwargs: capture_policy(),
     )
     monkeypatch.setattr(
         schema_inventory,
@@ -271,9 +272,9 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
     observed_reserved: list[int] = []
     cleanup_states: list[str] = []
     monkeypatch.setattr(
-        RuntimeResourcePolicy,
-        "capture",
-        staticmethod(lambda **_kwargs: policy),
+        runtime_resources,
+        "_capture_runtime_resource_policy",
+        lambda **_kwargs: policy,
     )
 
     @contextmanager
@@ -291,8 +292,8 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
         _path: Path,
         _payload: object,
     ) -> Path:
-        observed.append(active_runtime_resource_policy())
-        observed_reserved.append(policy.reserved_memory_bytes)
+        observed.append(current_runtime_resource_policy())
+        observed_reserved.append(policy.used_memory_bytes)
         _path.write_text("{}", encoding="utf-8")
         return _path
 
@@ -302,7 +303,7 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
     assert observed == [policy]
     assert observed_reserved == [64]
     assert cleanup_states == ["ACTIVE"]
-    assert policy.reserved_memory_bytes == 0
+    assert policy.used_memory_bytes == 0
 
 
 def test_schema_inventory_rejects_accumulated_items_over_budget(
@@ -314,9 +315,9 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
         explicit_cap_bytes=64 * 1024 + 750,
     )
     monkeypatch.setattr(
-        RuntimeResourcePolicy,
-        "capture",
-        staticmethod(lambda **_kwargs: policy),
+        runtime_resources,
+        "_capture_runtime_resource_policy",
+        lambda **_kwargs: policy,
     )
     monkeypatch.setattr(
         schema_inventory,

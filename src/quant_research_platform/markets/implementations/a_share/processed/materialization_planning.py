@@ -37,8 +37,6 @@ from quant_research_platform.markets.session_windows import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -123,7 +121,7 @@ def require_dataset_coverage(
         sessions.nbytes + len(expected_sessions) * np.dtype(np.bool_).itemsize
     )
     reader_headroom_bytes = (
-        resource_policy.task_memory_budget_bytes - retained_state_bytes
+        resource_policy.memory_budget_bytes - retained_state_bytes
     )
     if reader_headroom_bytes <= 0:
         raise materialization_io.MaterializationCapacityExceeded(
@@ -176,7 +174,7 @@ def _mark_dataset_session_coverage(
             owner="a_share.planning.calendar.inspection",
         )
     reader_headroom_bytes = (
-        resource_policy.task_memory_budget_bytes - retained_state_bytes
+        resource_policy.memory_budget_bytes - retained_state_bytes
     )
     if reader_headroom_bytes <= 0:
         raise materialization_io.MaterializationCapacityExceeded(
@@ -188,7 +186,7 @@ def _mark_dataset_session_coverage(
         time_window=time_window,
         resource_policy=resource_policy,
         target_chunk_bytes=min(
-            resource_policy.remaining_memory_bytes,
+            resource_policy.available_memory_bytes,
             reader_headroom_bytes,
         ),
         retained_payload_bytes=retained_state_bytes,
@@ -226,7 +224,7 @@ def iter_active_materialization_batches(
     retained_payload_bytes: int = 0,
     materialize: Callable[..., pd.DataFrame],
 ) -> Iterator[object]:
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = resource_policy
     if current_runtime_resource_policy() is not bound_policy:
         raise RuntimeError("a_share_materialization_policy_scope_required")
     if valid_bar_offsets is not None:
@@ -302,8 +300,8 @@ def iter_active_materialization_batches(
                 resource_policy=bound_policy,
             )
             discovery_headroom = (
-                bound_policy.task_memory_budget_bytes
-                - bound_policy.reserved_memory_bytes
+                bound_policy.memory_budget_bytes
+                - bound_policy.used_memory_bytes
                 - owner_retained_bytes
             )
             if discovery_headroom <= 0:
@@ -333,8 +331,8 @@ def iter_active_materialization_batches(
                                 raise ValueError("invalid_processed_panel_asset_id")
                             encoded_bound = sys.getsizeof(b"") + 4 * len(value)
                             available_bytes = (
-                                bound_policy.task_memory_budget_bytes
-                                - bound_policy.reserved_memory_bytes
+                                bound_policy.memory_budget_bytes
+                                - bound_policy.used_memory_bytes
                                 - owner_retained_bytes
                             )
                             if encoded_bound > available_bytes:
@@ -401,8 +399,8 @@ def iter_active_materialization_batches(
                     )
 
             batch_available = (
-                bound_policy.task_memory_budget_bytes
-                - bound_policy.reserved_memory_bytes
+                bound_policy.memory_budget_bytes
+                - bound_policy.used_memory_bytes
                 - owner_retained_bytes
                 - batch_state_bytes
             )
@@ -458,10 +456,10 @@ def iter_active_materialization_batches(
     def activate_under_policy() -> Iterator[object]:
         assert bound_policy is not None
         if (
-            bound_policy.reserved_memory_bytes
+            bound_policy.used_memory_bytes
             + retained_payload_bytes
             + retained_session_bytes
-            > bound_policy.task_memory_budget_bytes
+            > bound_policy.memory_budget_bytes
         ):
             raise materialization_io.MaterializationCapacityExceeded(
                 "a_share_known_payloads_exceed_task_memory_budget"
@@ -518,7 +516,7 @@ def _require_retained_materialization_capacity(
     *,
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
-    if retained_payload_bytes > resource_policy.task_memory_budget_bytes:
+    if retained_payload_bytes > resource_policy.memory_budget_bytes:
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
         )
@@ -536,11 +534,11 @@ def _iter_adaptive_materialization_batches(
     materialize: Callable[..., pd.DataFrame],
 ) -> Iterator[object]:
     """Pack assets then sessions from one immutable soft throughput target."""
-    policy = active_runtime_resource_policy()
+    policy = current_runtime_resource_policy()
     pointer_bytes = np.dtype(object).itemsize
     remaining = (
-        policy.task_memory_budget_bytes
-        - policy.reserved_memory_bytes
+        policy.memory_budget_bytes
+        - policy.used_memory_bytes
         - retained_payload_bytes
     )
     if remaining <= 0:
@@ -594,10 +592,10 @@ def _iter_adaptive_materialization_batches(
                 else (session_stop - session_start) * pointer_bytes
             )
             if (
-                policy.reserved_memory_bytes
+                policy.used_memory_bytes
                 + retained_payload_bytes
                 + planned_slice_bytes
-                > policy.task_memory_budget_bytes
+                > policy.memory_budget_bytes
             ):
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
@@ -726,7 +724,7 @@ def _build_valid_bar_key_index(
         columns=("asset_id", "timestamp"),
         time_window=time_window,
         resource_policy=resource_policy,
-        target_chunk_bytes=resource_policy.remaining_memory_bytes,
+        target_chunk_bytes=resource_policy.available_memory_bytes,
         asset_ids=asset_ids,
         retained_payload_bytes=owner_retained_bytes,
     )
@@ -813,10 +811,10 @@ def bounded_valid_bar_key_coverage(
     slot_count = lookback_bars + 2 + lookahead_bars
     boundary_state_bytes = int(len(asset_ids) * slot_count * np.dtype("int64").itemsize)
     if (
-        resource_policy.reserved_memory_bytes
+        resource_policy.used_memory_bytes
         + retained_payload_bytes
         + boundary_state_bytes
-        > resource_policy.task_memory_budget_bytes
+        > resource_policy.memory_budget_bytes
     ):
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
@@ -879,10 +877,10 @@ def bounded_valid_bar_key_coverage(
             output_count * (np.dtype(np.int64).itemsize + np.dtype(object).itemsize)
         )
         if (
-            resource_policy.reserved_memory_bytes
+            resource_policy.used_memory_bytes
             + retained_payload_bytes
             + output_state_bytes
-            > resource_policy.task_memory_budget_bytes
+            > resource_policy.memory_budget_bytes
         ):
             raise materialization_io.MaterializationCapacityExceeded(
                 "a_share_known_payloads_exceed_task_memory_budget"
@@ -952,7 +950,7 @@ def available_trading_sessions(
         + position_state_bytes
         + maximum_selected_output_bytes
     )
-    if compact_peak_bytes > resource_policy.task_memory_budget_bytes:
+    if compact_peak_bytes > resource_policy.memory_budget_bytes:
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
         )
@@ -962,7 +960,7 @@ def available_trading_sessions(
         + np.dtype("datetime64[ns]").itemsize
     )
     transform_row_bytes = 2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
-    reader_headroom_bytes = resource_policy.task_memory_budget_bytes - (
+    reader_headroom_bytes = resource_policy.memory_budget_bytes - (
         maximum_session_state_bytes
     )
     if reader_headroom_bytes <= 0:
@@ -975,7 +973,7 @@ def available_trading_sessions(
         + ceil(persisted_payload_bytes / max(1, calendar_row_count)),
     )
     read_target_bytes = min(
-        resource_policy.remaining_memory_bytes,
+        resource_policy.available_memory_bytes,
         initial_read_target_bytes,
         max(
             1,
@@ -1013,7 +1011,7 @@ def available_trading_sessions(
                 maximum_session_state_bytes
                 + pandas_frame_payload_bytes(calendar)
                 + actual_transform_scratch_bytes
-                > resource_policy.task_memory_budget_bytes
+                > resource_policy.memory_budget_bytes
             ):
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
@@ -1066,7 +1064,7 @@ def available_trading_sessions(
     )
     selected_bytes = (stop - first) * np.dtype(np.int64).itemsize
     if session_values.nbytes + keep.nbytes + positions.nbytes + selected_bytes > (
-        resource_policy.task_memory_budget_bytes
+        resource_policy.memory_budget_bytes
     ):
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
@@ -1133,7 +1131,7 @@ def require_known_materialization_payload_bound(
     if (
         retained_payload_bytes
         + sum(pandas_frame_payload_bytes(frame) for frame in unique_frames)
-        > resource_policy.task_memory_budget_bytes
+        > resource_policy.memory_budget_bytes
     ):
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"

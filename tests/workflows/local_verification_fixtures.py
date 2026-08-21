@@ -102,6 +102,7 @@ def persist_fake_artifact(
         frame,
         spec=_dataset_spec(dataset_id, logical_layer),
         resource_policy=current_runtime_resource_policy(),
+        borrowed_input=True,
     )
 
 
@@ -390,6 +391,7 @@ def persist_tiny_a_share_processed_inputs(
             _tiny_a_share_processed_frame(spec, training_periods=training_periods),
             spec=spec,
             resource_policy=current_runtime_resource_policy(),
+            borrowed_input=True,
         )
         inspections[data_id] = inspect_fake_artifact(root)
     return inspections

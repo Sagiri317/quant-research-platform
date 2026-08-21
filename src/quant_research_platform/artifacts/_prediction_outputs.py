@@ -50,7 +50,6 @@ def write_prediction_outputs(
     output_chunks: Iterable[pd.DataFrame] | None = None,
     model_metadata: Mapping[str, object] | None = None,
     prediction_metadata_factory: Callable[[], Mapping[str, object]] | None = None,
-    _finalize_memory: bool = False,
 ) -> Path:
     """Write local prediction outputs."""
 
@@ -64,7 +63,6 @@ def write_prediction_outputs(
             layout=layout,
             model_metadata=model_metadata,
             prediction_metadata_factory=prediction_metadata_factory,
-            finalize_memory=_finalize_memory,
         )
     if frame is None:
         raise ValueError("prediction_output_frame_required")
@@ -136,11 +134,7 @@ def write_prediction_outputs(
             ),
         )
 
-    atomic_write_directory(
-        output_bundle,
-        _write,
-        finalize_memory=_finalize_memory,
-    )
+    atomic_write_directory(output_bundle, _write)
     return output_bundle
 
 
@@ -152,7 +146,6 @@ def _write_prediction_output_chunks(
     layout: StorageLayout,
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
-    finalize_memory: bool = False,
 ) -> Path:
     output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
@@ -210,9 +203,5 @@ def _write_prediction_output_chunks(
             ),
         )
 
-    atomic_write_directory(
-        output_bundle,
-        _write,
-        finalize_memory=finalize_memory,
-    )
+    atomic_write_directory(output_bundle, _write)
     return output_bundle

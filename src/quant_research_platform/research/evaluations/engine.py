@@ -343,8 +343,8 @@ def _iter_evaluation_work_frames(
             del selected_frame
         normalized_bytes = pandas_frame_payload_bytes(normalized)
         if resource_policy is not None and (
-            resource_policy.reserved_memory_bytes + normalized_bytes
-            > resource_policy.task_memory_budget_bytes
+            resource_policy.used_memory_bytes + normalized_bytes
+            > resource_policy.memory_budget_bytes
         ):
             raise ValueError(
                 "research_evaluation_working_set_exceeds_task_memory_budget"

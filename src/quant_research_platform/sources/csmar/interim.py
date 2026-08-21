@@ -27,8 +27,7 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -545,17 +544,11 @@ def iter_interim_frames(
     pruning_reports: list[dict[str, object]] | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
+    bound_policy = resource_policy
     overrides = _validated_column_overrides({} if overrides is None else overrides)
 
     def activate() -> Iterator[object]:
-        policy = bind_runtime_resource_policy(
-            bound_policy,
-            allow_implicit_active=False,
-        ) or active_runtime_resource_policy()
+        policy = bound_policy or current_runtime_resource_policy()
         producer = _iter_interim_frames(
             data_id=data_id,
             input_files=input_files,
@@ -564,9 +557,8 @@ def iter_interim_frames(
             overrides=overrides,
             chunksize=chunksize,
             pruning_reports=pruning_reports,
-            resource_policy=policy,
         )
-        with runtime_resource_policy_scope(policy):
+        with runtime_resource_policy_scope(policy) as policy:
             try:
                 bound = next(producer)
             except StopIteration:
@@ -616,87 +608,76 @@ def _iter_interim_frames(
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
     scratch_parent: Path | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[object]:
-    bound_policy = bind_runtime_resource_policy(resource_policy)
     validated_overrides = {} if overrides is None else overrides
 
     def activate() -> Iterator[object]:
-        policy = bind_runtime_resource_policy(
-            bound_policy,
-            allow_implicit_active=False,
-        ) or active_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy):
-            operation_reports: list[dict[str, object]] = []
-            raw_dataset = _raw_dataset_for_interim(data_id)
-            inputs = iter(input_files)
-            with closing_dataset_iterator(inputs):
-                selected_scratch_parent = scratch_parent
-                prepared_inputs: Iterable[Path | tuple[Path, DatasetFileIdentity]] = (
-                    inputs
+        operation_reports: list[dict[str, object]] = []
+        raw_dataset = _raw_dataset_for_interim(data_id)
+        inputs = iter(input_files)
+        with closing_dataset_iterator(inputs):
+            selected_scratch_parent = scratch_parent
+            prepared_inputs: Iterable[Path | tuple[Path, DatasetFileIdentity]] = inputs
+            if data_id in SOURCE_REFERENCE_DATA_IDS:
+                try:
+                    first_input = next(inputs)
+                except StopIteration:
+                    _append_reference_duplicate_summary(
+                        operation_reports,
+                        data_id,
+                        0,
+                    )
+                    first_input = None
+                if first_input is not None:
+                    first_path = _input_file_path(first_input)
+                    if selected_scratch_parent is None:
+                        selected_scratch_parent = first_path.parent
+                        source_parent = require_unaliased_path(
+                            first_path.parent,
+                            error="csmar_reference_source_volume_mismatch",
+                        )
+                        source_metadata = source_parent.lstat()
+                        if not stat.S_ISDIR(source_metadata.st_mode):
+                            raise ValueError(
+                                "csmar_reference_source_volume_mismatch"
+                            )
+                        source_device = source_metadata.st_dev
+                    else:
+                        source_device = None
+                    prepared_inputs = _iter_reference_inputs(
+                        first_input,
+                        inputs,
+                        source_device=source_device,
+                    )
+            if selected_scratch_parent is not None or data_id not in (
+                SOURCE_REFERENCE_DATA_IDS
+            ):
+                frames = _iter_pruned_interim_frames(
+                    data_id=data_id,
+                    raw_dataset=raw_dataset,
+                    input_files=prepared_inputs,
+                    start_date=start_date,
+                    end_date=end_date,
+                    overrides=validated_overrides,
+                    chunksize=chunksize,
+                    pruning_reports=operation_reports,
                 )
                 if data_id in SOURCE_REFERENCE_DATA_IDS:
-                    try:
-                        first_input = next(inputs)
-                    except StopIteration:
-                        _append_reference_duplicate_summary(
-                            operation_reports,
-                            data_id,
-                            0,
-                        )
-                        first_input = None
-                    if first_input is not None:
-                        first_path = _input_file_path(first_input)
-                        if selected_scratch_parent is None:
-                            selected_scratch_parent = first_path.parent
-                            source_parent = require_unaliased_path(
-                                first_path.parent,
-                                error="csmar_reference_source_volume_mismatch",
-                            )
-                            source_metadata = source_parent.lstat()
-                            if not stat.S_ISDIR(source_metadata.st_mode):
-                                raise ValueError(
-                                    "csmar_reference_source_volume_mismatch"
-                                )
-                            source_device = source_metadata.st_dev
-                        else:
-                            source_device = None
-                        prepared_inputs = _iter_reference_inputs(
-                            first_input,
-                            inputs,
-                            source_device=source_device,
-                        )
-                if selected_scratch_parent is not None or data_id not in (
-                    SOURCE_REFERENCE_DATA_IDS
-                ):
-                    frames = _iter_pruned_interim_frames(
+                    assert selected_scratch_parent is not None
+                    reference_frames = _iter_deduped_reference_frames(
+                        frames,
                         data_id=data_id,
-                        raw_dataset=raw_dataset,
-                        input_files=prepared_inputs,
-                        start_date=start_date,
-                        end_date=end_date,
-                        overrides=validated_overrides,
-                        chunksize=chunksize,
                         pruning_reports=operation_reports,
-                        resource_policy=policy,
+                        scratch_parent=selected_scratch_parent,
                     )
-                    if data_id in SOURCE_REFERENCE_DATA_IDS:
-                        assert selected_scratch_parent is not None
-                        reference_frames = _iter_deduped_reference_frames(
-                            frames,
-                            data_id=data_id,
-                            pruning_reports=operation_reports,
-                            scratch_parent=selected_scratch_parent,
-                            resource_policy=policy,
-                        )
-                        with closing_dataset_iterator(reference_frames):
-                            yield from reference_frames
-                    else:
-                        with closing_dataset_iterator(frames):
-                            yield from frames
-            if pruning_reports is not None:
-                for report in operation_reports:
-                    _merge_pruning_report(pruning_reports, report)
+                    with closing_dataset_iterator(reference_frames):
+                        yield from reference_frames
+                else:
+                    with closing_dataset_iterator(frames):
+                        yield from frames
+        if pruning_reports is not None:
+            for report in operation_reports:
+                _merge_pruning_report(pruning_reports, report)
 
     return activate()
 
@@ -712,12 +693,7 @@ def materialize_interim_data(
     chunksize: int = 500_000,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> InterimImportResult:
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
-    policy = bound_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(resource_policy):
         return _materialize_interim_data(
             layout=layout,
             raw_root=raw_root,
@@ -726,7 +702,6 @@ def materialize_interim_data(
             end_date=end_date,
             override_path=override_path,
             chunksize=chunksize,
-            resource_policy=policy,
         )
 
 
@@ -739,8 +714,10 @@ def _materialize_interim_data(
     end_date: str | None,
     override_path: Path | None,
     chunksize: int,
-    resource_policy: RuntimeResourcePolicy,
 ) -> InterimImportResult:
+    resource_policy = current_runtime_resource_policy()
+    if resource_policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     catalog = interim_catalog()
     source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
     overrides = (
@@ -779,7 +756,6 @@ def _materialize_interim_data(
                 chunksize=chunksize,
                 pruning_reports=pruning_reports,
                 scratch_parent=artifact_root.parent,
-                resource_policy=resource_policy,
             )
             with closing_dataset_iterator(frames):
                 try:
@@ -814,9 +790,10 @@ def _iter_pruned_interim_frames(
     overrides: Mapping[str, Mapping[str, object]],
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
-    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[object]:
-    policy = resource_policy or active_runtime_resource_policy()
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     local_reports: list[dict[str, object]] = []
     primary_key = tuple(interim_catalog().get(data_id).primary_key)
     previous_key: tuple[object, ...] | None = None
@@ -888,7 +865,6 @@ def _iter_pruned_interim_frames(
                                 retained_previous_bytes=(
                                     0 if candidate is chunk else chunk_bytes
                                 ),
-                                resource_policy=policy,
                             )
                         except _InterimCapacityExceeded as exc:
                             del candidate
@@ -925,7 +901,7 @@ def _iter_pruned_interim_frames(
                         if stop < len(chunk):
                             remainder_bound = min(
                                 lease.reserved_bytes,
-                                max(1, policy.remaining_memory_bytes),
+                                max(1, policy.available_memory_bytes),
                             )
                             next_pending_lease = policy.lease(
                                 "source.csmar.interim.pending",
@@ -1013,16 +989,17 @@ def _transform_interim_chunk(
     end_date: str | None,
     overrides: Mapping[str, Mapping[str, object]],
     retained_previous_bytes: int,
-    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    policy = resource_policy or active_runtime_resource_policy()
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     chunk_bytes = pandas_frame_payload_bytes(chunk)
     normalization_preallocation_bytes = _normalization_preallocation_bytes(
         chunk, data_id=data_id
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + chunk_bytes + normalization_preallocation_bytes,
-        policy.remaining_memory_bytes,
+        policy.available_memory_bytes,
     )
     normalized = normalize_raw_frame(chunk, data_id)
     normalized_bytes = pandas_frame_payload_bytes(normalized)
@@ -1034,7 +1011,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filter_preallocation_bytes,
-        policy.remaining_memory_bytes,
+        policy.available_memory_bytes,
     )
     filtered = _filter_normalized_frame(
         normalized,
@@ -1045,14 +1022,14 @@ def _transform_interim_chunk(
     filtered_bytes = pandas_frame_payload_bytes(filtered)
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filtered_bytes,
-        policy.remaining_memory_bytes,
+        policy.available_memory_bytes,
     )
     del normalized
     if filtered.empty:
         return filtered, {}
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + filtered_bytes,
-        policy.remaining_memory_bytes,
+        policy.available_memory_bytes,
     )
     pruned, report = _apply_output_column_rules_validated(
         filtered,
@@ -1061,7 +1038,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + pandas_frame_payload_bytes(pruned),
-        policy.remaining_memory_bytes,
+        policy.available_memory_bytes,
     )
     del filtered
     return pruned, report
@@ -1123,8 +1100,10 @@ def _iter_deduped_reference_frames(
     data_id: str,
     pruning_reports: list[dict[str, object]] | None,
     scratch_parent: Path,
-    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[object]:
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     spec = interim_catalog().get(data_id)
     primary_key = tuple(spec.primary_key)
     exact_duplicate_count = 0
@@ -1136,8 +1115,8 @@ def _iter_deduped_reference_frames(
         ),
         scratch_parent=scratch_parent,
     )
-    with runtime_resource_policy_scope(resource_policy):
-        index_lease = resource_policy.lease(
+    with runtime_resource_policy_scope(policy):
+        index_lease = policy.lease(
             "source.csmar.reference.index",
             index.retained_memory_bytes,
         )

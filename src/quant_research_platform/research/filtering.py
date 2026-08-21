@@ -35,8 +35,8 @@ def apply_filter_mode(
             2 * mask_bytes,
         )
         if policy is not None and (
-            policy.reserved_memory_bytes + working_bytes
-            > policy.task_memory_budget_bytes
+            policy.used_memory_bytes + working_bytes
+            > policy.memory_budget_bytes
         ):
             raise ValueError("research_filter_working_set_exceeds_task_memory_budget")
         reservation = (

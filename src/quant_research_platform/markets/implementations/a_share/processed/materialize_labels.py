@@ -66,6 +66,7 @@ def write_labels(
     policy: RuntimeResourcePolicy,
     sessions: pd.DatetimeIndex,
     written: dict[str, DatasetInspection],
+    cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
     retained_written_bytes = sum(
         dataset_inspection_retained_memory_bytes(inspection)
@@ -196,6 +197,7 @@ def write_labels(
         time_window=time_window,
         written=written,
         resource_policy=policy,
+        cleanup_stack=cleanup_stack,
     )
 
 

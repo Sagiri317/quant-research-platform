@@ -24,7 +24,6 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -532,7 +531,7 @@ def test_csv_owner_admits_parser_payload_before_next_record_pull(
     original_try_fast_fields = raw_schemas._BoundedCsvRecords._try_fast_fields
 
     def observe_before_pull(owner):  # noqa: ANN001
-        observed_reserved.append(policy.reserved_memory_bytes)
+        observed_reserved.append(policy.used_memory_bytes)
         return original_try_fast_fields(owner)
 
     monkeypatch.setattr(
@@ -548,7 +547,7 @@ def test_csv_owner_admits_parser_payload_before_next_record_pull(
         records.close()
 
     assert observed_reserved and observed_reserved[0] > 0
-    assert policy.reserved_memory_bytes == 0
+    assert policy.used_memory_bytes == 0
 
 
 def test_csv_direct_record_leases_release_in_lifo_order(
@@ -599,7 +598,7 @@ def test_csv_direct_record_leases_release_in_lifo_order(
         "source.csmar.csv.parser",
         "source.csmar.csv.record",
     ]
-    assert policy.reserved_memory_bytes == 0
+    assert policy.used_memory_bytes == 0
 
 
 def test_csv_record_lease_close_failure_preserves_primary(
@@ -640,7 +639,8 @@ def test_csv_record_lease_close_failure_preserves_primary(
             RuntimeError,
             match="runtime_data_scale_process_poisoned",
         ):
-            RuntimeResourcePolicy.capture()
+            with runtime_resource_policy_scope():
+                pass
     finally:
         monkeypatch.setattr(MemoryLease, "close", real_close)
         for lease in failed_leases:
@@ -1104,7 +1104,7 @@ def test_private_export_parent_reservation_blocks_downstream_overlap(
         lease = policy.lease("test.csmar.raw", bound)
         previous = chunks.send(lease)
         assert isinstance(previous, _OwnedValue)
-        assert policy.reserved_memory_bytes == lease.reserved_bytes
+        assert policy.used_memory_bytes == lease.reserved_bytes
 
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
             with policy.reserve("storage.dataset.arrow", 50 * 1024**2):
@@ -1214,7 +1214,7 @@ def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
     monkeypatch.setattr(
         interim,
         "pandas_frame_payload_bytes",
-        lambda _frame: policy.remaining_memory_bytes,
+        lambda _frame: policy.available_memory_bytes,
     )
 
     def reject_mapping(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
@@ -1409,8 +1409,8 @@ def test_private_export_batch_target_adapts_to_measured_frame_payload() -> None:
         resource_policy=policy,
     )
 
-    assert compact_target == policy.remaining_memory_bytes // 2
-    assert expanded_target == policy.remaining_memory_bytes // 16
+    assert compact_target == policy.available_memory_bytes // 2
+    assert expanded_target == policy.available_memory_bytes // 16
     assert expanded_target < compact_target
 
 
@@ -1883,7 +1883,6 @@ def test_reference_dedup_uses_selected_sibling_parent(
                     data_id="stock_master",
                     pruning_reports=None,
                     scratch_parent=scratch_parent,
-                    resource_policy=policy,
                 )
             )
             == []
@@ -2724,7 +2723,7 @@ def test_index_info_reconstruction_admits_result_overlap_before_join(
         raw_exports,
         "_iter_csv_records",
         lambda *_args, **_kwargs: iter(
-            ((header, record, policy.task_memory_budget_bytes),)
+            ((header, record, policy.memory_budget_bytes),)
         ),
     )
 
@@ -3167,7 +3166,6 @@ def test_csmar_reference_dedup_summary_is_atomic_on_upstream_failure(
                 data_id="stock_master",
                 pruning_reports=reports,
                 scratch_parent=Path("."),
-                resource_policy=policy,
             ),
             policy,
         )
@@ -3190,7 +3188,6 @@ def test_csmar_reference_dedup_empty_success_has_atomic_zero_summary() -> None:
                     data_id="stock_master",
                     pruning_reports=reports,
                     scratch_parent=Path("."),
-                    resource_policy=policy,
                 )
             )
             == []
@@ -3233,7 +3230,6 @@ def test_csmar_reference_dedup_is_typed_bounded_exact_across_chunks() -> None:
             data_id="stock_master",
             pruning_reports=reports,
             scratch_parent=Path("."),
-            resource_policy=policy,
         ),
         policy,
     )
@@ -3257,7 +3253,6 @@ def test_csmar_reference_dedup_is_typed_bounded_exact_across_chunks() -> None:
                 data_id="stock_master",
                 pruning_reports=[],
                 scratch_parent=Path("."),
-                resource_policy=conflict_policy,
             ),
             conflict_policy,
         )
@@ -3333,7 +3328,6 @@ def test_csmar_reference_dedup_rejects_unadmitted_remainder_without_second_lease
                 data_id="stock_master",
                 pruning_reports=[],
                 scratch_parent=Path("."),
-                resource_policy=policy,
             ),
             policy,
         )
@@ -3394,7 +3388,6 @@ def test_csmar_reference_dedup_delegates_typed_classification_to_storage(
                     data_id="stock_master",
                     pruning_reports=[],
                     scratch_parent=Path("."),
-                    resource_policy=policy,
                 ),
                 policy,
             )
@@ -3475,7 +3468,6 @@ def test_csmar_reference_opaque_arrow_overrun_fails_before_index_mutation(
                     data_id="stock_master",
                     pruning_reports=[],
                     scratch_parent=Path("."),
-                    resource_policy=policy,
                 ),
                 policy,
             )
@@ -3528,7 +3520,6 @@ def test_csmar_interim_uses_one_observed_downshift_then_fixed_batches(
                 overrides={},
                 chunksize=8,
                 pruning_reports=None,
-                resource_policy=policy,
             ),
             policy,
         )
@@ -3572,7 +3563,6 @@ def test_csmar_pruned_empty_first_reuses_admitted_lease(
             overrides={},
             chunksize=1,
             pruning_reports=None,
-            resource_policy=policy,
         ),
         policy,
     )
@@ -3641,7 +3631,6 @@ def test_csmar_pruned_pending_payload_clears_before_lease_close(
             overrides={},
             chunksize=8,
             pruning_reports=None,
-            resource_policy=policy,
         ),
         policy,
     )
@@ -3687,7 +3676,6 @@ def test_csmar_pruned_file_transition_reuses_admitted_lease(
             overrides={},
             chunksize=1,
             pruning_reports=None,
-            resource_policy=policy,
         ),
         policy,
     )
@@ -3785,7 +3773,6 @@ def test_csmar_reference_empty_or_duplicate_returns_lease_before_next_bound(
             data_id="stock_master",
             pruning_reports=[],
             scratch_parent=Path("."),
-            resource_policy=policy,
         ),
         policy,
     )
@@ -3834,7 +3821,7 @@ def test_csmar_direct_lazy_iteration_captures_policy_before_first_raw_decode(
             lease,
         )
 
-    monkeypatch.setattr(interim, "active_runtime_resource_policy", active_policy)
+    monkeypatch.setattr(interim, "current_runtime_resource_policy", active_policy)
     monkeypatch.setattr(interim, "_iter_pruned_interim_frames", raw_frames)
 
     frames = interim.iter_interim_frames(
@@ -3901,7 +3888,6 @@ def test_csmar_pruning_reports_merge_repeated_chunk_facts_by_data_id(
                     overrides=interim._validated_column_overrides({}),
                     chunksize=100,
                     pruning_reports=reports,
-                    resource_policy=policy,
                 ),
                 policy,
             )
@@ -4021,7 +4007,6 @@ def test_csmar_source_order_validation_honors_inventory_order(
                 overrides=interim._validated_column_overrides({}),
                 chunksize=1,
                 pruning_reports=[],
-                resource_policy=policy,
             ),
             policy,
         )
@@ -4096,7 +4081,6 @@ def test_csmar_source_order_rejects_inverse_boundaries_for_every_data_id(
                 overrides=interim._validated_column_overrides({}),
                 chunksize=1,
                 pruning_reports=[],
-                resource_policy=policy,
             ),
             policy,
         )
@@ -4154,7 +4138,6 @@ def test_csmar_source_order_accepts_equal_and_empty_boundaries_for_every_data_id
             overrides=interim._validated_column_overrides({}),
             chunksize=1,
             pruning_reports=[],
-            resource_policy=policy,
         ),
         policy,
     )
@@ -4231,7 +4214,6 @@ def test_csmar_raw_close_failure_does_not_replace_primary(
             overrides=interim._validated_column_overrides({}),
             chunksize=1,
             pruning_reports=[],
-            resource_policy=policy,
         )
 
         with pytest.raises(primary_type, match="body_primary"):
@@ -4372,7 +4354,7 @@ def test_csv_owner_rejects_unissued_policy_before_open(
 
     class Policy:
         payload_target_bytes = 1024 * 1024
-        task_memory_budget_bytes = 1024 * 1024
+        memory_budget_bytes = 1024 * 1024
 
     monkeypatch.setattr(raw_schemas, "Path", lambda path: path)
     with pytest.raises(TypeError, match="invalid_runtime_resource_policy"):
@@ -4477,7 +4459,7 @@ def test_csmar_direct_reference_iteration_uses_active_policy_target(
     assert observed_targets == [expected_target]
 
 
-def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
+def test_csmar_materialization_forwards_operation_policy_target_to_exact_index(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
@@ -4517,7 +4499,7 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
     )
     monkeypatch.setattr(
         interim,
-        "active_runtime_resource_policy",
+        "current_runtime_resource_policy",
         lambda: policy_calls.append(True) or policy,
         raising=False,
     )
@@ -4543,7 +4525,7 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
     )
 
     def write_dataset(_root, frames, **kwargs):  # noqa: ANN001, ANN202
-        write_policies.append(active_runtime_resource_policy())
+        write_policies.append(current_runtime_resource_policy())
         _collect_bound_first_frames(frames, kwargs["resource_policy"])
 
     monkeypatch.setattr(interim, "write_dataset", write_dataset)
@@ -4559,9 +4541,10 @@ def test_csmar_materialization_forwards_captured_policy_target_to_exact_index(
     interim.materialize_interim_data(
         layout=layout,
         data_ids=("stock_master",),
+        resource_policy=policy,
     )
 
-    assert policy_calls == [True]
+    assert policy_calls
     assert dataset_policies == [policy]
     expected_target = 256 * 1024 - int(
         frame.memory_usage(index=True, deep=True).sum()
@@ -4599,7 +4582,6 @@ def test_csmar_reference_dedup_closes_upstream_on_early_close() -> None:
             data_id="stock_master",
             pruning_reports=None,
             scratch_parent=Path("."),
-            resource_policy=policy,
         )
         next(output)
         output.close()
@@ -5202,7 +5184,6 @@ def test_csmar_reference_frames_close_under_policy_and_preserve_primary(
             data_id="reference",
             pruning_reports=None,
             scratch_parent=Path("."),
-            resource_policy=policy,
         )
         with pytest.raises(primary_type) as raised:
             next(chunks)
@@ -5224,7 +5205,7 @@ def test_private_export_first_frame_reserves_owner_known_decode_buffers(
         yield (
             [f"column_{index}" for index in range(column_count)],
             ["1"] * column_count,
-            policy.task_memory_budget_bytes - 1,
+            policy.memory_budget_bytes - 1,
         )
 
     monkeypatch.setattr(raw_exports, "_iter_csv_records", records)
@@ -5742,7 +5723,7 @@ def test_interim_transform_variable_width_preflight_precedes_normalize(
     monkeypatch.setattr(
         interim,
         "pandas_frame_payload_bytes",
-        lambda _frame: policy.task_memory_budget_bytes - 64,
+        lambda _frame: policy.memory_budget_bytes - 64,
     )
     monkeypatch.setattr(
         interim,
@@ -5814,7 +5795,6 @@ def test_non_reference_publication_keeps_upstream_alive_until_next_pull(
             overrides={},
             chunksize=1,
             pruning_reports=None,
-            resource_policy=policy,
         )
         bound = next(publications)
         lease = policy.lease("test.csmar.consumer", bound)
@@ -6151,95 +6131,6 @@ def test_csmar_direct_csv_reader_activates_explicit_policy_before_identity_probe
         next(rows)
 
     assert observed == [policy]
-
-
-@pytest.mark.parametrize(
-    "factory",
-    (raw_exports.iter_raw_export_files,),
-)
-def test_csmar_lazy_inventory_policy_is_resolved_only_at_activation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory,
-) -> None:  # noqa: ANN001
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    bind_calls: list[RuntimeResourcePolicy | None] = []
-    activation_calls: list[str] = []
-    gate_hits: list[RuntimeResourcePolicy | None] = []
-    real_bind = raw_exports.bind_runtime_resource_policy
-
-    def bind(
-        value: RuntimeResourcePolicy | None,
-        **kwargs,
-    ) -> RuntimeResourcePolicy | None:  # noqa: ANN003
-        bind_calls.append(value)
-        return real_bind(value, **kwargs)
-
-    def activate() -> RuntimeResourcePolicy:
-        activation_calls.append("active")
-        return policy
-
-    def stop_at_first_filesystem_gate(path: Path, *, error: str) -> Path:
-        assert error == "csmar_raw_export_identity_changed"
-        gate_hits.append(current_runtime_resource_policy())
-        raise RuntimeError("activation_gate_hit")
-
-    monkeypatch.setattr(
-        raw_exports, "require_unaliased_path", stop_at_first_filesystem_gate
-    )
-    monkeypatch.setattr(raw_exports, "bind_runtime_resource_policy", bind)
-    monkeypatch.setattr(raw_exports, "active_runtime_resource_policy", activate)
-
-    lazy = factory(tmp_path)
-    assert bind_calls == [None]
-    assert activation_calls == []
-    assert gate_hits == []
-    with pytest.raises(RuntimeError, match="^activation_gate_hit$"):
-        next(lazy)
-
-    assert activation_calls == ["active"]
-    assert gate_hits == [policy]
-    assert lazy.gi_frame is None
-
-
-@pytest.mark.parametrize(
-    "factory",
-    (raw_exports.iter_raw_export_files,),
-)
-def test_csmar_lazy_inventory_abandon_before_activation_has_no_active_owner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory,
-) -> None:  # noqa: ANN001
-    bind_calls: list[RuntimeResourcePolicy | None] = []
-    activation_calls: list[str] = []
-    real_bind = raw_exports.bind_runtime_resource_policy
-
-    def bind(
-        value: RuntimeResourcePolicy | None,
-        **kwargs,
-    ) -> RuntimeResourcePolicy | None:  # noqa: ANN003
-        bind_calls.append(value)
-        return real_bind(value, **kwargs)
-
-    monkeypatch.setattr(raw_exports, "bind_runtime_resource_policy", bind)
-    monkeypatch.setattr(
-        raw_exports,
-        "active_runtime_resource_policy",
-        lambda: (
-            activation_calls.append("active") or pytest.fail("activation_after_abandon")
-        ),
-    )
-
-    lazy = factory(tmp_path)
-    lazy.close()
-
-    assert bind_calls == [None]
-    assert activation_calls == []
-    assert lazy.gi_frame is None
 
 
 @pytest.mark.parametrize("dataset", ("unknown_dataset",))
@@ -6613,16 +6504,16 @@ def test_interim_root_replacement_fails_before_publication(
     )
     caught: BaseException | None = None
     try:
-        interim._materialize_interim_data(
-            layout=StorageLayout(project_root=tmp_path),
-            raw_root=raw_root,
-            data_ids=("trading_calendar",),
-            start_date=None,
-            end_date=None,
-            override_path=None,
-            chunksize=1,
-            resource_policy=policy,
-        )
+        with runtime_resource_policy_scope(policy):
+            interim._materialize_interim_data(
+                layout=StorageLayout(project_root=tmp_path),
+                raw_root=raw_root,
+                data_ids=("trading_calendar",),
+                start_date=None,
+                end_date=None,
+                override_path=None,
+                chunksize=1,
+            )
     except BaseException as exc:  # pragma: no branch - asserted below
         caught = exc
 
@@ -6818,16 +6709,16 @@ def test_interim_second_replay_rejects_before_transform_or_publication(
     )
     caught: BaseException | None = None
     try:
-        interim._materialize_interim_data(
-            layout=StorageLayout(project_root=tmp_path),
-            raw_root=raw_root,
-            data_ids=("trading_calendar",),
-            start_date=None,
-            end_date=None,
-            override_path=None,
-            chunksize=1,
-            resource_policy=policy,
-        )
+        with runtime_resource_policy_scope(policy):
+            interim._materialize_interim_data(
+                layout=StorageLayout(project_root=tmp_path),
+                raw_root=raw_root,
+                data_ids=("trading_calendar",),
+                start_date=None,
+                end_date=None,
+                override_path=None,
+                chunksize=1,
+            )
     except BaseException as exc:  # pragma: no branch - asserted below
         caught = exc
 

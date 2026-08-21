@@ -40,8 +40,8 @@ def validate_research_dataset(
     policy = current_runtime_resource_policy()
     mask_bytes = int(frame.index.memory_usage(deep=True)) + len(frame)
     if policy is not None and (
-        policy.reserved_memory_bytes + mask_bytes
-        > policy.task_memory_budget_bytes
+        policy.used_memory_bytes + mask_bytes
+        > policy.memory_budget_bytes
     ):
         raise ValueError("research_validation_working_set_exceeds_task_memory_budget")
     reservation = (

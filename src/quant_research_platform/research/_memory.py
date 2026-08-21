@@ -12,8 +12,6 @@ import pandas as pd
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -169,18 +167,19 @@ def _iter_contiguous_session_frames(
     frame: pd.DataFrame,
     *,
     timestamps: pd.Series,
-    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
-    policy = resource_policy
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     frame_bytes = _frame_bytes(frame)
-    remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+    remaining = policy.memory_budget_bytes - policy.used_memory_bytes
     if frame_bytes <= remaining:
         yield frame
         return
 
     start = 0
     while start < len(frame):
-        remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+        remaining = policy.memory_budget_bytes - policy.used_memory_bytes
         stop = start
         output_bound = 0
         while stop < len(frame):
@@ -220,22 +219,17 @@ def iter_complete_time_sized_frames(
 
     with ExitStack() as pending_capture_cleanup:
         pending_capture_cleanup.enter_context(closing_dataset_iterator(frames))
-        bound_policy = bind_runtime_resource_policy(
-            resource_policy,
-            allow_implicit_active=True,
-        )
+        bound_policy = resource_policy or current_runtime_resource_policy()
         activation_cleanup = pending_capture_cleanup.pop_all()
 
     def activate() -> Iterator[pd.DataFrame]:
         with ExitStack() as pending_entry_cleanup:
             pending_entry_cleanup.enter_context(activation_cleanup)
-            policy = bound_policy or active_runtime_resource_policy()
-            with runtime_resource_policy_scope(policy):
+            with runtime_resource_policy_scope(bound_policy):
                 with pending_entry_cleanup.pop_all():
-                    yield from _iter_complete_time_sized_frames_with_policy(
+                    yield from _iter_complete_time_sized_frames_impl(
                         frames,
                         timestamp_column=timestamp_column,
-                        resource_policy=policy,
                     )
 
     return activate()
@@ -261,7 +255,9 @@ def iter_complete_session_frames(
                 if frame.empty:
                     yield frame
                     continue
-                policy = active_runtime_resource_policy()
+                policy = current_runtime_resource_policy()
+                if policy is None:
+                    raise RuntimeError("runtime_resource_policy_not_active")
                 boundary_bytes = len(frame) * (
                     np.dtype(np.bool_).itemsize + np.dtype(np.intp).itemsize
                 )
@@ -292,12 +288,14 @@ def iter_complete_session_frames(
     return activate()
 
 
-def _iter_complete_time_sized_frames_with_policy(
+def _iter_complete_time_sized_frames_impl(
     frames: Iterator[pd.DataFrame],
     *,
     timestamp_column: str,
-    resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
+    resource_policy = current_runtime_resource_policy()
+    if resource_policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     pending: pd.DataFrame | None = None
     pending_timestamp: pd.Timestamp | None = None
     emitted_max: pd.Timestamp | None = None
@@ -319,8 +317,8 @@ def _iter_complete_time_sized_frames_with_policy(
                 timestamp_column=timestamp_column,
             )
             if (
-                resource_policy.reserved_memory_bytes + operation_bytes
-                > resource_policy.task_memory_budget_bytes
+                resource_policy.used_memory_bytes + operation_bytes
+                > resource_policy.memory_budget_bytes
             ):
                 raise ValueError(
                     "research_indivisible_time_unit_exceeds_task_memory_budget"
@@ -336,8 +334,8 @@ def _iter_complete_time_sized_frames_with_policy(
                 if not timestamps.is_monotonic_increasing:
                     sort_bytes = _time_sort_working_set_bytes(frame)
                     if (
-                        resource_policy.reserved_memory_bytes + sort_bytes
-                        > resource_policy.task_memory_budget_bytes
+                        resource_policy.used_memory_bytes + sort_bytes
+                        > resource_policy.memory_budget_bytes
                     ):
                         raise ValueError(
                             "research_indivisible_time_unit_exceeds_task_memory_budget"
@@ -375,7 +373,6 @@ def _iter_complete_time_sized_frames_with_policy(
                         combined = _concat_time_boundary_frames(
                             pending,
                             frame.iloc[:first_stop],
-                            resource_policy=resource_policy,
                         )
                         pending_reservation.close()
                         pending_reservation = ExitStack()
@@ -417,14 +414,13 @@ def _iter_complete_time_sized_frames_with_policy(
                     yield from _iter_contiguous_session_frames(
                         prefix,
                         timestamps=prefix_timestamps,
-                        resource_policy=resource_policy,
                     )
                     emitted_max = pd.Timestamp(prefix_timestamps.iloc[-1])
                 tail = frame.iloc[last_start:]
                 tail_bytes = _frame_bytes(tail)
                 if (
-                    resource_policy.reserved_memory_bytes + tail_bytes
-                    > resource_policy.task_memory_budget_bytes
+                    resource_policy.used_memory_bytes + tail_bytes
+                    > resource_policy.memory_budget_bytes
                 ):
                     raise ValueError(
                         "research_indivisible_time_unit_exceeds_task_memory_budget"
@@ -454,20 +450,17 @@ def _iter_complete_time_sized_frames_with_policy(
 def _concat_time_boundary_frames(
     left: pd.DataFrame,
     right: pd.DataFrame,
-    *,
-    resource_policy: RuntimeResourcePolicy,
 ) -> pd.DataFrame:
-    policy = resource_policy
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     retained_payload_bytes = _frame_bytes(left) + _frame_bytes(right)
     if (
-        policy.reserved_memory_bytes + retained_payload_bytes
-        > policy.task_memory_budget_bytes
+        policy.used_memory_bytes + retained_payload_bytes
+        > policy.memory_budget_bytes
     ):
         raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
-    with runtime_resource_policy_scope(policy), policy.reserve(
-        "research.time.boundary",
-        retained_payload_bytes,
-    ):
+    with policy.reserve("research.time.boundary", retained_payload_bytes):
         result = pd.concat([left, right], ignore_index=True)
         if _frame_bytes(result) > retained_payload_bytes:
             raise ValueError(

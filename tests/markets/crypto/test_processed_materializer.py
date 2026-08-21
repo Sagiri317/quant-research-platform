@@ -185,10 +185,10 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         target_chunk_bytes: int,
         operation_headroom_bytes: int,
     ):
-        assert target_chunk_bytes == policy.remaining_memory_bytes
+        assert target_chunk_bytes == policy.available_memory_bytes
         expected_external_bytes = 200 if session.name == "bar" else 100
         assert operation_headroom_bytes == (
-            policy.task_memory_budget_bytes - expected_external_bytes
+            policy.memory_budget_bytes - expected_external_bytes
         )
         count = 1 if session.name == "bar" else 2
         with runtime_resource_policy_scope(session.resource_policy):
@@ -1115,9 +1115,9 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=session.resource_policy.remaining_memory_bytes,
+            target_chunk_bytes=session.resource_policy.available_memory_bytes,
             error="invalid_crypto_test_asset_grouping",
-            operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
+            operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
         ) as views:
             normal_selections = tuple(view.path_selection for _key, view in views)
             assert {key[0]: len(view.read_paths) for key, view in views} == {
@@ -1139,9 +1139,9 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
             with materialization_validation.crypto_asset_session_views(
                 session,
                 columns=("asset_id",),
-                target_chunk_bytes=session.resource_policy.remaining_memory_bytes,
+                target_chunk_bytes=session.resource_policy.available_memory_bytes,
                 error="invalid_crypto_test_asset_grouping",
-                operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
+                operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
             ) as views:
                 consumer_selections = tuple(view.path_selection for _key, view in views)
                 raise RuntimeError("crypto_view_consumer_failed")
@@ -1180,9 +1180,9 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
             with materialization_validation.crypto_asset_session_views(
                 session,
                 columns=("asset_id",),
-                target_chunk_bytes=session.resource_policy.remaining_memory_bytes,
+                target_chunk_bytes=session.resource_policy.available_memory_bytes,
                 error="invalid_crypto_test_asset_grouping",
-                operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
+                operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
             ):
                 raise AssertionError("unreachable")
         assert allocated
@@ -1296,9 +1296,9 @@ def test_matching_chunk_caller_releases_selection_on_all_exit_paths(
             "time_window": TimeWindow("2026-01-01", "2026-12-31"),
             "source_asset_error": "invalid_test_source_asset_id",
             "timestamp_error": "invalid_test_timestamp",
-            "target_chunk_bytes": session.resource_policy.remaining_memory_bytes,
+            "target_chunk_bytes": session.resource_policy.available_memory_bytes,
             "operation_headroom_bytes": (
-                session.resource_policy.task_memory_budget_bytes
+                session.resource_policy.memory_budget_bytes
             ),
         }
 
@@ -1414,9 +1414,9 @@ def test_asset_views_preserve_primary_and_attempt_all_selection_release(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.remaining_memory_bytes,
+            target_chunk_bytes=policy.available_memory_bytes,
             error="invalid_test_asset_grouping",
-            operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
+            operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
         ):
             if failure_site == "body":
                 raise primary
@@ -1480,9 +1480,9 @@ def test_asset_views_propagate_first_release_failure_after_attempting_all(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.remaining_memory_bytes,
+            target_chunk_bytes=policy.available_memory_bytes,
             error="invalid_test_asset_grouping",
-            operation_headroom_bytes=session.resource_policy.task_memory_budget_bytes,
+            operation_headroom_bytes=session.resource_policy.memory_budget_bytes,
         ):
             pass
     assert raised.value is first_failure
@@ -2629,7 +2629,9 @@ def test_panel_writer_keeps_all_input_sessions_live_through_publication(
 
     def record_write(root, data, **kwargs):  # noqa: ANN001, ANN202
         assert len(live_sessions) == 3
-        frames = _collect_bound_first(data, kwargs["resource_policy"])
+        current = current_runtime_resource_policy()
+        assert current is policy
+        frames = _collect_bound_first(data, current)
 
         def publications():  # noqa: ANN202
             for publication in frames:
@@ -2712,7 +2714,7 @@ def test_existing_panel_dependency_acquires_panel_after_all_live_inputs(
                 live_sessions.remove(session)
 
     monkeypatch.setattr(materializer, "open_dataset_session", record_open)
-    with ExitStack() as stack:
+    with runtime_resource_policy_scope(policy), ExitStack() as stack:
         _inspection, panel_session = materializer._inspect_existing_dependency(
             layout,
             processed_catalog().get("market_panel_1m"),
@@ -2768,7 +2770,10 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
         assert "retained_payload_bytes" not in kwargs
         write_baselines.append(True)
         publications.extend(data)
-        lease = kwargs["resource_policy"].lease("test.crypto.writer.result", 0)
+        lease = current_runtime_resource_policy().lease(
+            "test.crypto.writer.result",
+            0,
+        )
         return _OwnedValue(SimpleNamespace(), lease)
 
     monkeypatch.setattr(module, "_write_dataset_owned", record_write)

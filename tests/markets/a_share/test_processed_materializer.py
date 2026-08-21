@@ -51,7 +51,6 @@ from quant_research_platform.research.labels.forward_returns import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -229,7 +228,7 @@ def test_a_share_output_publication_rejects_near_headroom_before_sort(
     monkeypatch.setattr(
         materialization_io,
         "pandas_frame_payload_bytes",
-        lambda _frame: policy.task_memory_budget_bytes - temporary_bytes + 1,
+        lambda _frame: policy.memory_budget_bytes - temporary_bytes + 1,
     )
 
     def reject_sort(*_args: object, **_kwargs: object) -> object:
@@ -251,7 +250,7 @@ def test_a_share_output_publication_rejects_near_headroom_before_sort(
         )
 
 
-def test_sorted_output_chunks_bind_creation_policy_and_activate_before_source_pull(
+def test_sorted_output_chunks_activate_under_bound_policy_before_source_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _publication_policy()
@@ -299,14 +298,8 @@ def test_sorted_output_chunks_bind_creation_policy_and_activate_before_source_pu
     assert current_runtime_resource_policy() is None
 
 
-def test_sorted_output_chunks_reject_different_creation_and_activation_policies() -> (
-    None
-):
+def test_sorted_output_chunks_reject_competing_activation_before_source_pull() -> None:
     policy = _publication_policy()
-    creation_other_policy = capture_test_policy(
-        available_memory_bytes=2 * 1024**3,
-        explicit_cap_bytes=512 * 1024 * 1024,
-    )
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     source_pulls = 0
 
@@ -315,12 +308,6 @@ def test_sorted_output_chunks_reject_different_creation_and_activation_policies(
             nonlocal source_pulls
             source_pulls += 1
             return iter(())
-
-    with runtime_resource_policy_scope(creation_other_policy):
-        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
-            materialization_io.iter_sorted_output_chunks(
-                Source(), spec, resource_policy=policy
-            )
 
     wrapped = materialization_io.iter_sorted_output_chunks(
         Source(), spec, resource_policy=policy
@@ -334,6 +321,7 @@ def test_sorted_output_chunks_reject_different_creation_and_activation_policies(
             next(iter(wrapped))
 
     assert source_pulls == 0
+    wrapped.close()
 
 
 @pytest.mark.parametrize("failure", [KeyboardInterrupt])
@@ -637,15 +625,15 @@ def test_write_and_inspect_activates_explicit_policy(
 
     def capture_write(*_args: object, **kwargs: object) -> None:
         assert "retained_payload_bytes" not in kwargs
-        observed.append((active_runtime_resource_policy(), True))
+        observed.append((current_runtime_resource_policy(), True))
 
     def capture_inspection(*_args: object, **kwargs: object) -> object:
         assert "retained_payload_bytes" not in kwargs
-        lease = active_runtime_resource_policy().lease(
+        lease = current_runtime_resource_policy().lease(
             "test.a_share.inspection",
             123,
         )
-        observed.append((active_runtime_resource_policy(), True))
+        observed.append((current_runtime_resource_policy(), True))
         return _OwnedValue(inspection, lease)
 
     monkeypatch.setattr(materialization_io, "_write_dataset", capture_write)

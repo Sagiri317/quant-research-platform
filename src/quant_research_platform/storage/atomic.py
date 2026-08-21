@@ -14,7 +14,6 @@ import pandas as pd
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts._json import render_qrp_json_object
-from quant_research_platform.runtime.resources import current_runtime_resource_policy
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._scratch_ownership import (
     create_owned_scratch,
@@ -139,8 +138,6 @@ def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
 def atomic_write_directory[T](
     root: Path,
     writer: Callable[[Path], T],
-    *,
-    finalize_memory: bool = False,
 ) -> T:
     final_root = Path(root)
     require_unaliased_path(final_root.parent, error="invalid_storage_write_path")
@@ -187,9 +184,6 @@ def atomic_write_directory[T](
         require_owned_scratch(target_marker, claimed_marker)
         _remove_claimed_path(target_marker, claimed_marker)
         claimed_marker = None
-        policy = current_runtime_resource_policy() if finalize_memory else None
-        if finalize_memory and policy is None:
-            raise RuntimeError("runtime_resource_policy_not_active")
         try:
             publish_no_replace(temp_root, final_root, source_identity=claimed_temp)
         except FileExistsError as exc:
@@ -204,10 +198,6 @@ def atomic_write_directory[T](
             if target_exists:
                 raise OutputAlreadyExistsError() from exc
             raise
-        if policy is not None:
-            policy.finish_memory_measurement(
-                on_reject=lambda: _remove_claimed_path(final_root, claimed_temp)
-            )
     except BaseException:
         if claimed_temp is not None:
             try:
@@ -403,9 +393,6 @@ def publish_no_replace(
 ) -> None:
     source = require_unaliased_path(Path(source), error="invalid_storage_write_path")
     target = require_unaliased_path(Path(target), error="invalid_storage_write_path")
-    policy = current_runtime_resource_policy()
-    if policy is not None:
-        policy.assert_memory_within_budget()
     for attempt in range(1, 4):
         require_unaliased_path(source, error="invalid_storage_write_path")
         require_unaliased_path(target, error="invalid_storage_write_path")

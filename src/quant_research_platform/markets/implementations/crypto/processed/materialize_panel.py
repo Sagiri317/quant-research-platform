@@ -62,6 +62,7 @@ def write_panel(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
     retained_payload_bytes: int,
+    cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
     root = require_artifact_root(
         layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
@@ -118,7 +119,6 @@ def write_panel(
             spec=spec,
             instance_metadata={"input_dataset_identities": input_identities},
             staged_validator=validate_staged_dataset,
-            resource_policy=resource_policy,
         )
         result = owned.value
 
@@ -130,7 +130,10 @@ def write_panel(
                 owner="crypto.panel.write.result",
             )
 
-        resource_policy.register_cleanup(release_result)
+        if cleanup_stack is None:
+            _release_owned_value(owned, owner="crypto.panel.write.result")
+        else:
+            cleanup_stack.callback(release_result)
         return result
 
 
@@ -148,7 +151,7 @@ def _iter_panel_chunks(
     ):
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        available_bytes = max(1, resource_policy.remaining_memory_bytes)
+        available_bytes = max(1, resource_policy.available_memory_bytes)
         chunk_target_bytes = max(1, available_bytes // 8)
         producer_bound = max(1, available_bytes // 2)
         bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
@@ -164,7 +167,7 @@ def _iter_panel_chunks(
             error="invalid_crypto_panel_source_physical_asset_grouping",
             key_error="invalid_crypto_matching_bar_source_asset_id",
             operation_headroom_bytes=(
-                resource_policy.task_memory_budget_bytes
+                resource_policy.memory_budget_bytes
                 - retained_input_bytes
                 - retained_payload_bytes
                 + bar_session.retained_memory_bytes
@@ -186,7 +189,7 @@ def _iter_panel_chunks(
                         asset_session,
                         target_chunk_bytes=chunk_target_bytes,
                         operation_headroom_bytes=(
-                            resource_policy.task_memory_budget_bytes
+                            resource_policy.memory_budget_bytes
                             - trade_session.retained_memory_bytes
                             - depth_session.retained_memory_bytes
                             - retained_payload_bytes
@@ -217,7 +220,7 @@ def _iter_panel_chunks(
                         )
                         materialization_resources.require_frame_within_budget(
                             prepared_bars,
-                            target_bytes=resource_policy.remaining_memory_bytes,
+                            target_bytes=resource_policy.available_memory_bytes,
                             error="crypto_indivisible_reducer_unit_exceeds_payload_target",
                         )
                         prepared_bar_bytes = pandas_frame_payload_bytes(prepared_bars)
@@ -230,7 +233,7 @@ def _iter_panel_chunks(
                                     prepared_bars,
                                     target_chunk_bytes=chunk_target_bytes,
                                     operation_headroom_bytes=(
-                                        resource_policy.task_memory_budget_bytes
+                                        resource_policy.memory_budget_bytes
                                         - bar_session.retained_memory_bytes
                                         - depth_session.retained_memory_bytes
                                         - prepared_bar_bytes
@@ -244,7 +247,7 @@ def _iter_panel_chunks(
                                     prepared_bars,
                                     target_chunk_bytes=chunk_target_bytes,
                                     operation_headroom_bytes=(
-                                        resource_policy.task_memory_budget_bytes
+                                        resource_policy.memory_budget_bytes
                                         - bar_session.retained_memory_bytes
                                         - trade_session.retained_memory_bytes
                                         - prepared_bar_bytes
@@ -258,14 +261,14 @@ def _iter_panel_chunks(
                                 prepared_bars,
                                 trade_chunks=trade_chunks,
                                 depth_chunks=depth_chunks,
-                                payload_target_bytes=resource_policy.remaining_memory_bytes,
+                                payload_target_bytes=resource_policy.available_memory_bytes,
                                 trade_continuity_state=trade_continuity_state,
                                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
                                 _output_stack=output_stack,
                             )
                             materialization_resources.require_frame_within_budget(
                                 output,
-                                target_bytes=resource_policy.remaining_memory_bytes,
+                                target_bytes=resource_policy.available_memory_bytes,
                                 error=(
                                     "crypto_indivisible_reducer_unit_exceeds_payload_target"
                                 ),

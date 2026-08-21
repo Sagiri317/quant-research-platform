@@ -24,8 +24,7 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -131,17 +130,11 @@ def iter_interim_frames(
     end_date: str | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
+    bound_policy = resource_policy
 
     def activate() -> Iterator[pd.DataFrame]:
-        policy = bind_runtime_resource_policy(
-            bound_policy,
-            allow_implicit_active=False,
-        ) or active_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy):
+        policy = bound_policy or current_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy) as policy:
             producer = _iter_owned_interim_frames(
                 data_id=data_id,
                 input_files=input_files,
@@ -207,14 +200,10 @@ def _iter_owned_interim_frames(
     )
     if isinstance(input_files, str) or not isinstance(input_files, tuple | list):
         raise ValueError("invalid_binance_raw_input_files")
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
-    policy = bound_policy or active_runtime_resource_policy()
+    bound_policy = resource_policy or current_runtime_resource_policy()
 
     def activate() -> Iterator[object]:
-        with runtime_resource_policy_scope(policy):
+        with runtime_resource_policy_scope(bound_policy) as policy:
             yielded = False
             empty_schema_frame: pd.DataFrame | None = None
             last_key: tuple[object, ...] | None = None
@@ -356,12 +345,7 @@ def materialize_interim_data(
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> BinanceInterimImportResult:
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
-    policy = bound_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(resource_policy) as policy:
         catalog = interim_catalog()
         source_raw_root = raw_root or layout.raw_source_root(ids.SOURCE_ID)
         files_by_data_id = dataset_files_by_id(source_raw_root)

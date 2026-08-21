@@ -7,9 +7,9 @@ import pytest
 
 from quant_research_platform.runtime import resources
 from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
+    runtime_resource_policy_scope,
 )
 
 
@@ -30,7 +30,8 @@ def test_capture_fails_closed_when_required_probe_fails(
     monkeypatch.setattr(resources, owner, fail)
 
     with pytest.raises(RuntimeError, match=error):
-        RuntimeResourcePolicy.capture()
+        with runtime_resource_policy_scope():
+            pass
 
 
 def test_disk_headroom_is_independent_of_memory_policy(

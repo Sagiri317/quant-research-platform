@@ -53,7 +53,6 @@ def write_prediction_outputs(
             output_chunks=output_chunks,
             model_metadata=model_metadata,
             prediction_metadata_factory=prediction_metadata_factory,
-            _finalize_memory=True,
         )
     )
 
@@ -79,7 +78,6 @@ def write_evaluation_outputs(
             spec=spec,
             output_spec=output_spec,
             layout=layout,
-            _finalize_memory=True,
         )
     )
 
@@ -99,7 +97,6 @@ def write_portfolio_outputs(
             spec=spec,
             output_spec=output_spec,
             layout=layout,
-            _finalize_memory=True,
         )
     )
 

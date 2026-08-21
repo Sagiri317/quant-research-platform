@@ -104,11 +104,11 @@ def test_lazy_memory_factory_rejects_delayed_consumption_after_outer_exit(
             resource_policy=policy if explicit_mode == "same" else None,
         )
 
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_retired"):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         next(chunks)
 
 
-def test_lazy_memory_factory_rejects_different_explicit_policy_at_creation() -> None:
+def test_lazy_memory_factory_rejects_different_explicit_policy_at_activation() -> None:
     active = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
@@ -119,16 +119,17 @@ def test_lazy_memory_factory_rejects_different_explicit_policy_at_creation() -> 
     )
     frame = _single_time_frame()
     with runtime_resource_policy_scope(active):
+        chunks = iter_complete_time_sized_frames(
+            iter((frame,)),
+            timestamp_column="timestamp",
+            resource_policy=different,
+        )
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
-            iter_complete_time_sized_frames(
-                iter((frame,)),
-                timestamp_column="timestamp",
-                resource_policy=different,
-            )
+            next(chunks)
 
 
 @pytest.mark.parametrize("close_fails", (False, True))
-def test_complete_memory_factory_closes_once_on_creation_policy_conflict(
+def test_complete_memory_factory_closes_once_on_activation_policy_conflict(
     close_fails: bool,
 ) -> None:
     active = capture_test_policy(
@@ -146,7 +147,7 @@ def test_complete_memory_factory_closes_once_on_creation_policy_conflict(
             return self
 
         def __next__(self) -> pd.DataFrame:
-            pytest.fail("frames consumed after creation-time conflict")
+            pytest.fail("frames consumed after activation conflict")
 
         def close(self) -> None:
             nonlocal close_calls
@@ -155,12 +156,13 @@ def test_complete_memory_factory_closes_once_on_creation_policy_conflict(
                 raise OSError("close_secondary")
 
     with runtime_resource_policy_scope(active):
+        chunks = iter_complete_time_sized_frames(
+            Frames(),
+            timestamp_column="timestamp",
+            resource_policy=different,
+        )
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
-            iter_complete_time_sized_frames(
-                Frames(),
-                timestamp_column="timestamp",
-                resource_policy=different,
-            )
+            next(chunks)
 
     assert close_calls == 1
 
@@ -226,9 +228,10 @@ def test_complete_time_sized_frames_rejects_single_timestamp_over_budget() -> No
             "value": ["x" * 20] * 400,
         }
     )
+    payload_bytes = pandas_frame_payload_bytes(frame)
     policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 750,
+        available_memory_bytes=payload_bytes * 2,
+        explicit_cap_bytes=payload_bytes,
     )
 
     with pytest.raises(
@@ -252,7 +255,7 @@ def test_complete_time_sized_frames_honor_live_root_reservations() -> None:
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("outer_owner", policy.task_memory_budget_bytes):
+        with policy.reserve("outer_owner", policy.memory_budget_bytes):
             with pytest.raises(
                 ValueError,
                 match="research_indivisible_time_unit_exceeds_task_memory_budget",
@@ -279,7 +282,7 @@ def test_complete_time_frames_reserve_pending_before_next_input_pull() -> None:
 
     def frames():
         yield first
-        assert policy.reserved_memory_bytes >= pandas_frame_payload_bytes(first)
+        assert policy.used_memory_bytes >= pandas_frame_payload_bytes(first)
         yield second
 
     with runtime_resource_policy_scope(policy):
@@ -307,7 +310,7 @@ def test_time_chunk_admission_precedes_timestamp_conversion(
     )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=64 * 1024 + 1,
+        explicit_cap_bytes=1,
     )
 
     def reject_conversion(*_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -347,21 +350,22 @@ def test_time_chunk_refreshes_shared_headroom_before_next_session_copy() -> None
         explicit_cap_bytes=hard_budget,
     )
 
-    chunks = iter_complete_time_sized_frames(
-        iter((frame,)),
-        timestamp_column="timestamp",
-        resource_policy=policy,
-    )
-    first = next(chunks)
-    assert first["timestamp"].nunique() == 1
-    new_owner_bytes = hard_budget - timestamp_bytes - second_bytes + 1
-    with policy.reserve("outer_after_first_yield", new_owner_bytes):
-        with pytest.raises(
-            ValueError,
-            match="research_indivisible_time_unit_exceeds_task_memory_budget",
-        ):
-            next(chunks)
-    chunks.close()
+    with runtime_resource_policy_scope(policy):
+        chunks = iter_complete_time_sized_frames(
+            iter((frame,)),
+            timestamp_column="timestamp",
+            resource_policy=policy,
+        )
+        first = next(chunks)
+        assert first["timestamp"].nunique() == 1
+        new_owner_bytes = hard_budget - timestamp_bytes - second_bytes + 1
+        with policy.reserve("outer_after_first_yield", new_owner_bytes):
+            with pytest.raises(
+                ValueError,
+                match="research_indivisible_time_unit_exceeds_task_memory_budget",
+            ):
+                next(chunks)
+        chunks.close()
 
 
 def test_time_boundary_concat_rejects_peak_before_allocation(
@@ -373,9 +377,12 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
             "value": ["x" * 20] * 200,
         }
     )
+    retained_payload_bytes = pandas_frame_payload_bytes(frame.iloc[:100].copy()) + (
+        pandas_frame_payload_bytes(frame.iloc[100:].copy())
+    )
     policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 750,
+        available_memory_bytes=retained_payload_bytes * 2,
+        explicit_cap_bytes=retained_payload_bytes - 1,
     )
 
     def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -383,15 +390,15 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
 
     monkeypatch.setattr(pd, "concat", reject_concat)
 
-    with pytest.raises(
-        ValueError,
-        match="research_time_boundary_payloads_exceed_task_memory_budget",
-    ):
-        _concat_time_boundary_frames(
-            frame.iloc[:100].copy(),
-            frame.iloc[100:].copy(),
-            resource_policy=policy,
-        )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            ValueError,
+            match="research_time_boundary_payloads_exceed_task_memory_budget",
+        ):
+            _concat_time_boundary_frames(
+                frame.iloc[:100].copy(),
+                frame.iloc[100:].copy(),
+            )
 
 
 @pytest.mark.parametrize("exit_kind", ("normal", "body_error", "consumer_close"))
@@ -552,9 +559,8 @@ def test_complete_time_frames_close_upstream_inside_policy_scope(
 @pytest.mark.parametrize(
     "entry_error",
     (
-        RuntimeError("runtime_resource_policy_retired"),
         RuntimeError("runtime_resource_policy_conflict"),
-        RuntimeError("runtime_resource_policy_concurrent_root"),
+        RuntimeError("runtime_resource_policy_not_active"),
     ),
 )
 @pytest.mark.parametrize("close_fails", (False, True))
@@ -627,16 +633,14 @@ def test_complete_time_frames_close_once_when_policy_resolution_fails(
 
     monkeypatch.setattr(
         memory_owner,
-        "active_runtime_resource_policy",
+        "current_runtime_resource_policy",
         fail_resolution,
     )
-    chunks = iter_complete_time_sized_frames(
-        Frames(),
-        timestamp_column="timestamp",
-    )
-
     with pytest.raises(BaseException) as raised:
-        next(chunks)
+        iter_complete_time_sized_frames(
+            Frames(),
+            timestamp_column="timestamp",
+        )
 
     assert raised.value is resolution_error
     assert close_calls == 1

@@ -19,7 +19,7 @@ from quant_research_platform.artifacts._output_manifest import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
+    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
@@ -200,7 +200,7 @@ def _read_prediction_output_bundle(
     time_window=None,  # noqa: ANN001
 ) -> Iterator[tuple[dict[str, object], _PredictionLookup]]:
     lookup: _PredictionLookup | None = None
-    policy = active_runtime_resource_policy()
+    policy = current_runtime_resource_policy()
     stack = ExitStack()
 
     def read_prediction(
@@ -270,7 +270,7 @@ def _read_prediction_output_bundle(
             filter_row_bytes = 0 if time_window is None else decoded_row_bytes + 3
             batch_row_bytes = decoded_row_bytes + filter_row_bytes
             batch_headroom = (
-                policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+                policy.memory_budget_bytes - policy.used_memory_bytes
             )
             if decode_fixed_bytes + batch_row_bytes > batch_headroom:
                 raise MemoryError("runtime_memory_budget_exceeded")

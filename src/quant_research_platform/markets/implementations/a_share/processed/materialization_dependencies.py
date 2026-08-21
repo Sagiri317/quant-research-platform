@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from contextlib import ExitStack
 
 import pandas as pd
 
@@ -63,6 +64,7 @@ def ensure_processed_dependencies(
     processed_catalog: ProcessedDataCatalog,
     dependency_windows: dict[str, TimeWindow],
     materialize_one,
+    cleanup_stack: ExitStack | None = None,
 ) -> None:
     dependency_window = _processed_dependency_time_window(
         spec,
@@ -103,6 +105,7 @@ def ensure_processed_dependencies(
                 written=written,
                 requested=False,
                 dependency_windows=dependency_windows,
+                cleanup_stack=cleanup_stack,
             )
 
 

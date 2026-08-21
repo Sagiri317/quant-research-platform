@@ -22,7 +22,6 @@ from quant_research_platform.research.predictions.outputs import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    bind_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -86,11 +85,7 @@ def write_prediction_output_and_read(
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> tuple[pd.DataFrame, Path, dict[str, object]]:
     layout = StorageLayout(project_root=project_root)
-    policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    ) or RuntimeResourcePolicy.capture()
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(resource_policy) as policy:
         result = build_prediction_result_from_frames(
             frames,
             spec,
@@ -128,7 +123,6 @@ def write_prediction_result(layout: StorageLayout, result) -> Path:
             output_chunks=result.output_chunks,
             model_metadata=result.model_metadata,
             prediction_metadata_factory=result.prediction_metadata_factory,
-            _finalize_memory=True,
         )
 
 

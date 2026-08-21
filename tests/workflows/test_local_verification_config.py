@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -83,14 +84,16 @@ def test_local_verification_preloads_models_before_root_capture(
         lambda specs: events.extend(spec.model_id for spec in specs),
     )
 
-    def reject_capture(cls, **_kwargs):  # noqa: ANN001
+    @contextmanager
+    def reject_capture(*_args, **_kwargs):  # noqa: ANN002, ANN003
         assert events == expected
         raise RuntimeError("capture_after_model_preload")
+        yield
 
     monkeypatch.setattr(
-        module.RuntimeResourcePolicy,
-        "capture",
-        classmethod(reject_capture),
+        module,
+        "runtime_resource_policy_scope",
+        reject_capture,
     )
 
     with pytest.raises(RuntimeError, match="capture_after_model_preload"):

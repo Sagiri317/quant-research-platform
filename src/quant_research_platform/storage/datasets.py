@@ -10,7 +10,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.runtime.resources import bind_runtime_resource_policy
+from quant_research_platform.runtime.resources import current_runtime_resource_policy
 from quant_research_platform.storage._dataset_comparison import (
     compare_datasets as _compare_datasets,
 )
@@ -35,7 +35,8 @@ from quant_research_platform.storage._dataset_writing import (
 
 
 def _reject_unrelated_active_root() -> None:
-    bind_runtime_resource_policy(None, allow_implicit_active=False)
+    if current_runtime_resource_policy() is not None:
+        raise RuntimeError("runtime_resource_policy_competing_root")
 
 
 def write_dataset(

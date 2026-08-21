@@ -18,7 +18,6 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
-    bind_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -54,6 +53,7 @@ def write_and_inspect(
     time_window: TimeWindow,
     written: dict[str, DatasetInspection],
     resource_policy: RuntimeResourcePolicy,
+    cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
     root = processed_root(layout, spec)
     if root.exists():
@@ -86,7 +86,13 @@ def write_and_inspect(
                 owner="a_share.materialization.inspection.result",
             )
 
-        resource_policy.register_cleanup(release_inspection)
+        if cleanup_stack is None:
+            _release_owned_value(
+                owned,
+                owner="a_share.materialization.inspection.result",
+            )
+        else:
+            cleanup_stack.callback(release_inspection)
     written[spec.data_id] = inspection
     return inspection
 
@@ -142,7 +148,7 @@ def iter_sorted_output_chunks(
     *,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterable[object]:
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = resource_policy
 
     def activate() -> Iterator[object]:
         assert bound_policy is not None
@@ -193,10 +199,10 @@ def iter_sorted_output_chunks(
                         + 2 * np.dtype(np.intp).itemsize
                     )
                     if (
-                        bound_policy.reserved_memory_bytes
+                        bound_policy.used_memory_bytes
                         + output_bytes
                         + key_temporary_bytes
-                        > bound_policy.task_memory_budget_bytes
+                        > bound_policy.memory_budget_bytes
                     ):
                         raise MaterializationCapacityExceeded(
                             "a_share_known_payloads_exceed_task_memory_budget"
@@ -317,8 +323,8 @@ def read_materialized_dataset(
     if retained_payload_bytes < 0:
         raise ValueError("invalid_a_share_retained_payload_bytes")
     available_bytes = (
-        resource_policy.task_memory_budget_bytes
-        - resource_policy.reserved_memory_bytes
+        resource_policy.memory_budget_bytes
+        - resource_policy.used_memory_bytes
         - retained_payload_bytes
     )
     if available_bytes <= 0:
@@ -334,7 +340,7 @@ def read_materialized_dataset(
     ) as session:
         return materialize_dataset_session(
             session,
-            target_chunk_bytes=resource_policy.remaining_memory_bytes,
+            target_chunk_bytes=resource_policy.available_memory_bytes,
             materialized_budget_bytes=available_bytes,
         )
 
@@ -351,7 +357,7 @@ def iter_dataset_chunks_with_policy(
     retained_payload_bytes: int = 0,
     _retained_payload_bytes: list[int] | None = None,
 ) -> Iterator[pd.DataFrame]:
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = resource_policy
     if retained_payload_bytes < 0:
         raise ValueError("invalid_a_share_retained_payload_bytes")
     retained_batch_bytes = _retained_payload_bytes
@@ -363,15 +369,15 @@ def iter_dataset_chunks_with_policy(
     def activate() -> Iterator[pd.DataFrame]:
         assert bound_policy is not None
         target_bytes = (
-            bound_policy.remaining_memory_bytes
+            bound_policy.available_memory_bytes
             if target_chunk_bytes is None
             else target_chunk_bytes
         )
         if type(target_bytes) is not int or target_bytes <= 0:
             raise ValueError("invalid_target_chunk_bytes")
         operation_headroom_bytes = (
-            bound_policy.task_memory_budget_bytes
-            - bound_policy.reserved_memory_bytes
+            bound_policy.memory_budget_bytes
+            - bound_policy.used_memory_bytes
             - retained_payload_bytes
         )
         if operation_headroom_bytes <= 0:

@@ -1589,27 +1589,27 @@ def test_dataset_inventory_does_not_delete_post_claim_replacement(
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     scratch_path: Path
 
-    with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
-        with runtime_resource_policy_scope(policy):
-            owner = inventory_owner.DatasetSessionInventory(
-                data_root=tmp_path / "data",
-                scratch_parent=tmp_path / "scratch",
-                resource_policy=policy,
-            )
-            scratch_path = owner.scratch_path
-            connection = owner._connection
-            assert connection is not None
-            connection.close()
-            owner._connection = None
-            shutil.rmtree(scratch_path)
-            scratch_path.mkdir()
-            (scratch_path / "foreign.txt").write_text("foreign", encoding="utf-8")
+    with runtime_resource_policy_scope(policy):
+        owner = inventory_owner.DatasetSessionInventory(
+            data_root=tmp_path / "data",
+            scratch_parent=tmp_path / "scratch",
+            resource_policy=policy,
+        )
+        scratch_path = owner.scratch_path
+        connection = owner._connection
+        assert connection is not None
+        connection.close()
+        owner._connection = None
+        shutil.rmtree(scratch_path)
+        scratch_path.mkdir()
+        (scratch_path / "foreign.txt").write_text("foreign", encoding="utf-8")
 
-            with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
-                owner.close()
+        with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
+            owner.close()
+        owner._lease.close()
 
-    assert policy.state == "POISONED"
-    assert policy.used_memory_bytes > 0
+    assert policy.state == "CLOSED"
+    assert policy.used_memory_bytes == 0
     assert (scratch_path / "foreign.txt").read_text(encoding="utf-8") == "foreign"
 
 
@@ -2061,7 +2061,7 @@ def test_standalone_storage_root_preflights_before_admission_and_cleans_before_r
 
     monkeypatch.setattr(
         module,
-        "active_runtime_resource_policy",
+        "current_runtime_resource_policy",
         lambda: pytest.fail("implicit_policy_issued_before_metadata_preflight"),
         raising=False,
     )
@@ -2270,40 +2270,6 @@ def test_inventory_exit_propagates_cleanup_failure_without_primary(
     with pytest.raises(RuntimeError, match="close_failed"):
         with _inventory_with_failing_connection(tmp_path):
             pass
-
-
-def test_inventory_root_cleanup_failure_preserves_primary_and_poison(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    class FailingConnection:
-        def close(self) -> None:
-            raise RuntimeError("sqlite_close_failed")
-
-    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
-    policy = capture_test_policy(available_memory_bytes=64 * 1024)
-    primary = GeneratorExit("body_primary")
-    inventory = None
-
-    with pytest.raises(GeneratorExit) as raised:
-        with runtime_resource_policy_scope(policy):
-            inventory = inventory_owner.DatasetSessionInventory(
-                data_root=tmp_path / "data",
-                scratch_parent=tmp_path / "scratch",
-                resource_policy=policy,
-            )
-            connection = inventory._connection
-            assert connection is not None
-            connection.close()
-            inventory._connection = FailingConnection()  # type: ignore[assignment]
-            raise primary
-
-    assert raised.value is primary
-    assert policy.state == "POISONED"
-    assert policy.used_memory_bytes > 0
-    assert inventory is not None
-    assert inventory._connection is not None
-    assert any("sqlite_close_failed" in note for note in primary.__notes__)
 
 
 def _patch_open_session_metadata_preflight(
@@ -3477,7 +3443,7 @@ def test_compare_runtime_admission_failure_is_not_mapped(
     right.mkdir()
     monkeypatch.setattr(
         comparison,
-        "active_runtime_resource_policy",
+        "current_runtime_resource_policy",
         lambda: (_ for _ in ()).throw(ValueError("runtime_admission_failed")),
     )
 
@@ -3634,7 +3600,7 @@ def test_write_dataset_requires_artifact_root_before_writer_or_data_pull(
     )
     monkeypatch.setattr(
         dataset_writing,
-        "_write_dataset_under_policy",
+        "_write_dataset_body",
         lambda *_args, **_kwargs: pytest.fail("writer_before_artifact_root_gate"),
     )
 

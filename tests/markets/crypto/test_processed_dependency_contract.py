@@ -25,7 +25,7 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -241,9 +241,9 @@ def test_asset_discovery_closes_file_batches_on_validation_failure(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.remaining_memory_bytes,
+            target_chunk_bytes=policy.available_memory_bytes,
             error="invalid_asset",
-            operation_headroom_bytes=policy.task_memory_budget_bytes,
+            operation_headroom_bytes=policy.memory_budget_bytes,
         ):
             raise AssertionError("unreachable")
     assert closed == [True]
@@ -1124,7 +1124,7 @@ def test_panel_dependent_validation_includes_prior_written_baseline(
         retained_payload_bytes=300,
     )
 
-    assert observed == [policy.task_memory_budget_bytes - 600]
+    assert observed == [policy.memory_budget_bytes - 600]
 
 
 def test_materialization_input_identity_validation_is_exact() -> None:
@@ -1679,17 +1679,17 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
     observed: list[RuntimeResourcePolicy] = []
 
     def capture_input_identities(_sessions):
-        observed.append(active_runtime_resource_policy())
+        observed.append(current_runtime_resource_policy())
         return {}
 
     def capture_write(
         *_args,
         staged_validator,
-        resource_policy,
         **_kwargs,
     ) -> DatasetInspection:
+        resource_policy = current_runtime_resource_policy()
         assert resource_policy is policy
-        observed.append(active_runtime_resource_policy())
+        observed.append(current_runtime_resource_policy())
         chunks = list(_args[1])
         assert len(chunks) == 1
         assert "retained_payload_bytes" not in _kwargs

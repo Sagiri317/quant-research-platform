@@ -510,7 +510,7 @@ def test_artifact_parquet_writers_admit_before_native_state(
     monkeypatch.setattr(pd.DataFrame, "to_parquet", reject_parquet)
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("outer", policy.task_memory_budget_bytes):
+        with policy.reserve("outer", policy.memory_budget_bytes):
             with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
                 parquet_writers.write_parquet_chunks(
                     (frame,),
@@ -543,7 +543,7 @@ def test_prediction_model_reservation_precedes_writer_startup(
     original_enter = ExactPrimaryKeyIndex.__enter__
 
     def assert_model_reserved(index):  # noqa: ANN001, ANN202
-        assert policy.reserved_memory_bytes >= retained_model_bytes + writer_bytes
+        assert policy.used_memory_bytes >= retained_model_bytes + writer_bytes
         return original_enter(index)
 
     def frames():
@@ -677,23 +677,23 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
 
         def _observe(self, event: str) -> None:
             assert (
-                policy.reserved_memory_bytes
+                policy.used_memory_bytes
                 > parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
             )
             events.append(event)
 
         def write_table(self, table, **kwargs):  # noqa: ANN001, ANN003
             self._observe("write")
-            write_reservations.append(policy.reserved_memory_bytes)
+            write_reservations.append(policy.used_memory_bytes)
             row_groups.append((table.num_rows, kwargs["row_group_size"]))
 
         def add_key_value_metadata(self, _metadata):  # noqa: ANN001
             self._observe("metadata")
-            metadata_reservations.append(policy.reserved_memory_bytes)
+            metadata_reservations.append(policy.used_memory_bytes)
 
         def close(self) -> None:
             self._observe("close")
-            close_reservations.append(policy.reserved_memory_bytes)
+            close_reservations.append(policy.used_memory_bytes)
 
     monkeypatch.setattr(parquet_writers.pq, "ParquetWriter", Writer)
     monkeypatch.setattr(
@@ -709,7 +709,7 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
             key_columns=("asset_id", "timestamp"),
             compression="zstd",
         )
-        assert policy.reserved_memory_bytes == 0
+        assert policy.used_memory_bytes == 0
 
     assert events == ["create", "write", "write", "write", "metadata", "close"]
     assert write_reservations[0] < write_reservations[1] < write_reservations[2]

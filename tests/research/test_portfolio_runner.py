@@ -200,7 +200,7 @@ def test_portfolio_prediction_join_keeps_its_creation_policy(
         monkeypatch.setattr(
             portfolio_runner,
             "pandas_frame_payload_bytes",
-            lambda _frame: policy.task_memory_budget_bytes,
+            lambda _frame: policy.memory_budget_bytes,
         )
 
         def reject_prediction_index(*_args, **_kwargs):
@@ -248,7 +248,6 @@ def test_portfolio_result_context_preserves_body_primary() -> None:
     closed: list[bool] = []
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024,
-        rss_bytes=100,
         explicit_cap_bytes=64 * 1024 + 768,
     )
     scope = portfolio_runner.runtime_resource_policy_scope(policy)

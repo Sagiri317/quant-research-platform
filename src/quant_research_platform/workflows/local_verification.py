@@ -188,7 +188,6 @@ def run_local_verification(
                 staged_identity=staged_identity,
                 run_root=run_root,
                 replaced_identity=replaced_identity,
-                resource_policy=resource_policy,
             )
         except BaseException:
             if staged_identity is None:
@@ -672,15 +671,10 @@ def _publish_staged_run_root(
     staged_identity: os.stat_result,
     run_root: Path,
     replaced_identity: os.stat_result | None,
-    resource_policy: RuntimeResourcePolicy,
 ) -> Path | None:
     require_owned_scratch(staged_root, staged_identity)
-    resource_policy.assert_memory_within_budget()
     if replaced_identity is None:
         move_path_no_replace(staged_root, run_root)
-        resource_policy.finish_memory_measurement(
-            on_reject=lambda: remove_owned_scratch(run_root, staged_identity)
-        )
         return None
     require_owned_scratch(run_root, replaced_identity)
     backup_root = _previous_generation_root(run_root)
@@ -697,11 +691,6 @@ def _publish_staged_run_root(
                 f"{type(rollback_error).__name__}"
             )
         raise
-    def rollback_published() -> None:
-        remove_owned_scratch(run_root, staged_identity)
-        move_path_no_replace(backup_root, run_root)
-
-    resource_policy.finish_memory_measurement(on_reject=rollback_published)
     return backup_root
 
 

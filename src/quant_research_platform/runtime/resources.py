@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -127,66 +127,9 @@ class RuntimeResourcePolicy:
     state: str
     _lock: _MachineLock
     _leases: set[MemoryLease] = field(default_factory=set, repr=False)
-    _cleanups: list[Callable[[], None]] = field(default_factory=list, repr=False)
-    _scope_depth: int = field(default=0, repr=False)
 
     def __new__(cls) -> RuntimeResourcePolicy:
         raise TypeError("runtime_resource_policy_capture_required")
-
-    @classmethod
-    def capture(
-        cls,
-        *,
-        explicit_cap_bytes: int | None = None,
-    ) -> RuntimeResourcePolicy:
-        """Acquire the data-scale lock, then capture available memory once."""
-
-        if _PROCESS_POISONED:
-            raise RuntimeError("runtime_data_scale_process_poisoned")
-        lock = _acquire_machine_lock()
-        try:
-            explicit_cap = (
-                None
-                if explicit_cap_bytes is None
-                else _exact_positive_int(
-                    explicit_cap_bytes,
-                    error="invalid_runtime_resource_explicit_cap",
-                )
-            )
-            available = _exact_positive_int(
-                _available_memory_bytes(),
-                error="invalid_runtime_resource_available_memory",
-            )
-            budget = (
-                available * _MEMORY_BUDGET_NUMERATOR
-                // _MEMORY_BUDGET_DENOMINATOR
-            )
-            if explicit_cap is not None:
-                budget = min(budget, explicit_cap)
-            if budget <= 0:
-                raise ValueError("invalid_runtime_resource_memory_budget")
-            policy = object.__new__(cls)
-            object.__setattr__(
-                policy,
-                "captured_available_memory_bytes",
-                available,
-            )
-            object.__setattr__(policy, "memory_budget_bytes", budget)
-            object.__setattr__(policy, "state", "ACTIVE")
-            object.__setattr__(policy, "_lock", lock)
-            object.__setattr__(policy, "_leases", set())
-            object.__setattr__(policy, "_cleanups", [])
-            object.__setattr__(policy, "_scope_depth", 0)
-            return policy
-        except BaseException as primary:
-            try:
-                lock.close()
-            except BaseException as release_error:
-                primary.add_note(
-                    "runtime machine-lock release also failed: "
-                    f"{type(release_error).__name__}"
-                )
-            raise
 
     @property
     def used_memory_bytes(self) -> int:
@@ -195,18 +138,6 @@ class RuntimeResourcePolicy:
     @property
     def available_memory_bytes(self) -> int:
         return self.memory_budget_bytes - self.used_memory_bytes
-
-    @property
-    def task_memory_budget_bytes(self) -> int:
-        return self.memory_budget_bytes
-
-    @property
-    def reserved_memory_bytes(self) -> int:
-        return self.used_memory_bytes
-
-    @property
-    def remaining_memory_bytes(self) -> int:
-        return self.available_memory_bytes
 
     def lease(self, owner: str, reserved_bytes: int) -> MemoryLease:
         self._require_active_root()
@@ -240,10 +171,6 @@ class RuntimeResourcePolicy:
                     f"{type(release_error).__name__}"
                 )
 
-    def register_cleanup(self, close: Callable[[], None]) -> None:
-        self._require_active_root()
-        self._cleanups.append(close)
-
     def to_payload(self) -> dict[str, int]:
         return {
             "captured_available_memory_bytes": self.captured_available_memory_bytes,
@@ -251,24 +178,6 @@ class RuntimeResourcePolicy:
             "used_memory_bytes": self.used_memory_bytes,
             "available_memory_bytes": self.available_memory_bytes,
         }
-
-    def memory_evidence(self) -> dict[str, str]:
-        """Temporary bridge; release evidence is collected externally."""
-
-        return {"evidence_scope": "external_release_only"}
-
-    def assert_memory_within_budget(self) -> None:
-        """Temporary bridge; production safety is structural admission."""
-
-    def finish_memory_measurement(
-        self,
-        *,
-        on_reject: Callable[[], None] | None = None,
-    ) -> dict[str, str]:
-        """Temporary bridge; external evidence has no publish authority."""
-
-        del on_reject
-        return self.memory_evidence()
 
     def _require_active_root(self) -> None:
         if self.state != "ACTIVE" or _ACTIVE_RUNTIME_RESOURCE_POLICY is not self:
@@ -298,71 +207,48 @@ _PROCESS_POISONED = False
 
 
 def current_runtime_resource_policy() -> RuntimeResourcePolicy | None:
-    """Temporary bridge for callers not yet migrated to explicit roots."""
-
     return _ACTIVE_RUNTIME_RESOURCE_POLICY
-
-
-def bind_runtime_resource_policy(
-    explicit: RuntimeResourcePolicy | None,
-    *,
-    allow_implicit_active: bool = False,
-) -> RuntimeResourcePolicy | None:
-    """Temporary bridge for creation-time explicit policy binding."""
-
-    if explicit is not None and type(explicit) is not RuntimeResourcePolicy:
-        raise TypeError("invalid_runtime_resource_policy")
-    if type(allow_implicit_active) is not bool:
-        raise TypeError("invalid_runtime_resource_policy_binding")
-    active = current_runtime_resource_policy()
-    if active is not None and explicit is None and not allow_implicit_active:
-        raise RuntimeError("runtime_resource_policy_competing_root")
-    if active is not None and explicit is not None and explicit is not active:
-        raise RuntimeError("runtime_resource_policy_conflict")
-    return active if active is not None else explicit
-
-
-def active_runtime_resource_policy() -> RuntimeResourcePolicy:
-    """Temporary bridge that captures a root only when none is active."""
-
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        return RuntimeResourcePolicy.capture()
-    return policy
 
 
 @contextmanager
 def runtime_resource_policy_scope(
-    policy: RuntimeResourcePolicy | None,
+    policy: RuntimeResourcePolicy | None = None,
     *,
     explicit_cap_bytes: int | None = None,
 ) -> Iterator[RuntimeResourcePolicy]:
     global _ACTIVE_RUNTIME_RESOURCE_POLICY
-    if policy is None:
-        if current_runtime_resource_policy() is not None:
-            raise RuntimeError("runtime_resource_policy_competing_root")
-        policy = RuntimeResourcePolicy.capture(
-            explicit_cap_bytes=explicit_cap_bytes,
-        )
-    else:
+    active = current_runtime_resource_policy()
+    owns_root = active is None
+    if policy is not None:
         if explicit_cap_bytes is not None:
             raise ValueError("invalid_runtime_resource_explicit_cap")
         if type(policy) is not RuntimeResourcePolicy:
             raise TypeError("invalid_runtime_resource_policy")
-    active = current_runtime_resource_policy()
+        if active is not None and active is not policy:
+            raise RuntimeError("runtime_resource_policy_conflict")
+    elif active is not None:
+        policy = active
+        owns_root = False
+        if explicit_cap_bytes is not None:
+            raise RuntimeError("runtime_resource_policy_conflict")
+    else:
+        policy = _capture_runtime_resource_policy(
+            explicit_cap_bytes=explicit_cap_bytes,
+        )
+    assert policy is not None
+    if active is None and policy.state != "ACTIVE":
+        raise RuntimeError("runtime_resource_policy_not_active")
     if active is not None and active is not policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     if policy.state != "ACTIVE":
         raise RuntimeError("runtime_resource_policy_not_active")
-    object.__setattr__(policy, "_scope_depth", policy._scope_depth + 1)
     if active is None:
         _ACTIVE_RUNTIME_RESOURCE_POLICY = policy
     try:
         yield policy
     finally:
         primary = sys.exception()
-        object.__setattr__(policy, "_scope_depth", policy._scope_depth - 1)
-        if policy._scope_depth == 0:
+        if owns_root:
             _close_runtime_resource_policy(policy, primary=primary)
 
 
@@ -373,30 +259,15 @@ def _close_runtime_resource_policy(
 ) -> None:
     global _ACTIVE_RUNTIME_RESOURCE_POLICY, _PROCESS_POISONED
 
-    cleanup_error: BaseException | None = None
-    while policy._cleanups:
-        close = policy._cleanups.pop()
-        try:
-            close()
-        except BaseException as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
-            if primary is not None:
-                primary.add_note(
-                    "runtime cleanup also failed: "
-                    f"{type(exc).__name__}: {exc}"
-                )
-
     outstanding = policy.used_memory_bytes
-    if cleanup_error is not None or outstanding:
+    if outstanding:
         object.__setattr__(policy, "state", "POISONED")
         _PROCESS_POISONED = True
         if _ACTIVE_RUNTIME_RESOURCE_POLICY is policy:
             _ACTIVE_RUNTIME_RESOURCE_POLICY = None
         if primary is None:
-            if cleanup_error is not None:
-                raise cleanup_error
             raise RuntimeError("runtime_memory_lease_leaked")
+        primary.add_note("runtime memory lease leaked")
         return
 
     try:
@@ -448,6 +319,51 @@ def _acquire_machine_lock() -> _MachineLock:
     return _MachineLock.acquire()
 
 
+def _capture_runtime_resource_policy(
+    *,
+    explicit_cap_bytes: int | None = None,
+) -> RuntimeResourcePolicy:
+    """Create the one root owned by ``runtime_resource_policy_scope``."""
+
+    if _PROCESS_POISONED:
+        raise RuntimeError("runtime_data_scale_process_poisoned")
+    lock = _acquire_machine_lock()
+    try:
+        explicit_cap = (
+            None
+            if explicit_cap_bytes is None
+            else _exact_positive_int(
+                explicit_cap_bytes,
+                error="invalid_runtime_resource_explicit_cap",
+            )
+        )
+        available = _exact_positive_int(
+            _available_memory_bytes(),
+            error="invalid_runtime_resource_available_memory",
+        )
+        budget = available * _MEMORY_BUDGET_NUMERATOR // _MEMORY_BUDGET_DENOMINATOR
+        if explicit_cap is not None:
+            budget = min(budget, explicit_cap)
+        if budget <= 0:
+            raise ValueError("invalid_runtime_resource_memory_budget")
+        policy = object.__new__(RuntimeResourcePolicy)
+        object.__setattr__(policy, "captured_available_memory_bytes", available)
+        object.__setattr__(policy, "memory_budget_bytes", budget)
+        object.__setattr__(policy, "state", "ACTIVE")
+        object.__setattr__(policy, "_lock", lock)
+        object.__setattr__(policy, "_leases", set())
+        return policy
+    except BaseException as primary:
+        try:
+            lock.close()
+        except BaseException as release_error:
+            primary.add_note(
+                "runtime machine-lock release also failed: "
+                f"{type(release_error).__name__}"
+            )
+        raise
+
+
 def _machine_lock_path() -> Path:
     user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
     user_hash = hashlib.sha256(user.encode("utf-8")).hexdigest()[:16]
@@ -488,7 +404,7 @@ def _exact_nonnegative_int(value: object, *, error: str) -> int:
 __all__ = [
     "MemoryLease",
     "RuntimeResourcePolicy",
-    "active_runtime_resource_policy",
+    "current_runtime_resource_policy",
     "pandas_frame_payload_bytes",
     "require_free_disk_headroom",
     "runtime_resource_policy_scope",

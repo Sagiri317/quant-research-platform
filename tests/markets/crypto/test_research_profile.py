@@ -9,6 +9,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_dependencies,
 )
 from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
 
@@ -74,23 +75,12 @@ def test_crypto_binance_profile_imports_processed_dependency_window(
         available_memory_bytes=128 * 1024 * 1024,
         explicit_cap_bytes=64 * 1024 * 1024,
     )
-    captures: list[object] = []
+    with runtime_resource_policy_scope(standalone_policy):
+        research_profile("crypto_binance_1m").materialize_interim_data(
+            StorageLayout(project_root=tmp_path),
+            tmp_path / "raw",
+            "2026-07-06",
+            "2026-07-06",
+        )
 
-    def capture_policy():
-        captures.append(standalone_policy)
-        return standalone_policy
-
-    monkeypatch.setattr(
-        research_profiles,
-        "active_runtime_resource_policy",
-        capture_policy,
-    )
-    research_profile("crypto_binance_1m").materialize_interim_data(
-        StorageLayout(project_root=tmp_path),
-        tmp_path / "raw",
-        "2026-07-06",
-        "2026-07-06",
-    )
-
-    assert captures == [standalone_policy]
     assert captured["resource_policy"] is standalone_policy

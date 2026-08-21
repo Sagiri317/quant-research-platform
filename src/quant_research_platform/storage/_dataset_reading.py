@@ -31,8 +31,6 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -215,7 +213,15 @@ def read_dataset(
         captured_policy = current_runtime_resource_policy()
         if resource_policy is None and captured_policy is not None:
             raise RuntimeError("runtime_resource_policy_competing_root")
-        bound_policy = bind_runtime_resource_policy(resource_policy)
+        bound_policy = resource_policy
+        if (
+            bound_policy is not None
+            and captured_policy is not None
+            and bound_policy is not captured_policy
+        ):
+            raise RuntimeError("runtime_resource_policy_conflict")
+        if bound_policy is None:
+            bound_policy = captured_policy
         independent_root = resource_policy is None and captured_policy is None
 
         def activate() -> Iterator[pd.DataFrame]:
@@ -232,7 +238,7 @@ def read_dataset(
                         yield from iter_dataset_chunks(
                             context,
                             target_chunk_bytes=(
-                                context.resource_policy.remaining_memory_bytes
+                                context.resource_policy.available_memory_bytes
                             ),
                         )
                 return
@@ -244,7 +250,7 @@ def read_dataset(
             ) as context:
                 yield from iter_dataset_chunks(
                     context,
-                    target_chunk_bytes=context.resource_policy.remaining_memory_bytes,
+                    target_chunk_bytes=context.resource_policy.available_memory_bytes,
                 )
 
         return activate()
@@ -260,8 +266,8 @@ def read_dataset(
     ) as context:
         return materialize_dataset_session(
             context,
-            target_chunk_bytes=context.resource_policy.remaining_memory_bytes,
-            materialized_budget_bytes=context.resource_policy.task_memory_budget_bytes,
+            target_chunk_bytes=context.resource_policy.available_memory_bytes,
+            materialized_budget_bytes=context.resource_policy.memory_budget_bytes,
         )
 
 
@@ -291,7 +297,7 @@ def _materialize_dataset_session(
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     materialized_budget = _validated_target_chunk_bytes(
-        context.resource_policy.task_memory_budget_bytes
+        context.resource_policy.memory_budget_bytes
         if materialized_budget_bytes is None
         else materialized_budget_bytes
     )
@@ -732,8 +738,7 @@ def open_dataset_session(
         manifest_identity = dataset_file_identity(manifest_path)
     except (OSError, ValueError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
-    issued_policy = resource_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(issued_policy):
+    with runtime_resource_policy_scope(resource_policy) as issued_policy:
         spec_stat_span_bytes = spec_identity.size
         manifest_stat_span_bytes = manifest_identity.size
         spec_identity_bytes = _dataset_file_identity_bytes(spec_identity)
@@ -812,7 +817,6 @@ def open_dataset_session(
                 owns_inventory=True,
                 session_lease=session_lease,
             )
-            issued_policy.register_cleanup(session.close)
         except BaseException as primary:
             cleanup_ok = True
             if session is not None:
@@ -913,7 +917,6 @@ def dataset_session_from_inventory(
             owns_inventory=False,
             session_lease=session_lease,
         )
-        resource_policy.register_cleanup(session.close)
     except BaseException as primary:
         if session is not None:
             try:
@@ -1322,7 +1325,7 @@ def iter_declared_parquet_member_batches(
         fixed_operation_headroom = (
             operation_headroom_bytes
             if operation_headroom_bytes is not None
-            else policy.task_memory_budget_bytes
+            else policy.memory_budget_bytes
         )
 
         def current_operation_headroom(
@@ -1331,8 +1334,8 @@ def iter_declared_parquet_member_batches(
         ) -> int:
             return min(
                 maximum,
-                active_policy.task_memory_budget_bytes
-                - active_policy.reserved_memory_bytes,
+                active_policy.memory_budget_bytes
+                - active_policy.used_memory_bytes,
             )
 
         live_operation_headroom = current_operation_headroom
@@ -1391,7 +1394,7 @@ def _iter_dataset_file_batches(
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     upstream_headroom = (
-        context.resource_policy.task_memory_budget_bytes
+        context.resource_policy.memory_budget_bytes
         if operation_headroom_bytes is None
         else _validated_target_chunk_bytes(operation_headroom_bytes)
     )
@@ -1403,10 +1406,10 @@ def _iter_dataset_file_batches(
     credited_reservation_bytes = 0
     if operation_headroom_bytes is not None:
         accounted_reservation_bytes = (
-            context.resource_policy.task_memory_budget_bytes - operation_headroom
+            context.resource_policy.memory_budget_bytes - operation_headroom
         )
         credited_reservation_bytes = min(
-            context.resource_policy.reserved_memory_bytes,
+            context.resource_policy.used_memory_bytes,
             accounted_reservation_bytes,
         )
     dtype_overrides = pandas_dtype_overrides_from_logical_payload(
@@ -1419,7 +1422,7 @@ def _iter_dataset_file_batches(
     def current_operation_headroom() -> int:
         unaccounted_reserved_bytes = max(
             0,
-            context.resource_policy.reserved_memory_bytes
+            context.resource_policy.used_memory_bytes
             - credited_reservation_bytes
             - previous_output_bytes[0],
         )
@@ -1685,12 +1688,12 @@ def _require_filter_preparation_overlap(
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
     if (
-        resource_policy.reserved_memory_bytes
+        resource_policy.used_memory_bytes
         + input_state_bytes
         + preflight_bytes
         + sort_state_bytes
         + timsort_scratch_bytes
-        > resource_policy.task_memory_budget_bytes
+        > resource_policy.memory_budget_bytes
     ):
         raise DatasetReadCapacityExceeded(
             "dataset_filter_values_exceed_task_memory_budget"

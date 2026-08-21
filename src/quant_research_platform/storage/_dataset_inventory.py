@@ -101,7 +101,6 @@ class DatasetSessionInventory:
         temporary_directory: Path | None = None
         temporary_identity: os.stat_result | None = None
         try:
-            resource_policy.register_cleanup(self.close)
             require_unaliased_path(
                 self._scratch_parent, error="invalid_storage_scratch_path"
             )

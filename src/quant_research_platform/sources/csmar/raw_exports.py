@@ -22,8 +22,7 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
@@ -403,17 +402,11 @@ def iter_raw_export_files(
 ) -> Iterator[Path]:
     """Yield supported raw exports in deterministic spill-backed order."""
 
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
+    bound_policy = resource_policy
     raw_root = Path(root)
 
     def iter_files() -> Iterator[Path]:
-        policy = bind_runtime_resource_policy(
-            bound_policy,
-            allow_implicit_active=False,
-        ) or active_runtime_resource_policy()
+        policy = bound_policy or current_runtime_resource_policy()
         with runtime_resource_policy_scope(policy):
             with _raw_export_path_session(raw_root) as (paths, verify_root):
                 with ExactPrimaryKeyIndex(
@@ -443,14 +436,13 @@ def inspect_raw_export(
 ) -> RawExportIntakeResult:
     """Inspect one raw export without writing metadata sidecars."""
 
-    policy = require_raw_resource_policy(resource_policy)
-    return _inspect_raw_export_with_identity(path, resource_policy=policy)
+    return _inspect_raw_export_with_identity(path, resource_policy=resource_policy)
 
 
 def _inspect_raw_export_with_identity(
     path: Path,
     *,
-    resource_policy: RuntimeResourcePolicy,
+    resource_policy: RuntimeResourcePolicy | None = None,
     expected_identity: DatasetFileIdentity | None = None,
 ) -> RawExportIntakeResult:
     try:
@@ -473,17 +465,11 @@ def iter_index_info_rows(
     expected_identity: DatasetFileIdentity | None = None,
     payload_lease_ref: list[MemoryLease | None] | None = None,
 ) -> Iterable[tuple[list[str], list[str], int]]:
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
+    bound_policy = resource_policy
 
     def activate() -> Iterator[tuple[list[str], list[str], int]]:
-        policy = bind_runtime_resource_policy(
-            bound_policy,
-            allow_implicit_active=False,
-        ) or active_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy):
+        policy = bound_policy or current_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy) as policy:
             yield from _iter_index_info_rows_under_policy(
                 export_path,
                 resource_policy=policy,
@@ -840,7 +826,7 @@ def _require_index_info_reconstruction_headroom(
     string_builder_span_bytes = result_bytes
     returned_string_span_bytes = result_bytes
     if payload_lease is None:
-        available_bytes = resource_policy.remaining_memory_bytes
+        available_bytes = resource_policy.available_memory_bytes
     elif payload_lease.active:
         available_bytes = payload_lease.reserved_bytes
     else:
@@ -895,17 +881,11 @@ def iter_private_export_chunks(
     if type(chunksize) is not int or chunksize <= 0:
         raise ValueError("invalid_csmar_chunksize")
 
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
+    bound_policy = resource_policy
 
     def activate() -> Iterator[pd.DataFrame]:
-        policy = bind_runtime_resource_policy(
-            bound_policy,
-            allow_implicit_active=False,
-        ) or active_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy):
+        policy = bound_policy or current_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy) as policy:
             chunks = iter_private_export_chunks_with_policy(
                 path,
                 dataset=dataset,
@@ -1132,10 +1112,10 @@ def _next_batch_target_bytes(
 ) -> int:
     if logical_bytes <= 0 or frame_payload_bytes <= 0:
         return 1
-    available_bytes = max(1, resource_policy.remaining_memory_bytes)
+    available_bytes = max(1, resource_policy.available_memory_bytes)
     measured_total_bytes = logical_bytes + frame_payload_bytes
     return min(
-        resource_policy.remaining_memory_bytes,
+        resource_policy.available_memory_bytes,
         max(1, available_bytes * logical_bytes // measured_total_bytes),
     )
 
@@ -1185,7 +1165,7 @@ def _bounded_export_frame(
         yield from iter_bounded_frame_chunks(
             frame,
             target_chunk_bytes=(
-                resource_policy.remaining_memory_bytes
+                resource_policy.available_memory_bytes
                 if target_chunk_bytes is None
                 else target_chunk_bytes
             ),
@@ -1202,7 +1182,7 @@ def _yield_bounded_export_frame(
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[pd.DataFrame]:
     parent_payload_bytes = pandas_frame_payload_bytes(frame)
-    target_chunk_bytes = resource_policy.remaining_memory_bytes
+    target_chunk_bytes = resource_policy.available_memory_bytes
     with resource_policy.reserve("source.csmar.raw-parent", parent_payload_bytes):
         chunks = iter(
             _bounded_export_frame(
@@ -1222,7 +1202,7 @@ def _require_raw_conversion_headroom(
     payload_lease: MemoryLease | None = None,
 ) -> None:
     if payload_lease is None:
-        available_bytes = resource_policy.remaining_memory_bytes
+        available_bytes = resource_policy.available_memory_bytes
     elif payload_lease.active:
         available_bytes = payload_lease.reserved_bytes
     else:
@@ -1240,18 +1220,12 @@ def dataset_files_with_identity_by_id(
 ) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
     """Yield inspected files with the identity bound during inspection."""
 
-    bound_policy = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
+    bound_policy = resource_policy
     root = Path(raw_root)
 
     def iter_files() -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
-        policy = bind_runtime_resource_policy(
-            bound_policy,
-            allow_implicit_active=False,
-        ) or active_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy):
+        policy = bound_policy or current_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy) as policy:
             with _raw_export_path_session(root) as (paths, verify_root):
                 with ExactPrimaryKeyIndex(
                     primary_key=("dataset_path",),
@@ -1407,15 +1381,12 @@ def _raw_export_identity_payload(identity: DatasetFileIdentity) -> bytes:
 def inspect_raw_export_tree(root: Path) -> Iterator[RawExportIntakeResult]:
     """Inspect supported raw exports under a private raw directory."""
 
-    bound_policy = bind_runtime_resource_policy(None, allow_implicit_active=False)
+    bound_policy = None
     raw_root = Path(root)
 
     def iter_inspections() -> Iterator[RawExportIntakeResult]:
-        policy = bind_runtime_resource_policy(
-            bound_policy,
-            allow_implicit_active=False,
-        ) or active_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy):
+        policy = bound_policy or current_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy) as policy:
             with _raw_export_path_session(raw_root) as (paths, verify_root):
                 with ExactPrimaryKeyIndex(
                     primary_key=("path",),

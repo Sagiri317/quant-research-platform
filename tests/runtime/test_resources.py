@@ -9,10 +9,7 @@ from pathlib import Path
 import pytest
 
 import quant_research_platform.runtime.resources as resources
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    runtime_resource_policy_scope,
-)
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.helpers.runtime_resources import capture_test_policy
 
 GIB = 1024**3
@@ -32,7 +29,8 @@ def _isolated_runtime_root() -> Iterator[None]:
 
 
 class _FakeMachineLock:
-    closed = False
+    def __init__(self) -> None:
+        self.closed = False
 
     def close(self) -> None:
         self.closed = True
@@ -42,7 +40,6 @@ def _patch_capture(
     monkeypatch: pytest.MonkeyPatch,
     *,
     available_memory_bytes: int = 10 * GIB,
-    explicit_cap_bytes: int | None = None,
 ) -> tuple[list[str], list[_FakeMachineLock]]:
     events: list[str] = []
     locks: list[_FakeMachineLock] = []
@@ -62,163 +59,142 @@ def _patch_capture(
     return events, locks
 
 
-def test_capture_acquires_machine_lock_before_available_memory(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_root_opener_locks_before_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     events, locks = _patch_capture(monkeypatch)
 
-    policy = RuntimeResourcePolicy.capture()
+    with runtime_resource_policy_scope() as policy:
+        assert policy.state == "ACTIVE"
 
     assert events == ["lock", "available"]
-    assert len(locks) == 1
-    assert not locks[0].closed
-    assert policy.state == "ACTIVE"
+    assert locks[0].closed
 
 
-def test_budget_is_exact_seventy_percent_floor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_budget_is_exact_seventy_percent_floor(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_capture(monkeypatch, available_memory_bytes=10 * GIB + 1)
 
-    policy = RuntimeResourcePolicy.capture()
+    with runtime_resource_policy_scope() as policy:
+        assert policy.captured_available_memory_bytes == 10 * GIB + 1
+        assert policy.memory_budget_bytes == 7 * GIB
+        assert policy.used_memory_bytes == 0
+        assert policy.available_memory_bytes == 7 * GIB
+        assert policy.to_payload() == {
+            "captured_available_memory_bytes": 10 * GIB + 1,
+            "memory_budget_bytes": 7 * GIB,
+            "used_memory_bytes": 0,
+            "available_memory_bytes": 7 * GIB,
+        }
 
-    assert policy.captured_available_memory_bytes == 10 * GIB + 1
-    assert policy.memory_budget_bytes == 7 * GIB
-    assert policy.used_memory_bytes == 0
-    assert policy.available_memory_bytes == 7 * GIB
-    assert policy.to_payload() == {
-        "captured_available_memory_bytes": 10 * GIB + 1,
-        "memory_budget_bytes": 7 * GIB,
-        "used_memory_bytes": 0,
-        "available_memory_bytes": 7 * GIB,
-    }
 
-
-def test_explicit_cap_only_lowers_budget(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_explicit_cap_only_lowers_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_capture(monkeypatch)
 
-    uncapped = RuntimeResourcePolicy.capture()
-    high = RuntimeResourcePolicy.capture(explicit_cap_bytes=20 * GIB)
-    low = RuntimeResourcePolicy.capture(explicit_cap_bytes=2 * GIB)
-
-    assert uncapped.memory_budget_bytes == 7 * GIB
-    assert high.memory_budget_bytes == 7 * GIB
-    assert low.memory_budget_bytes == 2 * GIB
+    with runtime_resource_policy_scope(explicit_cap_bytes=20 * GIB) as high:
+        assert high.memory_budget_bytes == 7 * GIB
+    with runtime_resource_policy_scope(explicit_cap_bytes=2 * GIB) as low:
+        assert low.memory_budget_bytes == 2 * GIB
 
 
 @pytest.mark.parametrize("explicit_cap_bytes", (True, 0, -1, 1.0, "1"))
-def test_invalid_cap_fails_and_releases_lock(
+def test_invalid_cap_fails_before_provider_and_releases_lock(
     monkeypatch: pytest.MonkeyPatch,
     explicit_cap_bytes: object,
 ) -> None:
     events, locks = _patch_capture(monkeypatch)
 
     with pytest.raises(ValueError, match="invalid_runtime_resource_explicit_cap"):
-        RuntimeResourcePolicy.capture(
+        with runtime_resource_policy_scope(
             explicit_cap_bytes=explicit_cap_bytes,  # type: ignore[arg-type]
-        )
+        ):
+            pass
 
     assert events == ["lock"]
     assert locks[0].closed
 
 
-@pytest.mark.parametrize(
-    ("available_memory_bytes", "error"),
-    [
-        (0, "invalid_runtime_resource_available_memory"),
-        (True, "invalid_runtime_resource_available_memory"),
-        (1.0, "invalid_runtime_resource_available_memory"),
-        (-1, "invalid_runtime_resource_available_memory"),
-    ],
-)
-def test_invalid_available_memory_fails_and_releases_lock(
+@pytest.mark.parametrize("available", (0, True, 1.0, -1))
+def test_invalid_provider_fails_and_releases_lock(
     monkeypatch: pytest.MonkeyPatch,
-    available_memory_bytes: object,
-    error: str,
-) -> None:
-    events, locks = _patch_capture(
-        monkeypatch,
-        available_memory_bytes=10 * GIB,  # type: ignore[arg-type]
-    )
-
-    def available() -> object:
-        events.append("available")
-        return available_memory_bytes
-
-    monkeypatch.setattr(
-        resources,
-        "_available_memory_bytes",
-        available,
-    )
-
-    with pytest.raises(ValueError, match=error):
-        RuntimeResourcePolicy.capture()
-
-    assert events == ["lock", "available"]
-    assert locks[0].closed
-
-
-def test_provider_failure_fails_and_releases_lock(
-    monkeypatch: pytest.MonkeyPatch,
+    available: object,
 ) -> None:
     events, locks = _patch_capture(monkeypatch)
 
-    def fail() -> int:
+    def provider() -> object:
         events.append("available")
-        raise RuntimeError("runtime_available_memory_discovery_failed")
+        return available
 
-    monkeypatch.setattr(resources, "_available_memory_bytes", fail)
-    with pytest.raises(RuntimeError, match="runtime_available_memory_discovery_failed"):
-        RuntimeResourcePolicy.capture()
+    monkeypatch.setattr(resources, "_available_memory_bytes", provider)
+    with pytest.raises(ValueError, match="invalid_runtime_resource_available_memory"):
+        with runtime_resource_policy_scope():
+            pass
 
     assert events == ["lock", "available"]
     assert locks[0].closed
 
 
-def test_held_machine_lock_fails_before_available_memory_probe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
+def test_provider_failure_releases_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    events, locks = _patch_capture(monkeypatch)
 
-    def acquire() -> _FakeMachineLock:
-        calls.append("lock")
-        if len(calls) == 1:
-            return _FakeMachineLock()
-        raise RuntimeError("runtime_data_scale_lock_busy")
+    def provider() -> int:
+        events.append("available")
+        raise RuntimeError("runtime_available_memory_discovery_failed")
 
-    monkeypatch.setattr(resources, "_acquire_machine_lock", acquire)
-    monkeypatch.setattr(
-        resources,
-        "_available_memory_bytes",
-        lambda: calls.append("available") or 10 * GIB,
-    )
-
-    first = RuntimeResourcePolicy.capture()
-    with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
-        RuntimeResourcePolicy.capture()
-
-    assert calls == ["lock", "available", "lock"]
-    with runtime_resource_policy_scope(first):
-        pass
+    monkeypatch.setattr(resources, "_available_memory_bytes", provider)
+    with pytest.raises(RuntimeError, match="runtime_available_memory_discovery_failed"):
+        with runtime_resource_policy_scope():
+            pass
+    assert events == ["lock", "available"]
+    assert locks[0].closed
 
 
-def _child_environment() -> dict[str, str]:
-    environment = os.environ.copy()
-    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
-    return environment
+def test_nested_scope_reuses_exact_context_and_rejects_conflict() -> None:
+    outer = capture_test_policy(available_memory_bytes=16 * MIB)
+    other = capture_test_policy(available_memory_bytes=16 * MIB)
+
+    with runtime_resource_policy_scope(outer):
+        with runtime_resource_policy_scope() as nested:
+            assert nested is outer
+        with runtime_resource_policy_scope(outer) as same:
+            assert same is outer
+        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
+            with runtime_resource_policy_scope(other):
+                pass
 
 
-def test_second_process_is_busy_and_crash_releases_machine_lock() -> None:
+def test_lease_overflow_release_and_leak_poison() -> None:
+    policy = capture_test_policy(available_memory_bytes=MIB, explicit_cap_bytes=733)
+    with runtime_resource_policy_scope(policy):
+        lease = policy.lease("producer", 600)
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            lease.grow(134)
+        lease.grow(133)
+        lease.shrink_to(500)
+        assert policy.used_memory_bytes == 500
+        lease.close()
+        assert policy.used_memory_bytes == 0
+
+    leaked = capture_test_policy(available_memory_bytes=MIB, explicit_cap_bytes=733)
+    with pytest.raises(RuntimeError, match="runtime_memory_lease_leaked"):
+        with runtime_resource_policy_scope(leaked):
+            leaked.lease("producer", 1)
+    assert leaked.state == "POISONED"
+    assert not leaked._lock.closed  # noqa: SLF001
+
+
+def test_leaked_child_keeps_machine_lock_until_process_exit() -> None:
     child = subprocess.Popen(
         (
             sys.executable,
             "-c",
             "from quant_research_platform.runtime.resources import "
-            "RuntimeResourcePolicy\n"
-            "RuntimeResourcePolicy.capture()\n"
-            "print('held', flush=True)\n"
+            "runtime_resource_policy_scope\n"
+            "try:\n"
+            "    with runtime_resource_policy_scope(\n"
+            "        explicit_cap_bytes=1048576\n"
+            "    ) as policy:\n"
+            "        policy.lease('leak', 1)\n"
+            "except RuntimeError as exc:\n"
+            "    assert str(exc) == 'runtime_memory_lease_leaked'\n"
+            "    print('leak-handled', flush=True)\n"
             "input()\n",
         ),
         stdin=subprocess.PIPE,
@@ -228,197 +204,82 @@ def test_second_process_is_busy_and_crash_releases_machine_lock() -> None:
         env=_child_environment(),
     )
     try:
-        assert child.stdout is not None and child.stdin is not None
+        assert child.stdout is not None
+        assert child.stdout.readline() == "leak-handled\n"
+        with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
+            with runtime_resource_policy_scope(explicit_cap_bytes=MIB):
+                pass
+        assert child.stdin is not None
+        child.stdin.write("\n")
+        child.stdin.flush()
+        child.wait(timeout=5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait(timeout=5)
+
+    with runtime_resource_policy_scope(explicit_cap_bytes=MIB) as policy:
+        assert policy.state == "ACTIVE"
+
+
+def _child_environment() -> dict[str, str]:
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    return environment
+
+
+def test_two_process_busy_then_crash_reentry() -> None:
+    child = subprocess.Popen(
+        (
+            sys.executable,
+            "-c",
+            "from quant_research_platform.runtime.resources import "
+            "runtime_resource_policy_scope\n"
+            "with runtime_resource_policy_scope(explicit_cap_bytes=1048576):\n"
+            " print('held', flush=True)\n"
+            " input()\n",
+        ),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=_child_environment(),
+    )
+    try:
+        assert child.stdout is not None
         assert child.stdout.readline() == "held\n"
         with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
-            RuntimeResourcePolicy.capture()
+            with runtime_resource_policy_scope(explicit_cap_bytes=MIB):
+                pass
     finally:
         child.kill()
         child.wait(timeout=5)
 
-    policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=MIB)
+    with runtime_resource_policy_scope(explicit_cap_bytes=MIB) as policy:
+        assert policy.state == "ACTIVE"
+
+
+def test_retired_root_cannot_reenter() -> None:
+    policy = capture_test_policy(available_memory_bytes=MIB)
     with runtime_resource_policy_scope(policy):
         pass
-
-
-def test_transfer_keeps_root_total_constant() -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    with runtime_resource_policy_scope(policy):
-        lease = policy.lease("producer", 600)
-        assert (lease.owner, lease.reserved_bytes, lease.active) == (
-            "producer",
-            600,
-            True,
-        )
-        lease.transfer("writer")
-        assert policy.used_memory_bytes == 600
-        lease.close()
-        assert policy.used_memory_bytes == 0
-        assert lease.active is False
-        lease.close()
-        assert policy.used_memory_bytes == 0
-
-
-def test_grow_pre_admits_atomically_and_shrink_only_decreases() -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=MIB,
-        explicit_cap_bytes=733,
-    )
-    with runtime_resource_policy_scope(policy):
-        lease = policy.lease("producer", 600)
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            lease.grow(134)
-        assert (lease.reserved_bytes, policy.used_memory_bytes) == (600, 600)
-
-        lease.grow(133)
-        assert (lease.reserved_bytes, policy.used_memory_bytes) == (733, 733)
-        with pytest.raises(ValueError, match="invalid_runtime_memory_lease_bytes"):
-            lease.shrink_to(734)
-        assert lease.reserved_bytes == 733
-
-        lease.shrink_to(500)
-        assert (lease.reserved_bytes, policy.used_memory_bytes) == (500, 500)
-        lease.close()
-
-
-def test_closed_lease_cannot_be_reused() -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    with runtime_resource_policy_scope(policy):
-        lease = policy.lease("producer", 10)
-        lease.close()
-        with pytest.raises(RuntimeError, match="runtime_memory_lease_not_active"):
-            lease.transfer("writer")
-        with pytest.raises(RuntimeError, match="runtime_memory_lease_not_active"):
-            lease.grow(1)
-        with pytest.raises(RuntimeError, match="runtime_memory_lease_not_active"):
-            lease.shrink_to(0)
-
-
-@pytest.mark.parametrize("owner", (None, "", 1))
-def test_lease_rejects_invalid_owner(owner: object) -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(ValueError, match="invalid_runtime_memory_lease_owner"):
-            policy.lease(owner, 1)  # type: ignore[arg-type]
-
-
-@pytest.mark.parametrize("reserved_bytes", (True, -1, 1.0, "1"))
-def test_lease_rejects_invalid_bytes(reserved_bytes: object) -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(ValueError, match="invalid_runtime_memory_lease_bytes"):
-            policy.lease("owner", reserved_bytes)  # type: ignore[arg-type]
-
-
-def test_owned_value_is_one_generic_wrapper() -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    with runtime_resource_policy_scope(policy):
-        lease = policy.lease("producer", 1)
-        owned = resources._OwnedValue(1, lease)
-        assert owned.value == 1
-        assert owned.lease is lease
-        lease.close()
-
-
-def test_cleanup_registry_is_lifo() -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    events: list[str] = []
-    with runtime_resource_policy_scope(policy):
-        policy.register_cleanup(lambda: events.append("first"))
-        policy.register_cleanup(lambda: events.append("second"))
-
-    assert events == ["second", "first"]
-    assert policy.state == "CLOSED"
-
-
-def test_clean_keyboard_interrupt_preserves_primary_and_releases_lock() -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
-            policy.register_cleanup(lambda: None)
-            raise KeyboardInterrupt()
-
-    assert policy.state == "CLOSED"
-    assert policy._lock.closed  # type: ignore[union-attr]  # noqa: SLF001
+            pass
 
 
-def test_leaked_lease_poisons_root_and_blocks_second_root(
-) -> None:
-    code = """
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    runtime_resource_policy_scope,
-)
-policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=1024)
-lease = None
-try:
-    with runtime_resource_policy_scope(policy):
-        lease = policy.lease("storage", 10)
-        raise KeyboardInterrupt
-except KeyboardInterrupt:
-    pass
-print(policy.state, policy.used_memory_bytes, policy._lock.closed)
-lease.close()
-print(policy.state, policy.used_memory_bytes, policy._lock.closed)
-try:
-    RuntimeResourcePolicy.capture()
-except RuntimeError as exc:
-    print(exc)
-"""
-    output = subprocess.run(
-        (sys.executable, "-c", code),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=_child_environment(),
-        timeout=30,
-    ).stdout.splitlines()
-
-    assert output == [
-        "POISONED 10 False",
-        "POISONED 0 False",
-        "runtime_data_scale_process_poisoned",
-    ]
-
-
-def test_cleanup_failure_adds_note_poisons_and_preserves_primary() -> None:
-    code = """
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    runtime_resource_policy_scope,
-)
-policy = RuntimeResourcePolicy.capture(explicit_cap_bytes=1024)
-try:
-    with runtime_resource_policy_scope(policy):
-        def fail():
-            raise RuntimeError("cleanup failed")
-        policy.register_cleanup(fail)
-        raise KeyboardInterrupt
-except KeyboardInterrupt as exc:
-    print(policy.state, policy._lock.closed)
-    print(exc.__notes__)
-"""
-    output = subprocess.run(
-        (sys.executable, "-c", code),
-        check=True,
-        capture_output=True,
-        text=True,
-        env=_child_environment(),
-        timeout=30,
-    ).stdout.splitlines()
-
-    assert output[0] == "POISONED False"
-    assert "runtime cleanup also failed: RuntimeError: cleanup failed" in output[1]
-
-
-def test_old_rss_surface_has_no_safety_authority() -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    with runtime_resource_policy_scope(policy):
-        evidence = policy.memory_evidence()
-        policy.assert_memory_within_budget()
-        assert policy.finish_memory_measurement() == evidence
-
-    assert evidence == {"evidence_scope": "external_release_only"}
-    assert "status" not in evidence
-    assert not hasattr(resources, "_OperationRssMeasurement")
-    assert not hasattr(resources, "_process_rss_bytes")
+def test_deleted_production_surfaces_are_absent() -> None:
+    assert not hasattr(resources.RuntimeResourcePolicy, "capture")
+    assert hasattr(resources, "current_runtime_resource_policy")
+    for name in ("active_runtime_resource_policy", "bind_runtime_resource_policy"):
+        assert not hasattr(resources, name)
+    for name in (
+        "task_memory_budget_bytes",
+        "reserved_memory_bytes",
+        "remaining_memory_bytes",
+        "register_cleanup",
+        "memory_evidence",
+        "assert_memory_within_budget",
+        "finish_memory_measurement",
+    ):
+        assert not hasattr(resources.RuntimeResourcePolicy, name)

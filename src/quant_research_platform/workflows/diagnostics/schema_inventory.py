@@ -566,9 +566,9 @@ def _aggregate_dataset_stats(
     duplicate_primary_key_count = exact_duplicate_count
     chunks = iter_dataset_chunks(
         session,
-        target_chunk_bytes=resource_policy.remaining_memory_bytes,
+        target_chunk_bytes=resource_policy.available_memory_bytes,
         operation_headroom_bytes=(
-            resource_policy.remaining_memory_bytes + session.retained_memory_bytes
+            resource_policy.available_memory_bytes + session.retained_memory_bytes
         ),
     )
     with closing_dataset_iterator(chunks):

@@ -32,7 +32,6 @@ from quant_research_platform.research.models.prediction import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    bind_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -85,7 +84,7 @@ def build_prediction_result_from_frames(
     retained_model_bytes: int = 0,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> PredictionResult:
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = resource_policy or current_runtime_resource_policy()
     if type(model_metadata) is not dict:
         raise ValueError("invalid_model_metadata")
     model_algorithm = model_metadata.get("model_algorithm")
@@ -278,8 +277,8 @@ def _iter_prediction_output_frames(
             + model_matrix_bytes
         )
         if policy is not None and (
-            policy.reserved_memory_bytes + working_bytes
-            > policy.task_memory_budget_bytes
+            policy.used_memory_bytes + working_bytes
+            > policy.memory_budget_bytes
         ):
             raise ValueError("prediction_working_set_exceeds_task_memory_budget")
         with ExitStack() as working:
@@ -304,8 +303,8 @@ def _iter_prediction_output_frames(
             )
         retained_bytes = pandas_frame_payload_bytes(output)
         if policy is not None and (
-            policy.reserved_memory_bytes + retained_bytes
-            > policy.task_memory_budget_bytes
+            policy.used_memory_bytes + retained_bytes
+            > policy.memory_budget_bytes
         ):
             raise ValueError("prediction_working_set_exceeds_task_memory_budget")
         build_state.record_prediction_output(output)
@@ -374,8 +373,8 @@ def _iter_prediction_work_frames(
         selected_bytes = _selected_frame_payload_bytes(frame, selected)
         policy = current_runtime_resource_policy()
         if policy is not None and (
-            policy.reserved_memory_bytes + selected_bytes
-            > policy.task_memory_budget_bytes
+            policy.used_memory_bytes + selected_bytes
+            > policy.memory_budget_bytes
         ):
             raise ValueError("prediction_working_set_exceeds_task_memory_budget")
         with ExitStack() as reservation:

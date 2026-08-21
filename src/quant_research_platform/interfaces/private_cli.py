@@ -13,7 +13,6 @@ from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._scratch_ownership import remove_owned_scratch
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
     open_schema_inventory_payload,
@@ -75,15 +74,8 @@ def schema_inventory(
                         resource_policy=policy,
                     )
                 )
-                published = atomic_write_json(output, inventory)
-                published_identity = published.lstat()
+                atomic_write_json(output, inventory)
                 inventory_stack.close()
-                policy.finish_memory_measurement(
-                    on_reject=lambda: remove_owned_scratch(
-                        published,
-                        published_identity,
-                    )
-                )
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc

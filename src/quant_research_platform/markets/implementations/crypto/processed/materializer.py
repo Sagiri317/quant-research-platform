@@ -166,6 +166,7 @@ def _materialize_requested_specs(
             resource_policy=resource_policy,
             panel_session=panel_session,
             retained_payload_bytes=retained_written_bytes,
+            cleanup_stack=session_stack,
         )
         if spec.kind is ProcessedDataKind.PANEL and needs_panel_session:
             panel_session = session_stack.enter_context(
@@ -281,6 +282,7 @@ def _materialize_one(
     resource_policy: RuntimeResourcePolicy,
     panel_session: DatasetSession | None,
     retained_payload_bytes: int,
+    cleanup_stack: ExitStack,
 ) -> DatasetInspection:
     if spec.kind is ProcessedDataKind.PANEL:
         return materialize_panel.write_panel(
@@ -290,6 +292,7 @@ def _materialize_one(
             time_window=time_window,
             resource_policy=resource_policy,
             retained_payload_bytes=retained_payload_bytes,
+            cleanup_stack=cleanup_stack,
         )
     if spec.kind is ProcessedDataKind.FACTOR:
         if panel_session is None:
@@ -301,6 +304,7 @@ def _materialize_one(
             time_window=time_window,
             resource_policy=resource_policy,
             retained_payload_bytes=retained_payload_bytes,
+            cleanup_stack=cleanup_stack,
         )
     if spec.kind is ProcessedDataKind.LABEL:
         if panel_session is None:
@@ -312,6 +316,7 @@ def _materialize_one(
             time_window=time_window,
             resource_policy=resource_policy,
             retained_payload_bytes=retained_payload_bytes,
+            cleanup_stack=cleanup_stack,
         )
     raise ValueError(f"unsupported_crypto_processed_kind: {spec.kind}")
 

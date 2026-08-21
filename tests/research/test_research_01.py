@@ -123,7 +123,7 @@ def test_research_indivisible_result_is_exact_and_pre_admitted(
             resource_policy=policy,
         ) as accumulator:
             accumulator.append(first)
-            with policy.reserve("outer", policy.remaining_memory_bytes):
+            with policy.reserve("outer", policy.available_memory_bytes):
                 with pytest.raises(
                     MemoryError,
                     match="runtime_memory_budget_exceeded",
@@ -385,7 +385,6 @@ def test_research_join_bound_admission_precedes_join_pull(
         processed_catalog=SimpleNamespace(get=lambda _key: object()),
         sessions=sessions,
         time_window=object(),
-        resource_policy=policy,
     )
 
     with runtime_resource_policy_scope(policy):
@@ -420,7 +419,7 @@ def test_research_time_key_scan_uses_payload_target(
         context, *, target_chunk_bytes, operation_headroom_bytes
     ):
         observed_targets.append(target_chunk_bytes)
-        assert operation_headroom_bytes == policy.task_memory_budget_bytes
+        assert operation_headroom_bytes == policy.memory_budget_bytes
         yield pd.DataFrame({"timestamp": timestamps})
 
     monkeypatch.setattr(
@@ -430,19 +429,19 @@ def test_research_time_key_scan_uses_payload_target(
         raising=False,
     )
 
-    result = assembler_module._time_keys_from_base_input(
-        session,
-        primary_key=platform_entity_time_key(),
-        time_window=TimeWindow(
-            "2026-01-01T00:00:00",
-            "2026-01-01T00:19:00",
-        ),
-        resource_policy=policy,
-        retained_payload_bytes=0,
-    )
+    with runtime_resource_policy_scope(policy):
+        result = assembler_module._time_keys_from_base_input(
+            session,
+            primary_key=platform_entity_time_key(),
+            time_window=TimeWindow(
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:19:00",
+            ),
+            retained_payload_bytes=0,
+        )
 
     assert len(result) == 20
-    assert observed_targets == [policy.remaining_memory_bytes]
+    assert observed_targets == [policy.available_memory_bytes]
 
 
 def test_research_time_key_scan_preserves_single_timestamp(
@@ -467,16 +466,16 @@ def test_research_time_key_scan_preserves_single_timestamp(
         ),
     )
 
-    assert assembler_module._time_keys_from_base_input(
-        session,
-        primary_key=platform_entity_time_key(),
-        time_window=TimeWindow(
-            "2026-01-01T00:00:00",
-            "2026-01-01T00:00:00",
-        ),
-        resource_policy=policy,
-        retained_payload_bytes=0,
-    ) == (pd.Timestamp("2026-01-01"),)
+    with runtime_resource_policy_scope(policy):
+        assert assembler_module._time_keys_from_base_input(
+            session,
+            primary_key=platform_entity_time_key(),
+            time_window=TimeWindow(
+                "2026-01-01T00:00:00",
+                "2026-01-01T00:00:00",
+            ),
+            retained_payload_bytes=0,
+        ) == (pd.Timestamp("2026-01-01"),)
 
 
 def test_research_time_key_scan_closes_iterator_before_view_cleanup(
@@ -521,14 +520,14 @@ def test_research_time_key_scan_closes_iterator_before_view_cleanup(
         lambda *_args, **_kwargs: iterator,
     )
 
-    with pytest.raises(KeyError, match="timestamp"):
-        assembler_module._time_keys_from_base_input(
-            base_session,
-            primary_key=platform_entity_time_key(),
-            time_window=TimeWindow("2026-01-01", "2026-01-01"),
-            resource_policy=policy,
-            retained_payload_bytes=0,
-        )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(KeyError, match="timestamp"):
+            assembler_module._time_keys_from_base_input(
+                base_session,
+                primary_key=platform_entity_time_key(),
+                time_window=TimeWindow("2026-01-01", "2026-01-01"),
+                retained_payload_bytes=0,
+            )
     assert events == ["iterator_close", "selection_release", "view_close"]
 
 
@@ -589,7 +588,6 @@ def test_research_view_cleanup_preserves_active_primary(
                 base,
                 primary_key=("timestamp",),
                 time_window=window,
-                resource_policy=policy,
                 retained_payload_bytes=0,
             )
     elif site == "materialize":
@@ -621,7 +619,6 @@ def test_research_view_cleanup_preserves_active_primary(
                 session=session,
                 existing_columns=(),
                 time_window=window,
-                resource_policy=policy,
                 retained_payload_bytes=0,
             )
     else:
@@ -649,11 +646,11 @@ def test_research_view_cleanup_preserves_active_primary(
             return assembler_module._research_session_view(
                 session,
                 time_window=window,
-                resource_policy=policy,
             )
 
-    with pytest.raises(primary_type, match="body_primary") as caught:
-        invoke()
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(primary_type, match="body_primary") as caught:
+            invoke()
     assert caught.value is primary
 
 
@@ -711,20 +708,20 @@ def test_research_processed_input_uses_task_budget_for_materialization(
 
     monkeypatch.setattr(assembler_module, "materialize_dataset_session", materialize)
 
-    assembler_module._read_processed_input(
-        dataset_spec=dataset_spec,
-        processed_spec=processed_spec,
-        session=context,
-        existing_columns=(),
-        time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        resource_policy=policy,
-        retained_payload_bytes=123,
-    )
+    with runtime_resource_policy_scope(policy):
+        assembler_module._read_processed_input(
+            dataset_spec=dataset_spec,
+            processed_spec=processed_spec,
+            session=context,
+            existing_columns=(),
+            time_window=TimeWindow("2014-01-02", "2014-01-08"),
+            retained_payload_bytes=123,
+        )
 
     assert observed == {
         "context": context,
-        "target_chunk_bytes": policy.remaining_memory_bytes,
-        "materialized_budget_bytes": policy.task_memory_budget_bytes - 123,
+        "target_chunk_bytes": policy.available_memory_bytes,
+        "materialized_budget_bytes": policy.memory_budget_bytes - 123,
     }
 
 
@@ -773,7 +770,6 @@ def test_research_join_preflights_merged_output_allocation(
                         "right": SimpleNamespace(retained_memory_bytes=0),
                     },
                     time_window=object(),
-                    resource_policy=policy,
                 )
         finally:
             blocking_lease.close()
@@ -835,7 +831,6 @@ def test_research_join_preflights_final_projection_allocation(
         processed_catalog=SimpleNamespace(get=lambda _key: object()),
         sessions=sessions,
         time_window=object(),
-        resource_policy=policy,
     )
 
     with runtime_resource_policy_scope(policy):
@@ -896,13 +891,12 @@ def test_research_join_clears_transient_chunk_before_next_bound(
         processed_catalog=SimpleNamespace(get=lambda _key: object()),
         sessions={"one": SimpleNamespace(retained_memory_bytes=0)},
         time_window=object(),
-        resource_policy=policy,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(chunks)
         lease = policy.lease("test.research.consumer", bound)
         owned = chunks.send(lease)
-        assert policy.reserved_memory_bytes == lease.reserved_bytes
+        assert policy.used_memory_bytes == lease.reserved_bytes
         holder["frame"] = None
         del owned
         next_bound = chunks.send(None)
@@ -1198,11 +1192,11 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
         time_window=TimeWindow("2014-12-31", "2015-01-02"),
         resource_policy=policy,
     ) as session:
-        view = assembler_module._research_session_view(
-            session,
-            time_window=TimeWindow("2015-01-02", "2015-01-02"),
-            resource_policy=policy,
-        )
+        with runtime_resource_policy_scope(policy):
+            view = assembler_module._research_session_view(
+                session,
+                time_window=TimeWindow("2015-01-02", "2015-01-02"),
+            )
 
         assert len(session.read_paths) == 2
         assert len(view.read_paths) == 1
@@ -1223,15 +1217,15 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
             "materialize_dataset_session",
             materialize,
         )
-        assembler_module._read_processed_input(
-            dataset_spec=dataset_spec,
-            processed_spec=processed_spec,
-            session=session,
-            existing_columns=(),
-            time_window=TimeWindow("2014-12-31", "2014-12-31"),
-            resource_policy=policy,
-            retained_payload_bytes=0,
-        )
+        with runtime_resource_policy_scope(policy):
+            assembler_module._read_processed_input(
+                dataset_spec=dataset_spec,
+                processed_spec=processed_spec,
+                session=session,
+                existing_columns=(),
+                time_window=TimeWindow("2014-12-31", "2014-12-31"),
+                retained_payload_bytes=0,
+            )
         normal_selection = observed_selections.pop()
         assert (
             session.inventory.path_count(
@@ -1251,16 +1245,19 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
             "materialize_dataset_session",
             fail_materialization,
         )
-        with pytest.raises(RuntimeError, match="research_test_materialization_failure"):
-            assembler_module._read_processed_input(
-                dataset_spec=dataset_spec,
-                processed_spec=processed_spec,
-                session=session,
-                existing_columns=(),
-                time_window=TimeWindow("2015-01-02", "2015-01-02"),
-                resource_policy=policy,
-                retained_payload_bytes=0,
-            )
+        with runtime_resource_policy_scope(policy):
+            with pytest.raises(
+                RuntimeError,
+                match="research_test_materialization_failure",
+            ):
+                assembler_module._read_processed_input(
+                    dataset_spec=dataset_spec,
+                    processed_spec=processed_spec,
+                    session=session,
+                    existing_columns=(),
+                    time_window=TimeWindow("2015-01-02", "2015-01-02"),
+                    retained_payload_bytes=0,
+                )
         error_selection = observed_selections.pop()
         assert (
             session.inventory.path_count(
@@ -2105,7 +2102,6 @@ def test_evaluation_runner_streams_research_chunks(
 
     evaluation_policy = capture_test_policy(
         available_memory_bytes=2 * 1024**2,
-        rss_bytes=0,
         explicit_cap_bytes=1024**2,
     )
     with runtime_resource_policy_scope(evaluation_policy):

@@ -15,7 +15,7 @@ import pyarrow as pa
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
+    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_fingerprinting import (
@@ -65,8 +65,8 @@ def compare_datasets(
         )
     if not right_path.exists():
         return _comparison("MISSING_RIGHT")
-    issued_policy = resource_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(issued_policy):
+    requested_policy = resource_policy or current_runtime_resource_policy()
+    with runtime_resource_policy_scope(requested_policy) as issued_policy:
         return _compare_datasets_under_policy(
             left_path,
             right_path,
@@ -367,8 +367,8 @@ def _index_dataset_rows(
             if column not in index.primary_key
         )
         comparison_columns = (*index.primary_key, *value_columns)
-        headroom = resource_policy.task_memory_budget_bytes
-        headroom -= resource_policy.reserved_memory_bytes
+        headroom = resource_policy.memory_budget_bytes
+        headroom -= resource_policy.used_memory_bytes
         headroom += context.retained_memory_bytes
         if headroom <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
@@ -379,8 +379,8 @@ def _index_dataset_rows(
         def index_batch(batch: pa.RecordBatch, _frame: Any) -> None:
             nonlocal duplicates
             callback_headroom = (
-                resource_policy.task_memory_budget_bytes
-                - resource_policy.reserved_memory_bytes
+                resource_policy.memory_budget_bytes
+                - resource_policy.used_memory_bytes
             )
             callback_target = min(exact_payload_target, callback_headroom)
             if callback_target <= 0:
@@ -400,7 +400,7 @@ def _index_dataset_rows(
             context,
             columns=comparison_columns,
             target_chunk_bytes=min(
-                resource_policy.remaining_memory_bytes,
+                resource_policy.available_memory_bytes,
                 reader_headroom,
             ),
             operation_headroom_bytes=reader_headroom,

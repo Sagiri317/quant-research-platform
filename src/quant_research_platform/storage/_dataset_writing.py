@@ -25,7 +25,6 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
-    active_runtime_resource_policy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -394,15 +393,13 @@ def write_dataset(
     resource_policy: RuntimeResourcePolicy | None,
     borrowed_input: bool = False,
 ) -> DatasetInspection:
-    issued_policy = resource_policy or active_runtime_resource_policy()
-    with runtime_resource_policy_scope(issued_policy):
+    with runtime_resource_policy_scope(resource_policy):
         owned = _write_dataset_owned(
             dataset_root,
             data,
             spec=spec,
             instance_metadata=instance_metadata,
             staged_validator=staged_validator,
-            resource_policy=issued_policy,
             borrowed_input=borrowed_input,
         )
         result = owned.value
@@ -417,38 +414,41 @@ def _write_dataset_owned(
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
-    resource_policy: RuntimeResourcePolicy,
     borrowed_input: bool = False,
 ) -> _OwnedValue[DatasetInspection]:
+    resource_policy = current_runtime_resource_policy()
+    if resource_policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     final_root = Path(dataset_root)
     validate_dataset_spec(spec)
     validate_dataset_artifact_root(final_root, spec)
     final_root = require_artifact_root(final_root)
     owner_reserve_bytes = _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-    if owner_reserve_bytes >= resource_policy.task_memory_budget_bytes:
+    if owner_reserve_bytes >= resource_policy.memory_budget_bytes:
         raise MemoryError("runtime_memory_budget_exceeded")
     with resource_policy.reserve("storage.dataset.write", owner_reserve_bytes):
-        return _write_dataset_under_policy(
+        return _write_dataset_body(
             final_root,
             data,
             spec=spec,
             instance_metadata=instance_metadata,
             staged_validator=staged_validator,
-            resource_policy=resource_policy,
             borrowed_input=borrowed_input,
         )
 
 
-def _write_dataset_under_policy(
+def _write_dataset_body(
     final_root: Path,
     data: pd.DataFrame | Iterable[object],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None,
-    resource_policy: RuntimeResourcePolicy,
     borrowed_input: bool,
 ) -> _OwnedValue[DatasetInspection]:
+    resource_policy = current_runtime_resource_policy()
+    if resource_policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     close = getattr(input_chunks, "close", None)
     input_closed = close is None
@@ -501,13 +501,11 @@ def _write_dataset_under_policy(
                 return
             active_producer_leases.pop()
 
-    resource_policy.register_cleanup(close_input_and_active_leases)
-
     def _writer(temp_root: Path) -> _OwnedValue[DatasetInspection]:
         try:
             if (
-                resource_policy.task_memory_budget_bytes
-                - resource_policy.reserved_memory_bytes
+                resource_policy.memory_budget_bytes
+                - resource_policy.used_memory_bytes
                 <= 0
             ):
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
@@ -533,8 +531,7 @@ def _write_dataset_under_policy(
                     input_chunks,
                     temp_root / "data",
                     spec=spec,
-                    target_chunk_bytes=resource_policy.remaining_memory_bytes,
-                    resource_policy=resource_policy,
+                    target_chunk_bytes=resource_policy.available_memory_bytes,
                     key_tracker=key_tracker,
                     inventory=inventory,
                     borrowed_input=borrowed_input,
@@ -549,8 +546,8 @@ def _write_dataset_under_policy(
                     {
                         **accumulator.payload(
                             target_chunk_bytes=(
-                                resource_policy.task_memory_budget_bytes
-                                - resource_policy.reserved_memory_bytes
+                                resource_policy.memory_budget_bytes
+                                - resource_policy.used_memory_bytes
                             )
                         ),
                         "schema_id": "qrp-dataset-manifest",
@@ -568,15 +565,27 @@ def _write_dataset_under_policy(
                     time_window=None,
                     resource_policy=resource_policy,
                 )
-                if staged_validator is not None:
-                    staged_validator(
-                        DatasetWriteReceipt(
-                            root=temp_root,
-                            session=session,
-                            exact_primary_key_index=key_tracker,
+                try:
+                    if staged_validator is not None:
+                        staged_validator(
+                            DatasetWriteReceipt(
+                                root=temp_root,
+                                session=session,
+                                exact_primary_key_index=key_tracker,
+                            )
                         )
-                    )
-                session.verify()
+                    session.verify()
+                except BaseException:
+                    primary = sys.exception()
+                    try:
+                        session.close()
+                    except BaseException as cleanup_error:
+                        if primary is not None:
+                            primary.add_note(
+                                "dataset session close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                    raise
                 result_bound = _inspection_result_bound(session)
                 try:
                     result_lease = resource_policy.lease(
@@ -596,9 +605,19 @@ def _write_dataset_under_policy(
                     if result_bytes > result_lease.reserved_bytes:
                         raise ValueError("dataset_write_result_bound_invalid")
                     result_lease.shrink_to(result_bytes)
+                    session.close()
                     return _OwnedValue(result, result_lease)
                 except BaseException:
                     result = None
+                    try:
+                        session.close()
+                    except BaseException as cleanup_error:
+                        primary = sys.exception()
+                        if primary is not None:
+                            primary.add_note(
+                                "dataset session close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
                     _close_lease_preserving_primary(
                         result_lease,
                         owner="storage.dataset.write.result",
@@ -622,13 +641,15 @@ def _write_contents(
     *,
     spec: DataSpec,
     target_chunk_bytes: int,
-    resource_policy: RuntimeResourcePolicy,
     key_tracker: ExactPrimaryKeyIndex,
     inventory: DatasetSessionInventory,
     borrowed_input: bool,
     active_producer_leases: list[MemoryLease],
     active_producer_values: list[_OwnedValue[pd.DataFrame]],
 ) -> _WriteStats:
+    resource_policy = current_runtime_resource_policy()
+    if resource_policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     timestamp_column = validate_dataset_spec(spec)
     timestamp_key_count = sum(
         spec.column_roles.get(column) is ColumnRole.TIMESTAMP
@@ -720,8 +741,8 @@ def _write_contents(
         with ExitStack() as publication_state:
             publication_state.callback(clear_current_chunk)
             metadata_budget = (
-                resource_policy.task_memory_budget_bytes
-                - resource_policy.reserved_memory_bytes
+                resource_policy.memory_budget_bytes
+                - resource_policy.used_memory_bytes
             )
             if metadata_budget <= 0:
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
@@ -761,8 +782,8 @@ def _write_contents(
                         table = accumulator.table_for_frame(frame)
                         del table
                     metadata_budget = (
-                        resource_policy.task_memory_budget_bytes
-                        - resource_policy.reserved_memory_bytes
+                        resource_policy.memory_budget_bytes
+                        - resource_policy.used_memory_bytes
                     )
                     accumulator.observe_logical_dtype_payload(
                         logical_dtypes,
@@ -882,8 +903,8 @@ def _write_contents(
                                     del table, bounded_partition
                                 for output_path in written_paths:
                                     readback_headroom = (
-                                        resource_policy.task_memory_budget_bytes
-                                        - resource_policy.reserved_memory_bytes
+                                        resource_policy.memory_budget_bytes
+                                        - resource_policy.used_memory_bytes
                                     )
                                     if readback_headroom <= 0:
                                         raise ValueError(
@@ -917,8 +938,8 @@ def _write_contents(
         raise ValueError("empty_dataset_schema_missing")
     if saw_empty_schema:
         metadata_budget = (
-            resource_policy.task_memory_budget_bytes
-            - resource_policy.reserved_memory_bytes
+            resource_policy.memory_budget_bytes
+            - resource_policy.used_memory_bytes
         )
         logical_dtypes = accumulator.materialized_logical_dtypes(
             target_chunk_bytes=metadata_budget
@@ -944,8 +965,8 @@ def _write_contents(
             )
             write_parquet_file(persisted_table, output_path)
             readback_headroom = (
-                resource_policy.task_memory_budget_bytes
-                - resource_policy.reserved_memory_bytes
+                resource_policy.memory_budget_bytes
+                - resource_policy.used_memory_bytes
             )
             accumulator.observe_file(
                 output_path,
@@ -1096,7 +1117,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
         batch_rows = max(1, persisted.num_rows)
         reservation = nullcontext()
     else:
-        remaining = policy.task_memory_budget_bytes - policy.reserved_memory_bytes
+        remaining = policy.memory_budget_bytes - policy.used_memory_bytes
         footer_bytes = _parquet_row_group_footer_upper_bound(
             persisted.schema,
             rows=persisted.num_rows,

@@ -20,8 +20,7 @@ from quant_research_platform.runtime.resources import (
     MIB,
     MemoryLease,
     RuntimeResourcePolicy,
-    active_runtime_resource_policy,
-    bind_runtime_resource_policy,
+    current_runtime_resource_policy,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
@@ -265,11 +264,12 @@ def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
 def require_raw_resource_policy(
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> RuntimeResourcePolicy:
-    bound = bind_runtime_resource_policy(
-        resource_policy,
-        allow_implicit_active=False,
-    )
-    return bound or active_runtime_resource_policy()
+    policy = resource_policy or current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
+    if type(policy) is not RuntimeResourcePolicy:
+        raise TypeError("invalid_runtime_resource_policy")
+    return policy
 
 
 @cache
@@ -566,7 +566,7 @@ class _BoundedCsvRecords:
             self._record_lease = payload_lease
             parser_bound = min(
                 _CSV_PARSER_WORKSPACE_BOUND_BYTES,
-                self._resource_policy.remaining_memory_bytes,
+                self._resource_policy.available_memory_bytes,
             )
             try:
                 self._parser_lease = self._resource_policy.lease(
@@ -584,7 +584,7 @@ class _BoundedCsvRecords:
                 owner="source.csmar.csv.record",
             )
             self._record_lease = None
-        available = self._resource_policy.remaining_memory_bytes
+        available = self._resource_policy.available_memory_bytes
         parser_bound = min(_CSV_PARSER_WORKSPACE_BOUND_BYTES, available)
         record_bound = min(
             _CSV_RECORD_LEASE_BOUND_BYTES,
@@ -981,7 +981,7 @@ def iter_export_csv_records(
     materialize_records: bool = True,
     first_record_field_count_error: str = "malformed_csmar_csv_row",
 ) -> Iterator[tuple[list[str] | BoundedCsvRecord, int]]:
-    bound_policy = bind_runtime_resource_policy(resource_policy)
+    bound_policy = require_raw_resource_policy(resource_policy)
 
     def activate() -> Iterator[tuple[list[str] | BoundedCsvRecord, int]]:
         assert bound_policy is not None
@@ -1031,6 +1031,22 @@ def read_export_header(
     path: str | Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
+    expected_identity: DatasetFileIdentity | None = None,
+) -> tuple[str, ...]:
+    """Read one CSV header under one managed operation scope."""
+
+    with runtime_resource_policy_scope(resource_policy) as policy:
+        return _read_export_header_under_policy(
+            path,
+            resource_policy=policy,
+            expected_identity=expected_identity,
+        )
+
+
+def _read_export_header_under_policy(
+    path: str | Path,
+    *,
+    resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None = None,
 ) -> tuple[str, ...]:
     """Read the header row from a supported CSV raw export."""
@@ -1093,6 +1109,22 @@ def inspect_raw_export_file(
     path: str | Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
+    expected_identity: DatasetFileIdentity | None = None,
+) -> RawExportInspection:
+    """Inspect one raw export under one managed operation scope."""
+
+    with runtime_resource_policy_scope(resource_policy) as policy:
+        return _inspect_raw_export_file_under_policy(
+            path,
+            resource_policy=policy,
+            expected_identity=expected_identity,
+        )
+
+
+def _inspect_raw_export_file_under_policy(
+    path: str | Path,
+    *,
+    resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None = None,
 ) -> RawExportInspection:
     """Inspect the file name, header, and metadata sidecar without full data reads."""

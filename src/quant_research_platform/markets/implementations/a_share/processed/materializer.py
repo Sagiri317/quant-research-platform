@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextlib import ExitStack
+
 import pandas as pd
 
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
@@ -102,7 +104,7 @@ def _materialize_processed_data_with_policy(
     lookback_sessions, lookahead_sessions = (
         materialization_dependencies.required_session_offsets(targets)
     )
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(policy), ExitStack() as cleanup_stack:
         sessions = materialization_planning.available_trading_sessions(
             layout,
             source_id,
@@ -137,6 +139,7 @@ def _materialize_processed_data_with_policy(
                 written=written,
                 requested=True,
                 dependency_windows=dependency_windows,
+                cleanup_stack=cleanup_stack,
             )
         return written
 
@@ -152,6 +155,7 @@ def _materialize_one(
     written: dict[str, DatasetInspection],
     requested: bool,
     dependency_windows: dict[str, TimeWindow],
+    cleanup_stack: ExitStack | None = None,
 ) -> DatasetInspection:
     root = materialization_io.processed_root(layout, spec)
     if spec.data_id in written:
@@ -185,7 +189,13 @@ def _materialize_one(
                 owner="a_share.materializer.inspection.result",
             )
 
-        policy.register_cleanup(release_inspection)
+        if cleanup_stack is None:
+            _release_owned_value(
+                owned,
+                owner="a_share.materializer.inspection.result",
+            )
+        else:
+            cleanup_stack.callback(release_inspection)
         return inspection
     catalog = processed_catalog()
     materialization_dependencies.ensure_processed_dependencies(
@@ -198,6 +208,7 @@ def _materialize_one(
         written=written,
         processed_catalog=catalog,
         dependency_windows=dependency_windows,
+        cleanup_stack=cleanup_stack,
         materialize_one=_materialize_one,
     )
     if spec.kind is ProcessedDataKind.PANEL:
@@ -210,6 +221,7 @@ def _materialize_one(
             policy=policy,
             sessions=sessions,
             written=written,
+            cleanup_stack=cleanup_stack,
         )
     if spec.kind is ProcessedDataKind.ANNOTATION:
         return materialize_annotations.write_annotations(
@@ -219,6 +231,7 @@ def _materialize_one(
             policy=policy,
             sessions=sessions,
             written=written,
+            cleanup_stack=cleanup_stack,
         )
     if spec.kind is ProcessedDataKind.FACTOR:
         return materialize_factors.write_factors(
@@ -228,6 +241,7 @@ def _materialize_one(
             policy=policy,
             sessions=sessions,
             written=written,
+            cleanup_stack=cleanup_stack,
         )
     if spec.kind is ProcessedDataKind.LABEL:
         return materialize_labels.write_labels(
@@ -237,6 +251,7 @@ def _materialize_one(
             policy=policy,
             sessions=sessions,
             written=written,
+            cleanup_stack=cleanup_stack,
         )
     raise ValueError(f"unsupported_processed_kind: {spec.kind}")
 

@@ -53,7 +53,6 @@ def write_portfolio_outputs(
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
-    _finalize_memory: bool = False,
 ) -> Path:
     """Write local portfolio outputs."""
 
@@ -63,7 +62,6 @@ def write_portfolio_outputs(
         spec=spec,
         output_spec=output_spec,
         layout=layout,
-        finalize_memory=_finalize_memory,
     )
 
 
@@ -74,7 +72,6 @@ def _write_portfolio_output_chunks(
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
-    finalize_memory: bool = False,
 ) -> Path:
     """Write local portfolio row outputs from bounded chunks."""
 
@@ -152,11 +149,7 @@ def _write_portfolio_output_chunks(
             ),
         )
 
-    atomic_write_directory(
-        output_bundle,
-        _write,
-        finalize_memory=finalize_memory,
-    )
+    atomic_write_directory(output_bundle, _write)
     return output_bundle
 
 

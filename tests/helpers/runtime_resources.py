@@ -16,7 +16,6 @@ class _TestMachineLock:
 def capture_test_policy(
     *,
     available_memory_bytes: int,
-    rss_bytes: int = 0,
     explicit_cap_bytes: int | None = None,
 ) -> RuntimeResourcePolicy:
     with (
@@ -31,7 +30,9 @@ def capture_test_policy(
             side_effect=lambda: _TestMachineLock(),
         ),
     ):
-        return RuntimeResourcePolicy.capture(explicit_cap_bytes=explicit_cap_bytes)
+        return resources._capture_runtime_resource_policy(
+            explicit_cap_bytes=explicit_cap_bytes
+        )
 
 
 def capture_storage_test_policy(

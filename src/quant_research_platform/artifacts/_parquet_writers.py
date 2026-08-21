@@ -412,7 +412,7 @@ def _artifact_table_write_state(
         rows=persisted.num_rows,
     )
     page_headroom = (
-        policy.remaining_memory_bytes + retained_page_bytes - footer_increment
+        policy.available_memory_bytes + retained_page_bytes - footer_increment
     )
     minimum_rows = 0 if persisted.num_rows == 0 else 1
     minimum_bytes = _table_parquet_page_working_set_bytes(

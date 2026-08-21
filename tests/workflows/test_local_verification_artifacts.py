@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import quant_research_platform.runtime.resources as runtime_resources
 from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import run_local_verification
 from quant_research_platform.workflows.local_verification_layout import (
@@ -41,11 +42,6 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     final_reserved_bytes: list[int] = []
     original_write_summary = module.write_markdown_evidence
     original_replace_json = module.replace_qrp_json
-    original_finish_memory = module.RuntimeResourcePolicy.finish_memory_measurement
-
-    def record_final_memory(self, **kwargs):  # noqa: ANN001, ANN003
-        final_reserved_bytes.append(self.reserved_memory_bytes)
-        return original_finish_memory(self, **kwargs)
 
     def track_summary_publish(path, text):
         publish_order.append("summary")
@@ -60,11 +56,6 @@ def test_local_verification_publishes_completed_run_only_after_summary(
 
     monkeypatch.setattr(module, "write_markdown_evidence", track_summary_publish)
     monkeypatch.setattr(module, "replace_qrp_json", track_run_publish)
-    monkeypatch.setattr(
-        module.RuntimeResourcePolicy,
-        "finish_memory_measurement",
-        record_final_memory,
-    )
 
     def assemble_dataset(**kwargs):
         calls.append("research")
@@ -162,7 +153,6 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     ]
     assert result.status == "NOT_RUN"
     assert publish_order == ["summary", "completed_run"]
-    assert final_reserved_bytes == [0]
     assert result.run_id == "s1"
     assert result.run_root == "s1"
     layout = LocalVerificationLayout.from_run_root(run_root)
@@ -208,13 +198,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     timing_steps = [
         record["step_name"] for record in run_payload["execution_metrics"]["records"]
     ]
-    validation_record = next(
-        record
-        for record in run_payload["execution_metrics"]["records"]
-        if record["step_name"] == "validation_summary"
-    )
     assert "validation_summary" in timing_steps
-    assert "rss_start_end_max_mb" in validation_record
     assert {path.name for path in run_root.iterdir()} == {
         "data",
         "logs",
@@ -315,9 +299,9 @@ def test_local_verification_replace_failure_preserves_old_good(
         )
     )
     monkeypatch.setattr(
-        module.RuntimeResourcePolicy,
-        "capture",
-        staticmethod(lambda **_kwargs: next(policies)),
+        runtime_resources,
+        "_capture_runtime_resource_policy",
+        lambda **_kwargs: next(policies),
     )
     result = run_local_verification(config)
     previous_root = module._previous_generation_root(run_root)
@@ -358,119 +342,6 @@ def test_local_verification_replace_failure_preserves_old_good(
         "new-good-2\n"
     )
 
-
-def test_final_rss_rejection_after_publish_restores_old_good(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "rss_old_good")
-    module._prepare_run_root(
-        run_root,
-        run_id="rss_old_good",
-        repo_root=run_root.parents[1],
-    )
-    old_run_json = (run_root / "run.json").read_bytes()
-    marker = run_root / "old-good.txt"
-    marker.write_text("old-good\n", encoding="utf-8")
-    policy = capture_test_policy(
-        available_memory_bytes=1024 * 1024,
-        rss_bytes=100,
-        explicit_cap_bytes=600 * 1024,
-    )
-    measurement = policy._measurement  # noqa: SLF001
-    original_payload = measurement._payload  # type: ignore[attr-defined]  # noqa: SLF001
-
-    def failed_evidence() -> dict[str, int | float | str]:
-        payload = original_payload()
-        if (run_root / "new-good.txt").exists():
-            payload["sampled_peak_rss_bytes"] = 701
-            payload["peak_incremental_rss_bytes"] = 601
-            payload["status"] = "FAIL"
-        return payload
-
-    measurement.checkpoint_evidence = failed_evidence  # type: ignore[method-assign]
-    monkeypatch.setattr(
-        module.RuntimeResourcePolicy,
-        "capture",
-        staticmethod(lambda **_kwargs: policy),
-    )
-
-    def replacement(**kwargs):
-        candidate = kwargs["run_root"]
-        (candidate / "new-good.txt").write_text("new-good\n", encoding="utf-8")
-        return module.LocalVerificationRunResult(
-            status="PASS",
-            run_id="rss_old_good",
-            run_root=candidate.name,
-            summary={},
-        )
-
-    monkeypatch.setattr(module, "_run_local_verification_with_policy", replacement)
-
-    config = make_local_verification_config(
-        run_root=run_root,
-        run_id="rss_old_good",
-        start_date="2014-01-01",
-        end_date="2014-12-31",
-        replace_output=True,
-        profile=profile_with_empty_prediction_and_portfolio_builders(),
-    )
-
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
-        run_local_verification(config)
-
-    assert (run_root / "run.json").read_bytes() == old_run_json
-    assert marker.read_text(encoding="utf-8") == "old-good\n"
-    assert tuple(path.name for path in run_root.parent.iterdir()) == (
-        "rss_old_good",
-    )
-
-
-def test_local_retained_state_closes_before_final_memory_measurement(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    run_root = repo_run_root(tmp_path, monkeypatch, ".run", "cleanup_sampled")
-    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
-    events: list[str] = []
-    original_finish = module.RuntimeResourcePolicy.finish_memory_measurement
-
-    monkeypatch.setattr(
-        module.RuntimeResourcePolicy,
-        "capture",
-        staticmethod(lambda **_kwargs: policy),
-    )
-
-    def replacement(**kwargs):
-        kwargs["retained_state"].callback(events.append, "cleanup")
-        return module.LocalVerificationRunResult(
-            status="PASS",
-            run_id="cleanup_sampled",
-            run_root=kwargs["run_root"].name,
-            summary={},
-        )
-
-    def finish(self, **kwargs):  # noqa: ANN001
-        events.append("finish")
-        return original_finish(self, **kwargs)
-
-    monkeypatch.setattr(module, "_run_local_verification_with_policy", replacement)
-    monkeypatch.setattr(
-        module.RuntimeResourcePolicy,
-        "finish_memory_measurement",
-        finish,
-    )
-    config = make_local_verification_config(
-        run_root=run_root,
-        run_id="cleanup_sampled",
-        start_date="2014-01-01",
-        end_date="2014-12-31",
-        profile=profile_with_empty_prediction_and_portfolio_builders(),
-    )
-
-    run_local_verification(config)
-
-    assert events == ["cleanup", "finish"]
 
 def test_local_verification_skips_empty_prediction_and_portfolio_catalogs(
     tmp_path,

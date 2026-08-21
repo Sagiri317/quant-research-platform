@@ -42,16 +42,16 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
         return policy
 
     def capture_policy() -> None:
-        snapshots.append(resource_module.active_runtime_resource_policy())
+        snapshots.append(resource_module.current_runtime_resource_policy())
 
     def assemble_dataset(**kwargs):
         capture_policy()
         return persist_fake_research_root(**kwargs)
 
     monkeypatch.setattr(
-        resource_module.RuntimeResourcePolicy,
-        "capture",
-        staticmethod(fake_capture),
+        resource_module,
+        "_capture_runtime_resource_policy",
+        fake_capture,
     )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
     real_publish = module._publish_staged_run_root
@@ -141,9 +141,9 @@ def test_local_verification_failure_cleanup_keeps_the_root_policy_active(
     real_remove = module.remove_owned_scratch
 
     monkeypatch.setattr(
-        resource_module.RuntimeResourcePolicy,
-        "capture",
-        staticmethod(lambda **_kwargs: policy),
+        resource_module,
+        "_capture_runtime_resource_policy",
+        lambda **_kwargs: policy,
     )
     monkeypatch.setattr(
         module,
@@ -152,7 +152,7 @@ def test_local_verification_failure_cleanup_keeps_the_root_policy_active(
     )
 
     def remove(path, identity):  # noqa: ANN001, ANN202
-        observed.append(resource_module.active_runtime_resource_policy())
+        observed.append(resource_module.current_runtime_resource_policy())
         return real_remove(path, identity)
 
     monkeypatch.setattr(module, "remove_owned_scratch", remove)

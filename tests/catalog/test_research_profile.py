@@ -29,7 +29,6 @@ from quant_research_platform.research.portfolios.engine import (
     construct_portfolio_positions,
 )
 from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar.interim import InterimImportResult
@@ -138,18 +137,6 @@ def test_a_share_profile_materializes_exact_processed_dependency_source_window(
     assert "trading_calendar" in result.artifact_roots
 
     calls.clear()
-    standalone_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    captures: list[object] = []
-
-    def capture_policy(**_kwargs):
-        captures.append(standalone_policy)
-        return standalone_policy
-
-    monkeypatch.setattr(
-        RuntimeResourcePolicy,
-        "capture",
-        staticmethod(capture_policy),
-    )
     legacy_result = profile.materialize_interim_data(
         StorageLayout(project_root=tmp_path),
         tmp_path / "raw",
@@ -157,32 +144,73 @@ def test_a_share_profile_materializes_exact_processed_dependency_source_window(
         "2014-01-03",
     )
 
-    assert captures == [standalone_policy]
-    assert all(call["resource_policy"] is standalone_policy for call in calls)
+    legacy_policy = calls[0]["resource_policy"]
+    assert legacy_policy is not None
+    assert all(call["resource_policy"] is legacy_policy for call in calls)
+    assert legacy_policy is not policy
     assert "trading_calendar" in legacy_result.artifact_roots
 
 
 @pytest.mark.parametrize("profile_id", (None, "crypto_binance_1m"))
-def test_profile_interim_legacy_call_rejects_ambient_root(
+def test_profile_interim_call_reuses_ambient_root(
     tmp_path: Path,
     profile_id: str | None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import quant_research_platform.profiles.research as profiles
+
+    calls: list[dict[str, object]] = []
+
+    if profile_id is None:
+        def materialize(**kwargs):  # noqa: ANN003
+            calls.append(kwargs)
+            data_ids = tuple(kwargs.get("data_ids", ("direct",)))
+            return InterimImportResult(
+                artifact_roots={data_id: tmp_path / data_id for data_id in data_ids},
+                skipped=(),
+                pruning_report_text="",
+            )
+
+        def sessions(*_args, **kwargs):  # noqa: ANN002, ANN003
+            assert kwargs["lookback_sessions"] == 252
+            assert kwargs["lookahead_sessions"] == 121
+            return pd.DatetimeIndex(
+                [
+                    *pd.bdate_range(end="2014-01-01", periods=252),
+                    pd.Timestamp("2014-01-02"),
+                    pd.Timestamp("2014-01-03"),
+                    *pd.bdate_range(start="2014-01-06", periods=121),
+                ]
+            )
+
+        monkeypatch.setattr(profiles, "_materialize_csmar_interim_data", materialize)
+        monkeypatch.setattr(
+            profiles.a_share_materialization_planning,
+            "available_trading_sessions",
+            sessions,
+        )
+    else:
+        def materialize(**kwargs):  # noqa: ANN003
+            calls.append(kwargs)
+            return object()
+
+        monkeypatch.setattr(profiles, "_materialize_binance_interim_data", materialize)
+
     from quant_research_platform.profiles.research import research_profile
 
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     profile = research_profile(profile_id)
 
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(
-            RuntimeError,
-            match="^runtime_resource_policy_competing_root$",
-        ):
-            profile.materialize_interim_data(
-                StorageLayout(project_root=tmp_path),
-                tmp_path / "raw",
-                "2024-01-02",
-                "2024-01-03",
-            )
+        profile.materialize_interim_data(
+            StorageLayout(project_root=tmp_path),
+            tmp_path / "raw",
+            "2014-01-02",
+            "2014-01-03",
+        )
+
+    assert calls
+    assert all(call["resource_policy"] is policy for call in calls)
 
 
 def test_research_profile_covers_required_models_predictions_and_signals() -> None:

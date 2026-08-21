@@ -7,7 +7,6 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.storage.atomic as atomic
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage._scratch_ownership import owned_scratch_name
 from quant_research_platform.storage.atomic import (
     atomic_write_csv,
@@ -16,7 +15,6 @@ from quant_research_platform.storage.atomic import (
     atomic_write_text,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
-from tests.helpers.runtime_resources import capture_test_policy
 
 
 class _FixedUuid:
@@ -24,96 +22,6 @@ class _FixedUuid:
 
 
 _NAMESPACE_PRIMARY_TYPES = (KeyboardInterrupt,)
-
-
-def test_atomic_publish_rejects_failed_active_rss_checkpoint(tmp_path: Path) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1024 * 1024,
-        rss_bytes=100,
-        explicit_cap_bytes=600 * 1024,
-    )
-    measurement = policy._measurement  # noqa: SLF001
-
-    def failed_checkpoint() -> dict[str, int | float | str]:
-        payload = measurement._payload()  # type: ignore[attr-defined]  # noqa: SLF001
-        payload["sampled_peak_rss_bytes"] = 701
-        payload["peak_incremental_rss_bytes"] = 601
-        payload["status"] = "FAIL"
-        return payload
-
-    measurement.checkpoint_evidence = failed_checkpoint  # type: ignore[method-assign]
-    target = tmp_path / "result.txt"
-
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
-        with runtime_resource_policy_scope(policy):
-            atomic_write_text(target, "result\n")
-
-    assert not target.exists()
-    assert tuple(tmp_path.iterdir()) == ()
-
-
-def test_atomic_publish_has_no_rejection_after_irreversible_rename(
-    tmp_path: Path,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1024 * 1024,
-        rss_bytes=100,
-        explicit_cap_bytes=600 * 1024,
-    )
-    measurement = policy._measurement  # noqa: SLF001
-    checkpoints = 0
-
-    def reject_after_rename() -> dict[str, int | float | str]:
-        nonlocal checkpoints
-        checkpoints += 1
-        payload = measurement._payload()  # type: ignore[attr-defined]  # noqa: SLF001
-        if checkpoints == 2:
-            payload["sampled_peak_rss_bytes"] = 701
-            payload["peak_incremental_rss_bytes"] = 601
-            payload["status"] = "FAIL"
-        return payload
-
-    measurement.checkpoint_evidence = reject_after_rename  # type: ignore[method-assign]
-    target = tmp_path / "result.txt"
-
-    with runtime_resource_policy_scope(policy):
-        atomic_write_text(target, "result\n")
-
-    assert checkpoints == 2
-    assert target.read_text(encoding="utf-8") == "result\n"
-
-
-def test_atomic_directory_final_rejection_removes_published_target(
-    tmp_path: Path,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=1024 * 1024,
-        rss_bytes=100,
-        explicit_cap_bytes=600 * 1024,
-    )
-    measurement = policy._measurement  # noqa: SLF001
-    target = tmp_path / "bundle"
-
-    def reject_published_target() -> dict[str, int | float | str]:
-        payload = measurement._payload()  # type: ignore[attr-defined]  # noqa: SLF001
-        if target.exists():
-            payload["sampled_peak_rss_bytes"] = 701
-            payload["peak_incremental_rss_bytes"] = 601
-            payload["status"] = "FAIL"
-        return payload
-
-    measurement.checkpoint_evidence = reject_published_target  # type: ignore[method-assign]
-
-    with pytest.raises(MemoryError, match="runtime_rss_budget_exceeded"):
-        with runtime_resource_policy_scope(policy):
-            atomic_write_directory(
-                target,
-                lambda stage: (stage / "done").write_text("ok", encoding="utf-8"),
-                finalize_memory=True,
-            )
-
-    assert not target.exists()
-    assert tuple(tmp_path.iterdir()) == ()
 
 
 def test_atomic_write_directory_cleans_temp_path_after_failure(tmp_path: Path) -> None:

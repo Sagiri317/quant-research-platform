@@ -244,7 +244,7 @@ def test_source_input_physical_reads_use_owner_resource_policy(
         target_chunk_bytes,
         materialized_budget_bytes,
     ):
-        assert materialized_budget_bytes == policy.task_memory_budget_bytes
+        assert materialized_budget_bytes == policy.memory_budget_bytes
         observed_targets.append(target_chunk_bytes)
         return _key_frame()
 
@@ -264,7 +264,7 @@ def test_source_input_physical_reads_use_owner_resource_policy(
     )
 
     assert set(inputs) == {"trading_calendar"}
-    assert observed_targets == [policy.remaining_memory_bytes]
+    assert observed_targets == [policy.available_memory_bytes]
 
 
 def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
@@ -307,8 +307,8 @@ def test_materialized_read_preserves_target_and_reserves_retained_owner_state(
         retained_payload_bytes=retained_payload_bytes,
     )
 
-    available = policy.task_memory_budget_bytes - retained_payload_bytes
-    assert observed == [(policy.remaining_memory_bytes, available)]
+    available = policy.memory_budget_bytes - retained_payload_bytes
+    assert observed == [(policy.available_memory_bytes, available)]
 
 
 @pytest.mark.parametrize("operation", ("materialized", "chunked"))
@@ -422,7 +422,7 @@ def test_materialized_read_rejects_exhausted_retained_state_before_decoder() -> 
         materialization_io.read_materialized_dataset(
             Path("dataset"),
             resource_policy=policy,
-            retained_payload_bytes=policy.task_memory_budget_bytes,
+            retained_payload_bytes=policy.memory_budget_bytes,
         )
 
 
@@ -455,7 +455,7 @@ def test_chunk_reader_rejects_exhausted_retained_state_before_session_open(
     chunks = materialization_io.iter_dataset_chunks_with_policy(
         Path("dataset"),
         resource_policy=policy,
-        retained_payload_bytes=policy.task_memory_budget_bytes,
+        retained_payload_bytes=policy.memory_budget_bytes,
     )
 
     with pytest.raises(
@@ -498,7 +498,7 @@ def test_chunk_reader_passes_caller_retained_state_to_session_acquisition(
 
 
 @pytest.mark.parametrize("operation", ("chunks", "assets"))
-def test_lazy_a_share_factories_bind_active_policy_at_creation(
+def test_a_share_factories_defer_policy_use_until_consumption(
     operation: str,
 ) -> None:
     active = capture_test_policy(
@@ -511,13 +511,17 @@ def test_lazy_a_share_factories_bind_active_policy_at_creation(
     )
 
     with runtime_resource_policy_scope(active):
-        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
-            if operation == "chunks":
-                materialization_io.iter_dataset_chunks_with_policy(
-                    Path("dataset"),
-                    resource_policy=explicit,
-                )
-            else:
+        if operation == "chunks":
+            chunks = materialization_io.iter_dataset_chunks_with_policy(
+                Path("dataset"),
+                resource_policy=explicit,
+            )
+            chunks.close()
+        else:
+            with pytest.raises(
+                RuntimeError,
+                match="a_share_materialization_policy_scope_required",
+            ):
                 materialization_planning.iter_active_materialization_batches(
                     Path("dataset"),
                     time_window=TimeWindow("2024-01-01", "2024-01-01"),
@@ -1205,7 +1209,7 @@ def test_write_paths_reserve_registered_output_before_transform(
         pass
 
     def reject_transform(*_args: object, **_kwargs: object) -> object:
-        assert policy.reserved_memory_bytes > live_frame_bytes
+        assert policy.used_memory_bytes > live_frame_bytes
         raise TransformObserved
 
     monkeypatch.setattr(transform_owner, transform_name, reject_transform)
@@ -1369,9 +1373,9 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
     )
     transform_row_bytes = 2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
     target_bytes = min(
-        policy.remaining_memory_bytes,
+        policy.available_memory_bytes,
         retained_bytes + (10**9 + 5) // 6,
-        (policy.task_memory_budget_bytes - retained_bytes)
+        (policy.memory_budget_bytes - retained_bytes)
         * fixed_row_bytes
         // (fixed_row_bytes + transform_row_bytes),
     )
@@ -1525,8 +1529,8 @@ def test_dataset_coverage_reader_accounts_compact_retained_state(
             "time_window": TimeWindow("2024-01-01", "2024-01-03"),
             "resource_policy": policy,
             "target_chunk_bytes": min(
-                policy.remaining_memory_bytes,
-                policy.task_memory_budget_bytes - retained_bytes,
+                policy.available_memory_bytes,
+                policy.memory_budget_bytes - retained_bytes,
             ),
             "retained_payload_bytes": retained_bytes,
         }
@@ -1618,7 +1622,7 @@ def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
             asset_ids=SliceRejectingTuple(("a", "b")),
             sessions=(pd.Timestamp("2024-01-02"),),
             session_context=(pd.Timestamp("2024-01-02"),),
-            retained_payload_bytes=policy.task_memory_budget_bytes - 1,
+            retained_payload_bytes=policy.memory_budget_bytes - 1,
             materialize=materialize,
         )
         bound = next(batches)
@@ -1822,7 +1826,7 @@ def test_active_materialization_owner_deduplicates_planned_batches_and_closes(
             (
                 tuple(asset_ids),
                 retained_payload_bytes,
-                policy.reserved_memory_bytes,
+                policy.used_memory_bytes,
             )
         )
         return pd.DataFrame({"asset_id": asset_ids, "timestamp": current_sessions})
@@ -1837,7 +1841,7 @@ def test_active_materialization_owner_deduplicates_planned_batches_and_closes(
         time_window=TimeWindow("2024-01-02", "2024-01-03"),
         sessions=sessions,
         resource_policy=policy,
-        output_row_bound_bytes=policy.task_memory_budget_bytes // 8,
+        output_row_bound_bytes=policy.memory_budget_bytes // 8,
         materialize=materialize,
     )
     result = pd.concat(
@@ -2010,7 +2014,7 @@ def test_active_materialization_owns_stable_target_sessions_across_capacity_spli
         time_window=window,
         sessions=sessions,
         resource_policy=policy,
-        output_row_bound_bytes=policy.task_memory_budget_bytes // 8,
+        output_row_bound_bytes=policy.memory_budget_bytes // 8,
         materialize=materialize,
     )
     first = next(output)["timestamp"].iloc[0]
@@ -2535,7 +2539,7 @@ def test_active_asset_discovery_admits_before_string_validation(
         def encode(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
             pytest.fail("asset_encoding_before_admission")
 
-    asset = UnencodableAsset("a" * policy.task_memory_budget_bytes)
+    asset = UnencodableAsset("a" * policy.memory_budget_bytes)
     frame = pd.DataFrame({"asset_id": pd.Series([asset], dtype=object)})
     monkeypatch.setattr(
         materialization_io,
@@ -2603,7 +2607,7 @@ def test_valid_bar_boundary_admits_state_before_array_allocation(
             core_sessions=(pd.Timestamp("2024-01-03"),),
             lookback_bars=1,
             lookahead_bars=1,
-            retained_payload_bytes=policy.task_memory_budget_bytes,
+            retained_payload_bytes=policy.memory_budget_bytes,
             resource_policy=policy,
         )
 
@@ -2626,7 +2630,7 @@ def test_valid_bar_output_capacity_is_checked_before_dataframe_construction(
     observed_reservations: list[int] = []
 
     def observe_empty(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        observed_reservations.append(policy.reserved_memory_bytes)
+        observed_reservations.append(policy.used_memory_bytes)
         return original_empty(*args, **kwargs)
 
     monkeypatch.setattr(materialization_planning.np, "empty", observe_empty)
@@ -2694,7 +2698,7 @@ def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
         assets, sessions, _session_context, retained, keys
     ):
         assert retained == 0
-        assert policy.reserved_memory_bytes > 0
+        assert policy.used_memory_bytes > 0
         assert len(assets) == 1
         assert set(keys["asset_id"]) == set(assets)
         return pd.DataFrame({"asset_id": assets, "timestamp": sessions})
@@ -2705,7 +2709,7 @@ def test_valid_bar_index_builds_once_across_adaptive_asset_splits(
         sessions=pd.date_range("2024-01-01", "2024-01-03"),
         resource_policy=policy,
         valid_bar_offsets=(1, 1),
-        output_row_bound_bytes=policy.task_memory_budget_bytes // 8,
+        output_row_bound_bytes=policy.memory_budget_bytes // 8,
         materialize=materialize,
     )
 
@@ -2755,7 +2759,7 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
             live_cache_bytes = sum(
                 index.retained_memory_bytes for index in active_indexes
             )
-            assert policy.reserved_memory_bytes >= live_cache_bytes
+            assert policy.used_memory_bytes >= live_cache_bytes
             build_observations.append(
                 (
                     len(active_indexes),

@@ -188,14 +188,14 @@ def test_portfolio_row_writer_fixed_reservation_covers_close_without_double_char
             return self
 
         def __next__(self) -> dict[str, pd.DataFrame]:
-            pull_reservations.append(policy.reserved_memory_bytes)
+            pull_reservations.append(policy.used_memory_bytes)
             if self.yielded:
                 raise StopIteration
             self.yielded = True
             return {name: frame for name in row_artifacts}
 
         def close(self) -> None:
-            input_close_reservations.append(policy.reserved_memory_bytes)
+            input_close_reservations.append(policy.used_memory_bytes)
 
     class Writer:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -205,10 +205,10 @@ def test_portfolio_row_writer_fixed_reservation_covers_close_without_double_char
             pass
 
         def add_key_value_metadata(self, _metadata: object) -> None:
-            metadata_reservations.append(policy.reserved_memory_bytes)
+            metadata_reservations.append(policy.used_memory_bytes)
 
         def close(self) -> None:
-            close_reservations.append(policy.reserved_memory_bytes)
+            close_reservations.append(policy.used_memory_bytes)
 
     monkeypatch.setattr(
         portfolio_outputs,
@@ -240,7 +240,7 @@ def test_portfolio_row_writer_fixed_reservation_covers_close_without_double_char
             required_columns={name: ("value",) for name in row_artifacts},
             spec=object(),  # type: ignore[arg-type]
         )
-        assert policy.reserved_memory_bytes == 0
+        assert policy.used_memory_bytes == 0
 
     assert pull_reservations == [fixed_bytes, fixed_bytes + len(row_artifacts)]
     assert metadata_reservations == [
