@@ -5962,6 +5962,125 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
     assert value_columns and set(value_columns) == {("value",)}
 
 
+def test_aggregate_chunks_stream_under_budget_without_terminal_materialization(
+    tmp_path: Path,
+) -> None:
+    chunk_rows = 2_000
+    chunk_count = 16
+    total_rows = chunk_rows * chunk_count
+    asset_suffix = "x" * 512
+    chunks: list[pd.DataFrame] = []
+    for start in range(0, total_rows, chunk_rows):
+        positions = np.arange(start, start + chunk_rows, dtype=np.int64)
+        chunks.append(
+            pd.DataFrame(
+                {
+                    "market_id": ["a_share"] * chunk_rows,
+                    "asset_id": [
+                        f"asset_{value % 8:02d}_{asset_suffix}"
+                        for value in positions
+                    ],
+                    "timestamp": pd.date_range(
+                        pd.Timestamp("2020-01-01") + pd.Timedelta(minutes=int(start)),
+                        periods=chunk_rows,
+                        freq="min",
+                    ),
+                    "value": positions.astype("float64"),
+                }
+            )
+        )
+    explicit_cap_bytes = 16 * 1024**2
+    def fresh_policy() -> RuntimeResourcePolicy:
+        return capture_test_policy(
+            available_memory_bytes=64 * 1024**2,
+            explicit_cap_bytes=explicit_cap_bytes,
+        )
+
+    payloads = tuple(pandas_frame_payload_bytes(chunk) for chunk in chunks)
+    assert all(payload < explicit_cap_bytes // 10 for payload in payloads)
+    assert sum(payloads) > explicit_cap_bytes
+    left = make_dataset_artifact_root(tmp_path / "left_parent", "aggregate_streaming")
+    right = make_dataset_artifact_root(tmp_path / "right_parent", "aggregate_streaming")
+    spec = make_processed_dataset_spec("aggregate_streaming")
+
+    for root in (left, right):
+        policy = fresh_policy()
+        inspection = dataset_writing.write_dataset(
+            root,
+            chunks,
+            spec=spec,
+            resource_policy=policy,
+            borrowed_input=True,
+        )
+        assert inspection.row_count == total_rows
+        assert policy.reserved_memory_bytes == 0
+
+    materialized_policy = fresh_policy()
+    with pytest.raises(
+        storage_errors.DatasetReadCapacityExceeded,
+        match="dataset_materialized_result_exceeds_target_bytes",
+    ):
+        dataset_reading.read_dataset(
+            left,
+            mode=DatasetReadMode.MATERIALIZED,
+            resource_policy=materialized_policy,
+        )
+    assert materialized_policy.reserved_memory_bytes == 0
+
+    streamed_policy = fresh_policy()
+    streamed_rows = 0
+    streamed = dataset_reading.read_dataset(
+        left,
+        mode=DatasetReadMode.CHUNKED,
+        resource_policy=streamed_policy,
+    )
+    try:
+        for chunk in streamed:
+            streamed_rows += len(chunk)
+            del chunk
+    finally:
+        close = getattr(streamed, "close", None)
+        if close is not None:
+            close()
+    assert streamed_rows == total_rows
+    assert streamed_policy.reserved_memory_bytes == 0
+
+    inspections = []
+    for root in (left, right):
+        policy = fresh_policy()
+        inspections.append(
+            dataset_inspection.inspect_dataset(
+                root,
+                resource_policy=policy,
+            )
+        )
+        assert policy.reserved_memory_bytes == 0
+    left_inspection, right_inspection = inspections
+    assert left_inspection.row_count == right_inspection.row_count == total_rows
+
+    fingerprints = []
+    for root in (left, right):
+        policy = fresh_policy()
+        fingerprints.append(
+            dataset_fingerprinting.fingerprint_dataset(
+                root,
+                resource_policy=policy,
+            )
+        )
+        assert policy.reserved_memory_bytes == 0
+    left_fingerprint, right_fingerprint = fingerprints
+    assert left_fingerprint == right_fingerprint
+
+    comparison_policy = fresh_policy()
+    comparison = dataset_comparison.compare_datasets(
+        left,
+        right,
+        resource_policy=comparison_policy,
+    )
+    assert comparison.status == "MATCH"
+    assert comparison_policy.reserved_memory_bytes == 0
+
+
 def test_storage_datasets_public_api_is_hard_cutover() -> None:
     import quant_research_platform.storage as storage
 
