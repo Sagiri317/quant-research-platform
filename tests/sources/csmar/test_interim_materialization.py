@@ -4,7 +4,6 @@ import csv
 import gc
 import io
 import os
-import struct
 import subprocess
 import tempfile
 import tracemalloc
@@ -19,6 +18,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
+import quant_research_platform.runtime.resources as runtime_resources
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -103,11 +103,16 @@ def test_csmar_spool_owners_reject_aliased_parent_before_disk_access(
     records._spool = None
     records._path = alias / "source.csv"
     records._slow_control_span_bytes = 1
-    records._retained_payload_bytes = [0]
-    records._task_memory_budget_bytes = 4096
+    policy = capture_test_policy(available_memory_bytes=4 * 1024**2)
     records._limit_bytes = 1024
-    with pytest.raises(ValueError, match="csmar_raw_scratch_parent_invalid"):
-        records._ensure_spool()
+    with runtime_resource_policy_scope(policy):
+        records._record_lease = policy.lease("test.csmar.csv.record", 4096)
+        records._parser_lease = records._record_lease
+        try:
+            with pytest.raises(ValueError, match="csmar_raw_scratch_parent_invalid"):
+                records._ensure_spool()
+        finally:
+            records._record_lease.close()
 
     assert not tuple(target.iterdir())
 
@@ -350,17 +355,20 @@ def test_csv_owner_rejects_retained_headroom_before_physical_read(
             pass
 
     monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: Handle())
-    records = raw_schemas.iter_export_csv_records(
-        Path("unused.csv"),
-        resource_policy=policy,
-        retained_payload_bytes=[policy.task_memory_budget_bytes],
-    )
-
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
-        next(records)
+    with runtime_resource_policy_scope(policy):
+        retained = policy.lease("test.csmar.retained", policy.memory_budget_bytes)
+        try:
+            records = raw_schemas.iter_export_csv_records(
+                Path("unused.csv"),
+                resource_policy=policy,
+            )
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="csmar_raw_working_set_exceeds_task_memory_budget",
+            ):
+                next(records)
+        finally:
+            retained.close()
 
     assert read_calls == 0
 
@@ -383,17 +391,23 @@ def test_csv_owner_never_requests_bytes_beyond_retained_headroom(
             pass
 
     monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: Handle())
-    records = raw_schemas.iter_export_csv_records(
-        Path("unused.csv"),
-        resource_policy=policy,
-        retained_payload_bytes=[policy.task_memory_budget_bytes - 100],
-    )
-
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
-        next(records)
+    with runtime_resource_policy_scope(policy):
+        retained = policy.lease(
+            "test.csmar.retained",
+            policy.memory_budget_bytes - 100,
+        )
+        try:
+            records = raw_schemas.iter_export_csv_records(
+                Path("unused.csv"),
+                resource_policy=policy,
+            )
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="csmar_raw_working_set_exceeds_task_memory_budget",
+            ):
+                next(records)
+        finally:
+            retained.close()
 
     assert read_limits == []
 
@@ -480,19 +494,160 @@ def test_csv_owner_fast_path_admits_before_content_materialization(
 
     monkeypatch.setattr(raw_schemas.io, "BufferedReader", Handle)
     monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: Handle())
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024**2,
+        explicit_cap_bytes=4 * 1024 * 1024,
+    )
     records = raw_schemas.iter_export_csv_records(
         Path("source.csv"),
-        resource_policy=capture_test_policy(
-            available_memory_bytes=4 * 1024**2,
-            explicit_cap_bytes=2 * 1024 * 1024,
-        ),
+        resource_policy=policy,
     )
 
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
+    with runtime_resource_policy_scope(policy):
+        blocker = policy.lease(
+            "test.csmar.retained",
+            policy.memory_budget_bytes - 2_500_000,
+        )
+        try:
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="csmar_raw_working_set_exceeds_task_memory_budget",
+            ):
+                next(records)
+        finally:
+            blocker.close()
+
+
+def test_csv_owner_admits_parser_payload_before_next_record_pull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "lease-before-pull.csv"
+    path.write_text("value\n1\n", encoding="utf-8")
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024**2,
+        explicit_cap_bytes=2 * 1024 * 1024,
+    )
+    observed_reserved: list[int] = []
+    original_try_fast_fields = raw_schemas._BoundedCsvRecords._try_fast_fields
+
+    def observe_before_pull(owner):  # noqa: ANN001
+        observed_reserved.append(policy.reserved_memory_bytes)
+        return original_try_fast_fields(owner)
+
+    monkeypatch.setattr(
+        raw_schemas._BoundedCsvRecords,
+        "_try_fast_fields",
+        observe_before_pull,
+    )
+    records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+    try:
+        first_line = path.read_bytes().splitlines(keepends=True)[0]
+        assert next(records) == (["value"], len(first_line))
+    finally:
+        records.close()
+
+    assert observed_reserved and observed_reserved[0] > 0
+    assert policy.reserved_memory_bytes == 0
+
+
+def test_csv_direct_record_leases_release_in_lifo_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "lease-order.csv"
+    path.write_text("value\n1\n2\n", encoding="utf-8")
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024**2,
+        explicit_cap_bytes=2 * 1024 * 1024,
+    )
+    events: list[tuple[str, str]] = []
+    real_lease = RuntimeResourcePolicy.lease
+    real_close = MemoryLease.close
+
+    def observe_lease(
+        current: RuntimeResourcePolicy,
+        owner: str,
+        reserved_bytes: int,
+    ) -> MemoryLease:
+        lease = real_lease(current, owner, reserved_bytes)
+        if owner in {"source.csmar.csv.record", "source.csmar.csv.parser"}:
+            events.append(("acquire", owner))
+        return lease
+
+    def observe_close(lease: MemoryLease) -> None:
+        if lease.owner in {"source.csmar.csv.record", "source.csmar.csv.parser"}:
+            events.append(("close", lease.owner))
+        real_close(lease)
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", observe_lease)
+    monkeypatch.setattr(MemoryLease, "close", observe_close)
+    records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+    try:
         next(records)
+        next(records)
+    finally:
+        records.close()
+
+    acquires = [owner for action, owner in events if action == "acquire"]
+    closes = [owner for action, owner in events if action == "close"]
+    assert acquires[:2] == [
+        "source.csmar.csv.record",
+        "source.csmar.csv.parser",
+    ]
+    assert closes[:2] == [
+        "source.csmar.csv.parser",
+        "source.csmar.csv.record",
+    ]
+    assert policy.reserved_memory_bytes == 0
+
+
+def test_csv_record_lease_close_failure_preserves_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
+    path = tmp_path / "record-close-primary.csv"
+    path.write_text("value\n1\n", encoding="utf-8")
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024**2,
+        explicit_cap_bytes=2 * 1024 * 1024,
+    )
+    real_close = MemoryLease.close
+    failed_leases: list[MemoryLease] = []
+
+    def fail_record_close(lease: MemoryLease) -> None:
+        if lease.owner == "source.csmar.csv.record" and not failed_leases:
+            failed_leases.append(lease)
+            raise OSError("record_close_secondary")
+        real_close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", fail_record_close)
+    primary = KeyboardInterrupt("record_primary")
+    try:
+        with pytest.raises(KeyboardInterrupt) as raised:
+            with runtime_resource_policy_scope(policy):
+                records = raw_schemas.iter_export_csv_records(
+                    path,
+                    resource_policy=policy,
+                )
+                next(records)
+                records.throw(primary)
+        assert raised.value is primary
+        assert failed_leases and failed_leases[0].active
+        assert policy.state == "POISONED"
+        with pytest.raises(
+            RuntimeError,
+            match="runtime_data_scale_process_poisoned",
+        ):
+            RuntimeResourcePolicy.capture()
+    finally:
+        monkeypatch.setattr(MemoryLease, "close", real_close)
+        for lease in failed_leases:
+            if lease.active:
+                lease.close()
+        if not policy._lock.closed:  # noqa: SLF001
+            policy._lock.close()  # noqa: SLF001
 
 
 def test_index_info_high_field_unicode_python_allocation_diagnostic(
@@ -607,7 +762,6 @@ def test_csv_owner_admits_slow_controls_before_spool_creation(
         available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    retained = [policy.task_memory_budget_bytes - 1]
     monkeypatch.setattr(
         raw_schemas.tempfile,
         "TemporaryFile",
@@ -616,7 +770,6 @@ def test_csv_owner_admits_slow_controls_before_spool_creation(
     records = raw_schemas.iter_export_csv_records(
         Path("quoted.csv"),
         resource_policy=policy,
-        retained_payload_bytes=retained,
     )
     monkeypatch.setattr(
         Path,
@@ -626,11 +779,16 @@ def test_csv_owner_admits_slow_controls_before_spool_creation(
         ),
     )
 
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
-        next(records)
+    with runtime_resource_policy_scope(policy):
+        blocker = policy.lease("test.csmar.retained", policy.memory_budget_bytes)
+        try:
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="csmar_raw_working_set_exceeds_task_memory_budget",
+            ):
+                next(records)
+        finally:
+            blocker.close()
 
 
 def test_csv_owner_admits_total_slow_materialization_before_decode(
@@ -650,36 +808,50 @@ def test_csv_owner_admits_total_slow_materialization_before_decode(
     records = raw_schemas.iter_export_csv_records(
         path,
         resource_policy=policy,
-        retained_payload_bytes=[900_000],
     )
 
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
-        next(records)
+    with runtime_resource_policy_scope(policy):
+        blocker = policy.lease(
+            "test.csmar.retained",
+            policy.memory_budget_bytes - 500_000,
+        )
+        try:
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="csmar_raw_working_set_exceeds_task_memory_budget",
+            ):
+                next(records)
+        finally:
+            blocker.close()
 
 
 def test_csv_owner_admits_fast_decoded_list_copy() -> None:
+    policy = capture_test_policy(available_memory_bytes=4 * 1024**2)
     owner = SimpleNamespace(
         generation=1,
-        _task_memory_budget_bytes=64,
-        _retained_payload_bytes=[49],
+        _buffer=b"",
+        _source_buffer_span_bytes=0,
+        _spool_buffer_span_bytes=0,
     )
-    record = raw_schemas.BoundedCsvRecord(
-        owner,
-        generation=1,
-        field_count=2,
-        source_bytes=4,
-        canonical_bytes=2,
-        decoded_fields=["a", "b"],
-    )
-
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
-        record.materialize()
+    with runtime_resource_policy_scope(policy):
+        owner._record_lease = policy.lease("test.csmar.csv.record", 32)
+        owner._parser_lease = owner._record_lease
+        record = raw_schemas.BoundedCsvRecord(
+            owner,
+            generation=1,
+            field_count=2,
+            source_bytes=4,
+            canonical_bytes=2,
+            decoded_fields=["a", "b"],
+        )
+        try:
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="csmar_raw_working_set_exceeds_task_memory_budget",
+            ):
+                record.materialize()
+        finally:
+            owner._record_lease.close()
 
 
 def test_over_width_header_rejects_before_field_decode() -> None:
@@ -942,7 +1114,7 @@ def test_private_export_parent_reservation_blocks_downstream_overlap(
         lease.close()
 
 
-def test_private_export_overflow_carry_transfers_to_next_writer_lease(
+def test_private_export_overflow_waits_for_next_writer_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = capture_test_policy(
@@ -950,50 +1122,33 @@ def test_private_export_overflow_carry_transfers_to_next_writer_lease(
         explicit_cap_bytes=4 * 1024 * 1024,
     )
 
-    class Row(list[str]):
-        pass
-
-    def make_records():
-        carry_row = Row(["4", "2024-01-03", "3", "O"])
-        carry_ref = weakref.ref(carry_row)
-
-        def records(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-            nonlocal carry_row
-            yield ["Markettype", "Clddt", "Daywk", "State"], [
-                "4",
-                "2024-01-02",
-                "2",
-                "O",
-            ], 4
-            yield ["Markettype", "Clddt", "Daywk", "State"], carry_row, 4
-            carry_row = None
-
-        return records(), carry_ref
-
-    records, carry_ref = make_records()
-    monkeypatch.setattr(
-        raw_exports,
-        "_iter_csv_records",
-        lambda *_args, **_kwargs: records,
+    rows = (
+        ["4", "2024-01-02", "2", "O"],
+        ["4", "2024-01-03", "3", "O"],
     )
-    monkeypatch.setattr(
-        raw_exports,
-        "_raw_frame_owner_known_bytes",
-        lambda rows, _header: 0 if len(rows) <= 1 else policy.memory_budget_bytes,
-    )
-    monkeypatch.setattr(raw_exports, "pandas_frame_payload_bytes", lambda _frame: 1)
-    carry_close_info: list[tuple[bool, bool]] = []
-    real_close = MemoryLease.close
-    consumer_leases: list[MemoryLease] = []
+    pulled = 0
 
-    def record_close(lease: MemoryLease) -> None:
-        if lease.owner == "source.csmar.raw.carry":
-            carry_close_info.append(
-                (carry_ref() is not None, consumer_leases[-1].active)
+    def records(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal pulled
+        for row in rows:
+            pulled += 1
+            yield ["Markettype", "Clddt", "Daywk", "State"], row, 4
+
+    monkeypatch.setattr(raw_exports, "_iter_csv_records", records)
+    observed_owners: list[tuple[str, ...]] = []
+    original_raw_frame = raw_exports._raw_frame
+
+    def observe_frame(rows, header):  # noqa: ANN001
+        observed_owners.append(
+            tuple(
+                sorted(
+                    lease.owner for lease in policy._leases if lease.active
+                )
             )
-        real_close(lease)
+        )
+        return original_raw_frame(rows, header)
 
-    monkeypatch.setattr(MemoryLease, "close", record_close)
+    monkeypatch.setattr(raw_exports, "_raw_frame", observe_frame)
     stream = raw_exports.iter_private_export_chunks_with_policy(
         Path("unused.csv"),
         dataset="trading_calendar",
@@ -1002,141 +1157,37 @@ def test_private_export_overflow_carry_transfers_to_next_writer_lease(
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
-        first_lease = policy.lease("test.csmar.raw.first", bound)
-        consumer_leases.append(first_lease)
-        first_owned = stream.send(first_lease)
-        assert isinstance(first_owned, _OwnedValue)
-        assert policy.used_memory_bytes > first_lease.reserved_bytes
-        next_bound = stream.send(None)
-        first_lease.close()
-        second_lease = policy.lease("test.csmar.raw.second", next_bound)
-        consumer_leases.append(second_lease)
-        second_owned = stream.send(second_lease)
-        assert isinstance(second_owned, _OwnedValue)
+        identities: list[tuple[object, object]] = []
+        for label in ("first", "second"):
+            consumer_lease = policy.lease(f"test.csmar.raw.{label}", bound)
+            owned = stream.send(consumer_lease)
+            assert isinstance(owned, _OwnedValue)
+            consumer_lease.transfer(f"test.csmar.output.{label}")
+            frame = owned.value
+            identities.append((frame["Clddt"].iloc[0], frame["State"].iloc[0]))
+            if label == "first":
+                assert pulled == 1
+            owned.value = None
+            del frame, owned
+            try:
+                bound = stream.send(None)
+            except StopIteration:
+                consumer_lease.close()
+                break
+            consumer_lease.close()
+        else:
+            consumer_lease.close()
         stream.close()
-        second_lease.close()
 
-    assert carry_close_info == [(True, True)]
-    assert carry_ref() is None
+    assert pulled == 2
+    assert identities == [("2024-01-02", "O"), ("2024-01-03", "O")]
+    assert observed_owners
+    assert all("source.csmar.raw.carry" not in owners for owners in observed_owners)
+    assert all(
+        any(owner.startswith("test.csmar.raw.") for owner in owners)
+        for owners in observed_owners
+    )
     assert policy.used_memory_bytes == 0
-
-
-def test_private_export_overflow_carry_preserves_primary_on_close_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
-    )
-
-    class Row(list[str]):
-        pass
-
-    carry_row = Row(["4", "2024-01-03", "3", "O"])
-    carry_ref = weakref.ref(carry_row)
-
-    def records(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        nonlocal carry_row
-        yield ["Markettype", "Clddt", "Daywk", "State"], [
-            "4",
-            "2024-01-02",
-            "2",
-            "O",
-        ], 4
-        yield ["Markettype", "Clddt", "Daywk", "State"], carry_row, 4
-        carry_row = None
-
-    monkeypatch.setattr(raw_exports, "_iter_csv_records", records)
-    monkeypatch.setattr(
-        raw_exports,
-        "_raw_frame_owner_known_bytes",
-        lambda rows, _header: 0 if len(rows) <= 1 else policy.memory_budget_bytes,
-    )
-    monkeypatch.setattr(raw_exports, "pandas_frame_payload_bytes", lambda _frame: 1)
-    real_close = MemoryLease.close
-    failed_carry_leases: list[MemoryLease] = []
-
-    def fail_carry_close(lease: MemoryLease) -> None:
-        if lease.owner == "source.csmar.raw.carry":
-            failed_carry_leases.append(lease)
-            raise OSError("carry close failure")
-        real_close(lease)
-
-    monkeypatch.setattr(MemoryLease, "close", fail_carry_close)
-    stream = raw_exports.iter_private_export_chunks_with_policy(
-        Path("unused.csv"),
-        dataset="trading_calendar",
-        chunksize=2,
-        resource_policy=policy,
-    )
-    with runtime_resource_policy_scope(policy):
-        bound = next(stream)
-        consumer_lease = policy.lease("test.csmar.raw.primary", bound)
-        first_owned = stream.send(consumer_lease)
-        assert isinstance(first_owned, _OwnedValue)
-        stream.send(None)
-        carry_row = None
-        primary = KeyboardInterrupt("primary")
-        with pytest.raises(KeyboardInterrupt) as raised:
-            stream.throw(primary)
-        assert raised.value is primary
-        assert consumer_lease.active
-        assert failed_carry_leases
-        assert carry_ref() is None
-        real_close(failed_carry_leases[0])
-        real_close(consumer_lease)
-
-    assert policy.used_memory_bytes == 0
-
-
-def test_private_export_reserves_downstream_retained_before_dataframe(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-
-    def records(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        yield (
-            ["Markettype", "Clddt", "Daywk", "State"],
-            [
-                "4",
-                "2024-01-02",
-                "2",
-                "O",
-            ],
-            1024,
-        )
-
-    monkeypatch.setattr(raw_exports, "_iter_csv_records", records)
-    monkeypatch.setattr(
-        raw_exports,
-        "_raw_frame",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("DataFrame allocated before downstream retained admission")
-        ),
-    )
-    retained_payload_bytes = [policy.task_memory_budget_bytes]
-
-    with runtime_resource_policy_scope(policy), pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
-        chunks = raw_exports.iter_private_export_chunks_with_policy(
-            Path("unused.csv"),
-            dataset="trading_calendar",
-            chunksize=1,
-            resource_policy=policy,
-            retained_payload_bytes=retained_payload_bytes,
-        )
-        bound = next(chunks)
-        lease = policy.lease("test.csmar.raw", bound)
-        try:
-            chunks.send(lease)
-        finally:
-            chunks.close()
-            lease.close()
 
 
 def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
@@ -1262,7 +1313,7 @@ def test_materialize_low_budget_fails_only_on_exact_working_set(
     )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
+        explicit_cap_bytes=4 * 1024 * 1024,
     )
     monkeypatch.setattr(
         interim,
@@ -5143,6 +5194,7 @@ def test_private_export_first_frame_reserves_owner_known_decode_buffers(
 
 @pytest.mark.parametrize("dataset", ("trading_calendar", "index_info"))
 def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
+    tmp_path: Path,
     dataset: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5164,20 +5216,33 @@ def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
             ["000986", "2014-01-02", "2013-12-31"],
             ["000987", "2014-01-03", "2013-12-31"],
         )
-    row_bytes = 4
-    observed: list[int] = []
+    path = tmp_path / f"{dataset}.csv"
+    path.write_text(
+        ",".join(header) + "\n" + "\n".join(",".join(row) for row in rows) + "\n",
+        encoding="utf-8",
+    )
+    observed: list[tuple[tuple[str, int], ...]] = []
+    observed_totals: list[int] = []
+    original_raw_frame = raw_exports._raw_frame
 
-    def records(*_args, retained_payload_bytes, **_kwargs):  # noqa: ANN001, ANN003, ANN202
-        for row in rows:
-            observed.append(retained_payload_bytes[0])
-            yield header, row, row_bytes
+    def observe_before_frame(rows, header):  # noqa: ANN001
+        observed.append(
+            tuple(
+                sorted(
+                    (lease.owner, lease.reserved_bytes)
+                    for lease in policy._leases
+                    if lease.active
+                )
+            )
+        )
+        observed_totals.append(policy.used_memory_bytes)
+        return original_raw_frame(rows, header)
 
-    owner = "iter_index_info_rows" if dataset == "index_info" else "_iter_csv_records"
-    monkeypatch.setattr(raw_exports, owner, records)
+    monkeypatch.setattr(raw_exports, "_raw_frame", observe_before_frame)
     with runtime_resource_policy_scope(policy):
         chunks = iter(
             raw_exports.iter_private_export_chunks_with_policy(
-                Path("unused.csv"),
+                path,
                 dataset=dataset,
                 chunksize=100,
                 resource_policy=policy,
@@ -5185,8 +5250,13 @@ def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
         )
         output = _collect_bound_first_frames(chunks, policy)
 
-    pointer_bytes = struct.calcsize("P")
-    assert observed[2] - observed[1] == row_bytes + (1 + len(header)) * pointer_bytes
+    assert observed
+    owners = dict(observed[0])
+    assert "test.csmar.consumer" in owners
+    assert set(owners) == {"test.csmar.consumer"}
+    assert "source.csmar.csv.record" not in owners
+    assert "source.csmar.csv.rows" not in owners
+    assert observed_totals[0] == owners["test.csmar.consumer"]
     assert sum(len(frame) for frame in output) == 3
 
 
@@ -5212,11 +5282,19 @@ def test_csv_reader_counts_copied_fast_header_before_data_pull(
         require_exact_width=require_exact_width,
     )
 
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
-    ):
-        next(rows)
+    with runtime_resource_policy_scope(policy):
+        blocker = policy.lease(
+            "test.csmar.retained",
+            policy.memory_budget_bytes - 800_000,
+        )
+        try:
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="csmar_raw_working_set_exceeds_task_memory_budget",
+            ):
+                next(rows)
+        finally:
+            blocker.close()
 
 
 def test_csv_reader_avoids_fast_record_duplicate_before_yield(
@@ -5261,31 +5339,37 @@ def test_index_continuation_unicode_write_admits_transient_before_append(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    with raw_exports._IndexInfoContinuationSpool(
-        record_limit_bytes=1024**2,
-        scratch_parent=tmp_path,
-    ) as spool:
-        if existing_continuation:
-            spool.append_fields(
-                ("existing",),
-                field_count=1,
-                retained_payload_bytes=0,
-                source_bytes=8,
-                resource_policy=policy,
+    with runtime_resource_policy_scope(policy):
+        with raw_exports._IndexInfoContinuationSpool(
+            record_limit_bytes=1024**2,
+            scratch_parent=tmp_path,
+        ) as spool:
+            if existing_continuation:
+                spool.append_fields(
+                    ("existing",),
+                    field_count=1,
+                    source_bytes=8,
+                    resource_policy=policy,
+                )
+            position = spool._handle.tell()
+            blocker = policy.lease(
+                "test.csmar.retained",
+                policy.memory_budget_bytes - 1,
             )
-        position = spool._handle.tell()
-        with pytest.raises(
-            storage_errors.DatasetReadCapacityExceeded,
-            match="csmar_raw_working_set_exceeds_task_memory_budget",
-        ):
-            spool.append_fields(
-                ("界" * io.DEFAULT_BUFFER_SIZE,),
-                field_count=1,
-                retained_payload_bytes=policy.task_memory_budget_bytes - 1,
-                source_bytes=1,
-                resource_policy=policy,
-            )
-        assert spool._handle.tell() == position
+            try:
+                with pytest.raises(
+                    storage_errors.DatasetReadCapacityExceeded,
+                    match="csmar_raw_working_set_exceeds_task_memory_budget",
+                ):
+                    spool.append_fields(
+                        ("界" * io.DEFAULT_BUFFER_SIZE,),
+                        field_count=1,
+                        source_bytes=1,
+                        resource_policy=policy,
+                    )
+            finally:
+                blocker.close()
+            assert spool._handle.tell() == position
 
 
 @pytest.mark.parametrize(

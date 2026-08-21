@@ -11,7 +11,7 @@ import struct
 import sys
 import tempfile
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import islice
 from pathlib import Path
@@ -40,6 +40,7 @@ from quant_research_platform.storage._dataset_reading import (
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
 from .raw_schemas import (
+    _CSV_RECORD_LEASE_BOUND_BYTES,
     LOGICAL_RECORD_LIMIT_ERROR,
     MAX_LOGICAL_RECORD_BYTES,
     RAW_TABLE_CONTRACTS,
@@ -134,7 +135,12 @@ class RawExportIntakeResult:
 class _IndexInfoContinuationSpool:
     """Bounded private scratch for malformed physical-row continuations."""
 
-    def __init__(self, *, record_limit_bytes: int, scratch_parent: Path) -> None:
+    def __init__(
+        self,
+        *,
+        record_limit_bytes: int,
+        scratch_parent: Path,
+    ) -> None:
         scratch_parent = require_unaliased_path(
             Path(scratch_parent), error="csmar_raw_scratch_parent_invalid"
         )
@@ -173,9 +179,9 @@ class _IndexInfoContinuationSpool:
         field_count: int,
         suffix_count: int = 0,
         include_empty: bool = True,
-        retained_payload_bytes: int,
         source_bytes: int,
         resource_policy: RuntimeResourcePolicy,
+        payload_lease: MemoryLease | None = None,
     ) -> list[str]:
         """Stream one continuation prefix and retain only its bounded suffix."""
 
@@ -184,8 +190,8 @@ class _IndexInfoContinuationSpool:
             raise ValueError("malformed_csmar_csv_row")
         _require_raw_conversion_headroom(
             logical_bytes=source_bytes + 4,
-            retained_previous_bytes=retained_payload_bytes,
             resource_policy=resource_policy,
+            payload_lease=payload_lease,
         )
         self._handle.seek(0, 2)
         frame_start = self._handle.tell()
@@ -201,9 +207,9 @@ class _IndexInfoContinuationSpool:
                 payload_bytes += 1
             payload_bytes += self._write_text(
                 value,
-                retained_payload_bytes=retained_payload_bytes,
                 source_bytes=source_bytes,
                 resource_policy=resource_policy,
+                payload_lease=payload_lease,
             )
         if payload_bytes == 0 and not include_empty:
             self._handle.seek(frame_start)
@@ -220,9 +226,9 @@ class _IndexInfoContinuationSpool:
         self,
         value: str,
         *,
-        retained_payload_bytes: int,
         source_bytes: int,
         resource_policy: RuntimeResourcePolicy,
+        payload_lease: MemoryLease | None = None,
     ) -> int:
         payload_bytes = 0
         codepoint_span = max(1, io.DEFAULT_BUFFER_SIZE // 4)
@@ -231,8 +237,8 @@ class _IndexInfoContinuationSpool:
             transient_bytes = (stop - start) * 8
             _require_raw_conversion_headroom(
                 logical_bytes=source_bytes + transient_bytes,
-                retained_previous_bytes=retained_payload_bytes,
                 resource_policy=resource_policy,
+                payload_lease=payload_lease,
             )
             text_slice = value[start:stop]
             payload = text_slice.encode("utf-8")
@@ -248,16 +254,16 @@ class _IndexInfoContinuationSpool:
         self,
         current: str,
         *,
-        retained_payload_bytes: int,
         source_bytes: int,
         resource_policy: RuntimeResourcePolicy,
+        payload_lease: MemoryLease | None = None,
     ) -> str:
         result_bytes = self._joined_payload_bytes(current)
         _require_index_info_reconstruction_headroom(
-            retained_payload_bytes=retained_payload_bytes,
             source_bytes=source_bytes,
             result_bytes=result_bytes,
             resource_policy=resource_policy,
+            payload_lease=payload_lease,
         )
         output = io.StringIO()
         wrote = bool(current)
@@ -465,7 +471,7 @@ def iter_index_info_rows(
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
     expected_identity: DatasetFileIdentity | None = None,
-    retained_payload_bytes: list[int] | None = None,
+    payload_lease_ref: list[MemoryLease | None] | None = None,
 ) -> Iterable[tuple[list[str], list[str], int]]:
     bound_policy = bind_runtime_resource_policy(
         resource_policy,
@@ -482,7 +488,7 @@ def iter_index_info_rows(
                 export_path,
                 resource_policy=policy,
                 expected_identity=expected_identity,
-                retained_payload_bytes=retained_payload_bytes,
+                payload_lease_ref=payload_lease_ref,
             )
 
     return activate()
@@ -493,21 +499,17 @@ def _iter_index_info_rows_under_policy(
     *,
     resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None,
-    retained_payload_bytes: list[int] | None,
+    payload_lease_ref: list[MemoryLease | None] | None,
 ) -> Iterator[tuple[list[str], list[str], int]]:
     policy = resource_policy
     record_limit_bytes = MAX_LOGICAL_RECORD_BYTES
-    downstream_retained_bytes = (
-        retained_payload_bytes if retained_payload_bytes is not None else [0]
-    )
-    reader_retained_bytes = [0]
     rows = iter(
         _iter_csv_records(
             export_path,
             resource_policy=policy,
             require_exact_width=False,
             expected_identity=expected_identity,
-            retained_payload_bytes=reader_retained_bytes,
+            payload_lease_ref=payload_lease_ref,
         )
     )
     with (
@@ -524,11 +526,8 @@ def _iter_index_info_rows_under_policy(
         complete_bytes = 0
         row_number = 1
         while True:
-            reader_retained_bytes[0] = downstream_retained_bytes[0] + (
-                _decoded_rows_owner_known_bytes(
-                    payload_bytes=pending_bytes + complete_bytes,
-                    rows=(pending_row, complete_row),
-                )
+            payload_lease = (
+                payload_lease_ref[0] if payload_lease_ref is not None else None
             )
             try:
                 header, record, source_bytes = next(rows)
@@ -551,47 +550,25 @@ def _iter_index_info_rows_under_policy(
                 )
                 _require_raw_conversion_headroom(
                     logical_bytes=next_bytes + pending_slot_bytes + suffix_slot_bytes,
-                    retained_previous_bytes=(
-                        downstream_retained_bytes[0]
-                        + _decoded_rows_owner_known_bytes(
-                            payload_bytes=complete_bytes,
-                            rows=(complete_row,),
-                        )
-                    ),
                     resource_policy=policy,
+                    payload_lease=payload_lease,
                 )
                 suffix = continuations.append_fields(
                     record.iter_fields(),
                     field_count=record.field_count,
                     suffix_count=remaining_columns if completes_row else 0,
                     include_empty=False,
-                    retained_payload_bytes=(
-                        downstream_retained_bytes[0]
-                        + _decoded_rows_owner_known_bytes(
-                            payload_bytes=complete_bytes,
-                            rows=(complete_row,),
-                        )
-                        + pending_slot_bytes
-                        + suffix_slot_bytes
-                    ),
                     source_bytes=next_bytes,
                     resource_policy=policy,
+                    payload_lease=payload_lease,
                 )
                 pending_bytes = next_bytes
                 if completes_row:
                     pending_row[-1] = continuations.joined(
                         pending_row[-1],
-                        retained_payload_bytes=(
-                            downstream_retained_bytes[0]
-                            + _decoded_rows_owner_known_bytes(
-                                payload_bytes=complete_bytes,
-                                rows=(complete_row,),
-                            )
-                            + pending_slot_bytes
-                            + suffix_slot_bytes
-                        ),
                         source_bytes=next_bytes,
                         resource_policy=policy,
+                        payload_lease=payload_lease,
                     )
                     pending_row.extend(suffix)
                     complete_row = _normalize_index_info_row(
@@ -599,13 +576,7 @@ def _iter_index_info_rows_under_policy(
                         len(header),
                         pending_start,
                         resource_policy=policy,
-                        retained_payload_bytes=(
-                            downstream_retained_bytes[0]
-                            + _decoded_rows_owner_known_bytes(
-                                payload_bytes=complete_bytes,
-                                rows=(complete_row,),
-                            )
-                        ),
+                        payload_lease=payload_lease,
                         source_bytes=next_bytes,
                     )
                     complete_bytes = pending_bytes
@@ -623,13 +594,7 @@ def _iter_index_info_rows_under_policy(
                         row_number,
                         continuation_spool=continuations,
                         resource_policy=policy,
-                        retained_payload_bytes=(
-                            downstream_retained_bytes[0]
-                            + _decoded_rows_owner_known_bytes(
-                                payload_bytes=complete_bytes,
-                                rows=(complete_row,),
-                            )
-                        ),
+                        payload_lease=payload_lease,
                         source_bytes=source_bytes,
                     )
                 elif complete_row is not None:
@@ -638,12 +603,9 @@ def _iter_index_info_rows_under_policy(
                     continuations.append_fields(
                         record.iter_fields(),
                         field_count=record.field_count,
-                        retained_payload_bytes=(
-                            downstream_retained_bytes[0]
-                            + _decoded_rows_slot_bytes((complete_row,))
-                        ),
                         source_bytes=complete_bytes + source_bytes,
                         resource_policy=policy,
+                        payload_lease=payload_lease,
                     )
                     complete_bytes += source_bytes
                     del record
@@ -659,12 +621,9 @@ def _iter_index_info_rows_under_policy(
                         if continuations:
                             complete_row[-1] = continuations.joined(
                                 complete_row[-1],
-                                retained_payload_bytes=(
-                                    downstream_retained_bytes[0]
-                                    + _decoded_rows_slot_bytes((complete_row,))
-                                ),
                                 source_bytes=complete_bytes,
                                 resource_policy=policy,
+                                payload_lease=payload_lease,
                             )
                         yield header, complete_row, complete_bytes
                         complete_row = None
@@ -682,12 +641,9 @@ def _iter_index_info_rows_under_policy(
                     continuations.append_fields(
                         row,
                         field_count=len(row),
-                        retained_payload_bytes=(
-                            downstream_retained_bytes[0]
-                            + _decoded_rows_slot_bytes((complete_row,))
-                        ),
                         source_bytes=complete_bytes + source_bytes,
                         resource_policy=policy,
+                        payload_lease=payload_lease,
                     )
                     complete_bytes += source_bytes
                     del row
@@ -697,12 +653,9 @@ def _iter_index_info_rows_under_policy(
                 if continuations:
                     complete_row[-1] = continuations.joined(
                         complete_row[-1],
-                        retained_payload_bytes=(
-                            downstream_retained_bytes[0]
-                            + _decoded_rows_slot_bytes((complete_row,))
-                        ),
                         source_bytes=complete_bytes,
                         resource_policy=policy,
+                        payload_lease=payload_lease,
                     )
                 yield header, complete_row, complete_bytes
                 complete_row = None
@@ -711,13 +664,7 @@ def _iter_index_info_rows_under_policy(
                 len(header),
                 row_number,
                 resource_policy=policy,
-                retained_payload_bytes=(
-                    downstream_retained_bytes[0]
-                    + _decoded_rows_owner_known_bytes(
-                        payload_bytes=complete_bytes,
-                        rows=(complete_row,),
-                    )
-                ),
+                payload_lease=payload_lease,
                 source_bytes=source_bytes,
             )
             del row
@@ -730,12 +677,9 @@ def _iter_index_info_rows_under_policy(
             if continuations:
                 complete_row[-1] = continuations.joined(
                     complete_row[-1],
-                    retained_payload_bytes=(
-                        downstream_retained_bytes[0]
-                        + _decoded_rows_slot_bytes((complete_row,))
-                    ),
                     source_bytes=complete_bytes,
                     resource_policy=policy,
+                    payload_lease=payload_lease,
                 )
             yield header, complete_row, complete_bytes
             complete_row = None
@@ -747,7 +691,7 @@ def _normalize_index_info_row(
     row_number: int | None,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
-    retained_payload_bytes: int = 0,
+    payload_lease: MemoryLease | None = None,
     source_bytes: int = 0,
 ) -> list[str]:
     if len(row) > column_count:
@@ -755,7 +699,7 @@ def _normalize_index_info_row(
             row,
             row_number,
             resource_policy=resource_policy,
-            retained_payload_bytes=retained_payload_bytes,
+            payload_lease=payload_lease,
             source_bytes=source_bytes,
         )
     if len(row) != column_count or not _looks_like_index_info_record_start(row):
@@ -774,7 +718,7 @@ def _normalize_bounded_index_info_record(
     *,
     continuation_spool: _IndexInfoContinuationSpool,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int,
+    payload_lease: MemoryLease | None = None,
     source_bytes: int,
 ) -> list[str]:
     """Normalize an over-width index record without a field-count-sized list."""
@@ -808,30 +752,30 @@ def _normalize_bounded_index_info_record(
     continuation_spool.append_fields(
         islice(record.iter_fields(), 5, candidate_start),
         field_count=sample_field_count,
-        retained_payload_bytes=retained_payload_bytes,
         source_bytes=source_bytes,
         resource_policy=resource_policy,
+        payload_lease=payload_lease,
     )
     sample = continuation_spool.joined(
         "",
-        retained_payload_bytes=retained_payload_bytes,
         source_bytes=source_bytes,
         resource_policy=resource_policy,
+        payload_lease=payload_lease,
     )
     continuation_spool.clear()
     formula_field_count = record.field_count - candidate_start - 5
     continuation_spool.append_fields(
         islice(record.iter_fields(), candidate_start + 5, None),
         field_count=formula_field_count,
-        retained_payload_bytes=retained_payload_bytes + _utf8_size(sample),
         source_bytes=source_bytes,
         resource_policy=resource_policy,
+        payload_lease=payload_lease,
     )
     formula = continuation_spool.joined(
         "",
-        retained_payload_bytes=retained_payload_bytes + _utf8_size(sample),
         source_bytes=source_bytes,
         resource_policy=resource_policy,
+        payload_lease=payload_lease,
     )
     continuation_spool.clear()
     return [*fixed, sample, *codes, formula]
@@ -842,7 +786,7 @@ def _normalize_long_index_info_row(
     row_number: int | None,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
-    retained_payload_bytes: int = 0,
+    payload_lease: MemoryLease | None = None,
     source_bytes: int = 0,
 ) -> list[str]:
     candidate_start: int | None = None
@@ -862,10 +806,10 @@ def _normalize_long_index_info_row(
         raise ValueError(f"malformed_csmar_csv_row: {row_number}")
     if resource_policy is not None:
         _require_index_info_reconstruction_headroom(
-            retained_payload_bytes=retained_payload_bytes,
             source_bytes=source_bytes,
             result_bytes=source_bytes,
             resource_policy=resource_policy,
+            payload_lease=payload_lease,
         )
     sample_scope = ",".join(row[5:candidate_start])
     formula = ",".join(row[candidate_start + 5 :])
@@ -887,21 +831,25 @@ def _normalize_long_index_info_row(
 
 def _require_index_info_reconstruction_headroom(
     *,
-    retained_payload_bytes: int,
     source_bytes: int,
     result_bytes: int,
     resource_policy: RuntimeResourcePolicy,
+    payload_lease: MemoryLease | None = None,
 ) -> None:
-    retained_payload_span_bytes = retained_payload_bytes
     live_source_span_bytes = source_bytes
     string_builder_span_bytes = result_bytes
     returned_string_span_bytes = result_bytes
+    if payload_lease is None:
+        available_bytes = resource_policy.remaining_memory_bytes
+    elif payload_lease.active:
+        available_bytes = payload_lease.reserved_bytes
+    else:
+        available_bytes = 0
     if (
-        retained_payload_span_bytes
-        + live_source_span_bytes
+        live_source_span_bytes
         + string_builder_span_bytes
         + returned_string_span_bytes
-        > resource_policy.task_memory_budget_bytes
+        > available_bytes
     ):
         raise DatasetReadCapacityExceeded(
             "csmar_raw_working_set_exceeds_task_memory_budget"
@@ -1011,17 +959,13 @@ def iter_private_export_chunks_with_policy(
     chunksize: int,
     resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None = None,
-    retained_payload_bytes: list[int] | None = None,
 ) -> Iterator[object]:
     require_raw_resource_policy(resource_policy)
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
     export_path = Path(path)
     producer_bound = max(1, resource_policy.memory_budget_bytes // 2)
-    downstream_retained_bytes = (
-        retained_payload_bytes if retained_payload_bytes is not None else [0]
-    )
-    base_retained_bytes = downstream_retained_bytes[0]
+    payload_lease_ref: list[MemoryLease | None] = [None]
 
     if dataset == "index_info":
         rows = iter(
@@ -1029,7 +973,7 @@ def iter_private_export_chunks_with_policy(
                 export_path,
                 resource_policy=resource_policy,
                 expected_identity=expected_identity,
-                retained_payload_bytes=downstream_retained_bytes,
+                payload_lease_ref=payload_lease_ref,
             )
         )
     else:
@@ -1040,110 +984,45 @@ def iter_private_export_chunks_with_policy(
                 resource_policy=resource_policy,
                 require_exact_width=True,
                 expected_identity=expected_identity,
-                retained_payload_bytes=downstream_retained_bytes,
+                payload_lease_ref=payload_lease_ref,
             )
         )
     with closing_dataset_iterator(rows):
-        carry: tuple[list[str], object, int] | None = None
-        carry_lease: MemoryLease | None = None
-
-        def close_carry() -> None:
-            nonlocal carry, carry_lease
-            primary = sys.exception()
-            carry = None
-            if carry_lease is not None:
-                lease = carry_lease
-                try:
-                    lease.close()
-                except BaseException as close_error:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        "csmar carry lease close also failed: "
-                        f"{type(close_error).__name__}: {close_error}"
-                    )
-                    return
-                carry_lease = None
-
-        with ExitStack() as cleanup:
-            cleanup.callback(close_carry)
+        try:
             while True:
                 lease = yield producer_bound
+                payload_lease_ref[0] = lease
                 pending: list[object] = []
                 pending_bytes = 0
-                pending_cell_count = 0
                 header: list[str] | None = None
                 while len(pending) < chunksize:
-                    downstream_retained_bytes[0] = (
-                        base_retained_bytes
-                        + _pending_decoded_owner_known_bytes(
-                            payload_bytes=pending_bytes,
-                            row_count=len(pending),
-                            cell_count=pending_cell_count,
-                        )
-                    )
-                    if carry is None:
-                        try:
-                            next_header, row, row_bytes = next(rows)
-                        except StopIteration:
-                            break
-                    else:
-                        next_header, row, row_bytes = carry
-                        carry = None
-                        old_carry_lease = carry_lease
-                        carry_lease = None
-                        if old_carry_lease is not None:
-                            old_carry_lease.close()
+                    if pending and (
+                        pending_bytes
+                        + _raw_frame_owner_known_bytes(pending, header)
+                        + _CSV_RECORD_LEASE_BOUND_BYTES
+                        + 64 * 1024
+                        > producer_bound
+                    ):
+                        break
+                    try:
+                        next_header, row, row_bytes = next(rows)
+                    except StopIteration:
+                        break
                     if header is None:
                         header = next_header
                     pending.append(row)
                     pending_bytes += row_bytes
-                    pending_cell_count += len(row)
-                    downstream_retained_bytes[0] = (
-                        base_retained_bytes
-                        + _pending_decoded_owner_known_bytes(
-                            payload_bytes=pending_bytes,
-                            row_count=len(pending),
-                            cell_count=pending_cell_count,
-                        )
-                    )
                     if (
                         pending_bytes
                         + _raw_frame_owner_known_bytes(pending, header)
                         + 64 * 1024
                         > producer_bound
                     ):
-                        if len(pending) == 1:
-                            raise DatasetReadCapacityExceeded(
-                                "csmar_raw_working_set_exceeds_task_memory_budget"
-                            )
-                        pending.pop()
-                        pending_bytes -= row_bytes
-                        pending_cell_count -= len(row)
-                        downstream_retained_bytes[0] = (
-                            base_retained_bytes
-                            + _pending_decoded_owner_known_bytes(
-                                payload_bytes=pending_bytes,
-                                row_count=len(pending),
-                                cell_count=pending_cell_count,
-                            )
+                        raise DatasetReadCapacityExceeded(
+                            "csmar_raw_working_set_exceeds_task_memory_budget"
                         )
-                        carry_bound = (
-                            _pending_decoded_owner_known_bytes(
-                                payload_bytes=row_bytes,
-                                row_count=1,
-                                cell_count=len(row),
-                            )
-                            + _raw_frame_owner_known_bytes([row], next_header)
-                            + 64 * 1024
-                        )
-                        carry_lease = resource_policy.lease(
-                            "source.csmar.raw.carry",
-                            carry_bound,
-                        )
-                        carry = (next_header, row, row_bytes)
-                        break
                 if not pending or header is None:
+                    payload_lease_ref[0] = None
                     return
                 if pending_bytes > producer_bound:
                     raise DatasetReadCapacityExceeded(
@@ -1152,8 +1031,8 @@ def iter_private_export_chunks_with_policy(
                 _require_raw_conversion_headroom(
                     logical_bytes=pending_bytes
                     + _raw_frame_owner_known_bytes(pending, header),
-                    retained_previous_bytes=downstream_retained_bytes[0],
                     resource_policy=resource_policy,
+                    payload_lease=lease,
                 )
                 if dataset == "index_info":
                     frame = _clean_index_info_source_codes(_raw_frame(pending, header))
@@ -1171,6 +1050,11 @@ def iter_private_export_chunks_with_policy(
                 header = None
                 yield _OwnedValue(frame, lease)
                 del frame, pending
+                payload_lease_ref[0] = None
+        finally:
+            payload_lease_ref[0] = None
+
+
 def _iter_csv_records(
     path: Path,
     *,
@@ -1178,18 +1062,14 @@ def _iter_csv_records(
     require_exact_width: bool,
     dataset: str | None = None,
     expected_identity: DatasetFileIdentity | None = None,
-    retained_payload_bytes: list[int] | None = None,
+    payload_lease_ref: list[MemoryLease | None] | None = None,
 ) -> Iterator[tuple[list[str], list[str] | BoundedCsvRecord, int]]:
-    caller_retained_bytes = (
-        retained_payload_bytes if retained_payload_bytes is not None else [0]
-    )
-    reader_retained_bytes = [caller_retained_bytes[0]]
     rows = iter(
         iter_export_csv_records(
             path,
             resource_policy=resource_policy,
             expected_identity=expected_identity,
-            retained_payload_bytes=reader_retained_bytes,
+            payload_lease_ref=payload_lease_ref,
             materialize_records=False,
         )
     )
@@ -1223,13 +1103,7 @@ def _iter_csv_records(
             header = [physical_header[index] for index in sorted(selected_positions)]
             del physical_header
         del header_record
-        header_owner_bytes = _pending_decoded_owner_known_bytes(
-            payload_bytes=sum(_utf8_size(column) for column in header),
-            row_count=1,
-            cell_count=len(header),
-        )
         while True:
-            reader_retained_bytes[0] = caller_retained_bytes[0] + header_owner_bytes
             try:
                 record, source_bytes = next(rows)
             except StopIteration:
@@ -1255,14 +1129,10 @@ def _next_batch_target_bytes(
     logical_bytes: int,
     frame_payload_bytes: int,
     resource_policy: RuntimeResourcePolicy,
-    retained_payload_bytes: int = 0,
 ) -> int:
     if logical_bytes <= 0 or frame_payload_bytes <= 0:
         return 1
-    available_bytes = max(
-        1,
-        resource_policy.remaining_memory_bytes - retained_payload_bytes,
-    )
+    available_bytes = max(1, resource_policy.remaining_memory_bytes)
     measured_total_bytes = logical_bytes + frame_payload_bytes
     return min(
         resource_policy.remaining_memory_bytes,
@@ -1298,24 +1168,6 @@ def _raw_frame_owner_known_bytes(
     frame_reference_bytes = (len(header) + cells) * pointer_bytes
     numeric_decode_bytes = cells * 16
     return pending_backing_bytes + frame_reference_bytes + numeric_decode_bytes
-
-
-def _pending_decoded_owner_known_bytes(
-    *,
-    payload_bytes: int,
-    row_count: int,
-    cell_count: int,
-) -> int:
-    pointer_bytes = struct.calcsize("P")
-    return payload_bytes + (row_count + cell_count) * pointer_bytes
-
-
-def _decoded_rows_owner_known_bytes(
-    *,
-    payload_bytes: int,
-    rows: Iterable[list[str] | None],
-) -> int:
-    return payload_bytes + _decoded_rows_slot_bytes(rows)
 
 
 def _decoded_rows_slot_bytes(rows: Iterable[list[str] | None]) -> int:
@@ -1366,13 +1218,16 @@ def _yield_bounded_export_frame(
 def _require_raw_conversion_headroom(
     *,
     logical_bytes: int,
-    retained_previous_bytes: int,
     resource_policy: RuntimeResourcePolicy,
+    payload_lease: MemoryLease | None = None,
 ) -> None:
-    if (
-        logical_bytes + retained_previous_bytes
-        > resource_policy.remaining_memory_bytes
-    ):
+    if payload_lease is None:
+        available_bytes = resource_policy.remaining_memory_bytes
+    elif payload_lease.active:
+        available_bytes = payload_lease.reserved_bytes
+    else:
+        available_bytes = 0
+    if logical_bytes > available_bytes:
         raise DatasetReadCapacityExceeded(
             "csmar_raw_working_set_exceeds_task_memory_budget"
         )

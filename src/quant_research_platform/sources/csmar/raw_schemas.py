@@ -18,6 +18,7 @@ from pathlib import Path
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.runtime.resources import (
     MIB,
+    MemoryLease,
     RuntimeResourcePolicy,
     active_runtime_resource_policy,
     bind_runtime_resource_policy,
@@ -37,6 +38,20 @@ MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 MAX_LOGICAL_RECORD_BYTES = MIB
 _MAX_PROVIDER_HEADER_FIELDS = 64
 LOGICAL_RECORD_LIMIT_ERROR = "csmar_logical_record_exceeds_source_limit"
+_CSV_RECORD_LEASE_BOUND_BYTES = 5 * MAX_LOGICAL_RECORD_BYTES
+_CSV_PARSER_WORKSPACE_BOUND_BYTES = 128 * 1024
+
+
+def _close_lease_preserving_primary(lease: MemoryLease, *, owner: str) -> None:
+    primary = sys.exception()
+    try:
+        lease.close()
+    except BaseException as close_error:
+        if primary is None:
+            raise
+        primary.add_note(
+            f"{owner} lease close also failed: {type(close_error).__name__}"
+        )
 
 
 @dataclass(frozen=True)
@@ -361,20 +376,30 @@ class BoundedCsvRecord:
             + len(getattr(owner, "_buffer", b""))
             + getattr(owner, "_spool_buffer_span_bytes", 0)
         )
+        parser_lease = owner._parser_lease
+        lease = owner._record_lease
         if (
-            owner._retained_payload_bytes[0]
-            + materialization_control_span_bytes
-            + current_encoded_field_bytes
+            parser_lease is None
+            or not parser_lease.active
+            or materialization_control_span_bytes > parser_lease.reserved_bytes
+            or lease is None
+            or not lease.active
+            or current_encoded_field_bytes
             + total_decoded_output_bytes
             + decoded_list_slot_bytes
-            > owner._task_memory_budget_bytes
+            > lease.reserved_bytes
         ):
             raise DatasetReadCapacityExceeded(
                 "csmar_raw_working_set_exceeds_task_memory_budget"
             )
 
     def _require_live(self) -> None:
-        if self._owner.generation != self._generation:
+        lease = self._owner._record_lease
+        if (
+            self._owner.generation != self._generation
+            or lease is None
+            or not lease.active
+        ):
             raise RuntimeError("csmar_csv_record_expired")
 
 
@@ -392,7 +417,7 @@ class _BoundedCsvRecords:
         *,
         limit_bytes: int,
         resource_policy: RuntimeResourcePolicy,
-        retained_payload_bytes: list[int],
+        payload_lease_ref: list[MemoryLease | None] | None = None,
         expected_identity: DatasetFileIdentity | None = None,
     ) -> None:
         try:
@@ -401,8 +426,9 @@ class _BoundedCsvRecords:
             raise ValueError("csmar_raw_export_identity_changed") from exc
         if expected_identity is not None and path_identity != expected_identity:
             raise ValueError("csmar_raw_export_identity_changed")
-        handle = path.open("rb")
+        handle = None
         try:
+            handle = path.open("rb")
             fileno = getattr(handle, "fileno", None)
             identity = (
                 None
@@ -422,7 +448,11 @@ class _BoundedCsvRecords:
             self._spool: object | None = None
             self._path = path
             self._limit_bytes = limit_bytes
-            self._task_memory_budget_bytes = resource_policy.task_memory_budget_bytes
+            self._resource_policy = resource_policy
+            self._payload_lease_ref = payload_lease_ref
+            self._record_lease: MemoryLease | None = None
+            self._parser_lease: MemoryLease | None = None
+            self._owns_record_lease = payload_lease_ref is None
             read_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
             validation_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
             field_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
@@ -447,23 +477,30 @@ class _BoundedCsvRecords:
                 + validation_buffer_span_bytes
                 + field_buffer_span_bytes
             )
-            self._retained_payload_bytes = retained_payload_bytes
             self._buffer = b""
             self._buffer_position = 0
             self._pushback: deque[int] = deque()
             self._first_record = True
             self.generation = 0
         except BaseException:
-            try:
-                handle.close()
-            except BaseException:
-                pass
+            if handle is not None:
+                try:
+                    handle.close()
+                except BaseException as close_error:
+                    primary = sys.exception()
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "csmar raw handle close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
             raise
 
     def __iter__(self) -> _BoundedCsvRecords:
         return self
 
     def __next__(self) -> BoundedCsvRecord:
+        self._start_record()
         self.generation += 1
         try:
             fast_fields = self._try_fast_fields()
@@ -490,6 +527,7 @@ class _BoundedCsvRecords:
         max_fields: int,
         field_count_error: str = "malformed_csmar_csv_row",
     ) -> tuple[list[str], int]:
+        self._start_record()
         self.generation += 1
         try:
             fast_fields = self._try_fast_fields()
@@ -511,6 +549,72 @@ class _BoundedCsvRecords:
             )
         except UnicodeDecodeError as exc:
             raise ValueError("malformed_csmar_csv_row") from exc
+
+    def _start_record(self) -> None:
+        if self._parser_lease is not None:
+            _close_lease_preserving_primary(
+                self._parser_lease,
+                owner="source.csmar.csv.parser",
+            )
+            self._parser_lease = None
+        if self._payload_lease_ref is not None:
+            payload_lease = self._payload_lease_ref[0]
+            if payload_lease is None or not payload_lease.active:
+                raise DatasetReadCapacityExceeded(
+                    "csmar_raw_working_set_exceeds_task_memory_budget"
+                )
+            self._record_lease = payload_lease
+            parser_bound = min(
+                _CSV_PARSER_WORKSPACE_BOUND_BYTES,
+                self._resource_policy.remaining_memory_bytes,
+            )
+            try:
+                self._parser_lease = self._resource_policy.lease(
+                    "source.csmar.csv.parser",
+                    parser_bound,
+                )
+            except MemoryError:
+                raise DatasetReadCapacityExceeded(
+                    "csmar_raw_working_set_exceeds_task_memory_budget"
+                ) from None
+            return
+        if self._record_lease is not None:
+            _close_lease_preserving_primary(
+                self._record_lease,
+                owner="source.csmar.csv.record",
+            )
+            self._record_lease = None
+        available = self._resource_policy.remaining_memory_bytes
+        parser_bound = min(_CSV_PARSER_WORKSPACE_BOUND_BYTES, available)
+        record_bound = min(
+            _CSV_RECORD_LEASE_BOUND_BYTES,
+            max(0, available - parser_bound),
+        )
+        try:
+            self._record_lease = self._resource_policy.lease(
+                "source.csmar.csv.record",
+                record_bound,
+            )
+            self._parser_lease = self._resource_policy.lease(
+                "source.csmar.csv.parser",
+                parser_bound,
+            )
+        except MemoryError:
+            if self._parser_lease is not None:
+                _close_lease_preserving_primary(
+                    self._parser_lease,
+                    owner="source.csmar.csv.parser",
+                )
+                self._parser_lease = None
+            if self._record_lease is not None:
+                _close_lease_preserving_primary(
+                    self._record_lease,
+                    owner="source.csmar.csv.record",
+                )
+                self._record_lease = None
+            raise DatasetReadCapacityExceeded(
+                "csmar_raw_working_set_exceeds_task_memory_budget"
+            ) from None
 
     def _ensure_spool(self) -> None:
         if self._spool is not None:
@@ -542,10 +646,9 @@ class _BoundedCsvRecords:
             or not isinstance(self._handle, io.BufferedReader)
         ):
             return None
+        lease = self._record_lease
         available = (
-            self._task_memory_budget_bytes
-            - self._retained_payload_bytes[0]
-            - self._fast_control_span_bytes
+            0 if lease is None else lease.reserved_bytes - self._limit_bytes
         )
         if available <= self._limit_bytes:
             return None
@@ -587,14 +690,13 @@ class _BoundedCsvRecords:
         decoded_fields_source_span_bytes = canonical_bytes
         decoded_list_slot_span_bytes = field_count * struct.calcsize("P")
         if (
-            self._retained_payload_bytes[0]
-            + source_line_span_bytes
+            lease is None
+            or source_line_span_bytes
             + content_span_bytes
             + decoded_record_source_span_bytes
             + decoded_fields_source_span_bytes
             + decoded_list_slot_span_bytes
-            + self._fast_control_span_bytes
-            > self._task_memory_budget_bytes
+            > lease.reserved_bytes
         ):
             raise DatasetReadCapacityExceeded(
                 "csmar_raw_working_set_exceeds_task_memory_budget"
@@ -770,10 +872,11 @@ class _BoundedCsvRecords:
             return self._pushback.popleft()
         if self._buffer_position == len(self._buffer):
             self._require_capacity(self._slow_control_span_bytes)
+            lease = self._parser_lease
             available = (
-                self._task_memory_budget_bytes
-                - self._retained_payload_bytes[0]
-                - self._slow_control_span_bytes
+                0
+                if lease is None
+                else lease.reserved_bytes - self._slow_control_span_bytes
             )
             if available <= 0:
                 raise DatasetReadCapacityExceeded(
@@ -788,16 +891,27 @@ class _BoundedCsvRecords:
         return byte
 
     def _require_capacity(self, *span_bytes: int) -> None:
+        parser_lease = self._parser_lease
+        record_lease = self._record_lease
+        control_bytes = span_bytes[0] if span_bytes else 0
+        payload_bytes = sum(span_bytes[1:])
         if (
-            self._retained_payload_bytes[0] + sum(span_bytes)
-            > self._task_memory_budget_bytes
+            parser_lease is None
+            or control_bytes > parser_lease.reserved_bytes
+            or payload_bytes > 0
+            and (record_lease is None or payload_bytes > record_lease.reserved_bytes)
         ):
             raise DatasetReadCapacityExceeded(
                 "csmar_raw_working_set_exceeds_task_memory_budget"
             )
 
     def close(self) -> None:
+        primary = sys.exception()
         failure: BaseException | None = None
+        self.generation += 1
+        self._buffer = b""
+        self._buffer_position = 0
+        self._pushback.clear()
         try:
             if self._identity is not None:
                 after = dataset_file_identity_from_stat(os.fstat(self._handle.fileno()))
@@ -817,11 +931,43 @@ class _BoundedCsvRecords:
             if failure is None:
                 failure = exc
         if self._spool is not None:
+            spool = self._spool
+            self._spool = None
             try:
-                self._spool.close()
+                spool.close()
             except BaseException as exc:
                 if failure is None:
                     failure = exc
+        parser_lease = self._parser_lease
+        if parser_lease is not None:
+            try:
+                parser_lease.close()
+            except BaseException as exc:
+                if failure is None and primary is None:
+                    failure = exc
+                elif primary is not None:
+                    primary.add_note(
+                        "source.csmar.csv.parser lease close also failed: "
+                        f"{type(exc).__name__}"
+                    )
+            else:
+                self._parser_lease = None
+        lease = self._record_lease
+        if lease is not None and self._owns_record_lease:
+            try:
+                lease.close()
+            except BaseException as exc:
+                if failure is None and primary is None:
+                    failure = exc
+                elif primary is not None:
+                    primary.add_note(
+                        "source.csmar.csv.record lease close also failed: "
+                        f"{type(exc).__name__}"
+                    )
+            else:
+                self._record_lease = None
+        elif lease is not None:
+            self._record_lease = None
         if failure is not None:
             raise failure
 
@@ -831,7 +977,7 @@ def iter_export_csv_records(
     *,
     resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None = None,
-    retained_payload_bytes: list[int] | None = None,
+    payload_lease_ref: list[MemoryLease | None] | None = None,
     materialize_records: bool = True,
     first_record_field_count_error: str = "malformed_csmar_csv_row",
 ) -> Iterator[tuple[list[str] | BoundedCsvRecord, int]]:
@@ -846,11 +992,7 @@ def iter_export_csv_records(
                     Path(path),
                     limit_bytes=MAX_LOGICAL_RECORD_BYTES,
                     resource_policy=bound_policy,
-                    retained_payload_bytes=(
-                        retained_payload_bytes
-                        if retained_payload_bytes is not None
-                        else [0]
-                    ),
+                    payload_lease_ref=payload_lease_ref,
                     expected_identity=expected_identity,
                 )
                 if materialize_records:
@@ -890,7 +1032,6 @@ def read_export_header(
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
     expected_identity: DatasetFileIdentity | None = None,
-    retained_payload_bytes: list[int] | None = None,
 ) -> tuple[str, ...]:
     """Read the header row from a supported CSV raw export."""
 
@@ -904,7 +1045,6 @@ def read_export_header(
             export_path,
             resource_policy=policy,
             expected_identity=expected_identity,
-            retained_payload_bytes=retained_payload_bytes,
             materialize_records=False,
         )
         try:
