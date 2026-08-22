@@ -31,10 +31,10 @@ from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKe
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
+    _dataset_file_identity_bytes,
 )
 from quant_research_platform.storage._dataset_reading import (
     closing_dataset_iterator,
-    iter_bounded_frame_chunks,
 )
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
@@ -1104,22 +1104,6 @@ def _iter_csv_records(
                 del record
 
 
-def _next_batch_target_bytes(
-    *,
-    logical_bytes: int,
-    frame_payload_bytes: int,
-    resource_policy: RuntimeResourcePolicy,
-) -> int:
-    if logical_bytes <= 0 or frame_payload_bytes <= 0:
-        return 1
-    available_bytes = max(1, resource_policy.available_memory_bytes)
-    measured_total_bytes = logical_bytes + frame_payload_bytes
-    return min(
-        resource_policy.available_memory_bytes,
-        max(1, available_bytes * logical_bytes // measured_total_bytes),
-    )
-
-
 def _raw_frame(rows: list[list[str]], header: list[str]) -> pd.DataFrame:
     frame = pd.DataFrame(rows, columns=header)
     frame.replace("", pd.NA, inplace=True)
@@ -1153,46 +1137,6 @@ def _raw_frame_owner_known_bytes(
 def _decoded_rows_slot_bytes(rows: Iterable[list[str] | None]) -> int:
     pointer_bytes = struct.calcsize("P")
     return sum((1 + len(row)) * pointer_bytes for row in rows if row is not None)
-
-
-def _bounded_export_frame(
-    frame: pd.DataFrame,
-    *,
-    resource_policy: RuntimeResourcePolicy,
-    target_chunk_bytes: int | None = None,
-) -> Iterator[pd.DataFrame]:
-    try:
-        yield from iter_bounded_frame_chunks(
-            frame,
-            target_chunk_bytes=(
-                resource_policy.available_memory_bytes
-                if target_chunk_bytes is None
-                else target_chunk_bytes
-            ),
-        )
-    except ValueError as exc:
-        if str(exc) == "dataset_row_exceeds_target_chunk_bytes":
-            raise ValueError(LOGICAL_RECORD_LIMIT_ERROR) from exc
-        raise
-
-
-def _yield_bounded_export_frame(
-    frame: pd.DataFrame,
-    *,
-    resource_policy: RuntimeResourcePolicy,
-) -> Iterator[pd.DataFrame]:
-    parent_payload_bytes = pandas_frame_payload_bytes(frame)
-    target_chunk_bytes = resource_policy.available_memory_bytes
-    with resource_policy.reserve("source.csmar.raw-parent", parent_payload_bytes):
-        chunks = iter(
-            _bounded_export_frame(
-                frame,
-                resource_policy=resource_policy,
-                target_chunk_bytes=target_chunk_bytes,
-            )
-        )
-        with closing_dataset_iterator(chunks):
-            yield from chunks
 
 
 def _require_raw_conversion_headroom(
@@ -1321,7 +1265,7 @@ def _iter_indexed_raw_export_files(
         identity = raw_export_file_identity(path)
         verify_root()
         relative = path.relative_to(root).as_posix().encode("utf-8")
-        payload = relative + b"\0" + _raw_export_identity_payload(identity)
+        payload = relative + b"\0" + _dataset_file_identity_bytes(identity)
         verify_root()
         inserted = index.add_identity_payloads(
             namespace=namespace,
@@ -1363,18 +1307,6 @@ def _iter_indexed_raw_export_files(
 def _raw_export_physical_key(identity: DatasetFileIdentity) -> bytes:
     return b"\0".join(
         str(value).encode("ascii") for value in (identity.device, identity.inode)
-    )
-
-
-def _raw_export_identity_payload(identity: DatasetFileIdentity) -> bytes:
-    return b"\0".join(
-        str(value).encode("ascii")
-        for value in (
-            identity.device,
-            identity.inode,
-            identity.size,
-            identity.modified_ns,
-        )
     )
 
 

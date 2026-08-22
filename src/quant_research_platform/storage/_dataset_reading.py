@@ -56,6 +56,7 @@ from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
     DatasetPartMetadata,
     PreparedMembershipValues,
+    _dataset_file_identity_bytes,
     dataset_file_identity,
     inspect_dataset_part,
     iter_dataset_part_batches,
@@ -1261,18 +1262,6 @@ def dataset_partition_state_reserve_bytes(context: DatasetSession) -> int:
         previous = partition
         retained += _utf8_payload_length(partition) + 12 * pointer_bytes + 32
     return retained
-
-
-def _dataset_file_identity_bytes(identity: DatasetFileIdentity) -> bytes:
-    return b"\0".join(
-        str(value).encode("ascii")
-        for value in (
-            identity.device,
-            identity.inode,
-            identity.size,
-            identity.modified_ns,
-        )
-    )
 
 
 def iter_dataset_chunks(

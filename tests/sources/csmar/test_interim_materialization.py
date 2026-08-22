@@ -1391,29 +1391,6 @@ def test_header_only_export_has_no_data_chunks(tmp_path: Path) -> None:
         )
 
 
-def test_private_export_batch_target_adapts_to_measured_frame_payload() -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    logical_bytes = 1024**2
-
-    compact_target = raw_exports._next_batch_target_bytes(
-        logical_bytes=logical_bytes,
-        frame_payload_bytes=logical_bytes,
-        resource_policy=policy,
-    )
-    expanded_target = raw_exports._next_batch_target_bytes(
-        logical_bytes=logical_bytes,
-        frame_payload_bytes=15 * logical_bytes,
-        resource_policy=policy,
-    )
-
-    assert compact_target == policy.available_memory_bytes // 2
-    assert expanded_target == policy.available_memory_bytes // 16
-    assert expanded_target < compact_target
-
-
 def test_index_info_continuations_join_once_after_linear_accumulation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

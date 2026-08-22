@@ -244,20 +244,6 @@ def model_metadata(
     return metadata
 
 
-def fit_controlled_linear_model_result_from_frames(
-    frames: Iterable[pd.DataFrame],
-    spec: ModelSpec,
-) -> ModelFitResult:
-    with runtime_resource_policy_scope():
-        owned = _fit_linear_model_result_owned_from_frames(frames, spec)
-        if isinstance(owned, _OwnedValue):
-            try:
-                return owned.value
-            finally:
-                owned.lease.close()
-        return owned
-
-
 def _fit_controlled_linear_model_result_owned_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,

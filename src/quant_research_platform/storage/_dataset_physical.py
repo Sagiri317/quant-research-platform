@@ -51,6 +51,18 @@ def dataset_file_identity_from_stat(value: os.stat_result) -> DatasetFileIdentit
     )
 
 
+def _dataset_file_identity_bytes(identity: DatasetFileIdentity) -> bytes:
+    return b"\0".join(
+        str(value).encode("ascii")
+        for value in (
+            identity.device,
+            identity.inode,
+            identity.size,
+            identity.modified_ns,
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class DatasetPartMetadata:
     identity: DatasetFileIdentity
@@ -603,17 +615,6 @@ def table_with_decoded_row_bounds(
     metadata.update(table.schema.metadata or {})
     metadata[_DECODED_ROW_BOUNDS_KEY] = payload
     return table.replace_schema_metadata(metadata)
-
-
-def table_decoded_working_set_bounds(table: pa.Table) -> tuple[int, int]:
-    decoded_bounds = _parse_decoded_row_bounds(
-        (table.schema.metadata or {}).get(_DECODED_ROW_BOUNDS_KEY),
-        names=table.column_names,
-    )
-    return (
-        max(1, sum(bound[0] for bound in decoded_bounds.values())),
-        sum(bound[1] for bound in decoded_bounds.values()),
-    )
 
 
 def _table_parquet_page_working_set_bytes(table: pa.Table, *, rows: int) -> int:
