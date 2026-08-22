@@ -51,11 +51,12 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
     algorithm: str,
 ) -> None:
     frame = _model_frame()
+    single_factor = algorithm == "single_factor_baseline"
     spec = ModelSpec(
         model_id=f"{algorithm}_demo",
         model_algorithm=algorithm,
         input_factor_columns=("factor",),
-        input_feature_columns=("feature",),
+        input_feature_columns=() if single_factor else ("feature",),
         label_column="label",
         hyperparameters=_model_smoke_hyperparameters(algorithm),
         random_seed=7,
@@ -85,12 +86,15 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
                 result.coefficients,
                 spec.input_columns,
                 prediction_model=result.prediction_model,
+                model_metadata=result.metadata,
             )
 
             assert estimator is not None
             assert result.metadata["model_algorithm"] == algorithm
             assert result.metadata["input_factor_columns"] == ["factor"]
-            assert result.metadata["input_feature_columns"] == ["feature"]
+            assert result.metadata["input_feature_columns"] == (
+                [] if single_factor else ["feature"]
+            )
             assert result.metadata["label_column"] == "label"
             assert result.metadata["dependency_status"]["status"] == "available"
             assert result.metadata["test_start"] is None
@@ -99,6 +103,13 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
             assert result.metadata["oos_end"] is None
             assert len(predictions) == 2
             assert np.isfinite(predictions["prediction_score"]).any()
+            if single_factor:
+                assert predictions.attrs["model_metadata"]["input_columns"] == [
+                    "factor"
+                ]
+                assert predictions.attrs["model_metadata"][
+                    "feature_importance"
+                ] == {"factor": 1.0}
         finally:
             result_owned.lease.close()
 

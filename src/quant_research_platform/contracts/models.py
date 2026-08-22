@@ -203,6 +203,13 @@ class ModelSpec:
             "input_feature_columns",
             required=False,
         )
+        facts = _MODEL_ALGORITHM_FACTS.get(self.model_algorithm)
+        if (
+            facts is not None
+            and facts.input_kind == "single_factor_input"
+            and (len(self.input_factor_columns) != 1 or self.input_feature_columns)
+        ):
+            raise ValueError("single_factor_input_requires_one_factor_and_no_features")
         if not self.input_factor_columns and not self.input_feature_columns:
             raise ValueError("model_input_columns_required")
         overlap = sorted(

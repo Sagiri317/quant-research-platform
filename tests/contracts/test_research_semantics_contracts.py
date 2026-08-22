@@ -371,6 +371,32 @@ def test_model_spec_uses_algorithm_and_explicit_factor_feature_inputs() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("input_factor_columns", "input_feature_columns"),
+    (
+        ((), ()),
+        ((), ("feature",)),
+        (("factor", "other_factor"), ()),
+        (("factor",), ("feature",)),
+    ),
+)
+def test_single_factor_model_spec_requires_one_factor_and_no_features(
+    input_factor_columns: tuple[str, ...],
+    input_feature_columns: tuple[str, ...],
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match="^single_factor_input_requires_one_factor_and_no_features$",
+    ):
+        ModelSpec(
+            model_id="single_factor_invalid",
+            model_algorithm="single_factor_baseline",
+            input_factor_columns=input_factor_columns,
+            input_feature_columns=input_feature_columns,
+            label_column="label",
+        )
+
+
 def test_evaluation_and_portfolio_specs_are_signal_owned() -> None:
     signal = SignalSpec(
         signal_id="linear_prediction_score",
