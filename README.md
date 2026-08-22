@@ -1,17 +1,6 @@
 # QRP
 
-QRP 是本地量化研究平台，用于数据合同、因子与特征研究、模型训练、预测、评估、组合构建、报告和 evidence。它不是生产或模拟交易系统，不接 broker/exchange，不提供 investment advice。
-
-## 现场事实
-
-仓库文档只描述长期合同。当前 branch、phase、review 与运行结果从 live Git 和本轮任务读取：
-
-```text
-git status --short --branch
-git log -1 --date=iso-strict --format="%H%n%cd%n%s"
-```
-
-Agent 执行规则见 `AGENTS.md`。
+QRP 是本地量化研究平台，用于数据合同、因子与特征研究、模型训练、预测、评估、组合构建、报告和 evidence。它不是 live trading 或模拟交易系统，不接 broker/exchange，也不提供 investment advice。
 
 ## 目录与 owner
 
@@ -23,36 +12,23 @@ data/        本地数据占位；不提交 private data
 .run/        ignored local outputs/evidence；不定义代码事实
 ```
 
-- `sources/` 负责摄取、raw schema 和 raw/interim 转换。
-- `markets/` 负责市场领域与具体市场实现。
-- `contracts/` 定义结构合同；`policy/` 定义共享安全规则。
-- `profiles/` 是 API、CLI 与 workflow 的组合根。
-- `research/` 和 `compute/` 只做研究与数值计算。
-- `storage/` 拥有 dataset IO、persisted identity、exact compare 与 data layout。
-- `runtime/` 拥有 resource policy 与 execution metrics。
-- `reports/` 构建内容；`artifacts/` 写 LOCAL_ONLY/REVIEW_SAFE 文件。
-- `workflows/` 只编排；`interfaces/` 暴露已批准 API/CLI。
+- `sources/` 负责摄取、raw schema 和 raw/interim 转换；`markets/` 负责市场领域实现。
+- `contracts/` 定义结构合同；`policy/` 定义共享安全规则；`profiles/` 绑定 API、CLI 与 workflow 组合根。
+- `research/` 和 `compute/` 负责研究与数值计算；`storage/` 负责 dataset IO、persisted identity、exact compare 与 data layout。
+- `runtime/` 负责资源准入与 execution metrics；`artifacts/` 写 LOCAL_ONLY/REVIEW_SAFE 文件；`reports/` 构建内容。
+- `workflows/` 只编排；`interfaces/` 暴露已批准的 API/CLI。
 
-## 核心合同
+## Managed operation
 
-一个 data-scale operation 先取得 host-local cross-process lock，再只捕获一次 available memory，生产预算为其 70% 与 explicit cap 的较小值。整个 operation 共享一个 explicit root policy、RAM lease ledger、transferable ownership 和 cleanup registry；每次数据规模 allocation 前先 acquire/grow lease，跨 producer/consumer 边界只 transfer，最终 close。RSS 只由外部 fresh-child release evidence 观测，80%-82% 是 release 阈值，不是生产预算。
+一个 managed data-scale operation 先取得 host-local lock，只捕获一次 `available0`，默认 RAM budget 为 `available0` 的 70%；explicit cap 只能进一步降低它。每个数据规模 read/decode/allocation 在发生前做保守准入，流程保持 bounded；aggregate persisted output 可以超过 RAM budget 而 exact 完成。新 payload/workspace/output 只有一个 logical owner，在 producer/consumer 边界转移，不重复计费；owner-local context 退出时释放资源。
 
-Dataset identity 由 persisted schema、dtype、PK、logical window 与 exact content 定义。Fingerprint 只用于 quick reject；只有 exact compare 可以产生 `MATCH`。Publication 必须 atomic、保留 old-good，cleanup 只处理 owner-qualified resources，active `BaseException` primary 不被 secondary failure 覆盖。
+默认 single-process + native threads，只使用一层主要并行，线程数不超过物理核并可因预算下调。RSS 只由仓库外 fresh-child 观测，以 `available0` 为分母；`<=80%` 是 PASS candidate，`80%-82%` 是 AT_RISK，`>82%` 是 default FAIL，这些阈值不参与 production planning。
+
+## Storage and publication
+
+Dataset identity 由 persisted schema、dtype、PK、logical window 与 exact content 定义。Fingerprint 只用于 quick reject；只有 exact compare 可以产生 `MATCH`。输出在 transaction-local disk preflight 后写入同父目录 UUID staging，再通过平台 native no-replace 或 owner-qualified replace 发布；成功才 atomic publish，失败保留 old-good，并只清理本次 operation 能证明创建的资源。存在 primary `BaseException` 时，释放或验证失败不得覆盖它。
 
 QRP 采用 current-contract-only：替换旧实现时删除旧入口，不保留 alias、compat reader 或平行实现。
-
-## 运行结果
-
-```text
-<run_root>/
-  run.json
-  data/{interim,processed,research}/
-  outputs/<output_id>/manifest.json
-  logs/
-  summary.md
-```
-
-`run.json` 是运行级 machine truth，`summary.md` 是人读摘要。Dataset 使用 `spec.json` 与 `_manifest/manifest.json`。QRP-owned JSON 顶层是 object，并使用不带版本后缀的 `schema_id`。
 
 ## Public surface
 
@@ -74,13 +50,13 @@ qrp research-datasets requirements <dataset_id>
 
 ```text
 conda run -n <env> ruff check .
-conda run -n <env> python -m pytest -q
-conda run -n <env> python -m pytest -q -o "addopts=--import-mode=importlib --strict-markers" tests
+conda run -n <env> pytest -q
+conda run -n <env> pytest -q -o "addopts=--import-mode=importlib --strict-markers" tests
 conda run -n <env> python -m build --no-isolation --sdist --wheel --outdir <run-dir>
 ```
 
-默认 pytest 只排除明确标记的 `slow` tests；完整命令覆盖默认 `addopts`。Build smoke 解压 wheel 后用 `PYTHONPATH` import，不安装 package。
+默认 `pytest -q` 使用项目的 non-slow 选择；第二条 pytest 命令显式覆盖默认过滤器以运行 full suite。Package acceptance 必须从仓库外 clean export 构建 fresh sdist，再从解出的 sdist 构建 wheel，在仓库外 isolated environment 安装，最后从 empty CWD 做 CLI/API smoke；editable checkout 或直接从源码路径导入不算通过。
 
 ## 数据安全
 
-不提交 private data、secret、vendor raw marker、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只包含 schema、计数、hash、状态、逻辑路径结构和不含私有行的摘要。
+不提交 private data、secret、vendor payload、本地绝对路径、股票代码样本、row-level sample 或 raw traceback。REVIEW_SAFE evidence 只包含 schema、计数、hash、状态、逻辑路径结构和不含私有行的摘要。
