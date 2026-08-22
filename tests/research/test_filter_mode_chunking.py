@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -37,9 +39,15 @@ from tests.research.prediction_output_helpers import (
 
 
 def wrap_filter_for_chunking(original_filter, filtered_chunk_rows: list[int]):
+    @contextmanager
     def record_filtered_chunk(frame, *, mode, metadata_key):
         filtered_chunk_rows.append(len(frame))
-        return original_filter(frame, mode=mode, metadata_key=metadata_key)
+        with original_filter(
+            frame,
+            mode=mode,
+            metadata_key=metadata_key,
+        ) as result:
+            yield result
 
     return record_filtered_chunk
 
@@ -170,12 +178,12 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
         spec,
         estimator=model_supervised.build_estimator_from_model_spec(spec),
     )
-    original_filter = model_fitting.apply_filter_mode
+    original_filter = model_fitting._filter_mode_scope
     filtered_chunk_rows: list[int] = []
 
     monkeypatch.setattr(
         model_fitting,
-        "apply_filter_mode",
+        "_filter_mode_scope",
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     result = model_fitting.fit_model_result_from_frames(
@@ -215,12 +223,12 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
         coefficients,
         ("factor",),
     )
-    original_filter = artifacts_module.apply_filter_mode
+    original_filter = artifacts_module._filter_mode_scope
     filtered_chunk_rows: list[int] = []
 
     monkeypatch.setattr(
         artifacts_module,
-        "apply_filter_mode",
+        "_filter_mode_scope",
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     result = prediction_frame_from_artifact_frames(
@@ -454,7 +462,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     expected = model_fitting.fit_model_result_from_frames(
         (frame,), spec, estimator=build_estimator_from_model_spec(spec)
     )
-    original_filter = model_fitting.apply_filter_mode
+    original_filter = model_fitting._filter_mode_scope
     filtered_chunk_rows: list[int] = []
 
     def fail_column_stack(*args, **kwargs):
@@ -462,7 +470,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
 
     monkeypatch.setattr(
         model_fitting,
-        "apply_filter_mode",
+        "_filter_mode_scope",
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     monkeypatch.setattr(np, "column_stack", fail_column_stack)
@@ -530,12 +538,12 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         coefficients=np.asarray([0.0, 0.01]),
         input_columns=("factor",),
     )
-    original_filter = artifacts_module.apply_filter_mode
+    original_filter = artifacts_module._filter_mode_scope
     filtered_chunk_rows: list[int] = []
 
     monkeypatch.setattr(
         artifacts_module,
-        "apply_filter_mode",
+        "_filter_mode_scope",
         wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
     )
     policy = capture_test_policy(

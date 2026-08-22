@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import weakref
+
 import pandas as pd
 import pytest
 
@@ -85,6 +87,30 @@ def test_filter_mode_scope_owns_filtered_frame_until_exit() -> None:
             assert metadata["rows_after_filter_mode"] == 1
             assert policy.used_memory_bytes > 0
         assert policy.used_memory_bytes == 0
+
+
+def test_filter_mode_scope_drops_its_filtered_alias_before_close() -> None:
+    frame = pd.DataFrame(
+        {
+            "eligible": [True, False],
+            "value": [10.0, 20.0],
+        }
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=1 * 1024**2,
+    )
+    with runtime_resource_policy_scope(policy):
+        with _filter_mode_scope(
+            frame,
+            mode="eligible",
+            metadata_key="filter_mode",
+        ) as (filtered, _metadata):
+            filtered_ref = weakref.ref(filtered)
+            assert policy.used_memory_bytes > 0
+            del filtered
+        assert policy.used_memory_bytes == 0
+        assert filtered_ref() is None
 
 
 def test_filter_mode_scope_releases_empty_filtered_frame() -> None:

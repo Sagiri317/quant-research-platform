@@ -11,9 +11,9 @@ import pandas as pd
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
 )
+from quant_research_platform.research._memory import _selected_frame_payload_bytes
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
 )
 
 VALIDATION_METRIC_COLUMNS = ("validation_ic", "validation_rankic", "validation_mse")
@@ -83,8 +83,10 @@ def evaluate_model_trial_metrics(
     missing = sorted({label_column, prediction_column}.difference(frame.columns))
     if missing:
         raise ValueError(f"missing_trial_metric_columns: {', '.join(missing)}")
-    frame_bytes = pandas_frame_payload_bytes(frame)
-    selected_output_bound = frame_bytes
+    selected_output_bound = _selected_frame_payload_bytes(
+        frame,
+        [label_column, prediction_column],
+    )
     usable_output_bound = selected_output_bound
     numeric_vector_count = 6
     numeric_working_bytes = len(frame) * 8 * numeric_vector_count
@@ -95,41 +97,59 @@ def evaluate_model_trial_metrics(
             reservation.enter_context(
                 policy.reserve(
                     "research.model.selection.metric",
-                    frame_bytes
-                    + selected_output_bound
+                    selected_output_bound
                     + usable_output_bound
                     + numeric_working_bytes
                     + mask_working_bytes,
                 )
             )
-        usable = frame.loc[:, [label_column, prediction_column]]
-        if usable.empty:
-            raise ValueError("empty_model_selection_validation_window")
-        label_values = pd.to_numeric(usable[label_column], errors="coerce")
-        prediction_values = pd.to_numeric(usable[prediction_column], errors="coerce")
-        if (
-            bool(label_values.isna().any())
-            or bool(prediction_values.isna().any())
-            or not bool(np.isfinite(label_values).all())
-            or not bool(np.isfinite(prediction_values).all())
-        ):
-            raise ValueError("invalid_trial_metric_values")
-        errors = prediction_values - label_values
-        return {
-            "model_id": model_id,
-            "validation_rows": int(len(usable)),
-            "validation_ic": _correlation(
-                label_values,
-                prediction_values,
-                rank=False,
-            ),
-            "validation_rankic": _correlation(
-                label_values,
-                prediction_values,
-                rank=True,
-            ),
-            "validation_mse": float(np.square(errors).mean()),
-        }
+        usable = None
+        label_values = None
+        prediction_values = None
+        errors = None
+        try:
+            usable = frame.loc[:, [label_column, prediction_column]]
+            if usable.empty:
+                raise ValueError("empty_model_selection_validation_window")
+            label_values = pd.to_numeric(usable[label_column], errors="coerce")
+            prediction_values = pd.to_numeric(
+                usable[prediction_column],
+                errors="coerce",
+            )
+            if (
+                bool(label_values.isna().any())
+                or bool(prediction_values.isna().any())
+                or not bool(np.isfinite(label_values).all())
+                or not bool(np.isfinite(prediction_values).all())
+            ):
+                raise ValueError("invalid_trial_metric_values")
+            errors = prediction_values - label_values
+            record = {
+                "model_id": model_id,
+                "validation_rows": int(len(usable)),
+                "validation_ic": _correlation(
+                    label_values,
+                    prediction_values,
+                    rank=False,
+                ),
+                "validation_rankic": _correlation(
+                    label_values,
+                    prediction_values,
+                    rank=True,
+                ),
+                "validation_mse": float(np.square(errors).mean()),
+            }
+        except BaseException:
+            usable = None
+            label_values = None
+            prediction_values = None
+            errors = None
+            raise
+        usable = None
+        label_values = None
+        prediction_values = None
+        errors = None
+        return record
 
 
 def build_model_selection_metadata(

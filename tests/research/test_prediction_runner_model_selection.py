@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import gc
 import json
 import warnings
+import weakref
 from datetime import timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -23,6 +25,10 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
+)
+from quant_research_platform.runtime.resources import (
+    pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -210,15 +216,174 @@ def test_model_selection_compares_common_validation_primary_keys(
         record_validation_keys,
     )
 
-    prediction_runner._select_prediction_model_spec(
-        prediction_spec=prediction_spec,
-        dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
-        model_catalog=model_catalog,
-        chunks=chunks,
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024**2,
+        explicit_cap_bytes=64 * 1024**2,
     )
+    with prediction_runner.runtime_resource_policy_scope(policy):
+        prediction_runner._select_prediction_model_spec(
+            prediction_spec=prediction_spec,
+            dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
+            model_catalog=model_catalog,
+            chunks=chunks,
+        )
 
     assert len(validation_keys) == 2
     assert validation_keys[0] == validation_keys[1]
+
+
+def test_model_selection_drops_candidate_model_alias_before_lease_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = make_prediction_frame()
+    model_catalog = _model_catalog(
+        _model("base_model", ("factor_a",)),
+        _model("candidate_model", ("factor_b",)),
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id="prediction_demo",
+        model_id="base_model",
+        research_dataset_id="research_demo",
+        train_end="2024-01-03",
+        test_start="2024-01-07",
+        test_end="2024-01-08",
+        candidate_model_ids=("candidate_model",),
+        model_selection_metric="validation_mse",
+        model_selection_validation_start="2024-01-04",
+        model_selection_validation_end="2024-01-06",
+    )
+    created_refs: list[weakref.ReferenceType[object]] = []
+
+    class Predictor:
+        def predict(self, values: pd.DataFrame) -> np.ndarray:
+            return np.ones(len(values), dtype="float64")
+
+    def fit_owned(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        predictor = Predictor()
+        created_refs.append(weakref.ref(predictor))
+        lease = prediction_runner.current_runtime_resource_policy().lease(
+            "research.test.candidate_model",
+            1024,
+        )
+        return prediction_runner._OwnedValue(  # noqa: SLF001
+            prediction_runner.fitting.ModelFitResult(
+                coefficients=np.array([0.0, 1.0]),
+                metadata={},
+                prediction_model=predictor,
+            ),
+            lease,
+        )
+
+    monkeypatch.setattr(
+        prediction_runner.fitting,
+        "_fit_model_result_owned_from_frames",
+        fit_owned,
+    )
+
+    def chunks(columns, *, input_columns):  # noqa: ANN001
+        del input_columns
+        return (frame.loc[:, list(columns)],)
+
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024**2,
+        explicit_cap_bytes=64 * 1024**2,
+    )
+    with runtime_resource_policy_scope(policy):
+        prediction_runner._select_prediction_model_spec(
+            prediction_spec=prediction_spec,
+            dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
+            model_catalog=model_catalog,
+            chunks=chunks,
+        )
+
+    assert created_refs
+    assert all(reference() is None for reference in created_refs)
+    assert policy.used_memory_bytes == 0
+
+
+def test_prediction_build_failure_drops_model_alias_before_lease_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_spec = _model("base_model", ("factor_a",))
+    prediction_spec = PredictionSpec(
+        prediction_id="prediction_demo",
+        model_id="base_model",
+        research_dataset_id="research_demo",
+        train_end="2024-01-03",
+        test_start="2024-01-07",
+        test_end="2024-01-08",
+    )
+    dataset_spec = SimpleNamespace(
+        primary_key=("timestamp", "asset_id"),
+        market_id=MarketId("a_share"),
+        data_id="research_demo",
+    )
+    created_refs: list[weakref.ReferenceType[object]] = []
+
+    class Predictor:
+        def predict(self, values: pd.DataFrame) -> np.ndarray:
+            return np.ones(len(values), dtype="float64")
+
+    closed_leases: list[object] = []
+
+    class ObservingLease:
+        active = True
+        close_count = 0
+
+        def close(self) -> None:
+            assert self.active
+            self.active = False
+            self.close_count += 1
+            closed_leases.append(self)
+
+    def fit_owned(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        predictor = Predictor()
+        created_refs.append(weakref.ref(predictor))
+        lease = ObservingLease()
+        return prediction_runner._OwnedValue(  # noqa: SLF001
+            prediction_runner.fitting.ModelFitResult(
+                coefficients=np.array([0.0, 1.0]),
+                metadata={},
+                prediction_model=predictor,
+            ),
+            lease,
+        )
+
+    def fail_build(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        raise RuntimeError("prediction_build_failure")
+
+    monkeypatch.setattr(
+        prediction_runner.fitting,
+        "_fit_model_result_owned_from_frames",
+        fit_owned,
+    )
+    monkeypatch.setattr(
+        prediction_runner,
+        "build_prediction_result_from_frames",
+        fail_build,
+    )
+
+    with pytest.raises(RuntimeError, match="prediction_build_failure"):
+        prediction_runner._build_prediction_result_from_research_dataset(  # noqa: SLF001
+            layout=SimpleNamespace(),
+            dataset_catalog=SimpleNamespace(get=lambda _dataset_id: dataset_spec),
+            model_catalog=SimpleNamespace(get=lambda _model_id: model_spec),
+            prediction_catalog=SimpleNamespace(
+                get=lambda _prediction_id: prediction_spec
+            ),
+            prediction_id="prediction_demo",
+            time_window=None,
+            prediction_train_end=None,
+            prediction_test_start=None,
+            prediction_test_end=None,
+        )
+
+    assert created_refs
+    gc.collect()
+    assert all(reference() is None for reference in created_refs)
+    assert len(closed_leases) == 1
+    assert closed_leases[0].close_count == 1
+    assert not closed_leases[0].active
 
 
 @pytest.mark.parametrize("invalid_prediction", [np.nan, np.inf, -np.inf])
@@ -432,7 +597,7 @@ def test_model_selection_purges_each_assets_validation_tail_before_test_window(
 
     def validation_frame() -> pd.DataFrame:
         return prediction_runner._validation_prediction_frame(
-            chunks,
+            lambda: iter(chunks),
             prediction_spec=prediction_spec,
             candidate_spec=candidate_spec,
             model_result=prediction_runner.fitting.ModelFitResult(
@@ -477,6 +642,99 @@ def test_prediction_runner_accepts_equivalent_timezone_representations() -> None
         pd.Timestamp("2024-01-15T17:00:00"),
         pd.Timestamp("2024-01-15T17:01:00"),
     ]
+
+
+def test_validation_preflight_uses_window_payload_and_deep_identity_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dates = pd.date_range("2024-01-01", periods=102, freq="D")
+    outside = pd.DataFrame(
+        {
+            "timestamp": [dates[0]],
+            "asset_id": ["short"],
+            "factor_a": [1.0],
+            "label": [2.0],
+            "eligible": [True],
+        }
+    )
+    rows = [outside] * 1000
+    rows.extend(
+        [
+            pd.DataFrame(
+                {
+                    "timestamp": [date],
+                    "asset_id": ["asset-" + "x" * 5000],
+                    "factor_a": [1.0],
+                    "label": [2.0],
+                    "eligible": [True],
+                }
+            )
+            for date in dates[100:]
+        ]
+    )
+    candidate_spec = _model("long_identity", ("factor_a",))
+    prediction_spec = PredictionSpec(
+        prediction_id="prediction_demo",
+        model_id=candidate_spec.model_id,
+        research_dataset_id="research_demo",
+        train_end="2023-12-31",
+        test_start="2024-01-01",
+        model_selection_validation_start="2024-04-10",
+        model_selection_validation_end="2024-04-11",
+    )
+    selected_output_bytes = sum(
+        prediction_runner._selected_frame_payload_bytes(  # noqa: SLF001
+            row,
+            ["timestamp", "asset_id", "label"],
+        )
+        + 8
+        for row in rows[-2:]
+    )
+    max_full_chunk_payload = max(pandas_frame_payload_bytes(row) for row in rows)
+    retained_bound = prediction_runner._validation_result_bound(  # noqa: SLF001
+        selected_output_bytes=selected_output_bytes,
+        max_selected_output_bytes=selected_output_bytes // 2,
+        max_full_chunk_payload=max_full_chunk_payload,
+        max_chunk_rows=1,
+        eligible_rows=2,
+        input_count=1,
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=2 * 1024**2,
+        explicit_cap_bytes=retained_bound + 4096,
+    )
+    original_copy = pd.DataFrame.copy
+
+    def admitted_copy(frame, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        if {"timestamp", "asset_id", "label"}.issubset(frame.columns):
+            assert policy.used_memory_bytes >= pandas_frame_payload_bytes(frame)
+        return original_copy(frame, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "copy", admitted_copy)
+    with runtime_resource_policy_scope(policy):
+        result = prediction_runner._validation_prediction_frame(  # noqa: SLF001
+            lambda: iter(rows),
+            prediction_spec=prediction_spec,
+            candidate_spec=candidate_spec,
+            model_result=prediction_runner.fitting.ModelFitResult(
+                coefficients=np.array([0.0, 1.0]),
+                metadata={},
+            ),
+            validation_start=dates[100],
+            validation_end=dates[101],
+        )
+        if isinstance(result, prediction_runner._OwnedValue):  # noqa: SLF001
+            result_frame = result.value
+            expected_asset_ids = list(result_frame["asset_id"])
+            result.value = None
+            result_frame = None
+            result.lease.close()
+        else:
+            expected_asset_ids = list(result["asset_id"])
+            result = None
+            result_frame = None
+    assert expected_asset_ids == ["asset-" + "x" * 5000] * 2
+    assert policy.used_memory_bytes == 0
 
 
 def test_prediction_lazy_root_waits_for_chunks_and_metadata(monkeypatch) -> None:

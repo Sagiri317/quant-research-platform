@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import ExitStack
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -25,12 +24,15 @@ from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
     iter_complete_time_sized_frames,
 )
-from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.filtering import (
+    _filter_mode_scope,
+)
 from quant_research_platform.research.models.algorithm_facts import algorithm_facts
 from quant_research_platform.research.models.prediction import (
     prediction_model_input_frame,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -82,7 +84,7 @@ def build_prediction_result_from_frames(
     *,
     prediction_model: object | None = None,
     model_metadata: dict[str, object],
-    retained_model_bytes: int = 0,
+    model_lease: MemoryLease | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> PredictionResult:
     bound_policy = resource_policy or current_runtime_resource_policy()
@@ -142,8 +144,27 @@ def build_prediction_result_from_frames(
     scoped_output_frames = _scoped_prediction_output_frames(
         output_frames,
         bound_policy=bound_policy,
-        retained_model_bytes=retained_model_bytes,
     )
+
+    def close_result() -> None:
+        primary: BaseException | None = None
+        try:
+            scoped_output_frames.close()
+        except BaseException as exc:
+            primary = exc
+        if model_lease is not None:
+            try:
+                model_lease.close()
+            except BaseException as cleanup_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "fitted model lease release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        if primary is not None:
+            raise primary
+
     return PredictionResult(
         spec=spec,
         output_chunks=scoped_output_frames,
@@ -157,7 +178,7 @@ def build_prediction_result_from_frames(
             spec=spec,
             input_columns=input_columns,
         ),
-        _close=scoped_output_frames.close,
+        _close=close_result,
     )
 
 
@@ -165,19 +186,8 @@ def _scoped_prediction_output_frames(
     frames: Iterable[pd.DataFrame],
     *,
     bound_policy: RuntimeResourcePolicy | None,
-    retained_model_bytes: int,
 ) -> Iterator[pd.DataFrame]:
-    with (
-        runtime_resource_policy_scope(bound_policy) as policy,
-        ExitStack() as retained,
-    ):
-        if retained_model_bytes:
-            retained.enter_context(
-                policy.reserve(
-                    "research.model.fitted_state",
-                    retained_model_bytes,
-                )
-            )
+    with runtime_resource_policy_scope(bound_policy):
         yield from frames
 
 
@@ -256,66 +266,114 @@ def _iter_prediction_output_frames(
     usable_columns = tuple(dict.fromkeys((*spec.primary_key, *input_columns)))
     with closing_dataset_iterator(iter(frames)) as active_frames:
         for chunk in active_frames:
-            filtered, metadata = apply_filter_mode(
+            with _filter_mode_scope(
                 chunk,
                 mode=spec.sample_filter_mode,
                 metadata_key="sample_filter_mode",
-            )
-            build_state.record_filter_metadata(metadata)
-            policy = current_runtime_resource_policy()
-            row_count = len(filtered)
-            index_bytes = int(filtered.index.memory_usage(deep=True))
-            mask_bytes = index_bytes + row_count * (len(input_columns) + 2)
-            test_frame_bytes = _selected_frame_payload_bytes(filtered, usable_columns)
-            output_bytes = _selected_frame_payload_bytes(filtered, spec.primary_key) + (
-                8 * row_count
-            )
-            model_matrix_bytes = 8 * row_count * (len(input_columns) + 1)
-            working_bytes = (
-                pandas_frame_payload_bytes(filtered)
-                + mask_bytes
-                + test_frame_bytes
-                + output_bytes
-                + model_matrix_bytes
-            )
-            if policy is not None and (
-                policy.used_memory_bytes + working_bytes
-                > policy.memory_budget_bytes
-            ):
-                raise ValueError("prediction_working_set_exceeds_task_memory_budget")
-            with ExitStack() as working:
-                if policy is not None:
-                    working.enter_context(
-                        policy.reserve("research.prediction.output", working_bytes)
-                    )
-                usable_mask = filtered.loc[:, list(input_columns)].notna().all(axis=1)
-                build_state.record_input_dropna_rows(int(usable_mask.sum()))
-                usable_mask &= filtered["timestamp"] >= pd.Timestamp(spec.test_start)
-                if spec.test_end is not None:
-                    usable_mask &= filtered["timestamp"] <= pd.Timestamp(spec.test_end)
-                test_frame = filtered.loc[usable_mask, list(usable_columns)]
-                if test_frame.empty:
-                    continue
-                output = test_frame.loc[:, list(spec.primary_key)].copy()
-                output[spec.prediction_column] = predictor(test_frame)
-                _validate_prediction_output_values(
-                    output,
-                    primary_key=spec.primary_key,
-                    prediction_column=spec.prediction_column,
+            ) as (filtered, metadata):
+                build_state.record_filter_metadata(metadata)
+                policy = current_runtime_resource_policy()
+                row_count = len(filtered)
+                index_bytes = int(filtered.index.memory_usage(deep=True))
+                mask_bytes = index_bytes + row_count * (len(input_columns) + 2)
+                test_frame_bytes = _selected_frame_payload_bytes(
+                    filtered,
+                    usable_columns,
                 )
-            retained_bytes = pandas_frame_payload_bytes(output)
-            if policy is not None and (
-                policy.used_memory_bytes + retained_bytes
-                > policy.memory_budget_bytes
-            ):
-                raise ValueError("prediction_working_set_exceeds_task_memory_budget")
-            build_state.record_prediction_output(output)
-            with ExitStack() as retained:
-                if policy is not None:
-                    retained.enter_context(
-                        policy.reserve("research.prediction.result", retained_bytes)
+                output_bytes = _selected_frame_payload_bytes(
+                    filtered,
+                    spec.primary_key,
+                ) + (8 * row_count)
+                model_matrix_bytes = 8 * row_count * (len(input_columns) + 1)
+                working_bytes = (
+                    mask_bytes
+                    + test_frame_bytes
+                    + output_bytes
+                    + model_matrix_bytes
+                )
+                if policy is not None and (
+                    policy.used_memory_bytes + working_bytes
+                    > policy.memory_budget_bytes
+                ):
+                    raise ValueError(
+                        "prediction_working_set_exceeds_task_memory_budget"
                     )
-                yield output
+                working_lease = None
+                if policy is not None:
+                    working_lease = policy.lease(
+                        "research.prediction.output",
+                        working_bytes,
+                    )
+                usable_mask = None
+                test_frame = None
+                output = None
+                try:
+                    usable_mask = filtered.loc[:, list(input_columns)].notna().all(
+                        axis=1
+                    )
+                    build_state.record_input_dropna_rows(int(usable_mask.sum()))
+                    usable_mask &= (
+                        filtered["timestamp"] >= pd.Timestamp(spec.test_start)
+                    )
+                    if spec.test_end is not None:
+                        usable_mask &= (
+                            filtered["timestamp"] <= pd.Timestamp(spec.test_end)
+                        )
+                    test_frame = filtered.loc[usable_mask, list(usable_columns)]
+                    if test_frame.empty:
+                        test_frame = None
+                        usable_mask = None
+                        filtered = None
+                        if working_lease is not None:
+                            working_lease.close()
+                        continue
+                    output = test_frame.loc[:, list(spec.primary_key)].copy()
+                    output[spec.prediction_column] = predictor(test_frame)
+                    _validate_prediction_output_values(
+                        output,
+                        primary_key=spec.primary_key,
+                        prediction_column=spec.prediction_column,
+                    )
+                    build_state.record_prediction_output(output)
+                    retained_bytes = pandas_frame_payload_bytes(output)
+                    if working_lease is not None:
+                        working_lease.shrink_to(retained_bytes)
+                        working_lease.transfer("research.prediction.result")
+                    test_frame = None
+                    usable_mask = None
+                    try:
+                        yield output
+                    except BaseException as primary:
+                        output = None
+                        filtered = None
+                        if working_lease is not None:
+                            try:
+                                working_lease.close()
+                            except BaseException as cleanup_error:
+                                primary.add_note(
+                                    "prediction output lease release also failed: "
+                                    f"{type(cleanup_error).__name__}"
+                                )
+                        raise
+                    else:
+                        output = None
+                        filtered = None
+                        if working_lease is not None:
+                            working_lease.close()
+                except BaseException as primary:
+                    output = None
+                    test_frame = None
+                    usable_mask = None
+                    filtered = None
+                    if working_lease is not None and working_lease.active:
+                        try:
+                            working_lease.close()
+                        except BaseException as cleanup_error:
+                            primary.add_note(
+                                "prediction output lease release also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                    raise
 
 
 def prediction_callable(
@@ -381,12 +439,27 @@ def _iter_prediction_work_frames(
                 > policy.memory_budget_bytes
             ):
                 raise ValueError("prediction_working_set_exceeds_task_memory_budget")
-            with ExitStack() as reservation:
-                if policy is not None:
-                    reservation.enter_context(
-                        policy.reserve("research.prediction.projection", selected_bytes)
-                    )
+            projection_lease = None
+            if policy is not None:
+                projection_lease = policy.lease(
+                    "research.prediction.projection",
+                    selected_bytes,
+                )
+            try:
                 yield frame.loc[:, selected]
+            except BaseException as primary:
+                if projection_lease is not None:
+                    try:
+                        projection_lease.close()
+                    except BaseException as cleanup_error:
+                        primary.add_note(
+                            "prediction projection lease release also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                raise
+            else:
+                if projection_lease is not None:
+                    projection_lease.close()
 
 
 def _strict_non_negative_prediction_count(value: object) -> int:

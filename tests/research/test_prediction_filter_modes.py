@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import warnings
+from contextlib import nullcontext
 from datetime import timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -39,6 +40,7 @@ from tests.helpers.research_processed_inputs import (
 from tests.helpers.research_specs import (
     make_research_dataset_catalog,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.filter_mode_fixtures import (
     make_filter_mode_frame,
 )
@@ -185,12 +187,12 @@ def test_prediction_build_rejects_invalid_filter_metadata_counts(
     }
     metadata[field] = value
 
-    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
-        return frame, metadata
+    def fake_filter_mode_scope(frame: pd.DataFrame, **_: object):
+        return nullcontext((frame, metadata))
 
     monkeypatch.setattr(
-        "quant_research_platform.research.predictions.outputs.apply_filter_mode",
-        fake_apply_filter_mode,
+        "quant_research_platform.research.predictions.outputs._filter_mode_scope",
+        fake_filter_mode_scope,
     )
     spec = PredictionSpec(
         prediction_id="pred_bad_metadata_count",
@@ -622,6 +624,10 @@ def test_prediction_outputs_require_finite_values_and_complete_unique_keys(
         )
 
     with pytest.raises(ValueError, match="empty_prediction_window"):
+        policy = capture_test_policy(
+            available_memory_bytes=64 * 1024**2,
+            explicit_cap_bytes=32 * 1024**2,
+        )
         prediction_frame_from_artifact(
             make_filter_mode_frame().assign(timestamp=pd.Timestamp("2024-01-02")),
             PredictionSpec(
@@ -634,7 +640,9 @@ def test_prediction_outputs_require_finite_values_and_complete_unique_keys(
             ),
             coefficients=np.asarray([0.0, 0.01]),
             input_columns=("factor",),
+            resource_policy=policy,
         )
+    assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize(
@@ -761,6 +769,10 @@ def test_prediction_handoff_empty_training_window_fails_closed(
         )
     )
 
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=32 * 1024**2,
+    )
     with pytest.raises(ValueError, match="empty_training_window"):
         build_prediction_result_from_research_dataset(
             layout=layout,
@@ -768,7 +780,9 @@ def test_prediction_handoff_empty_training_window_fails_closed(
             model_catalog=model_catalog,
             prediction_catalog=prediction_catalog,
             prediction_id="pred_empty_train",
+            resource_policy=policy,
         )
+    assert policy.used_memory_bytes == 0
 
 
 def test_prediction_outputs_rejects_filter_columns_as_direct_features() -> None:

@@ -633,16 +633,19 @@ def _iter_evaluation_output_chunks(
             mode=spec.filter_mode,
             metadata_key="filter_mode",
         ) as (filtered, filter_metadata):
-            yield from _iter_evaluation_filtered_chunks(
-                filtered,
-                filter_metadata,
-                spec=spec,
-                signal_columns=signal_columns,
-                label_columns=label_columns,
-                n_groups=n_groups,
-                asset_column=asset_column,
-                resource_policy=resource_policy,
-            )
+            try:
+                yield from _iter_evaluation_filtered_chunks(
+                    filtered,
+                    filter_metadata,
+                    spec=spec,
+                    signal_columns=signal_columns,
+                    label_columns=label_columns,
+                    n_groups=n_groups,
+                    asset_column=asset_column,
+                    resource_policy=resource_policy,
+                )
+            finally:
+                filtered = None
 
 
 def _iter_evaluation_filtered_chunks(

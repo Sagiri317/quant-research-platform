@@ -25,12 +25,25 @@ def apply_filter_mode(
     mode: str,
     metadata_key: str,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    with _filter_mode_scope(
-        frame,
-        mode=mode,
-        metadata_key=metadata_key,
-    ) as result:
-        return result
+    columns = required_filter_columns(mode)
+    if mode == "unfiltered":
+        filtered = frame
+    else:
+        keep = _validated_bool_mask(frame, columns[0])
+        for column in columns[1:]:
+            mask = _validated_bool_mask(frame, column)
+            keep &= mask
+        if len(columns) > 1:
+            del mask
+        filtered = frame.loc[keep]
+        del keep
+    return filtered, {
+        metadata_key: mode,
+        "filter_columns_used": list(columns),
+        "filter_definition": filter_definition(mode),
+        "rows_input": int(len(frame)),
+        "rows_after_filter_mode": int(len(filtered)),
+    }
 
 
 @contextmanager
@@ -40,7 +53,6 @@ def _filter_mode_scope(
     mode: str,
     metadata_key: str,
 ) -> Iterator[tuple[pd.DataFrame, dict[str, object]]]:
-    columns = required_filter_columns(mode)
     policy = current_runtime_resource_policy()
     lease = None
     if mode == "unfiltered":
@@ -60,18 +72,16 @@ def _filter_mode_scope(
         if policy is not None:
             lease = policy.lease("research.filter", working_bytes)
         try:
-            keep = _validated_bool_mask(frame, columns[0])
-            for column in columns[1:]:
-                mask = _validated_bool_mask(frame, column)
-                keep &= mask
-            if len(columns) > 1:
-                del mask
-            filtered = frame.loc[keep]
-            del keep
+            filtered, metadata = apply_filter_mode(
+                frame,
+                mode=mode,
+                metadata_key=metadata_key,
+            )
             if lease is not None:
                 lease.shrink_to(pandas_frame_payload_bytes(filtered))
                 lease.transfer("research.filter.output")
         except BaseException as exc:
+            filtered = None
             if lease is not None:
                 try:
                     lease.close()
@@ -83,16 +93,16 @@ def _filter_mode_scope(
                 lease = None
             raise
     try:
-        metadata = {
-            metadata_key: mode,
-            "filter_columns_used": list(columns),
-            "filter_definition": filter_definition(mode),
-            "rows_input": int(len(frame)),
-            "rows_after_filter_mode": int(len(filtered)),
-        }
+        if mode == "unfiltered":
+            filtered, metadata = apply_filter_mode(
+                frame,
+                mode=mode,
+                metadata_key=metadata_key,
+            )
         yield filtered, metadata
     finally:
         primary = sys.exception()
+        filtered = None
         if lease is not None:
             try:
                 lease.close()

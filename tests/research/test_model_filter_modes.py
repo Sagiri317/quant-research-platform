@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gc
 import weakref
+from contextlib import nullcontext
 
 import numpy as np
 import pandas as pd
@@ -31,6 +33,7 @@ from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -236,10 +239,10 @@ def test_model_streaming_fit_rejects_invalid_filter_metadata_counts(
     metadata = _model_filter_metadata()
     metadata[field] = value
 
-    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
-        return frame, metadata
+    def fake_filter_mode_scope(frame: pd.DataFrame, **_: object):
+        return nullcontext((frame, metadata))
 
-    monkeypatch.setattr(model_fitting, "apply_filter_mode", fake_apply_filter_mode)
+    monkeypatch.setattr(model_fitting, "_filter_mode_scope", fake_filter_mode_scope)
     spec = ModelSpec(
         model_id="linear_bad_streaming_metadata_count",
         model_algorithm="linear_regression",
@@ -276,10 +279,10 @@ def test_model_training_collection_rejects_invalid_filter_metadata_counts(
     metadata = _model_filter_metadata()
     metadata[field] = value
 
-    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
-        return frame, metadata
+    def fake_filter_mode_scope(frame: pd.DataFrame, **_: object):
+        return nullcontext((frame, metadata))
 
-    monkeypatch.setattr(model_fitting, "apply_filter_mode", fake_apply_filter_mode)
+    monkeypatch.setattr(model_fitting, "_filter_mode_scope", fake_filter_mode_scope)
     spec = ModelSpec(
         model_id="linear_bad_collected_metadata_count",
         model_algorithm="linear_regression",
@@ -297,10 +300,10 @@ def test_model_fit_accepts_valid_filter_metadata_counts(
 ) -> None:
     import quant_research_platform.research.models.fitting as model_fitting
 
-    def fake_apply_filter_mode(frame: pd.DataFrame, **_: object):
-        return frame, _model_filter_metadata()
+    def fake_filter_mode_scope(frame: pd.DataFrame, **_: object):
+        return nullcontext((frame, _model_filter_metadata()))
 
-    monkeypatch.setattr(model_fitting, "apply_filter_mode", fake_apply_filter_mode)
+    monkeypatch.setattr(model_fitting, "_filter_mode_scope", fake_filter_mode_scope)
     spec = ModelSpec(
         model_id="linear_valid_metadata_count",
         model_algorithm="linear_regression",
@@ -830,14 +833,13 @@ def test_linear_tsqr_reserves_first_frame_across_second_pull(
 
     def frames():
         yield first
-        assert len(ephemeral_refs) == 2
-        assert ephemeral_refs[0]() is None
-        retained = ephemeral_refs[1]()
+        assert ephemeral_refs
+        assert all(reference() is None for reference in ephemeral_refs[:-1])
+        retained = ephemeral_refs[-1]()
         assert retained is not None
         assert policy.used_memory_bytes >= original_payload(retained)
         del retained
         yield second
-        assert len(ephemeral_refs) == 4
         assert all(reference() is None for reference in ephemeral_refs)
         yield third
 
@@ -850,6 +852,69 @@ def test_linear_tsqr_reserves_first_frame_across_second_pull(
 
     assert len(coefficients) == 2
     assert row_counts["rows_after_input_label_dropna"] == 3 * rows
+
+
+def test_linear_qr_failure_clears_work_arrays_before_lease_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = 32
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="min"),
+            "factor": np.linspace(0.0, 1.0, rows),
+            "label": np.linspace(1.0, 2.0, rows),
+        }
+    )
+    spec = ModelSpec(
+        model_id="linear_qr_failure_aliases",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        sample_filter_mode="unfiltered",
+    )
+    qr_refs: list[weakref.ReferenceType[object]] = []
+
+    class FailingTranspose:
+        def __matmul__(self, _other):  # noqa: ANN001
+            raise RuntimeError("qr_after_allocation")
+
+    class QFactor:
+        @property
+        def T(self) -> FailingTranspose:
+            return FailingTranspose()
+
+    def failing_qr(matrix, *, mode):  # noqa: ANN001
+        del mode
+        del matrix
+        q_factor = QFactor()
+        r_factor = np.ones((2, 2), dtype="float64")
+        qr_refs.extend((weakref.ref(q_factor), weakref.ref(r_factor)))
+        return q_factor, r_factor
+
+    monkeypatch.setattr(model_fitting.np.linalg, "qr", failing_qr)
+    original_close = MemoryLease.close
+    close_checks: list[bool] = []
+
+    def observing_close(self: MemoryLease) -> None:
+        if self.owner == "research.model.qr_work":
+            gc.collect()
+            close_checks.append(all(reference() is None for reference in qr_refs))
+            assert close_checks[-1]
+        original_close(self)
+
+    monkeypatch.setattr(MemoryLease, "close", observing_close)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024 * 1024)
+
+    with pytest.raises(RuntimeError, match="qr_after_allocation"):
+        with runtime_resource_policy_scope(policy):
+            model_fitting.fit_linear_coefficients(
+                (frame,),
+                spec=spec,
+                fit_columns=("timestamp", "factor", "label"),
+            )
+
+    assert close_checks == [True]
+    assert policy.used_memory_bytes == 0
 
 
 def test_estimator_target_and_model_state_stay_reserved_through_metadata(
