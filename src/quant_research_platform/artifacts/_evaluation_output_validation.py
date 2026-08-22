@@ -17,6 +17,11 @@ from quant_research_platform.artifacts._output_common_validation import (
     require_signal_metadata_list,
     validate_filter_metadata,
 )
+from quant_research_platform.compute.dataframe.cross_section import (
+    CORRELATION_RAW_REASON_CODES,
+    CORRELATION_SUMMARY_REASON_CODES,
+    GROUP_SPREAD_REASON_CODES,
+)
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -31,7 +36,16 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.validation import strict_timestamp_series
 
-EVALUATION_METRICS_COLUMNS = ("timestamp", "signal", "label", "ic", "rankic", "n_obs")
+EVALUATION_METRICS_COLUMNS = (
+    "timestamp",
+    "signal",
+    "label",
+    "ic",
+    "rankic",
+    "n_obs",
+    "ic_reason",
+    "rankic_reason",
+)
 EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
     "timestamp",
     "signal",
@@ -53,6 +67,10 @@ EVALUATION_IC_SUMMARY_COLUMNS = (
     "rankicir",
     "positive_rankic_rate",
     "valid_rankic_count",
+    "ic_reason",
+    "icir_reason",
+    "rankic_reason",
+    "rankicir_reason",
 )
 EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
     "signal",
@@ -62,6 +80,7 @@ EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
     "top_bottom_label_value_spread_mean",
     "top_bottom_label_value_spread_hit_rate",
     "group_monotonicity_score",
+    "group_monotonicity_score_reason",
 )
 EVALUATION_ARTIFACTS = [
     "metrics.parquet",
@@ -315,14 +334,15 @@ def validate_evaluation_artifact_structure(
     if bool(groups.gt(n_groups).any()):
         raise ValueError("evaluation_group_out_of_range")
     for frame, columns in (
-        (metrics, ("ic", "rankic")),
-        (grouped_label_values, ("mean_label_value",)),
+        (metrics, ("ic", "rankic", "n_obs")),
+        (grouped_label_values, ("mean_label_value", "group", "n_obs")),
         (
             ic_summary,
             tuple(
                 column
                 for column in ic_summary.columns
                 if column not in {"signal", "label"}
+                and not column.endswith("_reason")
             ),
         ),
         (
@@ -331,11 +351,96 @@ def validate_evaluation_artifact_structure(
                 column
                 for column in group_spread_summary.columns
                 if column not in {"signal", "label"}
+                and not column.endswith("_reason")
             ),
         ),
     ):
         for column in columns:
+            values = frame[column]
+            if pd.api.types.is_bool_dtype(values) or (
+                not pd.api.types.is_numeric_dtype(values) and not values.isna().all()
+            ):
+                raise ValueError("invalid_evaluation_numeric_values")
             strict_finite_or_null_numeric_series(frame[column])
+    for column in ("ic", "rankic"):
+        if bool(metrics[column].dropna().abs().gt(1.0).any()):
+            raise ValueError("invalid_evaluation_correlation_values")
+    for column in ("mean_ic", "mean_rankic"):
+        if bool(ic_summary[column].dropna().abs().gt(1.0).any()):
+            raise ValueError("invalid_evaluation_correlation_values")
+    for column in ("valid_ic_count", "valid_rankic_count"):
+        strict_non_negative_count_series(
+            ic_summary[column],
+            error="invalid_evaluation_summary_values",
+        )
+    for column in ("std_ic", "std_rankic"):
+        if bool(ic_summary[column].dropna().lt(0).any()):
+            raise ValueError("invalid_evaluation_summary_values")
+    for column in ("positive_ic_rate", "positive_rankic_rate"):
+        values = ic_summary[column].dropna()
+        if bool(values.lt(0).any() or values.gt(1).any()):
+            raise ValueError("invalid_evaluation_summary_values")
+    spread_hit_rate = group_spread_summary[
+        "top_bottom_label_value_spread_hit_rate"
+    ].dropna()
+    if bool(spread_hit_rate.lt(0).any() or spread_hit_rate.gt(1).any()):
+        raise ValueError("invalid_evaluation_summary_values")
+    monotonicity = group_spread_summary["group_monotonicity_score"].dropna()
+    if bool(monotonicity.lt(-1).any() or monotonicity.gt(1).any()):
+        raise ValueError("invalid_evaluation_summary_values")
+    _validate_reason_pair(
+        metrics["ic"],
+        metrics["ic_reason"],
+        allowed=CORRELATION_RAW_REASON_CODES,
+    )
+    _validate_reason_pair(
+        metrics["rankic"],
+        metrics["rankic_reason"],
+        allowed=CORRELATION_RAW_REASON_CODES,
+    )
+    _validate_reason_pair(
+        ic_summary["mean_ic"],
+        ic_summary["ic_reason"],
+        allowed=CORRELATION_SUMMARY_REASON_CODES,
+    )
+    _validate_reason_pair(
+        ic_summary["icir"],
+        ic_summary["icir_reason"],
+        allowed=CORRELATION_SUMMARY_REASON_CODES,
+    )
+    _validate_reason_pair(
+        ic_summary["mean_rankic"],
+        ic_summary["rankic_reason"],
+        allowed=CORRELATION_SUMMARY_REASON_CODES,
+    )
+    _validate_reason_pair(
+        ic_summary["rankicir"],
+        ic_summary["rankicir_reason"],
+        allowed=CORRELATION_SUMMARY_REASON_CODES,
+    )
+    _validate_reason_pair(
+        group_spread_summary["group_monotonicity_score"],
+        group_spread_summary["group_monotonicity_score_reason"],
+        allowed=GROUP_SPREAD_REASON_CODES,
+    )
+    for value_column, reason_column in (
+        ("ic", "ic_reason"),
+        ("rankic", "rankic_reason"),
+    ):
+        for n_obs, value, reason in zip(
+            metrics["n_obs"],
+            metrics[value_column],
+            metrics[reason_column],
+            strict=True,
+        ):
+            insufficient = (
+                type(reason) is str and reason == "insufficient_observations"
+            )
+            if int(n_obs) < 2:
+                if not (pd.isna(value) and insufficient):
+                    raise ValueError("invalid_evaluation_statistic_reason")
+            elif insufficient:
+                raise ValueError("invalid_evaluation_statistic_reason")
 
 
 def _reject_duplicate_keys(
@@ -365,3 +470,19 @@ def _validate_signal_label_membership(
         spec.label_columns,
         "evaluation_artifact_signal_label_mismatch",
     )
+
+
+def _validate_reason_pair(
+    values: pd.Series,
+    reasons: pd.Series,
+    *,
+    allowed: frozenset[str],
+) -> None:
+    for value, reason in zip(values, reasons, strict=True):
+        value_is_null = bool(pd.isna(value))
+        reason_is_null = bool(pd.isna(reason))
+        if value_is_null:
+            if reason_is_null or type(reason) is not str or reason not in allowed:
+                raise ValueError("invalid_evaluation_statistic_reason")
+        elif not reason_is_null:
+            raise ValueError("invalid_evaluation_statistic_reason")

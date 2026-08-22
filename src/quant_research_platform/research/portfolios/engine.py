@@ -11,7 +11,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.exposure import summarize_exposure
 from quant_research_platform.compute.dataframe.performance import (
     _validate_returns_frame,
-    calculate_cumulative_returns,
+    calculate_additive_cumulative_returns,
     summarize_performance,
 )
 from quant_research_platform.compute.dataframe.portfolio_returns import (
@@ -46,7 +46,7 @@ class PortfolioComputationResult:
     turnover: pd.DataFrame
     cost_breakdown: pd.DataFrame
     portfolio_returns: pd.DataFrame
-    cumulative_returns: pd.DataFrame
+    additive_cumulative_returns: pd.DataFrame
     performance_summary: pd.DataFrame
     exposure_summary: pd.DataFrame
     concentration: pd.DataFrame
@@ -93,11 +93,10 @@ def construct_portfolio_positions(
             return_source_column=spec.return_source_column,
         )
     )
-    cumulative_returns = compute_cumulative_returns(portfolio_returns)
-    performance_summary = compute_performance_summary(
-        portfolio_returns,
-        cumulative_returns,
+    additive_cumulative_returns = calculate_additive_cumulative_returns(
+        portfolio_returns
     )
+    performance_summary = summarize_performance(portfolio_returns)
     exposure_summary = compute_exposure_summary(positions, portfolio_returns)
     concentration = summarize_concentration(positions)
     period_breakdown = summarize_period_breakdown(portfolio_returns)
@@ -122,7 +121,7 @@ def construct_portfolio_positions(
         turnover=turnover,
         cost_breakdown=cost_breakdown,
         portfolio_returns=portfolio_returns,
-        cumulative_returns=cumulative_returns,
+        additive_cumulative_returns=additive_cumulative_returns,
         performance_summary=performance_summary,
         exposure_summary=exposure_summary,
         concentration=concentration,
@@ -132,17 +131,6 @@ def construct_portfolio_positions(
         numeric_exposure_diagnostics=numeric_exposure_diagnostics,
         categorical_exposure_diagnostics=categorical_exposure_diagnostics,
     )
-
-
-def compute_cumulative_returns(portfolio_returns: pd.DataFrame) -> pd.DataFrame:
-    return calculate_cumulative_returns(portfolio_returns)
-
-
-def compute_performance_summary(
-    portfolio_returns: pd.DataFrame,
-    cumulative_returns: pd.DataFrame,
-) -> pd.DataFrame:
-    return summarize_performance(portfolio_returns, cumulative_returns)
 
 
 def compute_exposure_summary(
@@ -305,8 +293,6 @@ def _portfolio_panel(
 __all__ = [
     "PortfolioComputationResult",
     "construct_portfolio_positions",
-    "compute_cumulative_returns",
-    "compute_performance_summary",
     "compute_exposure_summary",
     "summarize_concentration",
     "summarize_period_breakdown",

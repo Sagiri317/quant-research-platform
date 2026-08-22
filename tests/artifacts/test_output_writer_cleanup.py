@@ -270,7 +270,7 @@ def test_portfolio_writers_close_once_and_attempt_all(
         writers.append(writer)
         return writer
 
-    row_artifacts = ("positions", "portfolio_returns", "cumulative_returns")
+    row_artifacts = ("positions", "portfolio_returns", "additive_cumulative_returns")
     frame = pd.DataFrame({"value": [1.0]})
     monkeypatch.setattr(
         portfolio_outputs,
@@ -307,7 +307,7 @@ def test_parquet_writers_close_once_without_replacing_body_primary(
 ) -> None:
     primary = primary_type("body_primary")
     close_failure = OSError("writer_close_secondary")
-    row_artifacts = ("positions", "portfolio_returns", "cumulative_returns")
+    row_artifacts = ("positions", "portfolio_returns", "additive_cumulative_returns")
     frame = pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]})
     first = (
         frame

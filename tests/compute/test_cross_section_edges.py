@@ -7,7 +7,6 @@ import pytest
 from quant_research_platform.compute.dataframe.cross_section import (
     _assign_groups_array,
     _average_ranks,
-    _pearson_correlation_values,
     compute_ic_and_grouped_label_values,
     compute_ic_and_grouped_label_values_from_validated_panel,
     summarize_group_spread,
@@ -93,6 +92,8 @@ def test_cross_section_summaries_validate_counts_and_primary_keys() -> None:
             "ic": [np.nan],
             "rankic": [np.nan],
             "n_obs": [0],
+            "ic_reason": ["insufficient_observations"],
+            "rankic_reason": ["insufficient_observations"],
         }
     )
     assert summarize_ic(ic).iloc[0]["valid_ic_count"] == 0
@@ -100,6 +101,10 @@ def test_cross_section_summaries_validate_counts_and_primary_keys() -> None:
         summarize_ic(ic.assign(ic=["0.1"]))
     with pytest.raises(ValueError, match="ic column 'rankic'.*numeric"):
         summarize_ic(ic.assign(rankic=["0.1"]))
+    with pytest.raises(ValueError, match=r"ic column 'ic'.*\[-1, 1\]"):
+        summarize_ic(ic.assign(ic=[1.1], ic_reason=[None]))
+    with pytest.raises(ValueError, match=r"ic column 'rankic'.*\[-1, 1\]"):
+        summarize_ic(ic.assign(rankic=[-1.1], rankic_reason=[None]))
     with pytest.raises(ValueError, match="ic n_obs.*numeric"):
         summarize_ic(ic.assign(n_obs=["0"]))
     with pytest.raises(ValueError, match="ic n_obs must be nonnegative"):
@@ -134,6 +139,3 @@ def test_cross_section_summaries_validate_counts_and_primary_keys() -> None:
 def test_dataframe_cross_section_numeric_helpers() -> None:
     assert _assign_groups_array(np.array([3.0, 1.0, 2.0]), 5).tolist() == [3, 1, 2]
     assert _average_ranks(np.array([2.0, 2.0, 1.0])).tolist() == [2.5, 2.5, 1.0]
-    assert np.isnan(
-        _pearson_correlation_values(np.array([1.0, 1.0]), np.array([2.0, 3.0]))
-    )

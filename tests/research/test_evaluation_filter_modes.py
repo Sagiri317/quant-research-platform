@@ -104,6 +104,10 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         "rankicir",
         "positive_rankic_rate",
         "valid_rankic_count",
+        "ic_reason",
+        "icir_reason",
+        "rankic_reason",
+        "rankicir_reason",
     ]
     assert list(eligible.group_spread_summary.columns) == [
         "signal",
@@ -113,6 +117,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         "top_bottom_label_value_spread_mean",
         "top_bottom_label_value_spread_hit_rate",
         "group_monotonicity_score",
+        "group_monotonicity_score_reason",
     ]
     assert eligible.grouped_label_values["mean_label_value"].tolist() == pytest.approx(
         [0.015, 0.045]
@@ -145,6 +150,10 @@ def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
     assert result.metrics["n_obs"].tolist() == [0]
     assert result.metrics["ic"].isna().all()
     assert result.metrics["rankic"].isna().all()
+    assert result.metrics["ic_reason"].tolist() == ["insufficient_observations"]
+    assert result.metrics["rankic_reason"].tolist() == [
+        "insufficient_observations"
+    ]
     assert result.grouped_label_values.empty
     assert result.group_spread_summary.empty
     assert result.diagnostics.rows_input == 6

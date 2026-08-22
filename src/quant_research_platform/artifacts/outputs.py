@@ -89,7 +89,7 @@ def write_portfolio_outputs(
     *,
     output_chunks: Iterable[Mapping[str, pd.DataFrame]],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
-    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]],
+    additive_cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]],
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
@@ -98,7 +98,7 @@ def write_portfolio_outputs(
         lambda: _write_portfolio_outputs(
             output_chunks=output_chunks,
             summary_factory=summary_factory,
-            cumulative_returns_factory=cumulative_returns_factory,
+            additive_cumulative_returns_factory=additive_cumulative_returns_factory,
             spec=spec,
             output_spec=output_spec,
             layout=layout,

@@ -81,8 +81,13 @@ _MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
         "validation_rows",
         "validation_ic",
         "validation_rankic",
+        "validation_ic_reason",
+        "validation_rankic_reason",
         "validation_mse",
     }
+)
+_MODEL_SELECTION_REASON_CODES = frozenset(
+    {"insufficient_observations", "zero_variance", "nonfinite_result"}
 )
 _PREDICTION_METADATA_KEYS = frozenset(
     {
@@ -309,6 +314,8 @@ def validate_model_selection_metadata_shape(metadata: object) -> None:
         "candidate_count",
         "invalid_model_metadata",
     )
+    if candidate_count < 1 or metadata["selected_model_id"] not in candidate_model_ids:
+        raise ValueError("invalid_model_metadata")
     if candidate_count != len(candidate_model_ids):
         raise ValueError("invalid_model_metadata")
     trial_metrics = metadata["trial_metrics"]
@@ -324,13 +331,43 @@ def validate_model_selection_metadata_shape(metadata: object) -> None:
         trial_model_ids.append(
             require_metadata_string(trial, "model_id", "invalid_model_metadata")
         )
-        require_non_negative_metadata_int(
+        validation_rows = require_non_negative_metadata_int(
             trial,
             "validation_rows",
             "invalid_model_metadata",
         )
-        for key in ("validation_ic", "validation_rankic", "validation_mse"):
-            require_finite_metadata_number(trial, key, "invalid_model_metadata")
+        if validation_rows < 1:
+            raise ValueError("invalid_model_metadata")
+        for key, reason_key in (
+            ("validation_ic", "validation_ic_reason"),
+            ("validation_rankic", "validation_rankic_reason"),
+        ):
+            value = trial[key]
+            reason = require_optional_metadata_string(
+                trial, reason_key, "invalid_model_metadata"
+            )
+            if reason is not None and reason not in _MODEL_SELECTION_REASON_CODES:
+                raise ValueError("invalid_model_metadata")
+            if validation_rows < 2:
+                if value is not None or reason != "insufficient_observations":
+                    raise ValueError("invalid_model_metadata")
+                continue
+            if value is None:
+                if reason is None or reason == "insufficient_observations":
+                    raise ValueError("invalid_model_metadata")
+            else:
+                numeric_value = require_finite_metadata_number(
+                    trial,
+                    key,
+                    "invalid_model_metadata",
+                )
+                if abs(numeric_value) > 1.0:
+                    raise ValueError("invalid_model_metadata")
+                if reason is not None:
+                    raise ValueError("invalid_model_metadata")
+        require_finite_metadata_number(
+            trial, "validation_mse", "invalid_model_metadata"
+        )
     if trial_model_ids != candidate_model_ids:
         raise ValueError("invalid_model_metadata")
 

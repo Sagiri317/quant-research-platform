@@ -927,16 +927,20 @@ def test_prediction_outputs_reject_tampered_selected_model_input_columns(
             "trial_metrics": [
                 {
                     "model_id": "model_demo",
-                    "validation_rows": 1,
+                    "validation_rows": 3,
                     "validation_ic": 0.0,
+                    "validation_ic_reason": None,
                     "validation_rankic": 0.0,
+                    "validation_rankic_reason": None,
                     "validation_mse": 1.0,
                 },
                 {
                     "model_id": "candidate_model",
-                    "validation_rows": 1,
+                    "validation_rows": 3,
                     "validation_ic": 0.0,
+                    "validation_ic_reason": None,
                     "validation_rankic": 0.0,
+                    "validation_rankic_reason": None,
                     "validation_mse": 0.0,
                 },
             ],
@@ -1080,16 +1084,20 @@ def test_prediction_outputs_reject_tampered_model_selection_direction(
             "trial_metrics": [
                 {
                     "model_id": "model_demo",
-                    "validation_rows": 1,
+                    "validation_rows": 3,
                     "validation_ic": 0.0,
+                    "validation_ic_reason": None,
                     "validation_rankic": 0.0,
+                    "validation_rankic_reason": None,
                     "validation_mse": 1.0,
                 },
                 {
                     "model_id": "candidate_model",
-                    "validation_rows": 1,
+                    "validation_rows": 3,
                     "validation_ic": 0.0,
+                    "validation_ic_reason": None,
                     "validation_rankic": 0.0,
+                    "validation_rankic_reason": None,
                     "validation_mse": 0.0,
                 },
             ],
@@ -1126,16 +1134,20 @@ def _valid_model_selection_metadata() -> dict[str, object]:
         "trial_metrics": [
             {
                 "model_id": "model_demo",
-                "validation_rows": 1,
+                "validation_rows": 3,
                 "validation_ic": 0.0,
+                "validation_ic_reason": None,
                 "validation_rankic": 0.0,
+                "validation_rankic_reason": None,
                 "validation_mse": 1.0,
             },
             {
                 "model_id": "candidate_model",
-                "validation_rows": 1,
+                "validation_rows": 3,
                 "validation_ic": 0.0,
+                "validation_ic_reason": None,
                 "validation_rankic": 0.0,
+                "validation_rankic_reason": None,
                 "validation_mse": 0.0,
             },
         ],
@@ -1148,6 +1160,8 @@ def _valid_model_selection_metadata() -> dict[str, object]:
         "candidate_missing",
         "candidate_extra",
         "candidate_duplicate",
+        "candidate_zero",
+        "selected_model_outside",
         "trial_missing",
         "trial_extra",
         "trial_duplicate",
@@ -1158,6 +1172,10 @@ def _valid_model_selection_metadata() -> dict[str, object]:
         "trial_validation_rows_string",
         "trial_validation_rows_numpy",
         "trial_validation_rows_negative",
+        "trial_validation_rows_zero",
+        "trial_metric_defined_insufficient_rows",
+        "trial_metric_wrong_reason_insufficient_rows",
+        "trial_metric_out_of_range",
         "candidate_count_bool",
         "candidate_count_string",
         "candidate_count_numpy",
@@ -1179,6 +1197,12 @@ def test_model_selection_candidate_trial_exact_mutation_matrix(
         candidates.append("extra_model")
     elif mutation == "candidate_duplicate":
         candidates[1] = candidates[0]
+    elif mutation == "candidate_zero":
+        metadata["candidate_model_ids"] = []
+        metadata["candidate_count"] = 0
+        metadata["trial_metrics"] = []
+    elif mutation == "selected_model_outside":
+        metadata["selected_model_id"] = "other_model"
     elif mutation == "trial_missing":
         trials.pop()
     elif mutation == "trial_extra":
@@ -1199,6 +1223,18 @@ def test_model_selection_candidate_trial_exact_mutation_matrix(
         trials[0]["validation_rows"] = np.int64(1)
     elif mutation == "trial_validation_rows_negative":
         trials[0]["validation_rows"] = -1
+    elif mutation == "trial_validation_rows_zero":
+        trials[0]["validation_rows"] = 0
+        trials[0]["validation_ic"] = None
+        trials[0]["validation_ic_reason"] = "insufficient_observations"
+    elif mutation == "trial_metric_defined_insufficient_rows":
+        trials[0]["validation_rows"] = 1
+    elif mutation == "trial_metric_wrong_reason_insufficient_rows":
+        trials[0]["validation_rows"] = 1
+        trials[0]["validation_ic"] = None
+        trials[0]["validation_ic_reason"] = "zero_variance"
+    elif mutation == "trial_metric_out_of_range":
+        trials[0]["validation_ic"] = 1.1
     elif mutation == "candidate_count_bool":
         metadata["candidate_count"] = True
     elif mutation == "candidate_count_string":

@@ -53,7 +53,9 @@ def write_portfolio_outputs(
     *,
     output_chunks: Iterable[Mapping[str, pd.DataFrame]],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
-    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]] | None = None,
+    additive_cumulative_returns_factory: Callable[
+        [], Iterable[pd.DataFrame]
+    ] | None = None,
     summary_pre_reserved: bool = False,
     spec: PortfolioSpec,
     output_spec: OutputSpec,
@@ -64,7 +66,7 @@ def write_portfolio_outputs(
     return _write_portfolio_output_chunks(
         output_chunks,
         summary_factory=summary_factory,
-        cumulative_returns_factory=cumulative_returns_factory,
+        additive_cumulative_returns_factory=additive_cumulative_returns_factory,
         summary_pre_reserved=summary_pre_reserved,
         spec=spec,
         output_spec=output_spec,
@@ -76,7 +78,9 @@ def _write_portfolio_output_chunks(
     output_chunks: Iterable[Mapping[str, pd.DataFrame]],
     *,
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
-    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]] | None = None,
+    additive_cumulative_returns_factory: Callable[
+        [], Iterable[pd.DataFrame]
+    ] | None = None,
     summary_pre_reserved: bool = False,
     spec: PortfolioSpec,
     output_spec: OutputSpec,
@@ -84,8 +88,8 @@ def _write_portfolio_output_chunks(
 ) -> Path:
     """Write local portfolio row outputs from bounded chunks."""
 
-    if cumulative_returns_factory is None:
-        raise ValueError("portfolio_cumulative_returns_factory_required")
+    if additive_cumulative_returns_factory is None:
+        raise ValueError("portfolio_additive_cumulative_returns_factory_required")
 
     output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
@@ -106,7 +110,7 @@ def _write_portfolio_output_chunks(
     summary_names = tuple(
         name
         for name in PORTFOLIO_ARTIFACTS
-        if name not in (*row_artifacts, "cumulative_returns")
+        if name not in (*row_artifacts, "additive_cumulative_returns")
     )
 
     def _write(temp_root: Path) -> None:
@@ -116,7 +120,7 @@ def _write_portfolio_output_chunks(
             row_artifacts=row_artifacts,
             required_columns=required_columns,
             spec=spec,
-            cumulative_returns_factory=cumulative_returns_factory,
+            additive_cumulative_returns_factory=additive_cumulative_returns_factory,
         )
         policy = current_runtime_resource_policy()
         summary_lease = None
@@ -187,13 +191,15 @@ def _write_portfolio_row_artifact_chunks(
     row_artifacts: tuple[str, ...],
     required_columns: Mapping[str, tuple[str, ...]],
     spec: PortfolioSpec,
-    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]] | None = None,
+    additive_cumulative_returns_factory: Callable[
+        [], Iterable[pd.DataFrame]
+    ] | None = None,
 ) -> dict[str, int]:
     all_row_artifacts = (
         row_artifacts
-        if cumulative_returns_factory is None
-        or "cumulative_returns" in row_artifacts
-        else (*row_artifacts, "cumulative_returns")
+        if additive_cumulative_returns_factory is None
+        or "additive_cumulative_returns" in row_artifacts
+        else (*row_artifacts, "additive_cumulative_returns")
     )
     writers: dict[str, pq.ParquetWriter] = {}
     writer_states: dict[str, ExitStack] = {}
@@ -293,15 +299,15 @@ def _write_portfolio_row_artifact_chunks(
                 for artifact_name in row_artifacts:
                     write_frame(artifact_name, artifact_chunk[artifact_name])
         if (
-            cumulative_returns_factory is not None
-            and "cumulative_returns" not in row_artifacts
+            additive_cumulative_returns_factory is not None
+            and "additive_cumulative_returns" not in row_artifacts
         ):
             with closing_dataset_iterator(
-                iter(cumulative_returns_factory())
-            ) as cumulative_chunks:
-                for frame in cumulative_chunks:
+                iter(additive_cumulative_returns_factory())
+            ) as additive_cumulative_chunks:
+                for frame in additive_cumulative_chunks:
                     write_frame(
-                        "cumulative_returns",
+                        "additive_cumulative_returns",
                         frame,
                     )
         for artifact_name in tuple(writers):

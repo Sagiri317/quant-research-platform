@@ -79,9 +79,9 @@ def test_portfolio_engine_produces_required_signal_artifacts() -> None:
     assert result.portfolio_returns["net_portfolio_return"].tolist() == pytest.approx(
         [0.038, 0.06]
     )
-    assert result.cumulative_returns["cumulative_net_return"].tolist() == pytest.approx(
-        [0.038, 0.098]
-    )
+    assert result.additive_cumulative_returns[
+        "additive_cumulative_net_return"
+    ].tolist() == pytest.approx([0.038, 0.098])
     assert result.performance_summary.loc[0, "max_drawdown"] == pytest.approx(0.0)
     assert result.performance_summary.loc[0, "win_rate"] == pytest.approx(1.0)
     assert result.exposure_summary.loc[0, "mean_gross_exposure"] == pytest.approx(2.0)
@@ -333,7 +333,7 @@ def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
         "turnover.parquet",
         "cost_breakdown.parquet",
         "portfolio_returns.parquet",
-        "cumulative_returns.parquet",
+        "additive_cumulative_returns.parquet",
         "performance_summary.parquet",
         "exposure_summary.parquet",
         "concentration.parquet",
@@ -411,7 +411,7 @@ def test_portfolio_runner_chunked_output_matches_single_chunk_path(
         "turnover.parquet",
         "cost_breakdown.parquet",
         "portfolio_returns.parquet",
-        "cumulative_returns.parquet",
+        "additive_cumulative_returns.parquet",
         "performance_summary.parquet",
         "exposure_summary.parquet",
         "concentration.parquet",
@@ -490,7 +490,7 @@ def _write_portfolio_result(layout: StorageLayout, result) -> Path:
         return write_portfolio_outputs(
             output_chunks=result.output_chunks,
             summary_factory=result.summary_factory,
-            cumulative_returns_factory=result.cumulative_returns_factory,
+            additive_cumulative_returns_factory=result.additive_cumulative_returns_factory,
             summary_pre_reserved=True,
             spec=result.spec,
             output_spec=OutputSpec(

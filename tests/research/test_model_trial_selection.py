@@ -4,6 +4,9 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.research._memory import _selected_frame_payload_bytes
+from quant_research_platform.research.models.rank_ensemble import (
+    ICWeightedRankEnsemble,
+)
 from quant_research_platform.research.models.trial_selection import (
     evaluate_model_trial_metrics,
     select_best_validation_trial,
@@ -71,9 +74,14 @@ def test_select_best_validation_trial_fails_closed_on_bad_inputs() -> None:
     with pytest.raises(ValueError, match="missing_trial_selection_columns"):
         select_best_validation_trial(pd.DataFrame({"trial_id": ["a"]}), **kwargs)
 
-    with pytest.raises(ValueError, match="invalid_trial_selection_metric"):
+    with pytest.raises(ValueError, match="all_validation_metrics_undefined"):
         select_best_validation_trial(
             pd.DataFrame({"trial_id": ["a"], "validation_loss": [float("nan")]}),
+            **kwargs,
+        )
+    with pytest.raises(ValueError, match="all_validation_metrics_undefined"):
+        select_best_validation_trial(
+            pd.DataFrame({"trial_id": ["a", "b"], "validation_loss": [None, None]}),
             **kwargs,
         )
 
@@ -86,7 +94,7 @@ def test_select_best_validation_trial_fails_closed_on_bad_inputs() -> None:
         )
 
 
-def test_evaluate_model_trial_metrics_returns_zero_correlation_for_one_row() -> None:
+def test_evaluate_model_trial_metrics_marks_one_row_correlation_undefined() -> None:
     metrics = evaluate_model_trial_metrics(
         pd.DataFrame({"label": [1.0], "prediction": [1.0]}),
         model_id="single_row",
@@ -95,9 +103,120 @@ def test_evaluate_model_trial_metrics_returns_zero_correlation_for_one_row() -> 
     )
 
     assert metrics["validation_rows"] == 1
-    assert metrics["validation_ic"] == 0.0
-    assert metrics["validation_rankic"] == 0.0
+    assert metrics["validation_ic"] is None
+    assert metrics["validation_ic_reason"] == "insufficient_observations"
+    assert metrics["validation_rankic"] is None
+    assert metrics["validation_rankic_reason"] == "insufficient_observations"
     assert metrics["validation_mse"] == 0.0
+
+
+def test_evaluate_model_trial_metrics_marks_constant_correlation_undefined() -> None:
+    metrics = evaluate_model_trial_metrics(
+        pd.DataFrame(
+            {
+                "label": [1.0, 1.0, 1.0],
+                "prediction": [2.0, 2.0, 2.0],
+            }
+        ),
+        model_id="constant_window",
+        label_column="label",
+        prediction_column="prediction",
+    )
+
+    assert metrics["validation_ic"] is None
+    assert metrics["validation_ic_reason"] == "zero_variance"
+    assert metrics["validation_rankic"] is None
+    assert metrics["validation_rankic_reason"] == "zero_variance"
+
+
+def test_select_best_validation_trial_excludes_undefined_candidates() -> None:
+    selected = select_best_validation_trial(
+        pd.DataFrame(
+            {
+                "trial_id": ["undefined", "defined"],
+                "validation_ic": [float("nan"), 0.2],
+            }
+        ),
+        trial_id_column="trial_id",
+        selection_metric="validation_ic",
+        maximize=True,
+        validation_metric_columns=("validation_ic",),
+        test_metric_columns=(),
+    )
+    assert selected == "defined"
+
+
+def test_select_best_validation_trial_rejects_numeric_text_and_mixed_values() -> None:
+    kwargs = {
+        "trial_id_column": "trial_id",
+        "selection_metric": "validation_ic",
+        "maximize": True,
+        "validation_metric_columns": ("validation_ic",),
+        "test_metric_columns": (),
+    }
+    for values in (["0.2", "0.1"], [0.2, "0.1"], ["0.2", None]):
+        with pytest.raises(ValueError, match="invalid_trial_selection_metric"):
+            select_best_validation_trial(
+                pd.DataFrame({"trial_id": ["a", "b"], "validation_ic": values}),
+                **kwargs,
+            )
+
+
+def test_ic_weighted_rank_ensemble_fails_when_correlations_are_undefined() -> None:
+    constant = pd.DataFrame(
+        {
+            "factor": [1.0, 1.0, 1.0],
+            "feature": [2.0, 2.0, 2.0],
+            "label": [0.0, 0.0, 0.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="all_ensemble_correlations_undefined"):
+        ICWeightedRankEnsemble.fit(
+            constant,
+            input_columns=("factor", "feature"),
+            label_column="label",
+        )
+
+
+def test_ic_weighted_rank_ensemble_fails_when_defined_weights_are_zero() -> None:
+    zero_corr = pd.DataFrame(
+        {
+            "factor": [-2.0, -1.0, 0.0, 1.0, 2.0],
+            "feature": [-2.0, -1.0, 0.0, 1.0, 2.0],
+            "label": [-2.0, 2.0, 1.0, 0.0, -1.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="all_ensemble_correlations_zero"):
+        ICWeightedRankEnsemble.fit(
+            zero_corr,
+            input_columns=("factor", "feature"),
+            label_column="label",
+        )
+
+
+def test_ic_weighted_rank_ensemble_excludes_only_undefined_inputs() -> None:
+    frame = pd.DataFrame(
+        {
+            "factor": [1.0, 2.0, 3.0, 4.0],
+            "constant": [7.0, 7.0, 7.0, 7.0],
+            "label": [10.0, 20.0, 30.0, 40.0],
+        }
+    )
+
+    ensemble = ICWeightedRankEnsemble.fit(
+        frame,
+        input_columns=("factor", "constant"),
+        label_column="label",
+    )
+
+    assert ensemble.columns == ("factor",)
+    assert ensemble.coefficient_count == 1
+    assert ensemble.weights.tolist() == pytest.approx([1.0])
+    assert ensemble.predict(frame).tolist() == pytest.approx(
+        [0.25, 0.5, 0.75, 1.0]
+    )
 
 
 def test_evaluate_model_trial_metrics_does_not_recharge_borrowed_input() -> None:

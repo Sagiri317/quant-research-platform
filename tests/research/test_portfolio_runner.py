@@ -13,6 +13,10 @@ from quant_research_platform.artifacts._output_bundle_validation import (
     _read_prediction_output_bundle,
 )
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
+from quant_research_platform.compute.dataframe.performance import (
+    calculate_additive_cumulative_returns,
+    summarize_performance,
+)
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnosticsConfig,
@@ -22,9 +26,7 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.engine import (
-    compute_cumulative_returns,
     compute_exposure_summary,
-    compute_performance_summary,
     summarize_concentration,
     summarize_period_breakdown,
 )
@@ -82,7 +84,7 @@ def test_portfolio_read_columns_include_diagnostics_config_columns() -> None:
 def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> None:
     timestamps = pd.date_range("2024-01-01", periods=6, freq="D")
     net_returns = {
-        "a": (0.10, -0.05, 0.05, -0.20, 0.01, 0.01),
+        "a": (-0.10, 0.02, 0.02, 0.02, 0.02, 0.02),
         "b": (0.02, -0.01, 0.03, -0.02, 0.04, -0.01),
     }
     return_rows: list[dict[str, object]] = []
@@ -135,13 +137,10 @@ def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> 
         for start in range(0, len(timestamps), 2)
     )
 
-    expected_cumulative = compute_cumulative_returns(returns)
+    expected_additive_cumulative = calculate_additive_cumulative_returns(returns)
     expected = {
-        "cumulative_returns": expected_cumulative,
-        "performance_summary": compute_performance_summary(
-            returns,
-            expected_cumulative,
-        ),
+        "additive_cumulative_returns": expected_additive_cumulative,
+        "performance_summary": summarize_performance(returns),
         "exposure_summary": compute_exposure_summary(positions, returns),
         "concentration": summarize_concentration(positions),
         "period_breakdown": summarize_period_breakdown(returns),
@@ -155,15 +154,39 @@ def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> 
             portfolio_returns=return_chunk,
         )
     summary_state.returns_complete = True
-    actual_cumulative = pd.concat(
-        list(portfolio_runner._iter_portfolio_cumulative_chunks(summary_state)),
+    actual_additive_cumulative = pd.concat(
+        list(portfolio_runner._iter_portfolio_additive_cumulative_chunks(summary_state)),
         ignore_index=True,
     )
     try:
         actual = {
-            "cumulative_returns": actual_cumulative,
+            "additive_cumulative_returns": actual_additive_cumulative,
             **portfolio_runner._portfolio_summary_outputs(summary_state),
         }
+        for column in (
+            "sharpe_like",
+            "sortino_like",
+            "calmar_like",
+            "skew",
+            "kurtosis",
+            "profit_factor",
+            "payoff_ratio",
+            "average_win",
+            "average_loss",
+        ):
+            assert actual["performance_summary"][column].dtype == "float64"
+        for column in (
+            "sharpe_like_reason",
+            "sortino_like_reason",
+            "calmar_like_reason",
+            "skew_reason",
+            "kurtosis_reason",
+            "profit_factor_reason",
+            "payoff_ratio_reason",
+            "average_win_reason",
+            "average_loss_reason",
+        ):
+            assert str(actual["performance_summary"][column].dtype) == "string"
 
         mismatches: list[str] = []
         for name, expected_frame in expected.items():
@@ -179,6 +202,130 @@ def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> 
             except AssertionError as exc:
                 mismatches.append(f"{name}: {exc}")
         assert not mismatches, "\n\n".join(mismatches)
+        a_cumulative = actual_additive_cumulative[
+            actual_additive_cumulative["signal"] == "a"
+        ].sort_values("timestamp")
+        assert a_cumulative["high_water_mark"].tolist() == pytest.approx(
+            [0.0] * len(timestamps)
+        )
+        assert a_cumulative["drawdown"].tolist() == pytest.approx(
+            [-0.10, -0.08, -0.06, -0.04, -0.02, 0.0]
+        )
+        a_summary = actual["performance_summary"].loc[
+            lambda frame: frame["signal"] == "a"
+        ].iloc[0]
+        assert a_summary["max_drawdown"] == pytest.approx(-0.10)
+        assert a_summary["drawdown_duration"] == len(timestamps)
+        assert a_summary["max_drawdown_start"] == ""
+        assert a_summary["max_drawdown_valley"] == timestamps[0].isoformat()
+        assert a_summary["max_drawdown_recovery"] == timestamps[-1].isoformat()
+    finally:
+        portfolio_runner._close_portfolio_summary_state(summary_state)
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        (0.01,),
+        (0.01, 0.02),
+        (-0.01, -0.02),
+        (0.01, 0.01),
+    ),
+)
+def test_portfolio_streaming_summary_matches_edge_semantics(
+    values: tuple[float, ...],
+) -> None:
+    returns = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=len(values)),
+            "signal": ["factor"] * len(values),
+            "return_source_column": ["label"] * len(values),
+            "portfolio_mode": ["long_short"] * len(values),
+            "long_return": values,
+            "short_return": [0.0] * len(values),
+            "gross_portfolio_return": values,
+            "turnover": [1.0] * len(values),
+            "cost": [0.0] * len(values),
+            "net_portfolio_return": values,
+            "long_count": [1] * len(values),
+            "short_count": [1] * len(values),
+        }
+    )
+    expected = summarize_performance(returns)
+    summary_state = portfolio_runner._PortfolioSummaryState()
+    try:
+        for row in returns.itertuples(index=False, name=None):
+            portfolio_runner._append_portfolio_return_summary(
+                summary_state,
+                pd.DataFrame([row], columns=returns.columns),
+            )
+        actual = portfolio_runner._portfolio_performance_summary(summary_state)
+        pd.testing.assert_frame_equal(
+            actual,
+            expected,
+            check_exact=False,
+            rtol=0.0,
+            atol=1e-12,
+        )
+    finally:
+        portfolio_runner._close_portfolio_summary_state(summary_state)
+
+
+def test_portfolio_streaming_stats_matches_full_across_fetch_boundary() -> None:
+    values = [0.10, 0.10, 0.0] + [0.0] * 4093 + [-0.30, -0.10]
+    returns = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=len(values)),
+            "signal": ["a"] * len(values),
+            "return_source_column": ["label"] * len(values),
+            "portfolio_mode": ["long_short"] * len(values),
+            "long_return": values,
+            "short_return": [0.0] * len(values),
+            "gross_portfolio_return": values,
+            "turnover": [1.0] * len(values),
+            "cost": [0.0] * len(values),
+            "net_portfolio_return": values,
+            "long_count": [1] * len(values),
+            "short_count": [1] * len(values),
+        }
+    )
+    returns = pd.concat(
+        [returns, returns.iloc[[0]].assign(signal="b")],
+        ignore_index=True,
+    )
+    expected = summarize_performance(returns)
+    summary_state = portfolio_runner._PortfolioSummaryState()
+    try:
+        portfolio_runner._append_portfolio_return_summary(summary_state, returns)
+        actual = portfolio_runner._portfolio_performance_summary(summary_state)
+        actual_additive = pd.concat(
+            list(
+                portfolio_runner._iter_portfolio_additive_cumulative_chunks(
+                    summary_state
+                )
+            ),
+            ignore_index=True,
+        )
+        pd.testing.assert_frame_equal(
+            actual,
+            expected,
+            check_exact=False,
+            rtol=0.0,
+            atol=1e-12,
+        )
+        for signal in ("a", "b"):
+            summary_row = actual.loc[actual["signal"] == signal].iloc[0]
+            additive_tail = actual_additive.loc[
+                actual_additive["signal"] == signal
+            ].iloc[-1]
+            assert (
+                summary_row["final_additive_cumulative_gross_return"]
+                == additive_tail["additive_cumulative_gross_return"]
+            )
+            assert (
+                summary_row["final_additive_cumulative_net_return"]
+                == additive_tail["additive_cumulative_net_return"]
+            )
     finally:
         portfolio_runner._close_portfolio_summary_state(summary_state)
 
@@ -216,6 +363,57 @@ def test_portfolio_summary_admits_before_frame_build_and_holds_lease(
         assert policy.used_memory_bytes > 0
         portfolio_runner._close_portfolio_summary_state(summary_state)
         assert policy.used_memory_bytes == 0
+
+
+def test_portfolio_summary_admits_stats_batch_before_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    returns = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-01")],
+            "signal": ["factor"],
+            "return_source_column": ["label"],
+            "portfolio_mode": ["long_short"],
+            "long_return": [0.01],
+            "short_return": [0.0],
+            "gross_portfolio_return": [0.01],
+            "turnover": [1.0],
+            "cost": [0.0],
+            "net_portfolio_return": [0.01],
+            "long_count": [1],
+            "short_count": [1],
+        }
+    )
+    summary_state = portfolio_runner._PortfolioSummaryState()
+    portfolio_runner._append_portfolio_return_summary(summary_state, returns)
+    bound = portfolio_runner._portfolio_summary_memory_bound(summary_state)
+    assert bound > 128 * 1024
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024 * 1024,
+        explicit_cap_bytes=128 * 1024,
+    )
+    summary_state.resource_policy = policy
+    built = False
+
+    def fail_if_built(_state) -> pd.DataFrame:  # noqa: ANN001
+        nonlocal built
+        built = True
+        return pd.DataFrame()
+
+    monkeypatch.setattr(
+        portfolio_runner,
+        "_portfolio_performance_summary",
+        fail_if_built,
+    )
+    try:
+        with runtime_resource_policy_scope(policy):
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                portfolio_runner._portfolio_summary_outputs(summary_state)
+        assert not built
+        assert policy.used_memory_bytes == 0
+    finally:
+        if summary_state.return_database is not None:
+            portfolio_runner._close_portfolio_summary_state(summary_state)
 
 
 def test_portfolio_summary_insufficient_headroom_fails_before_build_and_reopens(

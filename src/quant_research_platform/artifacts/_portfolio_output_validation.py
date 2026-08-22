@@ -28,13 +28,14 @@ from quant_research_platform.contracts.portfolios import (
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 PORTFOLIO_ARTIFACTS = {
     "positions": "positions.parquet",
     "turnover": "turnover.parquet",
     "cost_breakdown": "cost_breakdown.parquet",
     "portfolio_returns": "portfolio_returns.parquet",
-    "cumulative_returns": "cumulative_returns.parquet",
+    "additive_cumulative_returns": "additive_cumulative_returns.parquet",
     "performance_summary": "performance_summary.parquet",
     "exposure_summary": "exposure_summary.parquet",
     "concentration": "concentration.parquet",
@@ -114,23 +115,23 @@ _PORTFOLIO_RETURN_COLUMNS = (
     "long_count",
     "short_count",
 )
-_PORTFOLIO_CUMULATIVE_RETURN_COLUMNS = (
+_PORTFOLIO_ADDITIVE_CUMULATIVE_RETURN_COLUMNS = (
     "timestamp",
     "signal",
     "gross_portfolio_return",
     "net_portfolio_return",
     "cost",
-    "cumulative_gross_return",
-    "cumulative_net_return",
-    "cumulative_cost",
+    "additive_cumulative_gross_return",
+    "additive_cumulative_net_return",
+    "additive_cumulative_cost",
     "high_water_mark",
     "drawdown",
 )
 _PORTFOLIO_PERFORMANCE_SUMMARY_COLUMNS = (
     "signal",
     "periods",
-    "final_cumulative_gross_return",
-    "final_cumulative_net_return",
+    "final_additive_cumulative_gross_return",
+    "final_additive_cumulative_net_return",
     "mean_net_portfolio_return",
     "volatility_net_portfolio_return",
     "downside_volatility",
@@ -165,6 +166,18 @@ _PORTFOLIO_PERFORMANCE_SUMMARY_COLUMNS = (
     "mean_cost",
     "cost_to_gross_return",
     "cost_to_net_return",
+    "sharpe_like_reason",
+    "sortino_like_reason",
+    "calmar_like_reason",
+    "skew_reason",
+    "kurtosis_reason",
+    "tail_ratio_reason",
+    "profit_factor_reason",
+    "payoff_ratio_reason",
+    "average_win_reason",
+    "average_loss_reason",
+    "cost_to_gross_return_reason",
+    "cost_to_net_return_reason",
 )
 _PORTFOLIO_EXPOSURE_SUMMARY_COLUMNS = (
     "signal",
@@ -210,6 +223,15 @@ _PORTFOLIO_DIAGNOSTIC_COLUMNS = (
     "short_count",
     "fallback_reason",
 )
+_PORTFOLIO_RATIO_REASON_CODES = frozenset(
+    {"zero_denominator", "nonfinite_input", "nonfinite_result"}
+)
+_PORTFOLIO_MOMENT_REASON_CODES = frozenset(
+    {"insufficient_observations", "zero_variance", "nonfinite_result"}
+)
+_PORTFOLIO_WIN_LOSS_REASON_CODES = frozenset(
+    {"no_positive_returns", "no_negative_returns"}
+)
 
 
 def portfolio_required_columns() -> dict[str, tuple[str, ...]]:
@@ -218,7 +240,7 @@ def portfolio_required_columns() -> dict[str, tuple[str, ...]]:
         "turnover": _PORTFOLIO_TURNOVER_COLUMNS,
         "cost_breakdown": _PORTFOLIO_COST_BREAKDOWN_COLUMNS,
         "portfolio_returns": _PORTFOLIO_RETURN_COLUMNS,
-        "cumulative_returns": _PORTFOLIO_CUMULATIVE_RETURN_COLUMNS,
+        "additive_cumulative_returns": _PORTFOLIO_ADDITIVE_CUMULATIVE_RETURN_COLUMNS,
         "performance_summary": _PORTFOLIO_PERFORMANCE_SUMMARY_COLUMNS,
         "exposure_summary": _PORTFOLIO_EXPOSURE_SUMMARY_COLUMNS,
         "concentration": _PORTFOLIO_CONCENTRATION_COLUMNS,
@@ -429,6 +451,39 @@ def validate_portfolio_artifact_membership_columns(
     artifact_name: str,
     spec: PortfolioSpec,
 ) -> None:
+    reason_pairs = {
+        "sharpe_like": ("sharpe_like_reason", _PORTFOLIO_RATIO_REASON_CODES),
+        "sortino_like": ("sortino_like_reason", _PORTFOLIO_RATIO_REASON_CODES),
+        "calmar_like": ("calmar_like_reason", _PORTFOLIO_RATIO_REASON_CODES),
+        "tail_ratio": ("tail_ratio_reason", _PORTFOLIO_RATIO_REASON_CODES),
+        "cost_to_gross_return": (
+            "cost_to_gross_return_reason",
+            _PORTFOLIO_RATIO_REASON_CODES,
+        ),
+        "cost_to_net_return": (
+            "cost_to_net_return_reason",
+            _PORTFOLIO_RATIO_REASON_CODES,
+        ),
+        "skew": ("skew_reason", _PORTFOLIO_MOMENT_REASON_CODES),
+        "kurtosis": ("kurtosis_reason", _PORTFOLIO_MOMENT_REASON_CODES),
+        "profit_factor": (
+            "profit_factor_reason",
+            frozenset({"no_negative_returns"}),
+        ),
+        "payoff_ratio": (
+            "payoff_ratio_reason",
+            _PORTFOLIO_WIN_LOSS_REASON_CODES,
+        ),
+        "average_win": ("average_win_reason", frozenset({"no_positive_returns"})),
+        "average_loss": ("average_loss_reason", frozenset({"no_negative_returns"})),
+    }
+    for value_column, (reason_column, allowed) in reason_pairs.items():
+        if value_column in frame and reason_column in frame:
+            _validate_statistic_reason_pair(
+                frame[value_column],
+                frame[reason_column],
+                allowed=allowed,
+            )
     if "signal" not in frame.columns:
         return
     signal_ids = {signal.signal_id for signal in spec.signals}
@@ -445,3 +500,31 @@ def validate_portfolio_artifact_membership_columns(
             (spec.return_source_column,),
             "portfolio_return_source_column_mismatch",
         )
+
+
+def _validate_statistic_reason_pair(
+    values: pd.Series,
+    reasons: pd.Series,
+    *,
+    allowed: frozenset[str],
+) -> None:
+    if pd.api.types.is_bool_dtype(values) or (
+        not pd.api.types.is_numeric_dtype(values) and not values.isna().all()
+    ):
+        raise ValueError("invalid_portfolio_statistic_reason")
+    try:
+        strict_finite_numeric_series(
+            values,
+            error="invalid_portfolio_statistic_reason",
+            allow_null=True,
+        )
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_portfolio_statistic_reason") from exc
+    for value, reason in zip(values, reasons, strict=True):
+        value_is_null = bool(pd.isna(value))
+        reason_is_null = bool(pd.isna(reason))
+        if value_is_null:
+            if reason_is_null or type(reason) is not str or reason not in allowed:
+                raise ValueError("invalid_portfolio_statistic_reason")
+        elif not reason_is_null:
+            raise ValueError("invalid_portfolio_statistic_reason")

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.exposure import summarize_exposure
 from quant_research_platform.compute.dataframe.performance import (
-    calculate_cumulative_returns,
+    calculate_additive_cumulative_returns,
     summarize_performance,
 )
 from quant_research_platform.compute.dataframe.portfolio_returns import (
@@ -169,7 +170,7 @@ def test_validated_stream_applies_detailed_cost_components() -> None:
     assert returns["cost"].round(6).tolist() == [0.0036, 0.0072]
 
 
-def test_calculate_cumulative_returns_accumulates_by_signal() -> None:
+def test_calculate_additive_cumulative_returns_accumulates_by_signal() -> None:
     returns = pd.DataFrame(
         {
             "timestamp": [
@@ -185,28 +186,34 @@ def test_calculate_cumulative_returns_accumulates_by_signal() -> None:
         }
     )
 
-    cumulative_returns = calculate_cumulative_returns(returns)
+    additive_cumulative_returns = calculate_additive_cumulative_returns(returns)
 
-    ordered = cumulative_returns.sort_values(["signal", "timestamp"]).reset_index(
-        drop=True
-    )
-    assert ordered["cumulative_net_return"].round(6).tolist() == [
+    ordered = additive_cumulative_returns.sort_values(
+        ["signal", "timestamp"]
+    ).reset_index(drop=True)
+    assert ordered["additive_cumulative_net_return"].round(6).tolist() == [
         -0.01,
         0.03,
         0.02,
         0.05,
     ]
-    assert ordered["cumulative_gross_return"].round(6).tolist() == [
+    assert ordered["additive_cumulative_gross_return"].round(6).tolist() == [
         -0.01,
         0.03,
         0.02,
         0.05,
     ]
-    assert ordered["cumulative_cost"].round(6).tolist() == [0.0, 0.001, 0.002, 0.003]
-    assert ordered["drawdown"].round(6).tolist() == [0.0, 0.0, 0.0, 0.0]
+    assert ordered["additive_cumulative_cost"].round(6).tolist() == [
+        0.0,
+        0.001,
+        0.002,
+        0.003,
+    ]
+    assert ordered["high_water_mark"].round(6).tolist() == [0.0, 0.03, 0.02, 0.05]
+    assert ordered["drawdown"].round(6).tolist() == [-0.01, 0.0, 0.0, 0.0]
 
 
-def test_calculate_cumulative_returns_rejects_invalid_numeric_input() -> None:
+def test_calculate_additive_cumulative_returns_rejects_invalid_numeric_input() -> None:
     returns = pd.DataFrame(
         {
             "timestamp": ["2026-01-01"],
@@ -216,9 +223,69 @@ def test_calculate_cumulative_returns_rejects_invalid_numeric_input() -> None:
     )
 
     with pytest.raises(ValueError, match="net_portfolio_return"):
-        calculate_cumulative_returns(returns)
+        calculate_additive_cumulative_returns(returns)
     with pytest.raises(ValueError, match="net_portfolio_return.*numeric"):
-        calculate_cumulative_returns(returns.assign(net_portfolio_return=["0.1"]))
+        calculate_additive_cumulative_returns(returns.assign(net_portfolio_return=["0.1"]))
+
+
+def test_performance_final_additive_returns_match_ordered_cumulative_tail_exactly(
+) -> None:
+    rng = np.random.default_rng(20260823)
+    values = rng.normal(0.0, 0.01, 100_000)
+    returns = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(
+                "2024-01-01", periods=len(values), freq="min"
+            ),
+            "signal": ["factor"] * len(values),
+            "gross_portfolio_return": values,
+            "turnover": np.ones(len(values)),
+            "cost": np.zeros(len(values)),
+            "net_portfolio_return": values,
+        }
+    )
+
+    additive = calculate_additive_cumulative_returns(returns)
+    summary = summarize_performance(returns).iloc[0]
+    additive_tail = additive.iloc[-1]
+
+    assert (
+        summary["final_additive_cumulative_gross_return"]
+        == additive_tail["additive_cumulative_gross_return"]
+    )
+    assert (
+        summary["final_additive_cumulative_net_return"]
+        == additive_tail["additive_cumulative_net_return"]
+    )
+
+
+def test_summarize_performance_empty_frame_keeps_stable_typed_schema() -> None:
+    empty_returns = pd.DataFrame(
+        {
+            "timestamp": pd.Series([], dtype="datetime64[ns]"),
+            "signal": pd.Series([], dtype="string"),
+            "gross_portfolio_return": pd.Series([], dtype="float64"),
+            "turnover": pd.Series([], dtype="float64"),
+            "cost": pd.Series([], dtype="float64"),
+            "net_portfolio_return": pd.Series([], dtype="float64"),
+        }
+    )
+    nonempty_returns = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-01")],
+            "signal": ["factor"],
+            "gross_portfolio_return": [0.01],
+            "turnover": [1.0],
+            "cost": [0.0],
+            "net_portfolio_return": [0.01],
+        }
+    )
+
+    empty_summary = summarize_performance(empty_returns)
+    nonempty_summary = summarize_performance(nonempty_returns)
+
+    assert list(empty_summary.columns) == list(nonempty_summary.columns)
+    assert empty_summary.dtypes.tolist() == nonempty_summary.dtypes.tolist()
 
 
 def test_returns_reject_segment_collision_with_formal_return_column() -> None:
@@ -232,7 +299,7 @@ def test_returns_reject_segment_collision_with_formal_return_column() -> None:
     )
 
     with pytest.raises(ValueError, match="gross_portfolio_return"):
-        calculate_cumulative_returns(
+        calculate_additive_cumulative_returns(
             returns,
             segment_columns=("gross_portfolio_return",),
         )
@@ -249,13 +316,11 @@ def test_summarize_performance_reports_common_portfolio_diagnostics() -> None:
             "net_portfolio_return": [0.029, -0.022, 0.0385],
         }
     )
-    cumulative_returns = calculate_cumulative_returns(returns)
-
-    summary = summarize_performance(returns, cumulative_returns)
+    summary = summarize_performance(returns)
 
     row = summary.iloc[0]
     assert row["periods"] == 3
-    assert row["final_cumulative_net_return"] == pytest.approx(0.0455)
+    assert row["final_additive_cumulative_net_return"] == pytest.approx(0.0455)
     assert row["win_rate"] == pytest.approx(2 / 3)
     assert row["loss_rate"] == pytest.approx(1 / 3)
     assert row["sortino_like"] != 0
@@ -277,6 +342,80 @@ def test_summarize_performance_reports_common_portfolio_diagnostics() -> None:
     assert row["total_cost"] == pytest.approx(0.0045)
     assert row["mean_cost"] == pytest.approx(0.0015)
     assert row["cost_to_gross_return"] == pytest.approx(0.0045 / 0.05)
+
+
+@pytest.mark.parametrize(
+    ("values", "payoff_reason", "profit_factor", "profit_factor_reason"),
+    [
+        ([0.01, 0.01], "no_negative_returns", None, "no_negative_returns"),
+        ([-0.01, -0.02], "no_positive_returns", 0.0, None),
+    ],
+)
+def test_summarize_performance_keeps_win_loss_undefined_reasons_truthful(
+    values: list[float],
+    payoff_reason: str,
+    profit_factor: float | None,
+    profit_factor_reason: str | None,
+) -> None:
+    returns = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=len(values)),
+            "signal": ["factor"] * len(values),
+            "gross_portfolio_return": values,
+            "turnover": [1.0] * len(values),
+            "cost": [0.0] * len(values),
+            "net_portfolio_return": values,
+        }
+    )
+
+    summary = summarize_performance(returns)
+    row = summary.iloc[0]
+
+    assert pd.isna(row["payoff_ratio"])
+    assert row["payoff_ratio_reason"] == payoff_reason
+    if profit_factor is None:
+        assert pd.isna(row["profit_factor"])
+    else:
+        assert row["profit_factor"] == pytest.approx(profit_factor)
+    if profit_factor_reason is None:
+        assert pd.isna(row["profit_factor_reason"])
+    else:
+        assert row["profit_factor_reason"] == profit_factor_reason
+    assert pd.isna(row["skew"])
+    assert row["skew_reason"] == "insufficient_observations"
+    assert pd.isna(row["kurtosis"])
+    assert row["kurtosis_reason"] == "insufficient_observations"
+    if all(value > 0 for value in values):
+        assert pd.isna(row["sharpe_like"])
+        assert row["sharpe_like_reason"] == "zero_denominator"
+        assert pd.isna(row["sortino_like"])
+        assert row["sortino_like_reason"] == "zero_denominator"
+        assert pd.isna(row["calmar_like"])
+        assert row["calmar_like_reason"] == "zero_denominator"
+    for column in (
+        "sharpe_like",
+        "sortino_like",
+        "calmar_like",
+        "skew",
+        "kurtosis",
+        "profit_factor",
+        "payoff_ratio",
+        "average_win",
+        "average_loss",
+    ):
+        assert summary[column].dtype == "float64"
+    for column in (
+        "sharpe_like_reason",
+        "sortino_like_reason",
+        "calmar_like_reason",
+        "skew_reason",
+        "kurtosis_reason",
+        "profit_factor_reason",
+        "payoff_ratio_reason",
+        "average_win_reason",
+        "average_loss_reason",
+    ):
+        assert str(summary[column].dtype) == "string"
 
 
 def test_summarize_exposure_reports_position_diagnostics() -> None:

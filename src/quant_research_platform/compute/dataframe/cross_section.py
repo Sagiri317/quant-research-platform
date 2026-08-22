@@ -18,7 +18,28 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 
-IC_RESULT_COLUMNS = ["timestamp", "signal", "label", "ic", "rankic", "n_obs"]
+IC_RESULT_COLUMNS = [
+    "timestamp",
+    "signal",
+    "label",
+    "ic",
+    "rankic",
+    "n_obs",
+    "ic_reason",
+    "rankic_reason",
+]
+CORRELATION_RAW_REASON_CODES = frozenset(
+    {"insufficient_observations", "zero_variance", "nonfinite_result"}
+)
+CORRELATION_SUMMARY_REASON_CODES = frozenset(
+    {
+        "no_valid_observations",
+        "insufficient_observations",
+        "zero_variance",
+        "nonfinite_result",
+    }
+)
+GROUP_SPREAD_REASON_CODES = frozenset({"no_group_transitions"})
 IC_SUMMARY_COLUMNS = [
     "signal",
     "label",
@@ -32,6 +53,10 @@ IC_SUMMARY_COLUMNS = [
     "rankicir",
     "positive_rankic_rate",
     "valid_rankic_count",
+    "ic_reason",
+    "icir_reason",
+    "rankic_reason",
+    "rankicir_reason",
 ]
 GROUPED_LABEL_VALUE_COLUMNS = [
     "timestamp",
@@ -49,6 +74,7 @@ GROUP_SPREAD_SUMMARY_COLUMNS = [
     "top_bottom_label_value_spread_mean",
     "top_bottom_label_value_spread_hit_rate",
     "group_monotonicity_score",
+    "group_monotonicity_score_reason",
 ]
 
 
@@ -99,9 +125,14 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
             n_obs = len(signal_valid)
             ic = np.nan
             rankic = np.nan
+            ic_reason = "insufficient_observations"
+            rankic_reason = "insufficient_observations"
             if n_obs >= 2:
-                ic = _pearson_correlation_values(signal_valid, label_valid)
-                rankic = _pearson_correlation_values(
+                ic, ic_reason = _pearson_correlation_result(
+                    signal_valid,
+                    label_valid,
+                )
+                rankic, rankic_reason = _pearson_correlation_result(
                     _average_ranks(signal_valid),
                     _average_ranks(label_valid),
                 )
@@ -126,13 +157,30 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
                     "ic": ic,
                     "rankic": rankic,
                     "n_obs": n_obs,
+                    "ic_reason": ic_reason,
+                    "rankic_reason": rankic_reason,
                 }
             )
 
-    return (
-        pd.DataFrame.from_records(ic_records, columns=IC_RESULT_COLUMNS),
-        pd.DataFrame.from_records(grouped_records, columns=GROUPED_LABEL_VALUE_COLUMNS),
+    metrics = pd.DataFrame.from_records(ic_records, columns=IC_RESULT_COLUMNS)
+    metrics["timestamp"] = metrics["timestamp"].astype("datetime64[ns]")
+    for column in ("signal", "label", "ic_reason", "rankic_reason"):
+        metrics[column] = metrics[column].astype("string")
+    for column in ("ic", "rankic"):
+        metrics[column] = metrics[column].astype("float64")
+    metrics["n_obs"] = metrics["n_obs"].astype("int64")
+
+    grouped = pd.DataFrame.from_records(
+        grouped_records,
+        columns=GROUPED_LABEL_VALUE_COLUMNS,
     )
+    grouped["timestamp"] = grouped["timestamp"].astype("datetime64[ns]")
+    for column in ("signal", "label"):
+        grouped[column] = grouped[column].astype("string")
+    grouped["group"] = grouped["group"].astype("int64")
+    grouped["mean_label_value"] = grouped["mean_label_value"].astype("float64")
+    grouped["n_obs"] = grouped["n_obs"].astype("int64")
+    return metrics, grouped
 
 
 def summarize_ic(
@@ -179,6 +227,20 @@ def summarize_ic(
             error=f"ic column {column!r} must contain finite numeric values.",
             allow_null=True,
         ).astype("float64")
+        if bool(ic[column].dropna().abs().gt(1.0).any()):
+            raise ValueError(f"ic column {column!r} must be in [-1, 1].")
+    _validate_reason_pair(
+        ic["ic"],
+        ic["ic_reason"],
+        allowed=CORRELATION_RAW_REASON_CODES,
+        error="ic reason does not match value.",
+    )
+    _validate_reason_pair(
+        ic["rankic"],
+        ic["rankic_reason"],
+        allowed=CORRELATION_RAW_REASON_CODES,
+        error="rankic reason does not match value.",
+    )
     if not pd.api.types.is_numeric_dtype(ic["n_obs"]):
         raise ValueError("ic n_obs must contain numeric values.")
     ic["n_obs"] = strict_integer_series(
@@ -213,6 +275,10 @@ def summarize_ic(
                 "rankicir": rankic_stats["ratio"],
                 "positive_rankic_rate": rankic_stats["positive_rate"],
                 "valid_rankic_count": rankic_stats["valid_count"],
+                "ic_reason": ic_stats["reason"],
+                "icir_reason": ic_stats["ratio_reason"],
+                "rankic_reason": rankic_stats["reason"],
+                "rankicir_reason": rankic_stats["ratio_reason"],
             }
         )
     return pd.DataFrame.from_records(records, columns=output_columns)
@@ -319,7 +385,9 @@ def summarize_group_spread(
     )
     if timestamp_frame.empty:
         return pd.DataFrame(columns=output_columns)
-    timestamp_frame["monotonicity"] = timestamp_frame["monotonicity"].fillna(0.0)
+    timestamp_frame["monotonicity_reason"] = timestamp_frame[
+        "monotonicity"
+    ].isna().map({True: "no_group_transitions", False: None})
     timestamp_frame["spread"] = (
         timestamp_frame["top_label_value"] - timestamp_frame["bottom_label_value"]
     )
@@ -340,25 +408,34 @@ def summarize_group_spread(
                 lambda values: (values > 0).mean(),
             ),
             group_monotonicity_score=("monotonicity", "mean"),
+            group_monotonicity_score_reason=(
+                "monotonicity_reason",
+                _first_reason,
+            ),
         )
         .reset_index()
     )
     return summary[output_columns]
 
 
-def _pearson_correlation_values(
+def _pearson_correlation_result(
     left_values: np.ndarray,
     right_values: np.ndarray,
-) -> float:
+) -> tuple[float | None, str | None]:
     left_centered = left_values - left_values.mean()
     right_centered = right_values - right_values.mean()
     denominator = np.sqrt(
         float(np.dot(left_centered, left_centered))
         * float(np.dot(right_centered, right_centered))
     )
-    if denominator == 0 or not np.isfinite(denominator):
-        return np.nan
-    return float(np.dot(left_centered, right_centered) / denominator)
+    if denominator == 0:
+        return None, "zero_variance"
+    if not np.isfinite(denominator):
+        return None, "nonfinite_result"
+    value = float(np.dot(left_centered, right_centered) / denominator)
+    if not np.isfinite(value):
+        return None, "nonfinite_result"
+    return value, None
 
 
 def _assign_groups_array(values: np.ndarray, n_groups: int) -> np.ndarray:
@@ -384,22 +461,108 @@ def _safe_ratio(numerator: float, denominator: float, *, valid_count: int) -> fl
     return float(numerator / denominator)
 
 
-def _summarize_correlation_values(values: pd.Series) -> dict[str, float | int]:
-    valid_count = int(len(values))
-    if valid_count == 0:
+def _summarize_correlation_values(
+    values: pd.Series,
+) -> dict[str, float | int | str | None]:
+    count = 0
+    mean = 0.0
+    m2 = 0.0
+    positive_count = 0
+    for value in values:
+        numeric = float(value)
+        count += 1
+        delta = numeric - mean
+        mean += delta / count
+        m2 += delta * (numeric - mean)
+        positive_count += int(numeric > 0)
+    return _summarize_correlation_aggregates(
+        count=count,
+        mean=mean,
+        m2=m2,
+        positive_count=positive_count,
+    )
+
+
+def _summarize_correlation_aggregates(
+    *,
+    count: int,
+    mean: float,
+    m2: float,
+    positive_count: int,
+) -> dict[str, float | int | str | None]:
+    if count == 0:
         return {
             "mean": np.nan,
             "std": np.nan,
             "ratio": np.nan,
             "positive_rate": np.nan,
             "valid_count": 0,
+            "reason": "no_valid_observations",
+            "ratio_reason": "no_valid_observations",
         }
-    mean = float(values.mean())
-    std = float(values.std(ddof=0))
+    if not np.isfinite(mean) or not np.isfinite(m2):
+        std = np.nan
+    else:
+        variance = m2 / count
+        std = (
+            float(np.sqrt(max(0.0, variance)))
+            if np.isfinite(variance)
+            else np.nan
+        )
+    ratio = _safe_ratio(mean, std, valid_count=count)
     return {
         "mean": mean,
         "std": std,
-        "ratio": _safe_ratio(mean, std, valid_count=valid_count),
-        "positive_rate": float((values > 0).mean()),
-        "valid_count": valid_count,
+        "ratio": ratio,
+        "positive_rate": positive_count / count,
+        "valid_count": count,
+        "reason": None,
+        "ratio_reason": _correlation_ratio_reason(
+            count=count,
+            mean=mean,
+            std=std,
+            ratio=ratio,
+        ),
     }
+
+
+def _correlation_ratio_reason(
+    *,
+    count: int,
+    mean: float,
+    std: float,
+    ratio: float,
+) -> str | None:
+    if np.isfinite(ratio):
+        return None
+    if count < 2:
+        return "insufficient_observations"
+    if not np.isfinite(mean) or not np.isfinite(std):
+        return "nonfinite_result"
+    if np.isclose(std, 0.0):
+        return "zero_variance"
+    return "nonfinite_result"
+
+
+def _first_reason(values: pd.Series) -> str | None:
+    reasons = [value for value in values if type(value) is str and value]
+    if len(reasons) == len(values) and len(set(reasons)) == 1:
+        return reasons[0]
+    return None
+
+
+def _validate_reason_pair(
+    values: pd.Series,
+    reasons: pd.Series,
+    *,
+    allowed: frozenset[str],
+    error: str,
+) -> None:
+    for value, reason in zip(values, reasons, strict=True):
+        value_is_null = bool(pd.isna(value))
+        reason_is_null = bool(pd.isna(reason))
+        if value_is_null:
+            if reason_is_null or type(reason) is not str or reason not in allowed:
+                raise ValueError(error)
+        elif not reason_is_null:
+            raise ValueError(error)

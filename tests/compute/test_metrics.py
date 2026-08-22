@@ -147,6 +147,8 @@ def test_summarize_ic_reports_icir_and_positive_rates() -> None:
             "ic": [0.2, -0.1, 0.4],
             "rankic": [0.3, 0.1, -0.2],
             "n_obs": [10, 10, 10],
+            "ic_reason": [None, None, None],
+            "rankic_reason": [None, None, None],
         }
     )
 
@@ -172,6 +174,8 @@ def test_summarize_ic_uses_nan_when_no_valid_ic_or_rankic() -> None:
             "ic": [np.nan, np.nan],
             "rankic": [np.nan, np.nan],
             "n_obs": [1, 1],
+            "ic_reason": ["insufficient_observations"] * 2,
+            "rankic_reason": ["insufficient_observations"] * 2,
         }
     )
 
@@ -199,6 +203,8 @@ def test_summarize_ic_uses_nan_icir_when_valid_count_or_std_is_insufficient() ->
             "ic": [0.4],
             "rankic": [-0.3],
             "n_obs": [10],
+            "ic_reason": [None],
+            "rankic_reason": [None],
         }
     )
     constant_valid = pd.DataFrame(
@@ -209,6 +215,8 @@ def test_summarize_ic_uses_nan_icir_when_valid_count_or_std_is_insufficient() ->
             "ic": [0.4, 0.4],
             "rankic": [-0.3, -0.3],
             "n_obs": [10, 10],
+            "ic_reason": [None, None],
+            "rankic_reason": [None, None],
         }
     )
 

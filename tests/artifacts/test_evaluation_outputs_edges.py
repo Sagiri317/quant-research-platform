@@ -236,7 +236,13 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
             layout=layout,
         )
 
-    skipped_metrics = make_artifact_evaluation_metrics_frame().assign(n_obs=[1])
+    skipped_metrics = make_artifact_evaluation_metrics_frame().assign(
+        n_obs=[1],
+        ic=[None],
+        rankic=[None],
+        ic_reason=["insufficient_observations"],
+        rankic_reason=["insufficient_observations"],
+    )
     bad_skipped = replace(
         make_output_edge_evaluation_diagnostics(),
         skipped_timestamp_count=0,
@@ -404,6 +410,87 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
             spec=spec,
             output_spec=report_spec,
             layout=layout,
+        )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    (
+        ("bad_string", "invalid_evaluation_numeric_values"),
+        ("infinite", "invalid_evaluation_numeric_values"),
+        ("out_of_range", "invalid_evaluation_correlation_values"),
+        ("missing_reason", "invalid_evaluation_statistic_reason"),
+        ("reason_with_value", "invalid_evaluation_statistic_reason"),
+        ("unknown_reason", "invalid_evaluation_statistic_reason"),
+        ("insufficient_reason_with_value", "invalid_evaluation_statistic_reason"),
+        (
+            "insufficient_reason_with_enough_observations",
+            "invalid_evaluation_statistic_reason",
+        ),
+        ("summary_mean_out_of_range", "invalid_evaluation_correlation_values"),
+        ("valid_ic_count_negative", "invalid_evaluation_summary_values"),
+        ("std_negative", "invalid_evaluation_summary_values"),
+        ("positive_rate_out_of_range", "invalid_evaluation_summary_values"),
+        ("spread_hit_rate_out_of_range", "invalid_evaluation_summary_values"),
+        ("monotonicity_out_of_range", "invalid_evaluation_summary_values"),
+    ),
+)
+def test_evaluation_artifact_numeric_and_reason_tampering(
+    mutation: str,
+    expected_error: str,
+) -> None:
+    metrics = make_artifact_evaluation_metrics_frame().copy()
+    ic_summary = make_artifact_evaluation_ic_summary_frame().copy()
+    group_spread_summary = make_artifact_evaluation_group_spread_summary_frame().copy()
+    if mutation == "bad_string":
+        metrics["ic"] = metrics["ic"].astype(object)
+        metrics.loc[0, "ic"] = "0.1"
+    elif mutation == "infinite":
+        metrics.loc[0, "ic"] = float("inf")
+    elif mutation == "out_of_range":
+        metrics.loc[0, "ic"] = 1.1
+    elif mutation == "missing_reason":
+        metrics.loc[0, "ic"] = float("nan")
+        metrics.loc[0, "ic_reason"] = None
+    elif mutation == "reason_with_value":
+        metrics.loc[0, "ic_reason"] = "zero_variance"
+    elif mutation == "unknown_reason":
+        metrics.loc[0, "ic"] = float("nan")
+        metrics.loc[0, "ic_reason"] = "made_up_reason"
+    elif mutation == "insufficient_reason_with_value":
+        metrics.loc[0, "n_obs"] = 1
+    elif mutation == "insufficient_reason_with_enough_observations":
+        metrics.loc[0, "ic"] = float("nan")
+        metrics.loc[0, "ic_reason"] = "insufficient_observations"
+    elif mutation == "summary_mean_out_of_range":
+        ic_summary.loc[0, "mean_ic"] = 1.1
+    elif mutation == "valid_ic_count_negative":
+        ic_summary.loc[0, "valid_ic_count"] = -1
+    elif mutation == "std_negative":
+        ic_summary.loc[0, "std_ic"] = -1.0
+    elif mutation == "positive_rate_out_of_range":
+        ic_summary.loc[0, "positive_ic_rate"] = 1.1
+    elif mutation == "spread_hit_rate_out_of_range":
+        group_spread_summary.loc[0, "top_bottom_label_value_spread_hit_rate"] = 1.1
+    elif mutation == "monotonicity_out_of_range":
+        group_spread_summary.loc[0, "group_monotonicity_score"] = -1.1
+    else:
+        raise AssertionError(f"unknown mutation: {mutation}")
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    with pytest.raises(ValueError, match=expected_error):
+        evaluation_output_validation.validate_evaluation_artifact_structure(
+            metrics=metrics,
+            grouped_label_values=make_artifact_evaluation_grouped_label_values_frame(),
+            ic_summary=ic_summary,
+            group_spread_summary=group_spread_summary,
+            spec=spec,
+            n_groups=2,
         )
 
 

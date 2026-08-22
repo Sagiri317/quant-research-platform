@@ -372,7 +372,7 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
         "positions.parquet",
         "turnover.parquet",
         "portfolio_returns.parquet",
-        "cumulative_returns.parquet",
+        "additive_cumulative_returns.parquet",
         "performance_summary.parquet",
         "exposure_summary.parquet",
         "concentration.parquet",

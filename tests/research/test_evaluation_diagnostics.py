@@ -44,6 +44,8 @@ def test_summarize_signal_label_coverage_counts_minimum_observation_skips() -> N
             "ic": [0.1, float("nan"), 0.2],
             "rankic": [0.2, float("nan"), 0.3],
             "n_obs": [3, 1, 2],
+            "ic_reason": [None, "insufficient_observations", None],
+            "rankic_reason": [None, "insufficient_observations", None],
         }
     )
 
@@ -92,6 +94,8 @@ def test_summarize_period_ic_makes_all_nan_behavior_explicit() -> None:
             "ic": [float("nan"), float("nan")],
             "rankic": [float("nan"), float("nan")],
             "n_obs": [1, 1],
+            "ic_reason": ["insufficient_observations"] * 2,
+            "rankic_reason": ["insufficient_observations"] * 2,
         }
     )
 
@@ -161,6 +165,8 @@ def test_evaluation_chunk_producer_does_not_terminal_concat(
         "ic",
         "rankic",
         "n_obs",
+        "ic_reason",
+        "rankic_reason",
     ]
     assert list(grouped.columns) == [
         "timestamp",
@@ -176,7 +182,7 @@ def test_evaluation_chunk_producer_does_not_terminal_concat(
 def test_streaming_ic_summary_matches_stable_canonical_values(
     epsilon: float,
 ) -> None:
-    values = (1.0 - epsilon, 1.0, 1.0 + epsilon)
+    values = (1.0 - epsilon, 1.0, 1.0 - 2 * epsilon)
     metrics = pd.DataFrame(
         {
             "timestamp": pd.date_range("2024-01-02", periods=3),
@@ -185,6 +191,8 @@ def test_streaming_ic_summary_matches_stable_canonical_values(
             "ic": values,
             "rankic": values,
             "n_obs": [2, 2, 2],
+            "ic_reason": [None, None, None],
+            "rankic_reason": [None, None, None],
         }
     )
     spec = EvaluationSpec(
@@ -459,6 +467,8 @@ def _build_diagnostics(
                 "ic": [0.1],
                 "rankic": [0.2],
                 "n_obs": [2],
+                "ic_reason": [None],
+                "rankic_reason": [None],
             }
         ),
         grouped_label_values=pd.DataFrame(),

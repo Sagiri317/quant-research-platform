@@ -92,16 +92,16 @@ def make_output_edge_portfolio_artifacts() -> dict[str, pd.DataFrame]:
                 "short_count": [1],
             }
         ),
-        "cumulative_returns": pd.DataFrame(
+        "additive_cumulative_returns": pd.DataFrame(
             {
                 "timestamp": [timestamp],
                 "signal": ["signal"],
                 "gross_portfolio_return": [0.03],
                 "net_portfolio_return": [0.03],
                 "cost": [0.0],
-                "cumulative_gross_return": [0.03],
-                "cumulative_net_return": [0.03],
-                "cumulative_cost": [0.0],
+                "additive_cumulative_gross_return": [0.03],
+                "additive_cumulative_net_return": [0.03],
+                "additive_cumulative_cost": [0.0],
                 "high_water_mark": [0.03],
                 "drawdown": [0.0],
             }
@@ -110,29 +110,29 @@ def make_output_edge_portfolio_artifacts() -> dict[str, pd.DataFrame]:
             {
                 "signal": ["signal"],
                 "periods": [1],
-                "final_cumulative_gross_return": [0.03],
-                "final_cumulative_net_return": [0.03],
+                "final_additive_cumulative_gross_return": [0.03],
+                "final_additive_cumulative_net_return": [0.03],
                 "mean_net_portfolio_return": [0.03],
                 "volatility_net_portfolio_return": [0.0],
                 "downside_volatility": [0.0],
-                "sharpe_like": [0.0],
-                "sortino_like": [0.0],
-                "calmar_like": [0.0],
+                "sharpe_like": [None],
+                "sortino_like": [None],
+                "calmar_like": [None],
                 "best_period_return": [0.03],
                 "worst_period_return": [0.03],
-                "skew": [0.0],
-                "kurtosis": [0.0],
+                "skew": [None],
+                "kurtosis": [None],
                 "var_95": [0.03],
                 "cvar_95": [0.03],
-                "tail_ratio": [0.0],
+                "tail_ratio": [1.0],
                 "positive_return_rate": [1.0],
                 "negative_return_rate": [0.0],
                 "win_rate": [1.0],
                 "loss_rate": [0.0],
-                "profit_factor": [0.0],
-                "payoff_ratio": [0.0],
+                "profit_factor": [None],
+                "payoff_ratio": [None],
                 "average_win": [0.03],
-                "average_loss": [0.0],
+                "average_loss": [None],
                 "max_consecutive_wins": [1],
                 "max_consecutive_losses": [0],
                 "max_drawdown": [0.0],
@@ -146,6 +146,18 @@ def make_output_edge_portfolio_artifacts() -> dict[str, pd.DataFrame]:
                 "mean_cost": [0.0],
                 "cost_to_gross_return": [0.0],
                 "cost_to_net_return": [0.0],
+                "sharpe_like_reason": ["zero_denominator"],
+                "sortino_like_reason": ["zero_denominator"],
+                "calmar_like_reason": ["zero_denominator"],
+                "skew_reason": ["insufficient_observations"],
+                "kurtosis_reason": ["insufficient_observations"],
+                "tail_ratio_reason": [None],
+                "profit_factor_reason": ["no_negative_returns"],
+                "payoff_ratio_reason": ["no_negative_returns"],
+                "average_win_reason": [None],
+                "average_loss_reason": ["no_negative_returns"],
+                "cost_to_gross_return_reason": [None],
+                "cost_to_net_return_reason": [None],
             }
         ),
         "exposure_summary": pd.DataFrame(
@@ -249,17 +261,17 @@ def write_output_edge_portfolio_chunks(
     row_artifacts = tuple(
         name
         for name in output_edge_portfolio_row_artifact_names()
-        if name != "cumulative_returns"
+        if name != "additive_cumulative_returns"
     )
     return portfolio_outputs._write_portfolio_output_chunks(
         ({artifact_name: artifacts[artifact_name] for artifact_name in row_artifacts},),
         summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]
             for artifact_name in artifacts
-            if artifact_name not in (*row_artifacts, "cumulative_returns")
+            if artifact_name not in (*row_artifacts, "additive_cumulative_returns")
         },
-        cumulative_returns_factory=lambda: iter(
-            (artifacts["cumulative_returns"],)
+        additive_cumulative_returns_factory=lambda: iter(
+            (artifacts["additive_cumulative_returns"],)
         ),
         spec=spec,
         output_spec=output_spec,
@@ -273,7 +285,7 @@ def output_edge_portfolio_row_artifact_names() -> tuple[str, ...]:
         "turnover",
         "cost_breakdown",
         "portfolio_returns",
-        "cumulative_returns",
+        "additive_cumulative_returns",
         "diagnostics",
         "capacity_diagnostics",
         "numeric_exposure_diagnostics",

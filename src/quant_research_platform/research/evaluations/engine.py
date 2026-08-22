@@ -14,6 +14,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import (
     GROUP_SPREAD_SUMMARY_COLUMNS,
     IC_SUMMARY_COLUMNS,
+    _summarize_correlation_aggregates,
     compute_ic_and_grouped_label_values,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
@@ -124,7 +125,16 @@ class _EvaluationStreamingState:
         if not metrics.empty:
             self._metric_rows += len(metrics)
             for row in metrics.itertuples(index=False, name=None):
-                _timestamp, signal, label, ic, rankic, count = row
+                (
+                    _timestamp,
+                    signal,
+                    label,
+                    ic,
+                    rankic,
+                    count,
+                    _ic_reason,
+                    _rankic_reason,
+                ) = row
                 count = int(count)
                 self._rows_after_signal_label_dropna += count
                 key = (str(signal), str(label))
@@ -173,7 +183,7 @@ class _EvaluationStreamingState:
                 top = math.nan if last_value is None else last_value
                 spread_value = top - bottom
                 monotonicity = (
-                    0.0
+                    None
                     if monotonicity_count == 0
                     else monotonicity_sum / monotonicity_count
                 )
@@ -239,6 +249,10 @@ class _EvaluationStreamingState:
                     "rankicir": rankic["ratio"],
                     "positive_rankic_rate": rankic["positive_rate"],
                     "valid_rankic_count": rankic["count"],
+                    "ic_reason": ic["reason"],
+                    "icir_reason": ic["ratio_reason"],
+                    "rankic_reason": rankic["reason"],
+                    "rankicir_reason": rankic["ratio_reason"],
                 }
             )
         return pd.DataFrame.from_records(records, columns=IC_SUMMARY_COLUMNS)
@@ -247,6 +261,7 @@ class _EvaluationStreamingState:
         records: list[dict[str, object]] = []
         for (signal, label), stats in sorted(self._spread.items()):
             count = int(stats["count"])
+            monotonicity_count = int(stats["monotonicity_count"])
             records.append(
                 {
                     "signal": signal,
@@ -264,10 +279,17 @@ class _EvaluationStreamingState:
                         stats["hit_sum"]
                     )
                     / count,
-                    "group_monotonicity_score": float(
-                        stats["monotonicity_sum"]
-                    )
-                    / count,
+                    "group_monotonicity_score": (
+                        None
+                        if monotonicity_count == 0
+                        else float(stats["monotonicity_sum"])
+                        / monotonicity_count
+                    ),
+                    "group_monotonicity_score_reason": (
+                        "no_group_transitions"
+                        if monotonicity_count == 0
+                        else None
+                    ),
                 }
             )
         return pd.DataFrame.from_records(
@@ -347,36 +369,16 @@ def _add_correlation(
 def _correlation_summary(
     stats: Mapping[str, float | int],
     prefix: str,
-) -> dict[str, float | int]:
+) -> dict[str, float | int | str | None]:
     count = int(stats[f"{prefix}_count"])
-    if count == 0:
-        return {
-            "mean": math.nan,
-            "std": math.nan,
-            "ratio": math.nan,
-            "positive_rate": math.nan,
-            "count": 0,
-        }
-    mean = float(stats[f"{prefix}_mean"])
-    variance = max(0.0, float(stats[f"{prefix}_m2"]) / count)
-    std = math.sqrt(variance)
-    ratio = (
-        math.nan
-        if (
-            count < 2
-            or not np.isfinite(mean)
-            or not np.isfinite(std)
-            or np.isclose(std, 0.0)
-        )
-        else mean / std
+    result = _summarize_correlation_aggregates(
+        count=count,
+        mean=float(stats[f"{prefix}_mean"]),
+        m2=float(stats[f"{prefix}_m2"]),
+        positive_count=int(stats[f"{prefix}_positive"]),
     )
-    return {
-        "mean": mean,
-        "std": std,
-        "ratio": ratio,
-        "positive_rate": int(stats[f"{prefix}_positive"]) / count,
-        "count": count,
-    }
+    result["count"] = result["valid_count"]
+    return result
 
 
 def _add_group_spread_observation(
@@ -387,7 +389,7 @@ def _add_group_spread_observation(
     bottom: float,
     spread_value: float,
     hit_rate: float,
-    monotonicity: float,
+    monotonicity: float | None,
 ) -> None:
     key = (signal, label)
     spread = spread_state.get(key)
@@ -399,6 +401,7 @@ def _add_group_spread_observation(
             "spread_sum": 0.0,
             "hit_sum": 0.0,
             "monotonicity_sum": 0.0,
+            "monotonicity_count": 0,
         }
         spread_state[key] = spread
     spread["count"] += 1
@@ -406,7 +409,9 @@ def _add_group_spread_observation(
     spread["bottom_sum"] += bottom
     spread["spread_sum"] += spread_value
     spread["hit_sum"] += hit_rate
-    spread["monotonicity_sum"] += monotonicity
+    if monotonicity is not None:
+        spread["monotonicity_sum"] += monotonicity
+        spread["monotonicity_count"] += 1
 
 
 @dataclass(frozen=True)

@@ -98,6 +98,8 @@ def _evaluation_metrics_frame_from_values(values: dict[str, object]) -> pd.DataF
             "ic": [0.1],
             "rankic": [0.2],
             "n_obs": [2],
+            "ic_reason": [None],
+            "rankic_reason": [None],
         }
     )
 
@@ -144,14 +146,18 @@ def _evaluation_ic_summary_frame_from_values(values: dict[str, object]) -> pd.Da
             "label": [values["label"]],
             "mean_ic": [0.1],
             "std_ic": [0.0],
-            "icir": [0.0],
+            "icir": [None],
             "positive_ic_rate": [1.0],
             "valid_ic_count": [1],
             "mean_rankic": [0.2],
             "std_rankic": [0.0],
-            "rankicir": [0.0],
+            "rankicir": [None],
             "positive_rankic_rate": [1.0],
             "valid_rankic_count": [1],
+            "ic_reason": [None],
+            "icir_reason": ["insufficient_observations"],
+            "rankic_reason": [None],
+            "rankicir_reason": ["insufficient_observations"],
         }
     )
 
@@ -180,6 +186,7 @@ def _evaluation_group_spread_summary_frame_from_values(
             "top_bottom_label_value_spread_mean": [values["mean_label_value"]],
             "top_bottom_label_value_spread_hit_rate": [1.0],
             "group_monotonicity_score": [1.0],
+            "group_monotonicity_score_reason": [None],
         }
     )
 

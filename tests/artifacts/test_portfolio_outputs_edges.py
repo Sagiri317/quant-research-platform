@@ -72,7 +72,7 @@ def test_portfolio_outputs_write_manifest_and_local_scope(
         "turnover.parquet",
         "cost_breakdown.parquet",
         "portfolio_returns.parquet",
-        "cumulative_returns.parquet",
+        "additive_cumulative_returns.parquet",
         "performance_summary.parquet",
         "exposure_summary.parquet",
         "concentration.parquet",
@@ -84,6 +84,30 @@ def test_portfolio_outputs_write_manifest_and_local_scope(
     ]
 
 
+@pytest.mark.parametrize(
+    "mutation",
+    ("bad_string", "infinite", "missing_reason", "reason_with_value", "unknown_reason"),
+)
+def test_portfolio_statistic_reason_pair_rejects_tampering(mutation: str) -> None:
+    spec = make_output_edge_portfolio_spec()
+    frame = make_output_edge_portfolio_artifacts()["performance_summary"].copy()
+    if mutation == "bad_string":
+        frame.loc[0, "sharpe_like"] = "0.1"
+    elif mutation == "infinite":
+        frame.loc[0, "sharpe_like"] = float("inf")
+    elif mutation == "missing_reason":
+        frame.loc[0, "sharpe_like_reason"] = None
+    elif mutation == "reason_with_value":
+        frame.loc[0, "sharpe_like"] = 1.0
+    else:
+        frame.loc[0, "sharpe_like_reason"] = "made_up_reason"
+
+    with pytest.raises(ValueError, match="invalid_portfolio_statistic_reason"):
+        validate_portfolio_artifact_membership_columns(
+            frame,
+            artifact_name="performance_summary",
+            spec=spec,
+        )
 def test_public_portfolio_writer_forwards_cumulative_factory(
     tmp_path: Path,
 ) -> None:
@@ -92,7 +116,7 @@ def test_public_portfolio_writer_forwards_cumulative_factory(
     row_artifacts = tuple(
         name
         for name in output_edge_portfolio_row_artifact_names()
-        if name != "cumulative_returns"
+        if name != "additive_cumulative_returns"
     )
     output_bundle = public_write_portfolio_outputs(
         output_chunks=(
@@ -101,10 +125,10 @@ def test_public_portfolio_writer_forwards_cumulative_factory(
         summary_factory=lambda: {
             name: artifacts[name]
             for name in artifacts
-            if name not in (*row_artifacts, "cumulative_returns")
+            if name not in (*row_artifacts, "additive_cumulative_returns")
         },
-        cumulative_returns_factory=lambda: iter(
-            (artifacts["cumulative_returns"],)
+        additive_cumulative_returns_factory=lambda: iter(
+            (artifacts["additive_cumulative_returns"],)
         ),
         spec=spec,
         output_spec=make_output_edge_report_spec(
@@ -113,10 +137,10 @@ def test_public_portfolio_writer_forwards_cumulative_factory(
         layout=StorageLayout(project_root=tmp_path),
     )
 
-    persisted = pd.read_parquet(output_bundle / "cumulative_returns.parquet")
+    persisted = pd.read_parquet(output_bundle / "additive_cumulative_returns.parquet")
     pd.testing.assert_frame_equal(
         persisted,
-        artifacts["cumulative_returns"],
+        artifacts["additive_cumulative_returns"],
         check_dtype=False,
     )
 
@@ -130,7 +154,7 @@ def test_portfolio_aggregate_rows_exceed_budget_without_full_materialization(
     row_artifacts = tuple(
         name
         for name in output_edge_portfolio_row_artifact_names()
-        if name != "cumulative_returns"
+        if name != "additive_cumulative_returns"
     )
     monkeypatch.setattr(parquet_writers, "_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES", 1)
     monkeypatch.setattr(portfolio_outputs, "_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES", 1)
@@ -160,7 +184,7 @@ def test_portfolio_aggregate_rows_exceed_budget_without_full_materialization(
 
     def cumulative_chunks():
         for _ in range(256):
-            yield artifacts["cumulative_returns"]
+            yield artifacts["additive_cumulative_returns"]
 
     with runtime_resource_policy_scope(policy):
         output_bundle = portfolio_outputs._write_portfolio_output_chunks(
@@ -168,9 +192,9 @@ def test_portfolio_aggregate_rows_exceed_budget_without_full_materialization(
             summary_factory=lambda: {
                 name: artifacts[name]
                 for name in artifacts
-                if name not in (*row_artifacts, "cumulative_returns")
+                if name not in (*row_artifacts, "additive_cumulative_returns")
             },
-            cumulative_returns_factory=cumulative_chunks,
+            additive_cumulative_returns_factory=cumulative_chunks,
             spec=spec,
             output_spec=make_output_edge_report_spec(
                 "portfolio_outputs", spec.portfolio_id, "portfolio"
@@ -179,10 +203,10 @@ def test_portfolio_aggregate_rows_exceed_budget_without_full_materialization(
         )
         assert policy.used_memory_bytes == 0
 
-    cumulative_path = output_bundle / "cumulative_returns.parquet"
+    cumulative_path = output_bundle / "additive_cumulative_returns.parquet"
     persisted_cumulative = pd.read_parquet(cumulative_path)
     expected_cumulative = pd.concat(
-        [artifacts["cumulative_returns"]] * 256,
+        [artifacts["additive_cumulative_returns"]] * 256,
         ignore_index=True,
     )
     pd.testing.assert_frame_equal(
@@ -194,7 +218,10 @@ def test_portfolio_aggregate_rows_exceed_budget_without_full_materialization(
     row_counts = manifest["metadata"]["row_counts"]
     for artifact_name in validation.PORTFOLIO_ARTIFACTS:
         expected_count = len(artifacts[artifact_name])
-        if artifact_name in row_artifacts or artifact_name == "cumulative_returns":
+        if (
+            artifact_name in row_artifacts
+            or artifact_name == "additive_cumulative_returns"
+        ):
             expected_count *= 256
         assert row_counts[artifact_name] == expected_count
     persisted_bytes = sum(
@@ -236,10 +263,10 @@ def test_portfolio_outputs_write_row_artifacts_from_chunks(
         summary_factory=lambda: {
             artifact_name: artifacts[artifact_name]
             for artifact_name in artifacts
-            if artifact_name not in (*row_artifacts, "cumulative_returns")
+            if artifact_name not in (*row_artifacts, "additive_cumulative_returns")
         },
-        cumulative_returns_factory=lambda: iter(
-            (artifacts["cumulative_returns"],)
+        additive_cumulative_returns_factory=lambda: iter(
+            (artifacts["additive_cumulative_returns"],)
         ),
         spec=spec,
         output_spec=make_output_edge_report_spec(
@@ -299,7 +326,7 @@ def test_portfolio_row_writers_disk_preflight_happens_before_first_pull(
     row_artifacts = tuple(
         name
         for name in output_edge_portfolio_row_artifact_names()
-        if name != "cumulative_returns"
+        if name != "additive_cumulative_returns"
     )
     spec = make_output_edge_portfolio_spec()
     output_spec = make_output_edge_report_spec(
@@ -330,7 +357,7 @@ def test_portfolio_row_writers_disk_preflight_happens_before_first_pull(
         portfolio_outputs._write_portfolio_output_chunks(
             Input(),  # type: ignore[arg-type]
             summary_factory=lambda: {},
-            cumulative_returns_factory=lambda: iter(()),
+            additive_cumulative_returns_factory=lambda: iter(()),
             spec=spec,
             output_spec=output_spec,
             layout=StorageLayout(project_root=tmp_path),
@@ -623,13 +650,13 @@ def test_portfolio_outputs_reject_exact_mapping_mutations_and_clean_scratch(
     row_names = tuple(
         name
         for name in output_edge_portfolio_row_artifact_names()
-        if name != "cumulative_returns"
+        if name != "additive_cumulative_returns"
     )
     row_mapping = {name: artifacts[name] for name in row_names}
     summary_mapping = {
         name: artifacts[name]
         for name in artifacts
-        if name not in (*row_names, "cumulative_returns")
+        if name not in (*row_names, "additive_cumulative_returns")
     }
     target = row_mapping if mapping_name == "rows" else summary_mapping
     if mutation == "missing":
@@ -645,8 +672,8 @@ def test_portfolio_outputs_reject_exact_mapping_mutations_and_clean_scratch(
         portfolio_outputs._write_portfolio_output_chunks(
             (row_mapping,),
             summary_factory=lambda: summary_mapping,
-            cumulative_returns_factory=lambda: iter(
-                (artifacts["cumulative_returns"],)
+            additive_cumulative_returns_factory=lambda: iter(
+                (artifacts["additive_cumulative_returns"],)
             ),
             spec=spec,
             output_spec=make_output_edge_report_spec(

@@ -468,8 +468,8 @@ def _run_local_verification_with_policy(
                         write_portfolio_outputs(
                             output_chunks=portfolio_result.output_chunks,
                             summary_factory=portfolio_result.summary_factory,
-                            cumulative_returns_factory=(
-                                portfolio_result.cumulative_returns_factory
+                            additive_cumulative_returns_factory=(
+                                portfolio_result.additive_cumulative_returns_factory
                             ),
                             summary_pre_reserved=True,
                             spec=portfolio_result.spec,

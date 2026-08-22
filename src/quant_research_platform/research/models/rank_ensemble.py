@@ -7,6 +7,10 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _pearson_correlation_result,
+)
+
 
 @dataclass(frozen=True)
 class RankEnsemblePredictor:
@@ -45,17 +49,36 @@ class ICWeightedRankEnsemble:
         label_column: str,
     ) -> ICWeightedRankEnsemble:
         weights = []
+        defined_columns: list[str] = []
         label = _rank_series(frame, label_column)
+        label_values = label.to_numpy(dtype="float64", copy=False)
         for column in input_columns:
-            corr = _rank_series(frame, column).corr(label, method="pearson")
-            weights.append(0.0 if pd.isna(corr) else float(corr))
+            input_values = _rank_series(frame, column).to_numpy(
+                dtype="float64",
+                copy=False,
+            )
+            valid = np.isfinite(input_values) & np.isfinite(label_values)
+            if int(valid.sum()) < 2:
+                corr = None
+            else:
+                corr, _reason = _pearson_correlation_result(
+                    input_values[valid],
+                    label_values[valid],
+                )
+            if corr is None:
+                continue
+            defined_columns.append(column)
+            weights.append(float(corr))
+        if not weights:
+            raise ValueError("all_ensemble_correlations_undefined")
         values = np.asarray(weights, dtype="float64")
-        if np.allclose(values, 0.0):
-            values = np.ones(len(input_columns), dtype="float64")
+        normalizer = float(np.sum(np.abs(values)))
+        if normalizer == 0.0:
+            raise ValueError("all_ensemble_correlations_zero")
         return cls(
-            columns=input_columns,
-            weights=values / np.sum(np.abs(values)),
-            coefficient_count=len(input_columns),
+            columns=tuple(defined_columns),
+            weights=values / normalizer,
+            coefficient_count=len(defined_columns),
         )
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:

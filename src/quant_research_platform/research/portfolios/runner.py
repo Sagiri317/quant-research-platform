@@ -17,8 +17,12 @@ import pandas as pd
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.compute.dataframe.performance import (
-    CUMULATIVE_RETURN_COLUMNS,
-    PERFORMANCE_SUMMARY_COLUMNS,
+    ADDITIVE_CUMULATIVE_RETURN_COLUMNS,
+    _new_performance_stats,
+    _ordered_cumulative,
+    _performance_summary_frame,
+    _performance_summary_record,
+    _update_performance_stats_batch,
     _validate_returns_frame,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
@@ -54,6 +58,7 @@ from quant_research_platform.storage.layout import StorageLayout
 
 _PORTFOLIO_ROW_WORKING_BYTES = 2048
 _PORTFOLIO_PERIOD_WORKING_BYTES = 4096
+_PORTFOLIO_STATS_BATCH_ROWS = 4096
 _PORTFOLIO_STATE_FIXED_WORKING_BYTES = 64 * 1024
 _PORTFOLIO_STATE_PER_SIGNAL_BYTES = 16 * 1024
 
@@ -63,7 +68,9 @@ class PortfolioResult:
     spec: PortfolioSpec
     output_chunks: Iterable[Mapping[str, pd.DataFrame]]
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]]
-    cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]] | None = field(
+    additive_cumulative_returns_factory: Callable[
+        [], Iterable[pd.DataFrame]
+    ] | None = field(
         default=None,
         repr=False,
         compare=False,
@@ -232,7 +239,7 @@ def build_portfolio_result_from_research_dataset(
         spec=result.spec,
         output_chunks=output_chunks(),
         summary_factory=summary,
-        cumulative_returns_factory=result.cumulative_returns_factory,
+        additive_cumulative_returns_factory=result.additive_cumulative_returns_factory,
         _close=close_result,
     )
     return owned_result
@@ -320,18 +327,18 @@ def _build_portfolio_result_from_research_dataset(
             summary_state,
         )
 
-        def cumulative_returns_factory() -> Iterable[pd.DataFrame]:
+        def additive_cumulative_returns_factory() -> Iterable[pd.DataFrame]:
             if not summary_state.returns_complete:
                 raise RuntimeError(
-                    "portfolio_cumulative_returns_before_output_complete"
+                    "portfolio_additive_cumulative_returns_before_output_complete"
                 )
-            return _iter_portfolio_cumulative_chunks(summary_state)
+            return _iter_portfolio_additive_cumulative_chunks(summary_state)
 
         return PortfolioResult(
             spec=spec,
             output_chunks=output_chunks,
             summary_factory=lambda: _portfolio_summary_outputs(summary_state),
-            cumulative_returns_factory=cumulative_returns_factory,
+            additive_cumulative_returns_factory=additive_cumulative_returns_factory,
             _close=lambda: _close_portfolio_summary_state(summary_state),
         )
     except BaseException:
@@ -1000,127 +1007,6 @@ def _append_portfolio_return_summary(
     database.commit()
 
 
-def _new_portfolio_return_stats() -> dict[str, object]:
-    return {
-        "periods": 0,
-        "gross_sum": 0.0,
-        "net_sum": 0.0,
-        "net_square_sum": 0.0,
-        "downside_sum": 0.0,
-        "downside_square_sum": 0.0,
-        "wins": 0,
-        "losses": 0,
-        "win_sum": 0.0,
-        "loss_sum": 0.0,
-        "best": None,
-        "worst": None,
-        "turnover_sum": 0.0,
-        "turnover_max": None,
-        "cost_sum": 0.0,
-        "cumulative_gross": 0.0,
-        "cumulative_net": 0.0,
-        "cumulative_cost": 0.0,
-        "high_water_mark": None,
-        "max_drawdown": 0.0,
-        "drawdown_peak_value": None,
-        "drawdown_start": "",
-        "drawdown_valley": "",
-        "drawdown_recovery": "",
-        "drawdown_start_index": 0,
-        "drawdown_recovery_index": None,
-        "peak_timestamp": "",
-        "peak_index": 0,
-        "max_drawdown_index": None,
-        "current_win_streak": 0,
-        "current_loss_streak": 0,
-        "max_consecutive_wins": 0,
-        "max_consecutive_losses": 0,
-        "net_sum_cubes": 0.0,
-        "net_sum_quads": 0.0,
-    }
-
-
-def _update_performance_stats(
-    stats: dict[str, object],
-    *,
-    timestamp: pd.Timestamp,
-    gross_return: object,
-    net_return: object,
-    cost: object,
-    turnover: object,
-) -> None:
-    index = int(stats["periods"])
-    stats["periods"] = index + 1
-    gross = float(gross_return)
-    net = float(net_return)
-    cost_value = float(cost)
-    turnover_value = float(turnover)
-    stats["gross_sum"] = float(stats["gross_sum"]) + gross
-    stats["net_sum"] = float(stats["net_sum"]) + net
-    stats["net_square_sum"] = float(stats["net_square_sum"]) + net * net
-    stats["net_sum_cubes"] = float(stats["net_sum_cubes"]) + net**3
-    stats["net_sum_quads"] = float(stats["net_sum_quads"]) + net**4
-    downside = min(net, 0.0)
-    stats["downside_sum"] = float(stats["downside_sum"]) + downside
-    stats["downside_square_sum"] = (
-        float(stats["downside_square_sum"]) + downside * downside
-    )
-    if stats["best"] is None or net > float(stats["best"]):
-        stats["best"] = net
-    if stats["worst"] is None or net < float(stats["worst"]):
-        stats["worst"] = net
-    if net > 0:
-        stats["wins"] = int(stats["wins"]) + 1
-        stats["win_sum"] = float(stats["win_sum"]) + net
-        stats["current_win_streak"] = int(stats["current_win_streak"]) + 1
-        stats["current_loss_streak"] = 0
-        stats["max_consecutive_wins"] = max(
-            int(stats["max_consecutive_wins"]),
-            int(stats["current_win_streak"]),
-        )
-    elif net < 0:
-        stats["losses"] = int(stats["losses"]) + 1
-        stats["loss_sum"] = float(stats["loss_sum"]) + net
-        stats["current_loss_streak"] = int(stats["current_loss_streak"]) + 1
-        stats["current_win_streak"] = 0
-        stats["max_consecutive_losses"] = max(
-            int(stats["max_consecutive_losses"]),
-            int(stats["current_loss_streak"]),
-        )
-    else:
-        stats["current_win_streak"] = 0
-        stats["current_loss_streak"] = 0
-    stats["cumulative_net"] = float(stats["cumulative_net"]) + net
-    high_water = stats["high_water_mark"]
-    if high_water is None or float(stats["cumulative_net"]) >= float(high_water):
-        stats["high_water_mark"] = float(stats["cumulative_net"])
-        stats["peak_timestamp"] = timestamp.isoformat()
-        stats["peak_index"] = index
-    drawdown = float(stats["cumulative_net"]) - float(stats["high_water_mark"])
-    if drawdown < float(stats["max_drawdown"]):
-        stats["max_drawdown"] = drawdown
-        stats["drawdown_peak_value"] = float(stats["high_water_mark"])
-        stats["drawdown_start"] = str(stats["peak_timestamp"])
-        stats["drawdown_valley"] = timestamp.isoformat()
-        stats["drawdown_recovery"] = ""
-        stats["drawdown_start_index"] = int(stats["peak_index"])
-        stats["drawdown_recovery_index"] = None
-        stats["max_drawdown_index"] = index
-    elif (
-        float(stats["max_drawdown"]) < 0
-        and stats["drawdown_recovery_index"] is None
-        and stats["drawdown_peak_value"] is not None
-        and float(stats["cumulative_net"])
-        >= float(stats["drawdown_peak_value"])
-    ):
-        stats["drawdown_recovery"] = timestamp.isoformat()
-        stats["drawdown_recovery_index"] = index
-    stats["cost_sum"] = float(stats["cost_sum"]) + cost_value
-    stats["turnover_sum"] = float(stats["turnover_sum"]) + turnover_value
-    if stats["turnover_max"] is None or turnover_value > float(stats["turnover_max"]):
-        stats["turnover_max"] = turnover_value
-
-
 def _ordered_performance_stats(
     summary_state: _PortfolioSummaryState,
 ) -> dict[str, dict[str, object]]:
@@ -1136,22 +1022,41 @@ def _ordered_performance_stats(
         """
     )
     try:
-        for signal, timestamp, gross, net, cost, turnover in cursor:
-            signal_id = str(signal)
-            stats = stats_by_signal.setdefault(
-                signal_id,
-                _new_portfolio_return_stats(),
-            )
-            _update_performance_stats(
-                stats,
-                timestamp=pd.Timestamp(timestamp),
-                gross_return=gross,
-                net_return=net,
-                cost=cost,
-                turnover=turnover,
-            )
+        columns = (
+            "signal",
+            "timestamp",
+            "gross_return",
+            "net_return",
+            "cost",
+            "turnover",
+        )
+        while rows := cursor.fetchmany(_PORTFOLIO_STATS_BATCH_ROWS):
+            frame = pd.DataFrame.from_records(rows, columns=columns)
+            for signal, group in frame.groupby("signal", sort=False):
+                signal_id = str(signal)
+                stats = stats_by_signal.setdefault(
+                    signal_id,
+                    _new_performance_stats(),
+                )
+                _update_performance_stats_batch(
+                    stats,
+                    timestamps=group["timestamp"].to_numpy(copy=False),
+                    gross_returns=group["gross_return"].to_numpy(copy=False),
+                    net_returns=group["net_return"].to_numpy(copy=False),
+                    costs=group["cost"].to_numpy(copy=False),
+                    turnovers=group["turnover"].to_numpy(copy=False),
+                )
     finally:
-        cursor.close()
+        primary = sys.exception()
+        try:
+            cursor.close()
+        except BaseException as cleanup_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "portfolio performance cursor close also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
     return stats_by_signal
 
 
@@ -1165,17 +1070,19 @@ def _portfolio_return_summary_frame(
         segment_columns=(),
         include_performance_columns=True,
     )
-    return selected.loc[:, RETURNS_COLUMNS].sort_values(
+    if tuple(selected.columns) != tuple(RETURNS_COLUMNS):
+        selected = selected.loc[:, RETURNS_COLUMNS]
+    return selected.sort_values(
         ["signal", "timestamp"], kind="mergesort"
     ).reset_index(drop=True)
 
 
-def _iter_portfolio_cumulative_chunks(
+def _iter_portfolio_additive_cumulative_chunks(
     summary_state: _PortfolioSummaryState,
 ) -> Iterable[pd.DataFrame]:
     database = summary_state.return_database
     if database is None:
-        raise RuntimeError("portfolio_cumulative_returns_unavailable")
+        raise RuntimeError("portfolio_additive_cumulative_returns_unavailable")
     policy = summary_state.resource_policy
     if policy is None:
         batch_rows = 1024
@@ -1203,53 +1110,90 @@ def _iter_portfolio_cumulative_chunks(
             try:
                 if policy is not None:
                     lease = policy.lease(
-                        "research.portfolio.cumulative",
+                        "research.portfolio.additive_cumulative",
                         batch_bound,
                     )
                 rows = cursor.fetchmany(batch_rows)
                 if not rows:
                     return
-                records: list[dict[str, object]] = []
+                rows_by_signal: dict[
+                    str, list[tuple[object, object, object, object]]
+                ] = {}
                 for timestamp, signal, gross, net, cost in rows:
-                    signal_id = str(signal)
+                    rows_by_signal.setdefault(str(signal), []).append(
+                        (timestamp, gross, net, cost)
+                    )
+                records: list[dict[str, object]] = []
+                for signal_id, signal_rows in rows_by_signal.items():
                     state = running.setdefault(
                         signal_id,
                         {
                             "gross": 0.0,
                             "net": 0.0,
                             "cost": 0.0,
-                            "high_water": float("nan"),
+                            "high_water": 0.0,
                         },
                     )
-                    gross_value = float(gross)
-                    net_value = float(net)
-                    cost_value = float(cost)
-                    state["gross"] += gross_value
-                    state["net"] += net_value
-                    state["cost"] += cost_value
-                    high_water = state["high_water"]
-                    if math.isnan(high_water):
-                        high_water = state["net"]
-                    else:
-                        high_water = max(high_water, state["net"])
-                    state["high_water"] = high_water
-                    records.append(
-                        {
-                            "timestamp": pd.Timestamp(timestamp),
-                            "signal": signal_id,
-                            "gross_portfolio_return": gross_value,
-                            "net_portfolio_return": net_value,
-                            "cost": cost_value,
-                            "cumulative_gross_return": state["gross"],
-                            "cumulative_net_return": state["net"],
-                            "cumulative_cost": state["cost"],
-                            "high_water_mark": high_water,
-                            "drawdown": state["net"] - high_water,
-                        }
+                    gross_values = np.asarray(
+                        [row[1] for row in signal_rows], dtype="float64"
                     )
+                    net_values = np.asarray(
+                        [row[2] for row in signal_rows], dtype="float64"
+                    )
+                    cost_values = np.asarray(
+                        [row[3] for row in signal_rows], dtype="float64"
+                    )
+                    gross_cumulative = _ordered_cumulative(
+                        gross_values,
+                        initial=state["gross"],
+                    )
+                    net_cumulative = _ordered_cumulative(
+                        net_values,
+                        initial=state["net"],
+                    )
+                    cost_cumulative = _ordered_cumulative(
+                        cost_values,
+                        initial=state["cost"],
+                    )
+                    high_water = np.maximum.accumulate(
+                        np.concatenate(([state["high_water"]], net_cumulative))
+                    )[1:]
+                    state["gross"] = float(gross_cumulative[-1])
+                    state["net"] = float(net_cumulative[-1])
+                    state["cost"] = float(cost_cumulative[-1])
+                    state["high_water"] = float(high_water[-1])
+                    for position, (timestamp, _gross, _net, _cost) in enumerate(
+                        signal_rows
+                    ):
+                        records.append(
+                            {
+                                "timestamp": pd.Timestamp(timestamp),
+                                "signal": signal_id,
+                                "gross_portfolio_return": float(
+                                    gross_values[position]
+                                ),
+                                "net_portfolio_return": float(
+                                    net_values[position]
+                                ),
+                                "cost": float(cost_values[position]),
+                                "additive_cumulative_gross_return": float(
+                                    gross_cumulative[position]
+                                ),
+                                "additive_cumulative_net_return": float(
+                                    net_cumulative[position]
+                                ),
+                                "additive_cumulative_cost": float(
+                                    cost_cumulative[position]
+                                ),
+                                "high_water_mark": float(high_water[position]),
+                                "drawdown": float(
+                                    net_cumulative[position] - high_water[position]
+                                ),
+                            }
+                        )
                 frame = pd.DataFrame.from_records(
                     records,
-                    columns=CUMULATIVE_RETURN_COLUMNS,
+                    columns=ADDITIVE_CUMULATIVE_RETURN_COLUMNS,
                 )
                 if lease is not None:
                     lease.shrink_to(max(1, pandas_frame_payload_bytes(frame)))
@@ -1263,7 +1207,7 @@ def _iter_portfolio_cumulative_chunks(
                         if primary is None:
                             raise
                         primary.add_note(
-                            "portfolio cumulative lease close also failed: "
+                            "portfolio additive cumulative lease close also failed: "
                             f"{type(cleanup_error).__name__}"
                         )
     finally:
@@ -1274,7 +1218,7 @@ def _iter_portfolio_cumulative_chunks(
             if primary is None:
                 raise
             primary.add_note(
-                "portfolio cumulative cursor close also failed: "
+                "portfolio additive cumulative cursor close also failed: "
                 f"{type(cleanup_error).__name__}"
             )
 
@@ -1336,11 +1280,15 @@ def _portfolio_summary_memory_bound(
     database = summary_state.return_database
     signal_rows = 0
     period_rows = 0
+    return_rows = 0
     if database is not None:
         signal_rows = int(
             database.execute(
                 "SELECT COUNT(DISTINCT signal) FROM returns"
             ).fetchone()[0]
+        )
+        return_rows = int(
+            database.execute("SELECT COUNT(*) FROM returns").fetchone()[0]
         )
         period_rows = int(
             database.execute(
@@ -1359,7 +1307,14 @@ def _portfolio_summary_memory_bound(
         + 2 * max(1, len(summary_state.position_stats))
         + period_rows
     )
-    return 64 * 1024 + summary_rows * 16 * 1024
+    batch_rows = min(_PORTFOLIO_STATS_BATCH_ROWS, return_rows)
+    batch_bound = (
+        _PORTFOLIO_PERIOD_WORKING_BYTES
+        + batch_rows * _PORTFOLIO_ROW_WORKING_BYTES
+        if batch_rows
+        else 0
+    )
+    return 64 * 1024 + summary_rows * 16 * 1024 + batch_bound
 
 
 def _portfolio_summary_outputs(
@@ -1399,174 +1354,19 @@ def _portfolio_performance_summary(
         periods = int(stats["periods"])
         if periods == 0:
             continue
-        mean_net = float(stats["net_sum"]) / periods
-        volatility = _population_std(
-            float(stats["net_square_sum"]),
-            mean_net,
-            periods,
-        )
-        downside_mean = float(stats["downside_sum"]) / periods
-        downside_volatility = _population_std(
-            float(stats["downside_square_sum"]),
-            downside_mean,
-            periods,
-        )
         var_95 = _spilled_quantile(database, signal, periods, 0.05)
         q95 = _spilled_quantile(database, signal, periods, 0.95)
         cvar_values = _spilled_cvar(database, signal, var_95)
-        max_drawdown = float(stats["max_drawdown"])
-        drawdown_recovery_index = stats["drawdown_recovery_index"]
-        end_index = (
-            int(drawdown_recovery_index)
-            if drawdown_recovery_index is not None
-            else periods - 1
-        )
-        drawdown_duration = (
-            end_index - int(stats["drawdown_start_index"])
-            if max_drawdown < 0
-            else 0
-        )
         records.append(
-            {
-                "signal": signal,
-                "periods": periods,
-                "final_cumulative_gross_return": float(stats["gross_sum"]),
-                "final_cumulative_net_return": float(stats["net_sum"]),
-                "mean_net_portfolio_return": mean_net,
-                "volatility_net_portfolio_return": volatility,
-                "downside_volatility": downside_volatility,
-                "sharpe_like": _summary_safe_ratio(mean_net, volatility),
-                "sortino_like": _summary_safe_ratio(mean_net, downside_volatility),
-                "calmar_like": _summary_safe_ratio(
-                    float(stats["net_sum"]),
-                    abs(max_drawdown),
-                ),
-                "best_period_return": (
-                    float(stats["best"]) if stats["best"] is not None else 0.0
-                ),
-                "worst_period_return": (
-                    float(stats["worst"]) if stats["worst"] is not None else 0.0
-                ),
-                "skew": _summary_skew(stats),
-                "kurtosis": _summary_kurtosis(stats),
-                "var_95": var_95,
-                "cvar_95": cvar_values,
-                "tail_ratio": _summary_safe_ratio(abs(q95), abs(var_95)),
-                "positive_return_rate": int(stats["wins"]) / periods,
-                "negative_return_rate": int(stats["losses"]) / periods,
-                "win_rate": int(stats["wins"]) / periods,
-                "loss_rate": int(stats["losses"]) / periods,
-                "profit_factor": _summary_safe_ratio(
-                    float(stats["win_sum"]),
-                    abs(float(stats["loss_sum"])),
-                ),
-                "payoff_ratio": _summary_safe_ratio(
-                    float(stats["win_sum"]) / int(stats["wins"])
-                    if stats["wins"]
-                    else 0.0,
-                    abs(float(stats["loss_sum"]) / int(stats["losses"]))
-                    if stats["losses"]
-                    else 0.0,
-                ),
-                "average_win": (
-                    float(stats["win_sum"]) / int(stats["wins"])
-                    if stats["wins"]
-                    else 0.0
-                ),
-                "average_loss": (
-                    float(stats["loss_sum"]) / int(stats["losses"])
-                    if stats["losses"]
-                    else 0.0
-                ),
-                "max_consecutive_wins": int(stats["max_consecutive_wins"]),
-                "max_consecutive_losses": int(stats["max_consecutive_losses"]),
-                "max_drawdown": max_drawdown,
-                "drawdown_duration": drawdown_duration,
-                "max_drawdown_start": (
-                    str(stats["drawdown_start"]) if max_drawdown < 0 else ""
-                ),
-                "max_drawdown_valley": (
-                    str(stats["drawdown_valley"]) if max_drawdown < 0 else ""
-                ),
-                "max_drawdown_recovery": (
-                    str(stats["drawdown_recovery"]) if max_drawdown < 0 else ""
-                ),
-                "mean_turnover": float(stats["turnover_sum"]) / periods,
-                "max_turnover": (
-                    float(stats["turnover_max"])
-                    if stats["turnover_max"] is not None
-                    else 0.0
-                ),
-                "total_cost": float(stats["cost_sum"]),
-                "mean_cost": float(stats["cost_sum"]) / periods,
-                "cost_to_gross_return": _summary_safe_ratio(
-                    float(stats["cost_sum"]),
-                    abs(float(stats["gross_sum"])),
-                ),
-                "cost_to_net_return": _summary_safe_ratio(
-                    float(stats["cost_sum"]),
-                    abs(float(stats["net_sum"])),
-                ),
-            }
+            _performance_summary_record(
+                signal,
+                stats,
+                var_95=var_95,
+                q95=q95,
+                cvar_95=cvar_values,
+            )
         )
-    return pd.DataFrame.from_records(records, columns=PERFORMANCE_SUMMARY_COLUMNS)
-
-
-def _population_std(square_sum: float, mean: float, count: int) -> float:
-    variance = max(0.0, square_sum / count - mean * mean)
-    return math.sqrt(variance)
-
-
-def _summary_safe_ratio(numerator: float, denominator: float) -> float:
-    if denominator == 0 or not math.isfinite(denominator):
-        return 0.0
-    return numerator / denominator
-
-
-def _summary_skew(stats: dict[str, object]) -> float:
-    count = int(stats["periods"])
-    if count < 3:
-        return 0.0
-    mean = float(stats["net_sum"]) / count
-    m2 = _central_moment(stats, mean, 2)
-    if m2 <= 0:
-        return 0.0
-    m3 = _central_moment(stats, mean, 3)
-    return math.sqrt(count * (count - 1)) / (count - 2) * m3 / m2**1.5
-
-
-def _summary_kurtosis(stats: dict[str, object]) -> float:
-    count = int(stats["periods"])
-    if count < 4:
-        return 0.0
-    mean = float(stats["net_sum"]) / count
-    m2 = _central_moment(stats, mean, 2)
-    if m2 <= 0:
-        return 0.0
-    m4 = _central_moment(stats, mean, 4)
-    g2 = m4 / m2**2 - 3.0
-    return ((count - 1) / ((count - 2) * (count - 3))) * ((count + 1) * g2 + 6.0)
-
-
-def _central_moment(stats: dict[str, object], mean: float, order: int) -> float:
-    count = int(stats["periods"])
-    if order == 2:
-        raw = float(stats["net_square_sum"]) / count
-        return raw - 2 * mean * float(stats["net_sum"]) / count + mean**2
-    if order == 3:
-        return (
-            float(stats["net_sum_cubes"]) / count
-            - 3 * mean * float(stats["net_square_sum"]) / count
-            + 3 * mean**2 * float(stats["net_sum"]) / count
-            - mean**3
-        )
-    return (
-        float(stats["net_sum_quads"]) / count
-        - 4 * mean * float(stats["net_sum_cubes"]) / count
-        + 6 * mean**2 * float(stats["net_square_sum"]) / count
-        - 4 * mean**3 * float(stats["net_sum"]) / count
-        + mean**4
-    )
+    return _performance_summary_frame(records)
 
 
 def _spilled_quantile(
@@ -1576,7 +1376,7 @@ def _spilled_quantile(
     quantile: float,
 ) -> float:
     if database is None or count == 0:
-        return 0.0
+        raise RuntimeError("portfolio_performance_spill_unavailable")
     position = (count - 1) * quantile
     lower_index = int(math.floor(position))
     values = database.execute(
@@ -1589,7 +1389,7 @@ def _spilled_quantile(
         (signal, lower_index),
     ).fetchall()
     if not values:
-        return 0.0
+        raise RuntimeError("portfolio_performance_spill_missing")
     lower = float(values[0][0])
     upper = float(values[-1][0])
     return lower + (upper - lower) * (position - lower_index)
@@ -1601,7 +1401,7 @@ def _spilled_cvar(
     threshold: float,
 ) -> float:
     if database is None:
-        return 0.0
+        raise RuntimeError("portfolio_performance_spill_unavailable")
     value = database.execute(
         """
         SELECT AVG(net_return) FROM returns
@@ -1609,7 +1409,9 @@ def _spilled_cvar(
         """,
         (signal, threshold),
     ).fetchone()[0]
-    return float(value) if value is not None else 0.0
+    if value is None:
+        raise RuntimeError("portfolio_performance_spill_missing")
+    return float(value)
 
 
 def _portfolio_period_breakdown(

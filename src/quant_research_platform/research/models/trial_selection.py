@@ -8,6 +8,9 @@ from contextlib import ExitStack
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _pearson_correlation_result,
+)
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
 )
@@ -17,6 +20,10 @@ from quant_research_platform.runtime.resources import (
 )
 
 VALIDATION_METRIC_COLUMNS = ("validation_ic", "validation_rankic", "validation_mse")
+VALIDATION_METRIC_REASON_COLUMNS = (
+    "validation_ic_reason",
+    "validation_rankic_reason",
+)
 TEST_METRIC_COLUMNS = ("test_ic", "test_rankic", "test_mse")
 
 
@@ -59,14 +66,33 @@ def select_best_validation_trial(
         raise ValueError(f"missing_trial_selection_columns: {', '.join(missing)}")
     if bool(trials[trial_id_column].duplicated().any()):
         raise ValueError("duplicate_trial_id")
-    metric_values = pd.to_numeric(trials[selection_metric], errors="coerce")
-    if bool(metric_values.isna().any()) or not bool(np.isfinite(metric_values).all()):
+    metric_series = trials[selection_metric]
+    if pd.api.types.is_bool_dtype(metric_series):
         raise ValueError("invalid_trial_selection_metric")
+    if not pd.api.types.is_numeric_dtype(metric_series):
+        if not bool(metric_series.isna().all()):
+            raise ValueError("invalid_trial_selection_metric")
+        metric_values = pd.Series(
+            np.nan,
+            index=metric_series.index,
+            dtype="float64",
+        )
+    else:
+        metric_values = metric_series.astype("float64")
+    if bool((~metric_values.isna() & ~np.isfinite(metric_values)).any()):
+        raise ValueError("invalid_trial_selection_metric")
+    defined = metric_values.notna()
+    if not bool(defined.any()):
+        raise ValueError("all_validation_metrics_undefined")
 
-    ordered = trials.assign(_selection_metric=metric_values).sort_values(
-        ["_selection_metric", trial_id_column],
-        ascending=[not maximize, True],
-        kind="mergesort",
+    ordered = (
+        trials.loc[defined]
+        .assign(_selection_metric=metric_values[defined])
+        .sort_values(
+            ["_selection_metric", trial_id_column],
+            ascending=[not maximize, True],
+            kind="mergesort",
+        )
     )
     return str(ordered.iloc[0][trial_id_column])
 
@@ -111,11 +137,14 @@ def evaluate_model_trial_metrics(
             usable = frame.loc[:, [label_column, prediction_column]]
             if usable.empty:
                 raise ValueError("empty_model_selection_validation_window")
-            label_values = pd.to_numeric(usable[label_column], errors="coerce")
-            prediction_values = pd.to_numeric(
-                usable[prediction_column],
-                errors="coerce",
-            )
+            for column in (label_column, prediction_column):
+                values = usable[column]
+                if not pd.api.types.is_numeric_dtype(
+                    values
+                ) or pd.api.types.is_bool_dtype(values):
+                    raise ValueError("invalid_trial_metric_values")
+            label_values = usable[label_column].astype("float64")
+            prediction_values = usable[prediction_column].astype("float64")
             if (
                 bool(label_values.isna().any())
                 or bool(prediction_values.isna().any())
@@ -124,19 +153,23 @@ def evaluate_model_trial_metrics(
             ):
                 raise ValueError("invalid_trial_metric_values")
             errors = prediction_values - label_values
+            validation_ic, validation_ic_reason = _validation_correlation(
+                label_values,
+                prediction_values,
+                rank=False,
+            )
+            validation_rankic, validation_rankic_reason = _validation_correlation(
+                label_values,
+                prediction_values,
+                rank=True,
+            )
             record = {
                 "model_id": model_id,
                 "validation_rows": int(len(usable)),
-                "validation_ic": _correlation(
-                    label_values,
-                    prediction_values,
-                    rank=False,
-                ),
-                "validation_rankic": _correlation(
-                    label_values,
-                    prediction_values,
-                    rank=True,
-                ),
+                "validation_ic": validation_ic,
+                "validation_ic_reason": validation_ic_reason,
+                "validation_rankic": validation_rankic,
+                "validation_rankic_reason": validation_rankic_reason,
                 "validation_mse": float(np.square(errors).mean()),
             }
         except BaseException:
@@ -169,10 +202,20 @@ def build_model_selection_metadata(
         raise ValueError("invalid_model_selection_metric")
     if selected_model_id not in candidate_model_ids:
         raise ValueError("selected_model_not_in_candidates")
-    records = trial_metrics.loc[:, ("model_id", *VALIDATION_METRIC_COLUMNS)].to_dict(
+    records = trial_metrics.loc[
+        :, ("model_id", *VALIDATION_METRIC_COLUMNS, *VALIDATION_METRIC_REASON_COLUMNS)
+    ].to_dict(
         "records"
     )
     for record in records:
+        for key in (
+            "validation_ic",
+            "validation_rankic",
+            "validation_ic_reason",
+            "validation_rankic_reason",
+        ):
+            if pd.isna(record[key]):
+                record[key] = None
         record["validation_rows"] = int(
             trial_metrics.loc[
                 trial_metrics["model_id"] == record["model_id"],
@@ -194,24 +237,25 @@ def build_model_selection_metadata(
     }
 
 
-def _correlation(
+def _validation_correlation(
     labels: pd.Series,
     predictions: pd.Series,
     *,
     rank: bool,
-) -> float:
+) -> tuple[float | None, str | None]:
     if len(labels) < 2:
-        return 0.0
+        return None, "insufficient_observations"
     left = labels.rank(method="average") if rank else labels
     right = predictions.rank(method="average") if rank else predictions
-    value = left.corr(right)
-    if pd.isna(value):
-        return 0.0
-    return float(value)
+    return _pearson_correlation_result(
+        left.to_numpy(dtype="float64", copy=False),
+        right.to_numpy(dtype="float64", copy=False),
+    )
 
 
 __all__ = [
     "VALIDATION_METRIC_COLUMNS",
+    "VALIDATION_METRIC_REASON_COLUMNS",
     "TEST_METRIC_COLUMNS",
     "build_model_selection_metadata",
     "evaluate_model_trial_metrics",
