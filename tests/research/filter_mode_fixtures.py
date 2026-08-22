@@ -4,11 +4,11 @@ import numpy as np
 import pandas as pd
 
 import quant_research_platform.research.predictions.outputs as prediction_outputs
-from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.models.algorithm_facts import (
-    model_smoke_hyperparameters,
+from quant_research_platform.contracts.models import (
+    ModelSpec,
+    _model_smoke_hyperparameters,
 )
+from quant_research_platform.contracts.predictions import PredictionSpec
 
 
 def sort_filter_mode_evaluation_frame(
@@ -65,4 +65,4 @@ def make_filter_mode_prediction_output_scores(
 def make_filter_mode_model_hyperparameters(
     model_algorithm: str,
 ) -> dict[str, object]:
-    return model_smoke_hyperparameters(model_algorithm)
+    return _model_smoke_hyperparameters(model_algorithm)

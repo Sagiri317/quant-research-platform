@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,16 +18,6 @@ from quant_research_platform.research.models.rank_ensemble import (
 @dataclass(frozen=True)
 class _LinearRegressionEstimator:
     coefficient_count: int = 0
-
-    def fit_model_result_from_frames(
-        self,
-        frames: Iterable[pd.DataFrame],
-        spec: ModelSpec,
-    ):
-        del self
-        import quant_research_platform.research.models.fitting as fitting
-
-        return fitting.fit_linear_model_result_from_frames(frames, spec)
 
 
 @dataclass(frozen=True)
@@ -148,6 +138,27 @@ def ic_weighted_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> obj
 def _set_random_state(params: dict[str, object], spec: ModelSpec) -> None:
     if spec.random_seed is not None:
         params.setdefault("random_state", spec.random_seed)
+
+
+_MODEL_ESTIMATOR_FACTORIES: dict[
+    str, Callable[[ModelSpec, dict[str, object]], object]
+] = {
+    "linear_regression": linear_regression_estimator,
+    "ridge_regression": ridge_regression_estimator,
+    "lasso_regression": lasso_regression_estimator,
+    "elastic_net": elastic_net_estimator,
+    "huber_regression": huber_regression_estimator,
+    "decision_tree_regressor": decision_tree_regressor,
+    "random_forest_regressor": random_forest_regressor,
+    "extra_trees_regressor": extra_trees_regressor,
+    "gradient_boosting_regressor": gradient_boosting_regressor,
+    "hist_gradient_boosting_regressor": hist_gradient_boosting_regressor,
+    "xgboost_regressor": xgboost_regressor,
+    "lightgbm_regressor": lightgbm_regressor,
+    "single_factor_baseline": single_factor_baseline,
+    "equal_weight_rank_ensemble": equal_weight_rank_ensemble,
+    "ic_weighted_rank_ensemble": ic_weighted_rank_ensemble,
+}
 
 
 __all__ = [

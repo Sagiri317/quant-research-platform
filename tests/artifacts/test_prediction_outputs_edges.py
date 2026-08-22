@@ -22,10 +22,10 @@ from quant_research_platform.artifacts import outputs
 from quant_research_platform.artifacts._output_manifest import (
     prediction_output_metadata,
 )
-from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.models.algorithm_facts import (
-    model_smoke_hyperparameters,
+from quant_research_platform.contracts.models import (
+    _model_smoke_hyperparameters,
 )
+from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
@@ -767,7 +767,7 @@ def test_prediction_artifact_rejects_invalid_parallel_thread_contract(
 ) -> None:
     metadata = make_artifact_prediction_output_frame().attrs["model_metadata"]
     requested = {
-        **model_smoke_hyperparameters("extra_trees_regressor"),
+        **_model_smoke_hyperparameters("extra_trees_regressor"),
         "n_jobs": requested_threads,
     }
     forged = {

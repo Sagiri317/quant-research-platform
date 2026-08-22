@@ -6,6 +6,7 @@ import sys
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from numbers import Integral
 
 import numpy as np
 import pandas as pd
@@ -74,8 +75,7 @@ def _fit_model_result_owned_from_frames(
     *,
     estimator: object,
 ) -> ModelFitResult | _OwnedModelFitResult:
-    fit_model_result = getattr(estimator, "fit_model_result_from_frames", None)
-    if callable(fit_model_result):
+    if spec.model_algorithm == "linear_regression":
         return _fit_linear_model_result_owned_from_frames(frames, spec)
     return _fit_estimator_model_result_owned_from_frames(
         frames,
@@ -631,12 +631,6 @@ def _fit_estimator_model_result_owned_from_frames(
                 )
         raise primary
     policy = current_runtime_resource_policy()
-    target_bytes = len(training) * np.dtype(np.float64).itemsize
-    model_state_bytes = _model_state_upper_bound_bytes(
-        training,
-        spec,
-        estimator=estimator,
-    )
     model_lease = None
     y: np.ndarray | None = None
     predictor: object | None = None
@@ -646,6 +640,12 @@ def _fit_estimator_model_result_owned_from_frames(
     resolved_hyperparameters: dict[str, object] | None = None
     result: ModelFitResult | None = None
     try:
+        target_bytes = len(training) * np.dtype(np.float64).itemsize
+        model_state_bytes = _model_state_upper_bound_bytes(
+            training,
+            spec,
+            estimator=estimator,
+        )
         thread_available_bytes = None
         if policy is not None:
             thread_available_bytes = max(
@@ -1419,7 +1419,13 @@ def _model_state_upper_bound_bytes(
         leaves = _bounded_tree_nodes(
             rows,
             depth=(
-                0 if depth_value == 0 else _positive_model_int(depth_value, default=6)
+                0
+                if (
+                    isinstance(depth_value, Integral)
+                    and not isinstance(depth_value, bool)
+                    and depth_value == 0
+                )
+                else _positive_model_int(depth_value, default=6)
             ),
         )
     elif algorithm == "lightgbm_regressor":
@@ -1443,7 +1449,11 @@ def _bounded_tree_nodes(rows: int, *, depth: int) -> int:
 
 
 def _positive_model_int(value: object, *, default: int) -> int:
-    return value if type(value) is int and value > 0 else default
+    if value is None:
+        return default
+    if isinstance(value, Integral) and not isinstance(value, bool) and value > 0:
+        return int(value)
+    raise ValueError("invalid_model_state_sizing_parameter")
 
 
 def fit_linear_coefficients_from_tsqr(

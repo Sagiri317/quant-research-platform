@@ -14,7 +14,10 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import (
+    ModelSpec,
+    _model_algorithm_ids,
+)
 from quant_research_platform.contracts.predictions import (
     PREDICTION_SCORE_COLUMN,
     PredictionSpec,
@@ -24,9 +27,6 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 )
 from quant_research_platform.markets.implementations.a_share.labels.definitions import (
     label_catalog,
-)
-from quant_research_platform.research.models.algorithm_facts import (
-    model_algorithm_ids,
 )
 from quant_research_platform.research.models.prediction import predict_model_frame
 from quant_research_platform.research.models.supervised import (
@@ -323,7 +323,7 @@ def test_model_fit_accepts_valid_filter_metadata_counts(
 
 @pytest.mark.parametrize(
     "model_algorithm",
-    model_algorithm_ids(),
+    _model_algorithm_ids(),
 )
 def test_required_model_algorithm_ids_fit_and_predict(model_algorithm: str) -> None:
     train = pd.DataFrame(
@@ -602,7 +602,7 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
         input_factor_columns=("factor",),
         label_column="label",
         sample_filter_mode="unfiltered",
-        hyperparameters={"n_estimators": 100_000, "n_jobs": 1},
+        hyperparameters={"n_estimators": np.int64(100_000), "n_jobs": 1},
         max_train_rows=len(frame),
     )
 
@@ -621,6 +621,45 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
                 spec,
                 estimator=Estimator(),
             )
+
+
+def test_numpy_integral_tree_size_matches_native_parameter_and_state_bound() -> None:
+    frame = make_filter_mode_frame().loc[:, ["timestamp", "factor", "label"]]
+    fitted: list[tuple[object, dict[str, object], int]] = []
+    for n_estimators in (100, np.int64(100)):
+        spec = ModelSpec(
+            model_id=f"forest_integral_{type(n_estimators).__name__}",
+            model_algorithm="random_forest_regressor",
+            input_factor_columns=("factor",),
+            label_column="label",
+            sample_filter_mode="unfiltered",
+            hyperparameters={"n_estimators": n_estimators, "n_jobs": 1},
+            max_train_rows=len(frame),
+        )
+        estimator = build_estimator_from_model_spec(spec)
+        result = model_fitting.fit_model_result_from_frames(
+            (frame,),
+            spec,
+            estimator=estimator,
+        )
+        fitted.append(
+            (
+                estimator,
+                result.metadata["resolved_hyperparameters"],
+                model_fitting._model_state_upper_bound_bytes(  # noqa: SLF001
+                    frame,
+                    spec,
+                    estimator=estimator,
+                ),
+            )
+        )
+
+    assert all(type(estimator.n_estimators) is int for estimator, _, _ in fitted)
+    assert all(
+        resolved["n_estimators"] == 100 and type(resolved["n_estimators"]) is int
+        for _, resolved, _ in fitted
+    )
+    assert fitted[0][2] == fitted[1][2]
 
 
 @pytest.mark.parametrize(
@@ -734,6 +773,20 @@ def test_model_threads_are_bound_to_physical_cores(
     assert build_estimator_from_model_spec(all_core).n_jobs == 2
     with pytest.raises(ValueError, match="model_threads_exceed_physical_cores"):
         build_estimator_from_model_spec(too_many)
+
+
+def test_model_threads_reject_numpy_integral_request() -> None:
+    spec = ModelSpec(
+        model_id="forest_numpy_thread_request",
+        model_algorithm="random_forest_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        hyperparameters={"n_estimators": 1, "n_jobs": np.int64(1)},
+        max_train_rows=8,
+    )
+
+    with pytest.raises(ValueError, match="invalid_model_thread_count"):
+        build_estimator_from_model_spec(spec)
 
 
 def test_model_threads_adapt_to_live_planning_headroom(
@@ -1036,6 +1089,32 @@ def test_unbounded_tree_sentinels_reject_before_estimator_fit(
                 spec,
                 estimator=Estimator(),
             )
+
+
+def test_gradient_tree_zero_depth_rejects_before_estimator_fit() -> None:
+    frame = make_filter_mode_frame().loc[:, ["timestamp", "factor", "label"]]
+    spec = ModelSpec(
+        model_id="gradient_zero_depth",
+        model_algorithm="gradient_boosting_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        sample_filter_mode="unfiltered",
+        hyperparameters={"n_estimators": 1, "max_depth": 0},
+        max_train_rows=len(frame),
+    )
+
+    class Estimator:
+        def fit(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            raise AssertionError("estimator fit entered before state validation")
+
+    with pytest.raises(ValueError, match="invalid_model_state_sizing_parameter"):
+        model_fitting.fit_estimator_model_result_from_frames(
+            (frame,),
+            spec,
+            estimator=Estimator(),
+        )
+    with runtime_resource_policy_scope():
+        pass
 
 
 @pytest.mark.parametrize(

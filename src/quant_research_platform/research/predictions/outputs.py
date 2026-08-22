@@ -13,6 +13,7 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 from quant_research_platform.contracts.models import (
+    _model_algorithm_facts,
     _resolved_model_hyperparameters_match,
 )
 from quant_research_platform.contracts.predictions import (
@@ -27,7 +28,6 @@ from quant_research_platform.research._memory import (
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
 )
-from quant_research_platform.research.models.algorithm_facts import algorithm_facts
 from quant_research_platform.research.models.prediction import (
     prediction_model_input_frame,
 )
@@ -103,7 +103,7 @@ def build_prediction_result_from_frames(
     ):
         raise ValueError("invalid_model_metadata")
     try:
-        facts = algorithm_facts(model_algorithm)
+        facts = _model_algorithm_facts(model_algorithm)
     except ValueError as exc:
         raise ValueError("invalid_model_metadata") from exc
     expected_package = facts.dependency_package or "internal"

@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from importlib import import_module
 
-import quant_research_platform.research.models.algorithm_facts as algorithm_facts
 from quant_research_platform._version import __version__ as qrp_version
+from quant_research_platform.contracts.models import _model_algorithm_facts
 
 _PREFLIGHTED_PACKAGES: set[str] = set()
 
 
 def model_dependency_status(algorithm: str) -> dict[str, str]:
-    facts = algorithm_facts.algorithm_facts(algorithm)
+    facts = _model_algorithm_facts(algorithm)
     package = facts.dependency_package
     if package is None:
         return {"status": "available", "package": "internal", "version": qrp_version}
@@ -33,12 +33,12 @@ def require_model_dependency(algorithm: str) -> dict[str, str]:
 
 
 def model_dependency_preflighted(algorithm: str) -> bool:
-    package = algorithm_facts.algorithm_facts(algorithm).dependency_package
+    package = _model_algorithm_facts(algorithm).dependency_package
     return package is None or package in _PREFLIGHTED_PACKAGES
 
 
 def preflight_model_dependency(algorithm: str) -> None:
-    facts = algorithm_facts.algorithm_facts(algorithm)
+    facts = _model_algorithm_facts(algorithm)
     package = facts.dependency_package
     if package is None:
         return

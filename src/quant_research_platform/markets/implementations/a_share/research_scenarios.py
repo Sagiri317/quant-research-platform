@@ -14,7 +14,13 @@ from quant_research_platform.contracts.data import (
     data_frequency_slug,
 )
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import (
+    ModelSpec,
+    _model_algorithm_facts,
+    _model_algorithm_ids,
+    _model_default_hyperparameters,
+    _model_smoke_hyperparameters,
+)
 from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
@@ -37,12 +43,6 @@ from quant_research_platform.research.factors.price_volume.columns import (
 )
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
-)
-from quant_research_platform.research.models.algorithm_facts import (
-    algorithm_facts,
-    model_algorithm_ids,
-    model_default_hyperparameters,
-    model_smoke_hyperparameters,
 )
 
 DEFAULT_MOMENTUM_WINDOW = 20
@@ -134,7 +134,7 @@ def build_signal_specs() -> tuple[SignalSpec, ...]:
 
 def build_model_specs(
     *,
-    model_algorithm_ids: Iterable[str] = model_algorithm_ids(),
+    model_algorithm_ids: Iterable[str] = _model_algorithm_ids(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     max_train_rows: int | None = DEFAULT_MAX_TRAIN_ROWS,
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
@@ -147,7 +147,7 @@ def build_model_specs(
     ).lookahead
     specs: list[ModelSpec] = []
     for model_algorithm in sorted(model_algorithm_ids):
-        facts = algorithm_facts(model_algorithm)
+        facts = _model_algorithm_facts(model_algorithm)
         single_factor = facts.input_kind == "single_factor_input"
         specs.append(
             ModelSpec(
@@ -163,9 +163,9 @@ def build_model_specs(
                 ),
                 label_column=return_source_column,
                 hyperparameters=(
-                    model_smoke_hyperparameters(model_algorithm)
+                    _model_smoke_hyperparameters(model_algorithm)
                     if hyperparameter_preset == "smoke"
-                    else model_default_hyperparameters(model_algorithm)
+                    else _model_default_hyperparameters(model_algorithm)
                 ),
                 random_seed=random_seed,
                 purge_gap_steps=purge_gap_steps,
@@ -179,7 +179,7 @@ def build_prediction_specs(
     *,
     train_end: str,
     test_start: str,
-    model_algorithm_ids: Iterable[str] = model_algorithm_ids(),
+    model_algorithm_ids: Iterable[str] = _model_algorithm_ids(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> tuple[PredictionSpec, ...]:
@@ -265,7 +265,7 @@ def build_portfolio_specs(
 
 def build_model_catalog(
     *,
-    model_algorithm_ids: Iterable[str] = model_algorithm_ids(),
+    model_algorithm_ids: Iterable[str] = _model_algorithm_ids(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     max_train_rows: int | None = DEFAULT_MAX_TRAIN_ROWS,
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
@@ -287,7 +287,7 @@ def build_prediction_catalog(
     *,
     train_end: str,
     test_start: str,
-    model_algorithm_ids: Iterable[str] = model_algorithm_ids(),
+    model_algorithm_ids: Iterable[str] = _model_algorithm_ids(),
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> PredictionCatalog:

@@ -6,12 +6,12 @@ import pytest
 
 import quant_research_platform.research.models.fitting as model_fitting
 from quant_research_platform._version import __version__ as qrp_version
-from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.models.algorithm_facts import (
-    model_algorithm_ids,
-    model_smoke_hyperparameters,
+from quant_research_platform.contracts.models import (
+    ModelSpec,
+    _model_algorithm_ids,
+    _model_smoke_hyperparameters,
 )
+from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research.models.prediction import predict_model_frame
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
@@ -46,7 +46,7 @@ def _model_frame() -> pd.DataFrame:
     )
 
 
-@pytest.mark.parametrize("algorithm", sorted(model_algorithm_ids()))
+@pytest.mark.parametrize("algorithm", sorted(_model_algorithm_ids()))
 def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
     algorithm: str,
 ) -> None:
@@ -57,7 +57,7 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
         input_factor_columns=("factor",),
         input_feature_columns=("feature",),
         label_column="label",
-        hyperparameters=model_smoke_hyperparameters(algorithm),
+        hyperparameters=_model_smoke_hyperparameters(algorithm),
         random_seed=7,
         max_train_rows=len(frame),
     )
@@ -144,7 +144,7 @@ def test_prediction_accepts_actual_bounded_parallel_model_threads() -> None:
         input_factor_columns=("factor",),
         input_feature_columns=("feature",),
         label_column="label",
-        hyperparameters=model_smoke_hyperparameters("extra_trees_regressor"),
+        hyperparameters=_model_smoke_hyperparameters("extra_trees_regressor"),
         random_seed=7,
         max_train_rows=len(frame),
     )
@@ -238,7 +238,7 @@ def test_persisted_parallel_model_threads_are_reader_host_independent(
     monkeypatch: pytest.MonkeyPatch,
     physical_cores: int,
 ) -> None:
-    hyperparameters = model_smoke_hyperparameters("extra_trees_regressor")
+    hyperparameters = _model_smoke_hyperparameters("extra_trees_regressor")
     resolved_hyperparameters = {**hyperparameters, "n_jobs": 8}
     monkeypatch.setattr(
         "quant_research_platform.contracts.models.psutil.cpu_count",

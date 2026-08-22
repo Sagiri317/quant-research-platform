@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from numbers import Integral
 from types import MappingProxyType
 
 import psutil
@@ -239,7 +240,20 @@ class ModelSpec:
         object.__setattr__(
             self,
             "hyperparameters",
-            MappingProxyType(dict(self.hyperparameters)),
+            MappingProxyType(
+                {
+                    key: (
+                        int(value)
+                        if (
+                            key != "n_jobs"
+                            and isinstance(value, Integral)
+                            and not isinstance(value, bool)
+                        )
+                        else value
+                    )
+                    for key, value in self.hyperparameters.items()
+                }
+            ),
         )
 
     @property

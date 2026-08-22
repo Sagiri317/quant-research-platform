@@ -228,13 +228,11 @@ def test_profile_interim_call_reuses_ambient_root(
 
 
 def test_research_profile_covers_required_models_predictions_and_signals() -> None:
+    from quant_research_platform.contracts.models import _model_algorithm_ids
     from quant_research_platform.profiles.research import research_profile
-    from quant_research_platform.research.models.algorithm_facts import (
-        model_algorithm_ids,
-    )
 
     profile = research_profile()
-    algorithms = tuple(model_algorithm_ids())
+    algorithms = tuple(_model_algorithm_ids())
     dataset = profile.research_datasets.get("price_volume_forward_returns")
     evaluation = profile.evaluations.get("signal_forward_return_20d")
     portfolio = research_scenarios.build_portfolio_catalog(
