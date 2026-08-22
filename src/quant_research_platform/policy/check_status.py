@@ -30,27 +30,6 @@ def require_status(value: object) -> str:
     return str(value)
 
 
-def aggregate_check_status(statuses: Iterable[object]) -> str:
-    return aggregate_component_status(statuses)
-
-
-def aggregate_component_status(statuses: Iterable[object]) -> str:
-    """Aggregate checks that must all execute and pass."""
-
-    values = tuple(require_status(status) for status in statuses)
-    if not values:
-        return CheckStatus.NOT_RUN.value
-    if CheckStatus.FAIL.value in values:
-        return CheckStatus.FAIL.value
-    if CheckStatus.BLOCKED.value in values:
-        return CheckStatus.BLOCKED.value
-    if CheckStatus.NOT_RUN.value in values:
-        if CheckStatus.PASS.value in values:
-            return CheckStatus.FAIL.value
-        return CheckStatus.NOT_RUN.value
-    return CheckStatus.PASS.value
-
-
 def aggregate_validation_matrix_status(statuses: Iterable[object]) -> str:
     """Aggregate independently runnable validation matrix entries."""
 
@@ -167,8 +146,6 @@ def _require_evidence_fields(
 __all__ = [
     "CheckStatus",
     "VALID_STATUS_TOKENS",
-    "aggregate_component_status",
-    "aggregate_check_status",
     "aggregate_validation_matrix_status",
     "overall_verification_status",
     "require_status",

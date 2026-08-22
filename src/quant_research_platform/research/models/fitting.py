@@ -84,20 +84,6 @@ def _fit_model_result_owned_from_frames(
     )
 
 
-def fit_linear_model_result_from_frames(
-    frames: Iterable[pd.DataFrame],
-    spec: ModelSpec,
-) -> ModelFitResult:
-    with runtime_resource_policy_scope():
-        owned = _fit_linear_model_result_owned_from_frames(frames, spec)
-        if isinstance(owned, _OwnedValue):
-            try:
-                return owned.value
-            finally:
-                owned.lease.close()
-        return owned
-
-
 def _fit_linear_model_result_owned_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
@@ -1497,6 +1483,5 @@ def _strict_non_negative_count_value(value: object) -> int:
 __all__ = [
     "ModelFitResult",
     "collect_training_frame",
-    "fit_linear_model_result_from_frames",
     "fit_model_result_from_frames",
 ]

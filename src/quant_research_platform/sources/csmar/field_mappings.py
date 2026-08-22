@@ -108,93 +108,6 @@ COLUMN_ALIASES = {
     },
 }
 
-FIELD_DESCRIPTIONS = {
-    "stock_master": {
-        "Stkcd": "证券代码",
-        "Stknme": "证券简称",
-        "Listdt": "上市日期",
-        "DelistedDate": "退市日期",
-        "Markettype": "市场类型",
-        "Nnindcd": "行业代码 C，2012 版证监会行业分类代码",
-        "Nnindnme": "行业名称 C，2012 版证监会行业分类名称",
-        "Statco": "公司活动情况",
-        "Statdt": "情况变动日",
-    },
-    MARKET_BARS_DATA_ID: {
-        "Stkcd": "证券代码",
-        "Trddt": "交易日期",
-        "Markettype": "市场类型",
-        "Trdsta": "交易状态",
-        "Filling": "填充标识",
-        "Opnprc": "日开盘价",
-        "Hiprc": "日最高价",
-        "Loprc": "日最低价",
-        "Clsprc": "日收盘价",
-        "Dnshrtrd": "日个股交易股数",
-        "Dnvaltrd": "日个股交易金额",
-        "Dsmvosd": "日个股流通市值",
-        "Dsmvtll": "日个股总市值 1",
-        "Dretwd": "考虑现金红利再投资的日个股回报率",
-        "Dretnd": "不考虑现金红利的日个股回报率",
-        "Adjprcwd": "考虑现金红利再投资的收盘价的可比价格",
-        "Adjprcnd": "不考虑现金红利的收盘价的可比价格",
-        "PreClosePrice": "昨收盘(交易所)",
-        "ChangeRatio": "涨跌幅",
-        "LimitDown": "跌停价",
-        "LimitUp": "涨停价",
-        "LimitStatus": "涨跌停状态",
-    },
-    "market_cap": {
-        "Stkcd": "证券代码",
-        "Shrchgdt": "股本变动日期",
-        "Nshrttl": "总股数",
-        "Nshra": "A 股流通股数",
-        "Nshrb": "B 股流通股数",
-        "Nshrh": "H 股流通股数",
-    },
-    "adjustment": {
-        "Symbol": "证券代码",
-        "TradingDate": "交易日期",
-        "FwardFactor": "前复权因子",
-        "BwardFactor": "后复权因子",
-        "CumulateFwardFactor": "前累计复权因子",
-        "CumulateBwardFactor": "后累计复权因子",
-    },
-    "index_market": {
-        "Indexcd": "交易所指数代码",
-        "Idxtrd01": "交易日期",
-        "Idxtrd02": "开盘指数",
-        "Idxtrd03": "最高指数",
-        "Idxtrd04": "最低指数",
-        "Idxtrd05": "收盘指数",
-        "Idxtrd06": "成份证券成交量",
-        "Idxtrd07": "成份证券成交金额",
-        "Idxtrd08": "指数回报率",
-        "Idxtrd09": "指数中文简称",
-    },
-    "index_info": {
-        "Indexcd": "交易所指数代码",
-        "Idxinfo01": "指数名称",
-        "Idxinfo11": "开始日期",
-        "Idxinfo02": "基准日期",
-        "Idxinfo03": "基准点数",
-        "Idxinfo04": "样本范围",
-        "Idxinfo05": "加权方式",
-        "Idxinfo06": "发布机构",
-        "Idxinfo07": "指数类别",
-        "Idxinfo08": "指数类型",
-        "Idxinfo09": "所属市场",
-        "Idxinfo10": "计算公式",
-    },
-    "trading_calendar": {
-        "Markettype": "市场类型",
-        "Clddt": "日历日期",
-        "Daywk": "星期",
-        "State": "开市情况",
-    },
-}
-
-
 def _validate_mapping_facts(
     mappings: Mapping[str, Mapping[str, str]],
     aliases_by_dataset: Mapping[str, Mapping[str, tuple[str, ...]]],
@@ -227,14 +140,6 @@ COLUMN_ALIASES = MappingProxyType(
         for name, values in COLUMN_ALIASES.items()
     }
 )
-FIELD_DESCRIPTIONS = MappingProxyType(
-    {
-        name: MappingProxyType(dict(values))
-        for name, values in FIELD_DESCRIPTIONS.items()
-    }
-)
-
-
 def missing_raw_columns(frame: pd.DataFrame, dataset: str) -> list[str]:
     """Return provider columns missing from a mappable raw export frame."""
 
@@ -270,12 +175,6 @@ def column_mapping(dataset: str) -> Mapping[str, str]:
     """Return raw-provider to source-local normalized column mappings."""
 
     return COLUMN_MAPPINGS[dataset]
-
-
-def field_descriptions(dataset: str) -> Mapping[str, str]:
-    """Return provider field descriptions for private metadata sidecars."""
-
-    return FIELD_DESCRIPTIONS.get(dataset, {})
 
 
 def map_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
@@ -357,9 +256,7 @@ def _format_stock_code(value: int, *, error: str) -> str:
 __all__ = [
     "COLUMN_ALIASES",
     "COLUMN_MAPPINGS",
-    "FIELD_DESCRIPTIONS",
     "column_mapping",
-    "field_descriptions",
     "map_columns",
     "missing_raw_column_names",
     "validate_raw_column_names",

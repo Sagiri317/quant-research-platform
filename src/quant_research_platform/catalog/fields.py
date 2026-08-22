@@ -58,19 +58,6 @@ def canonical_field_names() -> CanonicalFieldNames:
     return _CANONICAL_FIELD_NAMES
 
 
-def platform_interim_column_names() -> tuple[str, ...]:
-    names = canonical_field_names()
-    return (
-        names.market_id,
-        names.asset_id,
-        names.timestamp,
-        names.session_date,
-        names.available_at,
-        names.source_id,
-        names.source_asset_id,
-    )
-
-
 def platform_entity_time_key() -> tuple[str, ...]:
     names = canonical_field_names()
     return (names.market_id, names.asset_id, names.timestamp)
@@ -140,5 +127,4 @@ __all__ = [
     "canonical_field_names",
     "platform_entity_time_key",
     "platform_field_catalog",
-    "platform_interim_column_names",
 ]

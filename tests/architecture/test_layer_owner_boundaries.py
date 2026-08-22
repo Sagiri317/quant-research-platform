@@ -156,12 +156,6 @@ def test_owner_layer_boundaries_reject_real_dependency_directions(
     assert any(module.startswith(prefix) for prefix in LAYER_BOUNDARIES.get(root, ()))
 
 
-def test_status_aggregation_rejects_pass_with_not_run_child() -> None:
-    from quant_research_platform.policy.check_status import aggregate_check_status
-
-    assert aggregate_check_status(["PASS", "NOT_RUN"]) == "FAIL"
-
-
 def test_physical_writes_require_storage_or_artifacts_owner() -> None:
     violations = _physical_writer_violations(
         {

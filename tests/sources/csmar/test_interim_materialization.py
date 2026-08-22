@@ -2397,12 +2397,6 @@ def test_csmar_field_mappings_describe_source_local_aliases() -> None:
         ("Markettype", "Daywk"),
         "trading_calendar",
     ) == ["Clddt", "State"]
-    assert set(field_mappings.field_descriptions("trading_calendar")) == {
-        "Markettype",
-        "Clddt",
-        "Daywk",
-        "State",
-    }
 
 
 def test_csmar_raw_reader_preserves_code_strings_and_index_formula_commas(

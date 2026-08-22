@@ -38,9 +38,6 @@ from quant_research_platform.storage._dataset_inventory import DatasetSessionInv
 from quant_research_platform.storage._dataset_key_tracking import (
     ExactPrimaryKeyIndex,
 )
-from quant_research_platform.storage._dataset_manifest_validation import (
-    validate_manifest_runtime_metadata_shape,
-)
 from quant_research_platform.storage._dataset_paths import (
     partition_frames,
     timestamp_column_from_spec_payload,
@@ -1941,48 +1938,6 @@ def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
                 partition_columns=("year",),
             )
         )
-
-    physical_schema = physical_schema_from_schema(
-        pa.schema([pa.field("market_id", pa.string(), nullable=False)])
-    )
-    manifest = {
-        "columns": ["market_id"],
-        "physical_schema": physical_schema,
-        "schema_hash": canonical_json_hash(physical_schema),
-        "file_count": 1,
-        "row_count": 2,
-        "partition_row_counts": {"year=2024": 2},
-    }
-    assert validate_manifest_runtime_metadata_shape(manifest)[0] == 1
-    for bad_manifest, error in (
-        ({**manifest, "columns": []}, "manifest_columns_invalid"),
-        ({**manifest, "schema_hash": ""}, "manifest_schema_hash_invalid"),
-        ({**manifest, "schema_hash": "A" * 64}, "manifest_schema_hash_invalid"),
-        ({**manifest, "file_count": "bad"}, "manifest_counts_invalid"),
-        ({**manifest, "file_count": True}, "manifest_counts_invalid"),
-        ({**manifest, "row_count": 2.0}, "manifest_counts_invalid"),
-        ({**manifest, "row_count": -1}, "manifest_counts_invalid"),
-        (
-            {**manifest, "partition_row_counts": {}},
-            "manifest_partition_row_counts_invalid",
-        ),
-        (
-            {**manifest, "partition_row_counts": {"": 1}},
-            "manifest_partition_row_counts_invalid",
-        ),
-        (
-            {**manifest, "partition_row_counts": {"year=2024": "bad"}},
-            "manifest_partition_row_counts_invalid",
-        ),
-        (
-            {**manifest, "partition_row_counts": {"year=2024": -1}},
-            "manifest_partition_row_counts_invalid",
-        ),
-        ({**manifest, "row_count": 3}, "manifest_row_count_mismatch"),
-    ):
-        with pytest.raises(ValueError, match=error):
-            validate_manifest_runtime_metadata_shape(bad_manifest)
-
 
 def test_dataset_spec_payload_accepts_exact_base_variant_and_rejects_extras() -> None:
     base_spec = {

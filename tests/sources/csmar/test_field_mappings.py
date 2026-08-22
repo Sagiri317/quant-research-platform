@@ -131,7 +131,6 @@ def test_all_registered_mapping_facts_are_self_consistent() -> None:
     (
         field_mappings.COLUMN_MAPPINGS,
         field_mappings.COLUMN_ALIASES,
-        field_mappings.FIELD_DESCRIPTIONS,
     ),
 )
 def test_registered_mapping_facts_are_deeply_immutable(facts: object) -> None:

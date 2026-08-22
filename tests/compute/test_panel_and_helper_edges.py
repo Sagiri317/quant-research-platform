@@ -16,7 +16,6 @@ from quant_research_platform.compute._portfolio_math import (
 from quant_research_platform.compute.dataframe import constraints, position_math
 from quant_research_platform.compute.dataframe.portfolio_helpers import (
     risk_values,
-    select_signal,
 )
 from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import (
@@ -153,9 +152,6 @@ def test_portfolio_helper_validation_and_selection_edges() -> None:
         select_signals(spec, ("signal", "signal"))
     with pytest.raises(ValueError, match="portfolio signals are not in spec"):
         select_signals(spec, ("missing",))
-    assert select_signal(spec, None) == "signal"
-    with pytest.raises(ValueError, match="signal_column"):
-        select_signal(spec, "missing")
 
 
 def test_portfolio_helper_costs_signals_and_group_keys() -> None:

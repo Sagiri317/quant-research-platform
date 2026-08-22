@@ -26,19 +26,6 @@ def apply_feature_transforms(
     )
 
 
-def apply_feature_transform(
-    frame: pd.DataFrame,
-    transform: FeatureTransformSpec,
-    *,
-    timestamp_column: str = "timestamp",
-) -> pd.DataFrame:
-    return _apply_feature_transforms_to_copy(
-        frame,
-        (transform,),
-        timestamp_column=timestamp_column,
-    )
-
-
 def _apply_feature_transforms_to_copy(
     frame: pd.DataFrame,
     transforms: tuple[FeatureTransformSpec, ...],
@@ -237,4 +224,4 @@ def _apply_fillna(
     raise ValueError("unsupported_feature_transform_fillna_policy")
 
 
-__all__ = ["apply_feature_transform", "apply_feature_transforms"]
+__all__ = ["apply_feature_transforms"]

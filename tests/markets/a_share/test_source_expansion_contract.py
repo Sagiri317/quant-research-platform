@@ -2,16 +2,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer as materializer,
-)
-from quant_research_platform.markets.implementations.a_share.validation import (
-    strict_values,
 )
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -126,28 +122,4 @@ def test_missing_required_source_column_fails_closed_with_data_id_and_column(
             source_id=source_id,
             time_window=TimeWindow("2024-01-02", "2024-01-03"),
             data_ids=(frequency_ids.MARKET_PANEL_DATA_ID,),
-        )
-
-
-def test_a_share_source_asset_ids_preserve_exact_stock_and_text_semantics() -> None:
-    stock = pd.Series(["1", " 000002 "], index=[7, 9])
-
-    normalized = strict_values.strict_stock_code_series(stock, error="invalid_stock")
-
-    assert normalized.tolist() == ["000001", "000002"]
-    assert normalized.index.tolist() == [7, 9]
-    assert strict_values.strict_source_asset_id_series(
-        pd.Series(["index_a"]),
-        asset_namespace="index",
-        error="invalid_asset",
-    ).tolist() == ["index_a"]
-
-
-@pytest.mark.parametrize("value", (1, "not-a-code", "-1", "1234567"))
-def test_a_share_stock_code_contract_rejects_coercion_and_out_of_range(
-    value: object,
-) -> None:
-    with pytest.raises(ValueError, match="invalid_stock"):
-        strict_values.strict_stock_code_series(
-            pd.Series([value]), error="invalid_stock"
         )

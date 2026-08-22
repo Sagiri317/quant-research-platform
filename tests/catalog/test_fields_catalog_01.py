@@ -3,7 +3,6 @@ from __future__ import annotations
 from quant_research_platform.catalog.fields import (
     canonical_field_names,
     platform_field_catalog,
-    platform_interim_column_names,
 )
 from quant_research_platform.contracts.columns import ColumnRole, FieldSpec, LogicalType
 
@@ -12,15 +11,6 @@ def test_catalog_fields_owns_platform_canonical_fields_only() -> None:
     names = canonical_field_names()
     catalog = platform_field_catalog()
 
-    assert platform_interim_column_names() == (
-        "market_id",
-        "asset_id",
-        "timestamp",
-        "session_date",
-        "available_at",
-        "source_id",
-        "source_asset_id",
-    )
     assert catalog.get(names.market_id) == FieldSpec(
         name="market_id",
         role=ColumnRole.KEY,

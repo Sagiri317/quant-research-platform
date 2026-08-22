@@ -8,7 +8,9 @@ import quant_research_platform.research.portfolios.engine as portfolio_engine
 import quant_research_platform.research.signals.materialization as materialization
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.features.transforms import apply_feature_transform
+from quant_research_platform.research.features.transforms import (
+    apply_feature_transforms,
+)
 from quant_research_platform.research.signals.materialization import (
     normalize_signal_frame,
 )
@@ -31,7 +33,7 @@ def test_winsorize_clips_by_timestamp_quantiles_instead_of_zscore() -> None:
         winsorize_quantiles=(0.2, 0.8),
     )
 
-    result = apply_feature_transform(frame, spec)
+    result = apply_feature_transforms(frame, (spec,))
 
     assert result["mom_20d_winsorized"].tolist() == pytest.approx([4.0, 10.0, 64.0])
 
@@ -56,8 +58,8 @@ def test_fillna_transform_names_apply_their_fill_policy() -> None:
         output_columns=("factor_median",),
     )
 
-    zero_result = apply_feature_transform(frame, zero_spec)
-    median_result = apply_feature_transform(frame, median_spec)
+    zero_result = apply_feature_transforms(frame, (zero_spec,))
+    median_result = apply_feature_transforms(frame, (median_spec,))
 
     assert zero_result["factor_zero"].tolist() == pytest.approx([1.0, 0.0, 3.0])
     assert median_result["factor_median"].tolist() == pytest.approx([1.0, 2.0, 3.0])
@@ -70,13 +72,15 @@ def test_zero_variance_zscore_keeps_numeric_output() -> None:
             "factor": [1.0, 1.0, 1.0],
         }
     )
-    result = apply_feature_transform(
+    result = apply_feature_transforms(
         frame,
-        FeatureTransformSpec(
-            transform_id="factor_zscore",
-            source_columns=("factor",),
-            transform="cross_sectional_zscore",
-            output_columns=("factor_zscore",),
+        (
+            FeatureTransformSpec(
+                transform_id="factor_zscore",
+                source_columns=("factor",),
+                transform="cross_sectional_zscore",
+                output_columns=("factor_zscore",),
+            ),
         ),
     )
 
@@ -117,7 +121,7 @@ def test_feature_transform_admits_before_result_copy(
                 MemoryError,
                 match="runtime_memory_budget_exceeded",
             ):
-                apply_feature_transform(frame, spec)
+                apply_feature_transforms(frame, (spec,))
     assert policy.used_memory_bytes == 0
 
 

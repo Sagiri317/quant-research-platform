@@ -38,9 +38,6 @@ from quant_research_platform.research.factors.price_volume.requirements import (
     price_volume_factor_input_columns,
     unsupported_price_volume_factors,
 )
-from quant_research_platform.research.factors.price_volume.windows import (
-    largest_price_volume_lookback_days,
-)
 from tests.helpers.price_volume_reference import (
     assert_frame_matches_reference,
     reference_price_volume_factors,
@@ -629,25 +626,6 @@ def test_price_volume_compute_fails_closed_for_unsupported_factor_names(
     assert unsupported_price_volume_factors(factor_columns) == factor_columns
     with pytest.raises(ValueError, match=error_match):
         calculate_price_volume_factors(panel, factor_columns=factor_columns)
-
-
-def test_price_volume_largest_lookback_is_derived_from_requested_columns() -> None:
-    columns = price_volume_factor_columns()
-
-    assert largest_price_volume_lookback_days(("mom_3d",)) == 3
-    assert (
-        largest_price_volume_lookback_days(
-            ("mom_3d", "amount_shock_15m", "ret_volume_corr_20tick")
-        )
-        == 20
-    )
-    assert largest_price_volume_lookback_days(()) == 0
-    assert largest_price_volume_lookback_days(columns) == max(
-        int(token[:-1])
-        for column in columns
-        for token in column.split("_")
-        if token.endswith("d") and token[:-1].isdigit()
-    )
 
 
 def test_price_volume_window_column_uses_frequency_suffix_contract() -> None:

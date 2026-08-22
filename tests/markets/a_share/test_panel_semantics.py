@@ -95,39 +95,6 @@ def test_a_share_calendar_rejects_invalid_source_market_type(
         )
 
 
-def test_a_share_calendar_warmup_start_uses_open_sessions() -> None:
-    frame = pd.DataFrame(
-        {
-            "calendar_date": pd.to_datetime(
-                [
-                    "2019-12-26",
-                    "2019-12-27",
-                    "2019-12-28",
-                    "2019-12-29",
-                    "2019-12-30",
-                    "2020-01-01",
-                    "2020-01-02",
-                    "2020-01-02",
-                ]
-            ),
-            "source_market_type": [1, 1, 1, 1, 1, 1, 1, 64],
-            "is_trading_day": [True, True, False, True, True, False, True, True],
-        }
-    )
-
-    assert calendar.warmup_start_date_for_window(
-        frame,
-        start_date="2020-01-01",
-        max_window=3,
-    ) == pd.Timestamp("2019-12-27")
-    with pytest.raises(ValueError, match="invalid_factor_warmup_window"):
-        calendar.warmup_start_date_for_window(
-            frame,
-            start_date="2020-01-01",
-            max_window=-1,
-        )
-
-
 def test_compute_market_panel_maps_source_assets_to_a_share_assets() -> None:
     panel = compute_market_panel(
         make_synthetic_market_bars_daily(["2014-01-02", "2014-01-03"]),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 import pandas as pd
 
@@ -64,21 +64,6 @@ def windows_from_requested_factors(requested: set[str]) -> tuple[int, ...]:
     return tuple(sorted(values))
 
 
-def largest_price_volume_lookback_days(
-    factor_columns: Iterable[str],
-) -> int:
-    """Return the largest rolling/trailing lookback encoded in factor names."""
-
-    windows = []
-    for column in factor_columns:
-        parsed = parse_price_volume_windowed_factor_name(column)
-        if parsed is None:
-            continue
-        _prefix, window, _frequency = parsed
-        windows.append(window)
-    return max(windows, default=0)
-
-
 def price_volume_valid_bar_read_window(
     panel_keys: pd.DataFrame | Mapping[object, Sequence[pd.Timestamp]],
     *,
@@ -131,6 +116,5 @@ def price_volume_valid_bar_read_window(
     return TimeWindow(start, read_window.end)
 
 __all__ = [
-    "largest_price_volume_lookback_days",
     "price_volume_valid_bar_read_window",
 ]
