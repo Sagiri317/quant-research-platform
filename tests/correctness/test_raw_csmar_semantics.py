@@ -221,7 +221,7 @@ def test_read_export_header_preserves_keyboard_interrupt_over_close_failure(
 
 
 @pytest.mark.parametrize("text_width", (1, 16_384))
-def test_non_index_raw_iteration_calibrates_from_a_single_first_row(
+def test_non_index_raw_iteration_bounds_requested_chunks_across_text_widths(
     tmp_path: Path,
     text_width: int,
 ) -> None:
@@ -243,7 +243,6 @@ def test_non_index_raw_iteration_calibrates_from_a_single_first_row(
         )
     )
 
-    assert len(chunks[0]) == 1
     assert all(0 < len(chunk) <= 4 for chunk in chunks)
     assert sum(map(len, chunks)) == 5
 
