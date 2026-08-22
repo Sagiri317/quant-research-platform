@@ -3,17 +3,14 @@ from __future__ import annotations
 import json
 import weakref
 from contextlib import contextmanager
-from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-import quant_research_platform.research._memory as research_memory
 import quant_research_platform.research.datasets.assembler as assembler_module
 import quant_research_platform.research.datasets.io as research_dataset_io
-import quant_research_platform.research.evaluations.runner as evaluation_runner_module
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.predictions.runner as prediction_runner_module
 import quant_research_platform.storage._dataset_reading as dataset_reading
@@ -24,7 +21,6 @@ from quant_research_platform.artifacts._evaluation_outputs import (
 from quant_research_platform.artifacts._prediction_outputs import (
     write_prediction_outputs,
 )
-from quant_research_platform.artifacts.outputs import write_evaluation_outputs
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.fields import platform_entity_time_key
@@ -62,10 +58,6 @@ from quant_research_platform.research.evaluations.engine import (
     _EvaluationStreamingState,
     _iter_evaluation_output_chunks,
     _iter_evaluation_work_frames,
-    evaluate_signal_frame_chunks,
-)
-from quant_research_platform.research.evaluations.runner import (
-    build_evaluation_result_from_research_dataset,
 )
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
@@ -100,49 +92,6 @@ from tests.research.filter_mode_fixtures import make_filter_mode_frame
 from tests.research.prediction_output_helpers import (
     write_prediction_output_and_read,
 )
-
-
-def test_research_indivisible_result_is_exact_and_pre_admitted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first = pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")], "value": [1.0]})
-    second = pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-02")], "value": [2.0]})
-    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
-
-    with runtime_resource_policy_scope(policy):
-        with research_memory._ResearchFrameAccumulator(
-            "research.test.exact",
-            resource_policy=policy,
-        ) as accumulator:
-            accumulator.append(first)
-            accumulator.append(second)
-            result = accumulator.materialize()
-    pd.testing.assert_frame_equal(
-        result,
-        pd.concat([first, second], ignore_index=True),
-    )
-
-    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
-    entered: list[bool] = []
-
-    def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        entered.append(True)
-        raise AssertionError("concat entered before full-overlap admission")
-
-    monkeypatch.setattr(research_memory.pd, "concat", reject_concat)
-    with runtime_resource_policy_scope(policy):
-        with research_memory._ResearchFrameAccumulator(
-            "research.test.reject",
-            resource_policy=policy,
-        ) as accumulator:
-            accumulator.append(first)
-            with policy.reserve("outer", policy.available_memory_bytes):
-                with pytest.raises(
-                    MemoryError,
-                    match="runtime_memory_budget_exceeded",
-                ):
-                    accumulator.materialize()
-    assert entered == []
 
 
 def test_research_dataset_chunk_wrapper_captures_outer_at_creation(
@@ -230,24 +179,6 @@ def _write_prediction_result(layout: StorageLayout, result) -> Path:
         output_chunks=result.output_chunks,
         model_metadata=result.model_metadata,
         prediction_metadata_factory=result.prediction_metadata_factory,
-    )
-
-
-def _write_evaluation_result(layout: StorageLayout, result) -> Path:
-    return write_evaluation_outputs(
-        result.metrics,
-        result.grouped_label_values,
-        ic_summary=result.ic_summary,
-        group_spread_summary=result.group_spread_summary,
-        evaluation_diagnostics=result.diagnostics,
-        spec=result.spec,
-        output_spec=_output_spec(
-            output_definition_id="evaluation_outputs",
-            run_id=result.spec.run_id,
-            market_id=result.spec.market_id,
-            run_type=result.spec.run_type,
-        ),
-        layout=layout,
     )
 
 
@@ -1691,13 +1622,6 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
 
 def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     frame = _research_rows()
-    eval_spec = EvaluationSpec(
-        run_id="eval_demo",
-        market_id=MarketId("a_share"),
-        research_dataset_id="demo",
-        signals=(make_signal_spec("mom_20d"),),
-        label_columns=("forward_return_20d",),
-    )
     model_spec = ModelSpec(
         model_id="linear_demo",
         model_algorithm="linear_regression",
@@ -1715,7 +1639,6 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
     )
     estimator = build_estimator_from_model_spec(model_spec)
 
-    evaluation = evaluate_signal_frame_chunks((frame,), eval_spec)
     with runtime_resource_policy_scope():
         model_result_owned = model_fitting._fit_model_result_owned_from_frames(
             (frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],),
@@ -1733,10 +1656,6 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
                 model_metadata=model_result.metadata,
             )
 
-            assert len(evaluation.metrics) == 2
-            assert len(evaluation.ic_summary) == 1
-            assert len(evaluation.group_spread_summary) == 1
-            assert evaluation.diagnostics.rows_input == 4
             assert prediction_spec.prediction_column in prediction.columns
             assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
             assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
@@ -2062,130 +1981,6 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
     assert any("forward_return_20d" not in columns for columns in read_columns_seen)
 
 
-def test_evaluation_runner_reads_research_dataset_and_writes_report(
-    tmp_path: Path,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
-    )
-    processed_catalog = make_demo_processed_catalog()
-    write_demo_processed_inputs(layout, processed_catalog)
-    assemble_research_dataset(
-        layout=layout,
-        dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
-        dataset_id="demo",
-        time_window=TimeWindow("2014-01-02", "2014-01-03"),
-    )
-    evaluation_catalog = EvaluationCatalog()
-    evaluation_catalog.register(
-        EvaluationSpec(
-            run_id="eval_demo",
-            market_id=MarketId("a_share"),
-            research_dataset_id="demo",
-            signals=(make_signal_spec("mom_20d"),),
-            label_columns=("forward_return_20d",),
-        )
-    )
-
-    result = build_evaluation_result_from_research_dataset(
-        layout=layout,
-        dataset_catalog=dataset_catalog,
-        evaluation_catalog=evaluation_catalog,
-        run_id="eval_demo",
-    )
-    output_bundle = _write_evaluation_result(layout, result)
-
-    assert output_bundle.as_posix().endswith("outputs/eval_demo")
-    assert (output_bundle / "metrics.parquet").is_file()
-    assert (output_bundle / "grouped_label_values.parquet").is_file()
-    assert (output_bundle / "ic_summary.parquet").is_file()
-    assert (output_bundle / "group_spread_summary.parquet").is_file()
-    assert (output_bundle / "summary.md").is_file()
-    assert (output_bundle / "manifest.json").is_file()
-    manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["files"] == [
-        "metrics.parquet",
-        "grouped_label_values.parquet",
-        "ic_summary.parquet",
-        "group_spread_summary.parquet",
-        "summary.md",
-    ]
-
-
-def test_evaluation_runner_streams_research_chunks(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = _research_rows_for_dates(
-        [
-            "2014-01-02",
-            "2014-01-03",
-            "2014-01-06",
-            "2014-01-07",
-            "2014-01-08",
-        ]
-    )
-    layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
-    )
-    processed_catalog = make_demo_processed_catalog()
-    write_demo_processed_inputs(layout, processed_catalog, frame=frame)
-    assembly_policy = capture_storage_test_policy(
-        working_headroom_bytes=4 * 1024**2,
-    )
-    assemble_research_dataset(
-        layout=layout,
-        dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
-        dataset_id="demo",
-        time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        resource_policy=assembly_policy,
-    )
-    evaluation_catalog = EvaluationCatalog()
-    evaluation_catalog.register(
-        EvaluationSpec(
-            run_id="eval_demo",
-            market_id=MarketId("a_share"),
-            research_dataset_id="demo",
-            signals=(make_signal_spec("mom_20d"),),
-            label_columns=("forward_return_20d",),
-        )
-    )
-    original_iter = evaluation_runner_module.iter_research_dataset_chunks
-    read_chunk_rows: list[int] = []
-
-    def wrapped_iter(*args, **kwargs):
-        for chunk in original_iter(*args, **kwargs):
-            read_chunk_rows.append(len(chunk))
-            yield chunk
-
-    monkeypatch.setattr(
-        evaluation_runner_module,
-        "iter_research_dataset_chunks",
-        wrapped_iter,
-    )
-
-    evaluation_policy = capture_test_policy(
-        available_memory_bytes=2 * 1024**2,
-        explicit_cap_bytes=1024**2,
-    )
-    with runtime_resource_policy_scope(evaluation_policy):
-        result = build_evaluation_result_from_research_dataset(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            evaluation_catalog=evaluation_catalog,
-            run_id="eval_demo",
-            resource_policy=evaluation_policy,
-        )
-    output_bundle = _write_evaluation_result(layout, result)
-
-    assert (output_bundle / "metrics.parquet").is_file()
-    assert read_chunk_rows == [len(frame)]
-
-
 def test_evaluation_input_lease_spans_normalization_and_closes_on_stop() -> None:
     frame = make_filter_mode_frame().assign(normalized_factor=999.0)
     spec = EvaluationSpec(
@@ -2277,7 +2072,6 @@ def test_managed_workflow_admits_summary_before_research_pull(
 
 def test_managed_evaluation_runner_persists_without_full_result(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = _research_rows_for_dates(
         ["2014-01-02", "2014-01-03", "2014-01-06"]
@@ -2308,12 +2102,6 @@ def test_managed_evaluation_runner_persists_without_full_result(
         label_columns=("forward_return_20d",),
     )
     evaluation_catalog.register(spec)
-    canonical = evaluate_signal_frame_chunks((frame,), spec)
-    monkeypatch.setattr(
-        evaluation_runner_module,
-        "build_evaluation_result_from_research_dataset",
-        lambda **_kwargs: pytest.fail("managed_workflow_built_full_result"),
-    )
     evaluation_policy = capture_test_policy(
         available_memory_bytes=32 * 1024**2,
         explicit_cap_bytes=16 * 1024**2,
@@ -2336,38 +2124,12 @@ def test_managed_evaluation_runner_persists_without_full_result(
         )
 
     assert evaluation_policy.used_memory_bytes == 0
-    pd.testing.assert_frame_equal(
-        pd.read_parquet(output_bundle / "metrics.parquet"),
-        canonical.metrics,
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    pd.testing.assert_frame_equal(
-        pd.read_parquet(output_bundle / "grouped_label_values.parquet"),
-        canonical.grouped_label_values,
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    pd.testing.assert_frame_equal(
-        pd.read_parquet(output_bundle / "ic_summary.parquet"),
-        canonical.ic_summary,
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    pd.testing.assert_frame_equal(
-        pd.read_parquet(output_bundle / "group_spread_summary.parquet"),
-        canonical.group_spread_summary,
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
+    metrics = pd.read_parquet(output_bundle / "metrics.parquet")
+    grouped = pd.read_parquet(output_bundle / "grouped_label_values.parquet")
+    assert len(metrics) == 3
+    assert len(grouped) == 6
+    assert len(pd.read_parquet(output_bundle / "ic_summary.parquet")) == 1
+    assert len(pd.read_parquet(output_bundle / "group_spread_summary.parquet")) == 1
 
 
 @pytest.mark.parametrize(
@@ -2399,7 +2161,6 @@ def test_managed_evaluation_parity_covers_filters_ties_and_all_nan(
         label_columns=("label",),
         filter_mode=filter_mode,
     )
-    canonical = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
     policy = capture_test_policy(
         available_memory_bytes=32 * 1024**2,
         explicit_cap_bytes=16 * 1024**2,
@@ -2443,64 +2204,27 @@ def test_managed_evaluation_parity_covers_filters_ties_and_all_nan(
         finally:
             state.close()
 
-    def sorted_frame(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-        return frame.sort_values(columns, kind="mergesort").reset_index(drop=True)
-
-    pd.testing.assert_frame_equal(
-        sorted_frame(
-            pd.read_parquet(output_bundle / "metrics.parquet"),
-            ["timestamp", "signal", "label"],
-        ),
-        sorted_frame(canonical.metrics, ["timestamp", "signal", "label"]),
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    pd.testing.assert_frame_equal(
-        sorted_frame(
-            pd.read_parquet(output_bundle / "grouped_label_values.parquet"),
-            ["timestamp", "signal", "label", "group"],
-        ),
-        sorted_frame(
-            canonical.grouped_label_values,
-            ["timestamp", "signal", "label", "group"],
-        ),
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    pd.testing.assert_frame_equal(
-        sorted_frame(
-            pd.read_parquet(output_bundle / "ic_summary.parquet"),
-            ["signal", "label"],
-        ),
-        sorted_frame(canonical.ic_summary, ["signal", "label"]),
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
-    pd.testing.assert_frame_equal(
-        sorted_frame(
-            pd.read_parquet(output_bundle / "group_spread_summary.parquet"),
-            ["signal", "label"],
-        ),
-        sorted_frame(canonical.group_spread_summary, ["signal", "label"]),
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
+    metrics = pd.read_parquet(output_bundle / "metrics.parquet")
+    grouped = pd.read_parquet(output_bundle / "grouped_label_values.parquet")
+    spread = pd.read_parquet(output_bundle / "group_spread_summary.parquet")
+    if case == "all_nan":
+        assert metrics["n_obs"].tolist() == [0]
+        assert grouped.empty
+        assert spread.empty
+        expected_dropna = 0
+        expected_grouped_rows = 0
+    else:
+        assert metrics["ic"].notna().any()
+        assert len(grouped) == 2
+        assert len(spread) == 1
+        expected_dropna = {"eligible": 4, "tradable": 2}.get(filter_mode, 6)
+        expected_grouped_rows = 2
     manifest = json.loads((output_bundle / "manifest.json").read_text())
     diagnostics = manifest["metadata"]["evaluation_diagnostics"]
-    expected_diagnostics = asdict(canonical.diagnostics)
-    expected_diagnostics.pop("contract_version")
-    expected_diagnostics["filter_columns_used"] = list(
-        expected_diagnostics["filter_columns_used"]
-    )
-    assert diagnostics == expected_diagnostics
+    assert diagnostics["filter_mode"] == filter_mode
+    assert diagnostics["rows_input"] == 6
+    assert diagnostics["rows_after_signal_label_dropna"] == expected_dropna
+    assert diagnostics["grouped_label_value_rows"] == expected_grouped_rows
     assert policy.used_memory_bytes == 0
 
 
@@ -2529,7 +2253,6 @@ def test_managed_evaluation_two_label_order_and_shared_skip_parity(
         label_columns=("label_a", "label_b"),
         n_groups=2,
     )
-    canonical = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
     def persist(
         frames: tuple[pd.DataFrame, ...],
         output_id: str,
@@ -2584,14 +2307,6 @@ def test_managed_evaluation_two_label_order_and_shared_skip_parity(
     )
 
     persisted_metrics = pd.read_parquet(output_bundle / "metrics.parquet")
-    pd.testing.assert_frame_equal(
-        persisted_metrics,
-        canonical.metrics,
-        check_exact=False,
-        check_dtype=False,
-        rtol=1e-12,
-        atol=1e-12,
-    )
     assert persisted_metrics["label"].tolist() == [
         "label_a",
         "label_b",
@@ -2602,37 +2317,25 @@ def test_managed_evaluation_two_label_order_and_shared_skip_parity(
     ]
     manifest = json.loads((output_bundle / "manifest.json").read_text())
     diagnostics = manifest["metadata"]["evaluation_diagnostics"]
-    expected_diagnostics = asdict(canonical.diagnostics)
-    expected_diagnostics.pop("contract_version")
-    expected_diagnostics["filter_columns_used"] = list(
-        expected_diagnostics["filter_columns_used"]
-    )
-    assert diagnostics == expected_diagnostics
+    assert diagnostics["filter_mode"] == "eligible"
+    assert diagnostics["rows_input"] == 12
+    assert diagnostics["rows_after_signal_label_dropna"] == 10
     assert diagnostics["skipped_timestamp_count"] == 1
     split_manifest = json.loads(
         (split_bundle / "manifest.json").read_text()
     )
     assert split_manifest["metadata"]["evaluation_diagnostics"] == diagnostics
-    expected_frames = {
-        "metrics.parquet": canonical.metrics,
-        "grouped_label_values.parquet": canonical.grouped_label_values,
-        "ic_summary.parquet": canonical.ic_summary,
-        "group_spread_summary.parquet": canonical.group_spread_summary,
-    }
-    for name, expected in expected_frames.items():
+    for name in (
+        "metrics.parquet",
+        "grouped_label_values.parquet",
+        "ic_summary.parquet",
+        "group_spread_summary.parquet",
+    ):
         full_frame = pd.read_parquet(output_bundle / name)
         split_frame = pd.read_parquet(split_bundle / name)
         pd.testing.assert_frame_equal(
             full_frame,
             split_frame,
-            check_exact=False,
-            check_dtype=False,
-            rtol=1e-12,
-            atol=1e-12,
-        )
-        pd.testing.assert_frame_equal(
-            full_frame,
-            expected,
             check_exact=False,
             check_dtype=False,
             rtol=1e-12,

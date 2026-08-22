@@ -15,9 +15,7 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import (
     PredictionSpec,
 )
-from quant_research_platform.research.evaluations.engine import (
-    evaluate_signal_frame_chunks,
-)
+from quant_research_platform.research.evaluations import engine as eval_engine
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
@@ -56,8 +54,6 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import quant_research_platform.research._memory as memory_owner
-    from quant_research_platform.research.evaluations import engine as eval_engine
-
     frame = pd.concat(
         [
             make_filter_mode_frame().assign(
@@ -80,7 +76,6 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
-    expected = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
     original = eval_engine.compute_ic_and_grouped_label_values
     seen_columns: list[tuple[str, ...]] = []
 
@@ -94,43 +89,108 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         "compute_ic_and_grouped_label_values",
         wrapped_compute,
     )
-    policy = capture_test_policy(
+
+    def run(policy):
+        with runtime_resource_policy_scope(policy):
+            state = eval_engine._EvaluationStreamingState(
+                spec=spec,
+                n_groups=2,
+                resource_policy=policy,
+            )
+            try:
+                outputs = list(
+                    eval_engine._iter_evaluation_output_chunks(
+                        (frame,),
+                        spec=spec,
+                        signal_columns=("factor",),
+                        label_columns=spec.label_columns,
+                        n_groups=2,
+                        asset_column="asset_id",
+                        resource_policy=policy,
+                        summary_state=state,
+                    )
+                )
+                return (
+                    outputs,
+                    state.ic_summary(),
+                    state.group_spread_summary(),
+                    state.diagnostics(),
+                )
+            finally:
+                state.close()
+
+    baseline_policy = capture_test_policy(
         available_memory_bytes=128 * 1024 * 1024,
         explicit_cap_bytes=64 * 1024 * 1024,
     )
+    (
+        baseline_outputs,
+        baseline_ic_summary,
+        baseline_group_spread_summary,
+        baseline_diagnostics,
+    ) = run(baseline_policy)
+
+    assert len(baseline_outputs) == 2
+    assert baseline_policy.used_memory_bytes == 0
+
     original_frame_bytes = memory_owner._frame_bytes
     monkeypatch.setattr(
         memory_owner,
         "_frame_bytes",
         lambda chunk: 5_000 * original_frame_bytes(chunk),
     )
-    result = evaluate_signal_frame_chunks(
-        (frame,),
-        spec,
-        n_groups=2,
-        resource_policy=policy,
+    forced_policy = capture_test_policy(
+        available_memory_bytes=128 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
     )
+    (
+        forced_outputs,
+        forced_ic_summary,
+        forced_group_spread_summary,
+        forced_diagnostics,
+    ) = run(forced_policy)
 
+    assert len(forced_outputs) > len(baseline_outputs)
+    assert forced_policy.used_memory_bytes == 0
     assert len(seen_columns) > 1
-    pd.testing.assert_frame_equal(
-        result.metrics.sort_values(["timestamp", "signal", "label"]).reset_index(
-            drop=True
-        ),
-        expected.metrics.sort_values(["timestamp", "signal", "label"]).reset_index(
-            drop=True
-        ),
-    )
-    pd.testing.assert_frame_equal(result.ic_summary, expected.ic_summary)
-    pd.testing.assert_frame_equal(
-        result.group_spread_summary,
-        expected.group_spread_summary,
-    )
-    assert result.diagnostics == expected.diagnostics
+
+    for index, sort_columns in (
+        (0, ("timestamp", "signal", "label")),
+        (1, ("timestamp", "signal", "label", "group")),
+    ):
+        baseline_frame = pd.concat(
+            [output[index] for output in baseline_outputs],
+            ignore_index=True,
+        ).sort_values(list(sort_columns), kind="mergesort").reset_index(drop=True)
+        forced_frame = pd.concat(
+            [output[index] for output in forced_outputs],
+            ignore_index=True,
+        ).sort_values(list(sort_columns), kind="mergesort").reset_index(drop=True)
+        pd.testing.assert_frame_equal(
+            forced_frame,
+            baseline_frame,
+            check_exact=False,
+            check_dtype=False,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+
+    for forced_summary, baseline_summary in (
+        (forced_ic_summary, baseline_ic_summary),
+        (forced_group_spread_summary, baseline_group_spread_summary),
+    ):
+        pd.testing.assert_frame_equal(
+            forced_summary,
+            baseline_summary,
+            check_exact=False,
+            check_dtype=False,
+            rtol=1e-12,
+            atol=1e-12,
+        )
+    assert forced_diagnostics == baseline_diagnostics
 
 
 def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
-    from quant_research_platform.research.evaluations import engine as eval_engine
-
     frame = make_filter_mode_frame()
     spec = EvaluationSpec(
         run_id="eval_split_timestamp",
@@ -139,25 +199,40 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
-    expected = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+    with runtime_resource_policy_scope() as expected_policy:
+        expected_outputs = list(
+            eval_engine._iter_evaluation_output_chunks(
+                (frame,),
+                spec=spec,
+                signal_columns=("factor",),
+                label_columns=spec.label_columns,
+                n_groups=2,
+                asset_column="asset_id",
+                resource_policy=expected_policy,
+            )
+        )
+    with runtime_resource_policy_scope() as result_policy:
+        result_outputs = list(
+            eval_engine._iter_evaluation_output_chunks(
+                (frame.iloc[:3], frame.iloc[3:]),
+                spec=spec,
+                signal_columns=("factor",),
+                label_columns=spec.label_columns,
+                n_groups=2,
+                asset_column="asset_id",
+                resource_policy=result_policy,
+            )
+        )
 
-    result = eval_engine.evaluate_signal_frame_chunks(
-        (frame.iloc[:3], frame.iloc[3:]),
-        spec,
-        n_groups=2,
-    )
-
-    pd.testing.assert_frame_equal(result.metrics, expected.metrics)
+    assert len(result_outputs) == len(expected_outputs)
+    result_metrics, result_grouped, result_metadata = result_outputs[0]
+    expected_metrics, expected_grouped, expected_metadata = expected_outputs[0]
+    pd.testing.assert_frame_equal(result_metrics, expected_metrics)
     pd.testing.assert_frame_equal(
-        result.grouped_label_values,
-        expected.grouped_label_values,
+        result_grouped,
+        expected_grouped,
     )
-    pd.testing.assert_frame_equal(result.ic_summary, expected.ic_summary)
-    pd.testing.assert_frame_equal(
-        result.group_spread_summary,
-        expected.group_spread_summary,
-    )
-    assert result.diagnostics == expected.diagnostics
+    assert result_metadata == expected_metadata
 
 
 def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
@@ -256,8 +331,6 @@ def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
 
 
 def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
-    from quant_research_platform.research.evaluations import engine as eval_engine
-
     frame = make_filter_mode_frame()
     first = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
     second = frame.assign(timestamp=pd.Timestamp("2024-01-03"))
@@ -270,17 +343,22 @@ def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
         label_columns=("label",),
     )
 
-    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
-        eval_engine.evaluate_signal_frame_chunks(
-            (first, second, late_overlap),
-            spec,
-            n_groups=2,
-        )
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
+            tuple(
+                eval_engine._iter_evaluation_output_chunks(
+                    (first, second, late_overlap),
+                    spec=spec,
+                    signal_columns=("factor",),
+                    label_columns=spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                )
+            )
 
 
 def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
-    from quant_research_platform.research.evaluations import engine as eval_engine
-
     frame = make_filter_mode_frame()
     first = frame.assign(timestamp=pd.Timestamp("2024-01-03"))
     earlier = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
@@ -292,12 +370,19 @@ def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
         label_columns=("label",),
     )
 
-    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
-        eval_engine.evaluate_signal_frame_chunks(
-            (first, earlier),
-            spec,
-            n_groups=2,
-        )
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
+            tuple(
+                eval_engine._iter_evaluation_output_chunks(
+                    (first, earlier),
+                    spec=spec,
+                    signal_columns=("factor",),
+                    label_columns=spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                )
+            )
 
 
 def test_complete_time_chunks_close_upstream_on_error_and_consumer_close() -> None:
@@ -354,8 +439,6 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import quant_research_platform.research._memory as memory_owner
-    from quant_research_platform.research.evaluations import engine as eval_engine
-
     frame = make_filter_mode_frame()
     first = frame.iloc[:3]
     second = frame.iloc[3:]
@@ -379,19 +462,25 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
 
     monkeypatch.setattr(memory_owner.pd, "concat", reject_concat)
 
-    with pytest.raises(
-        ValueError,
-        match="research_time_boundary_payloads_exceed_task_memory_budget",
-    ):
-        eval_engine.evaluate_signal_frame_chunks(
-            (first, second),
-            spec,
-            n_groups=2,
-            resource_policy=policy,
-        )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            ValueError,
+            match="research_time_boundary_payloads_exceed_task_memory_budget",
+        ):
+            tuple(
+                eval_engine._iter_evaluation_output_chunks(
+                    (first, second),
+                    spec=spec,
+                    signal_columns=("factor",),
+                    label_columns=spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                )
+            )
 
 
-def test_evaluation_output_accumulation_honors_shared_root_headroom() -> None:
+def test_evaluation_streaming_output_honors_shared_root_headroom() -> None:
     frame = make_filter_mode_frame()
     spec = EvaluationSpec(
         run_id="eval_shared_headroom",
@@ -416,11 +505,16 @@ def test_evaluation_output_accumulation_honors_shared_root_headroom() -> None:
                 ValueError,
                 match="task_memory_budget",
             ):
-                evaluate_signal_frame_chunks(
-                    (frame,),
-                    spec,
-                    n_groups=2,
-                    resource_policy=policy,
+                tuple(
+                    eval_engine._iter_evaluation_output_chunks(
+                        (frame,),
+                        spec=spec,
+                        signal_columns=("factor",),
+                        label_columns=spec.label_columns,
+                        n_groups=2,
+                        asset_column="asset_id",
+                        resource_policy=policy,
+                    )
                 )
 
 
@@ -433,15 +527,23 @@ def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
         label_columns=("label",),
     )
 
-    with pytest.raises(ValueError, match="invalid_time_chunk_timestamp_values"):
-        evaluate_signal_frame_chunks(
-            (
-                make_filter_mode_frame().assign(
-                    timestamp=[pd.NaT] * len(make_filter_mode_frame())
-                ),
-            ),
-            spec,
-        )
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="invalid_time_chunk_timestamp_values"):
+            tuple(
+                eval_engine._iter_evaluation_output_chunks(
+                    (
+                        make_filter_mode_frame().assign(
+                            timestamp=[pd.NaT] * len(make_filter_mode_frame())
+                        ),
+                    ),
+                    spec=spec,
+                    signal_columns=("factor",),
+                    label_columns=spec.label_columns,
+                    n_groups=spec.n_groups,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                )
+            )
 
 
 def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(

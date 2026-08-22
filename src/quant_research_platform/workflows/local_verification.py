@@ -56,12 +56,12 @@ from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.datasets.validation import (
+    validate_evaluation_input,
+)
 from quant_research_platform.research.evaluations.engine import (
     _EvaluationStreamingState,
     _iter_evaluation_output_chunks,
-)
-from quant_research_platform.research.evaluations.runner import (
-    _validated_evaluation_chunks,
 )
 from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.portfolios.runner import (
@@ -176,12 +176,17 @@ def _write_evaluation_outputs_from_research_dataset(
             time_window=time_window,
             columns=read_columns,
         )
-        validated_chunks = _validated_evaluation_chunks(
-            chunks,
-            dataset_spec=dataset_spec,
-            signals=spec.signals,
-            label_columns=spec.label_columns,
-        )
+
+        def validated_chunks():
+            for chunk in chunks:
+                validate_evaluation_input(
+                    chunk,
+                    dataset_spec,
+                    signals=spec.signals,
+                    label_columns=spec.label_columns,
+                )
+                yield chunk
+
         state = _EvaluationStreamingState(
             spec=spec,
             n_groups=effective_groups,
@@ -190,7 +195,7 @@ def _write_evaluation_outputs_from_research_dataset(
         primary: BaseException | None = None
         try:
             evaluation_chunks = _iter_evaluation_output_chunks(
-                validated_chunks,
+                validated_chunks(),
                 spec=spec,
                 signal_columns=tuple(signal.signal_id for signal in spec.signals),
                 label_columns=spec.label_columns,

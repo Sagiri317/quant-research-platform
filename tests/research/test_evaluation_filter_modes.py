@@ -11,11 +11,14 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.evaluations.engine import (
-    evaluate_signal_frame_chunks,
+    _EvaluationStreamingState,
+    _iter_evaluation_output_chunks,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.filter_mode_fixtures import (
     make_filter_mode_frame,
     sort_filter_mode_evaluation_frame,
@@ -59,39 +62,112 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         filter_mode="unfiltered",
     )
 
-    eligible = evaluate_signal_frame_chunks((frame,), eligible_spec, n_groups=2)
-    tradable = evaluate_signal_frame_chunks((frame,), tradable_spec, n_groups=2)
-    unfiltered = evaluate_signal_frame_chunks((frame,), unfiltered_spec, n_groups=2)
+    eligible_policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(eligible_policy):
+        eligible_state = _EvaluationStreamingState(
+            spec=eligible_spec,
+            n_groups=2,
+            resource_policy=eligible_policy,
+        )
+        try:
+            eligible_output = list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=eligible_spec,
+                    signal_columns=("factor",),
+                    label_columns=eligible_spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=eligible_policy,
+                    summary_state=eligible_state,
+                )
+            )
+            eligible_metrics, eligible_grouped, _ = eligible_output[0]
+            eligible_diagnostics = eligible_state.diagnostics()
+            eligible_ic_summary = eligible_state.ic_summary()
+            eligible_group_spread_summary = eligible_state.group_spread_summary()
+        finally:
+            eligible_state.close()
 
-    assert eligible.diagnostics.filter_mode == "eligible"
-    assert eligible.diagnostics.filter_columns_used == ("eligible",)
-    assert eligible.diagnostics.filter_definition == "eligible == True"
-    assert eligible.diagnostics.rows_input == 6
-    assert eligible.diagnostics.rows_after_filter_mode == 5
-    assert eligible.diagnostics.rows_after_signal_label_dropna == 4
-    assert eligible.diagnostics.metric_rows == 1
-    assert eligible.diagnostics.grouped_label_value_rows == 2
-    assert eligible.diagnostics.ic_summary_rows == 1
-    assert eligible.diagnostics.group_spread_summary_rows == 1
-    assert eligible.diagnostics.timestamp_count == 1
-    assert eligible.diagnostics.min_timestamp == "2024-01-02"
-    assert eligible.diagnostics.max_timestamp == "2024-01-02"
-    assert eligible.diagnostics.n_groups == 2
-    assert eligible.diagnostics.skipped_timestamp_count == 0
-    assert tradable.diagnostics.filter_columns_used == (
+    tradable_policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(tradable_policy):
+        tradable_state = _EvaluationStreamingState(
+            spec=tradable_spec,
+            n_groups=2,
+            resource_policy=tradable_policy,
+        )
+        try:
+            tradable_output = list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=tradable_spec,
+                    signal_columns=("factor",),
+                    label_columns=tradable_spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=tradable_policy,
+                    summary_state=tradable_state,
+                )
+            )
+            tradable_metrics, tradable_grouped, _ = tradable_output[0]
+            tradable_diagnostics = tradable_state.diagnostics()
+        finally:
+            tradable_state.close()
+
+    unfiltered_policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(unfiltered_policy):
+        unfiltered_state = _EvaluationStreamingState(
+            spec=unfiltered_spec,
+            n_groups=2,
+            resource_policy=unfiltered_policy,
+        )
+        try:
+            unfiltered_output = list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=unfiltered_spec,
+                    signal_columns=("factor",),
+                    label_columns=unfiltered_spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=unfiltered_policy,
+                    summary_state=unfiltered_state,
+                )
+            )
+            unfiltered_metrics, unfiltered_grouped, _ = unfiltered_output[0]
+            unfiltered_diagnostics = unfiltered_state.diagnostics()
+        finally:
+            unfiltered_state.close()
+
+    assert eligible_diagnostics.filter_mode == "eligible"
+    assert eligible_diagnostics.filter_columns_used == ("eligible",)
+    assert eligible_diagnostics.filter_definition == "eligible == True"
+    assert eligible_diagnostics.rows_input == 6
+    assert eligible_diagnostics.rows_after_filter_mode == 5
+    assert eligible_diagnostics.rows_after_signal_label_dropna == 4
+    assert eligible_diagnostics.metric_rows == 1
+    assert eligible_diagnostics.grouped_label_value_rows == 2
+    assert eligible_diagnostics.ic_summary_rows == 1
+    assert eligible_diagnostics.group_spread_summary_rows == 1
+    assert eligible_diagnostics.timestamp_count == 1
+    assert eligible_diagnostics.min_timestamp == "2024-01-02"
+    assert eligible_diagnostics.max_timestamp == "2024-01-02"
+    assert eligible_diagnostics.n_groups == 2
+    assert eligible_diagnostics.skipped_timestamp_count == 0
+    assert tradable_diagnostics.filter_columns_used == (
         "eligible",
         "can_enter",
         "can_exit",
     )
-    assert tradable.diagnostics.rows_after_filter_mode == 3
-    assert tradable.diagnostics.rows_after_signal_label_dropna == 2
-    assert unfiltered.diagnostics.filter_columns_used == ()
-    assert unfiltered.diagnostics.rows_after_filter_mode == 6
-    assert unfiltered.diagnostics.rows_after_signal_label_dropna == 5
+    assert tradable_diagnostics.rows_after_filter_mode == 3
+    assert tradable_diagnostics.rows_after_signal_label_dropna == 2
+    assert unfiltered_diagnostics.filter_columns_used == ()
+    assert unfiltered_diagnostics.rows_after_filter_mode == 6
+    assert unfiltered_diagnostics.rows_after_signal_label_dropna == 5
 
-    assert eligible.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert eligible.metrics.loc[0, "rankic"] == pytest.approx(1.0)
-    assert list(eligible.ic_summary.columns) == [
+    assert eligible_metrics.loc[0, "ic"] == pytest.approx(1.0)
+    assert eligible_metrics.loc[0, "rankic"] == pytest.approx(1.0)
+    assert list(eligible_ic_summary.columns) == [
         "signal",
         "label",
         "mean_ic",
@@ -109,7 +185,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         "rankic_reason",
         "rankicir_reason",
     ]
-    assert list(eligible.group_spread_summary.columns) == [
+    assert list(eligible_group_spread_summary.columns) == [
         "signal",
         "label",
         "top_group_mean_label_value",
@@ -119,15 +195,15 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
         "group_monotonicity_score",
         "group_monotonicity_score_reason",
     ]
-    assert eligible.grouped_label_values["mean_label_value"].tolist() == pytest.approx(
+    assert eligible_grouped["mean_label_value"].tolist() == pytest.approx(
         [0.015, 0.045]
     )
-    assert tradable.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert tradable.grouped_label_values["mean_label_value"].tolist() == pytest.approx(
+    assert tradable_metrics.loc[0, "ic"] == pytest.approx(1.0)
+    assert tradable_grouped["mean_label_value"].tolist() == pytest.approx(
         [0.01, 0.02]
     )
-    assert unfiltered.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert unfiltered.grouped_label_values[
+    assert unfiltered_metrics.loc[0, "ic"] == pytest.approx(1.0)
+    assert unfiltered_grouped[
         "mean_label_value"
     ].tolist() == pytest.approx([0.02, 0.045])
 
@@ -145,24 +221,48 @@ def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
         filter_mode="unfiltered",
     )
 
-    result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+    policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        state = _EvaluationStreamingState(
+            spec=spec,
+            n_groups=2,
+            resource_policy=policy,
+        )
+        try:
+            output = list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=spec,
+                    signal_columns=("factor",),
+                    label_columns=spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                    summary_state=state,
+                )
+            )
+            metrics, grouped, _ = output[0]
+            spread = state.group_spread_summary()
+            diagnostics = state.diagnostics()
+        finally:
+            state.close()
 
-    assert result.metrics["n_obs"].tolist() == [0]
-    assert result.metrics["ic"].isna().all()
-    assert result.metrics["rankic"].isna().all()
-    assert result.metrics["ic_reason"].tolist() == ["insufficient_observations"]
-    assert result.metrics["rankic_reason"].tolist() == [
+    assert metrics["n_obs"].tolist() == [0]
+    assert metrics["ic"].isna().all()
+    assert metrics["rankic"].isna().all()
+    assert metrics["ic_reason"].tolist() == ["insufficient_observations"]
+    assert metrics["rankic_reason"].tolist() == [
         "insufficient_observations"
     ]
-    assert result.grouped_label_values.empty
-    assert result.group_spread_summary.empty
-    assert result.diagnostics.rows_input == 6
-    assert result.diagnostics.rows_after_filter_mode == 6
-    assert result.diagnostics.rows_after_signal_label_dropna == 0
-    assert result.diagnostics.metric_rows == 1
-    assert result.diagnostics.grouped_label_value_rows == 0
-    assert result.diagnostics.group_spread_summary_rows == 0
-    assert result.diagnostics.skipped_timestamp_count == 1
+    assert grouped.empty
+    assert spread.empty
+    assert diagnostics.rows_input == 6
+    assert diagnostics.rows_after_filter_mode == 6
+    assert diagnostics.rows_after_signal_label_dropna == 0
+    assert diagnostics.metric_rows == 1
+    assert diagnostics.grouped_label_value_rows == 0
+    assert diagnostics.group_spread_summary_rows == 0
+    assert diagnostics.skipped_timestamp_count == 1
 
 
 def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
@@ -185,44 +285,89 @@ def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
         label_columns=("label",),
     )
 
-    baseline = evaluate_signal_frame_chunks((frame,), spec, n_groups=3)
-    shuffled = evaluate_signal_frame_chunks(
-        (frame.sample(frac=1.0, random_state=31).reset_index(drop=True),),
-        spec,
-        n_groups=3,
-    )
+    baseline_policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(baseline_policy):
+        baseline_state = _EvaluationStreamingState(
+            spec=spec,
+            n_groups=3,
+            resource_policy=baseline_policy,
+        )
+        try:
+            baseline_output = list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=spec,
+                    signal_columns=("factor",),
+                    label_columns=spec.label_columns,
+                    n_groups=3,
+                    asset_column="asset_id",
+                    resource_policy=baseline_policy,
+                    summary_state=baseline_state,
+                )
+            )
+            baseline_metrics, baseline_grouped, _ = baseline_output[0]
+            baseline_spread = baseline_state.group_spread_summary()
+            baseline_diagnostics = baseline_state.diagnostics()
+        finally:
+            baseline_state.close()
+
+    shuffled_policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(shuffled_policy):
+        shuffled_state = _EvaluationStreamingState(
+            spec=spec,
+            n_groups=3,
+            resource_policy=shuffled_policy,
+        )
+        try:
+            shuffled_output = list(
+                _iter_evaluation_output_chunks(
+                    (frame.sample(frac=1.0, random_state=31).reset_index(drop=True),),
+                    spec=spec,
+                    signal_columns=("factor",),
+                    label_columns=spec.label_columns,
+                    n_groups=3,
+                    asset_column="asset_id",
+                    resource_policy=shuffled_policy,
+                    summary_state=shuffled_state,
+                )
+            )
+            shuffled_metrics, shuffled_grouped, _ = shuffled_output[0]
+            shuffled_spread = shuffled_state.group_spread_summary()
+            shuffled_diagnostics = shuffled_state.diagnostics()
+        finally:
+            shuffled_state.close()
 
     pd.testing.assert_frame_equal(
         sort_filter_mode_evaluation_frame(
-            baseline.metrics,
+            baseline_metrics,
             ("timestamp", "signal", "label"),
         ),
         sort_filter_mode_evaluation_frame(
-            shuffled.metrics,
+            shuffled_metrics,
             ("timestamp", "signal", "label"),
         ),
     )
     pd.testing.assert_frame_equal(
         sort_filter_mode_evaluation_frame(
-            baseline.grouped_label_values,
+            baseline_grouped,
             ("timestamp", "signal", "label", "group"),
         ),
         sort_filter_mode_evaluation_frame(
-            shuffled.grouped_label_values,
+            shuffled_grouped,
             ("timestamp", "signal", "label", "group"),
         ),
     )
     pd.testing.assert_frame_equal(
         sort_filter_mode_evaluation_frame(
-            baseline.group_spread_summary,
+            baseline_spread,
             ("signal", "label"),
         ),
         sort_filter_mode_evaluation_frame(
-            shuffled.group_spread_summary,
+            shuffled_spread,
             ("signal", "label"),
         ),
     )
-    assert shuffled.diagnostics == baseline.diagnostics
+    assert shuffled_diagnostics == baseline_diagnostics
 
 
 def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None:
@@ -251,14 +396,37 @@ def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None
         label_columns=("label",),
     )
 
-    result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+    policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        state = _EvaluationStreamingState(
+            spec=spec,
+            n_groups=2,
+            resource_policy=policy,
+        )
+        try:
+            output = list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=spec,
+                    signal_columns=("risk_signal",),
+                    label_columns=spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                    summary_state=state,
+                )
+            )
+            metrics, grouped, _ = output[0]
+            spread = state.group_spread_summary()
+        finally:
+            state.close()
 
-    assert result.metrics.loc[0, "signal"] == "risk_signal"
-    assert result.metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert result.metrics.loc[0, "rankic"] == pytest.approx(1.0)
-    assert set(result.grouped_label_values["signal"]) == {"risk_signal"}
+    assert metrics.loc[0, "signal"] == "risk_signal"
+    assert metrics.loc[0, "ic"] == pytest.approx(1.0)
+    assert metrics.loc[0, "rankic"] == pytest.approx(1.0)
+    assert set(grouped["signal"]) == {"risk_signal"}
     assert (
-        result.group_spread_summary.loc[
+        spread.loc[
             0,
             "top_bottom_label_value_spread_mean",
         ]
@@ -290,16 +458,41 @@ def test_evaluation_computes_multiple_signals_in_one_run() -> None:
         label_columns=("label",),
     )
 
-    result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+    policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        state = _EvaluationStreamingState(
+            spec=spec,
+            n_groups=2,
+            resource_policy=policy,
+        )
+        try:
+            output = list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=spec,
+                    signal_columns=("factor_signal", "reverse_signal"),
+                    label_columns=spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                    summary_state=state,
+                )
+            )
+            metrics, _, _ = output[0]
+            ic_summary = state.ic_summary()
+            group_spread_summary = state.group_spread_summary()
+            diagnostics = state.diagnostics()
+        finally:
+            state.close()
 
-    assert set(result.metrics["signal"]) == {"factor_signal", "reverse_signal"}
-    assert set(result.ic_summary["signal"]) == {"factor_signal", "reverse_signal"}
-    assert set(result.group_spread_summary["signal"]) == {
+    assert set(metrics["signal"]) == {"factor_signal", "reverse_signal"}
+    assert set(ic_summary["signal"]) == {"factor_signal", "reverse_signal"}
+    assert set(group_spread_summary["signal"]) == {
         "factor_signal",
         "reverse_signal",
     }
-    assert result.diagnostics.rows_after_filter_mode == 5
-    assert result.diagnostics.rows_after_signal_label_dropna == 8
+    assert diagnostics.rows_after_filter_mode == 5
+    assert diagnostics.rows_after_signal_label_dropna == 8
 
 
 def test_evaluation_computes_signal_by_label_cross_product() -> None:
@@ -327,12 +520,35 @@ def test_evaluation_computes_signal_by_label_cross_product() -> None:
         label_columns=("label", "label_alt"),
     )
 
-    result = evaluate_signal_frame_chunks((frame,), spec, n_groups=2)
+    policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        state = _EvaluationStreamingState(
+            spec=spec,
+            n_groups=2,
+            resource_policy=policy,
+        )
+        try:
+            output = list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=spec,
+                    signal_columns=("factor_signal", "reverse_signal"),
+                    label_columns=spec.label_columns,
+                    n_groups=2,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                    summary_state=state,
+                )
+            )
+            metrics, _, _ = output[0]
+            diagnostics = state.diagnostics()
+        finally:
+            state.close()
 
-    assert set(result.metrics["signal"]) == {"factor_signal", "reverse_signal"}
-    assert set(result.metrics["label"]) == {"label", "label_alt"}
-    assert len(result.metrics) == 4
-    assert result.diagnostics.rows_after_signal_label_dropna == 18
+    assert set(metrics["signal"]) == {"factor_signal", "reverse_signal"}
+    assert set(metrics["label"]) == {"label", "label_alt"}
+    assert len(metrics) == 4
+    assert diagnostics.rows_after_signal_label_dropna == 18
 
 
 def test_evaluation_diagnostics_contract_validates_shape() -> None:
@@ -459,5 +675,19 @@ def test_evaluation_filter_columns_fail_closed(
     frame: pd.DataFrame,
     match: str,
 ) -> None:
-    with pytest.raises(ValueError, match=match):
-        evaluate_signal_frame_chunks((frame,), spec)
+    policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match=match):
+            tuple(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=spec,
+                    signal_columns=tuple(
+                        signal.signal_id for signal in spec.signals
+                    ),
+                    label_columns=spec.label_columns,
+                    n_groups=spec.n_groups,
+                    asset_column="asset_id",
+                    resource_policy=policy,
+                )
+            )

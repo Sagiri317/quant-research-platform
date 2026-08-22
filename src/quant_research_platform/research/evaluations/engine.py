@@ -6,7 +6,6 @@ import math
 import sys
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
@@ -27,14 +26,8 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research._memory import (
-    _ResearchFrameAccumulator,
     _selected_frame_payload_bytes,
     iter_complete_time_sized_frames,
-)
-from quant_research_platform.research.evaluations.diagnostics import (
-    build_evaluation_diagnostics,
-    summarize_group_spread,
-    summarize_period_ic,
 )
 from quant_research_platform.research.signals.materialization import (
     normalize_signal_frame,
@@ -42,7 +35,6 @@ from quant_research_platform.research.signals.materialization import (
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
 )
 
 _EVALUATION_RECORD_WORKING_BYTES = 512
@@ -412,201 +404,6 @@ def _add_group_spread_observation(
     if monotonicity is not None:
         spread["monotonicity_sum"] += monotonicity
         spread["monotonicity_count"] += 1
-
-
-@dataclass(frozen=True)
-class EvaluationResult:
-    spec: EvaluationSpec
-    metrics: pd.DataFrame
-    grouped_label_values: pd.DataFrame
-    ic_summary: pd.DataFrame
-    group_spread_summary: pd.DataFrame
-    diagnostics: EvaluationDiagnostics
-
-
-def evaluate_signal_frame_chunks(
-    frames: Iterable[pd.DataFrame],
-    spec: EvaluationSpec,
-    *,
-    n_groups: int = 5,
-    asset_column: str = "asset_id",
-    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> EvaluationResult:
-    with runtime_resource_policy_scope(resource_policy) as policy:
-        return _evaluate_signal_frame_chunks(
-            frames,
-            spec,
-            n_groups=n_groups,
-            asset_column=asset_column,
-            source_columns_by_kind=source_columns_by_kind,
-            resource_policy=policy,
-        )
-
-
-def _evaluate_signal_frame_chunks(
-    frames: Iterable[pd.DataFrame],
-    spec: EvaluationSpec,
-    *,
-    n_groups: int,
-    asset_column: str,
-    source_columns_by_kind: Mapping[str, Sequence[str]] | None,
-    resource_policy: RuntimeResourcePolicy,
-) -> EvaluationResult:
-    metrics, grouped_label_values, filter_metadata, rows_after_dropna = (
-        _compute_evaluation_frames(
-            frames,
-            spec=spec,
-            signal_columns=tuple(signal.signal_id for signal in spec.signals),
-            label_columns=spec.label_columns,
-            n_groups=n_groups,
-            asset_column=asset_column,
-            source_columns_by_kind=source_columns_by_kind,
-            resource_policy=resource_policy,
-        )
-    )
-    retained_bytes = pandas_frame_payload_bytes(metrics) + pandas_frame_payload_bytes(
-        grouped_label_values
-    )
-    aggregation_state_bytes = (len(metrics) + len(grouped_label_values)) * 8 * 8
-    summary_output_bound = retained_bytes + 64 * 1024
-    with ExitStack() as retained_outputs:
-        if resource_policy is not None:
-            retained_outputs.enter_context(
-                resource_policy.reserve(
-                    "research.evaluation.result",
-                    retained_bytes,
-                )
-            )
-            retained_outputs.enter_context(
-                resource_policy.reserve(
-                    "research.evaluation.summary",
-                    aggregation_state_bytes + summary_output_bound,
-                )
-            )
-        ic_summary = summarize_period_ic(metrics)
-        group_spread_summary = summarize_group_spread(grouped_label_values)
-        diagnostics = build_evaluation_diagnostics(
-            spec=spec,
-            filter_metadata=filter_metadata,
-            rows_after_signal_label_dropna=rows_after_dropna,
-            metrics=metrics,
-            grouped_label_values=grouped_label_values,
-            ic_summary=ic_summary,
-            group_spread_summary=group_spread_summary,
-            n_groups=n_groups,
-            timestamp_column="timestamp",
-        )
-        if (
-            pandas_frame_payload_bytes(ic_summary)
-            + pandas_frame_payload_bytes(group_spread_summary)
-            > summary_output_bound
-        ):
-            raise ValueError(
-                "research_evaluation_working_set_exceeds_task_memory_budget"
-            )
-    return EvaluationResult(
-        spec=spec,
-        metrics=metrics,
-        grouped_label_values=grouped_label_values,
-        ic_summary=ic_summary,
-        group_spread_summary=group_spread_summary,
-        diagnostics=diagnostics,
-    )
-
-
-def _compute_evaluation_frames(
-    frames: Iterable[pd.DataFrame],
-    *,
-    spec: EvaluationSpec,
-    signal_columns: tuple[str, ...],
-    label_columns: tuple[str, ...],
-    n_groups: int,
-    asset_column: str,
-    resource_policy: RuntimeResourcePolicy,
-    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, object], int]:
-    rows_input = 0
-    rows_after_filter = 0
-    rows_after_dropna = 0
-    filter_columns_used: list[str] = []
-    filter_definition = ""
-    empty_metrics: pd.DataFrame | None = None
-    empty_grouped: pd.DataFrame | None = None
-    with (
-        _ResearchFrameAccumulator(
-            "research.evaluation.metrics",
-            resource_policy=resource_policy,
-        ) as metric_accumulator,
-        _ResearchFrameAccumulator(
-            "research.evaluation.grouped",
-            resource_policy=resource_policy,
-        ) as grouped_accumulator,
-    ):
-        for metrics, grouped_label_values, metadata in _iter_evaluation_output_chunks(
-            frames,
-            spec=spec,
-            signal_columns=signal_columns,
-            label_columns=label_columns,
-            n_groups=n_groups,
-            asset_column=asset_column,
-            source_columns_by_kind=source_columns_by_kind,
-            resource_policy=resource_policy,
-        ):
-            rows_input += strict_non_negative_count_value(metadata["rows_input"])
-            rows_after_filter += strict_non_negative_count_value(
-                metadata["rows_after_filter_mode"]
-            )
-            filter_columns_used = list(metadata["filter_columns_used"])
-            filter_definition = str(metadata["filter_definition"])
-            rows_after_dropna += int(
-                strict_non_negative_count_series(metrics["n_obs"]).sum()
-            )
-            if metrics.empty:
-                if empty_metrics is None:
-                    empty_metrics = metrics
-            else:
-                metric_accumulator.append(metrics)
-                empty_metrics = None
-            if grouped_label_values.empty:
-                if empty_grouped is None:
-                    empty_grouped = grouped_label_values
-            else:
-                grouped_accumulator.append(grouped_label_values)
-                empty_grouped = None
-            del metrics, grouped_label_values
-
-        if metric_accumulator.row_count == 0 and empty_metrics is not None:
-            metric_accumulator.append(empty_metrics)
-        if grouped_accumulator.row_count == 0 and empty_grouped is not None:
-            grouped_accumulator.append(empty_grouped)
-        metrics_result = metric_accumulator.materialize()
-        result_reservation = ExitStack()
-        try:
-            if resource_policy is not None:
-                result_reservation.enter_context(
-                    resource_policy.reserve(
-                        "research.evaluation.concat",
-                        pandas_frame_payload_bytes(metrics_result),
-                    )
-                )
-            grouped_result = grouped_accumulator.materialize()
-        finally:
-            result_reservation.close()
-
-    filter_metadata = {
-        "filter_mode": spec.filter_mode,
-        "filter_columns_used": filter_columns_used,
-        "filter_definition": filter_definition,
-        "rows_input": rows_input,
-        "rows_after_filter_mode": rows_after_filter,
-    }
-    return (
-        metrics_result,
-        grouped_result,
-        filter_metadata,
-        rows_after_dropna,
-    )
 
 
 def _iter_evaluation_output_chunks(
@@ -1121,6 +918,3 @@ def _iter_evaluation_work_frames(
                     "evaluation input lease release also failed: "
                     f"{type(close_error).__name__}"
                 )
-
-
-__all__ = ["EvaluationResult", "evaluate_signal_frame_chunks"]
