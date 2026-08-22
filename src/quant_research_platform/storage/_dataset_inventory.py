@@ -27,7 +27,6 @@ from quant_research_platform.storage._dataset_physical import (
     dataset_file_identity,
 )
 from quant_research_platform.storage._scratch_ownership import (
-    cleanup_stale_owned_scratch,
     create_owned_scratch,
     owned_scratch_name,
     remove_owned_scratch,
@@ -113,12 +112,6 @@ class DatasetSessionInventory:
                 reserve_bytes=_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
             )
             parent_identity = self._scratch_parent.lstat()
-            cleanup_stale_owned_scratch(
-                self._scratch_parent,
-                parent_identity=parent_identity,
-                prefix=_PREFIX,
-                directory=True,
-            )
             require_unaliased_path(
                 self._scratch_parent, error="invalid_storage_scratch_path"
             )

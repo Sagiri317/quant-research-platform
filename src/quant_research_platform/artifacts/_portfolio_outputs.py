@@ -35,6 +35,7 @@ from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
+    require_free_disk_headroom,
 )
 from quant_research_platform.storage._dataset_physical import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
@@ -210,6 +211,10 @@ def _write_portfolio_row_artifact_chunks(
         for artifact_name in all_row_artifacts
     }
     row_counts = {artifact_name: 0 for artifact_name in PORTFOLIO_ARTIFACTS}
+    require_free_disk_headroom(
+        temp_root,
+        reserve_bytes=len(all_row_artifacts) * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+    )
     fixed_state = _artifact_writer_fixed_reservation(
         writer_count=len(all_row_artifacts),
         index_bytes=0,

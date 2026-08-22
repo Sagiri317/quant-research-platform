@@ -23,7 +23,6 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._scratch_ownership import (
-    cleanup_stale_owned_scratch,
     create_owned_scratch,
     owned_scratch_name,
     remove_owned_scratch,
@@ -117,12 +116,6 @@ class ExactPrimaryKeyIndex:
             reserve_bytes=_EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES,
         )
         parent_identity = self._scratch_parent.lstat()
-        cleanup_stale_owned_scratch(
-            self._scratch_parent,
-            parent_identity=parent_identity,
-            prefix=".k-",
-            directory=True,
-        )
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )

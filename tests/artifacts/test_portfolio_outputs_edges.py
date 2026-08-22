@@ -292,6 +292,58 @@ def test_portfolio_row_writers_reject_fixed_workspace_before_first_pull(
     assert pulls == 0
 
 
+def test_portfolio_row_writers_disk_preflight_happens_before_first_pull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    row_artifacts = tuple(
+        name
+        for name in output_edge_portfolio_row_artifact_names()
+        if name != "cumulative_returns"
+    )
+    spec = make_output_edge_portfolio_spec()
+    output_spec = make_output_edge_report_spec(
+        "portfolio_outputs",
+        spec.portfolio_id,
+        "portfolio",
+    )
+    observed: dict[str, object] = {}
+    pulls = 0
+
+    class Input:
+        def __iter__(self) -> Input:
+            return self
+
+        def __next__(self) -> object:
+            nonlocal pulls
+            pulls += 1
+            raise AssertionError("portfolio_input_pulled_before_disk_preflight")
+
+    def reject_disk(path: Path, *, reserve_bytes: int) -> None:
+        observed["path"] = path
+        observed["reserve_bytes"] = reserve_bytes
+        raise OSError("portfolio_disk_preflight")
+
+    monkeypatch.setattr(portfolio_outputs, "require_free_disk_headroom", reject_disk)
+
+    with pytest.raises(OSError, match="portfolio_disk_preflight"):
+        portfolio_outputs._write_portfolio_output_chunks(
+            Input(),  # type: ignore[arg-type]
+            summary_factory=lambda: {},
+            cumulative_returns_factory=lambda: iter(()),
+            spec=spec,
+            output_spec=output_spec,
+            layout=StorageLayout(project_root=tmp_path),
+        )
+
+    assert pulls == 0
+    assert observed["reserve_bytes"] == (
+        len(row_artifacts) + 1
+    ) * portfolio_outputs._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+    assert not (tmp_path / "outputs" / output_spec.output_id).exists()
+    assert not list((tmp_path / "outputs").glob(".a-*"))
+
+
 def test_portfolio_row_writer_fixed_reservation_covers_close_without_double_charge(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

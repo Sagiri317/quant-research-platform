@@ -457,6 +457,40 @@ def test_report_parquet_writer_cleans_temp_on_failure(
     assert not list(tmp_path.glob(".f-*"))
 
 
+def test_chunk_writer_disk_preflight_happens_before_first_pull(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    pulls: list[str] = []
+
+    def frames():  # type: ignore[no-untyped-def]
+        pulls.append("pulled")
+        yield pd.DataFrame(
+            {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
+        )
+
+    def reject(_path: Path, *, reserve_bytes: int) -> int:
+        assert reserve_bytes == (
+            parquet_writers._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+            + parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
+        )
+        raise OSError("disk_preflight")
+
+    monkeypatch.setattr(parquet_writers, "require_free_disk_headroom", reject)
+
+    with pytest.raises(OSError, match="disk_preflight"):
+        parquet_writers.write_parquet_chunks(
+            frames(),
+            tmp_path / "prediction.parquet",
+            required=("timestamp", "value"),
+            key_columns=("timestamp",),
+            compression="snappy",
+        )
+
+    assert pulls == []
+    assert not list(tmp_path.glob(".f-*"))
+
+
 def test_report_parquet_writer_uses_short_temp_for_long_final_component(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

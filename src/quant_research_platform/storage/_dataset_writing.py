@@ -27,6 +27,7 @@ from quant_research_platform.runtime.resources import (
     _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_inspection import (
@@ -1146,6 +1147,19 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
     metadata = dict(persisted.schema.metadata or {})
     metadata[_PHYSICAL_PAGE_ROWS_KEY] = str(batch_rows).encode("ascii")
     persisted = persisted.replace_schema_metadata(metadata)
+    require_free_disk_headroom(
+        path.parent,
+        reserve_bytes=(
+            _table_parquet_page_working_set_bytes(
+                persisted,
+                rows=persisted.num_rows,
+            )
+            + _parquet_row_group_footer_upper_bound(
+                persisted.schema,
+                rows=persisted.num_rows,
+            )
+        ),
+    )
     with reservation:
         pq.write_table(
             persisted,

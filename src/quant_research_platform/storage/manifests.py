@@ -156,12 +156,6 @@ def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
     final_path.parent.mkdir(parents=True, exist_ok=True)
     parent_identity = final_path.parent.lstat()
     require_unaliased_path(final_path, error="invalid_storage_write_path")
-    scratch_owner.cleanup_stale_owned_scratch(
-        final_path.parent,
-        parent_identity=parent_identity,
-        prefix=".f-",
-        directory=False,
-    )
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
     )

@@ -862,6 +862,61 @@ def test_managed_evaluation_admits_summary_before_first_pull(
     assert policy.used_memory_bytes == 0
 
 
+def test_managed_evaluation_disk_preflight_happens_before_first_pull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = EvaluationSpec(
+        run_id="eval_disk_admission",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    report_spec = make_output_edge_report_spec(
+        "evaluation_outputs",
+        spec.run_id,
+        "evaluation",
+    )
+    pulled: list[bool] = []
+    observed: dict[str, object] = {}
+
+    def chunks():
+        pulled.append(True)
+        yield (
+            make_artifact_evaluation_metrics_frame(),
+            make_artifact_evaluation_grouped_label_values_frame(),
+            {},
+        )
+
+    def reject_disk(path: Path, *, reserve_bytes: int) -> None:
+        observed["path"] = path
+        observed["reserve_bytes"] = reserve_bytes
+        raise OSError("evaluation_disk_preflight")
+
+    monkeypatch.setattr(
+        evaluation_outputs_owner,
+        "require_free_disk_headroom",
+        reject_disk,
+    )
+
+    with pytest.raises(OSError, match="evaluation_disk_preflight"):
+        evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+            chunks(),
+            spec=spec,
+            output_spec=report_spec,
+            layout=StorageLayout(project_root=tmp_path),
+            n_groups=2,
+        )
+
+    assert pulled == []
+    assert observed["reserve_bytes"] == (
+        2 * evaluation_outputs_owner._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+    )
+    assert not (tmp_path / "outputs" / report_spec.output_id).exists()
+    assert not list((tmp_path / "outputs").glob(".a-*"))
+
+
 def test_managed_evaluation_failure_closes_partial_writer_and_preserves_primary(
     tmp_path: Path,
 ) -> None:

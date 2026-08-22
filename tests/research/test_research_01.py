@@ -78,7 +78,6 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage import atomic as storage_atomic
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
@@ -1547,8 +1546,7 @@ def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
     assert len(opened_roots) == len(processed_catalog.list())
     assert len(opened_roots) == len(set(opened_roots))
     assert not artifact_root.exists()
-    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(artifact_root)
-    assert list(artifact_root.parent.glob(f"{scratch_prefix}*")) == []
+    assert list(artifact_root.parent.glob(".a-*")) == []
 
 
 def test_sparse_research_dataset_left_joins_missing_non_base_input_key(

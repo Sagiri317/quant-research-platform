@@ -49,6 +49,7 @@ from quant_research_platform.research.evaluations.engine import (
 )
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
+    require_free_disk_headroom,
 )
 from quant_research_platform.storage._dataset_physical import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
@@ -427,6 +428,10 @@ def _write_evaluation_artifact_chunks(
 
     primary: BaseException | None = None
     try:
+        require_free_disk_headroom(
+            temp_root,
+            reserve_bytes=2 * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+        )
         fixed_state = _artifact_writer_fixed_reservation(
             writer_count=2,
             index_bytes=0,

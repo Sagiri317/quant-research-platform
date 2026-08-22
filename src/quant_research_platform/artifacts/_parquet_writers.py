@@ -25,6 +25,7 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    require_free_disk_headroom,
 )
 from quant_research_platform.storage._dataset_key_tracking import (
     EXACT_KEY_SQLITE_PAGE_BYTES,
@@ -60,15 +61,15 @@ def write_parquet_chunks(
     final_path = Path(path)
     reject_if_exists(final_path)
     require_unaliased_path(final_path.parent, error="invalid_output_write_path")
+    require_free_disk_headroom(
+        final_path.parent,
+        reserve_bytes=(
+            _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES + EXACT_KEY_SQLITE_PAGE_BYTES
+        ),
+    )
     final_path.parent.mkdir(parents=True, exist_ok=True)
     parent_identity = final_path.parent.lstat()
     require_unaliased_path(final_path, error="invalid_output_write_path")
-    scratch_owner.cleanup_stale_owned_scratch(
-        final_path.parent,
-        parent_identity=parent_identity,
-        prefix=".f-",
-        directory=False,
-    )
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
     )
@@ -284,15 +285,17 @@ def write_parquet(
     final_path = Path(path)
     reject_if_exists(final_path)
     require_unaliased_path(final_path.parent, error="invalid_output_write_path")
+    payload_bytes = pandas_frame_payload_bytes(frame)
+    require_free_disk_headroom(
+        final_path.parent,
+        reserve_bytes=max(
+            _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+            payload_bytes * 2,
+        ),
+    )
     final_path.parent.mkdir(parents=True, exist_ok=True)
     parent_identity = final_path.parent.lstat()
     require_unaliased_path(final_path, error="invalid_output_write_path")
-    scratch_owner.cleanup_stale_owned_scratch(
-        final_path.parent,
-        parent_identity=parent_identity,
-        prefix=".f-",
-        directory=False,
-    )
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
     )

@@ -37,7 +37,6 @@ import quant_research_platform.storage._dataset_physical as dataset_physical
 import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage._dataset_schema as dataset_schema
 import quant_research_platform.storage._dataset_writing as dataset_writing
-import quant_research_platform.storage.atomic as storage_atomic
 import quant_research_platform.storage.datasets as datasets
 import quant_research_platform.storage.errors as storage_errors
 import quant_research_platform.storage.manifests as storage_manifests
@@ -1090,9 +1089,7 @@ def test_writer_key_index_scratch_is_inside_staged_dataset_root(
     assert observed_database_paths
     assert all(
         path.is_relative_to(root.parent)
-        and path.parts[len(root.parent.parts)].startswith(
-            storage_atomic._atomic_directory_scratch_prefix(root)
-        )
+        and path.parts[len(root.parent.parts)].startswith(".a-")
         for path in observed_database_paths
     )
     assert not any(path.exists() for path in observed_database_paths)
@@ -2704,210 +2701,6 @@ def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
     )
 
 
-def test_exact_key_index_recovers_dead_sibling_scratch(tmp_path: Path) -> None:
-    module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
-    )
-    stale = tmp_path / ".k-qzzzzzz-stale"
-    stale.mkdir()
-    for name in ("k.db", "k.db-journal", "k.db-wal", "k.db-shm"):
-        (stale / name).write_bytes(b"scratch")
-
-    with module.ExactPrimaryKeyIndex(
-        primary_key=("key",),
-        timestamp_columns=(),
-        scratch_parent=tmp_path,
-    ) as index:
-        assert not stale.exists()
-        assert index.add_frame(pd.DataFrame({"key": ["safe"]})) == 0
-
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_exact_key_index_preserves_live_pid_named_sibling(tmp_path: Path) -> None:
-    module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
-    )
-    ownership = importlib.import_module(
-        "quant_research_platform.storage._scratch_ownership"
-    )
-    live = tmp_path / ownership.owned_scratch_name(".k-", "concurrent")
-    live.mkdir()
-
-    with module.ExactPrimaryKeyIndex(
-        primary_key=("key",),
-        timestamp_columns=(),
-        scratch_parent=tmp_path,
-    ) as index:
-        assert live.is_dir()
-        assert index.add_frame(pd.DataFrame({"key": ["safe"]})) == 0
-
-    live.rmdir()
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_exact_key_index_removes_reused_pid_sibling(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
-    )
-    ownership = importlib.import_module(
-        "quant_research_platform.storage._scratch_ownership"
-    )
-    live_name = ownership.owned_scratch_name(".k-", "live")
-    owner_pid = live_name.split("-", 3)[1]
-    reused = tmp_path / f".k-{owner_pid}-0-reused"
-    reused.mkdir()
-    (reused / "k.db").write_bytes(b"scratch")
-    monkeypatch.setattr(
-        ownership.psutil,
-        "Process",
-        lambda _pid: SimpleNamespace(
-            create_time=lambda: reused.stat().st_ctime + 60,
-            is_running=lambda: True,
-        ),
-    )
-
-    with module.ExactPrimaryKeyIndex(
-        primary_key=("key",),
-        timestamp_columns=(),
-        scratch_parent=tmp_path,
-    ) as index:
-        assert not reused.exists()
-        assert index.add_frame(pd.DataFrame({"key": ["safe"]})) == 0
-
-    assert list(tmp_path.iterdir()) == []
-
-
-def test_dataset_write_recovers_stale_key_scratch_without_publishing_it(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "stale_key_scratch")
-    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
-    stale_stage = root.parent / f"{scratch_prefix}qzzzzzz-stale"
-    stale_scratch = stale_stage / ".k-qzzzzzz-stale"
-    stale_scratch.mkdir(parents=True)
-    Path(f"{stale_stage}.target").write_text(
-        storage_atomic._atomic_target_identity(root),
-        encoding="utf-8",
-    )
-    for name in (
-        "k.db",
-        "k.db-journal",
-        "k.db-wal",
-        "k.db-shm",
-    ):
-        (stale_scratch / name).write_bytes(b"scratch")
-
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("stale_key_scratch"),
-    )
-
-    assert not stale_stage.exists()
-    assert not stale_scratch.exists()
-    assert not list(root.rglob("*.sqlite3"))
-    assert not list(root.rglob("*.sqlite3-*"))
-
-
-def test_dataset_write_does_not_remove_live_concurrent_key_scratch(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "live_key_scratch")
-    ownership = importlib.import_module(
-        "quant_research_platform.storage._scratch_ownership"
-    )
-    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
-    live_stage = root.parent / ownership.owned_scratch_name(
-        scratch_prefix,
-        "concurrent",
-    )
-    live_scratch = live_stage / ".k-concurrent"
-    live_scratch.mkdir(parents=True)
-    Path(f"{live_stage}.target").write_text(
-        storage_atomic._atomic_target_identity(root),
-        encoding="utf-8",
-    )
-    (live_scratch / "k.db").write_bytes(b"live")
-
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("live_key_scratch"),
-    )
-
-    assert live_scratch.is_dir()
-
-
-def test_dataset_write_removes_reused_pid_staged_scratch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "reused_pid_stage")
-    ownership = importlib.import_module(
-        "quant_research_platform.storage._scratch_ownership"
-    )
-    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
-    live_name = ownership.owned_scratch_name(
-        scratch_prefix,
-        "live",
-    )
-    owner_pid = live_name.removeprefix(scratch_prefix).split("-", 1)[0]
-    reused_stage = root.parent / f"{scratch_prefix}{owner_pid}-0-reused"
-    reused_scratch = reused_stage / ".k-reused"
-    reused_scratch.mkdir(parents=True)
-    Path(f"{reused_stage}.target").write_text(
-        storage_atomic._atomic_target_identity(root),
-        encoding="utf-8",
-    )
-    (reused_scratch / "k.db").write_bytes(b"scratch")
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-    )
-    monkeypatch.setattr(
-        ownership.psutil,
-        "Process",
-        lambda _pid: SimpleNamespace(
-            create_time=lambda: reused_stage.stat().st_ctime + 60,
-            is_running=lambda: True,
-        ),
-    )
-
-    dataset_writing.write_dataset(
-        root,
-        _bound_first_frames((make_default_dataset_frame(),)),
-        spec=make_processed_dataset_spec("reused_pid_stage"),
-        resource_policy=policy,
-    )
-
-    assert not reused_scratch.exists()
-
-
-def test_dataset_write_recovers_dead_stage_when_final_exists(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "published_with_dead_stage")
-    spec = make_processed_dataset_spec("published_with_dead_stage")
-    write_dataset(root, make_default_dataset_frame(), spec=spec)
-    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
-    stale_stage = root.with_name(f"{scratch_prefix}qzzzzzz-stale")
-    Path(f"{stale_stage}.target").write_text(
-        storage_atomic._atomic_target_identity(root),
-        encoding="utf-8",
-    )
-    stale_scratch = stale_stage / ".k-qzzzzzz-stale"
-    stale_scratch.mkdir(parents=True)
-    (stale_scratch / "k.db").write_bytes(b"scratch")
-
-    with pytest.raises(ValueError, match="dataset_exists"):
-        write_dataset(root, make_default_dataset_frame(), spec=spec)
-
-    assert not stale_stage.exists()
-
-
 def test_exact_key_index_honors_configured_sqlite_cache_budget(
     tmp_path: Path,
 ) -> None:
@@ -2945,8 +2738,7 @@ def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
         )
 
     assert not root.exists()
-    scratch_prefix = storage_atomic._atomic_directory_scratch_prefix(root)
-    assert list(root.parent.glob(f"{scratch_prefix}*")) == []
+    assert not list(root.parent.glob(".a-*"))
 
 
 def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -> None:
@@ -9221,6 +9013,47 @@ def test_writer_rejects_before_native_parquet_write(
 
     assert conversions == 1
     assert native_writes == 0
+
+
+def test_dataset_parquet_disk_preflight_precedes_native_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    table = pa.table({"value": [1]})
+    path = tmp_path / "part.parquet"
+    captured: dict[str, int] = {}
+    native_writes = 0
+
+    def reject_disk(path: Path, *, reserve_bytes: int) -> None:
+        captured["reserve_bytes"] = reserve_bytes
+        assert path == tmp_path
+        raise OSError("dataset_disk_preflight")
+
+    def forbid_native_write(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        nonlocal native_writes
+        native_writes += 1
+        raise AssertionError("native_write_started_before_disk_preflight")
+
+    monkeypatch.setattr(dataset_writing, "require_free_disk_headroom", reject_disk)
+    monkeypatch.setattr(dataset_writing.pq, "write_table", forbid_native_write)
+
+    with pytest.raises(OSError, match="dataset_disk_preflight"):
+        dataset_writing.write_parquet_file(table, path)
+
+    persisted = dataset_writing.table_with_decoded_row_bounds(table)
+    metadata = dict(persisted.schema.metadata or {})
+    metadata[dataset_writing._PHYSICAL_PAGE_ROWS_KEY] = b"1"
+    persisted = persisted.replace_schema_metadata(metadata)
+    expected = dataset_writing._table_parquet_page_working_set_bytes(
+        persisted,
+        rows=table.num_rows,
+    ) + dataset_writing._parquet_row_group_footer_upper_bound(
+        persisted.schema,
+        rows=table.num_rows,
+    )
+    assert captured["reserve_bytes"] == expected
+    assert native_writes == 0
+    assert not path.exists()
 
 
 def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(
