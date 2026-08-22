@@ -87,9 +87,6 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
 
     operations = (
         lambda: atomic.atomic_write_text(alias / "text.txt", "payload"),
-        lambda: atomic.atomic_write_csv(
-            pd.DataFrame({"value": [1]}), alias / "frame.csv", index=False
-        ),
         lambda: atomic.atomic_write_directory(alias / "tree", lambda _root: None),
         lambda: manifests.replace_qrp_json(
             alias / "manifest.json", {"schema_id": "qrp-test"}

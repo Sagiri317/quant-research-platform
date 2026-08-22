@@ -7,8 +7,6 @@ from collections.abc import Callable
 from pathlib import Path
 from uuid import uuid4
 
-import pandas as pd
-
 import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts._json import render_qrp_json_object
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
@@ -58,27 +56,6 @@ def atomic_write_json(path: Path, payload: object) -> Path:
         render_qrp_json_object(payload) + "\n",
         encoding="utf-8",
     )
-
-
-def atomic_write_csv(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
-    final_path, parent_identity, temp_path = _prepare_file_target(path)
-    claimed_temp: os.stat_result | None = None
-    try:
-        handle, claimed_temp = open_owned_scratch_file(
-            temp_path,
-            encoding=str(kwargs.get("encoding", "utf-8")),
-        )
-        with scratch_owner.handle_preserving_primary(handle):
-            require_owned_scratch(final_path.parent, parent_identity)
-            frame.to_csv(handle, **kwargs)
-            handle.flush()
-            os.fsync(handle.fileno())
-        require_owned_scratch(final_path.parent, parent_identity)
-        publish_no_replace(temp_path, final_path, source_identity=claimed_temp)
-    except BaseException as primary:
-        _cleanup_claimed(temp_path, claimed_temp, primary)
-        raise
-    return final_path
 
 
 def atomic_write_directory[T](
@@ -154,7 +131,6 @@ def publish_no_replace(
 
 
 __all__ = [
-    "atomic_write_csv",
     "atomic_write_directory",
     "atomic_write_json",
     "atomic_write_text",

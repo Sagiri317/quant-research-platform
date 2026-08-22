@@ -1,15 +1,11 @@
 from __future__ import annotations
 
-import errno
-import os
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 import quant_research_platform.storage.atomic as atomic
 from quant_research_platform.storage.atomic import (
-    atomic_write_csv,
     atomic_write_directory,
     atomic_write_json,
     atomic_write_text,
@@ -36,27 +32,6 @@ def test_atomic_directory_writer_failure_removes_only_operation_temp(
     assert not final_root.exists()
     assert (unrelated / "keep.txt").read_text(encoding="utf-8") == "keep"
     assert not list(tmp_path.glob(".a-[0-9a-f]*"))
-
-
-def test_atomic_file_writer_failure_removes_only_operation_temp(
-    tmp_path: Path,
-) -> None:
-    final_path = tmp_path / "nested" / "output.csv"
-    unrelated = final_path.with_name(".f-user")
-    unrelated.parent.mkdir(parents=True, exist_ok=True)
-    unrelated.write_text("keep", encoding="utf-8")
-
-    class FailingFrame:
-        def to_csv(self, sink, **_kwargs: object) -> None:  # noqa: ANN001
-            sink.write("partial\n")
-            raise RuntimeError("writer_failed")
-
-    with pytest.raises(RuntimeError, match="writer_failed"):
-        atomic_write_csv(FailingFrame(), final_path, index=False)
-
-    assert not final_path.exists()
-    assert unrelated.read_text(encoding="utf-8") == "keep"
-    assert not list(final_path.parent.glob(".f-[0-9a-f]*"))
 
 
 @pytest.mark.parametrize("exception", [KeyboardInterrupt, SystemExit])
@@ -87,21 +62,16 @@ def test_atomic_write_text_creates_nested_parent_and_publishes(
     assert not list(final_path.parent.glob(".f-*"))
 
 
-def test_atomic_file_writers_reject_existing_targets_without_overwrite(
+def test_atomic_json_writer_rejects_existing_target_without_overwrite(
     tmp_path: Path,
 ) -> None:
     json_path = tmp_path / "manifest.json"
-    csv_path = tmp_path / "table.csv"
     json_path.write_text("existing", encoding="utf-8")
-    csv_path.write_text("existing", encoding="utf-8")
 
     with pytest.raises(OutputAlreadyExistsError):
         atomic_write_json(json_path, {"ok": True})
-    with pytest.raises(OutputAlreadyExistsError):
-        atomic_write_csv(pd.DataFrame({"x": [1]}), csv_path, index=False)
 
     assert json_path.read_text(encoding="utf-8") == "existing"
-    assert csv_path.read_text(encoding="utf-8") == "existing"
 
 
 def test_atomic_directory_rejects_existing_target_without_overwrite(
@@ -183,45 +153,3 @@ def test_atomic_directory_publishes_writer_result(tmp_path: Path) -> None:
 
     assert atomic_write_directory(final_root, write) == "published"
     assert (final_root / "done.txt").read_text(encoding="utf-8") == "done"
-
-
-def test_atomic_csv_writer_preserves_enospc_primary_and_cleans_temp(
-    tmp_path: Path,
-) -> None:
-    final_path = tmp_path / "output.csv"
-    primary = OSError(errno.ENOSPC, "disk_full")
-
-    class FullFrame:
-        def to_csv(self, _sink, **_kwargs: object) -> None:  # noqa: ANN001
-            raise primary
-
-    with pytest.raises(OSError, match="disk_full") as caught:
-        atomic_write_csv(FullFrame(), final_path, index=False)
-
-    assert caught.value is primary
-    assert not final_path.exists()
-    assert not list(tmp_path.glob(".f-*"))
-
-
-def test_atomic_writer_preserves_writer_primary_over_cleanup_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    final_path = tmp_path / "output.csv"
-    primary = RuntimeError("writer_primary")
-    cleanup = PermissionError("cleanup_secondary")
-
-    def remove(_path: Path, _identity: os.stat_result) -> None:
-        raise cleanup
-
-    monkeypatch.setattr(atomic, "remove_owned_scratch", remove)
-
-    class FailingFrame:
-        def to_csv(self, _sink, **_kwargs: object) -> None:  # noqa: ANN001
-            raise primary
-
-    with pytest.raises(RuntimeError, match="writer_primary") as caught:
-        atomic_write_csv(FailingFrame(), final_path, index=False)
-
-    assert caught.value is primary
-    assert any("cleanup" in note for note in getattr(primary, "__notes__", []))
