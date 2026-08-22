@@ -1713,30 +1713,36 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         test_start="2014-01-03",
         test_end="2014-01-03",
     )
+    estimator = build_estimator_from_model_spec(model_spec)
 
     evaluation = evaluate_signal_frame_chunks((frame,), eval_spec)
-    model_result = model_fitting.fit_model_result_from_frames(
-        (frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],),
-        model_spec,
-        estimator=build_estimator_from_model_spec(model_spec),
-    )
-    prediction, output_bundle, _ = write_prediction_output_and_read(
-        tmp_path,
-        (frame,),
-        prediction_spec,
-        model_result.coefficients,
-        model_spec.input_columns,
-        model_metadata=model_result.metadata,
-    )
+    with runtime_resource_policy_scope():
+        model_result_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],),
+            model_spec,
+            estimator=estimator,
+        )
+        try:
+            model_result = model_result_owned.value
+            prediction, output_bundle, _ = write_prediction_output_and_read(
+                tmp_path,
+                (frame,),
+                prediction_spec,
+                model_result.coefficients,
+                model_spec.input_columns,
+                model_metadata=model_result.metadata,
+            )
 
-    assert len(evaluation.metrics) == 2
-    assert len(evaluation.ic_summary) == 1
-    assert len(evaluation.group_spread_summary) == 1
-    assert evaluation.diagnostics.rows_input == 4
-    assert prediction_spec.prediction_column in prediction.columns
-    assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
-    assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
-    assert output_bundle.as_posix().endswith("outputs/pred_demo")
+            assert len(evaluation.metrics) == 2
+            assert len(evaluation.ic_summary) == 1
+            assert len(evaluation.group_spread_summary) == 1
+            assert evaluation.diagnostics.rows_input == 4
+            assert prediction_spec.prediction_column in prediction.columns
+            assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
+            assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
+            assert output_bundle.as_posix().endswith("outputs/pred_demo")
+        finally:
+            model_result_owned.lease.close()
 
 
 @pytest.mark.parametrize(
@@ -1759,45 +1765,54 @@ def test_prediction_builder_binds_backend_package_to_actual_model_owner(
         label_column="forward_return_20d",
         max_train_rows=len(frame),
     )
-    model_result = model_fitting.fit_model_result_from_frames(
-        (frame,),
-        model_spec,
-        estimator=build_estimator_from_model_spec(model_spec),
-    )
-    prediction_spec = PredictionSpec(
-        prediction_id=f"{model_algorithm}_prediction",
-        model_id=model_spec.model_id,
-        research_dataset_id="demo",
-        train_end="2014-01-02",
-        test_start="2014-01-03",
-        test_end="2014-01-03",
-    )
-    result = prediction_runner_module.build_prediction_result_from_frames(
-        (frame,),
-        prediction_spec,
-        model_result.coefficients,
-        model_spec.input_columns,
-        prediction_model=model_result.prediction_model,
-        model_metadata=model_result.metadata,
-    )
-
-    assert result.model_metadata["dependency_status"]["package"] == expected_package
-    wrong_metadata = {
-        **model_result.metadata,
-        "dependency_status": {
-            **model_result.metadata["dependency_status"],
-            "package": wrong_package,
-        },
-    }
-    with pytest.raises(ValueError, match="invalid_model_metadata"):
-        prediction_runner_module.build_prediction_result_from_frames(
+    estimator = build_estimator_from_model_spec(model_spec)
+    with runtime_resource_policy_scope():
+        model_result_owned = model_fitting._fit_model_result_owned_from_frames(
             (frame,),
-            prediction_spec,
-            model_result.coefficients,
-            model_spec.input_columns,
-            prediction_model=model_result.prediction_model,
-            model_metadata=wrong_metadata,
+            model_spec,
+            estimator=estimator,
         )
+        try:
+            model_result = model_result_owned.value
+            prediction_spec = PredictionSpec(
+                prediction_id=f"{model_algorithm}_prediction",
+                model_id=model_spec.model_id,
+                research_dataset_id="demo",
+                train_end="2014-01-02",
+                test_start="2014-01-03",
+                test_end="2014-01-03",
+            )
+            result = prediction_runner_module.build_prediction_result_from_frames(
+                (frame,),
+                prediction_spec,
+                model_result.coefficients,
+                model_spec.input_columns,
+                prediction_model=model_result.prediction_model,
+                model_metadata=model_result.metadata,
+            )
+
+            assert (
+                result.model_metadata["dependency_status"]["package"]
+                == expected_package
+            )
+            wrong_metadata = {
+                **model_result.metadata,
+                "dependency_status": {
+                    **model_result.metadata["dependency_status"],
+                    "package": wrong_package,
+                },
+            }
+            with pytest.raises(ValueError, match="invalid_model_metadata"):
+                prediction_runner_module.build_prediction_result_from_frames(
+                    (frame,),
+                    prediction_spec,
+                    model_result.coefficients,
+                    model_spec.input_columns,
+                    prediction_model=model_result.prediction_model,
+                    model_metadata=wrong_metadata,
+                )
+        finally:
+            model_result_owned.lease.close()
 
 
 def test_prediction_handoff_reads_research_dataset_and_writes_report(

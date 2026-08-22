@@ -173,33 +173,45 @@ def test_model_fit_merges_adjacent_chunks_that_split_one_timestamp(
         label_column="label",
         max_train_rows=len(frame),
     )
-    expected = model_fitting.fit_model_result_from_frames(
-        (frame,),
-        spec,
-        estimator=model_supervised.build_estimator_from_model_spec(spec),
-    )
+    expected_estimator = model_supervised.build_estimator_from_model_spec(spec)
+    result_estimator = model_supervised.build_estimator_from_model_spec(spec)
     original_filter = model_fitting._filter_mode_scope
     filtered_chunk_rows: list[int] = []
 
-    monkeypatch.setattr(
-        model_fitting,
-        "_filter_mode_scope",
-        wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
-    )
-    result = model_fitting.fit_model_result_from_frames(
-        (frame.iloc[:3], frame.iloc[3:]),
-        spec,
-        estimator=model_supervised.build_estimator_from_model_spec(spec),
-    )
-
-    assert filtered_chunk_rows == [len(frame)]
-    assert result.coefficients.tolist() == pytest.approx(expected.coefficients.tolist())
-    result_metadata = dict(result.metadata)
-    expected_metadata = dict(expected.metadata)
-    assert result_metadata.pop("feature_importance") == pytest.approx(
-        expected_metadata.pop("feature_importance")
-    )
-    assert result_metadata == expected_metadata
+    with runtime_resource_policy_scope():
+        expected_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            spec,
+            estimator=expected_estimator,
+        )
+        try:
+            expected = expected_owned.value
+            monkeypatch.setattr(
+                model_fitting,
+                "_filter_mode_scope",
+                wrap_filter_for_chunking(original_filter, filtered_chunk_rows),
+            )
+            result_owned = model_fitting._fit_model_result_owned_from_frames(
+                (frame.iloc[:3], frame.iloc[3:]),
+                spec,
+                estimator=result_estimator,
+            )
+            try:
+                result = result_owned.value
+                assert filtered_chunk_rows == [len(frame)]
+                assert result.coefficients.tolist() == pytest.approx(
+                    expected.coefficients.tolist()
+                )
+                result_metadata = dict(result.metadata)
+                expected_metadata = dict(expected.metadata)
+                assert result_metadata.pop("feature_importance") == pytest.approx(
+                    expected_metadata.pop("feature_importance")
+                )
+                assert result_metadata == expected_metadata
+            finally:
+                result_owned.lease.close()
+        finally:
+            expected_owned.lease.close()
 
 
 def test_prediction_merges_adjacent_chunks_that_split_one_timestamp(
@@ -459,9 +471,17 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         label_column="label",
         max_train_rows=len(frame),
     )
-    expected = model_fitting.fit_model_result_from_frames(
-        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
-    )
+    estimator = build_estimator_from_model_spec(spec)
+    with runtime_resource_policy_scope():
+        expected_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,), spec, estimator=estimator
+        )
+        try:
+            expected = expected_owned.value
+            expected_coefficients = expected.coefficients.copy()
+            expected_metadata = dict(expected.metadata)
+        finally:
+            expected_owned.lease.close()
     original_filter = model_fitting._filter_mode_scope
     filtered_chunk_rows: list[int] = []
 
@@ -484,23 +504,28 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         "_frame_bytes",
         lambda chunk: 10_000 * original_frame_bytes(chunk),
     )
+    estimator = build_estimator_from_model_spec(spec)
     with runtime_resource_policy_scope(policy):
-        result = model_fitting.fit_model_result_from_frames(
+        owned = model_fitting._fit_model_result_owned_from_frames(
             (frame,),
             spec,
-            estimator=build_estimator_from_model_spec(spec),
-            resource_policy=policy,
+            estimator=estimator,
         )
+        try:
+            result = owned.value
+            assert result.coefficients.tolist() == pytest.approx(
+                expected_coefficients.tolist()
+            )
+            result_metadata = dict(result.metadata)
+            assert result_metadata.pop("feature_importance") == pytest.approx(
+                expected_metadata.pop("feature_importance")
+            )
+            assert result_metadata == expected_metadata
+        finally:
+            owned.lease.close()
 
     assert len(filtered_chunk_rows) > 1
     assert max(filtered_chunk_rows) < len(frame)
-    assert result.coefficients.tolist() == pytest.approx(expected.coefficients.tolist())
-    result_metadata = dict(result.metadata)
-    expected_metadata = dict(expected.metadata)
-    assert result_metadata.pop("feature_importance") == pytest.approx(
-        expected_metadata.pop("feature_importance")
-    )
-    assert result_metadata == expected_metadata
 
 
 def test_prediction_forced_tiny_resource_chunks_match_default(

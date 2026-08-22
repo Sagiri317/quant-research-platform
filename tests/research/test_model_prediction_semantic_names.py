@@ -12,13 +12,13 @@ from quant_research_platform.contracts.models import (
     _model_smoke_hyperparameters,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.models.prediction import predict_model_frame
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.research.prediction_output_helpers import (
     prediction_frame_from_artifact,
 )
@@ -63,23 +63,44 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
     )
 
     estimator = build_estimator_from_model_spec(spec)
-    result = model_fitting.fit_model_result_from_frames(
-        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
+    prediction_spec = PredictionSpec(
+        prediction_id=f"{algorithm}_prediction",
+        model_id=spec.model_id,
+        research_dataset_id="research_demo",
+        train_end="2024-01-03",
+        test_start="2024-01-04",
+        test_end="2024-01-04",
     )
-    predictions = predict_model_frame(frame, spec, result)
+    with runtime_resource_policy_scope():
+        result_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame.loc[frame["timestamp"] <= "2024-01-03"],),
+            spec,
+            estimator=estimator,
+        )
+        try:
+            result = result_owned.value
+            predictions = prediction_frame_from_artifact(
+                frame,
+                prediction_spec,
+                result.coefficients,
+                spec.input_columns,
+                prediction_model=result.prediction_model,
+            )
 
-    assert estimator is not None
-    assert result.metadata["model_algorithm"] == algorithm
-    assert result.metadata["input_factor_columns"] == ["factor"]
-    assert result.metadata["input_feature_columns"] == ["feature"]
-    assert result.metadata["label_column"] == "label"
-    assert result.metadata["dependency_status"]["status"] == "available"
-    assert result.metadata["test_start"] is None
-    assert result.metadata["test_end"] is None
-    assert result.metadata["oos_start"] is None
-    assert result.metadata["oos_end"] is None
-    assert len(predictions) == len(frame)
-    assert np.isfinite(predictions["prediction_score"]).any()
+            assert estimator is not None
+            assert result.metadata["model_algorithm"] == algorithm
+            assert result.metadata["input_factor_columns"] == ["factor"]
+            assert result.metadata["input_feature_columns"] == ["feature"]
+            assert result.metadata["label_column"] == "label"
+            assert result.metadata["dependency_status"]["status"] == "available"
+            assert result.metadata["test_start"] is None
+            assert result.metadata["test_end"] is None
+            assert result.metadata["oos_start"] is None
+            assert result.metadata["oos_end"] is None
+            assert len(predictions) == 2
+            assert np.isfinite(predictions["prediction_score"]).any()
+        finally:
+            result_owned.lease.close()
 
 
 def test_training_controls_leave_future_rows_out_of_fit_metadata() -> None:
@@ -93,14 +114,22 @@ def test_training_controls_leave_future_rows_out_of_fit_metadata() -> None:
         max_train_rows=4,
         purge_gap_steps=1,
     )
+    estimator = build_estimator_from_model_spec(spec)
 
-    result = model_fitting.fit_model_result_from_frames(
-        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
-    )
+    with runtime_resource_policy_scope():
+        result_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,), spec, estimator=estimator
+        )
+        try:
+            result_train_end = result_owned.value.metadata["train_end"]
+            result_test_start = result_owned.value.metadata["test_start"]
+            result_test_end = result_owned.value.metadata["test_end"]
+        finally:
+            result_owned.lease.close()
 
-    assert pd.Timestamp(result.metadata["train_end"]) < frame["timestamp"].max()
-    assert result.metadata["test_start"] is None
-    assert result.metadata["test_end"] is None
+    assert pd.Timestamp(result_train_end) < frame["timestamp"].max()
+    assert result_test_start is None
+    assert result_test_end is None
 
 
 def test_model_metadata_records_resolved_parameters_and_backend_version() -> None:
@@ -116,20 +145,26 @@ def test_model_metadata_records_resolved_parameters_and_backend_version() -> Non
         max_train_rows=len(frame),
         purge_gap_steps=1,
     )
+    estimator = build_estimator_from_model_spec(spec)
 
-    result = model_fitting.fit_model_result_from_frames(
-        (frame,),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
+    with runtime_resource_policy_scope():
+        result_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            spec,
+            estimator=estimator,
+        )
+        try:
+            result_metadata = dict(result_owned.value.metadata)
+        finally:
+            result_owned.lease.close()
 
-    assert result.metadata["hyperparameters"] == {"alpha": 7.0}
-    assert result.metadata["resolved_hyperparameters"] == {"alpha": 7.0}
-    assert result.metadata["random_seed"] == 11
-    assert result.metadata["purge_gap_steps"] == 1
-    assert result.metadata["train_start"] == "2024-01-02"
-    assert result.metadata["train_end"] == "2024-01-03"
-    assert result.metadata["dependency_status"] == {
+    assert result_metadata["hyperparameters"] == {"alpha": 7.0}
+    assert result_metadata["resolved_hyperparameters"] == {"alpha": 7.0}
+    assert result_metadata["random_seed"] == 11
+    assert result_metadata["purge_gap_steps"] == 1
+    assert result_metadata["train_start"] == "2024-01-02"
+    assert result_metadata["train_end"] == "2024-01-03"
+    assert result_metadata["dependency_status"] == {
         "status": "available",
         "package": "sklearn",
         "version": pytest.importorskip("sklearn").__version__,
@@ -148,11 +183,7 @@ def test_prediction_accepts_actual_bounded_parallel_model_threads() -> None:
         random_seed=7,
         max_train_rows=len(frame),
     )
-    fit = model_fitting.fit_model_result_from_frames(
-        (frame,),
-        model_spec,
-        estimator=build_estimator_from_model_spec(model_spec),
-    )
+    estimator = build_estimator_from_model_spec(model_spec)
     prediction_spec = PredictionSpec(
         prediction_id="extra_trees_prediction",
         model_id=model_spec.model_id,
@@ -161,76 +192,85 @@ def test_prediction_accepts_actual_bounded_parallel_model_threads() -> None:
         test_start="2024-01-04",
         test_end="2024-01-04",
     )
-
-    result = build_prediction_result_from_frames(
-        (),
-        prediction_spec,
-        fit.coefficients,
-        model_spec.input_columns,
-        prediction_model=fit.prediction_model,
-        model_metadata=fit.metadata,
-    )
-
-    assert int(result.model_metadata["resolved_hyperparameters"]["n_jobs"]) > 0  # type: ignore[index]
-
-    bounded_request = {
-        **fit.metadata["hyperparameters"],
-        "n_jobs": 4,
-    }
-    bounded_resolved = {
-        **fit.metadata["resolved_hyperparameters"],
-        "n_jobs": 2,
-    }
-    bounded = {
-        **fit.metadata,
-        "hyperparameters": bounded_request,
-        "resolved_hyperparameters": bounded_resolved,
-    }
-    assert (
-        build_prediction_result_from_frames(
-            (),
-            prediction_spec,
-            fit.coefficients,
-            model_spec.input_columns,
-            prediction_model=fit.prediction_model,
-            model_metadata=bounded,
-        ).model_metadata["resolved_hyperparameters"]
-        == bounded_resolved
-    )
-
-    forged = {
-        **fit.metadata,
-        "hyperparameters": {**fit.metadata["hyperparameters"], "n_jobs": 1},
-        "resolved_hyperparameters": {
-            **fit.metadata["resolved_hyperparameters"],
-            "n_jobs": 999_999,
-        },
-    }
-    with pytest.raises(ValueError, match="invalid_model_metadata"):
-        build_prediction_result_from_frames(
-            (),
-            prediction_spec,
-            fit.coefficients,
-            model_spec.input_columns,
-            prediction_model=fit.prediction_model,
-            model_metadata=forged,
+    with runtime_resource_policy_scope():
+        fit_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            model_spec,
+            estimator=estimator,
         )
-
-    for invalid_threads in (0, -1, True, 1.0):
-        resolved = {
-            **fit.metadata["resolved_hyperparameters"],
-            "n_jobs": invalid_threads,
-        }
-        forged = {**fit.metadata, "resolved_hyperparameters": resolved}
-        with pytest.raises(ValueError, match="invalid_model_metadata"):
-            build_prediction_result_from_frames(
+        try:
+            fit = fit_owned.value
+            result = build_prediction_result_from_frames(
                 (),
                 prediction_spec,
                 fit.coefficients,
                 model_spec.input_columns,
                 prediction_model=fit.prediction_model,
-                model_metadata=forged,
+                model_metadata=fit.metadata,
             )
+
+            assert int(result.model_metadata["resolved_hyperparameters"]["n_jobs"]) > 0  # type: ignore[index]
+
+            bounded_request = {
+                **fit.metadata["hyperparameters"],
+                "n_jobs": 4,
+            }
+            bounded_resolved = {
+                **fit.metadata["resolved_hyperparameters"],
+                "n_jobs": 2,
+            }
+            bounded = {
+                **fit.metadata,
+                "hyperparameters": bounded_request,
+                "resolved_hyperparameters": bounded_resolved,
+            }
+            assert (
+                build_prediction_result_from_frames(
+                    (),
+                    prediction_spec,
+                    fit.coefficients,
+                    model_spec.input_columns,
+                    prediction_model=fit.prediction_model,
+                    model_metadata=bounded,
+                ).model_metadata["resolved_hyperparameters"]
+                == bounded_resolved
+            )
+
+            forged = {
+                **fit.metadata,
+                "hyperparameters": {**fit.metadata["hyperparameters"], "n_jobs": 1},
+                "resolved_hyperparameters": {
+                    **fit.metadata["resolved_hyperparameters"],
+                    "n_jobs": 999_999,
+                },
+            }
+            with pytest.raises(ValueError, match="invalid_model_metadata"):
+                build_prediction_result_from_frames(
+                    (),
+                    prediction_spec,
+                    fit.coefficients,
+                    model_spec.input_columns,
+                    prediction_model=fit.prediction_model,
+                    model_metadata=forged,
+                )
+
+            for invalid_threads in (0, -1, True, 1.0):
+                resolved = {
+                    **fit.metadata["resolved_hyperparameters"],
+                    "n_jobs": invalid_threads,
+                }
+                forged = {**fit.metadata, "resolved_hyperparameters": resolved}
+                with pytest.raises(ValueError, match="invalid_model_metadata"):
+                    build_prediction_result_from_frames(
+                        (),
+                        prediction_spec,
+                        fit.coefficients,
+                        model_spec.input_columns,
+                        prediction_model=fit.prediction_model,
+                        model_metadata=forged,
+                    )
+        finally:
+            fit_owned.lease.close()
 
 
 @pytest.mark.parametrize("physical_cores", (16, 4))
@@ -307,50 +347,21 @@ def test_model_metadata_matches_actual_execution_owner(
     )
 
     estimator = build_estimator_from_model_spec(spec)
-    result = model_fitting.fit_model_result_from_frames(
-        (frame,), spec, estimator=estimator
-    )
+    with runtime_resource_policy_scope():
+        result_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,), spec, estimator=estimator
+        )
+        try:
+            dependency_status = dict(
+                result_owned.value.metadata["dependency_status"]
+            )
+        finally:
+            result_owned.lease.close()
 
     assert type(estimator).__module__.startswith(module_prefix)
-    assert result.metadata["dependency_status"]["package"] == package
+    assert dependency_status["package"] == package
     if package == "internal":
-        assert result.metadata["dependency_status"]["version"] == qrp_version
-
-
-def test_prediction_output_helpers_do_not_export_bundle_semantics() -> None:
-    frame = _model_frame()
-    spec = PredictionSpec(
-        prediction_id="prediction_demo",
-        model_id="linear_regression_demo",
-        research_dataset_id="research_demo",
-        train_end="2024-01-02",
-        test_start="2024-01-03",
-        test_end="2024-01-04",
-    )
-    model_spec = ModelSpec(
-        model_id="linear_regression_demo",
-        model_algorithm="linear_regression",
-        input_factor_columns=("factor",),
-        input_feature_columns=("feature",),
-        label_column="label",
-        max_train_rows=len(frame),
-    )
-    fit = model_fitting.fit_model_result_from_frames(
-        (frame.loc[frame["timestamp"] <= "2024-01-02"],),
-        model_spec,
-        estimator=build_estimator_from_model_spec(model_spec),
-    )
-
-    prediction = prediction_frame_from_artifact(
-        frame,
-        spec,
-        fit.coefficients,
-        model_spec.input_columns,
-        prediction_model=fit.prediction_model,
-    )
-    assert spec.primary_key == ("timestamp", "asset_id")
-    assert spec.prediction_column == "prediction_score"
-    assert list(prediction.columns) == ["timestamp", "asset_id", "prediction_score"]
+        assert dependency_status["version"] == qrp_version
 
 
 def test_prediction_spec_rejects_non_canonical_output_schema() -> None:

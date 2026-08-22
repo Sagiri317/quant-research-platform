@@ -28,8 +28,9 @@ from quant_research_platform.research._memory import (
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
 )
-from quant_research_platform.research.models.prediction import (
-    prediction_model_input_frame,
+from quant_research_platform.research.models.rank_ensemble import (
+    ICWeightedRankEnsemble,
+    RankEnsemblePredictor,
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -384,12 +385,13 @@ def prediction_callable(
     if prediction_model is not None:
 
         def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
+            columns = input_columns
+            if isinstance(
+                prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
+            ):
+                columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
             predicted = prediction_model.predict(
-                prediction_model_input_frame(
-                    frame,
-                    input_columns=input_columns,
-                    prediction_model=prediction_model,
-                )
+                frame.loc[:, list(columns)]
             )
             return np.asarray(predicted, dtype="float64")
 

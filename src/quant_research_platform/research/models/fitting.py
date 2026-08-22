@@ -25,11 +25,9 @@ from quant_research_platform.research._memory import (
 from quant_research_platform.research.filtering import _filter_mode_scope
 from quant_research_platform.runtime.resources import (
     MemoryLease,
-    RuntimeResourcePolicy,
     _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
@@ -46,27 +44,6 @@ class ModelFitResult:
 
 
 type _OwnedModelFitResult = _OwnedValue[ModelFitResult]
-
-
-def fit_model_result_from_frames(
-    frames: Iterable[pd.DataFrame],
-    spec: ModelSpec,
-    *,
-    estimator: object,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> ModelFitResult:
-    with runtime_resource_policy_scope(resource_policy):
-        owned = _fit_model_result_owned_from_frames(
-            frames,
-            spec,
-            estimator=estimator,
-        )
-        if isinstance(owned, _OwnedValue):
-            try:
-                return owned.value
-            finally:
-                owned.lease.close()
-        return owned
 
 
 def _fit_model_result_owned_from_frames(
@@ -568,26 +545,6 @@ def fit_linear_coefficients(
             )
 
 
-def fit_estimator_model_result_from_frames(
-    frames: Iterable[pd.DataFrame],
-    spec: ModelSpec,
-    *,
-    estimator: object,
-) -> ModelFitResult:
-    with runtime_resource_policy_scope():
-        owned = _fit_estimator_model_result_owned_from_frames(
-            frames,
-            spec,
-            estimator=estimator,
-        )
-        if isinstance(owned, _OwnedValue):
-            try:
-                return owned.value
-            finally:
-                owned.lease.close()
-        return owned
-
-
 def _fit_estimator_model_result_owned_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
@@ -747,20 +704,6 @@ def _fit_estimator_model_result_owned_from_frames(
                     f"{type(cleanup_error).__name__}"
                 )
         raise
-
-
-def collect_training_frame(
-    frames: Iterable[pd.DataFrame],
-    spec: ModelSpec,
-) -> tuple[pd.DataFrame, dict[str, object], dict[str, object]]:
-    with runtime_resource_policy_scope():
-        owned = _collect_training_frame_owned(frames, spec)
-        if isinstance(owned, _OwnedValue):
-            try:
-                return owned.value
-            finally:
-                owned.lease.close()
-        return owned
 
 
 def _collect_training_frame_owned(
@@ -1482,6 +1425,4 @@ def _strict_non_negative_count_value(value: object) -> int:
 
 __all__ = [
     "ModelFitResult",
-    "collect_training_frame",
-    "fit_model_result_from_frames",
 ]

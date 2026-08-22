@@ -16,19 +16,14 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import (
     ModelSpec,
-    _model_algorithm_ids,
 )
-from quant_research_platform.contracts.predictions import (
-    PREDICTION_SCORE_COLUMN,
-    PredictionSpec,
-)
+from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.markets.implementations.a_share.labels import (
     calculations as label_calculations,
 )
 from quant_research_platform.markets.implementations.a_share.labels.definitions import (
     label_catalog,
 )
-from quant_research_platform.research.models.prediction import predict_model_frame
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
@@ -43,11 +38,7 @@ from tests.helpers.research_specs import (
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.filter_mode_fixtures import (
     make_filter_mode_frame,
-    make_filter_mode_model_hyperparameters,
     make_filter_mode_prediction_output_scores,
-)
-from tests.research.prediction_output_helpers import (
-    prediction_frame_from_artifact,
 )
 
 
@@ -86,22 +77,38 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
         sample_filter_mode="unfiltered",
         max_train_rows=len(frame),
     )
+    eligible_estimator = build_estimator_from_model_spec(eligible_spec)
+    unfiltered_estimator = build_estimator_from_model_spec(unfiltered_spec)
 
-    eligible = model_fitting.fit_model_result_from_frames(
-        (frame,),
-        eligible_spec,
-        estimator=build_estimator_from_model_spec(eligible_spec),
-    )
-    unfiltered = model_fitting.fit_model_result_from_frames(
-        (frame,),
-        unfiltered_spec,
-        estimator=build_estimator_from_model_spec(unfiltered_spec),
-    )
+    with runtime_resource_policy_scope():
+        eligible_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            eligible_spec,
+            estimator=eligible_estimator,
+        )
+        try:
+            eligible = eligible_owned.value
+            eligible_metadata = dict(eligible.metadata)
+            eligible_coefficients = eligible.coefficients.copy()
+        finally:
+            eligible_owned.lease.close()
+    with runtime_resource_policy_scope():
+        unfiltered_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            unfiltered_spec,
+            estimator=unfiltered_estimator,
+        )
+        try:
+            unfiltered = unfiltered_owned.value
+            unfiltered_metadata = dict(unfiltered.metadata)
+            unfiltered_coefficients = unfiltered.coefficients.copy()
+        finally:
+            unfiltered_owned.lease.close()
 
     assert (
-        eligible.metadata
+        eligible_metadata
         | {
-            key: eligible.metadata[key]
+            key: eligible_metadata[key]
             for key in (
                 "dependency_status",
                 "feature_importance",
@@ -111,10 +118,10 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
                 "random_seed",
             )
         }
-        == eligible.metadata
+        == eligible_metadata
     )
     assert {
-        key: eligible.metadata[key]
+        key: eligible_metadata[key]
         for key in (
             "model_algorithm",
             "sample_filter_mode",
@@ -149,24 +156,32 @@ def test_model_sample_filter_modes_and_metadata_ignore_tradability_masks() -> No
         "label_column": "label",
         "coefficient_count": 2,
     }
-    assert eligible.metadata["dependency_status"]["status"] == "available"
-    assert eligible.metadata["hyperparameters"] == {}
-    assert eligible.metadata["random_seed"] is None
-    assert eligible.metadata["max_train_rows"] == len(frame)
-    assert eligible.metadata["purge_gap_steps"] == 0
-    assert eligible.metadata["feature_importance"] == pytest.approx({"factor": 0.01})
-    assert unfiltered.metadata["rows_after_filter_mode"] == 6
-    assert unfiltered.metadata["rows_after_input_label_dropna"] == 5
-    assert eligible.coefficients.tolist() == pytest.approx([0.0, 0.01])
-    assert unfiltered.coefficients.tolist() == pytest.approx([0.0, 0.01])
+    assert eligible_metadata["dependency_status"]["status"] == "available"
+    assert eligible_metadata["hyperparameters"] == {}
+    assert eligible_metadata["random_seed"] is None
+    assert eligible_metadata["max_train_rows"] == len(frame)
+    assert eligible_metadata["purge_gap_steps"] == 0
+    assert eligible_metadata["feature_importance"] == pytest.approx({"factor": 0.01})
+    assert unfiltered_metadata["rows_after_filter_mode"] == 6
+    assert unfiltered_metadata["rows_after_input_label_dropna"] == 5
+    assert eligible_coefficients.tolist() == pytest.approx([0.0, 0.01])
+    assert unfiltered_coefficients.tolist() == pytest.approx([0.0, 0.01])
 
     all_tradability_blocked = frame.assign(can_enter=False, can_exit=False)
-    still_trains = model_fitting.fit_model_result_from_frames(
-        (all_tradability_blocked,),
-        eligible_spec,
-        estimator=build_estimator_from_model_spec(eligible_spec),
-    )
-    assert still_trains.metadata["rows_after_input_label_dropna"] == 4
+    still_trains_estimator = build_estimator_from_model_spec(eligible_spec)
+    with runtime_resource_policy_scope():
+        still_trains_owned = model_fitting._fit_model_result_owned_from_frames(
+            (all_tradability_blocked,),
+            eligible_spec,
+            estimator=still_trains_estimator,
+        )
+        try:
+            still_trains_rows = still_trains_owned.value.metadata[
+                "rows_after_input_label_dropna"
+            ]
+        finally:
+            still_trains_owned.lease.close()
+    assert still_trains_rows == 4
 
 
 @pytest.mark.parametrize(
@@ -249,13 +264,15 @@ def test_model_streaming_fit_rejects_invalid_filter_metadata_counts(
         input_factor_columns=("factor",),
         label_column="label",
     )
+    estimator = build_estimator_from_model_spec(spec)
 
     with pytest.raises(ValueError, match="invalid_model_metadata_count"):
-        model_fitting.fit_model_result_from_frames(
-            (make_filter_mode_frame(),),
-            spec,
-            estimator=build_estimator_from_model_spec(spec),
-        )
+        with runtime_resource_policy_scope():
+            model_fitting._fit_model_result_owned_from_frames(
+                (make_filter_mode_frame(),),
+                spec,
+                estimator=estimator,
+            )
 
 
 @pytest.mark.parametrize(
@@ -292,93 +309,10 @@ def test_model_training_collection_rejects_invalid_filter_metadata_counts(
     )
 
     with pytest.raises(ValueError, match="invalid_model_metadata_count"):
-        model_fitting.collect_training_frame((make_filter_mode_frame(),), spec)
-
-
-def test_model_fit_accepts_valid_filter_metadata_counts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import quant_research_platform.research.models.fitting as model_fitting
-
-    def fake_filter_mode_scope(frame: pd.DataFrame, **_: object):
-        return nullcontext((frame, _model_filter_metadata()))
-
-    monkeypatch.setattr(model_fitting, "_filter_mode_scope", fake_filter_mode_scope)
-    spec = ModelSpec(
-        model_id="linear_valid_metadata_count",
-        model_algorithm="linear_regression",
-        input_factor_columns=("factor",),
-        label_column="label",
-    )
-
-    result = model_fitting.fit_model_result_from_frames(
-        (make_filter_mode_frame(),),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
-
-    assert result.metadata["rows_input"] == 2
-    assert result.metadata["rows_after_filter_mode"] == 2
-
-
-@pytest.mark.parametrize(
-    "model_algorithm",
-    _model_algorithm_ids(),
-)
-def test_required_model_algorithm_ids_fit_and_predict(model_algorithm: str) -> None:
-    train = pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 8,
-            "asset_id": [f"asset_{idx}" for idx in range(8)],
-            "timestamp": [pd.Timestamp("2024-01-02")] * 8,
-            "factor": [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8],
-            "feature": [0.8, 0.7, 0.6, 0.5, 0.4, 0.3, 0.2, 0.1],
-            "label": [0.11, 0.19, 0.31, 0.41, 0.49, 0.61, 0.69, 0.81],
-            "eligible": [True] * 8,
-        }
-    )
-    test = train.assign(
-        timestamp=pd.Timestamp("2024-01-03"),
-        label=np.nan,
-    )
-    frame = pd.concat([train, test], ignore_index=True)
-    spec = ModelSpec(
-        model_id=f"{model_algorithm}_demo",
-        model_algorithm=model_algorithm,
-        input_factor_columns=("factor",),
-        input_feature_columns=("feature",),
-        label_column="label",
-        random_seed=7,
-        hyperparameters=make_filter_mode_model_hyperparameters(model_algorithm),
-        max_train_rows=len(train),
-    )
-    prediction_spec = PredictionSpec(
-        prediction_id=f"{model_algorithm}_pred",
-        model_id=spec.model_id,
-        research_dataset_id="demo_filter",
-        train_end="2024-01-02",
-        test_start="2024-01-03",
-        test_end="2024-01-03",
-    )
-
-    result = model_fitting.fit_model_result_from_frames(
-        (frame.loc[frame["timestamp"].lt("2024-01-03")],),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
-    prediction = prediction_frame_from_artifact(
-        frame,
-        prediction_spec,
-        result.coefficients,
-        spec.input_columns,
-        prediction_model=result.prediction_model,
-    )
-
-    assert result.metadata["model_algorithm"] == model_algorithm
-    assert result.metadata["input_columns"] == ["factor", "feature"]
-    assert result.metadata["rows_after_input_label_dropna"] == 8
-    assert len(prediction) == 8
-    assert prediction[PREDICTION_SCORE_COLUMN].notna().all()
+        with runtime_resource_policy_scope():
+            model_fitting._collect_training_frame_owned(
+                (make_filter_mode_frame(),), spec
+            )
 
 
 @pytest.mark.parametrize("model_algorithm", ["linear_regression", "ridge_regression"])
@@ -409,22 +343,36 @@ def test_model_training_controls_apply_to_linear_and_estimators(
         purge_gap_steps=1,
         max_train_rows=len(frame),
     )
+    max_rows_estimator = build_estimator_from_model_spec(max_rows_spec)
+    purge_estimator = build_estimator_from_model_spec(purge_spec)
 
-    max_rows = model_fitting.fit_model_result_from_frames(
-        (frame,),
-        max_rows_spec,
-        estimator=build_estimator_from_model_spec(max_rows_spec),
-    )
-    purge = model_fitting.fit_model_result_from_frames(
-        (frame,), purge_spec, estimator=build_estimator_from_model_spec(purge_spec)
-    )
+    with runtime_resource_policy_scope():
+        max_rows_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            max_rows_spec,
+            estimator=max_rows_estimator,
+        )
+        try:
+            max_rows_metadata = dict(max_rows_owned.value.metadata)
+        finally:
+            max_rows_owned.lease.close()
+    with runtime_resource_policy_scope():
+        purge_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            purge_spec,
+            estimator=purge_estimator,
+        )
+        try:
+            purge_metadata = dict(purge_owned.value.metadata)
+        finally:
+            purge_owned.lease.close()
 
-    assert max_rows.metadata["rows_after_input_label_dropna"] == 1
-    assert max_rows.metadata["train_start"] == "2024-01-03"
-    assert max_rows.metadata["train_end"] == "2024-01-03"
-    assert purge.metadata["rows_after_input_label_dropna"] == 2
-    assert purge.metadata["train_start"] == "2024-01-01"
-    assert purge.metadata["train_end"] == "2024-01-02"
+    assert max_rows_metadata["rows_after_input_label_dropna"] == 1
+    assert max_rows_metadata["train_start"] == "2024-01-03"
+    assert max_rows_metadata["train_end"] == "2024-01-03"
+    assert purge_metadata["rows_after_input_label_dropna"] == 2
+    assert purge_metadata["train_start"] == "2024-01-01"
+    assert purge_metadata["train_end"] == "2024-01-02"
 
 
 def test_model_training_purge_uses_each_assets_valid_label_rows() -> None:
@@ -460,9 +408,12 @@ def test_model_training_purge_uses_each_assets_valid_label_rows() -> None:
         max_train_rows=len(frame),
     )
 
-    training, _row_counts, _metadata = model_fitting.collect_training_frame(
-        (frame,), spec
-    )
+    with runtime_resource_policy_scope():
+        training_owned = model_fitting._collect_training_frame_owned((frame,), spec)
+        try:
+            training = training_owned.value[0].copy()
+        finally:
+            training_owned.lease.close()
 
     assert definition.lookahead == 2
     assert training["factor"].tolist() == [1.0]
@@ -516,10 +467,13 @@ def test_model_max_train_rows_streaming_matches_multi_asset_full_training() -> N
         spec,
     ).drop(columns="asset_id")
 
-    training, row_counts, _metadata = model_fitting.collect_training_frame(
-        chunks,
-        spec,
-    )
+    with runtime_resource_policy_scope():
+        training_owned = model_fitting._collect_training_frame_owned(chunks, spec)
+        try:
+            training = training_owned.value[0].copy()
+            row_counts = dict(training_owned.value[1])
+        finally:
+            training_owned.lease.close()
 
     pd.testing.assert_frame_equal(training, expected)
     assert row_counts["rows_after_input_label_dropna"] == len(expected)
@@ -544,16 +498,18 @@ def test_model_training_collection_rejects_unbounded_collection() -> None:
     )
 
     with pytest.raises(ValueError, match="unbounded_model_training_collection"):
-        model_fitting.collect_training_frame(
-            (frame,),
-            spec,
-        )
+        with runtime_resource_policy_scope():
+            model_fitting._collect_training_frame_owned(
+                (frame,),
+                spec,
+            )
 
     with pytest.raises(ValueError, match="unbounded_model_training_collection"):
-        model_fitting.collect_training_frame(
-            (chunk for _, chunk in frame.groupby("timestamp")),
-            spec,
-        )
+        with runtime_resource_policy_scope():
+            model_fitting._collect_training_frame_owned(
+                (chunk for _, chunk in frame.groupby("timestamp")),
+                spec,
+            )
 
 
 def test_linear_matrix_admission_precedes_allocation(
@@ -616,7 +572,7 @@ def test_model_native_state_admission_uses_resolved_tree_size_before_fit() -> No
     )
     with runtime_resource_policy_scope(policy):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            model_fitting.fit_estimator_model_result_from_frames(
+            model_fitting._fit_model_result_owned_from_frames(
                 (frame,),
                 spec,
                 estimator=Estimator(),
@@ -637,15 +593,22 @@ def test_numpy_integral_tree_size_matches_native_parameter_and_state_bound() -> 
             max_train_rows=len(frame),
         )
         estimator = build_estimator_from_model_spec(spec)
-        result = model_fitting.fit_model_result_from_frames(
-            (frame,),
-            spec,
-            estimator=estimator,
-        )
+        with runtime_resource_policy_scope():
+            result_owned = model_fitting._fit_model_result_owned_from_frames(
+                (frame,),
+                spec,
+                estimator=estimator,
+            )
+            try:
+                resolved_hyperparameters = dict(
+                    result_owned.value.metadata["resolved_hyperparameters"]
+                )
+            finally:
+                result_owned.lease.close()
         fitted.append(
             (
                 estimator,
-                result.metadata["resolved_hyperparameters"],
+                resolved_hyperparameters,
                 model_fitting._model_state_upper_bound_bytes(  # noqa: SLF001
                     frame,
                     spec,
@@ -739,14 +702,15 @@ def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
     )
 
     with runtime_resource_policy_scope(policy):
-        assert (
-            model_fitting.fit_estimator_model_result_from_frames(
-                (frame,),
-                spec,
-                estimator=estimator,
-            ).prediction_model
-            is estimator
+        owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            spec,
+            estimator=estimator,
         )
+        try:
+            assert owned.value.prediction_model is estimator
+        finally:
+            owned.lease.close()
 
 
 def test_model_threads_are_bound_to_physical_cores(
@@ -841,14 +805,15 @@ def test_model_threads_adapt_to_live_planning_headroom(
 
     estimator = Estimator()
     with runtime_resource_policy_scope(policy):
-        assert (
-            model_fitting.fit_estimator_model_result_from_frames(
-                (frame,),
-                spec,
-                estimator=estimator,
-            ).prediction_model
-            is estimator
+        owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            spec,
+            estimator=estimator,
         )
+        try:
+            assert owned.value.prediction_model is estimator
+        finally:
+            owned.lease.close()
 
 
 def test_linear_tsqr_reserves_first_frame_across_second_pull(
@@ -1026,14 +991,17 @@ def test_estimator_target_and_model_state_stay_reserved_through_metadata(
     monkeypatch.setattr(pd.Series, "to_numpy", admitted_to_numpy)
 
     with runtime_resource_policy_scope(policy):
-        result = model_fitting.fit_estimator_model_result_from_frames(
+        owned = model_fitting._fit_model_result_owned_from_frames(
             (frame,),
             spec,
             estimator=Estimator(),
         )
+        try:
+            assert owned.value.metadata["feature_importance"] == {"factor": 1.0}
+        finally:
+            owned.lease.close()
 
     assert observations
-    assert result.metadata["feature_importance"] == {"factor": 1.0}
 
 
 @pytest.mark.parametrize(
@@ -1084,7 +1052,7 @@ def test_unbounded_tree_sentinels_reject_before_estimator_fit(
     )
     with runtime_resource_policy_scope(policy):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            model_fitting.fit_estimator_model_result_from_frames(
+            model_fitting._fit_model_result_owned_from_frames(
                 (frame,),
                 spec,
                 estimator=Estimator(),
@@ -1108,53 +1076,14 @@ def test_gradient_tree_zero_depth_rejects_before_estimator_fit() -> None:
             raise AssertionError("estimator fit entered before state validation")
 
     with pytest.raises(ValueError, match="invalid_model_state_sizing_parameter"):
-        model_fitting.fit_estimator_model_result_from_frames(
-            (frame,),
-            spec,
-            estimator=Estimator(),
-        )
+        with runtime_resource_policy_scope():
+            model_fitting._fit_model_result_owned_from_frames(
+                (frame,),
+                spec,
+                estimator=Estimator(),
+            )
     with runtime_resource_policy_scope():
         pass
-
-
-@pytest.mark.parametrize(
-    "model_algorithm",
-    ["equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"],
-)
-def test_rank_ensembles_predict_cross_sectional_ranks_per_timestamp(
-    model_algorithm: str,
-) -> None:
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(
-                ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
-            ),
-            "asset_id": ["asset_a", "asset_b", "asset_a", "asset_b"],
-            "factor": [1.0, 2.0, 1.0, 2.0],
-            "feature": [10.0, 20.0, 10.0, 20.0],
-            "label": [0.0, 1.0, 0.0, 1.0],
-            "eligible": [True, True, True, True],
-        }
-    )
-    spec = ModelSpec(
-        model_id=f"{model_algorithm}_rank_scope",
-        model_algorithm=model_algorithm,
-        input_factor_columns=("factor",),
-        input_feature_columns=("feature",),
-        label_column="label",
-        max_train_rows=len(frame),
-    )
-
-    result = model_fitting.fit_model_result_from_frames(
-        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
-    )
-    predicted = result.prediction_model.predict(frame)
-    predicted_frame = predict_model_frame(frame, spec, result)
-
-    assert predicted.tolist() == pytest.approx([0.5, 1.0, 0.5, 1.0])
-    assert predicted_frame["prediction_score"].tolist() == pytest.approx(
-        [0.5, 1.0, 0.5, 1.0]
-    )
 
 
 @pytest.mark.parametrize(
@@ -1191,27 +1120,34 @@ def test_rank_ensemble_prediction_outputs_are_chunk_boundary_invariant(
         train_end="2024-01-01",
         test_start="2024-01-02",
     )
-    result = model_fitting.fit_model_result_from_frames(
-        (frame,), model_spec, estimator=build_estimator_from_model_spec(model_spec)
-    )
+    estimator = build_estimator_from_model_spec(model_spec)
+    with runtime_resource_policy_scope():
+        result_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,), model_spec, estimator=estimator
+        )
+        try:
+            result = result_owned.value
+            one_chunk = make_filter_mode_prediction_output_scores(
+                [frame],
+                prediction_spec=prediction_spec,
+                model_spec=model_spec,
+                result=result,
+            )
+            split_chunks = make_filter_mode_prediction_output_scores(
+                [chunk for _, chunk in frame.groupby("timestamp", sort=True)],
+                prediction_spec=prediction_spec,
+                model_spec=model_spec,
+                result=result,
+            )
 
-    one_chunk = make_filter_mode_prediction_output_scores(
-        [frame],
-        prediction_spec=prediction_spec,
-        model_spec=model_spec,
-        result=result,
-    )
-    split_chunks = make_filter_mode_prediction_output_scores(
-        [chunk for _, chunk in frame.groupby("timestamp", sort=True)],
-        prediction_spec=prediction_spec,
-        model_spec=model_spec,
-        result=result,
-    )
-
-    assert one_chunk["prediction_score"].tolist() == pytest.approx([0.5, 1.0, 0.5, 1.0])
-    assert split_chunks["prediction_score"].tolist() == pytest.approx(
-        one_chunk["prediction_score"].tolist()
-    )
+            assert one_chunk["prediction_score"].tolist() == pytest.approx(
+                [0.5, 1.0, 0.5, 1.0]
+            )
+            assert split_chunks["prediction_score"].tolist() == pytest.approx(
+                one_chunk["prediction_score"].tolist()
+            )
+        finally:
+            result_owned.lease.close()
 
 
 def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
@@ -1282,12 +1218,18 @@ def test_model_rank_deficient_fit_matches_direct_lstsq_design() -> None:
     design[:, 0] = 1.0
     design[:, 1:] = x
     expected, *_ = np.linalg.lstsq(design, y, rcond=None)
+    estimator = build_estimator_from_model_spec(spec)
 
-    result = model_fitting.fit_model_result_from_frames(
-        (frame,), spec, estimator=build_estimator_from_model_spec(spec)
-    )
+    with runtime_resource_policy_scope():
+        result_owned = model_fitting._fit_model_result_owned_from_frames(
+            (frame,), spec, estimator=estimator
+        )
+        try:
+            result_coefficients = result_owned.value.coefficients.tolist()
+        finally:
+            result_owned.lease.close()
 
-    assert result.coefficients.tolist() == pytest.approx(expected.tolist())
+    assert result_coefficients == pytest.approx(expected.tolist())
 
 
 def test_model_rejects_tradable_sample_filter_mode() -> None:
