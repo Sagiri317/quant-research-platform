@@ -11,12 +11,10 @@ import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts._json import render_qrp_json_object
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._scratch_ownership import (
-    create_owned_scratch,
     move_path_no_replace,
     open_owned_scratch_file,
     owned_scratch_name,
     remove_owned_scratch,
-    require_owned_scratch,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
@@ -33,17 +31,21 @@ def atomic_write_text(
     *,
     encoding: str = "utf-8",
 ) -> Path:
-    final_path, parent_identity, temp_path = _prepare_file_target(path)
-    claimed_temp: os.stat_result | None = None
+    final_path, temp_path = _prepare_file_target(path)
+    claimed_temp = False
     try:
-        handle, claimed_temp = open_owned_scratch_file(temp_path, encoding=encoding)
+        handle = open_owned_scratch_file(temp_path, encoding=encoding)
+        claimed_temp = True
         with scratch_owner.handle_preserving_primary(handle):
-            require_owned_scratch(final_path.parent, parent_identity)
+            require_unaliased_path(
+                final_path.parent,
+                error="invalid_storage_write_path",
+            )
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        require_owned_scratch(final_path.parent, parent_identity)
-        publish_no_replace(temp_path, final_path, source_identity=claimed_temp)
+        require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
+        publish_no_replace(temp_path, final_path)
     except BaseException as primary:
         _cleanup_claimed(temp_path, claimed_temp, primary)
         raise
@@ -65,47 +67,52 @@ def atomic_write_directory[T](
     final_root = require_unaliased_path(Path(root), error="invalid_storage_write_path")
     require_unaliased_path(final_root.parent, error="invalid_storage_write_path")
     final_root.parent.mkdir(parents=True, exist_ok=True)
-    parent_identity = final_root.parent.lstat()
     reject_if_exists(final_root)
     temp_root = final_root.with_name(
         owned_scratch_name(".a-", uuid4().hex[:12])
     )
-    claimed_temp: os.stat_result | None = None
+    claimed_temp = False
     try:
-        claimed_temp = create_owned_scratch(temp_root)
-        require_owned_scratch(final_root.parent, parent_identity)
+        os.mkdir(temp_root)
+        claimed_temp = True
+        require_unaliased_path(
+            final_root.parent,
+            error="invalid_storage_write_path",
+        )
         result = writer(temp_root)
-        require_owned_scratch(final_root.parent, parent_identity)
-        publish_no_replace(temp_root, final_root, source_identity=claimed_temp)
+        require_unaliased_path(
+            final_root.parent,
+            error="invalid_storage_write_path",
+        )
+        publish_no_replace(temp_root, final_root)
     except BaseException as primary:
         _cleanup_claimed(temp_root, claimed_temp, primary)
         raise
     return result
 
 
-def _prepare_file_target(path: Path) -> tuple[Path, os.stat_result, Path]:
+def _prepare_file_target(path: Path) -> tuple[Path, Path]:
     final_path = require_unaliased_path(Path(path), error="invalid_storage_write_path")
     reject_if_exists(final_path)
     require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
     final_path.parent.mkdir(parents=True, exist_ok=True)
-    parent_identity = final_path.parent.lstat()
     require_unaliased_path(final_path, error="invalid_storage_write_path")
     temp_path = final_path.with_name(
         owned_scratch_name(".f-", uuid4().hex[:12])
     )
     require_unaliased_path(temp_path, error="invalid_storage_write_path")
-    return final_path, parent_identity, temp_path
+    return final_path, temp_path
 
 
 def _cleanup_claimed(
     path: Path,
-    identity: os.stat_result | None,
+    claimed: bool,
     primary: BaseException,
 ) -> None:
-    if identity is None:
+    if not claimed:
         return
     try:
-        remove_owned_scratch(path, identity)
+        remove_owned_scratch(path)
     except BaseException as cleanup_error:
         primary.add_note(
             "atomic scratch cleanup also failed: "
@@ -116,12 +123,9 @@ def _cleanup_claimed(
 def publish_no_replace(
     source: Path,
     target: Path,
-    *,
-    source_identity: os.stat_result,
 ) -> None:
     source = require_unaliased_path(Path(source), error="invalid_storage_write_path")
     target = require_unaliased_path(Path(target), error="invalid_storage_write_path")
-    require_owned_scratch(source, source_identity)
     try:
         move_path_no_replace(source, target)
     except FileExistsError as exc:

@@ -23,10 +23,8 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._scratch_ownership import (
-    create_owned_scratch,
     owned_scratch_name,
     remove_owned_scratch,
-    require_owned_scratch,
 )
 
 _MAX_SQLITE_CACHE_BYTES = 8 * 1024 * 1024
@@ -82,7 +80,6 @@ class ExactPrimaryKeyIndex:
             raise ValueError("invalid_exact_key_sqlite_cache_budget")
         self._sqlite_cache_kib = sqlite_cache_bytes // 1024
         self._temporary_directory: Path | None = None
-        self._temporary_identity: os.stat_result | None = None
         self._connection: sqlite3.Connection | None = None
 
     @property
@@ -115,25 +112,22 @@ class ExactPrimaryKeyIndex:
             self._scratch_parent,
             reserve_bytes=_EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES,
         )
-        parent_identity = self._scratch_parent.lstat()
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
         temporary_directory = self._scratch_parent / owned_scratch_name(
             ".k-", uuid4().hex[:8]
         )
-        temporary_identity: os.stat_result | None = None
+        claimed_temporary = False
         connection: sqlite3.Connection | None = None
         try:
-            temporary_identity = create_owned_scratch(temporary_directory)
-            require_owned_scratch(self._scratch_parent, parent_identity)
+            os.mkdir(temporary_directory)
+            claimed_temporary = True
             self._temporary_directory = temporary_directory
-            self._temporary_identity = temporary_identity
             require_unaliased_path(
                 temporary_directory,
                 error="invalid_storage_scratch_path",
             )
-            require_owned_scratch(temporary_directory, temporary_identity)
             connection = sqlite3.connect(self.database_path)
             connection.execute("PRAGMA page_size=1024")
             sqlite_page_limit = (
@@ -172,13 +166,12 @@ class ExactPrimaryKeyIndex:
                     connection.close()
                 except BaseException:
                     pass
-            if temporary_identity is not None:
+            if claimed_temporary:
                 try:
-                    remove_owned_scratch(temporary_directory, temporary_identity)
+                    remove_owned_scratch(temporary_directory)
                 except BaseException:
                     pass
             self._temporary_directory = None
-            self._temporary_identity = None
             raise
         assert connection is not None
         self._connection = connection
@@ -201,23 +194,21 @@ class ExactPrimaryKeyIndex:
     def close(self) -> None:
         connection = self._connection
         temporary_directory = self._temporary_directory
-        temporary_identity = self._temporary_identity
         self._connection = None
         self._temporary_directory = None
-        self._temporary_identity = None
         try:
             if connection is not None:
                 connection.close()
         except BaseException:
-            if temporary_directory is not None and temporary_identity is not None:
+            if temporary_directory is not None:
                 try:
-                    remove_owned_scratch(temporary_directory, temporary_identity)
+                    remove_owned_scratch(temporary_directory)
                 except BaseException:
                     pass
             raise
         else:
-            if temporary_directory is not None and temporary_identity is not None:
-                remove_owned_scratch(temporary_directory, temporary_identity)
+            if temporary_directory is not None:
+                remove_owned_scratch(temporary_directory)
 
     def add_frame(self, frame: pd.DataFrame, *, namespace: str = "dataset") -> int:
         missing = [column for column in self._primary_key if column not in frame]

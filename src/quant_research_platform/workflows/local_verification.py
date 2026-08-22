@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import stat
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -86,7 +85,6 @@ from quant_research_platform.storage._scratch_ownership import (
     move_path_no_replace,
     owned_scratch_name,
     remove_owned_scratch,
-    require_owned_scratch,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -255,25 +253,25 @@ def run_local_verification(
     )
     run_root = configured_run_root.resolve(strict=False)
     run_id = resolve_local_verification_run_id(config.run_id, run_root)
-    replaced_identity = _replacement_target_identity(
+    replacing = _replacement_target_exists(
         run_root,
         replace_output=config.replace_output,
     )
     preflight_model_specs(config.profile.models.list())
     staged_root = run_root.with_name(owned_scratch_name(".lv-", uuid4().hex[:8]))
-    staged_identity: os.stat_result | None = None
+    staged_claimed = False
     with runtime_resource_policy_scope(
         None,
         explicit_cap_bytes=config.explicit_memory_cap_bytes,
     ) as resource_policy, ExitStack() as retained_state:
         try:
-            if replaced_identity is not None:
+            if replacing:
                 _cleanup_previous_generation(run_root, run_id=run_id)
             _prepare_run_root(
                 staged_root,
                 run_id=run_id,
             )
-            staged_identity = staged_root.lstat()
+            staged_claimed = True
             layout = LocalVerificationLayout.from_run_root(staged_root)
             _create_layout_directories(layout)
             result = _run_local_verification_with_policy(
@@ -288,19 +286,13 @@ def run_local_verification(
             retained_state.close()
             _publish_staged_run_root(
                 staged_root,
-                staged_identity=staged_identity,
                 run_root=run_root,
-                replaced_identity=replaced_identity,
+                replacing=replacing,
             )
         except BaseException:
-            if staged_identity is None:
+            if staged_claimed:
                 try:
-                    staged_identity = staged_root.lstat()
-                except BaseException:
-                    staged_identity = None
-            if staged_identity is not None:
-                try:
-                    remove_owned_scratch(staged_root, staged_identity)
+                    remove_owned_scratch(staged_root)
                 except BaseException:
                     pass
             raise
@@ -732,41 +724,34 @@ def _find_git_root(path: Path) -> Path | None:
     return None
 
 
-def _replacement_target_identity(
+def _replacement_target_exists(
     run_root: Path,
     *,
     replace_output: bool,
-) -> os.stat_result | None:
+) -> bool:
     if not run_root.exists():
-        return None
-    identity = run_root.lstat()
-    if not stat.S_ISDIR(identity.st_mode):
+        return False
+    metadata = run_root.lstat()
+    if not stat.S_ISDIR(metadata.st_mode):
         raise ValueError("local_verification_run_root_invalid")
     if not replace_output:
         raise ValueError("run_root_already_exists")
     _read_run_json(run_root)
-    current = run_root.lstat()
-    if not stat.S_ISDIR(current.st_mode) or not os.path.samestat(current, identity):
-        raise ValueError("local_verification_run_root_invalid")
-    return identity
+    return True
 
 
 def _publish_staged_run_root(
     staged_root: Path,
     *,
-    staged_identity: os.stat_result,
     run_root: Path,
-    replaced_identity: os.stat_result | None,
+    replacing: bool,
 ) -> Path | None:
-    require_owned_scratch(staged_root, staged_identity)
-    if replaced_identity is None:
+    if not replacing:
         move_path_no_replace(staged_root, run_root)
         return None
-    require_owned_scratch(run_root, replaced_identity)
     backup_root = _previous_generation_root(run_root)
     move_path_no_replace(run_root, backup_root)
     try:
-        require_owned_scratch(staged_root, staged_identity)
         move_path_no_replace(staged_root, run_root)
     except BaseException as primary:
         try:
@@ -788,18 +773,15 @@ def _previous_generation_root(run_root: Path) -> Path:
 def _cleanup_previous_generation(run_root: Path, *, run_id: str) -> None:
     previous = _previous_generation_root(run_root)
     try:
-        identity = previous.lstat()
+        metadata = previous.lstat()
     except FileNotFoundError:
         return
-    if not stat.S_ISDIR(identity.st_mode):
+    if not stat.S_ISDIR(metadata.st_mode):
         raise ValueError("local_verification_previous_generation_invalid")
     payload = _read_run_json(previous)
     if payload["run_id"] != run_id:
         raise ValueError("local_verification_previous_generation_invalid")
-    current = previous.lstat()
-    if not os.path.samestat(current, identity):
-        raise ValueError("local_verification_previous_generation_invalid")
-    remove_owned_scratch(previous, identity)
+    remove_owned_scratch(previous)
 
 
 def _prepare_run_root(
@@ -823,7 +805,17 @@ def _prepare_run_root(
             raise ValueError("local_verification_run_root_invalid")
         raise ValueError("run_root_already_exists")
     run_root.mkdir(parents=True, exist_ok=False)
-    _write_seed_run_json(run_root, run_id=run_id)
+    try:
+        _write_seed_run_json(run_root, run_id=run_id)
+    except BaseException as primary:
+        try:
+            remove_owned_scratch(run_root)
+        except BaseException as cleanup_error:
+            primary.add_note(
+                "local verification scratch cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
+        raise
 
 
 def _resolve_effective_windows(

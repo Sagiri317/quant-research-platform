@@ -27,10 +27,8 @@ from quant_research_platform.storage._dataset_physical import (
     dataset_file_identity,
 )
 from quant_research_platform.storage._scratch_ownership import (
-    create_owned_scratch,
     owned_scratch_name,
     remove_owned_scratch,
-    require_owned_scratch,
 )
 
 _PREFIX = ".i-"
@@ -90,7 +88,6 @@ class DatasetSessionInventory:
         self.data_root = Path(data_root)
         self._scratch_parent = Path(scratch_parent)
         self._temporary_directory: Path | None = None
-        self._temporary_identity: os.stat_result | None = None
         self._connection: sqlite3.Connection | None = None
         self._next_selection_id = 0
         self._lease = resource_policy.lease(
@@ -98,7 +95,7 @@ class DatasetSessionInventory:
             _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
         )
         temporary_directory: Path | None = None
-        temporary_identity: os.stat_result | None = None
+        claimed_temporary = False
         try:
             require_unaliased_path(
                 self._scratch_parent, error="invalid_storage_scratch_path"
@@ -111,22 +108,19 @@ class DatasetSessionInventory:
                 self._scratch_parent,
                 reserve_bytes=_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
             )
-            parent_identity = self._scratch_parent.lstat()
             require_unaliased_path(
                 self._scratch_parent, error="invalid_storage_scratch_path"
             )
             temporary_directory = self._scratch_parent / owned_scratch_name(
                 _PREFIX, uuid4().hex[:8]
             )
-            temporary_identity = create_owned_scratch(temporary_directory)
+            os.mkdir(temporary_directory)
+            claimed_temporary = True
             self._temporary_directory = temporary_directory
-            self._temporary_identity = temporary_identity
-            require_owned_scratch(self._scratch_parent, parent_identity)
             require_unaliased_path(
                 temporary_directory,
                 error="invalid_storage_scratch_path",
             )
-            require_owned_scratch(temporary_directory, temporary_identity)
             self._connection = sqlite3.connect(temporary_directory / "i.db")
             connection = self._connection
             connection.execute(f"PRAGMA page_size={DATASET_INVENTORY_RESERVE_BYTES}")
@@ -162,19 +156,8 @@ class DatasetSessionInventory:
             )
             self._lease.shrink_to(DATASET_INVENTORY_RESERVE_BYTES)
         except BaseException as primary:
-            if temporary_directory is not None and temporary_identity is not None:
-                if self._temporary_directory is None:
-                    object.__setattr__(
-                        self,
-                        "_temporary_directory",
-                        temporary_directory,
-                    )
-                if self._temporary_identity is None:
-                    object.__setattr__(
-                        self,
-                        "_temporary_identity",
-                        temporary_identity,
-                    )
+            if claimed_temporary and self._temporary_directory is None:
+                object.__setattr__(self, "_temporary_directory", temporary_directory)
             try:
                 self.close()
             except BaseException as cleanup_error:
@@ -211,11 +194,9 @@ class DatasetSessionInventory:
             self._connection = None
 
         temporary = self._temporary_directory
-        temporary_identity = self._temporary_identity
-        if temporary is not None and temporary_identity is not None:
-            remove_owned_scratch(temporary, temporary_identity)
+        if temporary is not None:
+            remove_owned_scratch(temporary)
             self._temporary_directory = None
-            self._temporary_identity = None
 
         try:
             self._lease.close()

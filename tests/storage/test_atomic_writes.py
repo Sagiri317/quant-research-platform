@@ -101,28 +101,10 @@ def test_publish_no_replace_preserves_concurrent_winner(
 
     monkeypatch.setattr(atomic, "move_path_no_replace", race)
     with pytest.raises(OutputAlreadyExistsError):
-        publish_no_replace(source, target, source_identity=source.lstat())
+        publish_no_replace(source, target)
 
     assert source.read_text(encoding="utf-8") == "candidate"
     assert target.read_text(encoding="utf-8") == "winner"
-
-
-def test_publish_rejects_replaced_claimed_source_without_deleting_foreign_path(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "candidate.tmp"
-    target = tmp_path / "output.txt"
-    source.write_text("owned", encoding="utf-8")
-    identity = source.lstat()
-    source.unlink()
-    source.write_text("foreign", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
-        publish_no_replace(source, target, source_identity=identity)
-
-    assert source.read_text(encoding="utf-8") == "foreign"
-    assert not target.exists()
-
 
 def test_atomic_write_text_rename_failure_cleans_operation_temp(
     tmp_path: Path,

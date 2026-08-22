@@ -40,7 +40,6 @@ from quant_research_platform.storage._dataset_physical import (
     table_with_decoded_row_bounds,
 )
 from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
-from quant_research_platform.storage._scratch_ownership import require_owned_scratch
 from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
 
 
@@ -68,14 +67,13 @@ def write_parquet_chunks(
         ),
     )
     final_path.parent.mkdir(parents=True, exist_ok=True)
-    parent_identity = final_path.parent.lstat()
     require_unaliased_path(final_path, error="invalid_output_write_path")
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
     )
     require_unaliased_path(temp_path, error="invalid_output_write_path")
     writer: pq.ParquetWriter | None = None
-    claimed_temp: os.stat_result | None = None
+    claimed_temp = False
     row_count = 0
     effective_test_end: str | None = None
     decoded_metadata: dict[bytes, bytes] | None = None
@@ -102,11 +100,15 @@ def write_parquet_chunks(
                             key_columns=key_columns,
                         )
                     )
-                    handle, claimed_temp = scratch_owner.open_owned_scratch_file(
+                    handle = scratch_owner.open_owned_scratch_file(
                         temp_path
                     )
+                    claimed_temp = True
                     with scratch_owner.handle_preserving_primary(handle):
-                        require_owned_scratch(final_path.parent, parent_identity)
+                        require_unaliased_path(
+                            final_path.parent,
+                            error="invalid_output_write_path",
+                        )
                         try:
                             with ExactPrimaryKeyIndex(
                                 primary_key=key_columns,
@@ -230,8 +232,7 @@ def write_parquet_chunks(
             raise ValueError("empty_prediction_window")
         reject_if_exists(final_path)
         require_unaliased_path(temp_path, error="invalid_output_write_path")
-        require_owned_scratch(temp_path, claimed_temp)
-        publish_no_replace(temp_path, final_path, source_identity=claimed_temp)
+        publish_no_replace(temp_path, final_path)
     except BaseException:
         if writer is not None:
             try:
@@ -239,10 +240,10 @@ def write_parquet_chunks(
             except BaseException:
                 pass
         writer_state.close()
-        if claimed_temp is not None:
+        if claimed_temp:
             try:
                 require_unaliased_path(temp_path, error="invalid_output_write_path")
-                scratch_owner.remove_owned_scratch(temp_path, claimed_temp)
+                scratch_owner.remove_owned_scratch(temp_path)
             except BaseException:
                 pass
         raise
@@ -294,21 +295,24 @@ def write_parquet(
         ),
     )
     final_path.parent.mkdir(parents=True, exist_ok=True)
-    parent_identity = final_path.parent.lstat()
     require_unaliased_path(final_path, error="invalid_output_write_path")
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
     )
     require_unaliased_path(temp_path, error="invalid_output_write_path")
-    claimed_temp: os.stat_result | None = None
+    claimed_temp = False
     try:
         with _artifact_frame_reservation(
             frame,
             payload_already_reserved=pre_reserved,
         ):
-            handle, claimed_temp = scratch_owner.open_owned_scratch_file(temp_path)
+            handle = scratch_owner.open_owned_scratch_file(temp_path)
+            claimed_temp = True
             with scratch_owner.handle_preserving_primary(handle):
-                require_owned_scratch(final_path.parent, parent_identity)
+                require_unaliased_path(
+                    final_path.parent,
+                    error="invalid_output_write_path",
+                )
                 options = dict(kwargs)
                 engine = options.pop("engine", None)
                 if engine not in (None, "pyarrow"):
@@ -340,13 +344,12 @@ def write_parquet(
                 os.fsync(handle.fileno())
         reject_if_exists(final_path)
         require_unaliased_path(temp_path, error="invalid_output_write_path")
-        require_owned_scratch(temp_path, claimed_temp)
-        publish_no_replace(temp_path, final_path, source_identity=claimed_temp)
+        publish_no_replace(temp_path, final_path)
     except BaseException:
-        if claimed_temp is not None:
+        if claimed_temp:
             try:
                 require_unaliased_path(temp_path, error="invalid_output_write_path")
-                scratch_owner.remove_owned_scratch(temp_path, claimed_temp)
+                scratch_owner.remove_owned_scratch(temp_path)
             except BaseException:
                 pass
         raise

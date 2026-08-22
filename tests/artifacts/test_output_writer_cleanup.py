@@ -501,11 +501,9 @@ def test_report_parquet_writer_uses_short_temp_for_long_final_component(
     def publish(
         source: Path,
         target: Path,
-        *,
-        source_identity: object,
     ) -> None:
         publications.append((source, target))
-        scratch_owner.remove_owned_scratch(source, source_identity)
+        scratch_owner.remove_owned_scratch(source)
 
     monkeypatch.setattr(parquet_writers, "publish_no_replace", publish)
 
@@ -591,11 +589,11 @@ def test_parquet_cleanup_uses_shared_owned_scratch_removal(
     events: list[str] = []
     original_remove = scratch_owner.remove_owned_scratch
 
-    def remove(path: Path, identity: object) -> None:
+    def remove(path: Path) -> None:
         if path == temp_path:
             events.append("remove")
             raise OSError("remove_secondary")
-        original_remove(path, identity)
+        original_remove(path)
 
     monkeypatch.setattr(
         parquet_writers,

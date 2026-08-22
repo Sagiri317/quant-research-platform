@@ -3,7 +3,6 @@ from __future__ import annotations
 import importlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -136,7 +135,7 @@ def test_local_verification_replace_output_rejects_unowned_directory(
         ValueError,
         match="run_root_not_owned_by_local_verification_workflow",
     ):
-        module._replacement_target_identity(
+        module._replacement_target_exists(
             run_root,
             replace_output=True,
         )
@@ -158,14 +157,13 @@ def test_local_verification_replace_target_validation_preserves_owned_directory(
         repo_root=repo_root,
     )
     (run_root / "old-artifact.txt").write_text("old\n", encoding="utf-8")
-    identity = module._replacement_target_identity(
+    replacing = module._replacement_target_exists(
         run_root,
         replace_output=True,
     )
 
     assert run_root.is_dir()
-    assert identity is not None
-    assert os.path.samestat(identity, run_root.lstat())
+    assert replacing is True
     assert (run_root / "old-artifact.txt").is_file()
     assert module._read_run_json(run_root)["root_ownership"]["replace_safe"] is True
 
@@ -190,7 +188,7 @@ def test_local_verification_rejects_owned_run_json_with_nested_identity_violatio
         ValueError,
         match="run_root_not_owned_by_local_verification_workflow",
     ):
-        module._replacement_target_identity(
+        module._replacement_target_exists(
             run_root,
             replace_output=True,
         )

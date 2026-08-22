@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from contextlib import contextmanager
 from pathlib import Path
@@ -171,8 +170,15 @@ def test_scratch_owner_cleans_retained_temp_after_post_create_gate_failure(
                 scratch_parent=scratch,
             ).__enter__(),
         ),
+        (
+            inventory_owner,
+            lambda scratch: _open_inventory_for_failure(
+                scratch.parent / "data",
+                scratch,
+            ),
+        ),
     ),
-    ids=("exact-primary-key-index",),
+    ids=("exact-primary-key-index", "dataset-session-inventory"),
 )
 @pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt))
 def test_scratch_owner_cleans_when_database_constructor_raises(
@@ -184,17 +190,10 @@ def test_scratch_owner_cleans_when_database_constructor_raises(
 ) -> None:
     scratch = tmp_path / "scratch"
     primary = primary_type("constructor_primary")
-    created: list[Path] = []
-    real_create = owner_module.create_owned_scratch
+    database_paths: list[Path] = []
 
-    def record_create(path: Path) -> os.stat_result:
-        identity = real_create(path)
-        created.append(path)
-        return identity
-
-    monkeypatch.setattr(owner_module, "create_owned_scratch", record_create)
-
-    def fail_connect(*_args, **_kwargs):
+    def fail_connect(database_path: Path, *_args, **_kwargs):
+        database_paths.append(Path(database_path))
         raise primary
 
     monkeypatch.setattr(owner_module.sqlite3, "connect", fail_connect)
@@ -203,79 +202,8 @@ def test_scratch_owner_cleans_when_database_constructor_raises(
         open_owner(scratch)
 
     assert caught.value is primary
-    assert len(created) == 1
-    assert not created[0].exists()
-
-
-@pytest.mark.parametrize(
-    ("owner_module", "open_owner"),
-    (
-        (
-            key_owner,
-            lambda scratch: key_owner.ExactPrimaryKeyIndex(
-                primary_key=("value",),
-                timestamp_columns=(),
-                scratch_parent=scratch,
-            ).__enter__(),
-        ),
-    ),
-    ids=("exact-primary-key-index",),
-)
-def test_scratch_owner_does_not_delete_post_claim_replacement(
-    tmp_path: Path,
-    owner_module: object,
-    open_owner,
-) -> None:
-    owner = open_owner(tmp_path / "scratch")
-    scratch_path = (
-        owner.scratch_path
-        if hasattr(owner, "scratch_path")
-        else owner.database_path.parent
-    )
-    connection = owner._connection
-    assert connection is not None
-    connection.close()
-    owner._connection = None
-    shutil.rmtree(scratch_path)
-    scratch_path.mkdir()
-    (scratch_path / "foreign.txt").write_text("foreign", encoding="utf-8")
-
-    with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
-        owner.close()
-
-    assert (scratch_path / "foreign.txt").read_text(encoding="utf-8") == "foreign"
-
-
-def test_dataset_inventory_does_not_delete_post_claim_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
-    policy = capture_test_policy(available_memory_bytes=64 * 1024)
-    scratch_path: Path
-
-    with runtime_resource_policy_scope(policy):
-        owner = inventory_owner.DatasetSessionInventory(
-            data_root=tmp_path / "data",
-            scratch_parent=tmp_path / "scratch",
-            resource_policy=policy,
-        )
-        scratch_path = owner.scratch_path
-        connection = owner._connection
-        assert connection is not None
-        connection.close()
-        owner._connection = None
-        shutil.rmtree(scratch_path)
-        scratch_path.mkdir()
-        (scratch_path / "foreign.txt").write_text("foreign", encoding="utf-8")
-
-        with pytest.raises(ValueError, match="storage_scratch_identity_changed"):
-            owner.close()
-        owner._lease.close()
-
-    assert policy.state == "CLOSED"
-    assert policy.used_memory_bytes == 0
-    assert (scratch_path / "foreign.txt").read_text(encoding="utf-8") == "foreign"
+    assert len(database_paths) == 1
+    assert not database_paths[0].parent.exists()
 
 
 def _policy(megabytes: int) -> RuntimeResourcePolicy:
@@ -1182,7 +1110,7 @@ def test_atomic_directory_cleanup_preserves_active_primary(
     monkeypatch.setattr(
         atomic,
         "remove_owned_scratch",
-        lambda _path, _identity: (_ for _ in ()).throw(RuntimeError("cleanup_failed")),
+        lambda _path: (_ for _ in ()).throw(RuntimeError("cleanup_failed")),
     )
 
     def writer(_path: Path) -> None:
@@ -1223,10 +1151,7 @@ def test_manifest_replace_preserves_body_primary_over_handle_close(
     monkeypatch.setattr(
         scratch_owner,
         "open_owned_scratch_file",
-        lambda *_args, **_kwargs: (
-            _BodyAndCloseFailingHandle(primary),
-            SimpleNamespace(st_dev=1, st_ino=2),
-        ),
+        lambda *_args, **_kwargs: _BodyAndCloseFailingHandle(primary),
     )
 
     with pytest.raises(primary_type, match="body_primary"):
@@ -1582,21 +1507,8 @@ def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:
     owned_directory.mkdir()
     (owned_directory / "part").write_bytes(b"x")
 
-    scratch_owner.remove_owned_scratch(owned_file, owned_file.lstat())
-    scratch_owner.remove_owned_scratch(owned_directory, owned_directory.lstat())
+    scratch_owner.remove_owned_scratch(owned_file)
+    scratch_owner.remove_owned_scratch(owned_directory)
 
     assert not owned_file.exists()
     assert not owned_directory.exists()
-
-
-def test_shared_scratch_rejects_mismatched_identity(tmp_path: Path) -> None:
-    owned = tmp_path / "owned"
-    owned.mkdir()
-    other = tmp_path / "other"
-    other.mkdir()
-
-    with pytest.raises(ValueError, match="^storage_scratch_identity_changed$"):
-        scratch_owner.remove_owned_scratch(owned, other.lstat())
-
-    assert owned.is_dir()
-    assert other.is_dir()

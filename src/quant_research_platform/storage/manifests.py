@@ -37,7 +37,6 @@ from quant_research_platform.storage._dataset_schema import (
 )
 from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
-    require_owned_scratch,
 )
 from quant_research_platform.storage.atomic import atomic_write_text
 
@@ -154,32 +153,34 @@ def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
     text = render_qrp_json_object(snapshot) + "\n"
     require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
     final_path.parent.mkdir(parents=True, exist_ok=True)
-    parent_identity = final_path.parent.lstat()
     require_unaliased_path(final_path, error="invalid_storage_write_path")
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
     )
     require_unaliased_path(temp_path, error="invalid_storage_write_path")
-    claimed_temp: os.stat_result | None = None
+    claimed_temp = False
     try:
-        handle, claimed_temp = scratch_owner.open_owned_scratch_file(
+        handle = scratch_owner.open_owned_scratch_file(
             temp_path,
             encoding="utf-8",
         )
+        claimed_temp = True
         with scratch_owner.handle_preserving_primary(handle):
-            require_owned_scratch(final_path.parent, parent_identity)
+            require_unaliased_path(
+                final_path.parent,
+                error="invalid_storage_write_path",
+            )
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
         require_unaliased_path(temp_path, error="invalid_storage_write_path")
-        require_owned_scratch(temp_path, claimed_temp)
         require_unaliased_path(final_path, error="invalid_storage_write_path")
         temp_path.replace(final_path)
     except BaseException:
-        if claimed_temp is not None:
+        if claimed_temp:
             try:
                 require_unaliased_path(temp_path, error="invalid_storage_write_path")
-                remove_owned_scratch(temp_path, claimed_temp)
+                remove_owned_scratch(temp_path)
             except BaseException:
                 pass
         raise

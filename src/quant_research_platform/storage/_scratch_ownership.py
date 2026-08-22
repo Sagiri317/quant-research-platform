@@ -59,19 +59,6 @@ def move_path_no_replace(source: Path, target: Path) -> None:
     raise OSError(error_number, os.strerror(error_number), target)
 
 
-def scratch_identity_matches(path: Path, identity: os.stat_result) -> bool:
-    try:
-        current = Path(path).lstat()
-    except FileNotFoundError:
-        return False
-    return os.path.samestat(identity, current)
-
-
-def require_owned_scratch(path: Path, identity: os.stat_result) -> None:
-    if not scratch_identity_matches(path, identity):
-        raise ValueError("storage_scratch_identity_changed")
-
-
 def _windows_extended_path(path: Path) -> str:
     absolute = os.path.abspath(path)
     if absolute.startswith("\\\\?\\"):
@@ -83,7 +70,6 @@ def _windows_extended_path(path: Path) -> str:
 
 def remove_owned_scratch(
     path: Path,
-    identity: os.stat_result,
     *,
     onexc: Callable[[Callable[[str], object], str, BaseException], object]
     | None = None,
@@ -93,8 +79,6 @@ def remove_owned_scratch(
         current = path.lstat()
     except FileNotFoundError:
         return
-    if not os.path.samestat(identity, current):
-        raise ValueError("storage_scratch_identity_changed")
     if stat.S_ISDIR(current.st_mode):
         target: str | Path = _windows_extended_path(path) if os.name == "nt" else path
         shutil.rmtree(target, onexc=onexc)
@@ -102,31 +86,21 @@ def remove_owned_scratch(
         path.unlink()
 
 
-def create_owned_scratch(path: Path, *, mode: int = 0o777) -> os.stat_result:
-    path = Path(path)
-    os.mkdir(path, mode)
-    identity = path.lstat()
-    if not stat.S_ISDIR(identity.st_mode):
-        raise ValueError("storage_scratch_identity_changed")
-    return identity
-
-
 def open_owned_scratch_file(
     path: Path,
     *,
     encoding: str | None = None,
-) -> tuple[Any, os.stat_result]:
+) -> Any:
     """Create and claim one exclusive ordinary scratch file."""
 
     path = Path(path)
     descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
-    identity = os.fstat(descriptor)
     try:
         if encoding is None:
             handle = os.fdopen(descriptor, "w+b")
         else:
             handle = os.fdopen(descriptor, "w+", encoding=encoding, newline="")
-        return handle, identity
+        return handle
     except BaseException as primary:
         try:
             os.close(descriptor)
@@ -136,7 +110,7 @@ def open_owned_scratch_file(
                 f"{type(cleanup_error).__name__}"
             )
         try:
-            remove_owned_scratch(path, identity)
+            remove_owned_scratch(path)
         except BaseException as cleanup_error:
             primary.add_note(
                 "scratch cleanup also failed: " f"{type(cleanup_error).__name__}"

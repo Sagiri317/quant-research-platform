@@ -327,10 +327,10 @@ def test_local_verification_replace_failure_preserves_old_good(
 
     original_remove = module.remove_owned_scratch
 
-    def fail_previous_cleanup(path, identity):  # noqa: ANN001, ANN202
+    def fail_previous_cleanup(path):  # noqa: ANN001, ANN202
         if path == previous_root:
             raise OSError("previous_generation_cleanup_failed")
-        return original_remove(path, identity)
+        return original_remove(path)
 
     monkeypatch.setattr(module, "remove_owned_scratch", fail_previous_cleanup)
     with pytest.raises(OSError, match="previous_generation_cleanup_failed"):

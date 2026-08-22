@@ -150,9 +150,9 @@ def test_local_verification_failure_cleanup_keeps_the_root_policy_active(
         lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("boom")),
     )
 
-    def remove(path, identity):  # noqa: ANN001, ANN202
+    def remove(path):  # noqa: ANN001, ANN202
         observed.append(resource_module.current_runtime_resource_policy())
-        return real_remove(path, identity)
+        return real_remove(path)
 
     monkeypatch.setattr(module, "remove_owned_scratch", remove)
     run_root = repo_run_root(tmp_path, monkeypatch, ".run", "local", "s-cleanup")

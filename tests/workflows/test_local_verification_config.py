@@ -53,6 +53,31 @@ def test_local_verification_workflow_rejects_existing_run_root(
         run_local_verification(config)
 
 
+def test_local_verification_uuid_collision_does_not_delete_unclaimed_scratch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedUUID:
+        hex = "c" * 32
+
+    monkeypatch.setattr(module, "uuid4", lambda: FixedUUID())
+    run_root = tmp_path / "local-verification-output" / "collision"
+    staged_root = run_root.with_name(".lv-" + FixedUUID.hex[:8])
+    staged_root.mkdir(parents=True)
+    (staged_root / "foreign.txt").write_text("keep\n", encoding="utf-8")
+    config = make_local_verification_config(
+        run_root=run_root,
+        start_date="2014-01-01",
+        end_date="2014-12-31",
+        profile=profile_with_empty_prediction_and_portfolio_builders(),
+    )
+
+    with pytest.raises(ValueError, match="run_root_already_exists"):
+        run_local_verification(config)
+
+    assert (staged_root / "foreign.txt").read_text(encoding="utf-8") == "keep\n"
+
+
 def test_local_verification_workflow_rejects_invalid_date_range(tmp_path):
     config = make_local_verification_config(
         run_root=tmp_path / "local-verification-output" / "s1",
