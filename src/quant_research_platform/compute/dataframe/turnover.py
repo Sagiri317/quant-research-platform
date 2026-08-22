@@ -5,7 +5,7 @@ from __future__ import annotations
 
 def active_position_map(records: list[dict[str, object]]) -> dict[str, float]:
     return {
-        str(record["asset"]): float(record["position"])
+        record["asset"]: float(record["position"])
         for record in records
         if float(record["position"]) != 0.0
     }

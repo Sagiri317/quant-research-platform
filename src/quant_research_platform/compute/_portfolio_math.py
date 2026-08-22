@@ -12,6 +12,7 @@ from quant_research_platform.contracts.portfolios import (
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 
 def select_signals(
@@ -20,6 +21,8 @@ def select_signals(
 ) -> tuple[str, ...]:
     if portfolio_signals is None:
         return spec.signal_columns
+    if len(set(portfolio_signals)) != len(portfolio_signals):
+        raise ValueError("portfolio signals must not contain duplicates.")
     missing_signals = [
         signal for signal in portfolio_signals if signal not in spec.signal_columns
     ]
@@ -30,15 +33,6 @@ def select_signals(
 
 def selection_count(n_obs: int, quantile: float) -> int:
     return max(1, floor(n_obs * quantile))
-
-
-def validate_segment_columns(
-    panel: pd.DataFrame,
-    segment_columns: tuple[str, ...],
-) -> None:
-    missing_columns = [column for column in segment_columns if column not in panel]
-    if missing_columns:
-        raise ValueError(f"segment columns are missing: {missing_columns}.")
 
 
 def validate_tradability_columns(
@@ -60,8 +54,12 @@ def validate_tradability_columns(
     if missing_columns:
         raise ValueError(f"tradability columns are missing: {missing_columns}.")
     for column in requested_columns:
-        if column is not None and not pd.api.types.is_bool_dtype(panel[column]):
+        if column is None:
+            continue
+        if not pd.api.types.is_bool_dtype(panel[column]):
             raise TypeError(f"tradability column {column!r} must be boolean.")
+        if bool(panel[column].isna().any()):
+            raise ValueError(f"tradability column {column!r} contains null values.")
 
 
 def validate_weight_columns(panel: pd.DataFrame, weight_config: WeightConfig) -> None:
@@ -71,7 +69,11 @@ def validate_weight_columns(panel: pd.DataFrame, weight_config: WeightConfig) ->
         raise ValueError(f"risk column {weight_config.risk_column!r} is missing.")
     if not pd.api.types.is_numeric_dtype(panel[weight_config.risk_column]):
         raise TypeError(f"risk column {weight_config.risk_column!r} must be numeric.")
-    if (panel[weight_config.risk_column].dropna() <= 0).any():
+    risk = strict_finite_numeric_series(
+        panel[weight_config.risk_column],
+        error=f"risk column {weight_config.risk_column!r} must be finite numeric.",
+    )
+    if (risk <= 0).any():
         raise ValueError(f"risk column {weight_config.risk_column!r} must be positive.")
 
 

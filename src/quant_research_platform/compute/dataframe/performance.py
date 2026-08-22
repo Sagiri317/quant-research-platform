@@ -5,7 +5,16 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.portfolio_constants import (
+    RETURNS_COLUMNS,
+)
 from quant_research_platform.compute.grouping import normalize_group_key
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_hashable_key_series,
+    strict_string_series,
+    strict_timestamp_series,
+)
 
 CUMULATIVE_RETURN_COLUMNS = [
     "timestamp",
@@ -68,31 +77,20 @@ def calculate_cumulative_returns(
 ) -> pd.DataFrame:
     """Calculate cumulative return and drawdown series."""
 
-    _validate_returns_frame(
+    result = _validate_returns_frame(
         returns,
         segment_columns=segment_columns,
         include_performance_columns=False,
     )
     output_columns = [*segment_columns, *CUMULATIVE_RETURN_COLUMNS]
-    if returns.empty:
+    if result.empty:
         return pd.DataFrame(columns=output_columns)
 
     sort_columns = [*segment_columns, "signal", "timestamp"]
-    result = returns.copy()
-    result["timestamp"] = pd.to_datetime(result["timestamp"])
-    result["net_portfolio_return"] = pd.to_numeric(
-        result["net_portfolio_return"],
-        errors="coerce",
-    )
     if "gross_portfolio_return" not in result:
         result["gross_portfolio_return"] = result["net_portfolio_return"]
     if "cost" not in result:
         result["cost"] = 0.0
-    result["gross_portfolio_return"] = pd.to_numeric(
-        result["gross_portfolio_return"],
-        errors="coerce",
-    )
-    result["cost"] = pd.to_numeric(result["cost"], errors="coerce")
     result = result.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
     group_columns = [*segment_columns, "signal"]
     result["cumulative_gross_return"] = result.groupby(group_columns, sort=False)[
@@ -119,18 +117,16 @@ def summarize_performance(
 ) -> pd.DataFrame:
     """Summarize frequency-neutral portfolio performance diagnostics."""
 
-    _validate_returns_frame(
+    frame = _validate_returns_frame(
         returns,
         segment_columns=segment_columns,
         include_performance_columns=True,
     )
     output_columns = [*segment_columns, *PERFORMANCE_SUMMARY_COLUMNS]
-    if returns.empty:
+    if frame.empty:
         return pd.DataFrame(columns=output_columns)
 
     sort_columns = [*segment_columns, "signal", "timestamp"]
-    frame = returns.copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
     frame = frame.sort_values(sort_columns, kind="mergesort").reset_index(drop=True)
     cumulative_frame = cumulative_returns.copy()
     records: list[dict[str, object]] = []
@@ -141,13 +137,10 @@ def summarize_performance(
         for segment in segment_columns:
             filters &= cumulative_frame[segment] == group_values[segment]
 
-        net_returns = pd.to_numeric(group["net_portfolio_return"], errors="coerce")
-        gross_returns = pd.to_numeric(
-            group["gross_portfolio_return"],
-            errors="coerce",
-        )
-        costs = pd.to_numeric(group["cost"], errors="coerce")
-        turnover = pd.to_numeric(group["turnover"], errors="coerce")
+        net_returns = group["net_portfolio_return"]
+        gross_returns = group["gross_portfolio_return"]
+        costs = group["cost"]
+        turnover = group["turnover"]
         wins = net_returns[net_returns > 0]
         losses = net_returns[net_returns < 0]
         volatility = float(net_returns.std(ddof=0))
@@ -225,13 +218,21 @@ def _max_drawdown_stats(cumulative_returns: pd.DataFrame) -> dict[str, object]:
         }
 
     frame = cumulative_returns.copy()
-    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
-    frame["cumulative_net_return"] = pd.to_numeric(
-        frame["cumulative_net_return"],
-        errors="coerce",
+    frame["timestamp"] = strict_timestamp_series(
+        frame["timestamp"], error="cumulative returns contain invalid timestamps."
     )
-    frame["high_water_mark"] = pd.to_numeric(frame["high_water_mark"], errors="coerce")
-    frame["drawdown"] = pd.to_numeric(frame["drawdown"], errors="coerce")
+    frame["cumulative_net_return"] = strict_finite_numeric_series(
+        frame["cumulative_net_return"],
+        error="cumulative returns contain invalid net values.",
+    ).astype("float64")
+    frame["high_water_mark"] = strict_finite_numeric_series(
+        frame["high_water_mark"],
+        error="cumulative returns contain invalid high-water values.",
+    ).astype("float64")
+    frame["drawdown"] = strict_finite_numeric_series(
+        frame["drawdown"],
+        error="cumulative returns contain invalid drawdown values.",
+    ).astype("float64")
     frame = frame.sort_values("timestamp", kind="mergesort").reset_index(drop=True)
     max_drawdown = float(frame["drawdown"].min())
     if max_drawdown >= 0:
@@ -299,17 +300,60 @@ def _validate_returns_frame(
     *,
     segment_columns: tuple[str, ...],
     include_performance_columns: bool,
-) -> None:
+    required_numeric_columns: tuple[str, ...] | None = None,
+) -> pd.DataFrame:
     if not isinstance(returns, pd.DataFrame):
         raise TypeError("returns must be a pandas DataFrame.")
-    required_columns = {
-        *segment_columns,
-        "timestamp",
-        "signal",
-        "net_portfolio_return",
-    }
+    if required_numeric_columns is None:
+        required_numeric_columns = ("net_portfolio_return",)
+    fixed_columns = {"timestamp", "signal"}
+    required_columns = {*segment_columns, *fixed_columns, *required_numeric_columns}
     if include_performance_columns:
         required_columns.update({"gross_portfolio_return", "turnover", "cost"})
     missing_columns = sorted(required_columns.difference(returns.columns))
     if missing_columns:
         raise ValueError(f"returns is missing columns: {missing_columns}.")
+    if len(set(segment_columns)) != len(segment_columns):
+        raise ValueError("return segment columns must not contain duplicates.")
+    overlap = set(segment_columns).intersection(RETURNS_COLUMNS)
+    if overlap:
+        raise ValueError(
+            "return segment columns must not overlap return columns: "
+            + ", ".join(sorted(overlap))
+        )
+    result = returns.copy()
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"], error="returns contain invalid timestamps."
+    )
+    result["signal"] = strict_string_series(
+        result["signal"], error="returns contain invalid signals.", strip=False
+    )
+    for column in segment_columns:
+        result[column] = strict_hashable_key_series(
+            result[column],
+            error=f"returns segment column {column!r} contains invalid keys.",
+        )
+    numeric_columns = list(required_numeric_columns)
+    if include_performance_columns:
+        numeric_columns.extend(
+            ["gross_portfolio_return", "turnover", "cost"]
+        )
+    else:
+        numeric_columns.extend(
+            column
+            for column in ("gross_portfolio_return", "cost")
+            if column in result
+        )
+    for column in numeric_columns:
+        if not pd.api.types.is_numeric_dtype(result[column]):
+            raise ValueError(
+                f"returns column {column!r} must contain numeric values."
+            )
+        result[column] = strict_finite_numeric_series(
+            result[column],
+            error=f"returns column {column!r} must contain finite numeric values.",
+        ).astype("float64")
+    key_columns = [*segment_columns, "timestamp", "signal"]
+    if bool(result.duplicated(key_columns).any()):
+        raise ValueError("returns must have unique segment-timestamp-signal rows.")
+    return result

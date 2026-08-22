@@ -523,6 +523,27 @@ def test_portfolio_runner_rejects_invalid_persisted_prediction_coverage(
         assert portfolio_runner.current_runtime_resource_policy() is reopened
 
 
+def test_portfolio_runner_rejects_parseable_numeric_prediction_text(tmp_path) -> None:
+    layout, dataset_catalog, portfolio_catalog, prediction, manifest, _root = (
+        _prediction_portfolio_inputs(tmp_path)
+    )
+    prediction = prediction.assign(
+        prediction_score=["0.0"] * len(prediction),
+    )
+
+    with pytest.raises(ValueError, match="persisted_prediction_values_invalid"):
+        result = build_portfolio_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            portfolio_catalog=portfolio_catalog,
+            portfolio_id="demo_prediction_portfolio",
+            time_window=TimeWindow("2024-01-01", "2024-01-02"),
+            prediction_frame=prediction,
+            prediction_metadata=manifest["metadata"],
+        )
+        list(result.output_chunks)
+
+
 def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

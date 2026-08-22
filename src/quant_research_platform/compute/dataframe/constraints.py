@@ -110,7 +110,7 @@ def build_tradability_context(
     spec: ComputePanelSpec,
     tradability_config: TradabilityConfig,
 ) -> dict[str, object]:
-    asset_values = timestamp_frame[spec.asset_column].astype(str).to_numpy()
+    asset_values = timestamp_frame[spec.asset_column].to_numpy()
     can_enter_values = _tradability_flag_values(
         timestamp_frame,
         tradability_config.can_enter_column,

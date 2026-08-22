@@ -84,6 +84,53 @@ def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> N
         summarize_group_spread(pd.DataFrame({"signal": ["factor"]}))
 
 
+def test_cross_section_summaries_validate_counts_and_primary_keys() -> None:
+    ic = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01"],
+            "signal": ["factor"],
+            "label": ["forward_return"],
+            "ic": [np.nan],
+            "rankic": [np.nan],
+            "n_obs": [0],
+        }
+    )
+    assert summarize_ic(ic).iloc[0]["valid_ic_count"] == 0
+    with pytest.raises(ValueError, match="ic column 'ic'.*numeric"):
+        summarize_ic(ic.assign(ic=["0.1"]))
+    with pytest.raises(ValueError, match="ic column 'rankic'.*numeric"):
+        summarize_ic(ic.assign(rankic=["0.1"]))
+    with pytest.raises(ValueError, match="ic n_obs.*numeric"):
+        summarize_ic(ic.assign(n_obs=["0"]))
+    with pytest.raises(ValueError, match="ic n_obs must be nonnegative"):
+        summarize_ic(ic.assign(n_obs=[-1]))
+    with pytest.raises(ValueError, match="unique timestamp-signal-label"):
+        summarize_ic(pd.concat([ic, ic], ignore_index=True))
+
+    grouped = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01"],
+            "signal": ["factor"],
+            "label": ["forward_return"],
+            "group": [1],
+            "mean_label_value": [0.1],
+            "n_obs": [1],
+        }
+    )
+    with pytest.raises(ValueError, match="grouped label group.*numeric"):
+        summarize_group_spread(grouped.assign(group=["1"]))
+    with pytest.raises(ValueError, match="mean_label_value.*numeric"):
+        summarize_group_spread(grouped.assign(mean_label_value=["0.1"]))
+    with pytest.raises(ValueError, match="grouped label n_obs.*numeric"):
+        summarize_group_spread(grouped.assign(n_obs=["1"]))
+    with pytest.raises(ValueError, match="group must be at least 1"):
+        summarize_group_spread(grouped.assign(group=[0]))
+    with pytest.raises(ValueError, match="n_obs must be at least 1"):
+        summarize_group_spread(grouped.assign(n_obs=[0]))
+    with pytest.raises(ValueError, match="unique timestamp-signal-label-group"):
+        summarize_group_spread(pd.concat([grouped, grouped], ignore_index=True))
+
+
 def test_dataframe_cross_section_numeric_helpers() -> None:
     assert _assign_groups_array(np.array([3.0, 1.0, 2.0]), 5).tolist() == [3, 1, 2]
     assert _average_ranks(np.array([2.0, 2.0, 1.0])).tolist() == [2.5, 2.5, 1.0]

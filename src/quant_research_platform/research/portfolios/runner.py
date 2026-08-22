@@ -19,16 +19,20 @@ from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.compute.dataframe.performance import (
     CUMULATIVE_RETURN_COLUMNS,
     PERFORMANCE_SUMMARY_COLUMNS,
+    _validate_returns_frame,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     EXPOSURE_SUMMARY_COLUMNS,
-    POSITION_COLUMNS,
     RETURNS_COLUMNS,
 )
+from quant_research_platform.compute.dataframe.position_math import validate_positions
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
     iter_complete_session_frames,
@@ -469,9 +473,12 @@ def _validated_prediction_input(
             test_end is not None and bool((timestamps > pd.Timestamp(test_end)).any())
         ):
             raise ValueError("persisted_prediction_window_mismatch")
-        values = pd.to_numeric(frame[signal.source_column], errors="coerce")
-        if not np.isfinite(values.to_numpy(dtype="float64", copy=False)).all():
+        if not pd.api.types.is_numeric_dtype(frame[signal.source_column]):
             raise ValueError("persisted_prediction_values_invalid")
+        values = strict_finite_numeric_series(
+            frame[signal.source_column],
+            error="persisted_prediction_values_invalid",
+        )
         result = frame
         if not timestamps.equals(frame["timestamp"]) or not values.equals(
             frame[signal.source_column]
@@ -932,12 +939,12 @@ def _append_portfolio_return_summary(
                     timestamp TEXT NOT NULL,
                     timestamp_ns INTEGER NOT NULL,
                     signal TEXT NOT NULL,
-                    gross_return REAL,
-                    net_return REAL,
-                    cost REAL,
-                    turnover REAL,
-                    long_count REAL,
-                    short_count REAL
+                    gross_return REAL NOT NULL,
+                    net_return REAL NOT NULL,
+                    cost REAL NOT NULL,
+                    turnover REAL NOT NULL,
+                    long_count REAL NOT NULL,
+                    short_count REAL NOT NULL
                 )
                 """
             )
@@ -974,12 +981,12 @@ def _append_portfolio_return_summary(
                 timestamp_value.isoformat(),
                 timestamp_value.value,
                 str(signal),
-                _finite_float(gross),
-                _finite_float(net),
-                _finite_float(cost),
-                _finite_float(turnover),
-                _finite_float(long_count),
-                _finite_float(short_count),
+                float(gross),
+                float(net),
+                float(cost),
+                float(turnover),
+                float(long_count),
+                float(short_count),
             )
     database.executemany(
         """
@@ -991,14 +998,6 @@ def _append_portfolio_return_summary(
         database_rows(),
     )
     database.commit()
-
-
-def _finite_float(value: object) -> float | None:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return number if math.isfinite(number) else None
 
 
 def _new_portfolio_return_stats() -> dict[str, object]:
@@ -1052,81 +1051,74 @@ def _update_performance_stats(
 ) -> None:
     index = int(stats["periods"])
     stats["periods"] = index + 1
-    gross = _finite_float(gross_return)
-    net = _finite_float(net_return)
-    cost_value = _finite_float(cost)
-    turnover_value = _finite_float(turnover)
-    if gross is not None:
-        stats["gross_sum"] = float(stats["gross_sum"]) + gross
-    if net is not None:
-        stats["net_sum"] = float(stats["net_sum"]) + net
-        stats["net_square_sum"] = float(stats["net_square_sum"]) + net * net
-        stats["net_sum_cubes"] = float(stats["net_sum_cubes"]) + net**3
-        stats["net_sum_quads"] = float(stats["net_sum_quads"]) + net**4
-        downside = min(net, 0.0)
-        stats["downside_sum"] = float(stats["downside_sum"]) + downside
-        stats["downside_square_sum"] = (
-            float(stats["downside_square_sum"]) + downside * downside
+    gross = float(gross_return)
+    net = float(net_return)
+    cost_value = float(cost)
+    turnover_value = float(turnover)
+    stats["gross_sum"] = float(stats["gross_sum"]) + gross
+    stats["net_sum"] = float(stats["net_sum"]) + net
+    stats["net_square_sum"] = float(stats["net_square_sum"]) + net * net
+    stats["net_sum_cubes"] = float(stats["net_sum_cubes"]) + net**3
+    stats["net_sum_quads"] = float(stats["net_sum_quads"]) + net**4
+    downside = min(net, 0.0)
+    stats["downside_sum"] = float(stats["downside_sum"]) + downside
+    stats["downside_square_sum"] = (
+        float(stats["downside_square_sum"]) + downside * downside
+    )
+    if stats["best"] is None or net > float(stats["best"]):
+        stats["best"] = net
+    if stats["worst"] is None or net < float(stats["worst"]):
+        stats["worst"] = net
+    if net > 0:
+        stats["wins"] = int(stats["wins"]) + 1
+        stats["win_sum"] = float(stats["win_sum"]) + net
+        stats["current_win_streak"] = int(stats["current_win_streak"]) + 1
+        stats["current_loss_streak"] = 0
+        stats["max_consecutive_wins"] = max(
+            int(stats["max_consecutive_wins"]),
+            int(stats["current_win_streak"]),
         )
-        if stats["best"] is None or net > float(stats["best"]):
-            stats["best"] = net
-        if stats["worst"] is None or net < float(stats["worst"]):
-            stats["worst"] = net
-        if net > 0:
-            stats["wins"] = int(stats["wins"]) + 1
-            stats["win_sum"] = float(stats["win_sum"]) + net
-            stats["current_win_streak"] = int(stats["current_win_streak"]) + 1
-            stats["current_loss_streak"] = 0
-            stats["max_consecutive_wins"] = max(
-                int(stats["max_consecutive_wins"]),
-                int(stats["current_win_streak"]),
-            )
-        elif net < 0:
-            stats["losses"] = int(stats["losses"]) + 1
-            stats["loss_sum"] = float(stats["loss_sum"]) + net
-            stats["current_loss_streak"] = int(stats["current_loss_streak"]) + 1
-            stats["current_win_streak"] = 0
-            stats["max_consecutive_losses"] = max(
-                int(stats["max_consecutive_losses"]),
-                int(stats["current_loss_streak"]),
-            )
-        else:
-            stats["current_win_streak"] = 0
-            stats["current_loss_streak"] = 0
-        stats["cumulative_net"] = float(stats["cumulative_net"]) + net
-        high_water = stats["high_water_mark"]
-        if high_water is None or float(stats["cumulative_net"]) >= float(high_water):
-            stats["high_water_mark"] = float(stats["cumulative_net"])
-            stats["peak_timestamp"] = timestamp.isoformat()
-            stats["peak_index"] = index
-        drawdown = float(stats["cumulative_net"]) - float(stats["high_water_mark"])
-        if drawdown < float(stats["max_drawdown"]):
-            stats["max_drawdown"] = drawdown
-            stats["drawdown_peak_value"] = float(stats["high_water_mark"])
-            stats["drawdown_start"] = str(stats["peak_timestamp"])
-            stats["drawdown_valley"] = timestamp.isoformat()
-            stats["drawdown_recovery"] = ""
-            stats["drawdown_start_index"] = int(stats["peak_index"])
-            stats["drawdown_recovery_index"] = None
-            stats["max_drawdown_index"] = index
-        elif (
-            float(stats["max_drawdown"]) < 0
-            and stats["drawdown_recovery_index"] is None
-            and stats["drawdown_peak_value"] is not None
-            and float(stats["cumulative_net"])
-            >= float(stats["drawdown_peak_value"])
-        ):
-            stats["drawdown_recovery"] = timestamp.isoformat()
-            stats["drawdown_recovery_index"] = index
-    if cost_value is not None:
-        stats["cost_sum"] = float(stats["cost_sum"]) + cost_value
-    if turnover_value is not None:
-        stats["turnover_sum"] = float(stats["turnover_sum"]) + turnover_value
-        if (
-            stats["turnover_max"] is None
-            or turnover_value > float(stats["turnover_max"])
-        ):
-            stats["turnover_max"] = turnover_value
+    elif net < 0:
+        stats["losses"] = int(stats["losses"]) + 1
+        stats["loss_sum"] = float(stats["loss_sum"]) + net
+        stats["current_loss_streak"] = int(stats["current_loss_streak"]) + 1
+        stats["current_win_streak"] = 0
+        stats["max_consecutive_losses"] = max(
+            int(stats["max_consecutive_losses"]),
+            int(stats["current_loss_streak"]),
+        )
+    else:
+        stats["current_win_streak"] = 0
+        stats["current_loss_streak"] = 0
+    stats["cumulative_net"] = float(stats["cumulative_net"]) + net
+    high_water = stats["high_water_mark"]
+    if high_water is None or float(stats["cumulative_net"]) >= float(high_water):
+        stats["high_water_mark"] = float(stats["cumulative_net"])
+        stats["peak_timestamp"] = timestamp.isoformat()
+        stats["peak_index"] = index
+    drawdown = float(stats["cumulative_net"]) - float(stats["high_water_mark"])
+    if drawdown < float(stats["max_drawdown"]):
+        stats["max_drawdown"] = drawdown
+        stats["drawdown_peak_value"] = float(stats["high_water_mark"])
+        stats["drawdown_start"] = str(stats["peak_timestamp"])
+        stats["drawdown_valley"] = timestamp.isoformat()
+        stats["drawdown_recovery"] = ""
+        stats["drawdown_start_index"] = int(stats["peak_index"])
+        stats["drawdown_recovery_index"] = None
+        stats["max_drawdown_index"] = index
+    elif (
+        float(stats["max_drawdown"]) < 0
+        and stats["drawdown_recovery_index"] is None
+        and stats["drawdown_peak_value"] is not None
+        and float(stats["cumulative_net"])
+        >= float(stats["drawdown_peak_value"])
+    ):
+        stats["drawdown_recovery"] = timestamp.isoformat()
+        stats["drawdown_recovery_index"] = index
+    stats["cost_sum"] = float(stats["cost_sum"]) + cost_value
+    stats["turnover_sum"] = float(stats["turnover_sum"]) + turnover_value
+    if stats["turnover_max"] is None or turnover_value > float(stats["turnover_max"]):
+        stats["turnover_max"] = turnover_value
 
 
 def _ordered_performance_stats(
@@ -1168,13 +1160,14 @@ def _portfolio_return_summary_frame(
 ) -> pd.DataFrame:
     if portfolio_returns.empty:
         return _empty_summary_frame(RETURNS_COLUMNS)
-    selected = portfolio_returns.loc[:, RETURNS_COLUMNS].copy()
-    selected["timestamp"] = strict_timestamp_series(
-        selected["timestamp"], error="invalid_portfolio_timestamp_values"
+    selected = _validate_returns_frame(
+        portfolio_returns,
+        segment_columns=(),
+        include_performance_columns=True,
     )
-    return selected.sort_values(["signal", "timestamp"], kind="mergesort").reset_index(
-        drop=True
-    )
+    return selected.loc[:, RETURNS_COLUMNS].sort_values(
+        ["signal", "timestamp"], kind="mergesort"
+    ).reset_index(drop=True)
 
 
 def _iter_portfolio_cumulative_chunks(
@@ -1228,9 +1221,9 @@ def _iter_portfolio_cumulative_chunks(
                             "high_water": float("nan"),
                         },
                     )
-                    gross_value = 0.0 if gross is None else float(gross)
-                    net_value = 0.0 if net is None else float(net)
-                    cost_value = 0.0 if cost is None else float(cost)
+                    gross_value = float(gross)
+                    net_value = float(net)
+                    cost_value = float(cost)
                     state["gross"] += gross_value
                     state["net"] += net_value
                     state["cost"] += cost_value
@@ -1292,11 +1285,7 @@ def _update_position_period_summary(
 ) -> None:
     if positions.empty:
         return
-    frame = positions.loc[:, POSITION_COLUMNS].copy()
-    frame["timestamp"] = strict_timestamp_series(
-        frame["timestamp"], error="invalid_portfolio_timestamp_values"
-    )
-    frame["position"] = pd.to_numeric(frame["position"], errors="coerce").fillna(0.0)
+    frame = validate_positions(positions)
     frame["abs_position"] = frame["position"].abs()
     for (signal, _timestamp), group in frame.groupby(
         ["signal", "timestamp"],
@@ -1648,10 +1637,10 @@ def _portfolio_period_breakdown(
             CAST(substr(timestamp, 1, 4) AS INTEGER) AS year,
             CAST(substr(timestamp, 6, 2) AS INTEGER) AS month,
             COUNT(*) AS periods,
-            SUM(COALESCE(gross_return, 0.0)),
-            SUM(COALESCE(net_return, 0.0)),
-            SUM(COALESCE(cost, 0.0)),
-            SUM(COALESCE(turnover, 0.0)),
+            SUM(gross_return),
+            SUM(net_return),
+            SUM(cost),
+            SUM(turnover),
             SUM(CASE WHEN net_return > 0 THEN 1 ELSE 0 END)
         FROM returns
         GROUP BY signal, year, month
@@ -1767,8 +1756,8 @@ def _portfolio_exposure_summary(
                 SELECT
                     signal,
                     COUNT(*),
-                    SUM(COALESCE(long_count, 0.0)),
-                    SUM(COALESCE(short_count, 0.0))
+                    SUM(long_count),
+                    SUM(short_count)
                 FROM returns
                 GROUP BY signal
                 """

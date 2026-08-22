@@ -10,18 +10,24 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.exposure import summarize_exposure
 from quant_research_platform.compute.dataframe.performance import (
+    _validate_returns_frame,
     calculate_cumulative_returns,
     summarize_performance,
 )
 from quant_research_platform.compute.dataframe.portfolio_returns import (
     simulate_weighted_long_short_returns_and_cost_from_validated_panel,
 )
+from quant_research_platform.compute.dataframe.position_math import validate_positions
 from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import (
     SUPPORTED_REBALANCE_FREQUENCIES,
     PortfolioSpec,
     normalize_rebalance_frequency,
+)
+from quant_research_platform.contracts.validation import (
+    strict_string_series,
+    strict_timestamp_series,
 )
 from quant_research_platform.research.portfolios.diagnostics import (
     build_capacity_diagnostics,
@@ -164,8 +170,8 @@ def summarize_concentration(
     if positions.empty:
         return pd.DataFrame(columns=output_columns)
 
-    frame = positions.copy()
-    frame["abs_position"] = pd.to_numeric(frame["position"], errors="coerce").abs()
+    frame = validate_positions(positions, segment_columns=segment_columns)
+    frame["abs_position"] = frame["position"].abs()
     period_columns = [*segment_columns, "signal", "timestamp"]
     totals = frame.groupby(period_columns, sort=True)["abs_position"].transform("sum")
     frame["abs_weight_share"] = frame["abs_position"].div(totals.replace(0, np.nan))
@@ -217,8 +223,12 @@ def summarize_period_breakdown(
     if portfolio_returns.empty:
         return pd.DataFrame(columns=output_columns)
 
-    frame = portfolio_returns.copy()
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    frame = _validate_returns_frame(
+        portfolio_returns,
+        segment_columns=segment_columns,
+        include_performance_columns=True,
+    )
+    timestamps = frame["timestamp"]
     frame["year"] = timestamps.dt.year.astype("int64")
     frame["month"] = timestamps.dt.month.astype("int64")
     group_columns = [*segment_columns, "signal", "year", "month"]
@@ -266,11 +276,21 @@ def _portfolio_panel(
     missing = sorted(required.difference(frame.columns))
     if missing:
         raise ValueError(f"missing_portfolio_columns: {', '.join(missing)}")
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+    )
+    assets = strict_string_series(
+        frame["asset_id"], error="invalid_portfolio_asset_values", strip=False
+    )
+    if pd.MultiIndex.from_arrays([timestamps, assets]).has_duplicates:
+        raise ValueError("duplicate_portfolio_timestamp_asset_keys")
     panel = normalize_signal_frame(
         frame,
         spec.signals,
         source_columns_by_kind=source_columns_by_kind,
     )
+    panel["timestamp"] = timestamps
+    panel["asset_id"] = assets
     if spec.execution_lag_steps:
         signal_ids = [signal.signal_id for signal in spec.signals]
         ordered = panel.sort_values(["asset_id", "timestamp"])

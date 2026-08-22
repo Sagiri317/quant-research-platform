@@ -79,6 +79,8 @@ def _validate_prediction_output_values(
         raise ValueError("invalid_prediction_keys")
     if bool(frame.duplicated(list(primary_key)).any()):
         raise ValueError("duplicate_prediction_keys")
+    if not pd.api.types.is_numeric_dtype(frame[prediction_column]):
+        raise ValueError("invalid_prediction_values")
     strict_finite_numeric_series(
         frame[prediction_column],
         error="invalid_prediction_values",

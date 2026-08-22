@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import isfinite
 
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -258,7 +259,8 @@ def _validate_quantile(value: float, name: str) -> None:
 def _validate_nonnegative(value: float, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{name} must be numeric.")
-    if float(value) < 0:
+    numeric = float(value)
+    if not isfinite(numeric) or numeric < 0:
         raise ValueError(f"{name} must be nonnegative.")
 
 

@@ -117,6 +117,48 @@ def test_build_exposure_diagnostics_fail_closed_on_bad_inputs() -> None:
         )
 
 
+def test_build_diagnostics_rejects_nonfinite_values_and_null_identity_keys() -> None:
+    positions = _positions()
+    context = _context()
+
+    with pytest.raises(ValueError, match="invalid_capacity_proxy_values"):
+        build_capacity_diagnostics(
+            positions.assign(position=[0.6, float("inf"), 1.0]),
+            context.assign(amount=[100.0, 200.0, 300.0]),
+            PortfolioDiagnosticsConfig(capacity_amount_column="amount"),
+        )
+    with pytest.raises(ValueError, match="invalid_capacity_proxy_values"):
+        build_capacity_diagnostics(
+            positions,
+            context.assign(amount=[100.0, float("inf"), 300.0]),
+            PortfolioDiagnosticsConfig(capacity_amount_column="amount"),
+        )
+    with pytest.raises(ValueError, match="invalid_capacity_proxy_values"):
+        build_capacity_diagnostics(
+            positions,
+            context.assign(
+                amount=[100.0, 200.0, 300.0],
+                float_market_cap=[1000.0, float("-inf"), 300.0],
+            ),
+            PortfolioDiagnosticsConfig(
+                capacity_amount_column="amount",
+                capacity_float_market_cap_column="float_market_cap",
+            ),
+        )
+    with pytest.raises(ValueError, match="invalid_portfolio_exposure_values"):
+        build_numeric_exposure_diagnostics(
+            positions,
+            context.assign(risk_beta=[0.8, float("-inf"), 1.1]),
+            PortfolioDiagnosticsConfig(numeric_exposure_columns=("risk_beta",)),
+        )
+    with pytest.raises(ValueError, match="invalid_weights_identity_keys"):
+        build_categorical_exposure_diagnostics(
+            positions.assign(asset=[None, "b", "a"]),
+            context,
+            PortfolioDiagnosticsConfig(categorical_exposure_columns=("industry",)),
+        )
+
+
 def _positions() -> pd.DataFrame:
     return pd.DataFrame(
         {

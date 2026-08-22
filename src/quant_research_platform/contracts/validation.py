@@ -33,9 +33,27 @@ def strict_string_series(
     allow_null: bool = False,
 ) -> pd.Series:
     result = pd.Series(values, copy=True)
+    null_mask = _null_mask(result)
+    if bool(null_mask.any()) and not allow_null:
+        raise ValueError(error)
+    non_null = result.loc[~null_mask]
+    is_fast_string = isinstance(result.dtype, pd.StringDtype)
+    if not is_fast_string:
+        inferred = pd.api.types.infer_dtype(non_null, skipna=False)
+        is_fast_string = (
+            inferred in {"empty", "string", "unicode"}
+            and bool(non_null.map(type).eq(str).all())
+        )
+    if is_fast_string:
+        output = result.astype("string")
+        if strip:
+            output = output.str.strip()
+        if not allow_empty and bool((output.eq("") & ~null_mask).any()):
+            raise ValueError(error)
+        return output.astype("object")
     output: list[object] = []
-    for value in result.tolist():
-        if _is_null_scalar(value):
+    for value, is_null in zip(result.tolist(), null_mask.tolist(), strict=True):
+        if is_null:
             if allow_null:
                 output.append(pd.NA)
                 continue
@@ -74,6 +92,19 @@ def strict_timestamp_series(
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
+    if pd.api.types.is_datetime64_dtype(series.dtype):
+        try:
+            return pd.Series(
+                series,
+                index=series.index,
+                dtype="datetime64[ns]",
+            )
+        except (TypeError, ValueError, OverflowError):
+            return _strict_timestamp_series_fallback(
+                series,
+                null_mask=null_mask,
+                error=error,
+            )
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
@@ -164,6 +195,9 @@ def strict_bool_series(
     allow_null: bool = False,
 ) -> pd.Series:
     series = pd.Series(values, copy=True)
+    null_mask = _null_mask(series)
+    if bool(null_mask.any()) and not allow_null:
+        raise ValueError(error)
     output: list[object] = []
     mapping = {
         "true": True,
@@ -171,8 +205,8 @@ def strict_bool_series(
         "1": True,
         "0": False,
     }
-    for value in series.tolist():
-        if _is_null_scalar(value):
+    for value, is_null in zip(series.tolist(), null_mask.tolist(), strict=True):
+        if is_null:
             if allow_null:
                 output.append(pd.NA)
                 continue
@@ -222,9 +256,12 @@ def strict_hashable_key_series(
     allow_null: bool = False,
 ) -> pd.Series:
     series = pd.Series(values, copy=True)
+    null_mask = _null_mask(series)
+    if bool(null_mask.any()) and not allow_null:
+        raise ValueError(error)
     output: list[object] = []
-    for value in series.tolist():
-        if _is_null_scalar(value):
+    for value, is_null in zip(series.tolist(), null_mask.tolist(), strict=True):
+        if is_null:
             if allow_null:
                 output.append(pd.NA)
                 continue
@@ -242,15 +279,27 @@ def _strict_numeric_series(
     allow_null: bool,
 ) -> pd.Series:
     series = pd.Series(values, copy=True)
-    for value in series.tolist():
-        if _is_null_scalar(value):
+    null_mask = _null_mask(series)
+    if bool(null_mask.any()) and not allow_null:
+        raise ValueError(error)
+    is_native_numeric = (
+        pd.api.types.is_numeric_dtype(series.dtype)
+        and not pd.api.types.is_bool_dtype(series.dtype)
+    )
+    if is_native_numeric:
+        numeric = pd.to_numeric(series, errors="coerce")
+        non_null = numeric.loc[~null_mask]
+        if not bool(np.isfinite(non_null.to_numpy()).all()):
+            raise ValueError(error)
+        return numeric.astype("Float64" if allow_null else "float64")
+    for value, is_null in zip(series.tolist(), null_mask.tolist(), strict=True):
+        if is_null:
             if allow_null:
                 continue
             raise ValueError(error)
         if isinstance(value, bool) or not _is_hashable(value):
             raise ValueError(error)
     numeric = pd.to_numeric(series, errors="coerce")
-    null_mask = _null_mask(series)
     invalid = numeric.isna() & ~(null_mask & allow_null)
     if bool(invalid.any()):
         raise ValueError(error)
@@ -278,11 +327,14 @@ def _is_null_scalar(value: object) -> bool:
 
 
 def _null_mask(series: pd.Series) -> pd.Series:
-    return pd.Series(
-        [_is_null_scalar(value) for value in series.tolist()],
-        index=series.index,
-        dtype="bool",
-    )
+    try:
+        return series.isna()
+    except (TypeError, ValueError):
+        return pd.Series(
+            [_is_null_scalar(value) for value in series.tolist()],
+            index=series.index,
+            dtype="bool",
+        )
 
 
 __all__ = [

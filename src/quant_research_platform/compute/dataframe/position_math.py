@@ -18,6 +18,12 @@ from quant_research_platform.compute.dataframe.portfolio_helpers import (
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import TradabilityConfig, WeightConfig
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_hashable_key_series,
+    strict_string_series,
+    strict_timestamp_series,
+)
 
 
 def build_signal_positions(
@@ -31,7 +37,7 @@ def build_signal_positions(
     group_values: dict[str, object],
     previous_positions: dict[str, float],
 ) -> tuple[list[dict[str, object]], dict[str, object]]:
-    asset_values = timestamp_frame[spec.asset_column].astype(str).to_numpy()
+    asset_values = timestamp_frame[spec.asset_column].to_numpy()
     signal_values = timestamp_frame[signal].to_numpy(dtype="float64", copy=False)
     valid_mask = ~pd.isna(signal_values)
     if tradability_config.eligibility_column is not None:
@@ -118,7 +124,7 @@ def build_signal_positions(
         if float(position) != 0.0
     ]
     if not nonzero_positions and len(asset_values):
-        marker_asset = str(asset_values[0])
+        marker_asset = asset_values[0]
         nonzero_positions = [(marker_asset, float(positions.get(marker_asset, 0.0)))]
     records = [
         {
@@ -189,7 +195,7 @@ def _leg_weights(
     normalized = raw / raw_sum
     return (
         {
-            str(asset): float(sign * weight)
+            asset: float(sign * weight)
             for asset, weight in zip(asset_values, normalized, strict=True)
         },
         fallback_reason,
@@ -207,12 +213,34 @@ def validate_positions(
     missing_columns = [column for column in required_columns if column not in positions]
     if missing_columns:
         raise ValueError(f"positions are missing columns: {missing_columns}.")
+    if len(set(segment_columns)) != len(segment_columns):
+        raise ValueError("position segment columns must not contain duplicates.")
+    overlap = set(segment_columns).intersection(POSITION_COLUMNS)
+    if overlap:
+        raise ValueError(
+            "position segment columns must not overlap position columns: "
+            + ", ".join(sorted(overlap))
+        )
     result = positions.copy()
-    result["timestamp"] = pd.to_datetime(result["timestamp"])
-    result["asset"] = result["asset"].astype(str)
-    result["signal"] = result["signal"].astype(str)
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"], error="positions contain invalid timestamps."
+    )
+    result["asset"] = strict_string_series(
+        result["asset"], error="positions contain invalid assets.", strip=False
+    )
+    result["signal"] = strict_string_series(
+        result["signal"], error="positions contain invalid signals.", strip=False
+    )
+    for column in segment_columns:
+        result[column] = strict_hashable_key_series(
+            result[column],
+            error=f"position segment column {column!r} contains invalid keys.",
+        )
     if not pd.api.types.is_numeric_dtype(result["position"]):
         raise TypeError("position must be numeric.")
+    result["position"] = strict_finite_numeric_series(
+        result["position"], error="position must be finite numeric."
+    ).astype("float64")
     key_columns = [*segment_columns, "timestamp", "asset", "signal"]
     if result.duplicated(key_columns).any():
         raise ValueError(

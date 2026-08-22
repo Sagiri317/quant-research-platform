@@ -253,6 +253,38 @@ def test_portfolio_engine_applies_execution_lag_steps_to_signal_scores() -> None
     )
 
 
+@pytest.mark.parametrize("mutation", ["null_asset", "null_timestamp", "duplicate"])
+def test_portfolio_engine_rejects_keys_before_execution_lag_groupby(
+    mutation: str,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b", "c", "d"],
+            "timestamp": [pd.Timestamp("2024-01-02")] * 4,
+            "raw_signal": [1.0, 2.0, 3.0, 4.0],
+            "forward_return": [0.0, 0.0, 0.0, 0.0],
+        }
+    )
+    if mutation == "null_asset":
+        frame.loc[0, "asset_id"] = None
+    elif mutation == "null_timestamp":
+        frame.loc[0, "timestamp"] = pd.NaT
+    else:
+        frame.loc[1, "asset_id"] = "a"
+    spec = PortfolioSpec(
+        portfolio_id="lagged_key_validation_portfolio",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(make_signal_spec("raw_signal"),),
+        return_source_column="forward_return",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
+        execution_lag_steps=1,
+    )
+
+    with pytest.raises(ValueError):
+        construct_portfolio_positions(frame, spec)
+
+
 def test_portfolio_spec_rejects_unsupported_rebalance_frequency() -> None:
     with pytest.raises(ValueError, match="unsupported_portfolio_rebalance_frequency"):
         PortfolioSpec(

@@ -10,6 +10,13 @@ from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
 )
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_hashable_key_series,
+    strict_integer_series,
+    strict_string_series,
+    strict_timestamp_series,
+)
 
 IC_RESULT_COLUMNS = ["timestamp", "signal", "label", "ic", "rankic", "n_obs"]
 IC_SUMMARY_COLUMNS = [
@@ -139,17 +146,56 @@ def summarize_ic(
     missing_columns = sorted(required_columns.difference(ic.columns))
     if missing_columns:
         raise ValueError(f"ic is missing columns: {missing_columns}.")
+    if len(set(segment_columns)) != len(segment_columns):
+        raise ValueError("ic segment columns must not contain duplicates.")
+    overlap = set(segment_columns).intersection(IC_RESULT_COLUMNS)
+    if overlap:
+        raise ValueError(
+            "ic segment columns must not overlap result columns: "
+            + ", ".join(sorted(overlap))
+        )
 
     output_columns = [*segment_columns, *IC_SUMMARY_COLUMNS]
     if ic.empty:
         return pd.DataFrame(columns=output_columns)
 
+    ic = ic.copy()
+    ic["timestamp"] = strict_timestamp_series(
+        ic["timestamp"], error="ic contains invalid timestamps."
+    )
+    for column in ("signal", "label"):
+        ic[column] = strict_string_series(
+            ic[column], error=f"ic contains invalid {column} values.", strip=False
+        )
+    for column in segment_columns:
+        ic[column] = strict_hashable_key_series(
+            ic[column], error=f"ic segment column {column!r} contains null keys."
+        )
+    for column in ("ic", "rankic"):
+        if not pd.api.types.is_numeric_dtype(ic[column]):
+            raise ValueError(f"ic column {column!r} must contain numeric values.")
+        ic[column] = strict_finite_numeric_series(
+            ic[column],
+            error=f"ic column {column!r} must contain finite numeric values.",
+            allow_null=True,
+        ).astype("float64")
+    if not pd.api.types.is_numeric_dtype(ic["n_obs"]):
+        raise ValueError("ic n_obs must contain numeric values.")
+    ic["n_obs"] = strict_integer_series(
+        ic["n_obs"], error="ic n_obs must contain finite integer values."
+    )
+    if bool((ic["n_obs"] < 0).any()):
+        raise ValueError("ic n_obs must be nonnegative.")
+    ic_key_columns = [*segment_columns, "timestamp", "signal", "label"]
+    if bool(ic.duplicated(ic_key_columns).any()):
+        raise ValueError("ic must have unique timestamp-signal-label rows.")
+
     records: list[dict[str, object]] = []
     group_columns = [*segment_columns, "signal", "label"]
     for group_key, group in ic.groupby(group_columns, sort=True, dropna=False):
         group_values = normalize_group_key(group_key, group_columns)
-        ic_values = pd.to_numeric(group["ic"], errors="coerce").dropna()
-        rankic_values = pd.to_numeric(group["rankic"], errors="coerce").dropna()
+        ic_values = group["ic"].dropna()
+        rankic_values = group["rankic"].dropna()
         ic_stats = _summarize_correlation_values(ic_values)
         rankic_stats = _summarize_correlation_values(rankic_values)
         records.append(
@@ -185,19 +231,73 @@ def summarize_group_spread(
         raise ValueError(
             f"grouped_label_values is missing columns: {missing_columns}."
         )
+    if len(set(segment_columns)) != len(segment_columns):
+        raise ValueError("grouped label segment columns must not contain duplicates.")
+    overlap = set(segment_columns).intersection(GROUPED_LABEL_VALUE_COLUMNS)
+    if overlap:
+        raise ValueError(
+            "grouped label segment columns must not overlap result columns: "
+            + ", ".join(sorted(overlap))
+        )
 
     output_columns = [*segment_columns, *GROUP_SPREAD_SUMMARY_COLUMNS]
     if grouped_label_values.empty:
         return pd.DataFrame(columns=output_columns)
 
+    grouped_label_values = grouped_label_values.copy()
+    grouped_label_values["timestamp"] = strict_timestamp_series(
+        grouped_label_values["timestamp"],
+        error="grouped label values contain invalid timestamps.",
+    )
+    for column in ("signal", "label"):
+        grouped_label_values[column] = strict_string_series(
+            grouped_label_values[column],
+            error=f"grouped label values contain invalid {column} values.",
+            strip=False,
+        )
+    if not pd.api.types.is_numeric_dtype(grouped_label_values["mean_label_value"]):
+        raise ValueError("grouped label mean_label_value must contain numeric values.")
+    grouped_label_values["mean_label_value"] = strict_finite_numeric_series(
+        grouped_label_values["mean_label_value"],
+        error="grouped label values must contain finite numeric values.",
+    ).astype("float64")
+    for column in segment_columns:
+        grouped_label_values[column] = strict_hashable_key_series(
+            grouped_label_values[column],
+            error=f"grouped label segment column {column!r} contains null keys.",
+        )
+    if not pd.api.types.is_numeric_dtype(grouped_label_values["group"]):
+        raise ValueError("grouped label group must contain numeric values.")
+    grouped_label_values["group"] = strict_integer_series(
+        grouped_label_values["group"],
+        error="grouped label group must contain finite integer values.",
+    )
+    if bool((grouped_label_values["group"] < 1).any()):
+        raise ValueError("grouped label group must be at least 1.")
+    if not pd.api.types.is_numeric_dtype(grouped_label_values["n_obs"]):
+        raise ValueError("grouped label n_obs must contain numeric values.")
+    grouped_label_values["n_obs"] = strict_integer_series(
+        grouped_label_values["n_obs"],
+        error="grouped label n_obs must contain finite integer values.",
+    )
+    if bool((grouped_label_values["n_obs"] < 1).any()):
+        raise ValueError("grouped label n_obs must be at least 1.")
+    grouped_key_columns = [
+        *segment_columns,
+        "timestamp",
+        "signal",
+        "label",
+        "group",
+    ]
+    if bool(grouped_label_values.duplicated(grouped_key_columns).any()):
+        raise ValueError(
+            "grouped label values must have unique timestamp-signal-label-group rows."
+        )
+
     timestamp_group_columns = [*segment_columns, "signal", "label", "timestamp"]
     ordered = grouped_label_values[
         [*timestamp_group_columns, "group", "mean_label_value"]
     ].copy()
-    ordered["mean_label_value"] = pd.to_numeric(
-        ordered["mean_label_value"],
-        errors="coerce",
-    )
     ordered = ordered.sort_values([*timestamp_group_columns, "group"], kind="mergesort")
     ordered["_return_diff_sign"] = np.sign(
         ordered.groupby(timestamp_group_columns, sort=True, dropna=False)[

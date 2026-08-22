@@ -558,6 +558,7 @@ def test_prediction_outputs_accept_equivalent_timezone_representations() -> None
     ("mutation", "error"),
     (
         ("nan", "invalid_prediction_values"),
+        ("numeric_text", "invalid_prediction_values"),
         ("positive_inf", "invalid_prediction_values"),
         ("negative_inf", "invalid_prediction_values"),
         ("null_timestamp", "invalid_prediction_keys"),
@@ -585,6 +586,8 @@ def test_prediction_outputs_require_finite_values_and_complete_unique_keys(
     )
     if mutation == "nan":
         frame.loc[0, PREDICTION_SCORE_COLUMN] = np.nan
+    elif mutation == "numeric_text":
+        frame[PREDICTION_SCORE_COLUMN] = ["0.1", "0.2"]
     elif mutation == "positive_inf":
         frame.loc[0, PREDICTION_SCORE_COLUMN] = np.inf
     elif mutation == "negative_inf":

@@ -9,7 +9,6 @@ from quant_research_platform.compute._portfolio_math import (
     cost_components,
     require_return_source_column,
     select_signals,
-    validate_segment_columns,
     validate_tradability_columns,
     validate_weight_columns,
 )
@@ -33,12 +32,14 @@ from quant_research_platform.compute.dataframe.turnover import (
 from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
+    validate_compute_panel,
 )
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
     TradabilityConfig,
     WeightConfig,
 )
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 
 def simulate_weighted_long_short_returns_and_cost_from_validated_panel(
@@ -79,7 +80,11 @@ def _stream_weighted_portfolio_from_validated_panel(
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Stream positions, turnover, costs, and portfolio returns."""
 
-    validate_segment_columns(panel, segment_columns)
+    panel = validate_compute_panel(
+        panel,
+        spec,
+        segment_columns=segment_columns,
+    )
     validate_weight_columns(panel, weight_config)
     if tradability_config is None:
         tradability_config = TradabilityConfig()
@@ -87,6 +92,23 @@ def _stream_weighted_portfolio_from_validated_panel(
         cost_config = CostConfig()
     validate_tradability_columns(panel, tradability_config)
     return_source_column = require_return_source_column(return_source_column)
+    if return_source_column != spec.label_column:
+        if return_source_column not in panel:
+            raise ValueError(
+                f"panel is missing columns: ['{return_source_column}']."
+            )
+        if not pd.api.types.is_numeric_dtype(panel[return_source_column]):
+            raise TypeError(
+                f"return source column {return_source_column!r} must be numeric."
+            )
+        panel[return_source_column] = strict_finite_numeric_series(
+            panel[return_source_column],
+            error=(
+                f"portfolio return source {return_source_column!r} "
+                "contains invalid values."
+            ),
+            allow_null=True,
+        ).astype("float64")
     signals = select_signals(spec, portfolio_signals)
     group_columns = [*segment_columns, spec.timestamp_column]
 
@@ -196,7 +218,7 @@ def _timestamp_label_lookup(
     spec: ComputePanelSpec,
     return_source_column: str,
 ) -> dict[str, float]:
-    assets = timestamp_frame[spec.asset_column].astype(str).to_numpy(copy=False)
+    assets = timestamp_frame[spec.asset_column].to_numpy(copy=False)
     labels = timestamp_frame[return_source_column].to_numpy(
         dtype="float64",
         copy=False,

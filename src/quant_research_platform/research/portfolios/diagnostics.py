@@ -12,6 +12,12 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
     PortfolioDiagnosticsConfig,
 )
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_hashable_key_series,
+    strict_string_series,
+    strict_timestamp_series,
+)
 
 
 def build_capacity_diagnostics(
@@ -119,11 +125,6 @@ def _summarize_capacity_proxy(
     if float_market_cap_column is not None:
         liquidity_columns.append(float_market_cap_column)
     _require_columns(liquidity, tuple(liquidity_columns), "liquidity")
-    _reject_duplicate_keys(
-        liquidity,
-        (context_asset_column, timestamp_column),
-        "liquidity",
-    )
     merged = _merge_position_context(
         weights,
         liquidity,
@@ -132,18 +133,25 @@ def _summarize_capacity_proxy(
         timestamp_column=timestamp_column,
         context_columns=tuple(liquidity_columns),
         missing_error="missing_liquidity_for_weight",
+        signal_column=signal_column,
+        context_name="liquidity",
     )
-    merged[weight_column] = pd.to_numeric(merged[weight_column], errors="coerce")
-    merged[amount_column] = pd.to_numeric(merged[amount_column], errors="coerce")
-    if bool(merged[[weight_column, amount_column]].isna().any().any()):
-        raise ValueError("invalid_capacity_proxy_values")
+    _validate_finite_numeric_column(
+        merged,
+        weight_column,
+        error="invalid_capacity_proxy_values",
+    )
+    _validate_finite_numeric_column(
+        merged,
+        amount_column,
+        error="invalid_capacity_proxy_values",
+    )
     if float_market_cap_column is not None:
-        merged[float_market_cap_column] = pd.to_numeric(
-            merged[float_market_cap_column],
-            errors="coerce",
+        _validate_finite_numeric_column(
+            merged,
+            float_market_cap_column,
+            error="invalid_capacity_proxy_values",
         )
-        if bool(merged[float_market_cap_column].isna().any()):
-            raise ValueError("invalid_capacity_proxy_values")
     else:
         merged["weighted_float_market_cap_proxy"] = 0.0
     records: list[dict[str, object]] = []
@@ -206,6 +214,12 @@ def _summarize_numeric_exposures(
         signal_column=signal_column,
         weight_column=weight_column,
     )
+    for column in exposure_columns:
+        _validate_finite_numeric_column(
+            merged,
+            column,
+            error="invalid_portfolio_exposure_values",
+        )
     records: list[dict[str, object]] = []
     for (timestamp, signal), group in merged.groupby(
         [timestamp_column, signal_column],
@@ -215,9 +229,7 @@ def _summarize_numeric_exposures(
         weights_abs = group[weight_column].abs()
         gross_weight = float(weights_abs.sum())
         for column in exposure_columns:
-            values = pd.to_numeric(group[column], errors="coerce")
-            if bool(values.isna().any()):
-                raise ValueError("invalid_portfolio_exposure_values")
+            values = group[column]
             records.append(
                 {
                     "timestamp": timestamp,
@@ -257,6 +269,12 @@ def _summarize_categorical_exposures(
         signal_column=signal_column,
         weight_column=weight_column,
     )
+    for column in exposure_columns:
+        merged[column] = strict_hashable_key_series(
+            merged[column],
+            error=f"categorical exposure column {column!r} contains invalid values",
+            allow_null=True,
+        )
     records: list[dict[str, object]] = []
     for column in exposure_columns:
         for (timestamp, signal, value), group in merged.groupby(
@@ -305,11 +323,6 @@ def _merged_exposure_frame(
         (context_asset_column, timestamp_column, *tuple(exposure_columns)),
         "exposures",
     )
-    _reject_duplicate_keys(
-        exposures,
-        (context_asset_column, timestamp_column),
-        "exposures",
-    )
     merged = _merge_position_context(
         weights,
         exposures,
@@ -322,10 +335,14 @@ def _merged_exposure_frame(
             *tuple(exposure_columns),
         ),
         missing_error="missing_asset_exposure",
+        signal_column=signal_column,
+        context_name="exposures",
     )
-    merged[weight_column] = pd.to_numeric(merged[weight_column], errors="coerce")
-    if bool(merged[weight_column].isna().any()):
-        raise ValueError("invalid_portfolio_exposure_values")
+    _validate_finite_numeric_column(
+        merged,
+        weight_column,
+        error="invalid_portfolio_exposure_values",
+    )
     return merged
 
 
@@ -338,11 +355,32 @@ def _merge_position_context(
     timestamp_column: str,
     context_columns: tuple[str, ...],
     missing_error: str,
+    signal_column: str | None,
+    context_name: str,
 ) -> pd.DataFrame:
-    renamed_context = context.loc[:, list(context_columns)].rename(
+    normalized_weights = _normalize_identity_frame(
+        weights,
+        asset_column=asset_column,
+        timestamp_column=timestamp_column,
+        signal_column=signal_column,
+        name="weights",
+    )
+    normalized_context = _normalize_identity_frame(
+        context,
+        asset_column=context_asset_column,
+        timestamp_column=timestamp_column,
+        signal_column=None,
+        name=context_name,
+    )
+    _reject_duplicate_keys(
+        normalized_context,
+        (context_asset_column, timestamp_column),
+        context_name,
+    )
+    renamed_context = normalized_context.loc[:, list(context_columns)].rename(
         columns={context_asset_column: asset_column}
     )
-    merged = weights.merge(
+    merged = normalized_weights.merge(
         renamed_context,
         on=[asset_column, timestamp_column],
         how="left",
@@ -352,6 +390,46 @@ def _merge_position_context(
     if bool(merged["_merge"].ne("both").any()):
         raise ValueError(missing_error)
     return merged.drop(columns=["_merge"])
+
+
+def _normalize_identity_frame(
+    frame: pd.DataFrame,
+    *,
+    asset_column: str,
+    timestamp_column: str,
+    signal_column: str | None,
+    name: str,
+) -> pd.DataFrame:
+    result = frame.copy()
+    result[timestamp_column] = strict_timestamp_series(
+        result[timestamp_column], error=f"invalid_{name}_identity_keys"
+    )
+    result[asset_column] = strict_string_series(
+        result[asset_column],
+        error=f"invalid_{name}_identity_keys",
+        strip=False,
+    )
+    if signal_column is not None:
+        result[signal_column] = strict_string_series(
+            result[signal_column],
+            error=f"invalid_{name}_identity_keys",
+            strip=False,
+        )
+    return result
+
+
+def _validate_finite_numeric_column(
+    frame: pd.DataFrame,
+    column: str,
+    *,
+    error: str,
+) -> None:
+    if not pd.api.types.is_numeric_dtype(frame[column]):
+        raise ValueError(error)
+    frame[column] = strict_finite_numeric_series(
+        frame[column],
+        error=error,
+    ).astype("float64")
 
 
 def _require_columns(frame: pd.DataFrame, columns: tuple[str, ...], name: str) -> None:

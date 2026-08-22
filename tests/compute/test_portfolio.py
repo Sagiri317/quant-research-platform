@@ -125,6 +125,25 @@ def test_validated_stream_requires_explicit_return_source_column() -> None:
         )
 
 
+def test_validated_stream_validates_only_an_extra_return_source() -> None:
+    panel, spec = _validated_ranking_panel()
+
+    with pytest.raises(ValueError, match="panel is missing columns"):
+        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+            panel,
+            spec,
+            WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+            return_source_column="missing_return",
+        )
+    with pytest.raises(TypeError, match="return source column 'extra_return'"):
+        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+            panel.assign(extra_return=["0.01"] * len(panel)),
+            spec,
+            WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+            return_source_column="extra_return",
+        )
+
+
 def test_validated_stream_applies_detailed_cost_components() -> None:
     panel, spec = _validated_ranking_panel()
 
@@ -185,6 +204,38 @@ def test_calculate_cumulative_returns_accumulates_by_signal() -> None:
     ]
     assert ordered["cumulative_cost"].round(6).tolist() == [0.0, 0.001, 0.002, 0.003]
     assert ordered["drawdown"].round(6).tolist() == [0.0, 0.0, 0.0, 0.0]
+
+
+def test_calculate_cumulative_returns_rejects_invalid_numeric_input() -> None:
+    returns = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01"],
+            "signal": ["factor"],
+            "net_portfolio_return": ["not-a-return"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="net_portfolio_return"):
+        calculate_cumulative_returns(returns)
+    with pytest.raises(ValueError, match="net_portfolio_return.*numeric"):
+        calculate_cumulative_returns(returns.assign(net_portfolio_return=["0.1"]))
+
+
+def test_returns_reject_segment_collision_with_formal_return_column() -> None:
+    returns = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01"],
+            "signal": ["factor"],
+            "gross_portfolio_return": [0.03],
+            "net_portfolio_return": [0.03],
+        }
+    )
+
+    with pytest.raises(ValueError, match="gross_portfolio_return"):
+        calculate_cumulative_returns(
+            returns,
+            segment_columns=("gross_portfolio_return",),
+        )
 
 
 def test_summarize_performance_reports_common_portfolio_diagnostics() -> None:
@@ -256,3 +307,13 @@ def test_summarize_exposure_reports_position_diagnostics() -> None:
     assert row["mean_long_count"] == pytest.approx(1.0)
     assert row["mean_short_count"] == pytest.approx(1.0)
     assert row["mean_position_count"] == pytest.approx(2.0)
+    with pytest.raises(ValueError, match="long_count.*numeric"):
+        summarize_exposure(
+            positions,
+            long_short.assign(long_count=["1", "1"]),
+        )
+    with pytest.raises(ValueError, match="short_count.*numeric"):
+        summarize_exposure(
+            positions,
+            long_short.assign(short_count=["1", "1"]),
+        )

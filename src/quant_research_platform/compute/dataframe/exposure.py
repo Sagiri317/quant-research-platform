@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.performance import (
+    _validate_returns_frame,
+)
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     EXPOSURE_SUMMARY_COLUMNS,
 )
-from quant_research_platform.compute.dataframe.position_math import validate_positions
+from quant_research_platform.compute.dataframe.position_math import (
+    validate_positions,
+)
 from quant_research_platform.compute.grouping import normalize_group_key
+from quant_research_platform.contracts.validation import strict_integer_series
 
 
 def summarize_exposure(
@@ -20,6 +26,25 @@ def summarize_exposure(
     """Summarize gross/net exposure and active position counts."""
 
     validated = validate_positions(positions, segment_columns=segment_columns)
+    count_frame = _validate_returns_frame(
+        returns,
+        segment_columns=segment_columns,
+        include_performance_columns=False,
+        required_numeric_columns=(),
+    )
+    for column in ("long_count", "short_count"):
+        if column not in count_frame:
+            raise ValueError(f"returns is missing columns: ['{column}'].")
+        if not pd.api.types.is_numeric_dtype(count_frame[column]):
+            raise ValueError(
+                f"returns column {column!r} must contain numeric values."
+            )
+        count_frame[column] = strict_integer_series(
+            count_frame[column],
+            error=f"returns column {column!r} must contain finite integer values.",
+        )
+        if bool((count_frame[column] < 0).any()):
+            raise ValueError(f"returns column {column!r} must be nonnegative.")
     output_columns = [*segment_columns, *EXPOSURE_SUMMARY_COLUMNS]
     if validated.empty:
         return pd.DataFrame(columns=output_columns)
@@ -35,7 +60,6 @@ def summarize_exposure(
         )
         .reset_index()
     )
-    count_frame = returns.copy()
     records: list[dict[str, object]] = []
     for group_key, group in exposure.groupby(group_columns, sort=True, dropna=False):
         group_values = normalize_group_key(group_key, group_columns)
@@ -52,10 +76,10 @@ def summarize_exposure(
                 "max_gross_exposure": float(group["gross_exposure"].max()),
                 "max_abs_net_exposure": float(group["net_exposure"].abs().max()),
                 "mean_long_count": float(
-                    pd.to_numeric(count_group["long_count"], errors="coerce").mean()
+                    count_group["long_count"].mean()
                 ),
                 "mean_short_count": float(
-                    pd.to_numeric(count_group["short_count"], errors="coerce").mean()
+                    count_group["short_count"].mean()
                 ),
                 "mean_position_count": float(group["position_count"].mean()),
             }

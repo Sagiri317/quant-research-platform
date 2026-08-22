@@ -8,6 +8,10 @@ from contextlib import nullcontext
 import pandas as pd
 
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -110,13 +114,25 @@ def _normalize_signal_values(
 ) -> pd.Series:
     if signal.source_column not in frame:
         raise ValueError(f"missing_signal_source_column: {signal.source_column}")
-    values = pd.to_numeric(frame[signal.source_column], errors="coerce")
+    group_timestamps = None
+    if signal.transform in {"rank", "zscore"}:
+        group_timestamps = strict_timestamp_series(
+            frame[timestamp_column],
+            error="invalid_signal_timestamps",
+        )
+    if not pd.api.types.is_numeric_dtype(frame[signal.source_column]):
+        raise ValueError(f"invalid_signal_values: {signal.source_column}")
+    values = strict_finite_numeric_series(
+        frame[signal.source_column],
+        error=f"invalid_signal_values: {signal.source_column}",
+        allow_null=True,
+    ).astype("float64")
     if signal.transform == "rank":
-        values = values.groupby(frame[timestamp_column], sort=False).rank(
+        values = values.groupby(group_timestamps, sort=False).rank(
             method="average",
         )
     elif signal.transform == "zscore":
-        grouped = values.groupby(frame[timestamp_column], sort=False)
+        grouped = values.groupby(group_timestamps, sort=False)
         mean = grouped.transform("mean")
         std = grouped.transform(lambda item: item.std(ddof=0))
         values = (values - mean) / std.replace(0, pd.NA)

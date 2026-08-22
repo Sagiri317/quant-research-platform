@@ -80,6 +80,9 @@ def test_blocked_entry_policy_names_have_distinct_contracts() -> None:
         ({"sell_cost_bps": -1}, "sell_cost_bps must be nonnegative"),
         ({"slippage_bps": -1}, "slippage_bps must be nonnegative"),
         ({"spread_bps": -1}, "spread_bps must be nonnegative"),
+        ({"buy_cost_bps": float("nan")}, "buy_cost_bps must be nonnegative"),
+        ({"sell_cost_bps": float("inf")}, "sell_cost_bps must be nonnegative"),
+        ({"slippage_bps": float("-inf")}, "slippage_bps must be nonnegative"),
         ({"impact_model": ""}, "unsupported_portfolio_impact_model"),
     ],
 )

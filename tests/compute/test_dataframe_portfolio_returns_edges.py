@@ -89,12 +89,12 @@ def test_dataframe_portfolio_return_rejects_nonfinite_active_return(
         )
 
 
-def test_dataframe_portfolio_return_timestamp_label_lookup_uses_asset_strings() -> None:
+def test_timestamp_label_lookup_keeps_validated_asset_ids() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="label")
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "asset": [1, 2],
+            "asset": ["1", "2"],
             "label": [0.1, 0.2],
         }
     )

@@ -142,6 +142,53 @@ def test_signal_materialization_normalizes_direction_and_transform() -> None:
     assert "risk" not in result.columns
 
 
+def test_signal_materialization_rejects_invalid_numeric_source() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-02")],
+            "risk": ["not-a-number"],
+        }
+    )
+    signal = SignalSpec(
+        signal_id="risk_signal",
+        source_kind="factor",
+        source_column="risk",
+    )
+
+    with pytest.raises(ValueError, match="invalid_signal_values"):
+        normalize_signal_frame(frame, (signal,))
+    with pytest.raises(ValueError, match="invalid_signal_values"):
+        normalize_signal_frame(
+            frame.assign(risk=["1.0"]),
+            (signal,),
+        )
+
+
+@pytest.mark.parametrize(
+    "timestamps",
+    [
+        [pd.NaT, pd.Timestamp("2024-01-02")],
+        ["not-a-timestamp", "2024-01-02"],
+    ],
+)
+def test_signal_materialization_rejects_invalid_group_timestamps(timestamps) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "risk": [1.0, 2.0],
+        }
+    )
+    signal = SignalSpec(
+        signal_id="risk_signal",
+        source_kind="factor",
+        source_column="risk",
+        transform="rank",
+    )
+
+    with pytest.raises(ValueError, match="invalid_signal_timestamps"):
+        normalize_signal_frame(frame, (signal,))
+
+
 def test_signal_materialization_admits_before_result_copy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

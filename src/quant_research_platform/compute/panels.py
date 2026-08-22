@@ -7,6 +7,13 @@ from typing import Any
 import pandas as pd
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_hashable_key_series,
+    strict_string_series,
+    strict_timestamp_series,
+)
+
 
 class ComputePanelSpec(BaseModel):
     """Column contract for long-format compute panels."""
@@ -75,14 +82,30 @@ def validate_compute_panel(
     missing_segments = [column for column in segment_columns if column not in frame]
     if missing_segments:
         raise ValueError(f"segment columns are missing: {missing_segments}.")
+    if len(set(segment_columns)) != len(segment_columns):
+        raise ValueError("segment columns must not contain duplicates.")
+    overlap = set(segment_columns).intersection(required_columns)
+    if overlap:
+        raise ValueError(
+            "segment columns must not overlap panel columns: "
+            + ", ".join(sorted(overlap))
+        )
 
     result = frame.copy()
-    result[spec.timestamp_column] = pd.to_datetime(result[spec.timestamp_column])
-    if result[spec.timestamp_column].isna().any():
-        raise ValueError("timestamp column contains missing timestamps.")
-    if result[spec.asset_column].isna().any():
-        raise ValueError("asset column contains missing assets.")
-    result[spec.asset_column] = result[spec.asset_column].astype(str)
+    result[spec.timestamp_column] = strict_timestamp_series(
+        result[spec.timestamp_column],
+        error="timestamp column contains missing timestamps.",
+    )
+    result[spec.asset_column] = strict_string_series(
+        result[spec.asset_column],
+        error="asset column contains missing assets.",
+        strip=False,
+    )
+    for column in segment_columns:
+        result[column] = strict_hashable_key_series(
+            result[column],
+            error=f"segment column {column!r} contains invalid keys.",
+        )
 
     key_columns = [*segment_columns, spec.timestamp_column, spec.asset_column]
     duplicated = result.duplicated(key_columns)
@@ -96,6 +119,11 @@ def validate_compute_panel(
     for column in (*spec.signal_columns, spec.label_column):
         if not pd.api.types.is_numeric_dtype(result[column]):
             raise TypeError(f"column {column!r} must be numeric.")
+        result[column] = strict_finite_numeric_series(
+            result[column],
+            error=f"column {column!r} must contain finite numeric values.",
+            allow_null=True,
+        ).astype("float64")
 
     return result.sort_values(key_columns, kind="mergesort").reset_index(drop=True)
 

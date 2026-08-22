@@ -10,7 +10,6 @@ from quant_research_platform.compute._portfolio_math import (
     cost_components,
     select_signals,
     selection_count,
-    validate_segment_columns,
     validate_tradability_columns,
     validate_weight_columns,
 )
@@ -64,6 +63,10 @@ def test_compute_panel_spec_and_frame_validation_edges() -> None:
         validate_compute_panel(pd.concat([frame, frame.iloc[[0]]]), spec)
     with pytest.raises(TypeError, match="must be numeric"):
         validate_compute_panel(frame.assign(signal=["x", "y"]), spec)
+    with pytest.raises(TypeError, match="must be numeric"):
+        validate_compute_panel(frame.assign(signal=["1.0", "2.0"]), spec)
+    with pytest.raises(ValueError, match="finite numeric"):
+        validate_compute_panel(frame.assign(signal=[float("inf"), 2.0]), spec)
 
 
 def test_validate_compute_panel_uses_segment_aware_uniqueness() -> None:
@@ -87,6 +90,14 @@ def test_validate_compute_panel_uses_segment_aware_uniqueness() -> None:
             spec,
             segment_columns=("segment",),
         )
+    with pytest.raises(ValueError, match="segment column 'segment'.*invalid keys"):
+        validate_compute_panel(
+            segmented.assign(segment=["s1", None]),
+            spec,
+            segment_columns=("segment",),
+        )
+    with pytest.raises(ValueError, match="must not overlap"):
+        validate_compute_panel(segmented, spec, segment_columns=("timestamp",))
     with pytest.raises(ValueError, match="unique timestamp-asset keys"):
         validate_compute_panel(segmented, spec)
 
@@ -98,9 +109,6 @@ def test_portfolio_helper_validation_and_selection_edges() -> None:
         label_column="label",
     )
 
-    validate_segment_columns(panel, ("segment",))
-    with pytest.raises(ValueError, match="segment columns are missing"):
-        validate_segment_columns(panel, ("missing",))
     validate_weight_columns(
         panel,
         WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
@@ -118,6 +126,16 @@ def test_portfolio_helper_validation_and_selection_edges() -> None:
             panel.assign(risk=["x", "y"]),
             WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
         )
+    with pytest.raises(TypeError, match="risk column 'risk' must be numeric"):
+        validate_weight_columns(
+            panel.assign(risk=["1.0", "2.0"]),
+            WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
+        )
+    with pytest.raises(ValueError, match="risk column 'risk' must be finite numeric"):
+        validate_weight_columns(
+            panel.assign(risk=[1.0, float("inf")]),
+            WeightConfig(method="inverse_vol_scaled_quantile", risk_column="risk"),
+        )
     with pytest.raises(ValueError, match="risk column 'risk' must be positive"):
         validate_weight_columns(
             panel.assign(risk=[1.0, 0.0]),
@@ -131,6 +149,8 @@ def test_portfolio_helper_validation_and_selection_edges() -> None:
     ).tolist() == [1.0, 2.0]
     assert select_signals(spec, None) == ("signal", "signal_alt")
     assert select_signals(spec, ("signal_alt",)) == ("signal_alt",)
+    with pytest.raises(ValueError, match="must not contain duplicates"):
+        select_signals(spec, ("signal", "signal"))
     with pytest.raises(ValueError, match="portfolio signals are not in spec"):
         select_signals(spec, ("missing",))
     assert select_signal(spec, None) == "signal"
@@ -194,6 +214,11 @@ def test_dataframe_tradability_helper_edges() -> None:
     with pytest.raises(TypeError, match="must be boolean"):
         validate_tradability_columns(
             frame.assign(can_enter=[1, 0]),
+            TradabilityConfig(can_enter_column="can_enter"),
+        )
+    with pytest.raises(ValueError, match="can_enter.*null"):
+        validate_tradability_columns(
+            frame.assign(can_enter=pd.Series([True, pd.NA], dtype="boolean")),
             TradabilityConfig(can_enter_column="can_enter"),
         )
 
@@ -375,6 +400,10 @@ def test_position_validation_rejects_shape_and_key_ambiguity() -> None:
         position_math.validate_positions(valid.drop(columns="signal"))
     with pytest.raises(TypeError, match="position must be numeric"):
         position_math.validate_positions(valid.assign(position=["x", "y"]))
+    with pytest.raises(TypeError, match="position must be numeric"):
+        position_math.validate_positions(valid.assign(position=["0.5", "-0.5"]))
+    with pytest.raises(ValueError, match="position must be finite numeric"):
+        position_math.validate_positions(valid.assign(position=[0.5, float("inf")]))
     with pytest.raises(ValueError, match="unique"):
         position_math.validate_positions(pd.concat([valid, valid.iloc[[0]]]))
 
