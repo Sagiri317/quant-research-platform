@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
 
@@ -43,9 +43,6 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.policy.share_safety import (
     evidence_text_stream_unsafe_reason,
-)
-from quant_research_platform.research.evaluations.engine import (
-    _EvaluationStreamingState,
 )
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
@@ -181,6 +178,15 @@ def write_evaluation_outputs(
 def _write_evaluation_outputs_from_chunks(
     chunks: Iterable[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]],
     *,
+    summary_factory: Callable[
+        [],
+        tuple[
+            EvaluationDiagnostics,
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+        ],
+    ],
     spec: EvaluationSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
@@ -195,97 +201,81 @@ def _write_evaluation_outputs_from_chunks(
     )
 
     def _write(temp_root: Path) -> None:
-        state = _write_evaluation_artifact_chunks(
+        _write_evaluation_artifact_chunks(
             chunks,
             temp_root=temp_root,
+        )
+        (
+            evaluation_diagnostics,
+            ic_summary,
+            group_spread_summary,
+            coverage_summary,
+        ) = summary_factory()
+        validate_output_frame(
+            ic_summary,
+            required=EVALUATION_IC_SUMMARY_COLUMNS,
+            error_name="evaluation_ic_summary",
+        )
+        validate_output_frame(
+            group_spread_summary,
+            required=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
+            error_name="evaluation_group_spread_summary",
+        )
+        validate_evaluation_artifact_structure(
+            metrics=pd.DataFrame(columns=EVALUATION_METRICS_COLUMNS),
+            grouped_label_values=pd.DataFrame(
+                columns=EVALUATION_GROUPED_LABEL_VALUE_COLUMNS
+            ),
+            ic_summary=ic_summary,
+            group_spread_summary=group_spread_summary,
             spec=spec,
             n_groups=n_groups,
         )
-        primary: BaseException | None = None
-        try:
-            ic_summary = state.ic_summary()
-            group_spread_summary = state.group_spread_summary()
-            validate_output_frame(
-                ic_summary,
-                required=EVALUATION_IC_SUMMARY_COLUMNS,
-                error_name="evaluation_ic_summary",
-            )
-            validate_output_frame(
-                group_spread_summary,
-                required=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
-                error_name="evaluation_group_spread_summary",
-            )
-            validate_evaluation_artifact_structure(
-                metrics=pd.DataFrame(columns=EVALUATION_METRICS_COLUMNS),
-                grouped_label_values=pd.DataFrame(
-                    columns=EVALUATION_GROUPED_LABEL_VALUE_COLUMNS
+        write_parquet(
+            ic_summary,
+            temp_root / "ic_summary.parquet",
+            pre_reserved=True,
+            engine="pyarrow",
+            compression="zstd",
+            index=False,
+        )
+        write_parquet(
+            group_spread_summary,
+            temp_root / "group_spread_summary.parquet",
+            pre_reserved=True,
+            engine="pyarrow",
+            compression="zstd",
+            index=False,
+        )
+        rendered_summary = _render_evaluation_summary(
+            spec=spec,
+            evaluation_diagnostics=evaluation_diagnostics,
+            metrics=pd.DataFrame(columns=EVALUATION_METRICS_COLUMNS),
+            ic_summary=ic_summary,
+            group_spread_summary=group_spread_summary,
+            coverage_summary=coverage_summary,
+        )
+        unsafe_summary = evidence_text_stream_unsafe_reason(
+            rendered_summary[offset : offset + 2048].encode("utf-8")
+            for offset in range(0, len(rendered_summary), 2048)
+        )
+        if unsafe_summary is not None:
+            raise ValueError(f"evaluation_summary_share_unsafe: {unsafe_summary}")
+        (temp_root / "summary.md").write_text(
+            rendered_summary,
+            encoding="utf-8",
+        )
+        write_manifest(
+            temp_root / "manifest.json",
+            output_manifest_payload(
+                output_spec=output_spec,
+                metadata=evaluation_output_metadata(
+                    spec=spec,
+                    evaluation_diagnostics=evaluation_diagnostics,
                 ),
-                ic_summary=ic_summary,
-                group_spread_summary=group_spread_summary,
-                spec=spec,
-                n_groups=n_groups,
-            )
-            evaluation_diagnostics = state.diagnostics()
-            write_parquet(
-                ic_summary,
-                temp_root / "ic_summary.parquet",
-                pre_reserved=True,
-                engine="pyarrow",
-                compression="zstd",
-                index=False,
-            )
-            write_parquet(
-                group_spread_summary,
-                temp_root / "group_spread_summary.parquet",
-                pre_reserved=True,
-                engine="pyarrow",
-                compression="zstd",
-                index=False,
-            )
-            rendered_summary = _render_evaluation_summary(
-                spec=spec,
-                evaluation_diagnostics=evaluation_diagnostics,
-                metrics=pd.DataFrame(columns=EVALUATION_METRICS_COLUMNS),
-                ic_summary=ic_summary,
-                group_spread_summary=group_spread_summary,
-                coverage_summary=state.coverage_summary(),
-            )
-            unsafe_summary = evidence_text_stream_unsafe_reason(
-                rendered_summary[offset : offset + 2048].encode("utf-8")
-                for offset in range(0, len(rendered_summary), 2048)
-            )
-            if unsafe_summary is not None:
-                raise ValueError(
-                    f"evaluation_summary_share_unsafe: {unsafe_summary}"
-                )
-            (temp_root / "summary.md").write_text(
-                rendered_summary,
-                encoding="utf-8",
-            )
-            write_manifest(
-                temp_root / "manifest.json",
-                output_manifest_payload(
-                    output_spec=output_spec,
-                    metadata=evaluation_output_metadata(
-                        spec=spec,
-                        evaluation_diagnostics=evaluation_diagnostics,
-                    ),
-                    files=EVALUATION_ARTIFACTS,
-                ),
-            )
-        except BaseException as exc:
-            primary = exc
-            raise
-        finally:
-            try:
-                state.close()
-            except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "evaluation summary reservation release also failed: "
-                    f"{type(close_error).__name__}"
-                )
+                files=EVALUATION_ARTIFACTS,
+            ),
+        )
 
     atomic_write_directory(output_bundle, _write)
     return output_bundle
@@ -295,9 +285,7 @@ def _write_evaluation_artifact_chunks(
     chunks: Iterable[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]],
     *,
     temp_root: Path,
-    spec: EvaluationSpec,
-    n_groups: int,
-) -> _EvaluationStreamingState:
+) -> None:
     batch_row_limit = 8_192
     writers: dict[str, pq.ParquetWriter] = {}
     writer_states: dict[str, ExitStack] = {}
@@ -328,11 +316,6 @@ def _write_evaluation_artifact_chunks(
         "grouped_label_values": EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     }
     row_counts = {name: 0 for name in paths}
-    state = _EvaluationStreamingState(
-        spec=spec,
-        n_groups=n_groups,
-        resource_policy=current_runtime_resource_policy(),
-    )
     fixed_state: ExitStack | None = None
 
     def flush(name: str) -> None:
@@ -437,8 +420,7 @@ def _write_evaluation_artifact_chunks(
             index_bytes=0,
         )
         with closing_dataset_iterator(iter(chunks)) as active_chunks:
-            for metrics, grouped, metadata in active_chunks:
-                state.consume(metrics, grouped, metadata)
+            for metrics, grouped, _ in active_chunks:
                 write_frame("metrics", metrics)
                 write_frame("grouped_label_values", grouped)
         flush("metrics")
@@ -517,27 +499,11 @@ def _write_evaluation_artifact_chunks(
                 fixed_state.close()
             except BaseException as close_error:
                 if primary is None:
-                    try:
-                        state.close()
-                    except BaseException as state_error:
-                        close_error.add_note(
-                            "evaluation summary reservation release also failed: "
-                            f"{type(state_error).__name__}"
-                        )
                     raise
                 primary.add_note(
                     "evaluation writer fixed reservation release also failed: "
                     f"{type(close_error).__name__}"
                 )
-        if primary is not None:
-            try:
-                state.close()
-            except BaseException as close_error:
-                primary.add_note(
-                    "evaluation summary reservation release also failed: "
-                    f"{type(close_error).__name__}"
-                )
-    return state
 
 
 def _render_evaluation_summary(

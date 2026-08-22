@@ -32,6 +32,7 @@ from quant_research_platform.policy.share_safety import (
     MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS,
 )
 from quant_research_platform.research.evaluations.engine import (
+    _EvaluationStreamingState,
     _iter_evaluation_output_chunks,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
@@ -48,6 +49,23 @@ from tests.helpers.report_output_frames import (
     make_artifact_signal_spec,
 )
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def _static_managed_summary_factory():
+    return (
+        make_output_edge_evaluation_diagnostics(),
+        make_artifact_evaluation_ic_summary_frame(),
+        make_artifact_evaluation_group_spread_summary_frame(),
+        pd.DataFrame(
+            {
+                "signal": ["signal"],
+                "label": ["label"],
+                "mean_n_obs": [2.0],
+                "min_n_obs": [2],
+                "non_empty_period_count": [1],
+            }
+        ),
+    )
 
 
 @pytest.mark.parametrize(
@@ -810,7 +828,7 @@ def test_summary_markdown_escapes_pipe_characters(tmp_path: Path) -> None:
     assert "data/raw" not in summary
 
 
-def test_managed_evaluation_admits_summary_before_first_pull(
+def test_managed_evaluation_admits_fixed_writers_before_first_pull(
     tmp_path: Path,
 ) -> None:
     spec = EvaluationSpec(
@@ -852,6 +870,7 @@ def test_managed_evaluation_admits_summary_before_first_pull(
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
             evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
                 chunks(),
+                summary_factory=_static_managed_summary_factory,
                 spec=spec,
                 output_spec=report_spec,
                 layout=StorageLayout(project_root=tmp_path),
@@ -903,6 +922,7 @@ def test_managed_evaluation_disk_preflight_happens_before_first_pull(
     with pytest.raises(OSError, match="evaluation_disk_preflight"):
         evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
             chunks(),
+            summary_factory=_static_managed_summary_factory,
             spec=spec,
             output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
@@ -960,6 +980,7 @@ def test_managed_evaluation_failure_closes_partial_writer_and_preserves_primary(
         with pytest.raises(RuntimeError) as raised:
             evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
                 chunks(),
+                summary_factory=_static_managed_summary_factory,
                 spec=spec,
                 output_spec=report_spec,
                 layout=StorageLayout(project_root=tmp_path),
@@ -999,6 +1020,7 @@ def test_managed_evaluation_empty_output_failure_closes_summary_state(
         with pytest.raises(OSError) as raised:
             evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
                 iter(()),
+                summary_factory=_static_managed_summary_factory,
                 spec=spec,
                 output_spec=report_spec,
                 layout=StorageLayout(project_root=tmp_path),
@@ -1054,6 +1076,7 @@ def test_managed_evaluation_pre_writer_failure_releases_table_state(
                         ),
                     )
                 ),
+                summary_factory=_static_managed_summary_factory,
                 spec=spec,
                 output_spec=report_spec,
                 layout=StorageLayout(project_root=tmp_path),
@@ -1121,22 +1144,39 @@ def test_managed_evaluation_persists_aggregate_beyond_ram_budget(
         explicit_cap_bytes=32 * 1024**2,
     )
     with runtime_resource_policy_scope(policy):
-        chunks = _iter_evaluation_output_chunks(
-            (frame,),
+        state = _EvaluationStreamingState(
             spec=spec,
-            signal_columns=tuple(signal.signal_id for signal in signals),
-            label_columns=labels,
             n_groups=2,
-            asset_column="asset_id",
             resource_policy=policy,
         )
-        output_bundle = evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
-            chunks,
-            spec=spec,
-            output_spec=report_spec,
-            layout=StorageLayout(project_root=tmp_path),
-            n_groups=2,
-        )
+        try:
+            chunks = _iter_evaluation_output_chunks(
+                (frame,),
+                spec=spec,
+                signal_columns=tuple(signal.signal_id for signal in signals),
+                label_columns=labels,
+                n_groups=2,
+                asset_column="asset_id",
+                resource_policy=policy,
+                summary_state=state,
+            )
+            output_bundle = (
+                evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+                    chunks,
+                    summary_factory=lambda: (
+                        state.diagnostics(),
+                        state.ic_summary(),
+                        state.group_spread_summary(),
+                        state.coverage_summary(),
+                    ),
+                    spec=spec,
+                    output_spec=report_spec,
+                    layout=StorageLayout(project_root=tmp_path),
+                    n_groups=2,
+                )
+            )
+        finally:
+            state.close()
 
     logical_persisted_bytes = sum(
         parquet_file.metadata.row_group(index).total_byte_size

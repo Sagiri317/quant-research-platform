@@ -17,6 +17,7 @@ import quant_research_platform.research.evaluations.runner as evaluation_runner_
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.predictions.runner as prediction_runner_module
 import quant_research_platform.storage._dataset_reading as dataset_reading
+import quant_research_platform.workflows.local_verification as local_verification_module
 from quant_research_platform.artifacts._evaluation_outputs import (
     _write_evaluation_outputs_from_chunks,
 )
@@ -58,12 +59,12 @@ from quant_research_platform.research.datasets.validation import (
     validate_prediction_input,
 )
 from quant_research_platform.research.evaluations.engine import (
+    _EvaluationStreamingState,
     _iter_evaluation_output_chunks,
     _iter_evaluation_work_frames,
     evaluate_signal_frame_chunks,
 )
 from quant_research_platform.research.evaluations.runner import (
-    _write_evaluation_outputs_from_research_dataset,
     build_evaluation_result_from_research_dataset,
 )
 from quant_research_platform.research.models.supervised import (
@@ -80,6 +81,9 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.workflows.local_verification import (
+    _write_evaluation_outputs_from_research_dataset,
+)
 from tests.helpers.research_processed_inputs import (
     make_demo_processed_catalog,
     write_demo_processed_inputs,
@@ -2196,6 +2200,66 @@ def test_evaluation_input_lease_spans_normalization_and_closes_on_stop() -> None
     assert policy.used_memory_bytes == 0
 
 
+def test_managed_workflow_admits_summary_before_research_pull(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dataset_catalog = make_research_dataset_catalog()
+    evaluation_catalog = EvaluationCatalog()
+    spec = EvaluationSpec(
+        run_id="eval_summary_admission",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(make_signal_spec("mom_20d"),),
+        label_columns=("forward_return_20d",),
+    )
+    evaluation_catalog.register(spec)
+    pulled: list[bool] = []
+    artifact_calls: list[bool] = []
+
+    def chunks(*_args, **_kwargs):
+        pulled.append(True)
+        yield pd.DataFrame()
+
+    def artifact_writer(*_args, **_kwargs):
+        artifact_calls.append(True)
+        raise AssertionError("artifact_writer_after_summary_admission")
+
+    monkeypatch.setattr(
+        local_verification_module,
+        "iter_research_dataset_chunks",
+        chunks,
+    )
+    monkeypatch.setattr(
+        local_verification_module,
+        "_write_evaluation_outputs_from_chunks",
+        artifact_writer,
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024,
+        explicit_cap_bytes=32 * 1024,
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            _write_evaluation_outputs_from_research_dataset(
+                layout=StorageLayout(project_root=tmp_path),
+                dataset_catalog=dataset_catalog,
+                evaluation_catalog=evaluation_catalog,
+                run_id=spec.run_id,
+                output_spec=_output_spec(
+                    output_definition_id="evaluation_outputs",
+                    run_id=spec.run_id,
+                    market_id=spec.market_id,
+                    run_type=spec.run_type,
+                ),
+                resource_policy=policy,
+            )
+
+    assert pulled == []
+    assert artifact_calls == []
+    assert policy.used_memory_bytes == 0
+
+
 def test_managed_evaluation_runner_persists_without_full_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2332,22 +2396,37 @@ def test_managed_evaluation_parity_covers_filters_ties_and_all_nan(
         run_type=spec.run_type,
     )
     with runtime_resource_policy_scope(policy):
-        chunks = _iter_evaluation_output_chunks(
-            (frame,),
+        state = _EvaluationStreamingState(
             spec=spec,
-            signal_columns=("factor",),
-            label_columns=spec.label_columns,
             n_groups=2,
-            asset_column="asset_id",
             resource_policy=policy,
         )
-        output_bundle = _write_evaluation_outputs_from_chunks(
-            chunks,
-            spec=spec,
-            output_spec=output_spec,
-            layout=StorageLayout(project_root=tmp_path),
-            n_groups=2,
-        )
+        try:
+            chunks = _iter_evaluation_output_chunks(
+                (frame,),
+                spec=spec,
+                signal_columns=("factor",),
+                label_columns=spec.label_columns,
+                n_groups=2,
+                asset_column="asset_id",
+                resource_policy=policy,
+                summary_state=state,
+            )
+            output_bundle = _write_evaluation_outputs_from_chunks(
+                chunks,
+                summary_factory=lambda: (
+                    state.diagnostics(),
+                    state.ic_summary(),
+                    state.group_spread_summary(),
+                    state.coverage_summary(),
+                ),
+                spec=spec,
+                output_spec=output_spec,
+                layout=StorageLayout(project_root=tmp_path),
+                n_groups=2,
+            )
+        finally:
+            state.close()
 
     def sorted_frame(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
         return frame.sort_values(columns, kind="mergesort").reset_index(drop=True)
@@ -2451,21 +2530,36 @@ def test_managed_evaluation_two_label_order_and_shared_skip_parity(
             run_type=spec.run_type,
         )
         with runtime_resource_policy_scope(policy):
-            output_bundle = _write_evaluation_outputs_from_chunks(
-                _iter_evaluation_output_chunks(
-                    frames,
-                    spec=spec,
-                    signal_columns=("factor",),
-                    label_columns=spec.label_columns,
-                    n_groups=2,
-                    asset_column="asset_id",
-                    resource_policy=policy,
-                ),
+            state = _EvaluationStreamingState(
                 spec=spec,
-                output_spec=output_spec,
-                layout=StorageLayout(project_root=tmp_path),
                 n_groups=2,
+                resource_policy=policy,
             )
+            try:
+                output_bundle = _write_evaluation_outputs_from_chunks(
+                    _iter_evaluation_output_chunks(
+                        frames,
+                        spec=spec,
+                        signal_columns=("factor",),
+                        label_columns=spec.label_columns,
+                        n_groups=2,
+                        asset_column="asset_id",
+                        resource_policy=policy,
+                        summary_state=state,
+                    ),
+                    summary_factory=lambda: (
+                        state.diagnostics(),
+                        state.ic_summary(),
+                        state.group_spread_summary(),
+                        state.coverage_summary(),
+                    ),
+                    spec=spec,
+                    output_spec=output_spec,
+                    layout=StorageLayout(project_root=tmp_path),
+                    n_groups=2,
+                )
+            finally:
+                state.close()
         return output_bundle, policy
 
     output_bundle, policy = persist((frame,), "eval_managed_two_labels_full")

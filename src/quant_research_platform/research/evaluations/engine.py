@@ -614,8 +614,9 @@ def _iter_evaluation_output_chunks(
     asset_column: str,
     resource_policy: RuntimeResourcePolicy,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
+    summary_state: _EvaluationStreamingState | None = None,
 ) -> Iterator[tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]]:
-    """Yield one bounded metrics/grouped pair per complete-time batch."""
+    """Yield bounded pairs and optionally consume them into research summaries."""
 
     from quant_research_platform.research.filtering import _filter_mode_scope
 
@@ -634,7 +635,7 @@ def _iter_evaluation_output_chunks(
             metadata_key="filter_mode",
         ) as (filtered, filter_metadata):
             try:
-                yield from _iter_evaluation_filtered_chunks(
+                for output in _iter_evaluation_filtered_chunks(
                     filtered,
                     filter_metadata,
                     spec=spec,
@@ -643,7 +644,10 @@ def _iter_evaluation_output_chunks(
                     n_groups=n_groups,
                     asset_column=asset_column,
                     resource_policy=resource_policy,
-                )
+                ):
+                    if summary_state is not None:
+                        summary_state.consume(*output)
+                    yield output
             finally:
                 filtered = None
 

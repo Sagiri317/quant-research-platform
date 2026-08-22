@@ -11,6 +11,9 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from quant_research_platform.artifacts._evaluation_outputs import (
+    _write_evaluation_outputs_from_chunks,
+)
 from quant_research_platform.artifacts._output_bundle_validation import (
     _read_prediction_output_bundle,
     validate_output_bundle,
@@ -25,7 +28,10 @@ from quant_research_platform.artifacts.evidence import (
     write_json_evidence,
     write_markdown_evidence,
 )
+from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.contracts.data import ProcessedDataKind
+from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
@@ -49,8 +55,13 @@ from quant_research_platform.reports.verification_summary import (
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
+from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.evaluations.engine import (
+    _EvaluationStreamingState,
+    _iter_evaluation_output_chunks,
+)
 from quant_research_platform.research.evaluations.runner import (
-    _write_evaluation_outputs_from_research_dataset,
+    _validated_evaluation_chunks,
 )
 from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.portfolios.runner import (
@@ -132,6 +143,97 @@ _ROOT_OWNERSHIP_KEYS = frozenset(
 )
 _PROFILE_PREDICTION_PREVIEW_TRAIN_END = "2000-01-01"
 _PROFILE_PREDICTION_PREVIEW_TEST_START = "2000-01-02"
+
+
+def _write_evaluation_outputs_from_research_dataset(
+    *,
+    layout: StorageLayout,
+    dataset_catalog: ResearchDatasetCatalog,
+    evaluation_catalog: EvaluationCatalog,
+    run_id: str,
+    output_spec: OutputSpec,
+    time_window: TimeWindow | None = None,
+    n_groups: int | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> Path:
+    """Compose the research producer and artifact persistence in the workflow."""
+
+    with runtime_resource_policy_scope(resource_policy) as policy:
+        spec = evaluation_catalog.get(run_id)
+        dataset_spec = dataset_catalog.get(spec.research_dataset_id)
+        signal_columns = tuple(signal.source_column for signal in spec.signals)
+        read_columns = (
+            *dataset_spec.primary_key,
+            *signal_columns,
+            *spec.label_columns,
+            *required_filter_columns(spec.filter_mode),
+        )
+        effective_groups = spec.n_groups if n_groups is None else n_groups
+        chunks = iter_research_dataset_chunks(
+            layout,
+            market_id=dataset_spec.market_id,
+            dataset_id=dataset_spec.data_id,
+            time_window=time_window,
+            columns=read_columns,
+        )
+        validated_chunks = _validated_evaluation_chunks(
+            chunks,
+            dataset_spec=dataset_spec,
+            signals=spec.signals,
+            label_columns=spec.label_columns,
+        )
+        state = _EvaluationStreamingState(
+            spec=spec,
+            n_groups=effective_groups,
+            resource_policy=policy,
+        )
+        primary: BaseException | None = None
+        try:
+            evaluation_chunks = _iter_evaluation_output_chunks(
+                validated_chunks,
+                spec=spec,
+                signal_columns=tuple(signal.signal_id for signal in spec.signals),
+                label_columns=spec.label_columns,
+                n_groups=effective_groups,
+                asset_column="asset_id",
+                source_columns_by_kind={
+                    "factor": tuple(dataset_spec.factor_columns),
+                    "feature": tuple(dataset_spec.feature_columns),
+                    "prediction": tuple(dataset_spec.context_columns),
+                },
+                resource_policy=policy,
+                summary_state=state,
+            )
+
+            def summary_factory():
+                return (
+                    state.diagnostics(),
+                    state.ic_summary(),
+                    state.group_spread_summary(),
+                    state.coverage_summary(),
+                )
+
+            return _write_evaluation_outputs_from_chunks(
+                evaluation_chunks,
+                summary_factory=summary_factory,
+                spec=spec,
+                output_spec=output_spec,
+                layout=layout,
+                n_groups=effective_groups,
+            )
+        except BaseException as exc:
+            primary = exc
+            raise
+        finally:
+            try:
+                state.close()
+            except BaseException as close_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "evaluation summary reservation release also failed: "
+                    f"{type(close_error).__name__}"
+                )
 
 
 def run_local_verification(
