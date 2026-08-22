@@ -255,7 +255,7 @@ def test_complete_time_sized_frames_honor_live_root_reservations() -> None:
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("outer_owner", policy.memory_budget_bytes):
+        with policy.lease("outer_owner", policy.memory_budget_bytes):
             with pytest.raises(
                 ValueError,
                 match="research_indivisible_time_unit_exceeds_task_memory_budget",
@@ -359,7 +359,7 @@ def test_time_chunk_refreshes_shared_headroom_before_next_session_copy() -> None
         first = next(chunks)
         assert first["timestamp"].nunique() == 1
         new_owner_bytes = hard_budget - timestamp_bytes - second_bytes + 1
-        with policy.reserve("outer_after_first_yield", new_owner_bytes):
+        with policy.lease("outer_after_first_yield", new_owner_bytes):
             with pytest.raises(
                 ValueError,
                 match="research_indivisible_time_unit_exceeds_task_memory_budget",

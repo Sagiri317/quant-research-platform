@@ -150,20 +150,20 @@ def test_public_dataset_writer_does_not_recharge_borrowed_frame_payload(
     root = make_dataset_artifact_root(tmp_path, "borrowed_input")
     frame = make_default_dataset_frame()
     reservation_owners: list[str] = []
-    original_reserve = RuntimeResourcePolicy.reserve
+    original_lease = RuntimeResourcePolicy.lease
 
-    def record_reserve(
+    def record_lease(
         policy: RuntimeResourcePolicy,
         owner: str,
-        reserve_bytes: int,
+        reserved_bytes: int,
     ):
         reservation_owners.append(owner)
-        return original_reserve(policy, owner, reserve_bytes)
+        return original_lease(policy, owner, reserved_bytes)
 
     monkeypatch.setattr(
         RuntimeResourcePolicy,
-        "reserve",
-        record_reserve,
+        "lease",
+        record_lease,
     )
 
     write_dataset(root, frame, spec=make_processed_dataset_spec("borrowed_input"))

@@ -143,7 +143,7 @@ def write_labels(
                 )
                 label_bound = panel_bytes + output_buffer + calculation_vectors
                 live.enter_context(
-                    policy.reserve("a_share.label.calculate", label_bound)
+                    policy.lease("a_share.label.calculate", label_bound)
                 )
                 labels = label_calculations.calculate_labels_for_panel(
                     panel, definitions=definitions

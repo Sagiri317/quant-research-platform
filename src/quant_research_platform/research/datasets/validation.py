@@ -45,7 +45,7 @@ def validate_research_dataset(
     ):
         raise ValueError("research_validation_working_set_exceeds_task_memory_budget")
     reservation = (
-        policy.reserve("research.dataset.validation", mask_bytes)
+        policy.lease("research.dataset.validation", mask_bytes)
         if policy is not None
         else nullcontext()
     )

@@ -180,6 +180,30 @@ def test_lease_overflow_release_and_leak_poison() -> None:
     assert not leaked._lock.closed  # noqa: SLF001
 
 
+def test_lease_context_manager_closes_and_preserves_body_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=MIB, explicit_cap_bytes=733)
+    real_close = resources.MemoryLease.close
+
+    def fail_close(lease: resources.MemoryLease) -> None:
+        real_close(lease)
+        raise OSError("lease_release_secondary")
+
+    monkeypatch.setattr(resources.MemoryLease, "close", fail_close)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(KeyboardInterrupt, match="lease_body_primary") as raised:
+            with policy.lease("primary", 17) as lease:
+                assert lease.active
+                assert policy.used_memory_bytes == 17
+                raise KeyboardInterrupt("lease_body_primary")
+        assert any(
+            "lease release also failed: OSError" in note
+            for note in raised.value.__notes__
+        )
+        assert policy.used_memory_bytes == 0
+
+
 def test_leaked_child_keeps_machine_lock_until_process_exit() -> None:
     child = subprocess.Popen(
         (
@@ -270,6 +294,7 @@ def test_retired_root_cannot_reenter() -> None:
 
 def test_deleted_production_surfaces_are_absent() -> None:
     assert not hasattr(resources.RuntimeResourcePolicy, "capture")
+    assert not hasattr(resources.RuntimeResourcePolicy, "reserve")
     assert hasattr(resources, "current_runtime_resource_policy")
     for name in ("active_runtime_resource_policy", "bind_runtime_resource_policy"):
         assert not hasattr(resources, name)

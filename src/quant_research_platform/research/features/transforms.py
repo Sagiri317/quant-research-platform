@@ -51,7 +51,7 @@ def _apply_feature_transforms_to_copy(
     )
     policy = current_runtime_resource_policy()
     reservation = (
-        policy.reserve(
+        policy.lease(
             "research.feature.transform",
             output_bound + workspace_bound,
         )

@@ -1497,7 +1497,7 @@ def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
         raise materialization_io.MaterializationCapacityExceeded("split")
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve(
+        with policy.lease(
             "test.a_share.preexisting",
             policy.memory_budget_bytes - 1,
         ):
@@ -2153,7 +2153,7 @@ def test_valid_bar_boundary_admits_state_before_array_allocation(
         match="a_share_known_payloads_exceed_task_memory_budget",
     ):
             with runtime_resource_policy_scope(policy):
-                with policy.reserve(
+                with policy.lease(
                     "test.a_share.preexisting",
                     policy.memory_budget_bytes - 1,
                 ):

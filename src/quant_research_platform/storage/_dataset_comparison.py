@@ -292,7 +292,7 @@ def _exact_comparison_counts(
     left_identity: bytes,
     right_identity: bytes,
 ) -> dict[str, int]:
-    with resource_policy.reserve(
+    with resource_policy.lease(
         "storage.dataset.comparison.index",
         EXACT_KEY_SQLITE_PAGE_BYTES,
     ):
@@ -384,7 +384,7 @@ def _index_dataset_rows(
             callback_target = min(exact_payload_target, callback_headroom)
             if callback_target <= 0:
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-            with resource_policy.reserve(
+            with resource_policy.lease(
                 "storage.dataset.comparison.payload",
                 callback_target,
             ):

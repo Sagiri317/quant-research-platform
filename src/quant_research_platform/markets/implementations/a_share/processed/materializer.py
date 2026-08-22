@@ -103,7 +103,7 @@ def _materialize_processed_data_with_policy(
     lookback_sessions, lookahead_sessions = (
         materialization_dependencies.required_session_offsets(targets)
     )
-    with runtime_resource_policy_scope(policy), ExitStack() as cleanup_stack:
+    with ExitStack() as cleanup_stack:
         owned_sessions = materialization_planning.available_trading_sessions(
             layout,
             source_id,

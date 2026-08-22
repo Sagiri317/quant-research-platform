@@ -109,7 +109,7 @@ def open_schema_inventory_payload(
             render_bound = 128 + retained_item_bytes + 2 * len(items)
             try:
                 retained.enter_context(
-                    policy.reserve(
+                    policy.lease(
                         "schema.inventory.consumer_overlap",
                         render_bound + len(items) * sys.getsizeof(None),
                     )
@@ -455,7 +455,7 @@ def _inventory_item_from_session(
     )
     try:
         retained_items.enter_context(
-            resource_policy.reserve("schema.inventory.items", build_bound)
+            resource_policy.lease("schema.inventory.items", build_bound)
         )
         stats = _aggregate_dataset_stats(
             session,

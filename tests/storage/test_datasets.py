@@ -1347,7 +1347,7 @@ def test_dataset_file_batches_subtract_live_root_reservations_before_conversion(
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("research.time.pending", policy.memory_budget_bytes):
+        with policy.lease("research.time.pending", policy.memory_budget_bytes):
             with pytest.raises(
                 ValueError,
                 match="dataset_working_set_exceeds_task_memory_budget",
@@ -1387,7 +1387,7 @@ def test_dataset_file_batches_do_not_repeat_explicitly_composed_reservations(
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve(
+        with policy.lease(
             "storage.dataset.write",
             policy.memory_budget_bytes - composed_headroom,
         ):
@@ -1441,7 +1441,7 @@ def test_dataset_file_batches_do_not_credit_implicit_live_reservations(
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("research.model.fitted_state", retained_bytes):
+        with policy.lease("research.model.fitted_state", retained_bytes):
             with pytest.raises(
                 ValueError,
                 match="dataset_working_set_exceeds_task_memory_budget",
@@ -1507,7 +1507,7 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
             next(converted)
             remaining = policy.memory_budget_bytes - policy.used_memory_bytes
             assert remaining > 0
-            with policy.reserve(
+            with policy.lease(
                 "research.time.pending",
                 remaining,
             ):
@@ -1555,7 +1555,7 @@ def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
     with dataset_reading.closing_dataset_iterator(converted):
         first_path, first = next(converted)
         with runtime_resource_policy_scope(policy):
-            with policy.reserve("research.time.pending", output_bytes[0]):
+            with policy.lease("research.time.pending", output_bytes[0]):
                 second_path, second = next(converted)
 
     assert first_path == path
@@ -6961,7 +6961,7 @@ def test_dataset_filter_preparation_subtracts_shared_reservations_before_sort(
 
     with (
         runtime_resource_policy_scope(policy),
-        policy.reserve("outer", policy.memory_budget_bytes - 1),
+        policy.lease("outer", policy.memory_budget_bytes - 1),
         pytest.raises(
             storage_errors.DatasetReadCapacityExceeded,
             match="dataset_filter_values_exceed_task_memory_budget",
@@ -8864,7 +8864,7 @@ def test_writer_deducts_other_live_root_reservations_before_allocation(
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("test.outer.owner", other_owner_bytes):
+        with policy.lease("test.outer.owner", other_owner_bytes):
             with pytest.raises(
                 ValueError,
                 match="dataset_working_set_exceeds_task_memory_budget",
@@ -9021,6 +9021,7 @@ def test_dataset_parquet_disk_preflight_precedes_native_write(
 ) -> None:
     table = pa.table({"value": [1]})
     path = tmp_path / "part.parquet"
+    policy = _writer_test_policy()
     captured: dict[str, int] = {}
     native_writes = 0
 
@@ -9037,8 +9038,9 @@ def test_dataset_parquet_disk_preflight_precedes_native_write(
     monkeypatch.setattr(dataset_writing, "require_free_disk_headroom", reject_disk)
     monkeypatch.setattr(dataset_writing.pq, "write_table", forbid_native_write)
 
-    with pytest.raises(OSError, match="dataset_disk_preflight"):
-        dataset_writing.write_parquet_file(table, path)
+    with pytest.raises(OSError, match="dataset_disk_preflight") as raised:
+        with runtime_resource_policy_scope(policy):
+            dataset_writing.write_parquet_file(table, path)
 
     persisted = dataset_writing.table_with_decoded_row_bounds(table)
     metadata = dict(persisted.schema.metadata or {})
@@ -9054,6 +9056,9 @@ def test_dataset_parquet_disk_preflight_precedes_native_write(
     assert captured["reserve_bytes"] == expected
     assert native_writes == 0
     assert not path.exists()
+    assert str(raised.value) == "dataset_disk_preflight"
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
 
 
 def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(

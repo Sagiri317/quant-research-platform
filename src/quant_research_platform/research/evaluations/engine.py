@@ -57,7 +57,7 @@ class _EvaluationStreamingState:
                 1, len(spec.label_columns)
             )
             self._summary_reservation.enter_context(
-                resource_policy.reserve(
+                resource_policy.lease(
                     "research.evaluation.summary.state",
                     64 * 1024 + domain_size * 4096,
                 )
@@ -831,7 +831,7 @@ def _iter_evaluation_compute_batches(
                 > resource_policy.memory_budget_bytes
             ):
                 if stop == start:
-                    with resource_policy.reserve(
+                    with resource_policy.lease(
                         "research.evaluation.kernel",
                         candidate_bytes,
                     ):

@@ -309,7 +309,6 @@ def fit_linear_coefficients(
     train_end: str | None = None
     factor_lease: MemoryLease | None = None
     first_usable_reservation = ExitStack()
-    policy = current_runtime_resource_policy()
     try:
         for chunk in frames:
             chunk_count += 1
@@ -336,7 +335,7 @@ def fit_linear_coefficients(
                     )
                     if policy is not None:
                         chunk_work.enter_context(
-                            policy.reserve(
+                            policy.lease(
                                 "research.model.linear_projection",
                                 usable_bound,
                             )
@@ -1074,7 +1073,7 @@ def fit_linear_coefficients_exact(
     with ExitStack() as solve_reservation:
         if policy is not None:
             solve_reservation.enter_context(
-                policy.reserve(
+                policy.lease(
                     "research.model.linear_solve",
                     _linear_exact_working_set_bytes(frame, spec),
                 )
@@ -1400,7 +1399,7 @@ def fit_linear_coefficients_from_tsqr(
                 solver_input_copy + right_singular_vectors + solver_vectors
             )
             solve_reservation.enter_context(
-                policy.reserve(
+                policy.lease(
                     "research.model.qr_solve",
                     solver_input_copy
                     + right_singular_vectors

@@ -113,7 +113,7 @@ class AggregateTradeReducer:
         self._policy = current_runtime_resource_policy()
         self._reservations = ExitStack()
         if self._policy is not None:
-            with self._policy.reserve(
+            with self._policy.lease(
                 "crypto.trade.reducer_measure",
                 max(4096, 2 * len(bars) * sys.getsizeof(None)),
             ):
@@ -129,7 +129,7 @@ class AggregateTradeReducer:
                     ),
                 )
             self._reservations.enter_context(
-                self._policy.reserve(
+                self._policy.lease(
                     "crypto.trade.reducer_state",
                     state_bound,
                 )
@@ -284,7 +284,7 @@ class DepthSnapshotReducer:
         self._policy = current_runtime_resource_policy()
         self._reservations = ExitStack()
         if self._policy is not None:
-            with self._policy.reserve(
+            with self._policy.lease(
                 "crypto.depth.reducer_measure",
                 max(4096, 2 * len(bars) * sys.getsizeof(None)),
             ):
@@ -305,7 +305,7 @@ class DepthSnapshotReducer:
                     ),
                 )
             self._reservations.enter_context(
-                self._policy.reserve(
+                self._policy.lease(
                     "crypto.depth.reducer_state",
                     state_bound,
                 )
@@ -545,10 +545,10 @@ def _next_frame_reservation(
     if policy is None:
         return ExitStack()
     diagnostic_bytes = max(1, len(frame.columns)) * sys.getsizeof(0)
-    with policy.reserve(f"{owner}.measure", diagnostic_bytes):
+    with policy.lease(f"{owner}.measure", diagnostic_bytes):
         frame_bytes = pandas_frame_payload_bytes(frame)
     scalar_slots = len(frame) * max(1, len(frame.columns)) * sys.getsizeof(None)
-    return policy.reserve(owner, frame_bytes + scalar_slots)
+    return policy.lease(owner, frame_bytes + scalar_slots)
 
 
 def _payload_checked_output_frame(

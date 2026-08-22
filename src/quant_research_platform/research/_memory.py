@@ -53,7 +53,7 @@ def _iter_contiguous_session_frames(
                 break
             output_bound += session_bound
             stop = session_stop
-        with policy.reserve("research.time.output", output_bound):
+        with policy.lease("research.time.output", output_bound):
             output = frame.iloc[start:stop].copy()
             if _frame_bytes(output) > output_bound:
                 raise ValueError(
@@ -123,7 +123,7 @@ def iter_complete_session_frames(
                     )
                     + boundary_bytes
                 )
-                with policy.reserve("research.session.inspect", inspection_bytes):
+                with policy.lease("research.session.inspect", inspection_bytes):
                     timestamps = strict_timestamp_series(
                         frame[timestamp_column],
                         error="invalid_time_chunk_timestamp_values",
@@ -180,7 +180,7 @@ def _iter_complete_time_sized_frames_impl(
                 )
             with ExitStack() as frame_work:
                 frame_work.enter_context(
-                    resource_policy.reserve("research.time.inspect", operation_bytes)
+                    resource_policy.lease("research.time.inspect", operation_bytes)
                 )
                 timestamps = strict_timestamp_series(
                     frame[timestamp_column],
@@ -196,7 +196,7 @@ def _iter_complete_time_sized_frames_impl(
                             "research_indivisible_time_unit_exceeds_task_memory_budget"
                         )
                     frame_work.enter_context(
-                        resource_policy.reserve("research.time.sort", sort_bytes)
+                        resource_policy.lease("research.time.sort", sort_bytes)
                     )
                     frame = frame.sort_values(
                         timestamp_column,
@@ -233,7 +233,7 @@ def _iter_complete_time_sized_frames_impl(
                         pending_reservation = ExitStack()
                         combined_bytes = _frame_bytes(combined)
                         pending_reservation.enter_context(
-                            resource_policy.reserve(
+                            resource_policy.lease(
                                 "research.time.pending",
                                 combined_bytes,
                             )
@@ -281,7 +281,7 @@ def _iter_complete_time_sized_frames_impl(
                         "research_indivisible_time_unit_exceeds_task_memory_budget"
                     )
                 pending_reservation.enter_context(
-                    resource_policy.reserve(
+                    resource_policy.lease(
                         "research.time.pending",
                         tail_bytes,
                     )
@@ -315,7 +315,7 @@ def _concat_time_boundary_frames(
         > policy.memory_budget_bytes
     ):
         raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
-    with policy.reserve("research.time.boundary", retained_payload_bytes):
+    with policy.lease("research.time.boundary", retained_payload_bytes):
         result = pd.concat([left, right], ignore_index=True)
         if _frame_bytes(result) > retained_payload_bytes:
             raise ValueError(

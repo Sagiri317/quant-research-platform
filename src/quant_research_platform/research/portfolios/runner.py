@@ -464,7 +464,7 @@ def _validated_prediction_input(
     with ExitStack() as validation_reservation:
         if policy is not None:
             validation_reservation.enter_context(
-                policy.reserve(
+                policy.lease(
                     "research.portfolio.prediction.validate",
                     validation_bytes,
                 )
@@ -546,7 +546,7 @@ def _iter_prediction_joined_chunks(
         if resource_policy is not None:
             try:
                 prediction_state.enter_context(
-                    resource_policy.reserve(
+                    resource_policy.lease(
                         "research.portfolio.prediction.input",
                         prediction_bytes + prediction_index_bytes + matched_bytes,
                     )
@@ -588,7 +588,7 @@ def _iter_prediction_joined_chunks(
                 with ExitStack() as chunk_state:
                     if resource_policy is not None:
                         chunk_state.enter_context(
-                            resource_policy.reserve(
+                            resource_policy.lease(
                                 "research.portfolio.prediction.join",
                                 chunk_working_bytes,
                             )
@@ -656,7 +656,7 @@ def _iter_prediction_lookup_joined_chunks(
             with ExitStack() as chunk_state:
                 if policy is not None:
                     chunk_state.enter_context(
-                        policy.reserve(
+                        policy.lease(
                             "research.portfolio.prediction.output",
                             timestamp_bytes
                             + required_mask_bytes
@@ -784,7 +784,7 @@ def _iter_portfolio_output_chunks(
             with ExitStack() as operation_reservation:
                 if policy is not None:
                     operation_reservation.enter_context(
-                        policy.reserve(
+                        policy.lease(
                             "research.portfolio.operation",
                             operation_bytes,
                         )
@@ -843,7 +843,7 @@ def _iter_portfolio_output_chunks(
                 context = next_context
                 if resource_policy is not None:
                     context_reservation.enter_context(
-                        resource_policy.reserve(
+                        resource_policy.lease(
                             "research.portfolio.context",
                             retained_context_bytes,
                         )
@@ -851,7 +851,7 @@ def _iter_portfolio_output_chunks(
                 with ExitStack() as output_reservation:
                     if policy is not None:
                         output_reservation.enter_context(
-                            policy.reserve("research.portfolio.output", output_bytes)
+                            policy.lease("research.portfolio.output", output_bytes)
                         )
                     yield output
                 del output, next_context
@@ -918,7 +918,7 @@ def _update_portfolio_summary_state(
     with ExitStack() as operation:
         if policy is not None:
             operation.enter_context(
-                policy.reserve(
+                policy.lease(
                     "research.portfolio.summary.update",
                     operation_bytes,
                 )

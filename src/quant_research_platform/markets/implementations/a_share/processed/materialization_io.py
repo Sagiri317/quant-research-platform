@@ -197,7 +197,7 @@ def iter_sorted_output_chunks(
                         raise MaterializationCapacityExceeded(
                             "a_share_known_payloads_exceed_task_memory_budget"
                         )
-                    with bound_policy.reserve(
+                    with bound_policy.lease(
                         "a_share.output.order",
                         key_temporary_bytes,
                     ):

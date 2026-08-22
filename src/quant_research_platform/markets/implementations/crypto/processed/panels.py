@@ -83,7 +83,7 @@ def calculate_market_panel_from_chunks(
         with ExitStack() as outputs:
             if policy is not None:
                 outputs.enter_context(
-                    policy.reserve(
+                    policy.lease(
                         "crypto.panel.trade_output",
                         pandas_frame_payload_bytes(trade_aggregates),
                     )
@@ -101,7 +101,7 @@ def calculate_market_panel_from_chunks(
             quote_snapshots = depth_reducer.finish()
             if policy is not None:
                 outputs.enter_context(
-                    policy.reserve(
+                    policy.lease(
                         "crypto.panel.depth_output",
                         pandas_frame_payload_bytes(quote_snapshots),
                     )
@@ -114,7 +114,7 @@ def calculate_market_panel_from_chunks(
                     quote_snapshots=quote_snapshots,
                     max_quote_age=max_quote_age,
                 )
-            with policy.reserve(
+            with policy.lease(
                 "crypto.panel.merge",
                 _panel_temporary_upper_bound(prepared_bars),
             ):
@@ -126,7 +126,7 @@ def calculate_market_panel_from_chunks(
                 )
                 if _output_stack is not None:
                     _output_stack.enter_context(
-                        policy.reserve(
+                        policy.lease(
                             "crypto.panel.output",
                             pandas_frame_payload_bytes(result),
                         )

@@ -362,7 +362,7 @@ def _artifact_writer_fixed_reservation(
     policy = current_runtime_resource_policy()
     if policy is not None:
         stack.enter_context(
-            policy.reserve(
+            policy.lease(
                 "artifacts.parquet.fixed",
                 index_bytes
                 + writer_count * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
@@ -396,7 +396,7 @@ def _artifact_frame_reservation(
         )
         key_mask_bytes = index_bytes + row_count if key_columns else 0
         stack.enter_context(
-            policy.reserve(
+            policy.lease(
                 "artifacts.parquet.frame",
                 input_charge + arrow_bytes + timestamp_bytes + key_mask_bytes,
             )
@@ -456,7 +456,7 @@ def _artifact_table_write_state(
     )
     next_retained = sum(next_memory)
     stack.enter_context(
-        policy.reserve(
+        policy.lease(
             "artifacts.parquet.native",
             next_retained - retained_bytes,
         )

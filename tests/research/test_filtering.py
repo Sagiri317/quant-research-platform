@@ -52,7 +52,7 @@ def test_filter_mode_scope_rejects_before_mask_allocation() -> None:
         explicit_cap_bytes=64 * 1024,
     )
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("test.filter.blocker", policy.memory_budget_bytes):
+        with policy.lease("test.filter.blocker", policy.memory_budget_bytes):
             with pytest.raises(
                 ValueError,
                 match="research_filter_working_set_exceeds_task_memory_budget",

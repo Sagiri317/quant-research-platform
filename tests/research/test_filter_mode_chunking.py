@@ -497,7 +497,7 @@ def test_evaluation_streaming_output_honors_shared_root_headroom() -> None:
     assert frame_bytes < policy.memory_budget_bytes
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve(
+        with policy.lease(
             "outer_owner",
             policy.memory_budget_bytes - frame_bytes,
         ):

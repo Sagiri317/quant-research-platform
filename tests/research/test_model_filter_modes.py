@@ -539,7 +539,7 @@ def test_linear_matrix_admission_precedes_allocation(
         explicit_cap_bytes=1 * 1024 * 1024,
     )
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("outer_owner", policy.memory_budget_bytes):
+        with policy.lease("outer_owner", policy.memory_budget_bytes):
             with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
                 model_fitting.fit_linear_coefficients_exact(frame, spec)
 

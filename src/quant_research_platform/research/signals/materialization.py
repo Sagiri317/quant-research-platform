@@ -71,7 +71,7 @@ def normalize_signal_frame(
     drop_output_bytes = result_bytes if consumed_sources else 0
     policy = current_runtime_resource_policy()
     reservation = (
-        policy.reserve(
+        policy.lease(
             "research.signal.normalize",
             result_bytes + transform_bytes + drop_output_bytes,
         )

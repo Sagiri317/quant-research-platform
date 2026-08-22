@@ -1646,7 +1646,7 @@ def _prepare_in_filter(
     )
     with (
         runtime_resource_policy_scope(resource_policy),
-        resource_policy.reserve(
+        resource_policy.lease(
             "storage.filter.sort",
             sort_state_bytes + timsort_scratch_bytes,
         ),
@@ -1684,7 +1684,7 @@ def _prepare_in_filter(
                 session_lease.grow(arrow_bound)
             else:
                 arrow_state.enter_context(
-                    resource_policy.reserve("storage.filter.arrow", arrow_bound)
+                    resource_policy.lease("storage.filter.arrow", arrow_bound)
                 )
             try:
                 acquired = pa.array(sorted_values, type=data_type)
@@ -1886,7 +1886,7 @@ def _arrow_batch_to_bounded_pandas(
         with ExitStack() as conversion_reservation:
             if policy is not None:
                 conversion_reservation.enter_context(
-                    policy.reserve(
+                    policy.lease(
                         "storage.arrow.to_pandas",
                         conversion_reserve_bytes,
                     )

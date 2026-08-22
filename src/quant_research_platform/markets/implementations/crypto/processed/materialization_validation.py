@@ -289,7 +289,7 @@ def _validate_receipt_key_coverage(
             raise RuntimeError("runtime_resource_policy_not_active")
         if active_policy is not resource_policy:
             raise RuntimeError("runtime_resource_policy_conflict")
-        with resource_policy.reserve(
+        with resource_policy.lease(
             "crypto.validation.keys",
             max(1, pandas_frame_payload_bytes(frame)),
         ):
@@ -435,7 +435,7 @@ def _iter_normalized_primary_key_rows(
         policy = current_runtime_resource_policy()
         if policy is None:
             raise RuntimeError("runtime_resource_policy_not_active")
-        with policy.reserve(
+        with policy.lease(
             "crypto.validation.keys",
             max(1, pandas_frame_payload_bytes(frame)),
         ):
@@ -530,7 +530,7 @@ def _iter_panel_primary_key_chunks(
         policy = current_runtime_resource_policy()
         if policy is None:
             raise RuntimeError("runtime_resource_policy_not_active")
-        with policy.reserve(
+        with policy.lease(
             "crypto.validation.panel-keys",
             max(1, pandas_frame_payload_bytes(chunk)),
         ):

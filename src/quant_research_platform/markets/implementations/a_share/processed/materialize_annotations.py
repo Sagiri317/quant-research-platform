@@ -103,7 +103,7 @@ def write_annotations(
                 )
                 annotation_bound = panel_bytes + output_buffer
                 live.enter_context(
-                    policy.reserve(
+                    policy.lease(
                         "a_share.annotation.calculate",
                         annotation_bound,
                     )

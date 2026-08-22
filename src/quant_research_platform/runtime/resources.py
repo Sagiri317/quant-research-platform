@@ -81,6 +81,27 @@ class MemoryLease:
     active: bool
     _root: RuntimeResourcePolicy = field(repr=False)
 
+    def __enter__(self) -> MemoryLease:
+        self._root._require_lease_owner(self)
+        return self
+
+    def __exit__(
+        self,
+        _exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        _traceback: object,
+    ) -> bool:
+        try:
+            self.close()
+        except BaseException as release_error:
+            if exc_value is None:
+                raise
+            exc_value.add_note(
+                "runtime memory lease release also failed: "
+                f"{type(release_error).__name__}"
+            )
+        return False
+
     def transfer(self, new_owner: str) -> None:
         self._root._require_lease_owner(self)
         self.owner = _required_owner(new_owner)
@@ -151,25 +172,6 @@ class RuntimeResourcePolicy:
         leased = MemoryLease(valid_owner, reserved, True, self)
         self._leases.add(leased)
         return leased
-
-    @contextmanager
-    def reserve(self, owner: str, reserve_bytes: int) -> Iterator[None]:
-        """Temporary bridge for callers not yet migrated to MemoryLease."""
-
-        leased = self.lease(owner, reserve_bytes)
-        try:
-            yield
-        finally:
-            primary = sys.exception()
-            try:
-                leased.close()
-            except BaseException as release_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "runtime memory reservation release also failed: "
-                    f"{type(release_error).__name__}"
-                )
 
     def to_payload(self) -> dict[str, int]:
         return {

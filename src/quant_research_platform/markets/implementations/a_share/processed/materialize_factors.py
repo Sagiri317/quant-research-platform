@@ -143,7 +143,7 @@ def write_factors(
                 )
                 factor_bound = panel_bytes + output_buffer + calculation_vectors
                 live.enter_context(
-                    policy.reserve("a_share.factor.calculate", factor_bound)
+                    policy.lease("a_share.factor.calculate", factor_bound)
                 )
                 factors = factor_calculations.calculate_factors_for_panel(
                     panel, definitions=definitions

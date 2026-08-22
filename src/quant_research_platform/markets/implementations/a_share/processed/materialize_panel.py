@@ -156,7 +156,7 @@ def write_panel(
                     output_buffer + source_bytes + market_bars_bytes
                 )
                 live.enter_context(
-                    policy.reserve("a_share.panel.calculate", panel_bound)
+                    policy.lease("a_share.panel.calculate", panel_bound)
                 )
                 panel = panels.compute_market_panel(
                     market_bars,

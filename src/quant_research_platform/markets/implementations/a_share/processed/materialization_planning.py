@@ -71,7 +71,7 @@ def filter_output_sessions(
     )
     with (
         runtime_resource_policy_scope(resource_policy),
-        resource_policy.reserve(
+        resource_policy.lease(
             "a_share.output_filter",
             filter_state_bytes,
         ),
@@ -106,7 +106,7 @@ def require_dataset_coverage(
     coverage_window = TimeWindow(sessions[first].date(), sessions[stop - 1].date())
     expected_sessions = sessions[first:stop]
     coverage_state_bytes = len(expected_sessions) * np.dtype(np.bool_).itemsize
-    with resource_policy.reserve("a_share.planning.coverage", coverage_state_bytes):
+    with resource_policy.lease("a_share.planning.coverage", coverage_state_bytes):
         covered = np.zeros(len(expected_sessions), dtype=np.bool_)
         owned_inspection = _inspect_dataset_owned(
             root,
@@ -224,7 +224,7 @@ def iter_active_materialization_batches(
             scratch_parent=root.parent,
         )
         with (
-            bound_policy.reserve(
+            bound_policy.lease(
                 "a_share.active_index",
                 active_index.retained_memory_bytes,
             ),
@@ -298,7 +298,7 @@ def iter_active_materialization_batches(
                     scratch_parent=root.parent,
                 )
                 with (
-                    bound_policy.reserve(
+                    bound_policy.lease(
                         "a_share.valid_bar_index",
                         valid_bar_index.retained_memory_bytes,
                     ),
@@ -363,7 +363,7 @@ def iter_active_materialization_batches(
                             asset_reservations.close()
                             asset_reservations = ExitStack()
                         asset_reservations.enter_context(
-                            bound_policy.reserve("a_share.asset_batch", item_bytes)
+                            bound_policy.lease("a_share.asset_batch", item_bytes)
                         )
                         asset_batch.append(payload.decode("utf-8"))
                         asset_batch_bytes += item_bytes
@@ -465,7 +465,7 @@ def _iter_adaptive_materialization_batches(
                 + producer_headroom_bytes
             )
             lease = yield planned_output_bound
-            with policy.reserve("a_share.batch.slice", planned_slice_bytes):
+            with policy.lease("a_share.batch.slice", planned_slice_bytes):
                 current_assets = (
                     asset_ids
                     if asset_start == 0 and asset_stop == len(asset_ids)
@@ -678,7 +678,7 @@ def bounded_valid_bar_key_coverage(
     with ExitStack() as state:
         state.enter_context(runtime_resource_policy_scope(resource_policy))
         state.enter_context(
-            resource_policy.reserve(
+            resource_policy.lease(
                 "a_share.valid_bar.boundary",
                 boundary_state_bytes,
             )
@@ -883,7 +883,7 @@ def available_trading_sessions(
                     chunk_rows = len(calendar)
                     actual_transform_scratch_bytes = chunk_rows * transform_row_bytes
                     market_values = source_market_type.to_numpy(copy=False)
-                    with resource_policy.reserve(
+                    with resource_policy.lease(
                         "a_share.calendar.transform",
                         actual_transform_scratch_bytes,
                     ):

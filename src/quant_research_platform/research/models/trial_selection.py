@@ -121,7 +121,7 @@ def evaluate_model_trial_metrics(
         policy = current_runtime_resource_policy()
         if policy is not None:
             reservation.enter_context(
-                policy.reserve(
+                policy.lease(
                     "research.model.selection.metric",
                     selected_output_bound
                     + usable_output_bound

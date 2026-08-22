@@ -169,7 +169,7 @@ class _PredictionLookup:
         key_arrow_bytes = key_frame_bytes + 9 * row_count * len(self.primary_key)
         lookup_state_bytes = 9 * row_count
         operation_bytes = key_frame_bytes + key_arrow_bytes + lookup_state_bytes
-        with self.resource_policy.reserve(
+        with self.resource_policy.lease(
             "artifacts.prediction.lookup.batch",
             operation_bytes,
         ):
@@ -238,7 +238,7 @@ def _read_prediction_output_bundle(
                 scratch_parent=prediction_path.parent.parent,
             )
             stack.enter_context(
-                policy.reserve(
+                policy.lease(
                     "artifacts.prediction.lookup",
                     key_index.retained_memory_bytes,
                 )
@@ -286,7 +286,7 @@ def _read_prediction_output_bundle(
                 )
             )
             while True:
-                with policy.reserve(
+                with policy.lease(
                     "artifacts.prediction.read.batch",
                     batch_working_bytes,
                 ):

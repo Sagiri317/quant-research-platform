@@ -3,7 +3,6 @@ from __future__ import annotations
 import os
 import sys
 import weakref
-from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
@@ -123,16 +122,14 @@ def test_validation_summary_reserves_complete_graph_before_build(
 ) -> None:
     dataset_root = _valid_dataset(tmp_path, "summary_admission")
     output_contract = _safe_output_bundle_contract(tmp_path)
-    original_reserve = RuntimeResourcePolicy.reserve
+    original_lease = RuntimeResourcePolicy.lease
 
-    @contextmanager
-    def reject_summary(self, owner: str, reserve_bytes: int):  # noqa: ANN001
+    def reject_summary(self, owner: str, reserved_bytes: int):  # noqa: ANN001
         if owner == "workflow.validation.summary":
             raise MemoryError("runtime_memory_budget_exceeded")
-        with original_reserve(self, owner, reserve_bytes):
-            yield
+        return original_lease(self, owner, reserved_bytes)
 
-    monkeypatch.setattr(RuntimeResourcePolicy, "reserve", reject_summary)
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", reject_summary)
 
     with pytest.raises(
         ValueError,
@@ -152,16 +149,14 @@ def test_validation_summary_admits_both_inspection_container_graphs(
 ) -> None:
     dataset_root = _valid_dataset(tmp_path, "summary_container_graph")
     observed_slots: list[int] = []
-    original_reserve = RuntimeResourcePolicy.reserve
+    original_lease = RuntimeResourcePolicy.lease
 
-    @contextmanager
-    def observe_reserve(self, owner: str, reserve_bytes: int):  # noqa: ANN001
+    def observe_lease(self, owner: str, reserved_bytes: int):  # noqa: ANN001
         if owner == "workflow.validation.inspection_slots":
-            observed_slots.append(reserve_bytes)
-        with original_reserve(self, owner, reserve_bytes):
-            yield
+            observed_slots.append(reserved_bytes)
+        return original_lease(self, owner, reserved_bytes)
 
-    monkeypatch.setattr(RuntimeResourcePolicy, "reserve", observe_reserve)
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", observe_lease)
     build_validation_summary(
         run_id="demo_run",
         dataset_roots=(dataset_root,),

@@ -92,17 +92,16 @@ def _materialize_processed_data_with_policy(
             raise ValueError("dataset_exists")
     requested_by_id = {spec.data_id: spec for spec in requested}
     specs = _include_dependencies(requested_by_id)
-    with runtime_resource_policy_scope(policy):
-        with ExitStack() as session_stack:
-            return _materialize_requested_specs(
-                specs=specs,
-                requested_by_id=requested_by_id,
-                layout=layout,
-                source_id=source_id,
-                time_window=time_window,
-                resource_policy=policy,
-                session_stack=session_stack,
-            )
+    with ExitStack() as session_stack:
+        return _materialize_requested_specs(
+            specs=specs,
+            requested_by_id=requested_by_id,
+            layout=layout,
+            source_id=source_id,
+            time_window=time_window,
+            resource_policy=policy,
+            session_stack=session_stack,
+        )
 
 
 def _materialize_requested_specs(

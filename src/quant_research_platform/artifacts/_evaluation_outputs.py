@@ -396,7 +396,7 @@ def _write_evaluation_artifact_chunks(
             policy = current_runtime_resource_policy()
             if policy is not None:
                 pending_states[name].enter_context(
-                    policy.reserve(
+                    policy.lease(
                         "artifacts.parquet.pending",
                         max(1, table.nbytes)
                         + _EVALUATION_PENDING_TABLE_OVERHEAD_BYTES,

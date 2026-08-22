@@ -234,7 +234,7 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
         observed_policies.append(resource_policy)
         observed_reserved_bytes.append(resource_policy.used_memory_bytes)
         retained_items.enter_context(
-            resource_policy.reserve("schema.inventory.items", 64)
+            resource_policy.lease("schema.inventory.items", 64)
         )
         return {"logical_relative_root": artifact_root.name}, 64
 
@@ -280,7 +280,7 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
     @contextmanager
     def inventory(_root: Path, *, resource_policy=None):  # type: ignore[no-untyped-def]
         assert resource_policy is policy
-        with policy.reserve("test.schema.inventory", 64):
+        with policy.lease("test.schema.inventory", 64):
             try:
                 yield {"schema_id": "qrp-schema-inventory", "datasets": []}
             finally:
@@ -326,7 +326,7 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
     )
     def inventory_item(_project_root, artifact_root, **kwargs):  # noqa: ANN001, ANN202
         kwargs["retained_items"].enter_context(
-            kwargs["resource_policy"].reserve("schema.inventory.items", 500)
+            kwargs["resource_policy"].lease("schema.inventory.items", 500)
         )
         return (
             {

@@ -116,7 +116,7 @@ def test_feature_transform_admits_before_result_copy(
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("test.feature.blocker", policy.memory_budget_bytes):
+        with policy.lease("test.feature.blocker", policy.memory_budget_bytes):
             with pytest.raises(
                 MemoryError,
                 match="runtime_memory_budget_exceeded",
@@ -222,7 +222,7 @@ def test_signal_materialization_admits_before_result_copy(
     )
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("test.signal.blocker", policy.memory_budget_bytes):
+        with policy.lease("test.signal.blocker", policy.memory_budget_bytes):
             with pytest.raises(
                 MemoryError,
                 match="runtime_memory_budget_exceeded",

@@ -1056,29 +1056,28 @@ def _read_export_header_under_policy(
     suffix = export_path.suffix.lower()
     if suffix != ".csv":
         raise ValueError(f"Unsupported CSMAR export extension: {suffix}")
-    with runtime_resource_policy_scope(policy):
-        rows = iter_export_csv_records(
-            export_path,
-            resource_policy=policy,
-            expected_identity=expected_identity,
-            materialize_records=False,
+    rows = iter_export_csv_records(
+        export_path,
+        resource_policy=policy,
+        expected_identity=expected_identity,
+        materialize_records=False,
+    )
+    try:
+        record = next(rows, None)
+        columns = (
+            tuple(materialize_header_record(record[0]))
+            if record is not None
+            else ()
         )
+        if not columns:
+            raise ValueError("malformed_csmar_csv_row")
+    finally:
+        primary = sys.exception()
         try:
-            record = next(rows, None)
-            columns = (
-                tuple(materialize_header_record(record[0]))
-                if record is not None
-                else ()
-            )
-            if not columns:
-                raise ValueError("malformed_csmar_csv_row")
-        finally:
-            primary = sys.exception()
-            try:
-                rows.close()
-            except BaseException:
-                if primary is None:
-                    raise
+            rows.close()
+        except BaseException:
+            if primary is None:
+                raise
     if len(columns) != len(set(columns)):
         raise ValueError("duplicate_csmar_provider_column")
     return tuple(str(column) for column in columns)

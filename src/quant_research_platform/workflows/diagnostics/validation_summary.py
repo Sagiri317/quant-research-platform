@@ -126,7 +126,7 @@ def _build_validation_summary(
     inspection_slot_bytes += len(dataset_roots) * sys.getsizeof((None, None))
     try:
         retained_state.enter_context(
-            resource_policy.reserve(
+            resource_policy.lease(
                 "workflow.validation.inspection_slots",
                 inspection_slot_bytes,
             )
@@ -203,7 +203,7 @@ def _build_validation_summary(
     )
     try:
         retained_state.enter_context(
-            resource_policy.reserve(
+            resource_policy.lease(
                 "workflow.validation.summary",
                 summary_bound_bytes,
             )

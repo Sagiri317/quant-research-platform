@@ -178,7 +178,7 @@ def _iter_joined_processed_chunks(
                 raise ValueError("research_joined_bound_invalid")
             validate_research_dataset(chunk, dataset_spec)
             sort_index_bytes = len(chunk) * np.dtype(np.intp).itemsize
-            with policy.reserve(
+            with policy.lease(
                 "research.assembly.sort",
                 sort_index_bytes + sort_index_bytes,
             ):
@@ -242,7 +242,7 @@ def _join_processed_inputs(
                     next_base_state = ExitStack()
                     try:
                         next_base_state.enter_context(
-                            policy.reserve(
+                            policy.lease(
                                 "research.assembly.base_keys",
                                 input_bytes,
                             )
@@ -272,7 +272,7 @@ def _join_processed_inputs(
                 output_state = ExitStack()
                 try:
                     output_state.enter_context(
-                        policy.reserve(
+                        policy.lease(
                             "research.assembly.merge.output",
                             output_bound,
                         )
@@ -285,7 +285,7 @@ def _join_processed_inputs(
                             len(base_keys) + len(input_frame),  # result masks
                         )
                     )
-                    with policy.reserve(
+                    with policy.lease(
                         "research.assembly.coverage",
                         coverage_bound,
                     ):
@@ -298,7 +298,7 @@ def _join_processed_inputs(
                     join_index_bytes = (len(assembled) + len(input_frame)) * np.dtype(
                         np.intp
                     ).itemsize
-                    with policy.reserve(
+                    with policy.lease(
                         "research.assembly.merge.workspace",
                         base_key_bytes + input_bytes + join_index_bytes,
                     ):
@@ -331,7 +331,7 @@ def _join_processed_inputs(
             transformed_state = ExitStack()
             try:
                 transformed_state.enter_context(
-                    policy.reserve(
+                    policy.lease(
                         "research.assembly.transformed",
                         transformed_bytes,
                     )
@@ -344,7 +344,7 @@ def _join_processed_inputs(
             assembled_state = transformed_state.pop_all()
 
         projection_bound = _frame_bytes(assembled)
-        with policy.reserve(
+        with policy.lease(
             "research.assembly.projection",
             projection_bound,
         ):
@@ -392,7 +392,7 @@ def _iter_research_chunk_windows_from_base_input(
                 timestamp_bytes = int(
                     timestamps.memory_usage(index=True, deep=True)
                 )
-                with policy.reserve(
+                with policy.lease(
                     "research.assembler.timestamp.windows",
                     max(1, timestamp_bytes + len(timestamps) * 32),
                 ):

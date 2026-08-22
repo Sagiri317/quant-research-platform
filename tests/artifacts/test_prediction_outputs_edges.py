@@ -510,7 +510,7 @@ def test_artifact_parquet_writers_admit_before_native_state(
     monkeypatch.setattr(pd.DataFrame, "to_parquet", reject_parquet)
 
     with runtime_resource_policy_scope(policy):
-        with policy.reserve("outer", policy.memory_budget_bytes):
+        with policy.lease("outer", policy.memory_budget_bytes):
             with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
                 parquet_writers.write_parquet_chunks(
                     (frame,),
@@ -547,7 +547,7 @@ def test_prediction_model_reservation_precedes_writer_startup(
         return original_enter(index)
 
     def frames():
-        with policy.reserve("research.model.fitted_state", retained_model_bytes):
+        with policy.lease("research.model.fitted_state", retained_model_bytes):
             yield frame
 
     monkeypatch.setattr(ExactPrimaryKeyIndex, "__enter__", assert_model_reserved)

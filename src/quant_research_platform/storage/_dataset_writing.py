@@ -419,7 +419,7 @@ def _write_dataset_owned(
     owner_reserve_bytes = _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
     if owner_reserve_bytes >= resource_policy.memory_budget_bytes:
         raise MemoryError("runtime_memory_budget_exceeded")
-    with resource_policy.reserve("storage.dataset.write", owner_reserve_bytes):
+    with resource_policy.lease("storage.dataset.write", owner_reserve_bytes):
         return _write_dataset_body(
             final_root,
             data,
@@ -756,7 +756,7 @@ def _write_contents(
                     * timestamp_key_count
                     * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
                 )
-                with resource_policy.reserve(
+                with resource_policy.lease(
                     "storage.dataset.prepare",
                     prepared_bound,
                 ):
@@ -768,7 +768,7 @@ def _write_contents(
                         + len(frame) * len(frame.columns) * _ARROW_CELL_OVERHEAD_BYTES
                     )
                     arrow_cast_bound = arrow_bound
-                    with resource_policy.reserve(
+                    with resource_policy.lease(
                         "storage.dataset.arrow",
                         arrow_bound + arrow_cast_bound,
                     ):
@@ -810,7 +810,7 @@ def _write_contents(
                     * timestamp_key_count
                     * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
                 )
-                with resource_policy.reserve(
+                with resource_policy.lease(
                     "storage.dataset.prepare",
                     prepared_bound,
                 ):
@@ -839,7 +839,7 @@ def _write_contents(
                             partition_output_bound,
                         )
                     )
-                    with resource_policy.reserve(
+                    with resource_policy.lease(
                         "storage.dataset.partition",
                         partition_bound,
                     ):
@@ -864,7 +864,7 @@ def _write_contents(
                                 )
                                 arrow_cast_bound = arrow_bound
                                 written_paths: list[Path] = []
-                                with resource_policy.reserve(
+                                with resource_policy.lease(
                                     "storage.dataset.arrow",
                                     arrow_bound + arrow_cast_bound,
                                 ):
@@ -944,7 +944,7 @@ def _write_contents(
         assert accumulator._arrow_schema is not None
         empty_table_bound = _ARROW_FRAME_FIXED_BYTES
         empty_cast_bound = _ARROW_FRAME_FIXED_BYTES
-        with resource_policy.reserve(
+        with resource_policy.lease(
             "storage.dataset.arrow",
             empty_table_bound + empty_cast_bound,
         ):
@@ -1108,7 +1108,6 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
     policy = current_runtime_resource_policy()
     if policy is None:
         batch_rows = max(1, persisted.num_rows)
-        reservation = nullcontext()
     else:
         remaining = policy.memory_budget_bytes - policy.used_memory_bytes
         footer_bytes = _parquet_row_group_footer_upper_bound(
@@ -1140,10 +1139,6 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
                     low = candidate + 1
                 else:
                     high = candidate - 1
-        reservation = policy.reserve(
-            "storage.parquet.native",
-            page_working_bytes + footer_bytes,
-        )
     metadata = dict(persisted.schema.metadata or {})
     metadata[_PHYSICAL_PAGE_ROWS_KEY] = str(batch_rows).encode("ascii")
     persisted = persisted.replace_schema_metadata(metadata)
@@ -1160,6 +1155,13 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
             )
         ),
     )
+    if policy is None:
+        reservation = nullcontext()
+    else:
+        reservation = policy.lease(
+            "storage.parquet.native",
+            page_working_bytes + footer_bytes,
+        )
     with reservation:
         pq.write_table(
             persisted,

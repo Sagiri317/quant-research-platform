@@ -1107,7 +1107,7 @@ def test_private_export_parent_reservation_blocks_downstream_overlap(
         assert policy.used_memory_bytes == lease.reserved_bytes
 
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            with policy.reserve("storage.dataset.arrow", 50 * 1024**2):
+            with policy.lease("storage.dataset.arrow", 50 * 1024**2):
                 pytest.fail("downstream overlap admitted")
         assert len(previous.value) == 1
         chunks.close()

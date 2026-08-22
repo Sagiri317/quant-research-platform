@@ -283,7 +283,7 @@ def iter_dataset_part_batches(
                 policy = current_runtime_resource_policy()
                 if policy is not None:
                     pull_reservation.enter_context(
-                        policy.reserve(
+                        policy.lease(
                             "storage.parquet.read",
                             physical_pull_bytes,
                         )
