@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 
+from quant_research_platform.catalog._immutable import ImmutableCatalog
 from quant_research_platform.contracts.columns import ColumnRole, FieldSpec, LogicalType
 
 
@@ -18,26 +20,24 @@ class CanonicalFieldNames:
     source_asset_id: str
 
 
-@dataclass
-class FieldCatalog:
-    _items: dict[str, FieldSpec] = field(default_factory=dict)
-
-    def register(self, spec: FieldSpec) -> None:
-        if spec.name in self._items:
-            raise ValueError(f"duplicate_field_spec: {spec.name}")
-        self._items[spec.name] = spec
+class FieldCatalog(ImmutableCatalog[FieldSpec]):
+    def __init__(self, items: Iterable[FieldSpec] = ()) -> None:
+        values = tuple(items)
+        seen: set[str] = set()
+        for spec in values:
+            if spec.name in seen:
+                raise ValueError(f"duplicate_field_spec: {spec.name}")
+            seen.add(spec.name)
+        super().__init__(sorted(values, key=lambda spec: spec.name))
 
     def get(self, name: str) -> FieldSpec:
         try:
-            return self._items[name]
-        except KeyError as exc:
+            return next(spec for spec in self._items if spec.name == name)
+        except StopIteration as exc:
             raise KeyError(f"unknown_field: {name}") from exc
 
-    def list(self) -> tuple[FieldSpec, ...]:
-        return tuple(self._items[name] for name in self.list_names())
-
     def list_names(self) -> tuple[str, ...]:
-        return tuple(sorted(self._items))
+        return tuple(spec.name for spec in self._items)
 
     def require(self, names: tuple[str, ...]) -> tuple[FieldSpec, ...]:
         return tuple(self.get(name) for name in names)
@@ -65,60 +65,59 @@ def platform_entity_time_key() -> tuple[str, ...]:
 
 def platform_field_catalog() -> FieldCatalog:
     names = canonical_field_names()
-    catalog = FieldCatalog()
-    for spec in (
-        FieldSpec(
-            name=names.market_id,
-            role=ColumnRole.KEY,
-            dtype="string",
-            logical_type=LogicalType.STRING_ID,
-            description="Platform market identifier.",
-        ),
-        FieldSpec(
-            name=names.asset_id,
-            role=ColumnRole.KEY,
-            dtype="string",
-            logical_type=LogicalType.STRING_ID,
-            description="Platform asset identifier.",
-        ),
-        FieldSpec(
-            name=names.timestamp,
-            role=ColumnRole.TIMESTAMP,
-            dtype="timestamp[ns]",
-            logical_type=LogicalType.TIMESTAMP,
-            description="Logical observation timestamp.",
-        ),
-        FieldSpec(
-            name=names.session_date,
-            role=ColumnRole.TIMESTAMP,
-            dtype="date",
-            logical_type=LogicalType.DATE,
-            description="Market-local trading session date.",
-        ),
-        FieldSpec(
-            name=names.available_at,
-            role=ColumnRole.TIMESTAMP,
-            dtype="timestamp[ns]",
-            logical_type=LogicalType.TIMESTAMP,
-            description="Earliest research availability timestamp.",
-        ),
-        FieldSpec(
-            name=names.source_id,
-            role=ColumnRole.SOURCE,
-            dtype="string",
-            logical_type=LogicalType.STRING_ID,
-            description="Source adapter identifier.",
-        ),
-        FieldSpec(
-            name=names.source_asset_id,
-            role=ColumnRole.SOURCE,
-            dtype="string",
-            logical_type=LogicalType.STRING_ID,
-            description="Source-native asset identifier.",
-        ),
-    ):
-        catalog.register(spec)
-    return catalog
+    return FieldCatalog(
+        (
+            FieldSpec(
+                name=names.market_id,
+                role=ColumnRole.KEY,
+                dtype="string",
+                logical_type=LogicalType.STRING_ID,
+                description="Platform market identifier.",
+            ),
+            FieldSpec(
+                name=names.asset_id,
+                role=ColumnRole.KEY,
+                dtype="string",
+                logical_type=LogicalType.STRING_ID,
+                description="Platform asset identifier.",
+            ),
+            FieldSpec(
+                name=names.timestamp,
+                role=ColumnRole.TIMESTAMP,
+                dtype="timestamp[ns]",
+                logical_type=LogicalType.TIMESTAMP,
+                description="Logical observation timestamp.",
+            ),
+            FieldSpec(
+                name=names.session_date,
+                role=ColumnRole.TIMESTAMP,
+                dtype="date",
+                logical_type=LogicalType.DATE,
+                description="Market-local trading session date.",
+            ),
+            FieldSpec(
+                name=names.available_at,
+                role=ColumnRole.TIMESTAMP,
+                dtype="timestamp[ns]",
+                logical_type=LogicalType.TIMESTAMP,
+                description="Earliest research availability timestamp.",
+            ),
+            FieldSpec(
+                name=names.source_id,
+                role=ColumnRole.SOURCE,
+                dtype="string",
+                logical_type=LogicalType.STRING_ID,
+                description="Source adapter identifier.",
+            ),
+            FieldSpec(
+                name=names.source_asset_id,
+                role=ColumnRole.SOURCE,
+                dtype="string",
+                logical_type=LogicalType.STRING_ID,
+                description="Source-native asset identifier.",
+            ),
+        )
+    )
 
 
 __all__ = [

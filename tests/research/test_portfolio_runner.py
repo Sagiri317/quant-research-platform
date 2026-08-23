@@ -872,9 +872,9 @@ def _prediction_portfolio_inputs(tmp_path):
         np.array([0.0, 1.0]),
         ("model_input",),
     )
-    portfolio_catalog = PortfolioCatalog()
-    portfolio_catalog.register(
-        PortfolioSpec(
+    portfolio_catalog = PortfolioCatalog(
+        (
+            PortfolioSpec(
             portfolio_id="demo_prediction_portfolio",
             market_id=MarketId("a_share"),
             research_dataset_id=dataset_spec.data_id,
@@ -888,6 +888,7 @@ def _prediction_portfolio_inputs(tmp_path):
             return_source_column="forward_return",
             rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
             execution_lag_steps=0,
+            ),
         )
     )
     return layout, dataset_catalog, portfolio_catalog, prediction, manifest, root

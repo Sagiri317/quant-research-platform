@@ -68,16 +68,20 @@ PANEL_FIELD_SPECS = (
 
 
 def field_catalog() -> FieldCatalog:
-    catalog = platform_field_catalog()
-    for spec in PANEL_FIELD_SPECS:
-        catalog.register(spec)
-    for column in MICROSTRUCTURE_FACTOR_COLUMNS:
-        catalog.register(
-            FieldSpec(name=column, role=ColumnRole.FACTOR, dtype="float64")
+    return FieldCatalog(
+        (
+            *platform_field_catalog().list(),
+            *PANEL_FIELD_SPECS,
+            *(
+                FieldSpec(name=column, role=ColumnRole.FACTOR, dtype="float64")
+                for column in MICROSTRUCTURE_FACTOR_COLUMNS
+            ),
+            *(
+                FieldSpec(name=column, role=ColumnRole.LABEL, dtype="float64")
+                for column in CRYPTO_FORWARD_RETURN_COLUMNS
+            ),
         )
-    for column in CRYPTO_FORWARD_RETURN_COLUMNS:
-        catalog.register(FieldSpec(name=column, role=ColumnRole.LABEL, dtype="float64"))
-    return catalog
+    )
 
 
 __all__ = ["MARKET_ID", "PANEL_FIELD_SPECS", "field_catalog"]

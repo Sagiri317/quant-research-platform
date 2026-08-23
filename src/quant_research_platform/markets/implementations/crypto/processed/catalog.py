@@ -53,40 +53,40 @@ PANEL_COLUMNS = (
 
 
 def processed_catalog() -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    for spec in (
-        _processed_spec(
-            kind=ProcessedDataKind.PANEL,
-            data_id=MARKET_PANEL_DATA_ID,
-            columns=PANEL_COLUMNS,
-            source_input_data_ids=(
-                source_ids.MARKET_BARS_SOURCE_DATA_ID,
-                source_ids.AGGREGATE_TRADES_SOURCE_DATA_ID,
-                source_ids.DEPTH_LEVELS_SOURCE_DATA_ID,
+    return ProcessedDataCatalog(
+        (
+            _processed_spec(
+                kind=ProcessedDataKind.PANEL,
+                data_id=MARKET_PANEL_DATA_ID,
+                columns=PANEL_COLUMNS,
+                source_input_data_ids=(
+                    source_ids.MARKET_BARS_SOURCE_DATA_ID,
+                    source_ids.AGGREGATE_TRADES_SOURCE_DATA_ID,
+                    source_ids.DEPTH_LEVELS_SOURCE_DATA_ID,
+                ),
+                role_overrides={"eligible": ColumnRole.UNIVERSE},
             ),
-            role_overrides={"eligible": ColumnRole.UNIVERSE},
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.FACTOR,
-            data_id=MICROSTRUCTURE_PROCESSED_DATA_ID,
-            columns=(*platform_entity_time_key(), *MICROSTRUCTURE_FACTOR_COLUMNS),
-            processed_input_data_ids=(MARKET_PANEL_DATA_ID,),
-            role_overrides={
-                column: ColumnRole.FACTOR for column in MICROSTRUCTURE_FACTOR_COLUMNS
-            },
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.LABEL,
-            data_id=FORWARD_RETURNS_PROCESSED_DATA_ID,
-            columns=(*platform_entity_time_key(), *CRYPTO_FORWARD_RETURN_COLUMNS),
-            processed_input_data_ids=(MARKET_PANEL_DATA_ID,),
-            role_overrides={
-                column: ColumnRole.LABEL for column in CRYPTO_FORWARD_RETURN_COLUMNS
-            },
-        ),
-    ):
-        catalog.register(spec)
-    return catalog
+            _processed_spec(
+                kind=ProcessedDataKind.FACTOR,
+                data_id=MICROSTRUCTURE_PROCESSED_DATA_ID,
+                columns=(*platform_entity_time_key(), *MICROSTRUCTURE_FACTOR_COLUMNS),
+                processed_input_data_ids=(MARKET_PANEL_DATA_ID,),
+                role_overrides={
+                    column: ColumnRole.FACTOR
+                    for column in MICROSTRUCTURE_FACTOR_COLUMNS
+                },
+            ),
+            _processed_spec(
+                kind=ProcessedDataKind.LABEL,
+                data_id=FORWARD_RETURNS_PROCESSED_DATA_ID,
+                columns=(*platform_entity_time_key(), *CRYPTO_FORWARD_RETURN_COLUMNS),
+                processed_input_data_ids=(MARKET_PANEL_DATA_ID,),
+                role_overrides={
+                    column: ColumnRole.LABEL for column in CRYPTO_FORWARD_RETURN_COLUMNS
+                },
+            ),
+        )
+    )
 
 
 def _processed_spec(

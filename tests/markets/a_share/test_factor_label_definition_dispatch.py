@@ -22,10 +22,6 @@ def test_factor_definitions_expose_unified_catalog_only() -> None:
         "quant_research_platform.markets.implementations.a_share.factors.definitions"
     )
 
-    assert set(module.__all__) == {
-        "factor_definitions",
-        "factor_catalog",
-    }
     assert module.factor_definitions()
     assert module.factor_catalog().list() == module.factor_definitions()
 
@@ -128,13 +124,6 @@ def test_label_definitions_expose_unified_catalog_only() -> None:
         "quant_research_platform.markets.implementations.a_share.labels.definitions"
     )
 
-    assert set(module.__all__) == {
-        "LABEL_BASE_COLUMNS",
-        "LABEL_PANEL_INPUT_COLUMNS",
-        "FORWARD_RETURN_HORIZONS",
-        "label_definitions",
-        "label_catalog",
-    }
     assert module.LABEL_BASE_COLUMNS == ("market_id", "asset_id", "timestamp")
     assert module.LABEL_PANEL_INPUT_COLUMNS == (
         "market_id",

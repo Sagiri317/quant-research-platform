@@ -25,10 +25,7 @@ def factor_definitions() -> tuple[FactorDefinition, ...]:
 
 
 def factor_catalog() -> FactorCatalog:
-    catalog = FactorCatalog()
-    for definition in factor_definitions():
-        catalog.register(definition)
-    return catalog
+    return FactorCatalog(factor_definitions())
 
 
 __all__ = [

@@ -620,9 +620,7 @@ def test_materializer_validates_processed_dependency_cycle() -> None:
 def test_materializer_selects_factor_definitions_from_required_columns_only() -> None:
     selected = _factor_definition("mom_5d", lookback_window=5)
     unselected = _factor_definition("mom_252d", lookback_window=252)
-    catalog = FactorCatalog()
-    catalog.register(selected)
-    catalog.register(unselected)
+    catalog = FactorCatalog((selected, unselected))
     spec = _processed_spec(
         "price_volume",
         kind=ProcessedDataKind.FACTOR,
@@ -638,9 +636,7 @@ def test_materializer_selects_factor_definitions_from_required_columns_only() ->
 def test_materializer_selects_label_definitions_from_required_columns_only() -> None:
     selected = _label_definition("forward_return_2d", horizon=2, lookahead=3)
     unselected = _label_definition("forward_return_120d", horizon=120, lookahead=121)
-    catalog = LabelCatalog()
-    catalog.register(selected)
-    catalog.register(unselected)
+    catalog = LabelCatalog((selected, unselected))
     spec = _processed_spec(
         "forward_returns",
         kind=ProcessedDataKind.LABEL,
@@ -2756,10 +2752,7 @@ def test_dependency_root_retires_policy_after_every_primary(
 
 
 def _catalog(*specs: ProcessedDataSpec) -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    for spec in specs:
-        catalog.register(spec)
-    return catalog
+    return ProcessedDataCatalog(specs)
 
 
 def _processed_spec(

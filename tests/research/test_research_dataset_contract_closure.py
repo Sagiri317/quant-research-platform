@@ -405,10 +405,13 @@ def test_research_dataset_reports_incompatible_and_missing_required_specs() -> N
         processed_catalog.get("factors"),
         primary_key=("asset_id", "market_id", "timestamp"),
     )
-    incompatible = ProcessedDataCatalog()
-    for data_id in ("base", "labels", "filters", "context"):
-        incompatible.register(processed_catalog.get(data_id))
-    incompatible.register(bad_factors)
+    incompatible = ProcessedDataCatalog(
+        tuple(
+            processed_catalog.get(data_id)
+            for data_id in ("base", "labels", "filters", "context")
+        )
+        + (bad_factors,)
+    )
     spec = make_dummy_research_dataset_spec()
     with pytest.raises(ValueError, match="incompatible_research_input_keys: factors"):
         _validate_inputs(spec, incompatible)

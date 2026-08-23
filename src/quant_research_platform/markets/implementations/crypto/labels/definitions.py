@@ -18,29 +18,25 @@ CRYPTO_FORWARD_RETURN_COLUMNS = tuple(
 
 
 def label_catalog() -> LabelCatalog:
-    catalog = LabelCatalog()
-    for horizon, column in zip(
-        CRYPTO_FORWARD_RETURN_HORIZONS,
-        CRYPTO_FORWARD_RETURN_COLUMNS,
-        strict=True,
-    ):
-        catalog.register(
-            LabelDefinition(
-                label_id=column,
-                market_id=MARKET_ID,
-                family="forward_return",
-                input_columns=("close",),
-                output_column=column,
-                label_timing=(
-                    "next_contiguous_bar_close_to_horizon_contiguous_bar_close"
-                ),
-                horizon=horizon,
-                lookahead=horizon + 1,
-                entry_rule="next_contiguous_1m_bar_close",
-                exit_rule="horizon_contiguous_1m_bar_close",
-            )
+    return LabelCatalog(
+        LabelDefinition(
+            label_id=column,
+            market_id=MARKET_ID,
+            family="forward_return",
+            input_columns=("close",),
+            output_column=column,
+            label_timing=("next_contiguous_bar_close_to_horizon_contiguous_bar_close"),
+            horizon=horizon,
+            lookahead=horizon + 1,
+            entry_rule="next_contiguous_1m_bar_close",
+            exit_rule="horizon_contiguous_1m_bar_close",
         )
-    return catalog
+        for horizon, column in zip(
+            CRYPTO_FORWARD_RETURN_HORIZONS,
+            CRYPTO_FORWARD_RETURN_COLUMNS,
+            strict=True,
+        )
+    )
 
 
 __all__ = [

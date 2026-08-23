@@ -55,10 +55,7 @@ def build_evaluation_catalog(
     *,
     signals: tuple[SignalSpec, ...] | None = None,
 ) -> EvaluationCatalog:
-    catalog = EvaluationCatalog()
-    for spec in build_evaluation_specs(signals=signals):
-        catalog.register(spec)
-    return catalog
+    return EvaluationCatalog(build_evaluation_specs(signals=signals))
 
 
 __all__ = [

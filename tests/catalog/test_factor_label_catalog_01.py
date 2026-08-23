@@ -1,15 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
+from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.outputs import OutputCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.outputs import (
-    OutputDefinition,
-    OutputScope,
-)
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
@@ -82,8 +80,16 @@ def test_a_share_price_volume_factor_definitions_have_input_requirements() -> No
     )
 
 
+def test_factor_catalog_rejects_duplicate_id_and_output_at_construction() -> None:
+    definition = factor_definitions.factor_definitions()[0]
+
+    with pytest.raises(ValueError, match="duplicate_factor_definition"):
+        FactorCatalog((definition, definition))
+    with pytest.raises(ValueError, match="duplicate_factor_output_column"):
+        FactorCatalog((definition, replace(definition, factor_id="factor_b")))
+
+
 def test_label_catalog_rejects_duplicate_label_by_default() -> None:
-    catalog = LabelCatalog()
     definition = LabelDefinition(
         label_id="forward_return_20d",
         market_id=MarketId("a_share"),
@@ -97,28 +103,11 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
         exit_rule="example_exit_rule",
     )
 
-    catalog.register(definition)
     with pytest.raises(ValueError, match="duplicate_label_definition"):
-        catalog.register(definition)
+        LabelCatalog((definition, definition))
 
+    catalog = LabelCatalog((definition,))
     assert catalog.get("forward_return_20d") == definition
-    assert catalog.list() == (definition,)
-
-
-def test_output_catalog_rejects_duplicate_definitions() -> None:
-    catalog = OutputCatalog()
-    definition = OutputDefinition(
-        output_definition_id="evaluation_outputs",
-        display_name="Evaluation report",
-        run_type="evaluation",
-        scope=OutputScope.LOCAL_ONLY,
-    )
-
-    catalog.register(definition)
-    with pytest.raises(ValueError, match="duplicate_output_definition"):
-        catalog.register(definition)
-
-    assert catalog.get("evaluation_outputs") == definition
     assert catalog.list() == (definition,)
 
 

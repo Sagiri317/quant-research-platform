@@ -2,28 +2,29 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
 
+from quant_research_platform.catalog._immutable import ImmutableCatalog
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 
 
-@dataclass
-class PortfolioCatalog:
-    _items: dict[str, PortfolioSpec] = field(default_factory=dict)
-
-    def register(self, spec: PortfolioSpec) -> None:
-        if spec.portfolio_id in self._items:
-            raise ValueError(f"duplicate_portfolio_spec: {spec.portfolio_id}")
-        self._items[spec.portfolio_id] = spec
+class PortfolioCatalog(ImmutableCatalog[PortfolioSpec]):
+    def __init__(self, items: Iterable[PortfolioSpec] = ()) -> None:
+        values = tuple(items)
+        seen: set[str] = set()
+        for spec in values:
+            if spec.portfolio_id in seen:
+                raise ValueError(f"duplicate_portfolio_spec: {spec.portfolio_id}")
+            seen.add(spec.portfolio_id)
+        super().__init__(sorted(values, key=lambda spec: spec.portfolio_id))
 
     def get(self, portfolio_id: str) -> PortfolioSpec:
         try:
-            return self._items[portfolio_id]
-        except KeyError as exc:
+            return next(
+                spec for spec in self._items if spec.portfolio_id == portfolio_id
+            )
+        except StopIteration as exc:
             raise KeyError(f"unknown_portfolio_spec: {portfolio_id}") from exc
-
-    def list(self) -> tuple[PortfolioSpec, ...]:
-        return tuple(self._items[key] for key in sorted(self._items))
 
 
 __all__ = ["PortfolioCatalog"]

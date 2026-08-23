@@ -63,9 +63,9 @@ def test_prediction_runner_selects_model_using_validation_metric(
         _model("base_model", ("factor_a",)),
         _model("candidate_model", ("factor_b",)),
     )
-    prediction_catalog = PredictionCatalog()
-    prediction_catalog.register(
-        PredictionSpec(
+    prediction_catalog = PredictionCatalog(
+        (
+            PredictionSpec(
             prediction_id="prediction_demo",
             model_id="base_model",
             research_dataset_id="research_demo",
@@ -76,6 +76,7 @@ def test_prediction_runner_selects_model_using_validation_metric(
             model_selection_metric="validation_mse",
             model_selection_validation_start="2024-01-04",
             model_selection_validation_end="2024-01-06",
+            ),
         )
     )
     write_dataset(
@@ -133,14 +134,15 @@ def test_prediction_runner_preloads_selected_models_before_root_capture(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     model_catalog = _model_catalog(_model("base_model", ("factor_a",)))
-    prediction_catalog = PredictionCatalog()
-    prediction_catalog.register(
-        PredictionSpec(
+    prediction_catalog = PredictionCatalog(
+        (
+            PredictionSpec(
             prediction_id="prediction_demo",
             model_id="base_model",
             research_dataset_id="research_demo",
             train_end="2024-01-03",
             test_start="2024-01-04",
+            ),
         )
     )
     events: list[str] = []
@@ -425,9 +427,9 @@ def test_prediction_runner_applies_sample_filter_to_validation_metrics(
         _model("base_model", ("factor_a",)),
         _model("candidate_model", ("factor_b",)),
     )
-    prediction_catalog = PredictionCatalog()
-    prediction_catalog.register(
-        PredictionSpec(
+    prediction_catalog = PredictionCatalog(
+        (
+            PredictionSpec(
             prediction_id="prediction_demo",
             model_id="base_model",
             research_dataset_id="research_demo",
@@ -439,6 +441,7 @@ def test_prediction_runner_applies_sample_filter_to_validation_metrics(
             model_selection_validation_start="2024-01-04",
             model_selection_validation_end="2024-01-06",
             sample_filter_mode="eligible",
+            ),
         )
     )
     write_dataset(
@@ -489,9 +492,9 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
         _model("base_model", ("factor_a",), label_column="label"),
         _model("candidate_model", ("factor_b",), label_column="other_label"),
     )
-    prediction_catalog = PredictionCatalog()
-    prediction_catalog.register(
-        PredictionSpec(
+    prediction_catalog = PredictionCatalog(
+        (
+            PredictionSpec(
             prediction_id="prediction_demo",
             model_id="base_model",
             research_dataset_id="research_demo",
@@ -500,6 +503,7 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
             candidate_model_ids=("candidate_model",),
             model_selection_validation_start="2024-01-04",
             model_selection_validation_end="2024-01-06",
+            ),
         )
     )
     write_dataset(
@@ -848,10 +852,7 @@ def test_prediction_result_context_preserves_body_primary() -> None:
 
 
 def _model_catalog(*models: ModelSpec) -> ModelCatalog:
-    catalog = ModelCatalog()
-    for model in models:
-        catalog.register(model)
-    return catalog
+    return ModelCatalog(models)
 
 
 def _model(

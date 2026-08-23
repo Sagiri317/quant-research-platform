@@ -2,32 +2,35 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
 
+from quant_research_platform.catalog._immutable import ImmutableCatalog
 from quant_research_platform.contracts.outputs import OutputDefinition
 
 
-@dataclass
-class OutputCatalog:
-    _items: dict[str, OutputDefinition] = field(default_factory=dict)
-
-    def register(self, definition: OutputDefinition) -> None:
-        if definition.output_definition_id in self._items:
-            raise ValueError(
-                f"duplicate_output_definition: {definition.output_definition_id}"
-            )
-        self._items[definition.output_definition_id] = definition
+class OutputCatalog(ImmutableCatalog[OutputDefinition]):
+    def __init__(self, items: Iterable[OutputDefinition] = ()) -> None:
+        values = tuple(items)
+        seen: set[str] = set()
+        for definition in values:
+            if definition.output_definition_id in seen:
+                raise ValueError(
+                    f"duplicate_output_definition: {definition.output_definition_id}"
+                )
+            seen.add(definition.output_definition_id)
+        super().__init__(sorted(values, key=lambda item: item.output_definition_id))
 
     def get(self, output_definition_id: str) -> OutputDefinition:
         try:
-            return self._items[output_definition_id]
-        except KeyError as exc:
+            return next(
+                definition
+                for definition in self._items
+                if definition.output_definition_id == output_definition_id
+            )
+        except StopIteration as exc:
             raise KeyError(
                 f"unknown_output_definition: {output_definition_id}"
             ) from exc
-
-    def list(self) -> tuple[OutputDefinition, ...]:
-        return tuple(self._items[key] for key in sorted(self._items))
 
 
 __all__ = ["OutputCatalog"]

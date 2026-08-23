@@ -170,11 +170,8 @@ def make_research_dataset_catalog(
     *specs: ResearchDatasetSpec,
     **spec_kwargs: object,
 ) -> ResearchDatasetCatalog:
-    catalog = ResearchDatasetCatalog()
     registered_specs = specs or (make_demo_research_dataset_spec(**spec_kwargs),)
-    for spec in registered_specs:
-        catalog.register(spec)
-    return catalog
+    return ResearchDatasetCatalog(registered_specs)
 
 
 def correctness_research_dataset_catalog(
@@ -194,14 +191,14 @@ def correctness_research_dataset_catalog(
         if include_feature_transform
         else ()
     )
-    catalog = ResearchDatasetCatalog()
-    catalog.register(
-        make_demo_research_dataset_spec(
+    return ResearchDatasetCatalog(
+        (
+            make_demo_research_dataset_spec(
             feature_columns=feature_columns,
             feature_transforms=feature_transforms,
+            ),
         )
     )
-    return catalog
 
 
 def correctness_processed_catalog():

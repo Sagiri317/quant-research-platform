@@ -116,10 +116,7 @@ def interim_specs() -> tuple[InterimDataSpec, ...]:
 
 
 def interim_catalog() -> InterimDataCatalog:
-    catalog = InterimDataCatalog()
-    for spec in interim_specs():
-        catalog.register(spec)
-    return catalog
+    return InterimDataCatalog(interim_specs())
 
 
 def iter_interim_frames(

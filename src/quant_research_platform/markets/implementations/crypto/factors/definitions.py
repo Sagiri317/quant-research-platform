@@ -15,13 +15,12 @@ from quant_research_platform.research.factors.microstructure.definitions import 
 
 
 def factor_catalog() -> FactorCatalog:
-    catalog = FactorCatalog()
-    for definition in microstructure_factor_definitions(
-        market_id=MARKET_ID,
-        required_input_data_id=MARKET_PANEL_DATA_ID,
-    ):
-        catalog.register(definition)
-    return catalog
+    return FactorCatalog(
+        microstructure_factor_definitions(
+            market_id=MARKET_ID,
+            required_input_data_id=MARKET_PANEL_DATA_ID,
+        )
+    )
 
 
 __all__ = [

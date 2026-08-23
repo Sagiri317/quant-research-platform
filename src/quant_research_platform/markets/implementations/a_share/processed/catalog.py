@@ -134,12 +134,9 @@ MARKET_BARS_SOURCE_DATA_ID = source_ids.MARKET_BARS_SOURCE_DATA_ID
 
 
 def processed_catalog() -> ProcessedDataCatalog:
-    """Register the first-stage A-share 0.1 processed data specs."""
+    """Return the first-stage A-share 0.1 processed data specs."""
 
-    catalog = ProcessedDataCatalog()
-    for spec in _processed_specs():
-        catalog.register(spec)
-    return catalog
+    return ProcessedDataCatalog(_processed_specs())
 
 
 def _processed_specs() -> tuple[ProcessedDataSpec, ...]:

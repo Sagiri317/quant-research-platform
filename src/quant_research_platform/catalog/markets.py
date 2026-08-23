@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 
+from quant_research_platform.catalog._immutable import ImmutableCatalog
 from quant_research_platform.contracts.ids import MarketId
 
 
@@ -15,24 +17,26 @@ class MarketDefinition:
     definition_version: str = "0.1"
 
 
-@dataclass
-class MarketRegistry:
-    _items: dict[str, MarketDefinition] = field(default_factory=dict)
-
-    def register(self, definition: MarketDefinition) -> None:
-        key = str(definition.market_id)
-        if key in self._items:
-            raise ValueError(f"duplicate_market_definition: {key}")
-        self._items[key] = definition
+class MarketRegistry(ImmutableCatalog[MarketDefinition]):
+    def __init__(self, items: Iterable[MarketDefinition] = ()) -> None:
+        values = tuple(items)
+        seen: set[str] = set()
+        for definition in values:
+            key = str(definition.market_id)
+            if key in seen:
+                raise ValueError(f"duplicate_market_definition: {key}")
+            seen.add(key)
+        super().__init__(sorted(values, key=lambda item: str(item.market_id)))
 
     def get(self, market_id: str) -> MarketDefinition:
         try:
-            return self._items[market_id]
-        except KeyError as exc:
+            return next(
+                definition
+                for definition in self._items
+                if str(definition.market_id) == market_id
+            )
+        except StopIteration as exc:
             raise KeyError(f"unknown_market_id: {market_id}") from exc
-
-    def list(self) -> tuple[MarketDefinition, ...]:
-        return tuple(self._items[key] for key in sorted(self._items))
 
 
 __all__ = ["MarketDefinition", "MarketRegistry"]

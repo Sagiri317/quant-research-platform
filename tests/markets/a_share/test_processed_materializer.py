@@ -698,11 +698,12 @@ def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
     frequency: DataFrequency,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    catalog = ProcessedDataCatalog()
-    catalog.register(
-        replace(
+    catalog = ProcessedDataCatalog(
+        (
+            replace(
             processed_catalog().get(MARKET_PANEL_DATA_ID),
             frequency=frequency,
+            ),
         )
     )
 
@@ -1290,19 +1291,20 @@ def _catalog_with_processed_inputs(
     target_data_id: str,
     processed_input_data_ids: tuple[str, ...],
 ) -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    for spec in processed_catalog().list():
-        if spec.data_id == target_data_id:
-            spec = replace(spec, processed_input_data_ids=processed_input_data_ids)
-        catalog.register(spec)
-    return catalog
+    return ProcessedDataCatalog(
+        tuple(
+            replace(spec, processed_input_data_ids=processed_input_data_ids)
+            if spec.data_id == target_data_id
+            else spec
+            for spec in processed_catalog().list()
+        )
+    )
 
 
 def _catalog_with_one_step_forward_return_only() -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    for spec in processed_catalog().list():
-        if spec.data_id == "forward_returns":
-            spec = replace(
+    return ProcessedDataCatalog(
+        tuple(
+            replace(
                 spec,
                 column_roles={
                     "market_id": ColumnRole.KEY,
@@ -1311,15 +1313,17 @@ def _catalog_with_one_step_forward_return_only() -> ProcessedDataCatalog:
                     FORWARD_RETURN_1D_COLUMN: ColumnRole.LABEL,
                 },
             )
-        catalog.register(spec)
-    return catalog
+            if spec.data_id == "forward_returns"
+            else spec
+            for spec in processed_catalog().list()
+        )
+    )
 
 
 def _catalog_with_momentum_20d_only() -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    for spec in processed_catalog().list():
-        if spec.data_id == "price_volume":
-            spec = replace(
+    return ProcessedDataCatalog(
+        tuple(
+            replace(
                 spec,
                 column_roles={
                     "market_id": ColumnRole.KEY,
@@ -1328,25 +1332,28 @@ def _catalog_with_momentum_20d_only() -> ProcessedDataCatalog:
                     MOMENTUM_20D_COLUMN: ColumnRole.FACTOR,
                 },
             )
-        catalog.register(spec)
-    return catalog
+            if spec.data_id == "price_volume"
+            else spec
+            for spec in processed_catalog().list()
+        )
+    )
 
 
 def _factor_catalog_with_families(families: tuple[str, ...]) -> FactorCatalog:
-    catalog = FactorCatalog()
     definitions = materialize_factors.factor_definitions.factor_definitions()
-    for index, definition in enumerate(definitions):
-        catalog.register(
+    return FactorCatalog(
+        tuple(
             replace(definition, family=families[min(index, len(families) - 1)])
+            for index, definition in enumerate(definitions)
         )
-    return catalog
+    )
 
 
 def _label_catalog_with_families(families: tuple[str, ...]) -> LabelCatalog:
-    catalog = LabelCatalog()
     definitions = materialize_labels.label_definitions.label_definitions()
-    for index, definition in enumerate(definitions):
-        catalog.register(
+    return LabelCatalog(
+        tuple(
             replace(definition, family=families[min(index, len(families) - 1)])
+            for index, definition in enumerate(definitions)
         )
-    return catalog
+    )

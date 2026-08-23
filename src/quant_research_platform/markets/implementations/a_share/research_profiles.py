@@ -109,12 +109,7 @@ def build_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
 
 
 def build_research_dataset_catalog() -> ResearchDatasetCatalog:
-    """Register A-share research dataset specs assembled from processed data."""
-
-    catalog = ResearchDatasetCatalog()
-    for spec in build_research_dataset_specs():
-        catalog.register(spec)
-    return catalog
+    return ResearchDatasetCatalog(build_research_dataset_specs())
 
 
 def _research_dataset_column_roles(

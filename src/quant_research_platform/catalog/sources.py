@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
+from dataclasses import dataclass
 from enum import StrEnum
 
+from quant_research_platform.catalog._immutable import ImmutableCatalog
 from quant_research_platform.contracts.ids import SourceId
 
 
@@ -29,24 +31,26 @@ class SourceDefinition:
             raise ValueError("source_definition_must_not_be_public")
 
 
-@dataclass
-class SourceRegistry:
-    _items: dict[str, SourceDefinition] = field(default_factory=dict)
-
-    def register(self, definition: SourceDefinition) -> None:
-        key = str(definition.source_id)
-        if key in self._items:
-            raise ValueError(f"duplicate_source_definition: {key}")
-        self._items[key] = definition
+class SourceRegistry(ImmutableCatalog[SourceDefinition]):
+    def __init__(self, items: Iterable[SourceDefinition] = ()) -> None:
+        values = tuple(items)
+        seen: set[str] = set()
+        for definition in values:
+            key = str(definition.source_id)
+            if key in seen:
+                raise ValueError(f"duplicate_source_definition: {key}")
+            seen.add(key)
+        super().__init__(sorted(values, key=lambda item: str(item.source_id)))
 
     def get(self, source_id: str) -> SourceDefinition:
         try:
-            return self._items[source_id]
-        except KeyError as exc:
+            return next(
+                definition
+                for definition in self._items
+                if str(definition.source_id) == source_id
+            )
+        except StopIteration as exc:
             raise KeyError(f"unknown_source_id: {source_id}") from exc
-
-    def list(self) -> tuple[SourceDefinition, ...]:
-        return tuple(self._items[key] for key in sorted(self._items))
 
 
 __all__ = ["SourceDefinition", "SourceRegistry", "SourceVisibility"]

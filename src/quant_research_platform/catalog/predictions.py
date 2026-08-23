@@ -2,28 +2,29 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from collections.abc import Iterable
 
+from quant_research_platform.catalog._immutable import ImmutableCatalog
 from quant_research_platform.contracts.predictions import PredictionSpec
 
 
-@dataclass
-class PredictionCatalog:
-    _items: dict[str, PredictionSpec] = field(default_factory=dict)
-
-    def register(self, spec: PredictionSpec) -> None:
-        if spec.prediction_id in self._items:
-            raise ValueError(f"duplicate_prediction_spec: {spec.prediction_id}")
-        self._items[spec.prediction_id] = spec
+class PredictionCatalog(ImmutableCatalog[PredictionSpec]):
+    def __init__(self, items: Iterable[PredictionSpec] = ()) -> None:
+        values = tuple(items)
+        seen: set[str] = set()
+        for spec in values:
+            if spec.prediction_id in seen:
+                raise ValueError(f"duplicate_prediction_spec: {spec.prediction_id}")
+            seen.add(spec.prediction_id)
+        super().__init__(sorted(values, key=lambda spec: spec.prediction_id))
 
     def get(self, prediction_id: str) -> PredictionSpec:
         try:
-            return self._items[prediction_id]
-        except KeyError as exc:
+            return next(
+                spec for spec in self._items if spec.prediction_id == prediction_id
+            )
+        except StopIteration as exc:
             raise KeyError(f"unknown_prediction_spec: {prediction_id}") from exc
-
-    def list(self) -> tuple[PredictionSpec, ...]:
-        return tuple(self._items[key] for key in sorted(self._items))
 
 
 __all__ = ["PredictionCatalog"]

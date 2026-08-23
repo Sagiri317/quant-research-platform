@@ -46,7 +46,6 @@ from quant_research_platform.policy.check_status import (
 from quant_research_platform.policy.share_safety import local_run_root_reason
 from quant_research_platform.profiles.research import (
     ResearchProfile,
-    _invoke_profile_materializer,
 )
 from quant_research_platform.reports.verification_summary import (
     render_run_summary_markdown,
@@ -348,8 +347,7 @@ def _run_local_verification_with_policy(
     )
     source_id = config.profile.source_id
     with recorder.record("interim_generation", logical_layer="interim"):
-        interim_result = _invoke_profile_materializer(
-            config.profile.materialize_interim_data,
+        interim_result = config.profile.materialize_interim_data(
             layout=storage_layout,
             raw_root=Path("data") / "raw" / str(source_id),
             start_date=config.start_date,
@@ -357,8 +355,7 @@ def _run_local_verification_with_policy(
             resource_policy=resource_policy,
         )
     with recorder.record("processed_generation", logical_layer="processed") as record:
-        processed_result = _invoke_profile_materializer(
-            config.profile.materialize_processed_data,
+        processed_result = config.profile.materialize_processed_data(
             layout=storage_layout,
             source_id=source_id,
             time_window=time_window,

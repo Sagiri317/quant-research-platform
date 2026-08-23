@@ -365,9 +365,9 @@ def test_local_verification_resolves_only_profile_dataset_and_evaluation() -> No
 def test_local_verification_rejects_ambiguous_profile_dataset() -> None:
     profile = research_profile()
     dataset = profile.research_datasets.list()[0]
-    catalog = ResearchDatasetCatalog()
-    catalog.register(dataset)
-    catalog.register(replace(dataset, data_id="other_research_dataset"))
+    catalog = ResearchDatasetCatalog(
+        (dataset, replace(dataset, data_id="other_research_dataset"))
+    )
 
     with pytest.raises(ValueError, match="ambiguous_research_dataset"):
         module._only_research_dataset_id(replace(profile, research_datasets=catalog))
@@ -376,9 +376,9 @@ def test_local_verification_rejects_ambiguous_profile_dataset() -> None:
 def test_local_verification_rejects_ambiguous_profile_evaluation() -> None:
     profile = research_profile()
     evaluation = profile.evaluations.list()[0]
-    catalog = EvaluationCatalog()
-    catalog.register(evaluation)
-    catalog.register(replace(evaluation, run_id="other_evaluation_run"))
+    catalog = EvaluationCatalog(
+        (evaluation, replace(evaluation, run_id="other_evaluation_run"))
+    )
 
     with pytest.raises(ValueError, match="ambiguous_evaluation_run"):
         module._only_evaluation_run_id(replace(profile, evaluations=catalog))

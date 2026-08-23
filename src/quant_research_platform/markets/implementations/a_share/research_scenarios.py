@@ -142,9 +142,9 @@ def build_model_specs(
 ) -> tuple[ModelSpec, ...]:
     if hyperparameter_preset not in {"default", "smoke"}:
         raise ValueError("unsupported_hyperparameter_preset")
-    purge_gap_steps = label_definitions.label_catalog().get(
-        return_source_column
-    ).lookahead
+    purge_gap_steps = (
+        label_definitions.label_catalog().get(return_source_column).lookahead
+    )
     specs: list[ModelSpec] = []
     for model_algorithm in sorted(model_algorithm_ids):
         facts = _model_algorithm_facts(model_algorithm)
@@ -271,16 +271,15 @@ def build_model_catalog(
     random_seed: int | None = DEFAULT_MODEL_RANDOM_SEED,
     hyperparameter_preset: str = "default",
 ) -> ModelCatalog:
-    catalog = ModelCatalog()
-    for spec in build_model_specs(
-        model_algorithm_ids=model_algorithm_ids,
-        return_source_column=return_source_column,
-        max_train_rows=max_train_rows,
-        random_seed=random_seed,
-        hyperparameter_preset=hyperparameter_preset,
-    ):
-        catalog.register(spec)
-    return catalog
+    return ModelCatalog(
+        build_model_specs(
+            model_algorithm_ids=model_algorithm_ids,
+            return_source_column=return_source_column,
+            max_train_rows=max_train_rows,
+            random_seed=random_seed,
+            hyperparameter_preset=hyperparameter_preset,
+        )
+    )
 
 
 def build_prediction_catalog(
@@ -291,16 +290,15 @@ def build_prediction_catalog(
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> PredictionCatalog:
-    catalog = PredictionCatalog()
-    for spec in build_prediction_specs(
-        model_algorithm_ids=model_algorithm_ids,
-        return_source_column=return_source_column,
-        train_end=train_end,
-        test_start=test_start,
-        test_end=test_end,
-    ):
-        catalog.register(spec)
-    return catalog
+    return PredictionCatalog(
+        build_prediction_specs(
+            model_algorithm_ids=model_algorithm_ids,
+            return_source_column=return_source_column,
+            train_end=train_end,
+            test_start=test_start,
+            test_end=test_end,
+        )
+    )
 
 
 def build_evaluation_catalog(
@@ -308,13 +306,12 @@ def build_evaluation_catalog(
     signals: tuple[SignalSpec, ...] | None = None,
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
 ) -> EvaluationCatalog:
-    catalog = EvaluationCatalog()
-    for spec in build_evaluation_specs(
-        signals=signals,
-        return_source_column=return_source_column,
-    ):
-        catalog.register(spec)
-    return catalog
+    return EvaluationCatalog(
+        build_evaluation_specs(
+            signals=signals,
+            return_source_column=return_source_column,
+        )
+    )
 
 
 def build_portfolio_catalog(
@@ -325,16 +322,15 @@ def build_portfolio_catalog(
     return_source_column: str = _DEFAULT_PORTFOLIO_RETURN_SOURCE_COLUMN,
     prediction_id: str | None = None,
 ) -> PortfolioCatalog:
-    catalog = PortfolioCatalog()
-    for spec in build_portfolio_specs(
-        signals=signals,
-        return_source_column=return_source_column,
-        rebalance_frequency=rebalance_frequency,
-        execution_lag_steps=execution_lag_steps,
-        prediction_id=prediction_id,
-    ):
-        catalog.register(spec)
-    return catalog
+    return PortfolioCatalog(
+        build_portfolio_specs(
+            signals=signals,
+            return_source_column=return_source_column,
+            rebalance_frequency=rebalance_frequency,
+            execution_lag_steps=execution_lag_steps,
+            prediction_id=prediction_id,
+        )
+    )
 
 
 def _model_id(model_algorithm: str, return_source_column: str) -> str:

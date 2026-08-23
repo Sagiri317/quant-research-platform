@@ -72,10 +72,7 @@ def build_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
 
 
 def build_research_dataset_catalog() -> ResearchDatasetCatalog:
-    catalog = ResearchDatasetCatalog()
-    for spec in build_research_dataset_specs():
-        catalog.register(spec)
-    return catalog
+    return ResearchDatasetCatalog(build_research_dataset_specs())
 
 
 def _column_roles(columns: tuple[str, ...]) -> dict[str, ColumnRole]:

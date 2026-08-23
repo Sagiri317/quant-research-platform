@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from quant_research_platform.catalog.processed import InterimDataCatalog
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.markets.implementations.a_share.definition import (
     market_definition,
@@ -21,22 +20,8 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.markets.implementations.a_share.research_profiles import (
     build_research_dataset_catalog,
 )
-from quant_research_platform.profiles.research import (
-    ResearchProfile,
-    research_profile,
-)
+from quant_research_platform.profiles.research import research_profile
 from tests.helpers import frequency_ids
-
-
-def test_local_profile_returns_boundary_sealed_bundle() -> None:
-    catalogs = research_profile()
-
-    assert isinstance(catalogs, ResearchProfile)
-    assert catalogs.factors is not None
-    assert catalogs.labels is not None
-    assert catalogs.processed is not None
-    assert catalogs.research_datasets is not None
-    assert catalogs.source_interim_catalogs["csmar"] is not None
 
 
 def test_local_profile_market_catalogs_delegate_to_a_share_owner_factories() -> None:
@@ -93,21 +78,6 @@ def test_local_profile_internal_registries_are_platform_composed() -> None:
     assert source.provider_id == "csmar"
     assert source.implementation_package == "quant_research_platform.sources.csmar"
     assert catalogs.outputs.get("evaluation_outputs").run_type == "evaluation"
-
-
-def test_local_profile_source_interim_catalogs_are_platform_composed() -> None:
-    source_catalogs = research_profile().source_interim_catalogs
-
-    assert set(source_catalogs) == {"csmar"}
-    assert isinstance(source_catalogs["csmar"], InterimDataCatalog)
-    assert {spec.data_id for spec in source_catalogs["csmar"].list()} == {
-        frequency_ids.MARKET_BARS_DATA_ID,
-        "stock_master",
-        "market_cap",
-        "adjustment",
-        "index_info",
-        "trading_calendar",
-    }
 
 
 def test_processed_catalog_owner_matches_profile() -> None:

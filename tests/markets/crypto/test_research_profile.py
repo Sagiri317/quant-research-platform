@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import quant_research_platform.profiles.research as research_profiles
-from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.portfolios import PortfolioCatalog
-from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_dependencies,
@@ -28,9 +25,6 @@ def test_crypto_binance_1m_profile_builds_with_empty_prediction_and_portfolio() 
     assert profile.evaluations.list()[0].run_id == (
         "microstructure_forward_returns_evaluation"
     )
-    assert isinstance(profile.models, ModelCatalog)
-    assert isinstance(profile.predictions, PredictionCatalog)
-    assert isinstance(profile.portfolios, PortfolioCatalog)
     assert profile.models.list() == ()
     assert profile.predictions.list() == ()
     assert profile.portfolios.list() == ()

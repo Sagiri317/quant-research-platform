@@ -6,8 +6,9 @@ from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass
 from datetime import date, datetime
-from inspect import signature
+from functools import cache
 from pathlib import Path
+from types import MappingProxyType
 
 import pandas as pd
 
@@ -31,7 +32,6 @@ from quant_research_platform.catalog.processed import (
 from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.data import (
     DataFrequency,
-    ProcessedDataKind,
     data_frequency_slug,
     normalize_data_frequency,
 )
@@ -149,27 +149,9 @@ class ResearchProfile:
     source_id: SourceId
     build_prediction_catalog: Callable[..., PredictionCatalog]
     build_portfolio_catalog: Callable[..., PortfolioCatalog]
-    materialize_interim_data: Callable[[StorageLayout, Path, str, str], object]
-    materialize_processed_data: Callable[
-        [StorageLayout, SourceId, TimeWindow, frozenset[ProcessedDataKind]],
-        Mapping[str, DatasetInspection],
-    ]
+    materialize_interim_data: Callable[..., object]
+    materialize_processed_data: Callable[..., Mapping[str, DatasetInspection]]
     schema_inventory_important_columns: Callable[[], tuple[str, ...]]
-
-
-def _invoke_profile_materializer(
-    materializer: Callable[..., object],
-    *,
-    resource_policy: RuntimeResourcePolicy,
-    **arguments: object,
-) -> object:
-    callback_signature = signature(materializer)
-    try:
-        callback_signature.bind(**arguments, resource_policy=resource_policy)
-    except TypeError:
-        callback_signature.bind(**arguments)
-        return materializer(**arguments)
-    return materializer(**arguments, resource_policy=resource_policy)
 
 
 def research_profile_id(
@@ -207,11 +189,10 @@ def research_profile(profile_id: str | None = None) -> ResearchProfile:
         raise KeyError("unknown_research_profile") from exc
 
 
+@cache
 def _a_share_csmar_research_profile() -> ResearchProfile:
-    sources = SourceRegistry()
-    sources.register(source_definition())
-    markets = MarketRegistry()
-    markets.register(a_share_definition.market_definition())
+    sources = SourceRegistry((source_definition(),))
+    markets = MarketRegistry((a_share_definition.market_definition(),))
     return ResearchProfile(
         profile_id=research_profile_id(
             MarketId("a_share"),
@@ -230,8 +211,8 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         sources=sources,
         markets=markets,
         outputs=output_catalog(),
-        source_interim_catalogs=_single_source_interim_catalogs(
-            csmar_interim_catalog()
+        source_interim_catalogs=MappingProxyType(
+            {str(csmar_ids.SOURCE_ID): csmar_interim_catalog()}
         ),
         source_id=csmar_ids.SOURCE_ID,
         build_prediction_catalog=a_share_research_scenarios.build_prediction_catalog,
@@ -244,11 +225,10 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
     )
 
 
+@cache
 def _crypto_binance_research_profile() -> ResearchProfile:
-    sources = SourceRegistry()
-    sources.register(binance_source_definition())
-    markets = MarketRegistry()
-    markets.register(crypto_definition.market_definition())
+    sources = SourceRegistry((binance_source_definition(),))
+    markets = MarketRegistry((crypto_definition.market_definition(),))
     return ResearchProfile(
         profile_id=research_profile_id(
             MarketId("crypto"),
@@ -267,8 +247,8 @@ def _crypto_binance_research_profile() -> ResearchProfile:
         sources=sources,
         markets=markets,
         outputs=output_catalog(),
-        source_interim_catalogs=_single_source_interim_catalogs(
-            binance_interim_catalog()
+        source_interim_catalogs=MappingProxyType(
+            {str(binance_ids.SOURCE_ID): binance_interim_catalog()}
         ),
         source_id=binance_ids.SOURCE_ID,
         build_prediction_catalog=_empty_prediction_catalog,
@@ -279,15 +259,6 @@ def _crypto_binance_research_profile() -> ResearchProfile:
         ),
         schema_inventory_important_columns=_crypto_schema_inventory_important_columns,
     )
-
-
-def _single_source_interim_catalogs(
-    catalog: InterimDataCatalog,
-) -> Mapping[str, InterimDataCatalog]:
-    source_ids = {str(spec.source_id) for spec in catalog.list()}
-    if len(source_ids) != 1:
-        raise ValueError("unexpected_source_interim_catalog_sources")
-    return {next(iter(source_ids)): catalog}
 
 
 def _materialize_crypto_binance_interim_data(

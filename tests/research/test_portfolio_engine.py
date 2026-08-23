@@ -309,8 +309,7 @@ def test_portfolio_runner_writes_private_outputs(tmp_path) -> None:
     dataset_catalog = make_research_dataset_catalog(
         make_portfolio_research_dataset_spec()
     )
-    portfolio_catalog = PortfolioCatalog()
-    portfolio_catalog.register(_portfolio_spec())
+    portfolio_catalog = PortfolioCatalog((_portfolio_spec(),))
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
     write_dataset(
         dataset_root,
@@ -363,8 +362,7 @@ def test_portfolio_runner_rejects_empty_time_window_before_artifact_write(
     dataset_catalog = make_research_dataset_catalog(
         make_portfolio_research_dataset_spec()
     )
-    portfolio_catalog = PortfolioCatalog()
-    portfolio_catalog.register(_portfolio_spec())
+    portfolio_catalog = PortfolioCatalog((_portfolio_spec(),))
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
     write_dataset(
         dataset_root,
@@ -467,8 +465,7 @@ def _run_demo_portfolio(project_root) -> Path:
     dataset_catalog = make_research_dataset_catalog(
         make_portfolio_research_dataset_spec()
     )
-    portfolio_catalog = PortfolioCatalog()
-    portfolio_catalog.register(_portfolio_spec())
+    portfolio_catalog = PortfolioCatalog((_portfolio_spec(),))
     dataset_root = layout.research_dataset_root(MarketId("a_share"), "demo")
     write_dataset(
         dataset_root,

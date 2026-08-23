@@ -46,8 +46,8 @@ def make_dummy_processed_catalog(
 
 
 def _demo_processed_catalog() -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    catalog.register(
+    return ProcessedDataCatalog(
+        (
         _processed_spec(
             data_id="demo_factors",
             market_id=MarketId("a_share"),
@@ -58,9 +58,7 @@ def _demo_processed_catalog() -> ProcessedDataCatalog:
                 "timestamp": ColumnRole.TIMESTAMP,
                 DEMO_FACTOR_COLUMN: ColumnRole.FACTOR,
             },
-        )
-    )
-    catalog.register(
+        ),
         _processed_spec(
             data_id="demo_labels",
             market_id=MarketId("a_share"),
@@ -71,9 +69,7 @@ def _demo_processed_catalog() -> ProcessedDataCatalog:
                 "timestamp": ColumnRole.TIMESTAMP,
                 DEMO_LABEL_COLUMN: ColumnRole.LABEL,
             },
-        )
-    )
-    catalog.register(
+        ),
         _processed_spec(
             data_id="demo_annotations",
             market_id=MarketId("a_share"),
@@ -87,14 +83,14 @@ def _demo_processed_catalog() -> ProcessedDataCatalog:
                 "can_exit": ColumnRole.MASK,
                 "market_type": ColumnRole.CONTEXT,
             },
+        ),
         )
     )
-    return catalog
 
 
 def _filter_processed_catalog() -> ProcessedDataCatalog:
-    catalog = ProcessedDataCatalog()
-    catalog.register(
+    return ProcessedDataCatalog(
+        (
         _processed_spec(
             data_id="demo_factor",
             market_id=MarketId("a_share"),
@@ -105,9 +101,7 @@ def _filter_processed_catalog() -> ProcessedDataCatalog:
                 "timestamp": ColumnRole.TIMESTAMP,
                 "factor": ColumnRole.FACTOR,
             },
-        )
-    )
-    catalog.register(
+        ),
         _processed_spec(
             data_id="demo_label",
             market_id=MarketId("a_share"),
@@ -118,9 +112,7 @@ def _filter_processed_catalog() -> ProcessedDataCatalog:
                 "timestamp": ColumnRole.TIMESTAMP,
                 "label": ColumnRole.LABEL,
             },
-        )
-    )
-    catalog.register(
+        ),
         _processed_spec(
             data_id="demo_annotation",
             market_id=MarketId("a_share"),
@@ -133,9 +125,9 @@ def _filter_processed_catalog() -> ProcessedDataCatalog:
                 "can_enter": ColumnRole.MASK,
                 "can_exit": ColumnRole.MASK,
             },
+        ),
         )
     )
-    return catalog
 
 
 def _dummy_processed_catalog(
@@ -197,10 +189,7 @@ def _dummy_processed_catalog(
             role=ColumnRole.CONTEXT,
         ),
     )
-    catalog = ProcessedDataCatalog()
-    for spec in specs:
-        catalog.register(spec)
-    return catalog
+    return ProcessedDataCatalog(specs)
 
 
 def _processed_spec(

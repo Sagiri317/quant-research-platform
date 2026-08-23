@@ -40,10 +40,7 @@ def label_definitions() -> tuple[LabelDefinition, ...]:
 
 
 def label_catalog() -> LabelCatalog:
-    catalog = LabelCatalog()
-    for definition in label_definitions():
-        catalog.register(definition)
-    return catalog
+    return LabelCatalog(label_definitions())
 
 
 __all__ = [

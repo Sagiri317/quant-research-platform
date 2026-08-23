@@ -293,7 +293,7 @@ def make_synthetic_interim_catalog(
             for column in specs[market_bars_data_id]
             if column != drop_daily_column
         )
-    catalog = InterimDataCatalog()
+    catalog_specs = []
     for data_id, columns in specs.items():
         primary_key = (
             ("timestamp",)
@@ -310,7 +310,7 @@ def make_synthetic_interim_catalog(
             )
             for column in columns
         }
-        catalog.register(
+        catalog_specs.append(
             InterimDataSpec(
                 data_id=data_id,
                 source_id=source_id,
@@ -321,7 +321,7 @@ def make_synthetic_interim_catalog(
                 partition_columns=("year",),
             )
         )
-    return catalog
+    return InterimDataCatalog(catalog_specs)
 
 
 def write_synthetic_interim_inputs(

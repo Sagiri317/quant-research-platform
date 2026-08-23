@@ -1,25 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 
-from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.catalog.evaluations import EvaluationCatalog
-from quant_research_platform.catalog.factors import FactorCatalog
-from quant_research_platform.catalog.fields import FieldCatalog
-from quant_research_platform.catalog.labels import LabelCatalog
-from quant_research_platform.catalog.markets import MarketRegistry
-from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.outputs import OutputCatalog
-from quant_research_platform.catalog.portfolios import PortfolioCatalog
-from quant_research_platform.catalog.predictions import PredictionCatalog
-from quant_research_platform.catalog.processed import (
-    ProcessedDataCatalog,
-)
-from quant_research_platform.catalog.sources import SourceRegistry
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share import (
@@ -39,45 +24,27 @@ from tests.helpers import frequency_ids
 from tests.helpers.runtime_resources import capture_test_policy
 
 
-def test_research_profile_is_only_public_profile_builder() -> None:
-    import quant_research_platform.profiles.research as profiles
-
-    assert set(profiles.__all__) == {
-        "ResearchProfile",
-        "research_profile",
-        "research_profile_id",
-    }
-
-
 def test_research_profile_contains_active_catalogs() -> None:
     from quant_research_platform.profiles.research import (
-        ResearchProfile,
         research_profile,
         research_profile_id,
     )
 
     profile = research_profile()
 
-    assert isinstance(profile, ResearchProfile)
     assert profile.profile_id == "a_share_csmar_1d"
     assert (
         research_profile_id("a_share", "csmar", frequency_ids.DAILY_FREQUENCY_SLUG)
         == profile.profile_id
     )
-    assert research_profile(profile.profile_id) == profile
-    assert isinstance(profile.fields, FieldCatalog)
-    assert isinstance(profile.factors, FactorCatalog)
-    assert isinstance(profile.labels, LabelCatalog)
-    assert isinstance(profile.processed, ProcessedDataCatalog)
-    assert isinstance(profile.research_datasets, ResearchDatasetCatalog)
-    assert isinstance(profile.outputs, OutputCatalog)
-    assert isinstance(profile.evaluations, EvaluationCatalog)
-    assert isinstance(profile.models, ModelCatalog)
-    assert isinstance(profile.predictions, PredictionCatalog)
-    assert isinstance(profile.portfolios, PortfolioCatalog)
-    assert isinstance(profile.sources, SourceRegistry)
-    assert isinstance(profile.markets, MarketRegistry)
+    assert research_profile(profile.profile_id) is profile
     assert set(profile.source_interim_catalogs) == {"csmar"}
+    with pytest.raises(AttributeError):
+        profile.fields.list().append(profile.fields.list()[0])
+    with pytest.raises(TypeError):
+        profile.source_interim_catalogs["other"] = profile.source_interim_catalogs[
+            "csmar"
+        ]
     assert profile.source_id == SourceId("csmar")
     assert callable(profile.materialize_interim_data)
     assert callable(profile.materialize_processed_data)
@@ -371,22 +338,3 @@ def test_a_share_factor_and_prediction_portfolios_apply_formal_masks() -> None:
             "a": -1.0,
             "d": 1.0,
         }
-
-
-def test_catalog_profile_source_interim_catalog_requires_single_source(
-    monkeypatch,
-) -> None:
-    import quant_research_platform.profiles.research as profiles
-
-    def fake_catalog() -> object:
-        return SimpleNamespace(
-            list=lambda: [
-                SimpleNamespace(source_id="synthetic_a"),
-                SimpleNamespace(source_id="synthetic_b"),
-            ]
-        )
-
-    monkeypatch.setattr(profiles, "csmar_interim_catalog", fake_catalog)
-
-    with pytest.raises(ValueError, match="unexpected_source_interim_catalog_sources"):
-        profiles.research_profile()

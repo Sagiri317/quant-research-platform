@@ -919,9 +919,7 @@ def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) ->
         primary_key=primary_key,
         partition_columns=("year",),
     )
-    processed_catalog = ProcessedDataCatalog()
-    processed_catalog.register(factor_spec)
-    processed_catalog.register(label_spec)
+    processed_catalog = ProcessedDataCatalog((factor_spec, label_spec))
     dataset_catalog = make_research_dataset_catalog(
         data_id="minute_research",
         market_id="crypto",
@@ -995,9 +993,9 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = ResearchDatasetCatalog()
-    dataset_catalog.register(
-        ResearchDatasetSpec(
+    dataset_catalog = ResearchDatasetCatalog(
+        (
+            ResearchDatasetSpec(
             data_id="demo",
             market_id=MarketId("a_share"),
             input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
@@ -1031,6 +1029,7 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
             },
             primary_key=platform_entity_time_key(),
             partition_columns=("year",),
+            ),
         )
     )
     write_demo_processed_inputs(layout, processed_catalog)
@@ -1527,9 +1526,9 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = ResearchDatasetCatalog()
-    dataset_catalog.register(
-        ResearchDatasetSpec(
+    dataset_catalog = ResearchDatasetCatalog(
+        (
+            ResearchDatasetSpec(
             data_id="bad_demo",
             market_id=MarketId("a_share"),
             input_data_ids=("demo_labels", "demo_annotations"),
@@ -1547,6 +1546,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
             },
             primary_key=platform_entity_time_key(),
             partition_columns=("year",),
+            ),
         )
     )
     write_demo_processed_inputs(layout, processed_catalog)
@@ -1575,9 +1575,6 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
     bad_column: str,
     expected_error: str,
 ) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = ResearchDatasetCatalog()
     spec_kwargs = {
         "factor_columns": ("mom_20d",),
         "label_columns": ("forward_return_20d",),
@@ -1586,8 +1583,9 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
     }
     spec_kwargs[field_name] = (bad_column,)
     with pytest.raises(ValueError, match=expected_error):
-        dataset_catalog.register(
-            ResearchDatasetSpec(
+        ResearchDatasetCatalog(
+            (
+                ResearchDatasetSpec(
                 data_id=f"bad_{field_name}",
                 market_id=MarketId("a_share"),
                 input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
@@ -1608,15 +1606,8 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
                 },
                 primary_key=platform_entity_time_key(),
                 partition_columns=("year",),
+                ),
             )
-        )
-        write_demo_processed_inputs(layout, processed_catalog)
-        assemble_research_dataset(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            processed_catalog=processed_catalog,
-            dataset_id=f"bad_{field_name}",
-            time_window=TimeWindow("2014-01-02", "2014-01-03"),
         )
 
 
@@ -1750,24 +1741,26 @@ def test_prediction_handoff_reads_research_dataset_and_writes_report(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
-    model_catalog = ModelCatalog()
-    model_catalog.register(
-        ModelSpec(
+    model_catalog = ModelCatalog(
+        (
+            ModelSpec(
             model_id="linear_demo",
             model_algorithm="linear_regression",
             input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
+            ),
         )
     )
-    prediction_catalog = PredictionCatalog()
-    prediction_catalog.register(
-        PredictionSpec(
+    prediction_catalog = PredictionCatalog(
+        (
+            PredictionSpec(
             prediction_id="pred_demo",
             model_id="linear_demo",
             research_dataset_id="demo",
             train_end="2014-01-02",
             test_start="2014-01-03",
             test_end="2014-01-03",
+            ),
         )
     )
 
@@ -1819,24 +1812,26 @@ def test_prediction_handoff_writes_prediction_report_without_materialized_bundle
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
-    model_catalog = ModelCatalog()
-    model_catalog.register(
-        ModelSpec(
+    model_catalog = ModelCatalog(
+        (
+            ModelSpec(
             model_id="linear_demo",
             model_algorithm="linear_regression",
             input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
+            ),
         )
     )
-    prediction_catalog = PredictionCatalog()
-    prediction_catalog.register(
-        PredictionSpec(
+    prediction_catalog = PredictionCatalog(
+        (
+            PredictionSpec(
             prediction_id="pred_demo",
             model_id="linear_demo",
             research_dataset_id="demo",
             train_end="2014-01-02",
             test_start="2014-01-03",
             test_end="2014-01-03",
+            ),
         )
     )
 
@@ -1882,24 +1877,26 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
         resource_policy=assembly_policy,
     )
-    model_catalog = ModelCatalog()
-    model_catalog.register(
-        ModelSpec(
+    model_catalog = ModelCatalog(
+        (
+            ModelSpec(
             model_id="linear_demo",
             model_algorithm="linear_regression",
             input_factor_columns=("mom_20d",),
             label_column="forward_return_20d",
+            ),
         )
     )
-    prediction_catalog = PredictionCatalog()
-    prediction_catalog.register(
-        PredictionSpec(
+    prediction_catalog = PredictionCatalog(
+        (
+            PredictionSpec(
             prediction_id="pred_demo",
             model_id="linear_demo",
             research_dataset_id="demo",
             train_end="2014-01-03",
             test_start="2014-01-06",
             test_end="2014-01-08",
+            ),
         )
     )
 
@@ -2015,7 +2012,6 @@ def test_managed_workflow_admits_summary_before_research_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset_catalog = make_research_dataset_catalog()
-    evaluation_catalog = EvaluationCatalog()
     spec = EvaluationSpec(
         run_id="eval_summary_admission",
         market_id=MarketId("a_share"),
@@ -2023,7 +2019,7 @@ def test_managed_workflow_admits_summary_before_research_pull(
         signals=(make_signal_spec("mom_20d"),),
         label_columns=("forward_return_20d",),
     )
-    evaluation_catalog.register(spec)
+    evaluation_catalog = EvaluationCatalog((spec,))
     pulled: list[bool] = []
     artifact_calls: list[bool] = []
 
@@ -2093,7 +2089,6 @@ def test_managed_evaluation_runner_persists_without_full_result(
         time_window=TimeWindow("2014-01-02", "2014-01-06"),
         resource_policy=assembly_policy,
     )
-    evaluation_catalog = EvaluationCatalog()
     spec = EvaluationSpec(
         run_id="eval_managed",
         market_id=MarketId("a_share"),
@@ -2101,7 +2096,7 @@ def test_managed_evaluation_runner_persists_without_full_result(
         signals=(make_signal_spec("mom_20d"),),
         label_columns=("forward_return_20d",),
     )
-    evaluation_catalog.register(spec)
+    evaluation_catalog = EvaluationCatalog((spec,))
     evaluation_policy = capture_test_policy(
         available_memory_bytes=32 * 1024**2,
         explicit_cap_bytes=16 * 1024**2,
