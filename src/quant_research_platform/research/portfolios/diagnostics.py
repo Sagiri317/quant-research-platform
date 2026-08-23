@@ -445,10 +445,3 @@ def _reject_duplicate_keys(
 ) -> None:
     if bool(frame.duplicated(list(keys)).any()):
         raise ValueError(f"duplicate_{name}_keys")
-
-
-__all__ = [
-    "build_capacity_diagnostics",
-    "build_categorical_exposure_diagnostics",
-    "build_numeric_exposure_diagnostics",
-]

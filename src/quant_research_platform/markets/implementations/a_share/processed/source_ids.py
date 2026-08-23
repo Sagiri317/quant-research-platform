@@ -17,6 +17,3 @@ def market_bars_source_data_id(spec: ProcessedDataSpec) -> str:
     if len(candidates) != 1:
         raise ValueError("panel_market_bars_source_input_not_unique")
     return candidates[0]
-
-
-__all__ = ["MARKET_BARS_SOURCE_DATA_ID", "market_bars_source_data_id"]

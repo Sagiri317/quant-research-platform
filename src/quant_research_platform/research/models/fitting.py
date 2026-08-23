@@ -1430,8 +1430,3 @@ def _strict_non_negative_count_value(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("invalid_model_metadata_count")
     return value
-
-
-__all__ = [
-    "ModelFitResult",
-]

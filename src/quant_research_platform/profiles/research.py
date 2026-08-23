@@ -365,6 +365,3 @@ def _crypto_schema_inventory_important_columns() -> tuple[str, ...]:
         "relative_spread",
         "forward_return_1m",
     )
-
-
-__all__ = ["ResearchProfile", "research_profile", "research_profile_id"]

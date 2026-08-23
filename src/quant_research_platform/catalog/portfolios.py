@@ -25,6 +25,3 @@ class PortfolioCatalog(ImmutableCatalog[PortfolioSpec]):
             )
         except StopIteration as exc:
             raise KeyError(f"unknown_portfolio_spec: {portfolio_id}") from exc
-
-
-__all__ = ["PortfolioCatalog"]

@@ -280,6 +280,3 @@ def _append_active_factor_carry(
         (active_carry.assign(**{_CORE_ROW: False}), segment),
         ignore_index=True,
     )
-
-
-__all__ = ["write_factors"]

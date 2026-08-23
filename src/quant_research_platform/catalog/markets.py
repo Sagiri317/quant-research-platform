@@ -37,6 +37,3 @@ class MarketRegistry(ImmutableCatalog[MarketDefinition]):
             )
         except StopIteration as exc:
             raise KeyError(f"unknown_market_id: {market_id}") from exc
-
-
-__all__ = ["MarketDefinition", "MarketRegistry"]

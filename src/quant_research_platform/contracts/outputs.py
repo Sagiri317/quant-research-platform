@@ -41,6 +41,3 @@ class OutputSpec:
         if self.output_id == self.output_definition_id:
             raise ValueError("output_id_must_identify_instance")
         validate_run_id(self.run_id)
-
-
-__all__ = ["OutputDefinition", "OutputScope", "OutputSpec"]

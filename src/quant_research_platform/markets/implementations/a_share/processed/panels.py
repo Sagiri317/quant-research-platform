@@ -397,6 +397,3 @@ def _first_static_stock_value(
         .set_index("asset_id")[column]
     )
     return values.to_dict()
-
-
-__all__ = ["MARKET_PANEL_KEY_COLUMNS", "compute_market_panel"]

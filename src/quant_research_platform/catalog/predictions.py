@@ -25,6 +25,3 @@ class PredictionCatalog(ImmutableCatalog[PredictionSpec]):
             )
         except StopIteration as exc:
             raise KeyError(f"unknown_prediction_spec: {prediction_id}") from exc
-
-
-__all__ = ["PredictionCatalog"]

@@ -195,6 +195,3 @@ def write_panel(
         resource_policy=policy,
         cleanup_stack=cleanup_stack,
     )
-
-
-__all__ = ["write_panel"]

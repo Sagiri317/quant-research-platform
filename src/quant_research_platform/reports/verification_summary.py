@@ -23,8 +23,3 @@ def render_run_summary_markdown(payload: dict[str, Any]) -> str:
         "",
     ]
     return "\n".join(lines)
-
-
-__all__ = [
-    "render_run_summary_markdown",
-]

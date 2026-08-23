@@ -31,6 +31,3 @@ def schema_inventory_important_columns(
         for horizon in label_horizons
     )
     return (*_MASK_DIAGNOSTIC_COLUMNS, *label_columns)
-
-
-__all__ = ["schema_inventory_important_columns"]

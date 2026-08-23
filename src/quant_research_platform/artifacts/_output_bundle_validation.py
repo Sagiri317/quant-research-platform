@@ -400,6 +400,3 @@ def _validated_regular_member(
     if resolved_path.parent != resolved_root:
         raise ValueError(error)
     return identity
-
-
-__all__ = ["validate_output_bundle"]

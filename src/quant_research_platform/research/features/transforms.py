@@ -222,6 +222,3 @@ def _apply_fillna(
         medians = values.groupby(timestamps, sort=False).transform("median")
         return values.fillna(medians)
     raise ValueError("unsupported_feature_transform_fillna_policy")
-
-
-__all__ = ["apply_feature_transforms"]

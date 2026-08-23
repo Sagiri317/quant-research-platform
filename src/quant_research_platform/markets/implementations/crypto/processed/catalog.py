@@ -123,6 +123,3 @@ def _column_roles(
         column: overrides[column] if column in overrides else catalog.get(column).role
         for column in columns
     }
-
-
-__all__ = ["PANEL_COLUMNS", "processed_catalog"]

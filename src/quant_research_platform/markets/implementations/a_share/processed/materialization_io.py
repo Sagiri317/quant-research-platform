@@ -319,12 +319,3 @@ def read_materialized_dataset(
             owner="a_share.materialized.input",
         )
         return owned.value
-
-
-__all__ = [
-    "iter_sorted_output_chunks",
-    "processed_root",
-    "read_processed_inputs_for_spec",
-    "read_source_inputs_for_spec",
-    "write_and_inspect",
-]

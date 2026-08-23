@@ -95,6 +95,3 @@ def _validation_error_details(exc: RequestValidationError) -> ApiErrorDetails:
             )
         )
     return ApiErrorDetails(errors=errors)
-
-
-__all__ = ["ApiError", "api_error_response", "register_api_error_handlers"]

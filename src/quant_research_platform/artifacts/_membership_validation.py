@@ -22,6 +22,3 @@ def validate_string_membership_column(
         raise ValueError(error_name)
     values = strict_string_series(frame[column], error=error_name, strip=False)
     strict_membership_series(values, allowed=set(allowed), error=error_name)
-
-
-__all__ = ["validate_string_membership_column"]

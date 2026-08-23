@@ -46,11 +46,3 @@ class SignalSpec:
         if self.transform not in {"identity", "rank", "zscore"}:
             raise ValueError("unsupported_signal_transform")
         reject_filter_input_columns((self.signal_id, self.source_column))
-
-
-__all__ = [
-    "SignalDirection",
-    "SignalSourceKind",
-    "SignalSpec",
-    "SignalTransform",
-]

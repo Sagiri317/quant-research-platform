@@ -41,12 +41,3 @@ def label_definitions() -> tuple[LabelDefinition, ...]:
 
 def label_catalog() -> LabelCatalog:
     return LabelCatalog(label_definitions())
-
-
-__all__ = [
-    "LABEL_BASE_COLUMNS",
-    "LABEL_PANEL_INPUT_COLUMNS",
-    "FORWARD_RETURN_HORIZONS",
-    "label_catalog",
-    "label_definitions",
-]

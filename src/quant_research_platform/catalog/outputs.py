@@ -31,6 +31,3 @@ class OutputCatalog(ImmutableCatalog[OutputDefinition]):
             raise KeyError(
                 f"unknown_output_definition: {output_definition_id}"
             ) from exc
-
-
-__all__ = ["OutputCatalog"]

@@ -173,23 +173,3 @@ def _has_utc_offset(value: str) -> bool:
         and offset[3] == ":"
         and offset[4:6].isdigit()
     )
-
-
-__all__ = [
-    "BINANCE_DATA_KINDS",
-    "BINANCE_SPOT_MARKET_TYPE",
-    "depth_side_levels",
-    "first_present",
-    "strict_boolean",
-    "strict_data_kind",
-    "strict_finite_float",
-    "strict_iso_timestamp",
-    "strict_market_type",
-    "strict_millisecond_timestamp",
-    "strict_non_empty_string",
-    "strict_non_negative_float",
-    "strict_non_negative_integer",
-    "strict_positive_float",
-    "strict_positive_integer",
-    "strict_symbol",
-]

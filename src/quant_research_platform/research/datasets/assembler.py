@@ -923,6 +923,3 @@ def _research_session_view(
                 f"{type(cleanup_error).__name__}"
             )
         raise
-
-
-__all__ = ["assemble_research_dataset"]

@@ -27,9 +27,3 @@ def write_markdown_evidence(path: Path, text: str) -> Path:
     if unsafe is not None:
         raise ValueError(f"unsafe_evidence: {unsafe}")
     return atomic_write_text(path, text, encoding="utf-8")
-
-
-__all__ = [
-    "write_json_evidence",
-    "write_markdown_evidence",
-]

@@ -269,8 +269,3 @@ def _build_portfolio_return_record_from_positions(
         "long_count": int(long_count),
         "short_count": int(short_count),
     }
-
-
-__all__ = [
-    "simulate_weighted_long_short_returns_and_cost_from_validated_panel",
-]

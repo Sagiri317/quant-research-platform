@@ -66,6 +66,3 @@ def infer_logical_type(*, dtype: str, role: ColumnRole) -> LogicalType:
     if normalized.startswith("float"):
         return LogicalType.FLOAT
     return LogicalType.CATEGORY
-
-
-__all__ = ["ColumnRole", "FieldSpec", "LogicalType", "infer_logical_type"]

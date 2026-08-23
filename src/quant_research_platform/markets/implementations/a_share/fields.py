@@ -78,6 +78,3 @@ def field_catalog() -> FieldCatalog:
     """Return platform canonical fields plus A-share-only processed fields."""
 
     return FieldCatalog((*platform_field_catalog().list(), *FIELD_SPECS))
-
-
-__all__ = ["FIELD_SPECS", "field_catalog"]

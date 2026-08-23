@@ -45,6 +45,3 @@ class LocalVerificationLayout:
     @property
     def summary_md_path(self) -> Path:
         return self.run_root / "summary.md"
-
-
-__all__ = ["LocalVerificationLayout"]

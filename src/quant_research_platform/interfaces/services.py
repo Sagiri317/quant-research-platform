@@ -48,11 +48,3 @@ def describe_research_dataset_requirements(
         feature_count=len(spec.feature_columns),
         label_count=len(spec.label_columns),
     )
-
-
-__all__ = [
-    "API_VERSION",
-    "describe_research_dataset_requirements",
-    "list_factors",
-    "list_labels",
-]

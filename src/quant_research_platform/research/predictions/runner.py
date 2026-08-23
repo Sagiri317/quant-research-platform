@@ -788,8 +788,3 @@ def _prediction_timestamps(chunk: pd.DataFrame) -> pd.Series:
     return strict_timestamp_series(
         chunk["timestamp"], error="invalid_prediction_timestamp_values"
     )
-
-
-__all__ = [
-    "build_prediction_result_from_research_dataset",
-]

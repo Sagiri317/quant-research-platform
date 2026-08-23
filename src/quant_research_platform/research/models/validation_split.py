@@ -62,6 +62,3 @@ def _purge_trailing_timestamps(
         return frame.iloc[0:0]
     cutoff = unique_timestamps[-purge_gap_steps]
     return frame.loc[timestamps < cutoff]
-
-
-__all__ = ["apply_training_controls", "trim_training_buffer"]

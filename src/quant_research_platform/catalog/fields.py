@@ -118,12 +118,3 @@ def platform_field_catalog() -> FieldCatalog:
             ),
         )
     )
-
-
-__all__ = [
-    "CanonicalFieldNames",
-    "FieldCatalog",
-    "canonical_field_names",
-    "platform_entity_time_key",
-    "platform_field_catalog",
-]

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from quant_research_platform.catalog.fields import FieldCatalog, platform_field_catalog
 from quant_research_platform.contracts.columns import ColumnRole, FieldSpec
-from quant_research_platform.markets.implementations.crypto.ids import MARKET_ID
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
 )
@@ -82,6 +81,3 @@ def field_catalog() -> FieldCatalog:
             ),
         )
     )
-
-
-__all__ = ["MARKET_ID", "PANEL_FIELD_SPECS", "field_catalog"]

@@ -126,6 +126,3 @@ def validate_compute_panel(
         ).astype("float64")
 
     return result.sort_values(key_columns, kind="mergesort").reset_index(drop=True)
-
-
-__all__ = ["ComputePanelSpec", "validate_compute_panel"]

@@ -128,6 +128,3 @@ def _validated_bool_mask(frame: pd.DataFrame, column: str) -> pd.Series:
         if not bool(invalid.any()):
             return series.eq(1)
     raise ValueError(f"invalid_filter_column_dtype: {column}")
-
-
-__all__ = ["apply_filter_mode"]

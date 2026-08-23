@@ -130,11 +130,3 @@ def _iso_date(value: str, field_name: str) -> date:
         return date.fromisoformat(value)
     except ValueError as exc:
         raise ValueError(f"invalid_{field_name}") from exc
-
-
-__all__ = [
-    "PREDICTION_PRIMARY_KEY",
-    "PREDICTION_SCORE_COLUMN",
-    "MODEL_SELECTION_METRIC_DIRECTIONS",
-    "PredictionSpec",
-]

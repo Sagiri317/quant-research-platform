@@ -78,6 +78,3 @@ class FactorDefinition:
         if self.window is not None:
             payload["window"] = self.window
         return payload
-
-
-__all__ = ["FactorDefinition", "FactorSet"]

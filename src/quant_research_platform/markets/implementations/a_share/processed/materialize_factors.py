@@ -179,6 +179,3 @@ def write_factors(
         resource_policy=policy,
         cleanup_stack=cleanup_stack,
     )
-
-
-__all__ = ["select_factor_definitions_for_spec", "write_factors"]

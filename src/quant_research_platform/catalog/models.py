@@ -23,6 +23,3 @@ class ModelCatalog(ImmutableCatalog[ModelSpec]):
             return next(spec for spec in self._items if spec.model_id == model_id)
         except StopIteration as exc:
             raise KeyError(f"unknown_model_spec: {model_id}") from exc
-
-
-__all__ = ["ModelCatalog"]

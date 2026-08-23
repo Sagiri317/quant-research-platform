@@ -232,6 +232,3 @@ def _bool_like_column(frame: pd.DataFrame, column: str) -> pd.Series:
     if not set(numeric.unique()).issubset({0, 1}):
         raise ValueError(f"invalid_one_word_limit_column: {column}")
     return numeric.astype(bool)
-
-
-__all__ = ["derive_annotations"]

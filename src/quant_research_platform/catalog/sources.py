@@ -51,6 +51,3 @@ class SourceRegistry(ImmutableCatalog[SourceDefinition]):
             )
         except StopIteration as exc:
             raise KeyError(f"unknown_source_id: {source_id}") from exc
-
-
-__all__ = ["SourceDefinition", "SourceRegistry", "SourceVisibility"]

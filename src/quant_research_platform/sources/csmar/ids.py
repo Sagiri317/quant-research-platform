@@ -22,10 +22,3 @@ def market_bars_data_id(
         context="csmar market bars",
     )
     return f"market_bars_{data_frequency_slug(normalized)}"
-
-
-__all__ = [
-    "SOURCE_ID",
-    "SUPPORTED_MARKET_BAR_FREQUENCIES",
-    "market_bars_data_id",
-]

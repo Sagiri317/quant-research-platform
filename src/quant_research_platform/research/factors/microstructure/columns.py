@@ -10,5 +10,3 @@ MICROSTRUCTURE_FACTOR_COLUMNS = (
     "signed_volume_5m",
     "flow_imbalance_5m",
 )
-
-__all__ = ["MICROSTRUCTURE_FACTOR_COLUMNS"]

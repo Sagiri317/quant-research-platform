@@ -14,6 +14,3 @@ def source_definition() -> SourceDefinition:
         display_name="CSMAR source adapter",
         implementation_package="quant_research_platform.sources.csmar",
     )
-
-
-__all__ = ["source_definition"]

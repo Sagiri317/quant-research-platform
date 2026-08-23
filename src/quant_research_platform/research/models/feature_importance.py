@@ -50,6 +50,3 @@ def estimator_feature_importance(
             for column, value in zip(spec.input_columns, values, strict=True)
         }
     return None
-
-
-__all__ = ["estimator_feature_importance", "linear_feature_importance"]

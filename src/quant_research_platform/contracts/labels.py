@@ -66,6 +66,3 @@ class LabelDefinition:
             "entry_rule": self.entry_rule,
             "exit_rule": self.exit_rule,
         }
-
-
-__all__ = ["LabelDefinition"]

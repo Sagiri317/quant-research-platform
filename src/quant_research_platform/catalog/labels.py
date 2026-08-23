@@ -27,6 +27,3 @@ class LabelCatalog(ImmutableCatalog[LabelDefinition]):
             )
         except StopIteration as exc:
             raise KeyError(label_id) from exc
-
-
-__all__ = ["LabelCatalog"]

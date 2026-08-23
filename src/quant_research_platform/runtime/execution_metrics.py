@@ -130,9 +130,3 @@ def _total_duration_seconds(records: list[ExecutionStepMetric]) -> float:
 
 def _format_time(value: datetime) -> str:
     return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-__all__ = [
-    "ExecutionMetricsRecorder",
-    "ExecutionStepMetric",
-]

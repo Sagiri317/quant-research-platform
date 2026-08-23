@@ -501,6 +501,3 @@ def calculate_price_volume_factors(
     for column in output_columns:
         result[column] = finite_or_nan(result[column])
     return result
-
-
-__all__ = ["calculate_price_volume_factors"]

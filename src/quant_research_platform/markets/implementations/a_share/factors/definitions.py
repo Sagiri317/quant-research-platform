@@ -26,9 +26,3 @@ def factor_definitions() -> tuple[FactorDefinition, ...]:
 
 def factor_catalog() -> FactorCatalog:
     return FactorCatalog(factor_definitions())
-
-
-__all__ = [
-    "factor_catalog",
-    "factor_definitions",
-]

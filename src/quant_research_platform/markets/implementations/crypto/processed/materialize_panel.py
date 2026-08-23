@@ -458,6 +458,3 @@ def _strict_source_asset_ids(frame: pd.DataFrame, *, error: str) -> pd.Series:
         ):
             raise ValueError(error)
     return values
-
-
-__all__ = ["write_panel"]

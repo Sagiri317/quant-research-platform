@@ -35,8 +35,3 @@ class StorageLayout:
 
     def research_dataset_root(self, market_id: MarketId, data_id: str) -> Path:
         return self.project_root / "data/research" / str(market_id) / data_id
-
-
-__all__ = [
-    "StorageLayout",
-]

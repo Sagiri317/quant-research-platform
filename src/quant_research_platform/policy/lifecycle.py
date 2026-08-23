@@ -26,6 +26,3 @@ def closing_iterator(iterator: Iterator[object]) -> Iterator[object]:
         close = getattr(iterator, "close", None)
         if close is not None:
             close()
-
-
-__all__ = ["closing_iterator"]

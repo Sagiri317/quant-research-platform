@@ -809,6 +809,3 @@ def _merge_profile(target: dict[str, int], value: object) -> None:
 
 def _utc_now() -> str:
     return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
-
-
-__all__ = ["build_validation_summary"]

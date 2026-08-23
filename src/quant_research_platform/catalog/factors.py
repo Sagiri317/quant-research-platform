@@ -33,6 +33,3 @@ class FactorCatalog(ImmutableCatalog[FactorDefinition]):
             )
         except StopIteration as exc:
             raise KeyError(factor_id) from exc
-
-
-__all__ = ["FactorCatalog"]

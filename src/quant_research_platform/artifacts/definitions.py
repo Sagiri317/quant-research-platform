@@ -32,6 +32,3 @@ def output_catalog() -> OutputCatalog:
             ),
         )
     )
-
-
-__all__ = ["output_catalog"]

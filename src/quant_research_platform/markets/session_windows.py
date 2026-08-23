@@ -136,12 +136,6 @@ class SessionWindowPlanner:
         return iter_windows()
 
 
-__all__ = [
-    "SessionWindow",
-    "SessionWindowPlanner",
-    "normalize_session_dates",
-]
-
 
 def _require_non_negative_int(value: object, *, error: str) -> None:
     if type(value) is not int or value < 0:

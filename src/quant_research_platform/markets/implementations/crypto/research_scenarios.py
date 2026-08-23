@@ -56,12 +56,3 @@ def build_evaluation_catalog(
     signals: tuple[SignalSpec, ...] | None = None,
 ) -> EvaluationCatalog:
     return EvaluationCatalog(build_evaluation_specs(signals=signals))
-
-
-__all__ = [
-    "DEFAULT_SIGNAL_COLUMNS",
-    "EVALUATION_RUN_ID",
-    "build_evaluation_catalog",
-    "build_evaluation_specs",
-    "build_signal_specs",
-]

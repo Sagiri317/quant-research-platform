@@ -1378,15 +1378,3 @@ def inspect_raw_export_tree(root: Path) -> Iterator[RawExportIntakeResult]:
                             verify_root()
 
     return iter_inspections()
-
-
-__all__ = [
-    "RawExportIntakeResult",
-    "STRING_CODE_DTYPES",
-    "SUPPORTED_RAW_EXPORT_SUFFIXES",
-    "dataset_files_with_identity_by_id",
-    "inspect_raw_export",
-    "inspect_raw_export_tree",
-    "iter_private_export_chunks",
-    "iter_raw_export_files",
-]

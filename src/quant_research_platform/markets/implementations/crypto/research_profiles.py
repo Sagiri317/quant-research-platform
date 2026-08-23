@@ -93,11 +93,3 @@ def _column_roles(columns: tuple[str, ...]) -> dict[str, ColumnRole]:
             continue
         roles[column] = fields.get(column).role
     return roles
-
-
-__all__ = [
-    "RESEARCH_DATASET_CONTEXT_COLUMNS",
-    "RESEARCH_DATASET_FILTER_COLUMNS",
-    "build_research_dataset_catalog",
-    "build_research_dataset_specs",
-]

@@ -23,6 +23,3 @@ class EvaluationCatalog(ImmutableCatalog[EvaluationSpec]):
             return next(spec for spec in self._items if spec.run_id == run_id)
         except StopIteration as exc:
             raise KeyError(f"unknown_evaluation_spec: {run_id}") from exc
-
-
-__all__ = ["EvaluationCatalog"]

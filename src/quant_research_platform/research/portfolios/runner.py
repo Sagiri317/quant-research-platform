@@ -1690,6 +1690,3 @@ def _empty_summary_frame(columns: Iterable[str]) -> pd.DataFrame:
     if "position" in frame.columns:
         frame["position"] = frame["position"].astype("float64")
     return frame
-
-
-__all__ = ["PortfolioResult", "build_portfolio_result_from_research_dataset"]

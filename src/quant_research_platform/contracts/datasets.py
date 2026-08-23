@@ -219,6 +219,3 @@ def _validate_feature_transforms(
             "feature_transform_output_not_in_feature_columns: "
             + ", ".join(undeclared_outputs)
         )
-
-
-__all__ = ["ResearchDatasetSpec"]

@@ -266,6 +266,3 @@ class ModelSpec:
     @property
     def input_columns(self) -> tuple[str, ...]:
         return (*self.input_factor_columns, *self.input_feature_columns)
-
-
-__all__ = ["ModelSpec"]

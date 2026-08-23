@@ -8,8 +8,6 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_PANEL_DATA_ID,
 )
 from quant_research_platform.research.factors.microstructure.definitions import (
-    MICROSTRUCTURE_FACTOR_FAMILY,
-    MICROSTRUCTURE_INPUT_COLUMNS,
     microstructure_factor_definitions,
 )
 
@@ -21,10 +19,3 @@ def factor_catalog() -> FactorCatalog:
             required_input_data_id=MARKET_PANEL_DATA_ID,
         )
     )
-
-
-__all__ = [
-    "MICROSTRUCTURE_FACTOR_FAMILY",
-    "MICROSTRUCTURE_INPUT_COLUMNS",
-    "factor_catalog",
-]

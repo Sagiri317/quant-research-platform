@@ -12,6 +12,3 @@ def normalize_group_key(
     else:
         values = tuple(group_key)
     return dict(zip(group_columns, values, strict=True))
-
-
-__all__ = ["normalize_group_key"]

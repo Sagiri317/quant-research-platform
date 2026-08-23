@@ -130,6 +130,3 @@ def _is_null_group_key(value: object) -> bool:
         return bool(pd.isna(value))
     except (TypeError, ValueError):
         return False
-
-
-__all__ = ["contiguous_segment_ids", "iter_grouped_timestamps"]

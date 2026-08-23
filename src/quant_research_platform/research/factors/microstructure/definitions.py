@@ -100,12 +100,3 @@ def _definition(
         required_input_data_id=required_input_data_id,
         window=window,
     )
-
-
-__all__ = [
-    "MICROSTRUCTURE_FACTOR_FAMILY",
-    "MICROSTRUCTURE_INPUT_COLUMNS",
-    "POINT_IN_TIME_MICROSTRUCTURE_FACTORS",
-    "ROLLING_5M_MICROSTRUCTURE_FACTORS",
-    "microstructure_factor_definitions",
-]

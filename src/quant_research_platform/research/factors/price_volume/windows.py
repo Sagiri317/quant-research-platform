@@ -114,7 +114,3 @@ def price_volume_valid_bar_read_window(
     if start >= read_window.start:
         return read_window
     return TimeWindow(start, read_window.end)
-
-__all__ = [
-    "price_volume_valid_bar_read_window",
-]

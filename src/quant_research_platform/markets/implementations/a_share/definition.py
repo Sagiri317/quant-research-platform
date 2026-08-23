@@ -31,6 +31,3 @@ def market_definition() -> MarketDefinition:
             FORWARD_RETURNS_PROCESSED_DATA_ID,
         ),
     )
-
-
-__all__ = ["market_definition"]

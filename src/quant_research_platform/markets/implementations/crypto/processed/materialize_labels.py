@@ -348,6 +348,3 @@ def _label_frame(panel: pd.DataFrame) -> pd.DataFrame:
         expected_interval=pd.Timedelta(minutes=1),
         require_contiguous=True,
     )
-
-
-__all__ = ["write_labels"]

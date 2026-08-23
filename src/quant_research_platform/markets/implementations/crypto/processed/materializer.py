@@ -335,6 +335,3 @@ def _strict_kinds(kinds: object) -> frozenset[ProcessedDataKind]:
     ):
         raise ValueError("invalid_crypto_processed_kinds")
     return kinds
-
-
-__all__ = ["materialize_processed_data", "processed_catalog"]

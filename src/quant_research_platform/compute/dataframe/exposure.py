@@ -85,7 +85,3 @@ def summarize_exposure(
             }
         )
     return pd.DataFrame.from_records(records, columns=output_columns)
-
-__all__ = [
-    "summarize_exposure",
-]

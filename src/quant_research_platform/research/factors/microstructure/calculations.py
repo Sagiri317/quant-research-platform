@@ -147,6 +147,3 @@ def _rolling_group_sum(
         .sort_index()
     )
     return rolling_sum.where(rolling_observed.eq(rolling_window))
-
-
-__all__ = ["calculate_microstructure_factors"]

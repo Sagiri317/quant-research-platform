@@ -23,6 +23,3 @@ class ResearchDatasetCatalog(ImmutableCatalog[ResearchDatasetSpec]):
             return next(spec for spec in self._items if spec.data_id == data_id)
         except StopIteration as exc:
             raise KeyError(f"unknown_research_dataset_spec: {data_id}") from exc
-
-
-__all__ = ["ResearchDatasetCatalog"]

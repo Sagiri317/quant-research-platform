@@ -20,11 +20,3 @@ def aggregate_trades_data_id() -> str:
 
 def depth_levels_data_id() -> str:
     return "depth_levels_tick"
-
-
-__all__ = [
-    "SOURCE_ID",
-    "aggregate_trades_data_id",
-    "depth_levels_data_id",
-    "market_bars_data_id",
-]

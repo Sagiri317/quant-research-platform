@@ -71,8 +71,6 @@ def main() -> None:
     app()
 
 
-__all__ = ["app", "main"]
-
 
 if __name__ == "__main__":
     main()

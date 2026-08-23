@@ -58,13 +58,3 @@ def _require_exact_source_input_set(spec: ProcessedDataSpec) -> None:
     )
     if len(values) != len(expected) or set(values) != set(expected):
         raise ValueError("panel_source_input_data_ids_mismatch")
-
-
-__all__ = [
-    "AGGREGATE_TRADES_SOURCE_DATA_ID",
-    "DEPTH_LEVELS_SOURCE_DATA_ID",
-    "MARKET_BARS_SOURCE_DATA_ID",
-    "aggregate_trades_source_data_id",
-    "depth_levels_source_data_id",
-    "market_bars_source_data_id",
-]

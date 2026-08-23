@@ -143,6 +143,3 @@ def write_annotations(
         resource_policy=policy,
         cleanup_stack=cleanup_stack,
     )
-
-
-__all__ = ["write_annotations"]

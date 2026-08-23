@@ -37,10 +37,3 @@ def label_catalog() -> LabelCatalog:
             strict=True,
         )
     )
-
-
-__all__ = [
-    "CRYPTO_FORWARD_RETURN_COLUMNS",
-    "CRYPTO_FORWARD_RETURN_HORIZONS",
-    "label_catalog",
-]

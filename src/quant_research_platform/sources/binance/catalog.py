@@ -13,6 +13,3 @@ def source_definition() -> SourceDefinition:
         display_name="Binance public market data source",
         implementation_package="quant_research_platform.sources.binance",
     )
-
-
-__all__ = ["source_definition"]

@@ -179,6 +179,3 @@ def write_labels(
         resource_policy=policy,
         cleanup_stack=cleanup_stack,
     )
-
-
-__all__ = ["select_label_definitions_for_spec", "write_labels"]

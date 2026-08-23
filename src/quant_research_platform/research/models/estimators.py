@@ -159,22 +159,3 @@ _MODEL_ESTIMATOR_FACTORIES: dict[
     "equal_weight_rank_ensemble": equal_weight_rank_ensemble,
     "ic_weighted_rank_ensemble": ic_weighted_rank_ensemble,
 }
-
-
-__all__ = [
-    "SingleFactorBaseline",
-    "decision_tree_regressor",
-    "elastic_net_estimator",
-    "equal_weight_rank_ensemble",
-    "extra_trees_regressor",
-    "gradient_boosting_regressor",
-    "hist_gradient_boosting_regressor",
-    "huber_regression_estimator",
-    "ic_weighted_rank_ensemble",
-    "lasso_regression_estimator",
-    "lightgbm_regressor",
-    "linear_regression_estimator",
-    "random_forest_regressor",
-    "ridge_regression_estimator",
-    "xgboost_regressor",
-]

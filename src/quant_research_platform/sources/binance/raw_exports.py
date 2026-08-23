@@ -427,6 +427,3 @@ def _validate_depth_side(
             first_price = price
         previous_price = price
     return first_price
-
-
-__all__ = ["DATA_ID_BY_RAW_KIND", "dataset_files_by_id", "iter_raw_envelopes"]

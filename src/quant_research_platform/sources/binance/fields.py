@@ -11,6 +11,3 @@ def field_role(column: str, *, primary_key: tuple[str, ...]) -> ColumnRole:
     if column in primary_key:
         return ColumnRole.KEY
     return ColumnRole.CONTEXT
-
-
-__all__ = ["field_role"]

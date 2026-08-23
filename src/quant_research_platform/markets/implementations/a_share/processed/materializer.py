@@ -257,6 +257,3 @@ def _materialize_one(
             cleanup_stack=cleanup_stack,
         )
     raise ValueError(f"unsupported_processed_kind: {spec.kind}")
-
-
-__all__ = ["materialize_processed_data"]
