@@ -19,6 +19,7 @@ from quant_research_platform.contracts.predictions import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research._memory import _selected_frame_payload_bytes
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.datasets.validation import (
@@ -48,7 +49,6 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -99,7 +99,7 @@ def build_prediction_result_from_research_dataset(
             )
         raise
     source_chunks = operation.enter_context(
-        closing_dataset_iterator(iter(result.output_chunks))
+        closing_iterator(iter(result.output_chunks))
     )
     operation.enter_context(result)
     chunks_complete = False
@@ -107,15 +107,11 @@ def build_prediction_result_from_research_dataset(
     terminal_error: BaseException | None = None
     operation_open = True
 
-    def close_operation(*, suppress_errors: bool = False) -> None:
+    def close_operation() -> None:
         nonlocal operation_open
         if operation_open:
             operation_open = False
-            try:
-                operation.close()
-            except BaseException:
-                if not suppress_errors:
-                    raise
+            operation.close()
 
     def close_result() -> None:
         nonlocal terminal_error

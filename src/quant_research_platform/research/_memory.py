@@ -9,13 +9,13 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
 
 def _iter_contiguous_session_frames(
@@ -73,7 +73,7 @@ def iter_complete_time_sized_frames(
     """Yield chunks without splitting any timestamp session across inputs."""
 
     with ExitStack() as pending_capture_cleanup:
-        pending_capture_cleanup.enter_context(closing_dataset_iterator(frames))
+        pending_capture_cleanup.enter_context(closing_iterator(frames))
         bound_policy = resource_policy or current_runtime_resource_policy()
         activation_cleanup = pending_capture_cleanup.pop_all()
 
@@ -105,7 +105,7 @@ def iter_complete_session_frames(
     )
 
     def activate() -> Iterator[pd.DataFrame]:
-        with closing_dataset_iterator(complete_frames):
+        with closing_iterator(complete_frames):
             for frame in complete_frames:
                 if frame.empty:
                     yield frame

@@ -176,11 +176,12 @@ class DatasetSessionInventory:
         primary: BaseException | None,
         _traceback: object,
     ) -> None:
+        if primary is None:
+            self.close()
+            return
         try:
             self.close()
         except BaseException as cleanup_error:
-            if primary is None:
-                raise
             primary.add_note(
                 "dataset inventory cleanup also failed: "
                 f"{type(cleanup_error).__name__}"
@@ -188,15 +189,39 @@ class DatasetSessionInventory:
 
     def close(self) -> None:
         primary = sys.exception()
+        first_error: BaseException | None = None
         connection = self._connection
+        self._connection = None
         if connection is not None:
-            connection.close()
-            self._connection = None
+            try:
+                connection.close()
+            except BaseException as connection_error:
+                if primary is not None:
+                    primary.add_note(
+                        "dataset inventory connection close also failed: "
+                        f"{type(connection_error).__name__}"
+                    )
+                else:
+                    first_error = connection_error
 
         temporary = self._temporary_directory
+        self._temporary_directory = None
         if temporary is not None:
-            remove_owned_scratch(temporary)
-            self._temporary_directory = None
+            try:
+                remove_owned_scratch(temporary)
+            except BaseException as temporary_error:
+                if primary is not None:
+                    primary.add_note(
+                        "dataset inventory scratch cleanup also failed: "
+                        f"{type(temporary_error).__name__}"
+                    )
+                elif first_error is None:
+                    first_error = temporary_error
+                else:
+                    first_error.add_note(
+                        "dataset inventory scratch cleanup also failed: "
+                        f"{type(temporary_error).__name__}"
+                    )
 
         try:
             self._lease.close()
@@ -206,8 +231,15 @@ class DatasetSessionInventory:
                     "dataset inventory lease release also failed: "
                     f"{type(lease_error).__name__}"
                 )
-                return
-            raise
+            elif first_error is None:
+                first_error = lease_error
+            else:
+                first_error.add_note(
+                    "dataset inventory lease release also failed: "
+                    f"{type(lease_error).__name__}"
+                )
+        if first_error is not None:
+            raise first_error
 
     @property
     def scratch_path(self) -> Path:
@@ -702,13 +734,17 @@ class DatasetSessionInventory:
 
 
 def _close_cursor_preserving_primary(cursor: sqlite3.Cursor) -> None:
-    if sys.exception() is None:
+    primary = sys.exception()
+    if primary is None:
         cursor.close()
         return
     try:
         cursor.close()
-    except BaseException:
-        pass
+    except BaseException as close_error:
+        primary.add_note(
+            "dataset inventory cursor close also failed: "
+            f"{type(close_error).__name__}"
+        )
 
 
 def _identity_values(identity: DatasetFileIdentity) -> tuple[str, str, str, str]:

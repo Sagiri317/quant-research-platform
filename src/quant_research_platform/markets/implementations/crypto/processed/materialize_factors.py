@@ -18,6 +18,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_validation as validation,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.factors.microstructure.calculations import (
     calculate_microstructure_factors,
 )
@@ -34,7 +35,6 @@ from quant_research_platform.storage._dataset_inspection import (
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
-    closing_dataset_iterator,
     iter_dataset_chunks,
 )
 from quant_research_platform.storage._dataset_writing import (
@@ -148,7 +148,7 @@ def _iter_factor_chunks(
                 if active_key != key:
                     active_key = key
                     close_carry()
-                with closing_dataset_iterator(
+                with closing_iterator(
                     iter_dataset_chunks(
                         asset_session,
                         target_chunk_bytes=chunk_target_bytes,
@@ -218,8 +218,14 @@ def _iter_factor_chunks(
                                 next_carry_bytes
                                 + min(64 * 1024, max(1, carry_bound // 2))
                             )
-                        except BaseException:
-                            next_carry_lease.close()
+                        except BaseException as primary:
+                            try:
+                                next_carry_lease.close()
+                            except BaseException as cleanup_error:
+                                primary.add_note(
+                                    "crypto factor carry lease close also failed: "
+                                    f"{type(cleanup_error).__name__}"
+                                )
                             raise
                         old_carry_lease = carry_lease
                         active_carry = next_carry

@@ -17,6 +17,7 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow, is_intraday_time_window
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
 )
@@ -34,7 +35,6 @@ from quant_research_platform.storage._dataset_inspection import _release_owned_v
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
-    closing_dataset_iterator,
     iter_dataset_chunks,
     materialize_dataset_session_owned,
     open_dataset_session,
@@ -162,7 +162,7 @@ def _iter_joined_processed_chunks(
         sessions[base_data_id],
         time_window=time_window,
     )
-    with closing_dataset_iterator(iter(chunk_windows)) as active_chunk_windows:
+    with closing_iterator(iter(chunk_windows)) as active_chunk_windows:
         for window_index, chunk_window in enumerate(active_chunk_windows):
             if window_index:
                 lease = yield producer_bound
@@ -254,8 +254,14 @@ def _join_processed_inputs(
                             raise ValueError(
                                 "research_known_join_payloads_exceed_task_memory_budget"
                             )
-                    except BaseException:
-                        next_base_state.close()
+                    except BaseException as primary:
+                        try:
+                            next_base_state.close()
+                        except BaseException as cleanup_error:
+                            primary.add_note(
+                                "research base-key state release also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
                         raise
                     assembled = input_frame
                     assembled_state.close()
@@ -312,14 +318,29 @@ def _join_processed_inputs(
                         raise ValueError(
                             "research_known_join_payloads_exceed_task_memory_budget"
                         )
-                except BaseException:
-                    output_state.close()
+                except BaseException as primary:
+                    try:
+                        output_state.close()
+                    except BaseException as cleanup_error:
+                        primary.add_note(
+                            "research merge state release also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
                     raise
                 assembled_state.close()
                 assembled = merged
                 assembled_state = output_state.pop_all()
             finally:
-                input_state.close()
+                primary = sys.exception()
+                try:
+                    input_state.close()
+                except BaseException as cleanup_error:
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "research input state release also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
 
         if assembled is None:
             raise ValueError("empty_research_dataset_inputs")
@@ -336,8 +357,14 @@ def _join_processed_inputs(
                         transformed_bytes,
                     )
                 )
-            except BaseException:
-                transformed_state.close()
+            except BaseException as primary:
+                try:
+                    transformed_state.close()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "research transformed state release also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
                 raise
             assembled_state.close()
             assembled = transformed
@@ -355,8 +382,35 @@ def _join_processed_inputs(
                 )
             return output
     finally:
-        base_key_state.close()
-        assembled_state.close()
+        primary = sys.exception()
+        first_failure: BaseException | None = None
+        try:
+            base_key_state.close()
+        except BaseException as cleanup_error:
+            if primary is not None:
+                primary.add_note(
+                    "research base-key state release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+            else:
+                first_failure = cleanup_error
+        try:
+            assembled_state.close()
+        except BaseException as cleanup_error:
+            if primary is not None:
+                primary.add_note(
+                    "research assembled state release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+            elif first_failure is None:
+                first_failure = cleanup_error
+            else:
+                first_failure.add_note(
+                    "research assembled state release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        if first_failure is not None:
+            raise first_failure
 
 
 def _frame_bytes(frame: pd.DataFrame) -> int:
@@ -381,7 +435,7 @@ def _iter_research_chunk_windows_from_base_input(
     last_timestamp: pd.Timestamp | None = None
     saw_timestamp = False
     try:
-        with closing_dataset_iterator(
+        with closing_iterator(
             iter_dataset_chunks(
                 session,
                 target_chunk_bytes=policy.available_memory_bytes,
@@ -554,13 +608,30 @@ def _close_research_view_preserving_primary(
         try:
             base_session.inventory.release_path_selection(view.path_selection)
         except BaseException as exc:
-            if primary is None:
+            if primary is None and first_failure is None:
                 first_failure = exc
+            elif primary is not None:
+                primary.add_note(
+                    "research session path-selection cleanup also failed: "
+                    f"{type(exc).__name__}"
+                )
+            else:
+                first_failure.add_note(
+                    "research session close also failed: " f"{type(exc).__name__}"
+                )
     try:
         view.close()
     except BaseException as exc:
         if primary is None and first_failure is None:
             first_failure = exc
+        elif primary is not None:
+            primary.add_note(
+                "research session close also failed: " f"{type(exc).__name__}"
+            )
+        else:
+            first_failure.add_note(
+                "research session close also failed: " f"{type(exc).__name__}"
+            )
     if first_failure is not None:
         raise first_failure
 
@@ -843,11 +914,14 @@ def _research_session_view(
             parquet_filters=parquet_filters,
             owns_inventory=False,
         )
-    except BaseException:
+    except BaseException as primary:
         try:
             session.inventory.release_path_selection(path_selection)
-        except BaseException:
-            pass
+        except BaseException as cleanup_error:
+            primary.add_note(
+                "research session path-selection cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
         raise
 
 

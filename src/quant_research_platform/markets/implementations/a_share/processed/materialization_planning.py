@@ -31,6 +31,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.markets.session_windows import (
     require_non_negative_session_offset,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     _OwnedValue,
@@ -47,7 +48,6 @@ from quant_research_platform.storage._dataset_key_tracking import (
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
-    closing_dataset_iterator,
     iter_dataset_chunks,
     open_dataset_session,
 )
@@ -130,7 +130,7 @@ def require_dataset_coverage(
                 session,
                 target_chunk_bytes=resource_policy.available_memory_bytes,
             )
-            with closing_dataset_iterator(chunks):
+            with closing_iterator(chunks):
                 for chunk in chunks:
                     for raw_timestamp in chunk["timestamp"]:
                         try:
@@ -249,7 +249,7 @@ def iter_active_materialization_batches(
                     session,
                     target_chunk_bytes=discovery_target,
                 )
-                with closing_dataset_iterator(chunks):
+                with closing_iterator(chunks):
                     for chunk in chunks:
                         if asset_column not in chunk:
                             raise ValueError("missing_processed_panel_asset_id")
@@ -340,7 +340,7 @@ def iter_active_materialization_batches(
             payloads = index.identity_payload_values(namespace="active-assets")
             asset_reservations = ExitStack()
             try:
-                with closing_dataset_iterator(payloads):
+                with closing_iterator(payloads):
                     for payload in payloads:
                         item_bytes = (
                             3 * pointer_bytes
@@ -592,7 +592,7 @@ def _build_valid_bar_key_index(
             session,
             target_chunk_bytes=resource_policy.available_memory_bytes,
         )
-        with closing_dataset_iterator(frames):
+        with closing_iterator(frames):
             for frame in frames:
                 missing = {"asset_id", "timestamp"}.difference(frame.columns)
                 if missing:
@@ -700,7 +700,7 @@ def bounded_valid_bar_key_coverage(
             values = index.identity_payload_values(
                 namespace=_valid_bar_asset_namespace(asset_id)
             )
-            with closing_dataset_iterator(values):
+            with closing_iterator(values):
                 for payload in values:
                     timestamp_value = _valid_bar_timestamp_value(payload)
                     if timestamp_value < first_core:
@@ -869,7 +869,7 @@ def available_trading_sessions(
             )
             session_values = np.empty(calendar_row_count, dtype=np.int64)
             session_position = 0
-            with closing_dataset_iterator(chunks):
+            with closing_iterator(chunks):
                 for calendar in chunks:
                     source_market_type = calendar["source_market_type"]
                     trading = calendar["is_trading_day"]

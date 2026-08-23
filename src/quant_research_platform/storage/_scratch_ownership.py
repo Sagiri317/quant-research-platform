@@ -19,14 +19,17 @@ def handle_preserving_primary(handle: Any) -> Iterator[Any]:
 
     try:
         yield handle
-    finally:
-        if sys.exception() is None:
+    except BaseException as primary:
+        try:
             handle.close()
-        else:
-            try:
-                handle.close()
-            except BaseException:
-                pass
+        except BaseException as close_error:
+            primary.add_note(
+                "scratch handle close also failed: "
+                f"{type(close_error).__name__}"
+            )
+        raise
+    else:
+        handle.close()
 
 
 def move_path_no_replace(source: Path, target: Path) -> None:

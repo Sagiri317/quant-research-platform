@@ -133,10 +133,37 @@ def calculate_market_panel_from_chunks(
                     )
                 return result
     finally:
+        primary = sys.exception()
+        first_failure: BaseException | None = None
         if trade_reducer is not None:
-            trade_reducer.close()
+            try:
+                trade_reducer.close()
+            except BaseException as cleanup_error:
+                if primary is not None:
+                    primary.add_note(
+                        "crypto trade reducer close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                else:
+                    first_failure = cleanup_error
         if depth_reducer is not None:
-            depth_reducer.close()
+            try:
+                depth_reducer.close()
+            except BaseException as cleanup_error:
+                if primary is not None:
+                    primary.add_note(
+                        "crypto depth reducer close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                elif first_failure is None:
+                    first_failure = cleanup_error
+                else:
+                    first_failure.add_note(
+                        "crypto depth reducer close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+        if first_failure is not None:
+            raise first_failure
 
 
 def _calculate_market_panel(

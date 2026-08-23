@@ -15,6 +15,7 @@ from quant_research_platform.contracts._json import (
     bounded_rendered_qrp_json_object_size,
     canonical_json_hash,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -27,7 +28,6 @@ from quant_research_platform.storage._dataset_inspection import (
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
-    closing_dataset_iterator,
     iter_dataset_chunks,
     open_dataset_session,
 )
@@ -568,7 +568,7 @@ def _aggregate_dataset_stats(
         session,
         target_chunk_bytes=resource_policy.available_memory_bytes,
     )
-    with closing_dataset_iterator(chunks):
+    with closing_iterator(chunks):
         for frame in chunks:
             row_count += int(len(frame))
             for column in frame.columns:

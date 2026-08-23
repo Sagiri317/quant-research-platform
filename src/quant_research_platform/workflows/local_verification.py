@@ -289,12 +289,15 @@ def run_local_verification(
                 run_root=run_root,
                 replacing=replacing,
             )
-        except BaseException:
+        except BaseException as primary:
             if staged_claimed:
                 try:
                     remove_owned_scratch(staged_root)
-                except BaseException:
-                    pass
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "local verification staged-root cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
             raise
     return LocalVerificationRunResult(
         status=result.status,

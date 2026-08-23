@@ -41,6 +41,7 @@ from quant_research_platform.contracts.evaluations import (
     strict_non_negative_count_series,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
     evidence_text_stream_unsafe_reason,
 )
@@ -51,7 +52,6 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage._dataset_physical import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
@@ -419,7 +419,7 @@ def _write_evaluation_artifact_chunks(
             writer_count=2,
             index_bytes=0,
         )
-        with closing_dataset_iterator(iter(chunks)) as active_chunks:
+        with closing_iterator(iter(chunks)) as active_chunks:
             for metrics, grouped, _ in active_chunks:
                 write_frame("metrics", metrics)
                 write_frame("grouped_label_values", grouped)
@@ -481,8 +481,11 @@ def _write_evaluation_artifact_chunks(
             writer = writers.pop(name)
             try:
                 writer.close()
-            except BaseException:
-                pass
+            except BaseException as close_error:
+                primary.add_note(
+                    "evaluation parquet writer close also failed: "
+                    f"{type(close_error).__name__}"
+                )
         for name, state_to_close in tuple(writer_states.items()):
             writer_states.pop(name)
             try:

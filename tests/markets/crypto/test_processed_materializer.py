@@ -41,6 +41,7 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 from quant_research_platform.markets.implementations.crypto.research_profiles import (
     build_research_dataset_catalog,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
@@ -57,7 +58,6 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage._dataset_reading import (
-    closing_dataset_iterator,
     open_dataset_session,
 )
 from quant_research_platform.storage.datasets import (
@@ -93,7 +93,7 @@ class SimpleNamespace(_SimpleNamespace):
 
 def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
     frames = []
-    with closing_dataset_iterator(data):
+    with closing_iterator(data):
         bound = next(data)
         while True:
             lease = policy.lease("test.crypto.consumer", bound)

@@ -232,6 +232,16 @@ def _close_lazy_json_values(
         except BaseException as exc:
             if primary is None and cleanup_failure is None:
                 cleanup_failure = exc
+            elif primary is not None:
+                primary.add_note(
+                    "lazy JSON value close also failed: "
+                    f"{type(exc).__name__}"
+                )
+            else:
+                cleanup_failure.add_note(
+                    "lazy JSON value close also failed: "
+                    f"{type(exc).__name__}"
+                )
     if cleanup_failure is not None:
         raise cleanup_failure
 

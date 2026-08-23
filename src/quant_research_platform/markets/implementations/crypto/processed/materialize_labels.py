@@ -24,6 +24,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_validation as validation,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
@@ -38,7 +39,6 @@ from quant_research_platform.storage._dataset_inspection import _release_owned_v
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
-    closing_dataset_iterator,
     iter_dataset_chunks,
 )
 from quant_research_platform.storage._dataset_writing import (
@@ -152,8 +152,14 @@ def _iter_label_chunks(
                 next_lease.shrink_to(
                     next_bytes + min(64 * 1024, max(1, bound // 2))
                 )
-            except BaseException:
-                next_lease.close()
+            except BaseException as primary:
+                try:
+                    next_lease.close()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "crypto label buffer lease close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
                 raise
             old_buffer_lease = buffer_lease
             buffer = next_buffer
@@ -199,7 +205,7 @@ def _iter_label_chunks(
                     else:
                         lease.close()
                         lease = None
-                with closing_dataset_iterator(
+                with closing_iterator(
                     iter_dataset_chunks(
                         asset_session,
                         target_chunk_bytes=chunk_target_bytes,

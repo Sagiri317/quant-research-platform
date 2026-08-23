@@ -23,6 +23,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import strict_string_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -47,7 +48,6 @@ from quant_research_platform.storage._dataset_paths import (
     require_unaliased_path,
 )
 from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage._dataset_writing import write_dataset
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.layout import StorageLayout
@@ -590,10 +590,36 @@ def iter_interim_frames(
                         break
             finally:
                 owned = None
-                with closing_dataset_iterator(producer):
-                    pass
+                primary = sys.exception()
+                first_failure: BaseException | None = None
+                try:
+                    producer.close()
+                except BaseException as cleanup_error:
+                    if primary is None:
+                        first_failure = cleanup_error
+                    else:
+                        primary.add_note(
+                            "CSMAR interim producer close also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
                 if lease is not None:
-                    lease.close()
+                    try:
+                        lease.close()
+                    except BaseException as cleanup_error:
+                        if primary is None and first_failure is None:
+                            first_failure = cleanup_error
+                        elif primary is not None:
+                            primary.add_note(
+                                "CSMAR interim lease close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        else:
+                            first_failure.add_note(
+                                "CSMAR interim lease close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                if first_failure is not None:
+                    raise first_failure
 
     return activate()
 
@@ -615,7 +641,7 @@ def _iter_interim_frames(
         operation_reports: list[dict[str, object]] = []
         raw_dataset = _raw_dataset_for_interim(data_id)
         inputs = iter(input_files)
-        with closing_dataset_iterator(inputs):
+        with closing_iterator(inputs):
             selected_scratch_parent = scratch_parent
             prepared_inputs: Iterable[Path | tuple[Path, DatasetFileIdentity]] = inputs
             if data_id in SOURCE_REFERENCE_DATA_IDS:
@@ -670,10 +696,10 @@ def _iter_interim_frames(
                         pruning_reports=operation_reports,
                         scratch_parent=selected_scratch_parent,
                     )
-                    with closing_dataset_iterator(reference_frames):
+                    with closing_iterator(reference_frames):
                         yield from reference_frames
                 else:
-                    with closing_dataset_iterator(frames):
+                    with closing_iterator(frames):
                         yield from frames
         if pruning_reports is not None:
             for report in operation_reports:
@@ -736,7 +762,7 @@ def _materialize_interim_data(
         source_raw_root,
         resource_policy=resource_policy,
     )
-    with closing_dataset_iterator(indexed_files):
+    with closing_iterator(indexed_files):
         for raw_dataset, group in groupby(indexed_files, key=lambda item: item[0]):
             data_id = requested_by_raw.get(raw_dataset)
             if data_id is None:
@@ -757,7 +783,7 @@ def _materialize_interim_data(
                 pruning_reports=pruning_reports,
                 scratch_parent=artifact_root.parent,
             )
-            with closing_dataset_iterator(frames):
+            with closing_iterator(frames):
                 try:
                     write_dataset(
                         artifact_root,
@@ -813,7 +839,7 @@ def _iter_pruned_interim_frames(
                 expected_identity=expected_identity,
             )
         )
-        with closing_dataset_iterator(chunks):
+        with closing_iterator(chunks):
             try:
                 upstream_bound = next(chunks)
             except StopIteration:
@@ -1121,7 +1147,7 @@ def _iter_deduped_reference_frames(
             index.retained_memory_bytes,
         )
         try:
-            with closing_dataset_iterator(frames), index:
+            with closing_iterator(frames), index:
                 try:
                     source_bound = next(frames)
                 except StopIteration:

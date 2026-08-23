@@ -92,11 +92,38 @@ def iter_raw_envelopes(
                     lease.close()
                     lease = None
             finally:
+                primary = sys.exception()
+                first_failure: BaseException | None = None
                 close = getattr(chunks, "close", None)
                 if close is not None:
-                    close()
+                    try:
+                        close()
+                    except BaseException as cleanup_error:
+                        if primary is not None:
+                            primary.add_note(
+                                "Binance raw chunks close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        else:
+                            first_failure = cleanup_error
                 if lease is not None:
-                    lease.close()
+                    try:
+                        lease.close()
+                    except BaseException as cleanup_error:
+                        if primary is not None:
+                            primary.add_note(
+                                "Binance raw lease close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        elif first_failure is None:
+                            first_failure = cleanup_error
+                        else:
+                            first_failure.add_note(
+                                "Binance raw lease close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                if first_failure is not None:
+                    raise first_failure
 
     return activate()
 

@@ -21,6 +21,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_ID,
     canonical_crypto_asset_id,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
@@ -29,7 +30,6 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
-    closing_dataset_iterator,
     filter_frame_by_time_window,
     iter_dataset_chunks,
     iter_dataset_file_batches,
@@ -87,7 +87,7 @@ def crypto_asset_session_views(
             session.inventory.select_path(selection, current_path)
 
         try:
-            with closing_dataset_iterator(
+            with closing_iterator(
                 iter_dataset_file_batches(
                     session,
                     columns=discovery_columns,
@@ -138,6 +138,16 @@ def crypto_asset_session_views(
                 except BaseException as exc:
                     if primary is None and first_failure is None:
                         first_failure = exc
+                    elif primary is not None:
+                        primary.add_note(
+                            "crypto asset path-selection cleanup also failed: "
+                            f"{type(exc).__name__}"
+                        )
+                    else:
+                        first_failure.add_note(
+                            "crypto asset path-selection cleanup also failed: "
+                            f"{type(exc).__name__}"
+                        )
             if first_failure is not None:
                 raise first_failure
 
@@ -209,13 +219,13 @@ def validate_panel_materialization(
         )
         chunk_target_bytes = resource_policy.available_memory_bytes
         with (
-            closing_dataset_iterator(
+            closing_iterator(
                 iter_dataset_chunks(
                     bar_session,
                     target_chunk_bytes=chunk_target_bytes,
                 )
             ) as bar_chunks,
-            closing_dataset_iterator(
+            closing_iterator(
                 _iter_panel_primary_key_chunks(
                     bar_chunks,
                     primary_key=spec.primary_key,
@@ -252,7 +262,7 @@ def validate_panel_dependent_materialization(
             error="crypto_processed_input_dataset_identity_mismatch",
         )
         chunk_target_bytes = resource_policy.available_memory_bytes
-        with closing_dataset_iterator(
+        with closing_iterator(
             _iter_core_window_chunks(
                 panel_session,
                 time_window=time_window,
@@ -331,19 +341,19 @@ def validate_existing_panel_materialization(
         )
         chunk_target_bytes = resource_policy.available_memory_bytes
         with (
-            closing_dataset_iterator(
+            closing_iterator(
                 iter_dataset_chunks(
                     bar_session,
                     target_chunk_bytes=chunk_target_bytes,
                 )
             ) as bar_chunks,
-            closing_dataset_iterator(
+            closing_iterator(
                 _iter_panel_primary_key_chunks(
                     bar_chunks,
                     primary_key=spec.primary_key,
                 )
             ) as expected_chunks,
-            closing_dataset_iterator(
+            closing_iterator(
                 iter_dataset_chunks(
                     panel_session,
                     target_chunk_bytes=chunk_target_bytes,
@@ -382,7 +392,7 @@ def _iter_core_window_chunks(
         owns_inventory=False,
     )
     view.verify()
-    with closing_dataset_iterator(
+    with closing_iterator(
         iter_dataset_chunks(
             view,
             target_chunk_bytes=target_chunk_bytes,
@@ -412,8 +422,8 @@ def _validate_ordered_key_stream_coverage(
         error=error,
     )
     with (
-        closing_dataset_iterator(expected_rows),
-        closing_dataset_iterator(actual_rows),
+        closing_iterator(expected_rows),
+        closing_iterator(actual_rows),
     ):
         for expected_row, actual_row in zip_longest(
             expected_rows,

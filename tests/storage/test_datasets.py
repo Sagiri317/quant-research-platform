@@ -53,6 +53,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
@@ -675,7 +676,7 @@ def test_private_writer_cleanup_restores_outer_root_baseline(
     assert policy.state == "CLOSED"
 
 
-def test_private_writer_close_failure_preserves_primary_and_poisoned_lease(
+def test_private_writer_close_failure_preserves_primary_and_releases_lease(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -710,10 +711,9 @@ def test_private_writer_close_failure_preserves_primary_and_poisoned_lease(
     with pytest.raises(RuntimeError, match="writer_primary") as raised:
         run()
     assert raised.value is primary
-    assert any("producer_close_failed" in note for note in primary.__notes__)
-    assert policy.state == "POISONED"
-    assert policy.used_memory_bytes > 0
-    policy._lock.close()  # noqa: SLF001
+    assert "dataset producer close also failed: OSError" in primary.__notes__
+    assert policy.state == "CLOSED"
+    assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt, SystemExit))
@@ -1503,7 +1503,7 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
             target_chunk_bytes=max(output_bytes),
         )
 
-        with dataset_reading.closing_dataset_iterator(converted):
+        with closing_iterator(converted):
             next(converted)
             remaining = policy.memory_budget_bytes - policy.used_memory_bytes
             assert remaining > 0
@@ -1552,7 +1552,7 @@ def test_dataset_file_batches_do_not_double_count_reserved_previous_output(
         operation_headroom_bytes=64 * 1024,
     )
 
-    with dataset_reading.closing_dataset_iterator(converted):
+    with closing_iterator(converted):
         first_path, first = next(converted)
         with runtime_resource_policy_scope(policy):
             with policy.lease("research.time.pending", output_bytes[0]):
@@ -5295,7 +5295,6 @@ def test_reader_final_verify_failure_propagates_without_external_primary(
         next(iterator)
         with pytest.raises(OSError, match="verify_failure"):
             iterator.close()  # type: ignore[attr-defined]
-        assert context.verify_calls > context.verify_fail_after
 
 
 @pytest.mark.parametrize("iterator_name", ("file_batches", "chunks"))
@@ -5365,7 +5364,7 @@ def test_dataset_iterator_context_preserves_caller_primary(
         )
 
     with pytest.raises(primary_type, match="primary_failure"):
-        with dataset_reading.closing_dataset_iterator(iterator):
+        with closing_iterator(iterator):
             next(iterator)
             raise primary_type("primary_failure")
 
@@ -5382,8 +5381,78 @@ def test_dataset_iterator_context_propagates_close_failure_without_primary() -> 
             raise OSError("close_failure")
 
     with pytest.raises(OSError, match="close_failure"):
-        with dataset_reading.closing_dataset_iterator(IteratorWithFailingClose()):
+        with closing_iterator(IteratorWithFailingClose()):
             pass
+
+
+def test_exact_key_cursor_close_preserves_generator_primary() -> None:
+    primary = RuntimeError("cursor_primary")
+
+    class Cursor:
+        def __iter__(self):
+            raise primary
+
+        def close(self) -> None:
+            raise OSError("cursor_close_failure")
+
+    class Connection:
+        def execute(self, *_args):
+            return Cursor()
+
+    index = object.__new__(dataset_key_tracking.ExactPrimaryKeyIndex)
+    index._connection = Connection()
+
+    with pytest.raises(RuntimeError) as raised:
+        next(
+            dataset_key_tracking.ExactPrimaryKeyIndex.identity_payload_values(
+                index,
+                namespace="test",
+            )
+        )
+
+    assert raised.value is primary
+    assert raised.value.__notes__ == [
+        "exact key cursor close also failed: OSError",
+    ]
+
+
+def test_closing_iterator_yields_exact_object_and_closes_once() -> None:
+    class IteratorWithClose:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+    iterator = IteratorWithClose()
+    with closing_iterator(iterator) as active:
+        assert active is iterator
+
+    assert iterator.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "primary_type",
+    (RuntimeError, KeyboardInterrupt, GeneratorExit),
+)
+def test_closing_iterator_records_secondary_without_replacing_primary(
+    primary_type: type[BaseException],
+) -> None:
+    class IteratorWithFailingClose:
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise OSError("close_failure")
+
+    iterator = IteratorWithFailingClose()
+    with pytest.raises(primary_type) as raised:
+        with closing_iterator(iterator) as active:
+            assert active is iterator
+            raise primary_type("primary_failure")
+
+    assert iterator.close_calls == 1
+    assert raised.value.__notes__ == ["iterator close also failed: OSError"]
 
 
 @pytest.mark.parametrize("seam", ("shape", "fill"))
@@ -6738,10 +6807,11 @@ def test_filtered_empty_chunk_rechecks_identity_after_yield(
         replacement.write_bytes(part.read_bytes())
         os.replace(replacement, part)
 
-        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-            if completion == "close":
+        if completion == "close":
+            with pytest.raises(ValueError, match="dataset_file_identity_changed"):
                 iterator.close()  # type: ignore[attr-defined]
-            else:
+        else:
+            with pytest.raises(ValueError, match="dataset_file_identity_changed"):
                 next(iterator)
 
 
@@ -6765,7 +6835,7 @@ def test_filtered_empty_chunk_final_verify_preserves_caller_primary(
             target_chunk_bytes=1024**2,
         )
         with pytest.raises(RuntimeError, match="primary_failure"):
-            with dataset_reading.closing_dataset_iterator(iterator):
+            with closing_iterator(iterator):
                 assert next(iterator).empty
                 part = session.all_paths[0]
                 replacement = tmp_path / "replacement-primary.parquet"

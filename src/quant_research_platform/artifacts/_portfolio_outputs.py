@@ -33,6 +33,7 @@ from quant_research_platform.artifacts._portfolio_output_validation import (
 )
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     require_free_disk_headroom,
@@ -41,7 +42,6 @@ from quant_research_platform.storage._dataset_physical import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _parquet_row_group_size,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
@@ -277,8 +277,14 @@ def _write_portfolio_row_artifact_chunks(
                         write_page_index=False,
                         write_page_checksum=False,
                     )
-                except BaseException:
-                    writer_states.pop(artifact_name).close()
+                except BaseException as primary:
+                    try:
+                        writer_states.pop(artifact_name).close()
+                    except BaseException as state_error:
+                        primary.add_note(
+                            "portfolio writer state release also failed: "
+                            f"{type(state_error).__name__}"
+                        )
                     writer_memory.pop(artifact_name)
                     raise
                 writers[artifact_name] = writer
@@ -289,7 +295,7 @@ def _write_portfolio_row_artifact_chunks(
             row_counts[artifact_name] += len(selected)
 
     try:
-        with closing_dataset_iterator(iter(artifact_chunks)) as active_chunks:
+        with closing_iterator(iter(artifact_chunks)) as active_chunks:
             for artifact_chunk in active_chunks:
                 artifact_chunk = validate_portfolio_artifact_mapping_keys(
                     artifact_chunk,
@@ -302,7 +308,7 @@ def _write_portfolio_row_artifact_chunks(
             additive_cumulative_returns_factory is not None
             and "additive_cumulative_returns" not in row_artifacts
         ):
-            with closing_dataset_iterator(
+            with closing_iterator(
                 iter(additive_cumulative_returns_factory())
             ) as additive_cumulative_chunks:
                 for frame in additive_cumulative_chunks:
@@ -311,24 +317,65 @@ def _write_portfolio_row_artifact_chunks(
                         frame,
                     )
         for artifact_name in tuple(writers):
-                writer = writers[artifact_name]
-                writer.add_key_value_metadata(decoded_metadata[artifact_name])
-                active_writer = writers.pop(artifact_name)
-                try:
-                    active_writer.close()
-                finally:
-                    writer_states.pop(artifact_name).close()
-    except BaseException:
+            writer = writers[artifact_name]
+            active_writer = writers.pop(artifact_name)
+            state = writer_states.pop(artifact_name)
+            first_error: BaseException | None = None
+            try:
+                active_writer.add_key_value_metadata(decoded_metadata[artifact_name])
+            except BaseException as metadata_error:
+                first_error = metadata_error
+            try:
+                active_writer.close()
+            except BaseException as close_error:
+                if first_error is None:
+                    first_error = close_error
+                else:
+                    first_error.add_note(
+                        "portfolio parquet writer close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+            try:
+                state.close()
+            except BaseException as state_error:
+                if first_error is None:
+                    first_error = state_error
+                else:
+                    first_error.add_note(
+                        "portfolio writer state release also failed: "
+                        f"{type(state_error).__name__}"
+                    )
+            if first_error is not None:
+                raise first_error
+    except BaseException as primary:
         for artifact_name in tuple(writers):
             writer = writers.pop(artifact_name)
             try:
                 writer.close()
-            except BaseException:
-                pass
-            writer_states.pop(artifact_name).close()
+            except BaseException as close_error:
+                primary.add_note(
+                    "portfolio parquet writer close also failed: "
+                    f"{type(close_error).__name__}"
+                )
+            try:
+                writer_states.pop(artifact_name).close()
+            except BaseException as state_error:
+                primary.add_note(
+                    "portfolio writer state release also failed: "
+                    f"{type(state_error).__name__}"
+                )
         raise
     finally:
-        fixed_state.close()
+        primary = sys.exception()
+        try:
+            fixed_state.close()
+        except BaseException as fixed_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "portfolio writer fixed reservation release also failed: "
+                f"{type(fixed_error).__name__}"
+            )
     for artifact_name in all_row_artifacts:
         if row_counts[artifact_name] == 0:
             write_parquet(

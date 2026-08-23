@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -32,9 +33,6 @@ from quant_research_platform.storage._dataset_paths import require_unaliased_pat
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
     _dataset_file_identity_bytes,
-)
-from quant_research_platform.storage._dataset_reading import (
-    closing_dataset_iterator,
 )
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
@@ -158,12 +156,16 @@ class _IndexInfoContinuationSpool:
     def __enter__(self) -> _IndexInfoContinuationSpool:
         return self
 
-    def __exit__(self, exc_type, _exc, _traceback) -> bool:  # noqa: ANN001
+    def __exit__(self, _exc_type, exc_value, _traceback) -> bool:  # noqa: ANN001
         try:
             self._handle.close()
-        except BaseException:
-            if exc_type is None:
+        except BaseException as close_error:
+            if exc_value is None:
                 raise
+            exc_value.add_note(
+                "CSMAR continuation spool close also failed: "
+                f"{type(close_error).__name__}"
+            )
         return False
 
     def clear(self) -> None:
@@ -386,13 +388,17 @@ def _raw_export_path_session(
         verify_root()
         yield iter_paths(), verify_root
     finally:
-        if sys.exc_info()[0] is None:
+        primary = sys.exception()
+        if primary is None:
             verify_root()
         else:
             try:
                 verify_root()
-            except BaseException:
-                pass
+            except BaseException as verify_error:
+                primary.add_note(
+                    "CSMAR raw export root verification also failed: "
+                    f"{type(verify_error).__name__}"
+                )
 
 
 def iter_raw_export_files(
@@ -499,7 +505,7 @@ def _iter_index_info_rows_under_policy(
         )
     )
     with (
-        closing_dataset_iterator(rows),
+        closing_iterator(rows),
         _IndexInfoContinuationSpool(
             record_limit_bytes=record_limit_bytes,
             scratch_parent=export_path.parent,
@@ -923,11 +929,38 @@ def iter_private_export_chunks(
                         break
             finally:
                 owned = None
+                primary = sys.exception()
+                first_failure: BaseException | None = None
                 close = getattr(chunks, "close", None)
                 if close is not None:
-                    close()
+                    try:
+                        close()
+                    except BaseException as cleanup_error:
+                        if primary is not None:
+                            primary.add_note(
+                                "CSMAR raw chunks close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        else:
+                            first_failure = cleanup_error
                 if active_lease is not None:
-                    active_lease.close()
+                    try:
+                        active_lease.close()
+                    except BaseException as cleanup_error:
+                        if primary is not None:
+                            primary.add_note(
+                                "CSMAR raw lease close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        elif first_failure is None:
+                            first_failure = cleanup_error
+                        else:
+                            first_failure.add_note(
+                                "CSMAR raw lease close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                if first_failure is not None:
+                    raise first_failure
 
     return activate()
 
@@ -967,7 +1000,7 @@ def iter_private_export_chunks_with_policy(
                 payload_lease_ref=payload_lease_ref,
             )
         )
-    with closing_dataset_iterator(rows):
+    with closing_iterator(rows):
         try:
             while True:
                 lease = yield producer_bound
@@ -1053,7 +1086,7 @@ def _iter_csv_records(
             materialize_records=False,
         )
     )
-    with closing_dataset_iterator(rows):
+    with closing_iterator(rows):
         header_record = next(rows, None)
         if header_record is None:
             return
@@ -1332,7 +1365,7 @@ def inspect_raw_export_tree(root: Path) -> Iterator[RawExportIntakeResult]:
                         index=index,
                         namespace="csmar-inspection-physical-exports",
                     )
-                    with closing_dataset_iterator(files):
+                    with closing_iterator(files):
                         for path, identity in files:
                             verify_root()
                             result = _inspect_raw_export_with_identity(

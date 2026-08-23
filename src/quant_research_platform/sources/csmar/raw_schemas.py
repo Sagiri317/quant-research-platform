@@ -482,14 +482,11 @@ class _BoundedCsvRecords:
             self._pushback: deque[int] = deque()
             self._first_record = True
             self.generation = 0
-        except BaseException:
+        except BaseException as primary:
             if handle is not None:
                 try:
                     handle.close()
                 except BaseException as close_error:
-                    primary = sys.exception()
-                    if primary is None:
-                        raise
                     primary.add_note(
                         "csmar raw handle close also failed: "
                         f"{type(close_error).__name__}"
@@ -918,35 +915,79 @@ class _BoundedCsvRecords:
                 if after != self._identity:
                     raise ValueError("csmar_raw_export_identity_changed")
         except BaseException as exc:
-            failure = exc
+            if primary is not None:
+                primary.add_note(
+                    "csmar raw handle verification also failed: "
+                    f"{type(exc).__name__}"
+                )
+            elif failure is None:
+                failure = exc
+            else:
+                failure.add_note(
+                    "csmar raw handle verification also failed: "
+                    f"{type(exc).__name__}"
+                )
         try:
             self._handle.close()
         except BaseException as exc:
-            if failure is None:
+            if primary is not None:
+                primary.add_note(
+                    "csmar raw handle close also failed: " f"{type(exc).__name__}"
+                )
+            elif failure is None:
                 failure = exc
+            else:
+                failure.add_note(
+                    "csmar raw handle close also failed: " f"{type(exc).__name__}"
+                )
         try:
             if dataset_file_identity(self._path) != self._path_identity:
                 raise ValueError("csmar_raw_export_identity_changed")
         except BaseException as exc:
-            if failure is None:
+            if primary is not None:
+                primary.add_note(
+                    "csmar raw path verification also failed: "
+                    f"{type(exc).__name__}"
+                )
+            elif failure is None:
                 failure = exc
+            else:
+                failure.add_note(
+                    "csmar raw path verification also failed: "
+                    f"{type(exc).__name__}"
+                )
         if self._spool is not None:
             spool = self._spool
             self._spool = None
             try:
                 spool.close()
             except BaseException as exc:
-                if failure is None:
+                if primary is not None:
+                    primary.add_note(
+                        "csmar raw spool close also failed: "
+                        f"{type(exc).__name__}"
+                    )
+                elif failure is None:
                     failure = exc
+                else:
+                    failure.add_note(
+                        "csmar raw spool close also failed: "
+                        f"{type(exc).__name__}"
+                    )
         parser_lease = self._parser_lease
         if parser_lease is not None:
             try:
                 parser_lease.close()
             except BaseException as exc:
-                if failure is None and primary is None:
-                    failure = exc
-                elif primary is not None:
+                if primary is not None:
                     primary.add_note(
+                        "source.csmar.csv.parser lease close also failed: "
+                        f"{type(exc).__name__}"
+                    )
+                elif failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(
                         "source.csmar.csv.parser lease close also failed: "
                         f"{type(exc).__name__}"
                     )
@@ -957,10 +998,15 @@ class _BoundedCsvRecords:
             try:
                 lease.close()
             except BaseException as exc:
-                if failure is None and primary is None:
-                    failure = exc
-                elif primary is not None:
+                if primary is not None:
                     primary.add_note(
+                        "source.csmar.csv.record lease close also failed: "
+                        f"{type(exc).__name__}"
+                    )
+                elif failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(
                         "source.csmar.csv.record lease close also failed: "
                         f"{type(exc).__name__}"
                     )
@@ -1020,9 +1066,13 @@ def iter_export_csv_records(
                 if records is not None:
                     try:
                         records.close()
-                    except BaseException:
+                    except BaseException as close_error:
                         if primary is None:
                             raise
+                        primary.add_note(
+                            "CSMAR CSV record cleanup also failed: "
+                            f"{type(close_error).__name__}"
+                        )
 
     return activate()
 
@@ -1075,9 +1125,13 @@ def _read_export_header_under_policy(
         primary = sys.exception()
         try:
             rows.close()
-        except BaseException:
+        except BaseException as close_error:
             if primary is None:
                 raise
+            primary.add_note(
+                "CSMAR CSV row cleanup also failed: "
+                f"{type(close_error).__name__}"
+            )
     if len(columns) != len(set(columns)):
         raise ValueError("duplicate_csmar_provider_column")
     return tuple(str(column) for column in columns)

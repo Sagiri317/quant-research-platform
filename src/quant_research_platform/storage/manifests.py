@@ -175,13 +175,16 @@ def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
         require_unaliased_path(temp_path, error="invalid_storage_write_path")
         require_unaliased_path(final_path, error="invalid_storage_write_path")
         temp_path.replace(final_path)
-    except BaseException:
+    except BaseException as primary:
         if claimed_temp:
             try:
                 require_unaliased_path(temp_path, error="invalid_storage_write_path")
                 remove_owned_scratch(temp_path)
-            except BaseException:
-                pass
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "manifest scratch cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
         raise
     return final_path
 

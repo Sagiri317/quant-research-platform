@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,7 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -48,7 +50,6 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_integer,
     strict_symbol,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage._dataset_writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -175,11 +176,38 @@ def iter_interim_frames(
                     lease = None
             finally:
                 owned = None
+                primary = sys.exception()
+                first_failure: BaseException | None = None
                 close = getattr(producer, "close", None)
                 if close is not None:
-                    close()
+                    try:
+                        close()
+                    except BaseException as cleanup_error:
+                        if primary is not None:
+                            primary.add_note(
+                                "Binance interim producer close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        else:
+                            first_failure = cleanup_error
                 if lease is not None:
-                    lease.close()
+                    try:
+                        lease.close()
+                    except BaseException as cleanup_error:
+                        if primary is not None:
+                            primary.add_note(
+                                "Binance interim lease close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        elif first_failure is None:
+                            first_failure = cleanup_error
+                        else:
+                            first_failure.add_note(
+                                "Binance interim lease close also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                if first_failure is not None:
+                    raise first_failure
 
     return activate()
 
@@ -210,7 +238,7 @@ def _iter_owned_interim_frames(
             lease: MemoryLease | None = None
             ordered_input_files = tuple(sorted(input_files))
             for input_file in ordered_input_files:
-                with closing_dataset_iterator(
+                with closing_iterator(
                     _iter_raw_envelope_batches(
                         input_file,
                         batch_size=row_batch_size,

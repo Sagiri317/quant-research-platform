@@ -326,41 +326,73 @@ def _opened_parquet(
         try:
             yield parquet_file, before
         finally:
-            if sys.exception() is not None:
+            primary = sys.exception()
+            if primary is not None:
                 try:
                     os.fstat(handle.fileno())
-                except BaseException:
-                    pass
+                except BaseException as verify_error:
+                    primary.add_note(
+                        "parquet handle verification also failed: "
+                        f"{type(verify_error).__name__}"
+                    )
                 try:
                     parquet_file.close()
-                except BaseException:
-                    pass
+                except BaseException as close_error:
+                    primary.add_note(
+                        "parquet file close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
             else:
                 try:
                     after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-                except BaseException:
+                except BaseException as primary:
                     try:
                         parquet_file.close()
-                    except BaseException:
-                        pass
+                    except BaseException as close_error:
+                        primary.add_note(
+                            "parquet file close also failed: "
+                            f"{type(close_error).__name__}"
+                        )
                     raise
                 parquet_file.close()
                 if after != before or dataset_file_identity(resolved) != before:
                     raise ValueError("dataset_file_identity_changed")
     finally:
-        if sys.exception() is None:
-            handle.close()
-            if dataset_file_identity(resolved) != path_identity:
-                raise ValueError("dataset_file_identity_changed")
+        primary = sys.exception()
+        if primary is None:
+            first_error: BaseException | None = None
+            try:
+                handle.close()
+            except BaseException as close_error:
+                first_error = close_error
+            try:
+                if dataset_file_identity(resolved) != path_identity:
+                    raise ValueError("dataset_file_identity_changed")
+            except BaseException as verify_error:
+                if first_error is None:
+                    first_error = verify_error
+                else:
+                    first_error.add_note(
+                        "parquet path verification also failed: "
+                        f"{type(verify_error).__name__}"
+                    )
+            if first_error is not None:
+                raise first_error
         else:
             try:
                 handle.close()
-            except BaseException:
-                pass
+            except BaseException as close_error:
+                primary.add_note(
+                    "parquet handle close also failed: "
+                    f"{type(close_error).__name__}"
+                )
             try:
                 dataset_file_identity(resolved)
-            except BaseException:
-                pass
+            except BaseException as verify_error:
+                primary.add_note(
+                    "parquet path verification also failed: "
+                    f"{type(verify_error).__name__}"
+                )
 
 
 def _part_metadata(

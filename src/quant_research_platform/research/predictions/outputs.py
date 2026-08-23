@@ -21,6 +21,7 @@ from quant_research_platform.contracts.predictions import (
     _validate_prediction_output_values,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
     iter_complete_time_sized_frames,
@@ -39,7 +40,6 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
 
 @dataclass(frozen=True)
@@ -265,7 +265,7 @@ def _iter_prediction_output_frames(
     build_state: _PredictionBuildState,
 ) -> Iterable[pd.DataFrame]:
     usable_columns = tuple(dict.fromkeys((*spec.primary_key, *input_columns)))
-    with closing_dataset_iterator(iter(frames)) as active_frames:
+    with closing_iterator(iter(frames)) as active_frames:
         for chunk in active_frames:
             with _filter_mode_scope(
                 chunk,
@@ -428,7 +428,7 @@ def _iter_prediction_work_frames(
         timestamp_column="timestamp",
         resource_policy=current_runtime_resource_policy(),
     )
-    with closing_dataset_iterator(complete_frames) as active_frames:
+    with closing_iterator(complete_frames) as active_frames:
         for frame in active_frames:
             missing = sorted(required.difference(frame.columns))
             if missing:

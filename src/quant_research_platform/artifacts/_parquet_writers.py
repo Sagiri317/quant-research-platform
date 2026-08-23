@@ -22,6 +22,7 @@ from quant_research_platform.contracts.predictions import (
     _validate_prediction_output_values,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -39,7 +40,6 @@ from quant_research_platform.storage._dataset_physical import (
     _table_parquet_page_working_set_bytes,
     table_with_decoded_row_bounds,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
 
 
@@ -88,7 +88,7 @@ def write_parquet_chunks(
             writer_count=1,
             index_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
         ):
-            with closing_dataset_iterator(iter(frames)) as active_frames:
+            with closing_iterator(iter(frames)) as active_frames:
                 try:
                     first_frame = next(active_frames)
                 except StopIteration:
@@ -211,14 +211,23 @@ def write_parquet_chunks(
                                         if is_first:
                                             first_frame_state.close()
                                             del first_frame
-                        except BaseException:
+                        except BaseException as primary:
                             if writer is not None:
                                 try:
                                     writer.close()
-                                except BaseException:
-                                    pass
+                                except BaseException as close_error:
+                                    primary.add_note(
+                                        "prediction parquet writer close also failed: "
+                                        f"{type(close_error).__name__}"
+                                    )
                                 writer = None
-                            writer_state.close()
+                            try:
+                                writer_state.close()
+                            except BaseException as state_error:
+                                primary.add_note(
+                                    "prediction writer state release also failed: "
+                                    f"{type(state_error).__name__}"
+                                )
                             raise
                         if writer is not None:
                             writer.add_key_value_metadata(decoded_metadata or {})
@@ -233,19 +242,31 @@ def write_parquet_chunks(
         reject_if_exists(final_path)
         require_unaliased_path(temp_path, error="invalid_output_write_path")
         publish_no_replace(temp_path, final_path)
-    except BaseException:
+    except BaseException as primary:
         if writer is not None:
             try:
                 writer.close()
-            except BaseException:
-                pass
-        writer_state.close()
+            except BaseException as close_error:
+                primary.add_note(
+                    "prediction parquet writer close also failed: "
+                    f"{type(close_error).__name__}"
+                )
+        try:
+            writer_state.close()
+        except BaseException as state_error:
+            primary.add_note(
+                "prediction writer state release also failed: "
+                f"{type(state_error).__name__}"
+            )
         if claimed_temp:
             try:
                 require_unaliased_path(temp_path, error="invalid_output_write_path")
                 scratch_owner.remove_owned_scratch(temp_path)
-            except BaseException:
-                pass
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "prediction temporary cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
         raise
     return _PredictionOutputWriteSummary(
         row_count=row_count,
@@ -345,13 +366,16 @@ def write_parquet(
         reject_if_exists(final_path)
         require_unaliased_path(temp_path, error="invalid_output_write_path")
         publish_no_replace(temp_path, final_path)
-    except BaseException:
+    except BaseException as primary:
         if claimed_temp:
             try:
                 require_unaliased_path(temp_path, error="invalid_output_write_path")
                 scratch_owner.remove_owned_scratch(temp_path)
-            except BaseException:
-                pass
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "prediction temporary cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
         raise
     return final_path
 

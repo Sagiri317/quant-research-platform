@@ -658,17 +658,25 @@ def _scan_validated_text_evidence(
                         != expected_identity
                     ):
                         raise ValueError("validation_summary_evidence_identity_changed")
-                except BaseException:
+                except BaseException as verify_error:
                     if primary is None:
                         raise
+                    primary.add_note(
+                        "validation summary evidence verification also failed: "
+                        f"{type(verify_error).__name__}"
+                    )
     finally:
         primary = sys.exception()
         try:
             if dataset_file_identity(path) != expected_identity:
                 raise ValueError("validation_summary_evidence_identity_changed")
-        except BaseException:
+        except BaseException as verify_error:
             if primary is None:
                 raise
+            primary.add_note(
+                "validation summary evidence verification also failed: "
+                f"{type(verify_error).__name__}"
+            )
     return reason
 
 
@@ -702,14 +710,17 @@ def _opened_evidence(
         ):
             raise ValueError("validation_summary_evidence_identity_changed")
         yield handle
-    finally:
-        if sys.exception() is None:
+    except BaseException as primary:
+        try:
             handle.close()
-        else:
-            try:
-                handle.close()
-            except BaseException:
-                pass
+        except BaseException as close_error:
+            primary.add_note(
+                "validation summary evidence close also failed: "
+                f"{type(close_error).__name__}"
+            )
+        raise
+    else:
+        handle.close()
 
 
 def _validate_layer_summary_graph(

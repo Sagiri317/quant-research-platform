@@ -119,9 +119,13 @@ def validate_output_bundle(
                 raise ValueError("output_bundle_identity_changed") from exc
             if identities_changed:
                 raise ValueError("output_bundle_identity_changed")
-        except BaseException:
+        except BaseException as verify_error:
             if primary is None:
                 raise
+            primary.add_note(
+                "output bundle verification also failed: "
+                f"{type(verify_error).__name__}"
+            )
     return manifest, admitted_identities
 
 

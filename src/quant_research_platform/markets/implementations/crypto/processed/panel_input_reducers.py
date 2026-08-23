@@ -156,8 +156,14 @@ class AggregateTradeReducer:
             ):
                 normalized = self._normalize_chunk(trades)
                 self._add_normalized(normalized)
-        except BaseException:
-            self.close()
+        except BaseException as primary:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "crypto trade reducer cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
             raise
 
     def _add_normalized(self, normalized: pd.DataFrame) -> None:
@@ -345,8 +351,14 @@ class DepthSnapshotReducer:
             ):
                 normalized = self._normalize_chunk(depth)
                 self._add_normalized(normalized)
-        except BaseException:
-            self.close()
+        except BaseException as primary:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "crypto depth reducer cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
             raise
 
     def _add_normalized(self, normalized: pd.DataFrame) -> None:

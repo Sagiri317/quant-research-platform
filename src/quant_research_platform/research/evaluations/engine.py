@@ -695,26 +695,36 @@ def _iter_evaluation_batch_outputs(
         yield metrics, grouped_label_values, metadata
     finally:
         primary = sys.exception()
+        first_failure: BaseException | None = None
         if concat_lease is not None:
             try:
                 concat_lease.close()
             except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "evaluation concat lease release also failed: "
-                    f"{type(close_error).__name__}"
-                )
+                if primary is not None:
+                    primary.add_note(
+                        "evaluation concat lease release also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+                else:
+                    first_failure = close_error
         for lease in label_leases:
             try:
                 lease.close()
             except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "evaluation output lease release also failed: "
-                    f"{type(close_error).__name__}"
-                )
+                if primary is not None:
+                    primary.add_note(
+                        "evaluation output lease release also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+                elif first_failure is None:
+                    first_failure = close_error
+                else:
+                    first_failure.add_note(
+                        "evaluation output lease release also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+        if first_failure is not None:
+            raise first_failure
 
 
 def _evaluation_kernel_bytes(

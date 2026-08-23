@@ -25,6 +25,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_validation as validation,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -38,7 +39,6 @@ from quant_research_platform.storage._dataset_inspection import (
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
     DatasetSession,
-    closing_dataset_iterator,
     iter_dataset_chunks,
     open_dataset_session,
     parquet_filters_for_time_window,
@@ -164,7 +164,7 @@ def _iter_panel_chunks(
                     panel_input_reducers.AggregateTradeContinuityState()
                 )
                 asset_session = view_by_source_asset[source_asset_id]
-                with closing_dataset_iterator(
+                with closing_iterator(
                     iter_dataset_chunks(
                         asset_session,
                         target_chunk_bytes=chunk_target_bytes,
@@ -201,14 +201,14 @@ def _iter_panel_chunks(
                         if prepared_bar_bytes + 256 * 1024 > lease.reserved_bytes:
                             raise ValueError("crypto_panel_bound_invalid")
                         with (
-                            closing_dataset_iterator(
+                            closing_iterator(
                                 _iter_matching_trade_chunks(
                                     trade_session,
                                     prepared_bars,
                                     target_chunk_bytes=chunk_target_bytes,
                                 )
                             ) as trade_chunks,
-                            closing_dataset_iterator(
+                            closing_iterator(
                                 _iter_matching_depth_chunks(
                                     depth_session,
                                     prepared_bars,
@@ -369,7 +369,7 @@ def _iter_matching_chunks(
         asset_ids=asset_ids,
     )
     try:
-        with closing_dataset_iterator(
+        with closing_iterator(
             iter_dataset_chunks(
                 view,
                 target_chunk_bytes=target_chunk_bytes,
@@ -391,9 +391,13 @@ def _iter_matching_chunks(
             primary = sys.exception()
             try:
                 session.inventory.release_path_selection(view.path_selection)
-            except BaseException:
+            except BaseException as cleanup_error:
                 if primary is None:
                     raise
+                primary.add_note(
+                    "crypto matching path-selection cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
 
 
 def _matching_session_view(
@@ -428,14 +432,15 @@ def _matching_session_view(
             owns_inventory=False,
         )
         view.verify()
-    except BaseException:
-        primary = sys.exception()
+    except BaseException as primary:
         try:
             session.inventory.release_path_selection(path_selection)
-        except BaseException:
-            pass
-        if primary is not None:
-            raise
+        except BaseException as cleanup_error:
+            primary.add_note(
+                "crypto matching path-selection cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
+        raise
     return view
 
 

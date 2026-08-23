@@ -464,35 +464,41 @@ def _write_dataset_body(
     def close_input_and_active_leases() -> None:
         nonlocal lease_cleanup_failed
         primary = sys.exception()
+        first_failure: BaseException | None = None
         try:
             close_input_once()
         except BaseException as cleanup_error:
             if primary is None:
-                raise
-            primary.add_note(
-                "dataset producer close also failed: "
-                f"{type(cleanup_error).__name__}: {cleanup_error}"
-            )
-            return
-        if input_cleanup_failed:
-            return
+                first_failure = cleanup_error
+            else:
+                primary.add_note(
+                    "dataset producer close also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
         active_producer_values.clear()
         if lease_cleanup_failed:
             return
         while active_producer_leases:
-            lease = active_producer_leases[-1]
+            lease = active_producer_leases.pop()
             try:
                 lease.close()
             except BaseException as cleanup_error:
                 lease_cleanup_failed = True
                 if primary is None:
-                    raise
-                primary.add_note(
-                    "dataset producer lease close also failed: "
-                    f"{type(cleanup_error).__name__}: {cleanup_error}"
-                )
-                return
-            active_producer_leases.pop()
+                    if first_failure is None:
+                        first_failure = cleanup_error
+                    else:
+                        first_failure.add_note(
+                            "dataset producer lease close also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                else:
+                    primary.add_note(
+                        "dataset producer lease close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+        if first_failure is not None:
+            raise first_failure
 
     def _writer(temp_root: Path) -> _OwnedValue[DatasetInspection]:
         try:
@@ -600,17 +606,15 @@ def _write_dataset_body(
                     result_lease.shrink_to(result_bytes)
                     session.close()
                     return _OwnedValue(result, result_lease)
-                except BaseException:
+                except BaseException as primary:
                     result = None
                     try:
                         session.close()
                     except BaseException as cleanup_error:
-                        primary = sys.exception()
-                        if primary is not None:
-                            primary.add_note(
-                                "dataset session close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
+                        primary.add_note(
+                            "dataset session close also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
                     _close_lease_preserving_primary(
                         result_lease,
                         owner="storage.dataset.write.result",

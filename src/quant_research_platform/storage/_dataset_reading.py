@@ -28,6 +28,7 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -141,8 +142,18 @@ class DatasetSession:
 
     def close(self) -> None:
         primary = sys.exception()
+        first_error: BaseException | None = None
         if self.owns_inventory:
-            self.inventory.close()
+            try:
+                self.inventory.close()
+            except BaseException as inventory_error:
+                if primary is not None:
+                    primary.add_note(
+                        "dataset session inventory release also failed: "
+                        f"{type(inventory_error).__name__}"
+                    )
+                else:
+                    first_error = inventory_error
         try:
             self._lease.close()
         except BaseException as lease_error:
@@ -151,8 +162,15 @@ class DatasetSession:
                     "dataset session lease release also failed: "
                     f"{type(lease_error).__name__}"
                 )
-                return
-            raise
+            elif first_error is None:
+                first_error = lease_error
+            else:
+                first_error.add_note(
+                    "dataset session lease release also failed: "
+                    f"{type(lease_error).__name__}"
+                )
+        if first_error is not None:
+            raise first_error
 
     def __enter__(self) -> DatasetSession:
         return self
@@ -163,11 +181,12 @@ class DatasetSession:
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
+        if exc_value is None:
+            self.close()
+            return
         try:
             self.close()
         except BaseException as cleanup_error:
-            if exc_value is None:
-                raise
             exc_value.add_note(
                 "dataset session cleanup also failed: "
                 f"{type(cleanup_error).__name__}"
@@ -447,15 +466,13 @@ def _scan_materialized_shape(
         target_chunk_bytes=target_chunk_bytes,
         operation_headroom_bytes=operation_headroom_bytes,
     )
-    try:
+    with closing_iterator(chunks):
         for frame in chunks:
             row_count += len(frame)
             for name in string_columns:
                 string_bytes[name] += _arrow_string_payload_bytes(frame[name])
             if object_columns:
                 object_bytes += _object_payload_bytes(frame, columns=object_columns)
-    finally:
-        _close_iterator_preserving_primary(chunks)
     return row_count, string_bytes, object_bytes
 
 
@@ -554,7 +571,7 @@ def _fill_materialized_buffers(
         target_chunk_bytes=target_chunk_bytes,
         operation_headroom_bytes=operation_headroom_bytes,
     )
-    try:
+    with closing_iterator(chunks):
         for frame in chunks:
             stop = cursor + len(frame)
             if stop > row_count:
@@ -562,8 +579,6 @@ def _fill_materialized_buffers(
             for name, buffer in buffers.items():
                 _fill_materialized_column(buffer, frame[name], start=cursor)
             cursor = stop
-    finally:
-        _close_iterator_preserving_primary(chunks)
     if cursor != row_count:
         raise ValueError("dataset_materialized_row_count_changed")
     for buffer in buffers.values():
@@ -1298,7 +1313,7 @@ def _iter_dataset_chunks(
             _verify_preserving_primary(context)
         return
     yielded = False
-    with closing_dataset_iterator(
+    with closing_iterator(
         iter_dataset_file_batches(
             context,
             columns=context.physical_columns,
@@ -1455,7 +1470,7 @@ def _iter_dataset_file_batches(
         for path in context.read_paths:
             metadata = context.metadata_for(path)
             member_headroom = current_operation_headroom()
-            with closing_dataset_iterator(
+            with closing_iterator(
                 iter_declared_parquet_member_batches(
                     path,
                     expected_identity=metadata.identity,
@@ -1480,38 +1495,16 @@ def _iter_dataset_file_batches(
 
 
 def _verify_preserving_primary(context: DatasetSession) -> None:
-    active = sys.exception()
-    if active is None or isinstance(active, GeneratorExit):
+    primary = sys.exception()
+    if primary is None or isinstance(primary, GeneratorExit):
         context.verify()
         return
     try:
         context.verify()
-    except BaseException:
-        pass
-
-
-def _close_iterator_preserving_primary(iterator: object) -> None:
-    close = getattr(iterator, "close", None)
-    if close is None:
-        return
-    active = sys.exception()
-    if active is None:
-        close()
-        return
-    try:
-        close()
-    except BaseException:
-        pass
-
-
-@contextmanager
-def closing_dataset_iterator(iterator: Iterator[Any]):  # type: ignore[no-untyped-def]
-    """Close one dataset traversal without replacing its caller's primary error."""
-
-    try:
-        yield iterator
-    finally:
-        _close_iterator_preserving_primary(iterator)
+    except BaseException as verification_error:
+        primary.add_note(
+            "dataset verification also failed: " f"{type(verification_error).__name__}"
+        )
 
 
 def dataset_primary_key_schema(

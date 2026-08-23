@@ -18,6 +18,7 @@ import quant_research_platform.research.models.supervised as supervised
 import quant_research_platform.research.models.validation_split as validation_split
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
     iter_complete_time_sized_frames,
@@ -29,7 +30,6 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 
 
 @dataclass(frozen=True)
@@ -124,7 +124,7 @@ def _fit_linear_model_result_with_lease(
         required=required,
         work_columns=work_columns,
     )
-    with closing_dataset_iterator(iter(work_frames)) as active_frames:
+    with closing_iterator(iter(work_frames)) as active_frames:
         beta, row_counts, filter_metadata = fit_linear_coefficients(
             active_frames,
             spec=spec,
@@ -516,6 +516,7 @@ def fit_linear_coefficients(
         return beta, row_counts, filter_metadata
     finally:
         primary = sys.exception()
+        first_failure: BaseException | None = None
         first_usable = None
         r_factor = None
         qt_y = None
@@ -527,21 +528,30 @@ def fit_linear_coefficients(
             try:
                 factor_lease.close()
             except BaseException as cleanup_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "linear QR state release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
+                if primary is not None:
+                    primary.add_note(
+                        "linear QR state release also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                else:
+                    first_failure = cleanup_error
         try:
             first_usable_reservation.close()
         except BaseException as cleanup_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "linear first usable release also failed: "
-                f"{type(cleanup_error).__name__}"
-            )
+            if primary is not None:
+                primary.add_note(
+                    "linear first usable release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+            elif first_failure is None:
+                first_failure = cleanup_error
+            else:
+                first_failure.add_note(
+                    "linear first usable release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        if first_failure is not None:
+            raise first_failure
 
 
 def _fit_estimator_model_result_owned_from_frames(

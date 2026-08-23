@@ -74,6 +74,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
 )
@@ -88,7 +89,6 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar import ids as csmar_ids
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
@@ -138,7 +138,7 @@ def _patch_planning_reader(monkeypatch: pytest.MonkeyPatch, reader) -> None:  # 
 
 def _consume_bound_first(data, policy):  # noqa: ANN001, ANN202
     frames = []
-    with closing_dataset_iterator(data):
+    with closing_iterator(data):
         try:
             bound = next(data)
         except StopIteration:

@@ -37,6 +37,7 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_timestamp_series,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
     iter_complete_session_frames,
@@ -53,7 +54,6 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_reading import closing_dataset_iterator
 from quant_research_platform.storage.layout import StorageLayout
 
 _PORTFOLIO_ROW_WORKING_BYTES = 2048
@@ -156,22 +156,18 @@ def build_portfolio_result_from_research_dataset(
         raise
     operation.callback(result.close)
     source_chunks = operation.enter_context(
-        closing_dataset_iterator(iter(result.output_chunks))
+        closing_iterator(iter(result.output_chunks))
     )
     chunks_complete = False
     summary_value: Mapping[str, pd.DataFrame] | None = None
     terminal_error: BaseException | None = None
     operation_open = True
 
-    def close_operation(*, suppress_errors: bool = False) -> None:
+    def close_operation() -> None:
         nonlocal operation_open
         if operation_open:
             operation_open = False
-            try:
-                operation.close()
-            except BaseException:
-                if not suppress_errors:
-                    raise
+            operation.close()
 
     def close_result() -> None:
         nonlocal terminal_error
@@ -560,7 +556,7 @@ def _iter_prediction_joined_chunks(
         )
         matched = np.zeros(prediction_rows, dtype=bool)
         missing_required = False
-        with closing_dataset_iterator(iter(chunks)) as active_chunks:
+        with closing_iterator(iter(chunks)) as active_chunks:
             for chunk in active_chunks:
                 chunk_rows = len(chunk)
                 chunk_bytes = pandas_frame_payload_bytes(chunk)
@@ -643,7 +639,7 @@ def _iter_prediction_lookup_joined_chunks(
     test_end: str | None,
 ):
     missing_required = False
-    with closing_dataset_iterator(iter(chunks)) as active_chunks:
+    with closing_iterator(iter(chunks)) as active_chunks:
         for chunk in active_chunks:
             row_count = len(chunk)
             frame_bytes = pandas_frame_payload_bytes(chunk)
@@ -739,7 +735,7 @@ def _iter_portfolio_output_chunks(
     saw_rows = False
     input_cleanup = ExitStack()
     active_chunks = input_cleanup.enter_context(
-        closing_dataset_iterator(iter(chunks))
+        closing_iterator(iter(chunks))
     )
 
     try:
@@ -856,8 +852,35 @@ def _iter_portfolio_output_chunks(
                     yield output
                 del output, next_context
     finally:
-        context_reservation.close()
-        input_cleanup.close()
+        primary = sys.exception()
+        first_failure: BaseException | None = None
+        try:
+            context_reservation.close()
+        except BaseException as cleanup_error:
+            if primary is not None:
+                primary.add_note(
+                    "portfolio context reservation release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+            else:
+                first_failure = cleanup_error
+        try:
+            input_cleanup.close()
+        except BaseException as cleanup_error:
+            if primary is not None:
+                primary.add_note(
+                    "portfolio input cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+            elif first_failure is None:
+                first_failure = cleanup_error
+            else:
+                first_failure.add_note(
+                    "portfolio input cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        if first_failure is not None:
+            raise first_failure
 
     if not saw_rows:
         raise ValueError("empty_portfolio_input")
@@ -869,7 +892,7 @@ def _observe_portfolio_summary_chunks(
 ) -> Iterable[dict[str, pd.DataFrame]]:
     completed = False
     try:
-        with closing_dataset_iterator(iter(output_chunks)) as active_chunks:
+        with closing_iterator(iter(output_chunks)) as active_chunks:
             for output_chunk in active_chunks:
                 _update_portfolio_summary_state(
                     summary_state,

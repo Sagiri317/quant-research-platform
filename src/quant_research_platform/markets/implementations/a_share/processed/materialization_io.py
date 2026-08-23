@@ -14,6 +14,7 @@ from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -27,7 +28,6 @@ from quant_research_platform.storage._dataset_inspection import (
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
 from quant_research_platform.storage._dataset_reading import (
-    closing_dataset_iterator,
     materialize_dataset_session_owned,
     open_dataset_session,
 )
@@ -145,7 +145,7 @@ def iter_sorted_output_chunks(
         with runtime_resource_policy_scope(bound_policy):
             frames = iter(frame)
             previous_last_key: tuple[object, ...] | None = None
-            with closing_dataset_iterator(frames):
+            with closing_iterator(frames):
                 try:
                     bound = next(frames)
                 except StopIteration:

@@ -160,17 +160,23 @@ class ExactPrimaryKeyIndex:
                 "ON comparison_rows(namespace, payload)"
             )
             connection.commit()
-        except BaseException:
+        except BaseException as primary:
             if connection is not None:
                 try:
                     connection.close()
-                except BaseException:
-                    pass
+                except BaseException as close_error:
+                    primary.add_note(
+                        "exact key connection close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
             if claimed_temporary:
                 try:
                     remove_owned_scratch(temporary_directory)
-                except BaseException:
-                    pass
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "exact key scratch cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
             self._temporary_directory = None
             raise
         assert connection is not None
@@ -179,36 +185,57 @@ class ExactPrimaryKeyIndex:
 
     def __exit__(
         self,
-        exc_type: type[BaseException] | None,
+        _exc_type: type[BaseException] | None,
         exc_value: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        if exc_type is None:
+        if exc_value is None:
             self.close()
             return
         try:
             self.close()
-        except BaseException:
-            pass
+        except BaseException as cleanup_error:
+            exc_value.add_note(
+                "exact key index cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
 
     def close(self) -> None:
+        primary = sys.exception()
+        first_error: BaseException | None = None
         connection = self._connection
         temporary_directory = self._temporary_directory
         self._connection = None
         self._temporary_directory = None
-        try:
-            if connection is not None:
+        if connection is not None:
+            try:
                 connection.close()
-        except BaseException:
-            if temporary_directory is not None:
-                try:
-                    remove_owned_scratch(temporary_directory)
-                except BaseException:
-                    pass
-            raise
-        else:
-            if temporary_directory is not None:
+            except BaseException as close_error:
+                if primary is not None:
+                    primary.add_note(
+                        "exact key connection close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+                else:
+                    first_error = close_error
+        if temporary_directory is not None:
+            try:
                 remove_owned_scratch(temporary_directory)
+            except BaseException as cleanup_error:
+                if primary is not None:
+                    primary.add_note(
+                        "exact key scratch cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                elif first_error is None:
+                    first_error = cleanup_error
+                else:
+                    first_error.add_note(
+                        "exact key scratch cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+        if first_error is not None:
+            raise first_error
 
     def add_frame(self, frame: pd.DataFrame, *, namespace: str = "dataset") -> int:
         missing = [column for column in self._primary_key if column not in frame]
@@ -628,13 +655,17 @@ class ExactPrimaryKeyIndex:
                     raise ValueError("exact_key_identity_payload_missing")
                 yield bytes(row[0])
         finally:
-            if sys.exception() is None:
+            primary = sys.exception()
+            if primary is None:
                 rows.close()
             else:
                 try:
                     rows.close()
-                except BaseException:
-                    pass
+                except BaseException as close_error:
+                    primary.add_note(
+                        "exact key cursor close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
 
     def difference_counts(
         self,

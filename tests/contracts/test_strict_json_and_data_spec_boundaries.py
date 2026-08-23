@@ -309,6 +309,40 @@ def test_bounded_json_close_preserves_size_limit_primary() -> None:
         )
 
 
+def test_bounded_json_active_primary_attempts_all_lazy_closes_and_notes() -> None:
+    events: list[str] = []
+
+    class Source:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __iter__(self) -> Source:
+            return self
+
+        def __next__(self) -> object:
+            return {"value": "x" * 128}
+
+        def close(self) -> None:
+            events.append(self.name)
+            raise OSError(f"{self.name}_close_failed")
+
+    with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes") as raised:
+        json_owner.bounded_rendered_qrp_json_object_size(
+            {"first": [], "schema_id": "x", "second": []},
+            lazy_arrays={
+                ("first",): Source("first"),
+                ("second",): Source("second"),
+            },
+            max_bytes=100,
+        )
+
+    assert events == ["first", "second"]
+    assert raised.value.__notes__ == [
+        "lazy JSON value close also failed: OSError",
+        "lazy JSON value close also failed: OSError",
+    ]
+
+
 def test_bounded_json_close_failure_propagates_without_primary() -> None:
     class EmptySource:
         def __iter__(self) -> EmptySource:
