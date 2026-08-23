@@ -2892,7 +2892,7 @@ def test_csmar_narrow_market_bars_optional_raw_columns_do_not_block_mapping() ->
     inspection = raw_schemas.RawExportInspection(
         path=Path("narrow.csv"),
         dataset=data_id,
-        table_code=raw_schemas.RAW_TABLE_CONTRACTS[data_id].table_code,
+        table_code=field_mappings.RAW_TABLE_CONTRACTS[data_id].table_code,
         columns=tuple(raw.columns),
         missing_required_columns=field_mappings.missing_raw_columns(raw, data_id),
         has_metadata=False,

@@ -1,9 +1,10 @@
-"""Internal provider field mapping and normalization helpers."""
+"""Internal CSMAR source contracts and provider field mapping helpers."""
 
 from __future__ import annotations
 
 import re
 from collections.abc import Mapping
+from dataclasses import dataclass
 from numbers import Integral, Real
 from types import MappingProxyType
 
@@ -11,9 +12,96 @@ import pandas as pd
 
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.sources.csmar.ids import market_bars_data_id
-from quant_research_platform.sources.csmar.raw_schemas import RAW_TABLE_CONTRACTS
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
+
+
+@dataclass(frozen=True)
+class _RawTableContract:
+    """Raw CSMAR export contract before internal standardization."""
+
+    table_code: str
+    required_columns: tuple[str, ...]
+
+
+RAW_TABLE_CONTRACTS = MappingProxyType(
+    {
+        "stock_master": _RawTableContract(
+            table_code="TRDNEW_Co",
+            required_columns=(
+                "Stkcd",
+                "Stknme",
+                "Listdt",
+                "DelistedDate",
+                "Markettype",
+                "Nnindcd",
+                "Nnindnme",
+                "Statco",
+                "Statdt",
+            ),
+        ),
+        MARKET_BARS_DATA_ID: _RawTableContract(
+            table_code="TRDNEW_Dalyr",
+            required_columns=(
+                "Stkcd",
+                "Trddt",
+                "Markettype",
+                "Trdsta",
+                "Filling",
+                "Opnprc",
+                "Hiprc",
+                "Loprc",
+                "Clsprc",
+                "Dnshrtrd",
+                "Dnvaltrd",
+                "Dsmvosd",
+                "Dsmvtll",
+                "Dretwd",
+                "Adjprcwd",
+                "PreClosePrice",
+                "LimitStatus",
+            ),
+        ),
+        "market_cap": _RawTableContract(
+            table_code="TRDNEW_Capchg",
+            required_columns=("Stkcd", "Shrchgdt", "Nshrttl", "Nshra"),
+        ),
+        "adjustment": _RawTableContract(
+            table_code="TRD_AdjustFactor",
+            required_columns=(
+                "Symbol",
+                "TradingDate",
+                "FwardFactor",
+                "BwardFactor",
+                "CumulateFwardFactor",
+                "CumulateBwardFactor",
+            ),
+        ),
+        "index_market": _RawTableContract(
+            table_code="IDX_Idxtrd",
+            required_columns=(
+                "Indexcd",
+                "Idxtrd01",
+                "Idxtrd02",
+                "Idxtrd03",
+                "Idxtrd04",
+                "Idxtrd05",
+                "Idxtrd06",
+                "Idxtrd07",
+                "Idxtrd08",
+                "Idxtrd09",
+            ),
+        ),
+        "index_info": _RawTableContract(
+            table_code="IDX_Idxinfo",
+            required_columns=("Indexcd", "Idxinfo11", "Idxinfo02"),
+        ),
+        "trading_calendar": _RawTableContract(
+            table_code="TRDNEW_Cale",
+            required_columns=("Markettype", "Clddt", "Daywk", "State"),
+        ),
+    }
+)
 
 COLUMN_MAPPINGS = {
     "stock_master": {

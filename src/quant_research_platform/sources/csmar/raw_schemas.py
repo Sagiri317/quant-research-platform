@@ -1,4 +1,4 @@
-"""Internal provider raw file, table, and export-inspection contracts."""
+"""Internal provider raw-file parsing and export-inspection helpers."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
 
-from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.runtime.resources import (
     MIB,
     MemoryLease,
@@ -24,7 +23,7 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.sources.csmar.ids import market_bars_data_id
+from quant_research_platform.sources.csmar import field_mappings as _field_mappings
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
@@ -33,7 +32,6 @@ from quant_research_platform.storage._dataset_physical import (
 )
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
-MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 MAX_LOGICAL_RECORD_BYTES = MIB
 _MAX_PROVIDER_HEADER_FIELDS = 64
 LOGICAL_RECORD_LIMIT_ERROR = "csmar_logical_record_exceeds_source_limit"
@@ -67,17 +65,6 @@ class RawFileMetadata:
 
 
 @dataclass(frozen=True)
-class RawTableContract:
-    """Raw CSMAR export contract before internal standardization."""
-
-    dataset: str
-    table_code: str
-    table_name_zh: str
-    required_columns: tuple[str, ...]
-    optional_columns: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
 class RawExportInspection:
     """Header-level inspection result for a raw CSMAR export file."""
 
@@ -89,106 +76,6 @@ class RawExportInspection:
     has_metadata: bool
 
 
-RAW_TABLE_CONTRACTS: dict[str, RawTableContract] = {
-    "stock_master": RawTableContract(
-        dataset="stock_master",
-        table_code="TRDNEW_Co",
-        table_name_zh="公司文件",
-        required_columns=(
-            "Stkcd",
-            "Stknme",
-            "Listdt",
-            "DelistedDate",
-            "Markettype",
-            "Nnindcd",
-            "Nnindnme",
-            "Statco",
-            "Statdt",
-        ),
-    ),
-    MARKET_BARS_DATA_ID: RawTableContract(
-        dataset=MARKET_BARS_DATA_ID,
-        table_code="TRDNEW_Dalyr",
-        table_name_zh="日个股回报率文件",
-        required_columns=(
-            "Stkcd",
-            "Trddt",
-            "Markettype",
-            "Trdsta",
-            "Filling",
-            "Opnprc",
-            "Hiprc",
-            "Loprc",
-            "Clsprc",
-            "Dnshrtrd",
-            "Dnvaltrd",
-            "Dsmvosd",
-            "Dsmvtll",
-            "Dretwd",
-            "Adjprcwd",
-            "PreClosePrice",
-            "LimitStatus",
-        ),
-        optional_columns=(
-            "Dretnd",
-            "Adjprcnd",
-            "ChangeRatio",
-            "LimitDown",
-            "LimitUp",
-        ),
-    ),
-    "market_cap": RawTableContract(
-        dataset="market_cap",
-        table_code="TRDNEW_Capchg",
-        table_name_zh="股本变动文件",
-        required_columns=("Stkcd", "Shrchgdt", "Nshrttl", "Nshra"),
-        optional_columns=("Nshrb", "Nshrh"),
-    ),
-    "adjustment": RawTableContract(
-        dataset="adjustment",
-        table_code="TRD_AdjustFactor",
-        table_name_zh="股票价格复权因子表(日)",
-        required_columns=(
-            "Symbol",
-            "TradingDate",
-            "FwardFactor",
-            "BwardFactor",
-            "CumulateFwardFactor",
-            "CumulateBwardFactor",
-        ),
-    ),
-    "index_market": RawTableContract(
-        dataset="index_market",
-        table_code="IDX_Idxtrd",
-        table_name_zh="国内指数日行情文件",
-        required_columns=(
-            "Indexcd",
-            "Idxtrd01",
-            "Idxtrd02",
-            "Idxtrd03",
-            "Idxtrd04",
-            "Idxtrd05",
-            "Idxtrd06",
-            "Idxtrd07",
-            "Idxtrd08",
-            "Idxtrd09",
-        ),
-    ),
-    "index_info": RawTableContract(
-        dataset="index_info",
-        table_code="IDX_Idxinfo",
-        table_name_zh="指数基本信息文件",
-        required_columns=("Indexcd", "Idxinfo11", "Idxinfo02"),
-    ),
-    "trading_calendar": RawTableContract(
-        dataset="trading_calendar",
-        table_code="TRDNEW_Cale",
-        table_name_zh="交易日历",
-        required_columns=("Markettype", "Clddt", "Daywk", "State"),
-    ),
-}
-
-
 FILENAME_RE = re.compile(
     r"^csmar__(?P<dataset>[a-z0-9_]+)__"
     r"(?P<market_scope>[a-z0-9_]+)__"
@@ -196,17 +83,6 @@ FILENAME_RE = re.compile(
     r"(?:(?:part-(?P<part>\d{2})__)?)"
     r"export-(?P<export>\d{8})\.(?P<extension>csv)$"
 )
-
-NATIVE_TABLE_DATASETS: dict[str, str] = {
-    "TRDNEW_Co": "stock_master",
-    "TRDNEW_Dalyr": MARKET_BARS_DATA_ID,
-    "TRDNEW_Capchg": "market_cap",
-    "TRD_AdjustFactor": "adjustment",
-    "IDX_Idxinfo": "index_info",
-    "IDX_Idxtrd": "index_market",
-    "TRDNEW_Cale": "trading_calendar",
-}
-
 
 def parse_raw_filename(path: str | Path) -> RawFileMetadata:
     """Parse the recommended raw CSMAR file name format."""
@@ -217,7 +93,7 @@ def parse_raw_filename(path: str | Path) -> RawFileMetadata:
         raise ValueError(f"Invalid CSMAR raw filename: {name}")
 
     dataset = match.group("dataset")
-    if dataset not in RAW_TABLE_CONTRACTS:
+    if dataset not in _field_mappings.RAW_TABLE_CONTRACTS:
         raise ValueError(f"Unknown CSMAR dataset in filename: {dataset}")
 
     return RawFileMetadata(
@@ -236,25 +112,22 @@ def infer_dataset_from_native_export(path: str | Path) -> str:
 
     export_path = Path(path)
     stem = re.sub(r"\d+$", "", export_path.stem)
-    if stem in NATIVE_TABLE_DATASETS:
-        return NATIVE_TABLE_DATASETS[stem]
+    for dataset, contract in _field_mappings.RAW_TABLE_CONTRACTS.items():
+        if contract.table_code == stem:
+            return dataset
 
     for part in reversed(export_path.parts):
-        if part in RAW_TABLE_CONTRACTS:
+        if part in _field_mappings.RAW_TABLE_CONTRACTS:
             return part
 
     raise ValueError(f"Cannot infer CSMAR dataset from native filename: {export_path}")
 
 
 def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
-    from quant_research_platform.sources.csmar.field_mappings import (
-        missing_raw_column_names,
-    )
-
     matches = [
         dataset
-        for dataset in RAW_TABLE_CONTRACTS
-        if not missing_raw_column_names(columns, dataset)
+        for dataset in _field_mappings.RAW_TABLE_CONTRACTS
+        if not _field_mappings.missing_raw_column_names(columns, dataset)
     ]
     if len(matches) != 1:
         raise ValueError(f"Cannot infer CSMAR dataset from raw header: {matches}")
@@ -276,15 +149,13 @@ def require_raw_resource_policy(
 def _legal_provider_field_count_bound() -> int:
     """Return the largest current legal provider header width."""
 
-    from quant_research_platform.sources.csmar.field_mappings import (
-        COLUMN_ALIASES,
-        COLUMN_MAPPINGS,
-    )
-
     return max(
         len(mapping)
-        + sum(len(values) for values in COLUMN_ALIASES.get(dataset, {}).values())
-        for dataset, mapping in COLUMN_MAPPINGS.items()
+        + sum(
+            len(values)
+            for values in _field_mappings.COLUMN_ALIASES.get(dataset, {}).values()
+        )
+        for dataset, mapping in _field_mappings.COLUMN_MAPPINGS.items()
     )
 
 
@@ -1214,14 +1085,10 @@ def _inspect_raw_export_file_under_policy(
             resource_policy=policy,
             expected_identity=export_identity,
         )
-    contract = RAW_TABLE_CONTRACTS[dataset]
-    from quant_research_platform.sources.csmar.field_mappings import (
-        missing_raw_column_names,
-        validate_raw_column_names,
-    )
+    contract = _field_mappings.RAW_TABLE_CONTRACTS[dataset]
 
-    validate_raw_column_names(columns, dataset)
-    missing = missing_raw_column_names(columns, dataset)
+    _field_mappings.validate_raw_column_names(columns, dataset)
+    missing = _field_mappings.missing_raw_column_names(columns, dataset)
     metadata_path = require_unaliased_path(
         expected_metadata_sidecar_path(export_path),
         error="csmar_raw_export_identity_changed",

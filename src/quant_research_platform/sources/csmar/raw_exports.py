@@ -36,11 +36,11 @@ from quant_research_platform.storage._dataset_physical import (
 )
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
+from .field_mappings import RAW_TABLE_CONTRACTS
 from .raw_schemas import (
     _CSV_RECORD_LEASE_BOUND_BYTES,
     LOGICAL_RECORD_LIMIT_ERROR,
     MAX_LOGICAL_RECORD_BYTES,
-    RAW_TABLE_CONTRACTS,
     BoundedCsvRecord,
     RawExportInspection,
     inspect_raw_export_file,
