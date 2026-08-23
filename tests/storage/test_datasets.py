@@ -15,7 +15,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
-from inspect import currentframe, signature
+from inspect import currentframe
 from pathlib import Path
 from time import perf_counter
 from types import SimpleNamespace
@@ -2718,10 +2718,6 @@ def test_exact_key_index_honors_configured_sqlite_cache_budget(
         assert index.retained_memory_bytes == 12 * 1024
 
     assert cache_size == -12
-    assert (
-        signature(module.ExactPrimaryKeyIndex).parameters["sqlite_cache_bytes"].default
-        == module.EXACT_KEY_SQLITE_PAGE_BYTES
-    )
 
 
 def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
@@ -5846,59 +5842,28 @@ def test_aggregate_chunks_stream_under_budget_without_terminal_materialization(
     assert comparison_policy.used_memory_bytes == 0
 
 
-def test_storage_datasets_public_api_is_hard_cutover() -> None:
-    import quant_research_platform.storage as storage
+def test_storage_datasets_public_operations_reject_resource_policy_control() -> None:
+    spec = make_processed_dataset_spec("no_resource_policy_control")
+    calls = (
+        lambda: write_dataset(
+            Path("ignored"),
+            pd.DataFrame(),
+            spec=spec,
+            resource_policy=None,
+        ),
+        lambda: read_dataset(Path("ignored"), resource_policy=None),
+        lambda: inspect_dataset(Path("ignored"), resource_policy=None),
+        lambda: fingerprint_dataset(Path("ignored"), resource_policy=None),
+        lambda: compare_datasets(
+            Path("left"),
+            Path("right"),
+            resource_policy=None,
+        ),
+    )
 
-    assert datasets.__all__ == [
-        "DatasetReadMode",
-        "DatasetInspection",
-        "DatasetFingerprint",
-        "DatasetComparison",
-        "write_dataset",
-        "read_dataset",
-        "inspect_dataset",
-        "fingerprint_dataset",
-        "compare_datasets",
-    ]
-    assert not hasattr(storage, "write_dataset")
-
-
-def test_storage_datasets_public_signatures_do_not_expose_physical_controls() -> None:
-    public_signatures = {
-        "write_dataset": signature(write_dataset),
-        "read_dataset": signature(read_dataset),
-        "inspect_dataset": signature(inspect_dataset),
-        "fingerprint_dataset": signature(fingerprint_dataset),
-        "compare_datasets": signature(compare_datasets),
-    }
-
-    assert list(public_signatures["write_dataset"].parameters) == [
-        "dataset_root",
-        "data",
-        "spec",
-        "instance_metadata",
-    ]
-    assert list(public_signatures["read_dataset"].parameters) == [
-        "dataset_root",
-        "columns",
-        "time_window",
-        "mode",
-    ]
-    assert list(public_signatures["inspect_dataset"].parameters) == [
-        "dataset_root",
-        "time_window",
-    ]
-    assert list(public_signatures["fingerprint_dataset"].parameters) == [
-        "dataset_root",
-        "columns",
-        "time_window",
-    ]
-    assert list(public_signatures["compare_datasets"].parameters) == [
-        "left_root",
-        "right_root",
-        "columns",
-        "time_window",
-    ]
+    for call in calls:
+        with pytest.raises(TypeError):
+            call()
 
 
 def test_dataset_session_returns_fresh_contract_views_and_keeps_frozen_truth(

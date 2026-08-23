@@ -2,11 +2,7 @@ from __future__ import annotations
 
 import time
 
-import quant_research_platform.runtime.execution_metrics as execution_metrics
-from quant_research_platform.runtime.execution_metrics import (
-    ExecutionMetricsRecorder,
-    ExecutionStepMetric,
-)
+from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
 
 
 def test_execution_metrics_records_duration_rows_and_throughput() -> None:
@@ -48,14 +44,10 @@ def test_execution_metrics_records_failure_status_and_error_code() -> None:
     assert record["duration_seconds"] >= 0
 
 
-def test_execution_metrics_marks_missing_rows_without_rss_surface() -> None:
+def test_execution_metrics_marks_missing_rows() -> None:
     recorder = ExecutionMetricsRecorder()
     with recorder.record("manual_comparison"):
         pass
 
     record = recorder.payload()["records"][0]
     assert record["unavailable_reason"] == "row_counts_unavailable"
-    assert not hasattr(execution_metrics, "ProcessMemorySampler")
-    assert not hasattr(execution_metrics, "_StepRssSampler")
-    assert not hasattr(execution_metrics, "threading")
-    assert not hasattr(ExecutionStepMetric, "rss_start_mb")

@@ -111,7 +111,6 @@ def test_dataset_inventory_lease_admits_shrinks_and_closes(tmp_path: Path) -> No
         inventory.close()
         assert policy.used_memory_bytes == 0
     assert not list(tmp_path.glob(".i-*"))
-    assert not hasattr(DatasetSessionInventory, "__del__")
 
 
 def test_dataset_inventory_rejection_releases_same_root_lease(

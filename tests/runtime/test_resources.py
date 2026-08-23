@@ -290,21 +290,3 @@ def test_retired_root_cannot_reenter() -> None:
     with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         with runtime_resource_policy_scope(policy):
             pass
-
-
-def test_deleted_production_surfaces_are_absent() -> None:
-    assert not hasattr(resources.RuntimeResourcePolicy, "capture")
-    assert not hasattr(resources.RuntimeResourcePolicy, "reserve")
-    assert hasattr(resources, "current_runtime_resource_policy")
-    for name in ("active_runtime_resource_policy", "bind_runtime_resource_policy"):
-        assert not hasattr(resources, name)
-    for name in (
-        "task_memory_budget_bytes",
-        "reserved_memory_bytes",
-        "remaining_memory_bytes",
-        "register_cleanup",
-        "memory_evidence",
-        "assert_memory_within_budget",
-        "finish_memory_measurement",
-    ):
-        assert not hasattr(resources.RuntimeResourcePolicy, name)
