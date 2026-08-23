@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import weakref
 from pathlib import Path
 
@@ -106,15 +107,65 @@ def test_binance_file_discovery_occurs_inside_one_root_policy(
 ) -> None:
     observed = []
 
-    def discover(_root: Path):
+    def discover(_root: Path, *, verify_root):  # noqa: ANN001
         observed.append(current_runtime_resource_policy())
         return {}
 
-    monkeypatch.setattr(interim, "dataset_files_by_id", discover)
+    monkeypatch.setattr(interim, "_dataset_files_by_id_with_identity", discover)
     result = materialize_interim_data(layout=StorageLayout(project_root=tmp_path))
 
     assert len(observed) == 1 and observed[0] is not None
     assert not result.artifact_roots
+
+
+def test_binance_materializer_rejects_discovery_to_open_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    raw_path = raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    _append_jsonl(raw_path, _kline_envelope(0))
+    _append_jsonl(replacement, _kline_envelope(1))
+    real_write_dataset = interim.write_dataset
+
+    def replace_before_open(*args, **kwargs):  # noqa: ANN002, ANN003
+        os.replace(replacement, raw_path)
+        return real_write_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "write_dataset", replace_before_open)
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=("market_bars_1m",),
+        )
+
+
+def test_binance_materializer_rejects_selected_root_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    raw_path = raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl"
+    _append_jsonl(raw_path, _kline_envelope(0))
+    moved_root = tmp_path / "moved-binance-root"
+    real_write_dataset = interim.write_dataset
+
+    def replace_before_open(*args, **kwargs):  # noqa: ANN002, ANN003
+        raw_root.rename(moved_root)
+        raw_root.mkdir(parents=True)
+        return real_write_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "write_dataset", replace_before_open)
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=("market_bars_1m",),
+        )
 
 
 def test_binance_interim_iterator_reuses_active_root_at_creation() -> None:
@@ -128,8 +179,7 @@ def test_binance_interim_iterator_reuses_active_root_at_creation() -> None:
         assert tuple(iterator) == ()
 
 
-def test_binance_interim_iterator_reuses_active_root_at_delayed_consumption(
-) -> None:
+def test_binance_interim_iterator_reuses_active_root_at_delayed_consumption() -> None:
     iterator = interim.iter_interim_frames(
         data_id="market_bars_1m",
         input_files=(),
@@ -466,9 +516,7 @@ def test_binance_blank_line_and_valid_row_share_one_admission(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "blank-first.jsonl"
-    path.write_bytes(
-        b"\n" + (json.dumps(_kline_envelope(0)) + "\n").encode("utf-8")
-    )
+    path.write_bytes(b"\n" + (json.dumps(_kline_envelope(0)) + "\n").encode("utf-8"))
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     stream = interim._iter_raw_envelope_batches(
         path,

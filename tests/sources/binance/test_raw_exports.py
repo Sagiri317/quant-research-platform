@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pandas as pd
@@ -37,6 +38,165 @@ def test_binance_dataset_files_by_id_groups_local_raw_jsonl(tmp_path: Path) -> N
         "aggregate_trades_tick": (trade_path,),
         "depth_levels_tick": (depth_path,),
     }
+
+
+def test_binance_raw_identity_rejects_file_and_directory_aliases(
+    tmp_path: Path,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    outside_file = tmp_path / "outside" / "2026-07-06.jsonl"
+    _write_jsonl(outside_file, _envelope(data_kind="klines"))
+    alias_file = raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl"
+    alias_file.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        alias_file.symlink_to(outside_file)
+    except OSError as error:
+        pytest.skip(f"filesystem symlink unavailable: {error}")
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        dataset_files_by_id(raw_root)
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        tuple(iter_raw_envelopes(alias_file))
+
+    outside_symbol = tmp_path / "outside-symbol" / "BTCUSDT"
+    _write_jsonl(
+        outside_symbol / "1m" / "2026-07-06.jsonl",
+        _envelope(data_kind="klines"),
+    )
+    alias_symbol = raw_root / "spot" / "klines" / "ALIASUSDT"
+    try:
+        alias_symbol.symlink_to(outside_symbol, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"filesystem directory symlink unavailable: {error}")
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        dataset_files_by_id(raw_root)
+
+
+def test_binance_raw_reader_rejects_replacement_before_open(tmp_path: Path) -> None:
+    path = tmp_path / "raw.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    _write_jsonl(path, _envelope(data_kind="klines"))
+    _write_jsonl(replacement, _envelope(data_kind="klines"))
+
+    reader = iter_raw_envelopes(path)
+    os.replace(replacement, path)
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        tuple(reader)
+
+
+def test_binance_raw_reader_maps_capture_to_open_disappearance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    _write_jsonl(path, _envelope(data_kind="klines"))
+    original_open = Path.open
+
+    def disappear_before_open(  # noqa: ANN001
+        candidate,
+        *args,
+        **kwargs,  # noqa: ANN002, ANN003
+    ):
+        if Path(candidate) == path:
+            path.unlink()
+        return original_open(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", disappear_before_open)
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_reader_rejects_replacement_during_consumption(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    _write_jsonl(path, _envelope(data_kind="klines"))
+    _write_jsonl(replacement, _envelope(data_kind="klines"))
+    original_next_record_length = raw_exports._next_record_length
+    replaced = False
+
+    def replace_before_read(handle, buffer):  # noqa: ANN001
+        nonlocal replaced
+        if not replaced:
+            path.write_text(replacement.read_text(encoding="utf-8"), encoding="utf-8")
+            replaced = True
+        return original_next_record_length(handle, buffer)
+
+    monkeypatch.setattr(raw_exports, "_next_record_length", replace_before_read)
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_reader_rejects_replacement_after_output(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    _write_jsonl(path, _envelope(data_kind="klines"))
+    _write_jsonl(replacement, _envelope(data_kind="klines"))
+    reader = iter_raw_envelopes(path)
+
+    assert next(reader)["data_kind"] == "klines"
+    path.write_text(replacement.read_text(encoding="utf-8"), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        next(reader)
+
+
+def test_binance_raw_reader_rejects_open_handle_identity_change(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    _write_jsonl(path, _envelope(data_kind="klines"))
+    original_identity_from_stat = raw_exports.dataset_file_identity_from_stat
+
+    def changed_handle_identity(stat_result):  # noqa: ANN001
+        identity = original_identity_from_stat(stat_result)
+        return raw_exports.DatasetFileIdentity(
+            identity.device,
+            identity.inode,
+            identity.size + 1,
+            identity.modified_ns,
+        )
+
+    monkeypatch.setattr(
+        raw_exports,
+        "dataset_file_identity_from_stat",
+        changed_handle_identity,
+    )
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        tuple(iter_raw_envelopes(path))
+
+
+def test_binance_raw_reader_preserves_primary_when_final_identity_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    _write_jsonl(path, _envelope(data_kind="klines"))
+    _write_jsonl(replacement, _envelope(data_kind="klines"))
+    primary = KeyboardInterrupt("primary")
+
+    def fail_after_mutation(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        path.write_text(replacement.read_text(encoding="utf-8"), encoding="utf-8")
+        raise primary
+
+    monkeypatch.setattr(raw_exports, "_validate_envelope", fail_after_mutation)
+
+    with pytest.raises(KeyboardInterrupt) as caught:
+        tuple(iter_raw_envelopes(path))
+
+    assert caught.value is primary
+    assert any("ValueError" in note for note in primary.__notes__)
 
 
 def test_binance_raw_exports_reads_canonical_envelopes(tmp_path: Path) -> None:

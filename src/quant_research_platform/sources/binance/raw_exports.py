@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +32,12 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
     strict_symbol,
 )
+from quant_research_platform.storage._dataset_paths import require_unaliased_path
+from quant_research_platform.storage._dataset_physical import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+    dataset_file_identity_from_stat,
+)
 
 DATA_ID_BY_RAW_KIND = {
     "klines": "market_bars_1m",
@@ -36,14 +45,88 @@ DATA_ID_BY_RAW_KIND = {
     "depth": "depth_levels_tick",
 }
 _SCAN_BUFFER_BYTES = 64 * 1024
+_RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
+_RawInputFile = tuple[Path, DatasetFileIdentity]
 
 
 def dataset_files_by_id(raw_root: Path) -> dict[str, tuple[Path, ...]]:
     root = Path(raw_root)
+    files_by_id = _dataset_files_by_id_with_identity(root)
     return {
-        data_id: tuple(sorted(_raw_kind_files(root, raw_kind)))
-        for raw_kind, data_id in DATA_ID_BY_RAW_KIND.items()
+        data_id: tuple(path for path, _identity in files)
+        for data_id, files in files_by_id.items()
     }
+
+
+def _dataset_files_by_id_with_identity(
+    raw_root: Path,
+    *,
+    verify_root: Callable[[], None] | None = None,
+) -> dict[str, tuple[_RawInputFile, ...]]:
+    root = Path(raw_root)
+    session = (
+        _raw_path_session(root) if verify_root is None else nullcontext(verify_root)
+    )
+    with session as verify:
+        return {
+            data_id: _discover_raw_kind_files(
+                root,
+                raw_kind,
+                verify_root=verify,
+            )
+            for raw_kind, data_id in DATA_ID_BY_RAW_KIND.items()
+        }
+
+
+@contextmanager
+def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
+    raw_root = Path(root)
+
+    def read_root_identity() -> os.stat_result | None:
+        require_unaliased_path(raw_root, error=_RAW_IDENTITY_ERROR)
+        try:
+            metadata = raw_root.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise ValueError(_RAW_IDENTITY_ERROR) from error
+        _reject_raw_reparse(metadata)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(_RAW_IDENTITY_ERROR)
+        return metadata
+
+    root_identity = read_root_identity()
+
+    def verify_root() -> None:
+        current = read_root_identity()
+        if root_identity is None:
+            if current is not None:
+                raise ValueError(_RAW_IDENTITY_ERROR)
+            return
+        if current is None:
+            raise ValueError(_RAW_IDENTITY_ERROR)
+        try:
+            unchanged = os.path.samestat(root_identity, current)
+        except OSError as error:
+            raise ValueError(_RAW_IDENTITY_ERROR) from error
+        if not unchanged:
+            raise ValueError(_RAW_IDENTITY_ERROR)
+
+    try:
+        verify_root()
+        yield verify_root
+    finally:
+        primary = sys.exception()
+        try:
+            verify_root()
+        except BaseException as verify_error:
+            if primary is not None:
+                primary.add_note(
+                    "Binance raw root verification also failed: "
+                    f"{type(verify_error).__name__}"
+                )
+            else:
+                raise
 
 
 def iter_raw_envelopes(
@@ -51,16 +134,19 @@ def iter_raw_envelopes(
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[dict[str, Any]]:
+    raw_path = Path(path)
+    expected_identity = _capture_raw_file_identity(raw_path)
     bound_policy = resource_policy
 
     def activate() -> Iterator[dict[str, Any]]:
         policy = bound_policy or current_runtime_resource_policy()
         with runtime_resource_policy_scope(policy) as policy:
             chunks = _iter_raw_envelope_batches(
-                path,
+                raw_path,
                 batch_size=1,
                 resource_policy=policy,
                 validate_depth_payload=True,
+                expected_identity=expected_identity,
             )
             lease: MemoryLease | None = None
             try:
@@ -134,17 +220,21 @@ def _iter_raw_envelope_batches(
     batch_size: int,
     resource_policy: RuntimeResourcePolicy,
     validate_depth_payload: bool = True,
+    expected_identity: DatasetFileIdentity | None = None,
+    verify_root: Callable[[], None] | None = None,
 ) -> Iterator[object]:
     raw_path = Path(path)
-    if not raw_path.is_file():
-        raise FileNotFoundError(raw_path)
-    if raw_path.stat().st_size == 0:
+    expected_identity = _capture_raw_file_identity(
+        raw_path,
+        expected_identity=expected_identity,
+    )
+    if expected_identity.size == 0:
         raise ValueError("empty_binance_raw_file")
     if raw_path.suffix != ".jsonl":
         raise ValueError("unsupported_binance_raw_file_extension")
     if type(batch_size) is not int or batch_size <= 0:
         raise ValueError("invalid_binance_raw_row_batch_size")
-    raw_file_size = max(1, raw_path.stat().st_size)
+    raw_file_size = max(1, expected_identity.size)
     producer_bound = max(
         256 * 1024,
         4 * min(raw_file_size, 8 * 1024 * 1024) + _SCAN_BUFFER_BYTES,
@@ -152,9 +242,34 @@ def _iter_raw_envelope_batches(
     line_number = 0
     yielded = False
 
-    with raw_path.open("rb") as handle:
+    try:
+        handle = raw_path.open("rb")
+    except OSError as open_error:
+        try:
+            current_identity = _capture_raw_file_identity(
+                raw_path,
+                missing_is_file_not_found=False,
+            )
+        except ValueError:
+            raise ValueError(_RAW_IDENTITY_ERROR) from open_error
+        if current_identity != expected_identity:
+            raise ValueError(_RAW_IDENTITY_ERROR) from open_error
+        raise
+    try:
+        _verify_raw_file_handle(
+            raw_path,
+            handle,
+            expected_identity=expected_identity,
+            verify_root=verify_root,
+        )
         while True:
             lease = yield producer_bound
+            _verify_raw_file_handle(
+                raw_path,
+                handle,
+                expected_identity=expected_identity,
+                verify_root=verify_root,
+            )
             scan_bytes = min(_SCAN_BUFFER_BYTES, max(1, producer_bound))
             if scan_bytes + 64 * 1024 > lease.reserved_bytes:
                 raise RuntimeError("binance_record_envelope_bound_invalid")
@@ -201,14 +316,101 @@ def _iter_raw_envelope_batches(
                 del buffer
                 if actual_bound > lease.reserved_bytes:
                     raise RuntimeError("binance_record_envelope_bound_invalid")
+                _verify_raw_file_handle(
+                    raw_path,
+                    handle,
+                    expected_identity=expected_identity,
+                    verify_root=verify_root,
+                )
                 yield _OwnedValue(tuple(batch), lease)
                 del batch
             else:
                 del buffer
             if end_of_file:
                 break
-    if not yielded:
-        raise ValueError("empty_binance_raw_file")
+        if not yielded:
+            raise ValueError("empty_binance_raw_file")
+    finally:
+        primary = sys.exception()
+        first_failure: BaseException | None = None
+        try:
+            _verify_raw_file_handle(
+                raw_path,
+                handle,
+                expected_identity=expected_identity,
+                verify_root=verify_root,
+            )
+        except BaseException as verify_error:
+            if primary is not None:
+                primary.add_note(
+                    "Binance raw file verification also failed: "
+                    f"{type(verify_error).__name__}"
+                )
+            else:
+                first_failure = verify_error
+        try:
+            handle.close()
+        except BaseException as close_error:
+            if primary is not None:
+                primary.add_note(
+                    f"Binance raw file close also failed: {type(close_error).__name__}"
+                )
+            elif first_failure is None:
+                first_failure = close_error
+            else:
+                first_failure.add_note(
+                    f"Binance raw file close also failed: {type(close_error).__name__}"
+                )
+        if first_failure is not None:
+            raise first_failure
+
+
+def _capture_raw_file_identity(
+    path: Path,
+    *,
+    expected_identity: DatasetFileIdentity | None = None,
+    missing_is_file_not_found: bool = True,
+) -> DatasetFileIdentity:
+    raw_path = Path(path)
+    try:
+        raw_path.lstat()
+    except FileNotFoundError as error:
+        if missing_is_file_not_found and expected_identity is None:
+            raise FileNotFoundError(raw_path) from error
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    except OSError as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    try:
+        identity = dataset_file_identity(raw_path)
+    except ValueError as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    if expected_identity is not None and identity != expected_identity:
+        raise ValueError(_RAW_IDENTITY_ERROR)
+    return identity
+
+
+def _verify_raw_file_handle(
+    path: Path,
+    handle: Any,
+    *,
+    expected_identity: DatasetFileIdentity,
+    verify_root: Callable[[], None] | None,
+) -> None:
+    if verify_root is not None:
+        verify_root()
+    try:
+        handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+    except (OSError, ValueError) as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    if handle_identity != expected_identity:
+        raise ValueError(_RAW_IDENTITY_ERROR)
+    _capture_raw_file_identity(
+        path,
+        expected_identity=expected_identity,
+        missing_is_file_not_found=False,
+    )
+    if verify_root is not None:
+        verify_root()
 
 
 def _next_record_length(handle: Any, buffer: bytearray) -> int:
@@ -239,22 +441,93 @@ def _json_record_working_set_bytes(record_bytes: int) -> int:
     return raw_and_text + decoded_and_normalized
 
 
-def _raw_kind_files(root: Path, raw_kind: str) -> tuple[Path, ...]:
+def _discover_raw_kind_files(
+    root: Path,
+    raw_kind: str,
+    *,
+    verify_root: Callable[[], None],
+) -> tuple[_RawInputFile, ...]:
     if raw_kind == "klines":
         base = root / "spot" / "klines"
-        patterns = ("*" + "/1m/*.jsonl",)
+        interval = "1m"
     elif raw_kind == "agg_trades":
         base = root / "spot" / "agg_trades"
-        patterns = ("*" + "/*.jsonl",)
+        interval = None
     elif raw_kind == "depth":
         base = root / "spot" / "depth"
-        patterns = ("*" + "/*.jsonl",)
+        interval = None
     else:
         raise ValueError(f"unsupported_binance_raw_kind: {raw_kind}")
-    files: list[Path] = []
-    for pattern in patterns:
-        files.extend(base.glob(pattern))
-    return tuple(path for path in files if path.is_file())
+    files: list[_RawInputFile] = []
+    for symbol_dir, symbol_metadata in _raw_directory_entries(
+        base,
+        verify_root=verify_root,
+    ):
+        if not stat.S_ISDIR(symbol_metadata.st_mode):
+            continue
+        data_dir = symbol_dir if interval is None else symbol_dir / interval
+        for path, metadata in _raw_directory_entries(
+            data_dir,
+            verify_root=verify_root,
+        ):
+            if not stat.S_ISREG(metadata.st_mode):
+                continue
+            if path.suffix != ".jsonl":
+                continue
+            verify_root()
+            identity = _capture_raw_file_identity(
+                path,
+                missing_is_file_not_found=False,
+            )
+            verify_root()
+            files.append((path, identity))
+    files.sort(key=lambda item: item[0])
+    verify_root()
+    return tuple(files)
+
+
+def _raw_directory_entries(
+    path: Path,
+    *,
+    verify_root: Callable[[], None],
+) -> tuple[tuple[Path, os.stat_result], ...]:
+    verify_root()
+    require_unaliased_path(path, error=_RAW_IDENTITY_ERROR)
+    try:
+        metadata = path.lstat()
+    except FileNotFoundError:
+        return ()
+    except OSError as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    _reject_raw_reparse(metadata)
+    if not stat.S_ISDIR(metadata.st_mode):
+        return ()
+    try:
+        children = tuple(path.iterdir())
+    except OSError as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    result: list[tuple[Path, os.stat_result]] = []
+    for child in children:
+        require_unaliased_path(child, error=_RAW_IDENTITY_ERROR)
+        try:
+            metadata = child.lstat()
+        except OSError as error:
+            raise ValueError(_RAW_IDENTITY_ERROR) from error
+        _reject_raw_reparse(metadata)
+        verify_root()
+        result.append((child, metadata))
+    result.sort(key=lambda item: item[0])
+    return tuple(result)
+
+
+def _reject_raw_reparse(metadata: os.stat_result) -> None:
+    reparse_flag = getattr(metadata, "st_file_attributes", 0) & getattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        0,
+    )
+    if reparse_flag:
+        raise ValueError(_RAW_IDENTITY_ERROR)
 
 
 def _loads_json(text: str, path: Path, *, line_number: int | None = None) -> Any:

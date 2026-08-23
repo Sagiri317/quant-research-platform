@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,8 +33,11 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.binance import ids
 from quant_research_platform.sources.binance.fields import field_role
 from quant_research_platform.sources.binance.raw_exports import (
+    _capture_raw_file_identity,
+    _dataset_files_by_id_with_identity,
     _iter_raw_envelope_batches,
-    dataset_files_by_id,
+    _raw_path_session,
+    _RawInputFile,
 )
 from quant_research_platform.sources.binance.validation import (
     depth_side_levels,
@@ -128,6 +131,7 @@ def iter_interim_frames(
     end_date: str | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Iterator[pd.DataFrame]:
+    input_files = _bind_interim_input_files(input_files)
     bound_policy = resource_policy
 
     def activate() -> Iterator[pd.DataFrame]:
@@ -212,11 +216,12 @@ def iter_interim_frames(
 def _iter_owned_interim_frames(
     *,
     data_id: str,
-    input_files: tuple[Path, ...],
+    input_files: tuple[Path | _RawInputFile, ...],
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
     start_date: str | None = None,
     end_date: str | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
+    verify_root: Callable[[], None] | None = None,
 ) -> Iterator[object]:
     _strict_data_ids((data_id,))
     strict_positive_integer(
@@ -233,14 +238,25 @@ def _iter_owned_interim_frames(
             empty_schema_frame: pd.DataFrame | None = None
             last_key: tuple[object, ...] | None = None
             lease: MemoryLease | None = None
-            ordered_input_files = tuple(sorted(input_files))
-            for input_file in ordered_input_files:
+            ordered_input_files = tuple(
+                sorted(
+                    input_files,
+                    key=lambda entry: entry[0] if isinstance(entry, tuple) else entry,
+                )
+            )
+            for input_entry in ordered_input_files:
+                if isinstance(input_entry, tuple):
+                    input_file, expected_identity = input_entry
+                else:
+                    input_file, expected_identity = input_entry, None
                 with closing_iterator(
                     _iter_raw_envelope_batches(
                         input_file,
                         batch_size=row_batch_size,
                         resource_policy=policy,
                         validate_depth_payload=False,
+                        expected_identity=expected_identity,
+                        verify_root=verify_root,
                     )
                 ) as raw_batches:
                     try:
@@ -295,10 +311,9 @@ def _iter_owned_interim_frames(
                                     )
                                 continue
                             yielded = True
-                            batch_bytes = sum(
-                                max(1, len(str(item)))
-                                for item in batch
-                            ) * 64
+                            batch_bytes = (
+                                sum(max(1, len(str(item))) for item in batch) * 64
+                            )
                             normalized_bytes = pandas_frame_payload_bytes(normalized)
                             filtered_bytes = pandas_frame_payload_bytes(filtered)
                             actual_bound = (
@@ -373,35 +388,55 @@ def materialize_interim_data(
     with runtime_resource_policy_scope(resource_policy) as policy:
         catalog = interim_catalog()
         source_raw_root = raw_root or layout.raw_source_root(ids.SOURCE_ID)
-        files_by_data_id = dataset_files_by_id(source_raw_root)
         written: dict[str, Path] = {}
         skipped: list[str] = []
         requested_data_ids = _strict_data_ids(data_ids)
-        for data_id in requested_data_ids:
-            spec = catalog.get(data_id)
-            input_files = files_by_data_id.get(data_id, ())
-            if not input_files:
-                skipped.append(data_id)
-                continue
-            artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
-            write_dataset(
-                artifact_root,
-                _iter_owned_interim_frames(
-                    data_id=data_id,
-                    input_files=input_files,
-                    row_batch_size=row_batch_size,
-                    start_date=start_date,
-                    end_date=end_date,
-                    resource_policy=policy,
-                ),
-                spec=spec,
-                resource_policy=policy,
+        with _raw_path_session(source_raw_root) as verify_root:
+            files_by_data_id = _dataset_files_by_id_with_identity(
+                source_raw_root,
+                verify_root=verify_root,
             )
-            written[data_id] = artifact_root
+            for data_id in requested_data_ids:
+                spec = catalog.get(data_id)
+                input_files = files_by_data_id.get(data_id, ())
+                if not input_files:
+                    skipped.append(data_id)
+                    continue
+                artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
+                write_dataset(
+                    artifact_root,
+                    _iter_owned_interim_frames(
+                        data_id=data_id,
+                        input_files=input_files,
+                        row_batch_size=row_batch_size,
+                        start_date=start_date,
+                        end_date=end_date,
+                        resource_policy=policy,
+                        verify_root=verify_root,
+                    ),
+                    spec=spec,
+                    resource_policy=policy,
+                )
+                written[data_id] = artifact_root
         return BinanceInterimImportResult(
             artifact_roots=written,
             skipped=tuple(skipped),
         )
+
+
+def _bind_interim_input_files(
+    input_files: tuple[Path, ...],
+) -> tuple[Path | _RawInputFile, ...]:
+    bound: list[Path | _RawInputFile] = []
+    for input_file in input_files:
+        path = Path(input_file)
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            bound.append(path)
+        else:
+            bound.append((path, _capture_raw_file_identity(path)))
+    return tuple(bound)
 
 
 def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
