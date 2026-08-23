@@ -6,7 +6,7 @@ from quant_research_platform.policy.identifiers import validate_run_identifier
 
 
 class RunIdValidationError(ValueError):
-    """Raised when a run id is not share-safe for contracts or paths."""
+    """Raised when a run id violates its contract grammar."""
 
 
 def validate_run_id(value: str) -> str:

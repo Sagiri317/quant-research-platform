@@ -15,7 +15,6 @@ from quant_research_platform.contracts.filtering import (
 )
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.policy.share_safety import sanitize_shared_object
 from quant_research_platform.storage.layout import StorageLayout
 
 _SIGNAL_METADATA_KEYS = frozenset(
@@ -31,20 +30,10 @@ def required_frame_metadata(
 ) -> dict[str, object]:
     if key not in frame.attrs:
         raise ValueError(error_name)
-    return sanitize_required_metadata(frame.attrs[key], error_name=error_name)
-
-
-def sanitize_required_metadata(
-    value: object,
-    *,
-    error_name: str,
-) -> dict[str, object]:
+    value = frame.attrs[key]
     if type(value) is not dict or not value:
         raise ValueError(error_name)
-    sanitized = sanitize_shared_object(value)
-    if type(sanitized) is not dict or not sanitized:
-        raise ValueError(error_name)
-    return sanitized
+    return value
 
 
 def validate_metadata_row_count_chain(

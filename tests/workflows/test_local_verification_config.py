@@ -260,33 +260,37 @@ def test_local_verification_run_id_can_be_explicit_long_semantic_value(tmp_path)
     assert config.run_id == "local_verification_smoke_a_share_2014_2016"
 
 
-def test_local_verification_run_id_uses_shared_share_safe_contract(
+def test_local_verification_run_id_uses_grammar_only_contract(
     tmp_path: Path,
 ) -> None:
-    assert (
-        module.resolve_local_verification_run_id(
+    valid_cases = (
+        (
             None,
-            tmp_path / "local-verification-output" / "run_202606",
-        )
-        == "run_202606"
+            tmp_path / "local-verification-output" / "run_000001",
+            "run_000001",
+        ),
+        (None, tmp_path / "local-verification-output" / "688001", "688001"),
+        (
+            "csmar_run",
+            tmp_path / "local-verification-output" / "safe",
+            "csmar_run",
+        ),
+        (
+            "source_run",
+            tmp_path / "local-verification-output" / "safe",
+            "source_run",
+        ),
     )
-    assert (
-        module.resolve_local_verification_run_id(
-            "run_2026_06",
-            tmp_path / "local-verification-output" / "ignored",
-        )
-        == "run_2026_06"
-    )
+    for run_id, run_root, expected in valid_cases:
+        assert module.resolve_local_verification_run_id(run_id, run_root) == expected
 
-    invalid_cases = (
-        (None, tmp_path / "local-verification-output" / "run_000001"),
-        (None, tmp_path / "local-verification-output" / "688001"),
-        ("csmar_run", tmp_path / "local-verification-output" / "safe"),
-        ("source_run", tmp_path / "local-verification-output" / "safe"),
-    )
-    for run_id, run_root in invalid_cases:
+    invalid_cases = ("Run-01", "run 01", "run/01", r"run\01", "a" * 129)
+    for run_id in invalid_cases:
         with pytest.raises(ValueError, match="invalid_run_id"):
-            module.resolve_local_verification_run_id(run_id, run_root)
+            module.resolve_local_verification_run_id(
+                run_id,
+                tmp_path / "local-verification-output" / "safe",
+            )
 
 
 def test_local_verification_uses_explicit_prediction_windows() -> None:

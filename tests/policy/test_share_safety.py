@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from quant_research_platform.policy.identifiers import unsafe_identifier_reason
+from quant_research_platform.policy.identifiers import validate_output_identifier
 from quant_research_platform.policy.share_safety import (
     local_run_root_reason,
     sanitize_shared_text,
@@ -18,7 +18,7 @@ def test_share_safety_rejects_local_path_and_sanitizes_it() -> None:
 
 
 def test_share_safety_does_not_treat_output_identifier_as_path() -> None:
-    assert unsafe_identifier_reason("prediction_outputs") is None
+    assert validate_output_identifier("prediction_outputs") == "prediction_outputs"
 
 
 def test_local_run_root_accepts_explicit_locations(tmp_path: Path) -> None:

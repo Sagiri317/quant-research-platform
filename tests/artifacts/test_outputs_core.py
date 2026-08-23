@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
 
@@ -52,6 +53,60 @@ def test_output_manifest_builder_validates_current_business_envelope() -> None:
     payload = _prediction_manifest_payload()
 
     assert validate_output_manifest_business_envelope(payload) is payload
+
+
+def test_output_manifest_preserves_typed_identifier_values() -> None:
+    output_spec = replace(
+        make_prediction_report_spec(),
+        output_id="provider_summary",
+        run_id="run_600000_sh",
+    )
+    base_payload = _prediction_manifest_payload()
+    payload = output_manifest_payload(
+        output_spec=output_spec,
+        metadata=prediction_output_metadata(
+            spec=make_report_prediction_spec(),
+            model_metadata=base_payload["metadata"]["model_metadata"],
+            prediction_metadata=base_payload["metadata"]["prediction_metadata"],
+        ),
+        files=("prediction.parquet",),
+    )
+
+    assert payload["output_id"] == "provider_summary"
+    assert payload["run_id"] == "run_600000_sh"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "absolute_path",
+        "provider_marker",
+        "credential_marker",
+        "traceback_marker",
+        "row_sample",
+    ),
+)
+def test_output_manifest_rejects_unsafe_free_form_metadata_before_publish(
+    mutation: str,
+) -> None:
+    payload = _prediction_manifest_payload()
+    model_metadata = payload["metadata"]["model_metadata"]
+    if mutation == "absolute_path":
+        model_metadata["dependency_status"]["version"] = (
+            "C:" + chr(92) + "private" + chr(92) + "environment"
+        )
+    else:
+        marker = {
+            "provider_marker": "csmar",
+            "credential_marker": "token=abcdefghijk",
+            "traceback_marker": "Traceback (most recent call last): secret",
+            "row_sample": "row_samples: market_id=a asset_id=b timestamp=t",
+        }[mutation]
+        model_metadata["hyperparameters"][mutation] = marker
+        model_metadata["resolved_hyperparameters"][mutation] = marker
+
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+        validate_output_manifest_business_envelope(payload)
 
 
 @pytest.mark.parametrize(

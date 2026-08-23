@@ -10,7 +10,6 @@ import pandas as pd
 from quant_research_platform.artifacts._output_common_validation import (
     derive_output_bundle_root,
     required_frame_metadata,
-    sanitize_required_metadata,
     validate_output_frame,
 )
 from quant_research_platform.artifacts._output_manifest import (
@@ -154,10 +153,7 @@ def _write_prediction_output_chunks(
     )
     required = (*spec.primary_key, spec.prediction_column)
     model_metadata_payload = validate_model_metadata_shape(
-        sanitize_required_metadata(
-            model_metadata,
-            error_name="missing_model_metadata",
-        )
+        dict(model_metadata)
     )
     validate_model_metadata_consistency(model_metadata_payload, spec=spec)
 
@@ -170,10 +166,7 @@ def _write_prediction_output_chunks(
             compression="zstd",
         )
         prediction_metadata = validate_prediction_metadata_shape(
-            sanitize_required_metadata(
-                prediction_metadata_factory(),
-                error_name="missing_prediction_metadata",
-            )
+            dict(prediction_metadata_factory())
         )
         validate_prediction_metadata_consistency_from_summary(
             prediction_metadata,

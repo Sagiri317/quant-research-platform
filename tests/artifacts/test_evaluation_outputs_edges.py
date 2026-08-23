@@ -21,13 +21,18 @@ from quant_research_platform.artifacts import (
 from quant_research_platform.artifacts import (
     outputs,
 )
+from quant_research_platform.artifacts._evaluation_output_validation import (
+    EVALUATION_ARTIFACTS,
+)
 from quant_research_platform.artifacts._output_manifest import (
     evaluation_output_metadata,
+    output_manifest_payload,
 )
 from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.policy.share_safety import (
     MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS,
 )
@@ -124,6 +129,42 @@ def test_evaluation_metadata_reuses_complete_business_owner_graph(
 
     with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
         evaluation_output_validation.validate_evaluation_output_metadata_shape(metadata)
+
+
+def test_output_manifest_preserves_nested_typed_identifier_values() -> None:
+    spec = EvaluationSpec(
+        run_id="eval_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(
+            SignalSpec(
+                signal_id="provider_id",
+                source_column="provider_id",
+                source_kind="factor",
+            ),
+        ),
+        label_columns=("label",),
+    )
+    payload = output_manifest_payload(
+        output_spec=make_output_edge_report_spec(
+            "evaluation_outputs", spec.run_id, "evaluation"
+        ),
+        metadata=evaluation_output_metadata(
+            spec=spec,
+            evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
+        ),
+        files=EVALUATION_ARTIFACTS,
+    )
+
+    assert payload["metadata"]["signals"] == [
+        {
+            "signal_id": "provider_id",
+            "source_kind": "factor",
+            "source_column": "provider_id",
+            "direction": "higher_is_better",
+            "transform": "identity",
+        }
+    ]
 
 
 def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> None:

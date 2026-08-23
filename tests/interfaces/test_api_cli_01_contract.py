@@ -5,14 +5,21 @@ import subprocess
 import sys
 from pathlib import Path
 
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from pydantic import BaseModel
 from typer.main import get_command
 from typer.testing import CliRunner
 
 import quant_research_platform.interfaces.api.app as api_app_module
 import quant_research_platform.interfaces.cli.commands as cli_commands_module
 import quant_research_platform.interfaces.services as services_module
-from quant_research_platform.interfaces.api.errors import ApiError, api_error_response
+from quant_research_platform.interfaces.api.errors import register_api_error_handlers
+from quant_research_platform.interfaces.api.models import (
+    FactorCatalogResponse,
+    LabelCatalogResponse,
+    ResearchDatasetRequirementsResponse,
+)
 from quant_research_platform.markets.implementations.a_share.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
@@ -74,6 +81,32 @@ def test_openapi_uses_approved_operation_ids() -> None:
         "list_catalog_labels",
         "describe_research_dataset_requirements",
     }
+
+
+def test_openapi_success_responses_use_closed_typed_schemas() -> None:
+    schema = create_app().openapi()
+    expected = {
+        "/api/0.1/catalog/factors": "#/components/schemas/FactorCatalogResponse",
+        "/api/0.1/catalog/labels": "#/components/schemas/LabelCatalogResponse",
+        "/api/0.1/research-datasets/{dataset_id}/requirements": (
+            "#/components/schemas/ResearchDatasetRequirementsResponse"
+        ),
+    }
+
+    for path, schema_ref in expected.items():
+        response_schema = schema["paths"][path]["get"]["responses"]["200"][
+            "content"
+        ]["application/json"]["schema"]
+        assert response_schema == {"$ref": schema_ref}
+
+    for name in (
+        "FactorCatalogResponse",
+        "FactorCatalogItem",
+        "LabelCatalogResponse",
+        "LabelCatalogItem",
+        "ResearchDatasetRequirementsResponse",
+    ):
+        assert schema["components"]["schemas"][name]["additionalProperties"] is False
 
 
 def test_api_01_endpoints_respond_without_provider_source_markers() -> None:
@@ -213,48 +246,39 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
         "describe_research_dataset_requirements": [],
     }
 
-    def list_factors(profile) -> dict[str, object]:
+    def list_factors(profile) -> FactorCatalogResponse:
         assert profile.fields.list_names()
         calls["list_factors"].append(())
-        return {
-            "api_version": "0.1",
-            "items": [
-                {
-                    "factor_id": "sentinel_factor",
-                    "market_id": "a_share",
-                    "factor_set": "core",
-                    "definition_version": "0.1",
-                }
-            ],
-        }
+        return FactorCatalogResponse(
+            api_version="0.1",
+            items=[],
+        )
 
-    def list_labels(profile) -> dict[str, object]:
+    def list_labels(profile) -> LabelCatalogResponse:
         assert profile.fields.list_names()
         calls["list_labels"].append(())
-        return {
-            "api_version": "0.1",
-            "items": [
-                {
-                    "label_id": "sentinel_label",
-                    "market_id": "a_share",
-                    "horizon": 1,
-                    "definition_version": "0.1",
-                }
-            ],
-        }
+        return LabelCatalogResponse(
+            api_version="0.1",
+            items=[],
+        )
 
     def describe_research_dataset_requirements(
         dataset_id: str,
         profile,
-    ) -> dict[str, object]:
+    ) -> ResearchDatasetRequirementsResponse:
         assert profile.research_datasets.list()
         calls["describe_research_dataset_requirements"].append((dataset_id,))
-        return {
-            "api_version": "0.1",
-            "status": "sentinel_requirements",
-            "dataset_id": dataset_id,
-            "input_data_ids": [PRICE_VOLUME_PROCESSED_DATA_ID],
-        }
+        return ResearchDatasetRequirementsResponse(
+            api_version="0.1",
+            status="sentinel_requirements",
+            mode="requirements_query_only",
+            dataset_id=dataset_id,
+            market_id="a_share",
+            input_data_ids=[PRICE_VOLUME_PROCESSED_DATA_ID],
+            factor_count=1,
+            feature_count=1,
+            label_count=1,
+        )
 
     monkeypatch.setattr(services_module, "list_factors", list_factors)
     monkeypatch.setattr(services_module, "list_labels", list_labels)
@@ -300,7 +324,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
         assert len(calls[service_name]) == 2
 
 
-def test_rejected_dataset_ids_are_sanitized() -> None:
+def test_rejected_dataset_ids_use_fixed_errors() -> None:
     client = TestClient(create_app())
     runner = CliRunner()
 
@@ -321,31 +345,65 @@ def test_rejected_dataset_ids_are_sanitized() -> None:
 
         assert dataset_response.status_code == 404
         assert dataset_result.exit_code != 0
+        assert "unknown_dataset_id" in dataset_result.output
+        assert value not in dataset_result.output
         _assert_public_text_has_no_provider_source_markers(str(dataset_response.json()))
         _assert_public_text_has_no_provider_source_markers(dataset_result.output)
 
 
-def test_api_error_envelope_sanitizes_private_details() -> None:
-    response = api_error_response(
-        ApiError(
-            error_code="invalid_private_detail",
-            message="failed with provider-internal detail",
-            field="dataset_id",
-            details={
-                "traceback": "Traceback (most recent call last): provider internals",
-                "credential_hint": "redacted credential detail",
-                "provider_id": "csmar",
-            },
-        )
-    )
-    payload = response.body.decode("utf-8")
+def test_api_error_handlers_keep_fixed_private_safe_422_500() -> None:
+    class RequestBody(BaseModel):
+        required_count: int
 
-    assert "C:" not in payload
-    assert "/mnt/" not in payload
-    assert "000001" not in payload
-    assert "abcdef123456" not in payload
-    assert "csmar" not in payload.lower()
-    assert "provider_id" not in payload
+    test_app = FastAPI()
+    register_api_error_handlers(test_app)
+
+    @test_app.post("/validate")
+    def validate(body: RequestBody) -> dict[str, int]:
+        return body.model_dump()
+
+    @test_app.get("/explode")
+    def explode() -> None:
+        raise RuntimeError(
+            "Traceback (most recent call): C:\\private\\row.txt "
+            "credential=secret provider_id=000001"
+        )
+
+    client = TestClient(test_app, raise_server_exceptions=False)
+    validation_response = client.post(
+        "/validate",
+        json={"required_count": "C:\\private\\row provider_id 000001"},
+    )
+    internal_response = client.get("/explode")
+
+    assert validation_response.status_code == 422
+    assert internal_response.status_code == 500
+    validation_error = validation_response.json()["error"]
+    internal_error = internal_response.json()["error"]
+    assert set(validation_error) == {"error_code", "message", "field", "details"}
+    assert set(internal_error) == {"error_code", "message", "field", "details"}
+    assert validation_error["error_code"] == "request_validation_error"
+    assert validation_error["message"] == "request_validation_error"
+    assert validation_error["field"] is None
+    assert validation_error["details"]["errors"]
+    assert internal_error == {
+        "error_code": "internal_error",
+        "message": "internal_error",
+        "field": None,
+        "details": {},
+    }
+    for marker in (
+        "c:\\private",
+        "/mnt/",
+        "credential",
+        "traceback",
+        "provider_id",
+        "source_id",
+        "000001",
+        "row",
+    ):
+        assert marker not in validation_response.text.lower()
+        assert marker not in internal_response.text.lower()
 
 
 def test_cli_error_output_is_sanitized() -> None:

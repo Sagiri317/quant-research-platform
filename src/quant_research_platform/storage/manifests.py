@@ -18,7 +18,6 @@ from quant_research_platform.policy.check_status import require_status
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
     evidence_json_value_unsafe_reason,
-    sanitize_shared_object,
 )
 from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.storage._dataset_paths import (
@@ -120,7 +119,7 @@ def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
 
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
-    snapshot = _bounded_qrp_json_snapshot(sanitize_shared_object(payload))
+    snapshot = _bounded_qrp_json_snapshot(payload)
     _require_schema_id(snapshot)
     text = render_qrp_json_object(snapshot) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")

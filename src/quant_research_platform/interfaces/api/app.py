@@ -12,6 +12,11 @@ from quant_research_platform.interfaces.api.errors import (
     ApiError,
     register_api_error_handlers,
 )
+from quant_research_platform.interfaces.api.models import (
+    FactorCatalogResponse,
+    LabelCatalogResponse,
+    ResearchDatasetRequirementsResponse,
+)
 from quant_research_platform.profiles.research import research_profile
 
 CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
@@ -57,21 +62,23 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
         "/api/0.1/catalog/factors",
         operation_id="list_catalog_factors",
     )
-    def catalog_factors() -> dict[str, object]:
+    def catalog_factors() -> FactorCatalogResponse:
         return services.list_factors(research_profile())
 
     @app.get(
         "/api/0.1/catalog/labels",
         operation_id="list_catalog_labels",
     )
-    def catalog_labels() -> dict[str, object]:
+    def catalog_labels() -> LabelCatalogResponse:
         return services.list_labels(research_profile())
 
     @app.get(
         "/api/0.1/research-datasets/{dataset_id}/requirements",
         operation_id="describe_research_dataset_requirements",
     )
-    def describe_research_dataset_requirements(dataset_id: str) -> dict[str, object]:
+    def describe_research_dataset_requirements(
+        dataset_id: str,
+    ) -> ResearchDatasetRequirementsResponse:
         try:
             return services.describe_research_dataset_requirements(
                 dataset_id,
@@ -80,7 +87,6 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
         except KeyError as exc:
             raise ApiError(
                 error_code="unknown_dataset_id",
-                message=str(exc),
                 status_code=404,
                 field="dataset_id",
             ) from exc

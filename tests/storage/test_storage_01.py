@@ -319,24 +319,6 @@ def test_non_ascii_nested_arrow_type_compares_end_to_end(tmp_path: Path) -> None
     assert compare_datasets(left, changed).status == "CONTENT_MISMATCH"
 
 
-def test_manifest_writer_sanitizes_review_safe_summary_payload(tmp_path: Path) -> None:
-    manifest = write_manifest(
-        tmp_path / "outputs" / "run" / "manifest.json",
-        {
-            "schema_id": "qrp-output-manifest",
-            "path": "provider-internal-detail",
-            "traceback": "Traceback (most recent call last): provider internals",
-            "credential_hint": "redacted credential detail",
-        },
-    )
-    text = manifest.read_text(encoding="utf-8")
-
-    assert "C:" not in text
-    assert "/mnt/" not in text
-    assert "000001" not in text
-    assert "abcdef123456" not in text
-
-
 def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     manifest = tmp_path / "outputs" / "run" / "manifest.json"
     manifest.parent.mkdir(parents=True)

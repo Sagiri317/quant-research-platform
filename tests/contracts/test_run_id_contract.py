@@ -52,23 +52,12 @@ def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
         "run 01",
         "run/01",
         r"run\01",
-        "csmar-run",
-        "provider_run",
-        "source_run",
         "data/raw/run",
         "data/interim/run",
         "data/processed/run",
         "data/research/run",
         r"data\research\run",
         "outputs/prediction_daily/run",
-        "600000.sh",
-        "000001.sz",
-        "000001",
-        "688001",
-        "run_000001",
-        "run-688001",
-        "run_600000_alpha",
-        "300001",
         "a" * 129,
     ],
 )
@@ -82,6 +71,36 @@ def test_output_spec_rejects_invalid_run_ids(run_id: str) -> None:
             run_type="prediction",
             scope=OutputScope.LOCAL_ONLY,
         )
+
+
+@pytest.mark.parametrize(
+    "run_id",
+    (
+        "csmar-run",
+        "provider_run",
+        "source_run",
+        "600000.sh",
+        "000001.sz",
+        "000001",
+        "688001",
+        "run_000001",
+        "run-688001",
+        "run_600000_alpha",
+        "run_600000_sh",
+        "300001",
+    ),
+)
+def test_output_spec_preserves_typed_content_identifiers(run_id: str) -> None:
+    report = OutputSpec(
+        output_id="prediction_daily",
+        output_definition_id="prediction_outputs",
+        run_id=run_id,
+        market_id=MarketId("a_share"),
+        run_type="prediction",
+        scope=OutputScope.LOCAL_ONLY,
+    )
+
+    assert report.run_id == run_id
 
 
 def test_evaluation_and_prediction_specs_validate_run_ids() -> None:

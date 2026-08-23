@@ -29,7 +29,9 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.policy.identifiers import validate_output_identifier
-from quant_research_platform.policy.share_safety import sanitize_shared_object
+from quant_research_platform.policy.share_safety import (
+    evidence_json_value_unsafe_reason,
+)
 
 _OUTPUT_MANIFEST_KEYS = frozenset(
     {
@@ -103,6 +105,16 @@ def validate_output_manifest_business_envelope(
     if "run_type" in metadata and metadata["run_type"] != definition.run_type:
         raise ValueError("output_manifest_metadata_invalid")
     if "scope" in metadata and metadata["scope"] != str(definition.scope):
+        raise ValueError("output_manifest_metadata_invalid")
+    evidence_payload: dict[str, object] = {}
+    if output_definition_id == "prediction_outputs":
+        model_metadata = metadata["model_metadata"]
+        evidence_payload = {
+            "hyperparameters": model_metadata["hyperparameters"],
+            "resolved_hyperparameters": model_metadata["resolved_hyperparameters"],
+            "dependency_version": model_metadata["dependency_status"]["version"],
+        }
+    if evidence_json_value_unsafe_reason(evidence_payload) is not None:
         raise ValueError("output_manifest_metadata_invalid")
 
     files = value["files"]
@@ -226,8 +238,8 @@ def evaluation_output_metadata(
         "signals": [_signal_payload(signal) for signal in spec.signals],
         "label_columns": list(spec.label_columns),
         "filter_mode": spec.filter_mode,
-        "evaluation_diagnostics": sanitize_shared_object(
-            _evaluation_diagnostics_payload(evaluation_diagnostics)
+        "evaluation_diagnostics": _evaluation_diagnostics_payload(
+            evaluation_diagnostics
         ),
     }
 

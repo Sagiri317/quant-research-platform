@@ -3,16 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from dataclasses import field as dataclass_field
-from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from quant_research_platform.interfaces.api.models import ApiErrorEnvelope
+from quant_research_platform.interfaces.api.models import (
+    ApiErrorDetails,
+    ApiErrorEnvelope,
+    ApiErrorPayload,
+    ApiValidationError,
+)
 from quant_research_platform.policy.share_safety import (
-    sanitize_shared_object,
     sanitize_shared_text,
 )
 
@@ -20,18 +22,21 @@ from quant_research_platform.policy.share_safety import (
 @dataclass(frozen=True)
 class ApiError(Exception):
     error_code: str
-    message: str
     status_code: int = 422
     field: str | None = None
-    details: dict[str, Any] = dataclass_field(default_factory=dict)
+    details: ApiErrorDetails | None = None
 
 
 def api_error_response(error: ApiError) -> JSONResponse:
-    envelope = ApiErrorEnvelope.from_error(
-        error_code=error.error_code,
-        message=sanitize_shared_text(error.message),
-        field=sanitize_shared_text(error.field) if error.field is not None else None,
-        details=sanitize_shared_object(error.details),
+    envelope = ApiErrorEnvelope(
+        error=ApiErrorPayload(
+            error_code=error.error_code,
+            message=error.error_code,
+            field=(
+                sanitize_shared_text(error.field) if error.field is not None else None
+            ),
+            details=error.details if error.details is not None else ApiErrorDetails(),
+        )
     )
     return JSONResponse(
         status_code=error.status_code,
@@ -52,7 +57,6 @@ def register_api_error_handlers(app: FastAPI) -> None:
         return api_error_response(
             ApiError(
                 error_code="request_validation_error",
-                message="request_validation_error",
                 status_code=422,
                 details=_validation_error_details(exc),
             )
@@ -66,23 +70,31 @@ def register_api_error_handlers(app: FastAPI) -> None:
         return api_error_response(
             ApiError(
                 error_code="internal_error",
-                message="internal_error",
                 status_code=500,
             )
         )
 
 
-def _validation_error_details(exc: RequestValidationError) -> dict[str, Any]:
-    sanitized_errors: list[dict[str, Any]] = []
+def _validation_error_details(exc: RequestValidationError) -> ApiErrorDetails:
+    errors: list[ApiValidationError] = []
     for item in exc.errors():
-        sanitized_errors.append(
-            {
-                "type": sanitize_shared_text(item.get("type", "")),
-                "loc": sanitize_shared_object(item.get("loc", ())),
-                "msg": "validation_error",
-            }
+        raw_loc = item.get("loc", ())
+        loc = (
+            tuple(
+                sanitize_shared_text(part) if type(part) is str else part
+                for part in raw_loc
+                if type(part) in {str, int}
+            )[:16]
+            if isinstance(raw_loc, (tuple, list))
+            else ()
         )
-    return {"errors": sanitized_errors}
+        errors.append(
+            ApiValidationError(
+                type=sanitize_shared_text(str(item.get("type", "")))[:128],
+                loc=loc,
+            )
+        )
+    return ApiErrorDetails(errors=errors)
 
 
 __all__ = ["ApiError", "api_error_response", "register_api_error_handlers"]

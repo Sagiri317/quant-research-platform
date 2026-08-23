@@ -2,26 +2,43 @@
 
 from __future__ import annotations
 
-from quant_research_platform.policy.share_safety import sanitize_shared_object
+from quant_research_platform.interfaces.api.models import (
+    FactorCatalogResponse,
+    LabelCatalogResponse,
+    ResearchDatasetRequirementsResponse,
+)
 from quant_research_platform.profiles.research import ResearchProfile
 
 API_VERSION = "0.1"
 
 
-def list_factors(profile: ResearchProfile) -> dict[str, object]:
-    return _response(items=[item.to_manifest() for item in profile.factors.list()])
+def list_factors(profile: ResearchProfile) -> FactorCatalogResponse:
+    return FactorCatalogResponse(
+        api_version=API_VERSION,
+        items=[
+            item.to_manifest()
+            for item in profile.factors.list()
+        ],
+    )
 
 
-def list_labels(profile: ResearchProfile) -> dict[str, object]:
-    return _response(items=[item.to_manifest() for item in profile.labels.list()])
+def list_labels(profile: ResearchProfile) -> LabelCatalogResponse:
+    return LabelCatalogResponse(
+        api_version=API_VERSION,
+        items=[
+            item.to_manifest()
+            for item in profile.labels.list()
+        ],
+    )
 
 
 def describe_research_dataset_requirements(
     dataset_id: str,
     profile: ResearchProfile,
-) -> dict[str, object]:
+) -> ResearchDatasetRequirementsResponse:
     spec = profile.research_datasets.get(dataset_id)
-    return _response(
+    return ResearchDatasetRequirementsResponse(
+        api_version=API_VERSION,
         status="available",
         mode="requirements_query_only",
         dataset_id=spec.data_id,
@@ -31,10 +48,6 @@ def describe_research_dataset_requirements(
         feature_count=len(spec.feature_columns),
         label_count=len(spec.label_columns),
     )
-
-
-def _response(**payload: object) -> dict[str, object]:
-    return sanitize_shared_object({"api_version": API_VERSION, **payload})
 
 
 __all__ = [

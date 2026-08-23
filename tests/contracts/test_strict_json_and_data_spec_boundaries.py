@@ -456,20 +456,6 @@ def test_manifest_writer_rejects_invalid_schema_identity(
     assert not path.exists()
 
 
-def test_manifest_writer_bounds_only_sanitized_persisted_output(tmp_path: Path) -> None:
-    path = tmp_path / "manifest.json"
-
-    manifests.write_manifest(
-        path,
-        {"schema_id": "qrp-test", "row_samples": "x" * (1024 * 1024)},
-    )
-
-    assert manifests.read_manifest(path) == {
-        "[row-sample]": "[row-sample]",
-        "schema_id": "qrp-test",
-    }
-
-
 def test_data_spec_snapshots_caller_roles_as_an_exact_dict() -> None:
     roles = {
         "asset_id": ColumnRole.KEY,
