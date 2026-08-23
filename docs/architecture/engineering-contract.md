@@ -10,11 +10,11 @@ QRP 使用 current-contract-only。Public machine contract、owner behavior、pe
 
 ## Resource lifecycle
 
-每个 top-level resource-bearing operation 在首次数据规模 read/decode/allocation 前只 admission 一次：有效 available memory 是 OS available memory 与适用 cgroup/container/job/process headroom 的最小值；operation budget 是该值 80% 向下取整与有效显式 cap 的最小值。Policy 与 budget 捕获后 immutable，pressure 只能缩小后续工作。
+每个 top-level resource-bearing operation 在首次数据规模 read/decode/allocation 前只 admission 一次：host-local data-scale lock 保护一个 process-local active root；该 root 只捕获一次 OS available0，并固定 operation budget（`floor(available0 * 70%)` 与有效显式 cap 的最小值）和 root identity。Lease ledger 与 lexical lease state 随 owner 生命周期可变。
 
-一个 process 默认只有一个 active root policy、execution lease 与 total reservation。Nested owner 继承相同 identity；different-policy nesting/parallel root fail closed。Copied context 不跨 thread/task 传递 authority；child 不越过 root lifetime。Resource-bearing child process 只能使用 parent 从 root budget 划分并显式传入的 cap；跨进程共享 reservation 未实现前保持 single-process execution。
+Nested owner 继承相同 root identity；different-policy nesting/parallel root fail closed。Lease 以 lexical owner context 管理，跨 producer/consumer 边界转移同一 logical owner，不重复计费；owner context 退出时释放资源。所有数据规模 allocation 在保守准入后进行并保持 bounded，aggregate persisted output 可以超过 RAM budget 而 exact 完成。
 
-全部 raw、decoded、Arrow/Pandas、copy/index/sort/join、reducer/planner/model/native、output/writer/readback/spill/overlap state 共用预算。每次数据规模 allocation 前 reserve conservative owner-local upper bound，planned reservation 不得超过 budget；不足则 shrink、release、spill 或 fail closed。不建立 universal deep-size framework，不为 probe 波动发明超配容忍线。
+全部 raw、decoded、Arrow/Pandas、copy/index/sort/join、reducer/planner/model/native、output/writer/readback/spill/overlap state 共用该 bounded budget；新 payload/workspace/output 只有一个 logical owner，准入不足则按 owner 语义 shrink、release、spill 或 fail closed。不建立 universal deep-size framework。
 
 ## Owner、identity 与 publication
 
@@ -37,7 +37,8 @@ LOCAL_ONLY 与 REVIEW_SAFE 分离。REVIEW_SAFE 内容不得包含 private row�
 git diff --check
 conda run -n <env> ruff check .
 conda run -n <env> python -m pytest -q -o "addopts=--import-mode=importlib --strict-markers" tests
-conda run -n <env> python -m build --no-isolation --sdist --wheel --outdir <run-dir>
+conda run -n <env> python -m build --no-isolation --sdist --outdir <sdist-run>
+conda run -n <env> python -m build --no-isolation --wheel --outdir <wheel-run>
 ```
 
-Build smoke 使用标准库解压 wheel，并以解压目录作为 `PYTHONPATH` import；不安装 package。
+Package acceptance 从仓库外 clean export 开始：先构建 fresh sdist，再从解出的 sdist 构建 wheel，在仓库外 isolated environment 安装，最后从 empty CWD 做 `qrp`、`qrp-private`、API 与 representative workflow smoke。editable checkout 或直接从源码路径导入不算通过。

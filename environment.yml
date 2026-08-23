@@ -12,6 +12,7 @@ dependencies:
   - pydantic>=2.13,<3
   - psutil>=7.2,<8
   - scikit-learn>=1.9,<2
+  - threadpoolctl>=3.5,<4
   - typer>=0.26,<1
   - pytest>=9,<10
   - python-build>=1.5,<2
