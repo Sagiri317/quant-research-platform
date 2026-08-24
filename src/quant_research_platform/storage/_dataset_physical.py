@@ -32,6 +32,7 @@ _PHYSICAL_PAGE_ROWS_KEY = b"qrp.parquet-page-rows"
 _PARQUET_MAX_ROW_GROUP_ROWS = 64 * 1024 * 1024
 _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES = 5 * 1024 * 1024
 _PARQUET_NATIVE_METADATA_PAGE_BYTES = 4096
+_PARQUET_METADATA_FIXED_WORKSPACE_BYTES = 2 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,30 +323,30 @@ def _opened_parquet(
         before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
         if before != path_identity or dataset_file_identity(resolved) != before:
             raise ValueError("dataset_file_identity_changed")
-        parquet_file = pq.ParquetFile(handle)
-        try:
-            yield parquet_file, before
-        finally:
-            primary = sys.exception()
-            if primary is not None:
-                try:
-                    os.fstat(handle.fileno())
-                except BaseException as verify_error:
-                    primary.add_note(
-                        "parquet handle verification also failed: "
-                        f"{type(verify_error).__name__}"
+        footer_length = _parquet_footer_length(handle)
+        with ExitStack() as parquet_stack:
+            policy = current_runtime_resource_policy()
+            if policy is not None:
+                parquet_stack.enter_context(
+                    policy.lease(
+                        "storage.parquet.metadata",
+                        _PARQUET_METADATA_FIXED_WORKSPACE_BYTES
+                        + 20 * footer_length,
                     )
-                try:
-                    parquet_file.close()
-                except BaseException as close_error:
-                    primary.add_note(
-                        "parquet file close also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-            else:
-                try:
-                    after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-                except BaseException as primary:
+                )
+            parquet_file = pq.ParquetFile(handle)
+            try:
+                yield parquet_file, before
+            finally:
+                primary = sys.exception()
+                if primary is not None:
+                    try:
+                        os.fstat(handle.fileno())
+                    except BaseException as verify_error:
+                        primary.add_note(
+                            "parquet handle verification also failed: "
+                            f"{type(verify_error).__name__}"
+                        )
                     try:
                         parquet_file.close()
                     except BaseException as close_error:
@@ -353,10 +354,23 @@ def _opened_parquet(
                             "parquet file close also failed: "
                             f"{type(close_error).__name__}"
                         )
-                    raise
-                parquet_file.close()
-                if after != before or dataset_file_identity(resolved) != before:
-                    raise ValueError("dataset_file_identity_changed")
+                else:
+                    try:
+                        after = dataset_file_identity_from_stat(
+                            os.fstat(handle.fileno())
+                        )
+                    except BaseException as primary:
+                        try:
+                            parquet_file.close()
+                        except BaseException as close_error:
+                            primary.add_note(
+                                "parquet file close also failed: "
+                                f"{type(close_error).__name__}"
+                            )
+                        raise
+                    parquet_file.close()
+                    if after != before or dataset_file_identity(resolved) != before:
+                        raise ValueError("dataset_file_identity_changed")
     finally:
         primary = sys.exception()
         if primary is None:
@@ -378,6 +392,7 @@ def _opened_parquet(
                     )
             if first_error is not None:
                 raise first_error
+
         else:
             try:
                 handle.close()
@@ -393,6 +408,32 @@ def _opened_parquet(
                     "parquet path verification also failed: "
                     f"{type(verify_error).__name__}"
                 )
+
+
+def _parquet_footer_length(handle: Any) -> int:
+    try:
+        position = handle.tell()
+        handle.seek(0, os.SEEK_END)
+        file_size = handle.tell()
+        if file_size < 8:
+            raise ValueError("dataset_parquet_footer_invalid")
+        handle.seek(-8, os.SEEK_END)
+        trailer = handle.read(8)
+    except (OSError, ValueError, TypeError) as exc:
+        if isinstance(exc, ValueError) and str(exc) == "dataset_parquet_footer_invalid":
+            raise
+        raise ValueError("dataset_parquet_footer_invalid") from exc
+    finally:
+        try:
+            handle.seek(position)
+        except (OSError, UnboundLocalError):
+            pass
+    if len(trailer) != 8 or trailer[4:] != b"PAR1":
+        raise ValueError("dataset_parquet_footer_invalid")
+    footer_length = int.from_bytes(trailer[:4], "little")
+    if footer_length > file_size - 8:
+        raise ValueError("dataset_parquet_footer_invalid")
+    return footer_length
 
 
 def _part_metadata(

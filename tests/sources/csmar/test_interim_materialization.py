@@ -57,7 +57,13 @@ def _collect_bound_first_frames(data, policy):  # noqa: ANN001, ANN202
         try:
             bound = next(data)
             while True:
-                lease = policy.lease("test.csmar.consumer", bound)
+                if isinstance(bound, tuple):
+                    assert len(bound) == 2
+                    handoff_bound, lease = bound
+                    assert type(handoff_bound) is int
+                    assert isinstance(lease, MemoryLease)
+                else:
+                    lease = policy.lease("test.csmar.consumer", bound)
                 try:
                     while True:
                         try:
@@ -3587,76 +3593,6 @@ def test_csmar_pruned_empty_first_reuses_admitted_lease(
     assert policy.used_memory_bytes == 0
 
 
-def test_csmar_pruned_pending_payload_clears_before_lease_close(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 94,
-    )
-    frame = pd.DataFrame(
-        {
-            "source_asset_id": [f"{index:06d}" for index in range(8)],
-            "timestamp": pd.date_range("2020-01-01", periods=8),
-        }
-    )
-    pending_references: list[weakref.ReferenceType[pd.DataFrame]] = []
-    close_results: list[bool] = []
-    real_copy = pd.DataFrame.copy
-    real_close = MemoryLease.close
-
-    def record_copy(current, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        copied = real_copy(current, *args, **kwargs)
-        pending_references.append(weakref.ref(copied))
-        return copied
-
-    def record_close(lease: MemoryLease) -> None:
-        if lease.owner == "source.csmar.interim.pending":
-            close_results.append(
-                all(reference() is None for reference in pending_references[:-1])
-            )
-        real_close(lease)
-
-    monkeypatch.setattr(pd.DataFrame, "copy", record_copy)
-    monkeypatch.setattr(MemoryLease, "close", record_close)
-    monkeypatch.setattr(
-        interim,
-        "iter_private_export_chunks_with_policy",
-        lambda *_args, **_kwargs: _bound_first_test_frames(
-            (frame,),
-            bound=policy.memory_budget_bytes // 2,
-        ),
-    )
-    calls: list[int] = []
-
-    def transform(candidate, **_kwargs):  # noqa: ANN001, ANN003
-        calls.append(len(candidate))
-        if len(candidate) == len(frame):
-            raise interim._InterimCapacityExceeded(200, 100)  # noqa: SLF001
-        return candidate, {}
-
-    monkeypatch.setattr(interim, "_transform_interim_chunk", transform)
-    monkeypatch.setattr(interim, "pandas_frame_payload_bytes", lambda _frame: 10)
-    output = _collect_bound_first_frames(
-        interim._iter_pruned_interim_frames(
-            data_id="stock_master",
-            raw_dataset="stock_master",
-            input_files=(Path("unused.csv"),),
-            start_date=None,
-            end_date=None,
-            overrides={},
-            chunksize=8,
-            pruning_reports=None,
-        ),
-        policy,
-    )
-
-    assert calls == [8, 3, 3, 2]
-    assert sum(len(chunk) for chunk in output) == len(frame)
-    assert close_results and all(close_results)
-    assert policy.used_memory_bytes == 0
-
-
 def test_csmar_pruned_file_transition_reuses_admitted_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -5318,6 +5254,105 @@ def test_private_export_retains_pending_decoded_owner_state_before_next_pull(
     assert "source.csmar.csv.rows" not in owners
     assert observed_totals[0] == owners["test.csmar.consumer"]
     assert sum(len(frame) for frame in output) == 3
+
+
+def test_pruned_pending_frame_transfers_its_existing_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=32 * 1024 * 1024,
+    )
+    frame = pd.DataFrame(
+        {
+            "source_asset_id": ["asset"] * 3,
+            "timestamp": pd.date_range("2026-01-01", periods=3),
+            "stock_name": ["name"] * 3,
+            "listing_date": pd.Timestamp("2020-01-01"),
+            "delisting_date": pd.NaT,
+            "company_status": ["O"] * 3,
+            "csrc_2012_industry_code": ["A"] * 3,
+            "csrc_2012_industry_name": ["industry"] * 3,
+            "status_change_date": pd.NaT,
+        }
+    )
+    source_bound = policy.memory_budget_bytes // 2
+
+    def source_chunks(*_args, **_kwargs):  # noqa: ANN001, ANN202
+        return _bound_first_test_frames((frame,), bound=source_bound)
+
+    monkeypatch.setattr(
+        interim,
+        "iter_private_export_chunks_with_policy",
+        source_chunks,
+    )
+    transform_calls = 0
+
+    def transform(candidate, **_kwargs):  # noqa: ANN001, ANN003, ANN202
+        nonlocal transform_calls
+        transform_calls += 1
+        if transform_calls == 1:
+            chunk_bytes = runtime_resources.pandas_frame_payload_bytes(candidate)
+            raise interim._InterimCapacityExceeded(
+                required_bytes=chunk_bytes * 2 + 1,
+                budget_bytes=chunk_bytes + max(1, chunk_bytes // 2),
+            )
+        return candidate.copy(), {
+            "data_id": "stock_master",
+            "report_type": "test",
+        }
+
+    monkeypatch.setattr(interim, "_transform_interim_chunk", transform)
+    data = interim._iter_pruned_interim_frames(
+        data_id="stock_master",
+        raw_dataset="stock_master",
+        input_files=(Path("unused.csv"),),
+        start_date=None,
+        end_date=None,
+        overrides={},
+        chunksize=3,
+        pruning_reports=None,
+    )
+    consumer_lease: MemoryLease | None = None
+    pending_lease: MemoryLease | None = None
+    try:
+        with runtime_resource_policy_scope(policy):
+            try:
+                bound = next(data)
+                consumer_lease = policy.lease("test.csmar.consumer", bound)
+                first = data.send(consumer_lease)
+                assert isinstance(first, _OwnedValue)
+                assert first.lease is consumer_lease
+                consumer_lease.transfer("test.csmar.output")
+
+                pending_handoff = data.send(None)
+                assert isinstance(pending_handoff, tuple)
+                pending_bound, pending_lease = pending_handoff
+                assert type(pending_bound) is int
+                assert isinstance(pending_lease, MemoryLease)
+                assert pending_lease is not consumer_lease
+                assert pending_lease.owner == "source.csmar.interim.pending"
+                assert pending_lease.active
+                consumer_lease.close()
+                consumer_lease = None
+
+                second = data.send(pending_lease)
+                assert isinstance(second, _OwnedValue)
+                assert second.lease is pending_lease
+                pending_lease.transfer("test.csmar.output")
+                pending_lease.close()
+                pending_lease = None
+            finally:
+                data.close()
+                if consumer_lease is not None:
+                    consumer_lease.close()
+                if pending_lease is not None:
+                    pending_lease.close()
+    finally:
+        data.close()
+
+    assert transform_calls == 3
+    assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("require_exact_width", (True, False))

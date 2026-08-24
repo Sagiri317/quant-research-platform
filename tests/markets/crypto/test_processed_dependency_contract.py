@@ -11,7 +11,6 @@ import pytest
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.processed import (
-    materialization_resources,
     materialization_validation,
     materialize_factors,
     materialize_labels,
@@ -30,7 +29,10 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_reading import open_dataset_session
+from quant_research_platform.storage._dataset_reading import (
+    DatasetSession,
+    open_dataset_session,
+)
 from quant_research_platform.storage._dataset_types import DatasetInspection
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -41,10 +43,12 @@ RESOURCE_POLICY = capture_test_policy(
 )
 
 
-def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
+def _collect_bound_first(data, policy, *, requested_bounds=None):  # noqa: ANN001, ANN202
     frames = []
     with runtime_resource_policy_scope(policy):
         bound = next(data)
+        if requested_bounds is not None:
+            requested_bounds.append(bound)
         while True:
             lease = policy.lease("test.crypto.consumer", bound)
             try:
@@ -63,6 +67,8 @@ def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
                 except StopIteration:
                     lease.close()
                     return frames
+                if requested_bounds is not None:
+                    requested_bounds.append(bound)
             except BaseException:
                 lease.close()
                 raise
@@ -312,11 +318,6 @@ def test_panel_iterator_closes_bar_traversal_on_early_close(
         lambda frame, **_kwargs: frame,
     )
     monkeypatch.setattr(
-        materialization_resources,
-        "require_frame_within_budget",
-        lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
         materialize_panel,
         "_iter_matching_trade_chunks",
         lambda *_args, **_kwargs: iter(()),
@@ -403,11 +404,6 @@ def test_panel_empty_asset_transition_reuses_admitted_lease(
         materialization_validation,
         "validated_ordered_dependency_chunk",
         lambda frame, **_kwargs: frame,
-    )
-    monkeypatch.setattr(
-        materialization_resources,
-        "require_frame_within_budget",
-        lambda *_args, **_kwargs: None,
     )
     monkeypatch.setattr(
         materialize_panel,
@@ -636,6 +632,94 @@ def test_crypto_factor_admits_each_segment_before_carry_append(
     assert append_bounds[1] > append_bounds[0]
     assert carry_seen
     assert carry_close_results and all(carry_close_results)
+    assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("module_name", ("factor", "label"))
+def test_crypto_carry_and_buffer_cap_fixed_allowance_to_admitted_bound(
+    monkeypatch: pytest.MonkeyPatch,
+    module_name: str,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1024 * 1024)
+    frame = _panel_frame(start=0, minutes=70)
+    target_headroom = 2_000
+    producer_bound = policy.available_memory_bytes // 2
+    reader_reserve = policy.memory_budget_bytes - producer_bound - target_headroom
+    assert (
+        pandas_frame_payload_bytes(
+            frame.tail(materialize_labels.LABEL_LOOKAHEAD_BARS)
+        )
+        > target_headroom
+    )
+    session = _dataset_session_stub(policy)
+    reader_lease: list[MemoryLease | None] = [None]
+    buffer_bounds: list[int] = []
+    requested_bounds: list[int] = []
+    real_close = MemoryLease.close
+    real_lease = RuntimeResourcePolicy.lease
+
+    def lease(root, owner, reserved_bytes):  # noqa: ANN001
+        result = real_lease(root, owner, reserved_bytes)
+        if root is policy and owner == "crypto.label.buffer":
+            buffer_bounds.append(reserved_bytes)
+        return result
+
+    def close(lease: MemoryLease) -> None:
+        real_close(lease)
+        if lease.owner == "test.crypto.consumer" and reader_lease[0] is not None:
+            reader_lease[0].close()
+
+    monkeypatch.setattr(MemoryLease, "close", close)
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", lease)
+    monkeypatch.setattr(
+        materialization_validation,
+        "crypto_asset_session_views",
+        lambda *_args, **_kwargs: _asset_views_context(
+            ((("crypto", "btc_usdt"), session),),
+        ),
+    )
+
+    def chunks(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        lease = policy.lease("test.crypto.reader", reader_reserve)
+        reader_lease[0] = lease
+        try:
+            yield frame
+        finally:
+            lease.close()
+
+    monkeypatch.setattr(
+        materialize_factors if module_name == "factor" else materialize_labels,
+        "iter_dataset_chunks",
+        chunks,
+    )
+    spec = processed_catalog().get(
+        "microstructure" if module_name == "factor" else "forward_returns"
+    )
+    iterator = (
+        materialize_factors._iter_factor_chunks(
+            spec,
+            panel_session=session,
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            resource_policy=policy,
+        )
+        if module_name == "factor"
+        else materialize_labels._iter_label_chunks(
+            spec,
+            panel_session=session,
+            time_window=TimeWindow("2026-07-06", "2026-07-06"),
+            resource_policy=policy,
+        )
+    )
+
+    outputs = _collect_bound_first(
+        iterator,
+        policy,
+        requested_bounds=requested_bounds,
+    )
+    if module_name == "label":
+        assert len(buffer_bounds) == 1
+        assert requested_bounds[1] + buffer_bounds[0] == producer_bound
+        assert sum(len(output) for output in outputs) == len(frame)
     assert policy.used_memory_bytes == 0
 
 
@@ -1174,9 +1258,111 @@ def test_panel_dependent_validation_uses_live_policy_headroom(
     assert observed == [
         {
             "time_window": TimeWindow("2026-07-06", "2026-07-06"),
-            "target_chunk_bytes": policy.available_memory_bytes,
+            "target_chunk_bytes": policy.available_memory_bytes // 8,
+            "columns": ("value",),
         }
     ]
+
+
+def test_panel_validation_projects_input_before_key_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=8 * 1024**2,
+        explicit_cap_bytes=4 * 1024**2,
+    )
+    row_count = 4_000
+    full_frame = pd.DataFrame(
+        {
+            "market_id": ["crypto"] * row_count,
+            "asset_id": ["asset"] * row_count,
+            "timestamp": pd.date_range("2026-01-01", periods=row_count, freq="s"),
+            "value": ["x" * 1_100] * row_count,
+        }
+    )
+    primary_key = ("market_id", "asset_id", "timestamp")
+    projected = full_frame.loc[:, list(primary_key)]
+    assert pandas_frame_payload_bytes(full_frame) > policy.memory_budget_bytes
+    assert 2 * pandas_frame_payload_bytes(projected) <= policy.memory_budget_bytes
+    session = DatasetSession(
+        root=Path("panel"),
+        data_root=Path("panel/data"),
+        spec_bytes=b"{}",
+        spec_identity_bytes=b"",
+        manifest_bytes=b"{}",
+        manifest_identity_bytes=b"",
+        inventory=SimpleNamespace(),
+        logical_columns=tuple(full_frame.columns),
+        physical_columns=tuple(full_frame.columns),
+        timestamp_column="timestamp",
+        time_window=None,
+        schema_hash="schema",
+        arrow_schema=None,
+        logical_dtype_bytes=b"",
+        parquet_filters=None,
+        resource_policy=policy,
+        owns_inventory=False,
+        _lease=None,
+        plan_base_retained_bytes=0,
+    )
+    observed: list[tuple[tuple[str, ...], int]] = []
+
+    class Index:
+        def add_frame(self, frame: pd.DataFrame, *, namespace: str) -> int:
+            assert namespace == "crypto_expected"
+            assert tuple(frame.columns) == primary_key
+            return 0
+
+        def difference_counts(
+            self,
+            *,
+            expected_namespace: str,
+            actual_namespace: str,
+        ) -> tuple[int, int]:
+            assert expected_namespace == "crypto_expected"
+            assert actual_namespace == "dataset"
+            return 0, 0
+
+    def chunks(view, *, target_chunk_bytes: int, **_kwargs):  # noqa: ANN001
+        observed.append((tuple(view.logical_columns), target_chunk_bytes))
+        frame = (
+            full_frame
+            if "value" in view.logical_columns
+            else projected
+        )
+        with policy.lease(
+            "storage.arrow.to_pandas",
+            pandas_frame_payload_bytes(frame),
+        ):
+            yield frame
+
+    monkeypatch.setattr(
+        materialization_validation,
+        "validate_materialization_input_identities",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(materialization_validation, "iter_dataset_chunks", chunks)
+    monkeypatch.setattr(DatasetSession, "verify", lambda _session: None)
+    receipt = SimpleNamespace(
+        session=SimpleNamespace(
+            manifest={},
+            resource_policy=policy,
+            verify=lambda: None,
+        ),
+        exact_primary_key_index=Index(),
+    )
+
+    materialization_validation.validate_panel_dependent_materialization(
+        receipt,
+        panel_session=session,
+        spec=SimpleNamespace(primary_key=primary_key),
+        time_window=TimeWindow("2026-01-01", "2026-01-01"),
+        expected_input_identities={},
+        resource_policy=policy,
+    )
+
+    assert observed == [(primary_key, policy.memory_budget_bytes // 8)]
+    assert policy.used_memory_bytes == 0
 
 
 def test_materialization_input_identity_validation_is_exact() -> None:

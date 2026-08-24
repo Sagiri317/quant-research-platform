@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import struct
-from collections.abc import Callable, Iterator
-from datetime import date, datetime
-from decimal import Decimal
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -13,10 +11,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts._json import (
-    CanonicalIdentityWriter,
-    canonical_json_hash,
-)
+from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -297,376 +292,45 @@ def _iter_fingerprint_hashes(
     arrow_schema: pa.Schema | None = None,
     primary_key: tuple[str, ...] = (),
 ) -> Iterator[np.ndarray[Any, np.dtype[np.uint64]]]:
+    """Hash formal primitive columns in bounded uint64 slices.
+
+    Fingerprints are only a quick reject. General nested/map canonicalization
+    is intentionally not part of the persisted dataset contract; exact compare
+    remains the authority for any supported complex value.
+    """
     if target_bytes <= 0:
         raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
     input_payload_bytes = pandas_frame_payload_bytes(frame)
     if input_payload_bytes > target_bytes:
         raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
     available_bytes = target_bytes - input_payload_bytes
-    physical_normalization = any(
-        arrow_schema is not None
-        and column in arrow_schema.names
-        and (
-            pa.types.is_map(arrow_schema.field(column).type)
-            or (
+    if arrow_schema is not None:
+        for column in frame.columns:
+            if column not in arrow_schema.names:
+                continue
+            data_type = arrow_schema.field(column).type
+            if pa.types.is_nested(data_type) or (
                 column in primary_key
                 and (
-                    pa.types.is_float32(arrow_schema.field(column).type)
-                    or pa.types.is_float64(arrow_schema.field(column).type)
+                    pa.types.is_float32(data_type)
+                    or pa.types.is_float64(data_type)
                 )
-            )
-        )
-        for column in frame.columns
-    )
-    full_hash_bytes = len(frame) * 8
-    if not physical_normalization and full_hash_bytes <= available_bytes:
-        try:
-            hashes = pd.util.hash_pandas_object(frame, index=False).to_numpy("uint64")
-        except TypeError:
-            pass
-        else:
-            yield hashes
-            return
-
-    start = 0
-    rows_per_slice = 1
-    calibrated = False
-    while start < len(frame):
-        stop = min(len(frame), start + rows_per_slice)
-        current = frame.iloc[start:stop]
-        hash_bytes = len(current) * 8
-        if hash_bytes > available_bytes:
-            if len(current) == 1:
-                raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
-            rows_per_slice = max(1, rows_per_slice // 2)
-            continue
-        try:
-            output = _normalized_fingerprint_slice(
-                current,
-                arrow_schema=arrow_schema,
-                primary_key=primary_key,
-                identity_target_bytes=available_bytes - hash_bytes,
-            )
-        except ValueError as exc:
-            if (
-                str(exc) != "dataset_fingerprint_value_exceeds_target_bytes"
-                or len(current) == 1
             ):
-                raise
-            rows_per_slice = max(1, rows_per_slice // 2)
-            continue
-        output_bytes = 0 if output is current else pandas_frame_payload_bytes(output)
-        if output_bytes + hash_bytes > available_bytes:
-            if len(current) == 1:
-                raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
-            rows_per_slice = max(1, rows_per_slice // 2)
-            continue
-        measured_row_bytes = max(
-            1,
-            (output_bytes + hash_bytes + len(current) - 1) // len(current),
-        )
-        hashes = pd.util.hash_pandas_object(output, index=False).to_numpy("uint64")
+                raise ValueError("unsupported_dataset_fingerprint_value")
+    if len(frame) == 0:
+        return
+    if available_bytes < 8:
+        raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
+    rows_per_slice = max(1, available_bytes // 8)
+    for start in range(0, len(frame), rows_per_slice):
+        current = frame.iloc[start : start + rows_per_slice]
+        try:
+            hashes = pd.util.hash_pandas_object(
+                current,
+                index=False,
+            ).to_numpy("uint64", copy=False)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("unsupported_dataset_fingerprint_value") from exc
+        if hashes.nbytes > available_bytes:
+            raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
         yield hashes
-        del hashes, output, current
-        start = stop
-        if not calibrated:
-            calibrated = True
-            rows_per_slice = max(1, available_bytes // measured_row_bytes)
-        rows_per_slice = min(rows_per_slice, len(frame) - start)
-
-
-def _normalized_fingerprint_slice(
-    frame: pd.DataFrame,
-    *,
-    arrow_schema: pa.Schema | None,
-    primary_key: tuple[str, ...],
-    identity_target_bytes: int,
-) -> pd.DataFrame:
-    output = frame
-    remaining_identity_bytes = identity_target_bytes
-    for column in frame.columns:
-        data_type = (
-            None
-            if arrow_schema is None or column not in arrow_schema.names
-            else arrow_schema.field(column).type
-        )
-        requires_physical_normalization = data_type is not None and pa.types.is_map(
-            data_type
-        )
-        requires_float_key_normalization = (
-            data_type is not None
-            and column in primary_key
-            and (pa.types.is_float32(data_type) or pa.types.is_float64(data_type))
-        )
-        if requires_float_key_normalization:
-            zero_mask = frame[column].eq(0)
-            if bool(zero_mask.any()):
-                if output is frame:
-                    output = frame.copy()
-                output[column] = frame[column].mask(zero_mask, 0.0)
-            continue
-        if not requires_physical_normalization:
-            try:
-                pd.util.hash_pandas_object(frame[column], index=False)
-            except TypeError:
-                pass
-            else:
-                continue
-        if output is frame:
-            output = frame.copy()
-
-        def canonicalize(
-            value: Any,
-            physical_type: pa.DataType | None = data_type,
-        ) -> bytes:
-            nonlocal remaining_identity_bytes
-            payload = _canonical_nested_value(
-                value,
-                max_bytes=remaining_identity_bytes,
-                data_type=physical_type,
-            )
-            remaining_identity_bytes -= len(payload)
-            return payload
-
-        output[column] = frame[column].map(canonicalize)
-    return output
-
-
-def _canonical_nested_value(
-    value: Any,
-    *,
-    max_bytes: int | None = None,
-    data_type: pa.DataType | None = None,
-) -> bytes:
-    writer = CanonicalIdentityWriter(max_bytes=max_bytes)
-    try:
-        _write_nested_identity(
-            writer,
-            value,
-            active=set(),
-            data_type=data_type,
-        )
-        return writer.finish()
-    except RecursionError as exc:
-        raise ValueError("dataset_fingerprint_value_too_deep") from exc
-    except ValueError as exc:
-        if str(exc) == "canonical_identity_exceeds_max_bytes":
-            raise ValueError("dataset_fingerprint_value_exceeds_target_bytes") from exc
-        if str(exc) == "canonical_json_recursion_limit":
-            raise ValueError("dataset_fingerprint_value_too_deep") from exc
-        raise
-
-
-def _write_nested_identity(
-    writer: CanonicalIdentityWriter,
-    value: Any,
-    *,
-    active: set[int],
-    data_type: pa.DataType | None = None,
-) -> None:
-    if data_type is not None and pa.types.is_map(data_type):
-        _write_arrow_map_identity(
-            writer,
-            value,
-            data_type=data_type,
-            active=active,
-        )
-    elif type(value) is np.ndarray:
-        _with_nested_container(
-            value,
-            active=active,
-            build=lambda: _write_ndarray_identity(writer, value, active=active),
-        )
-    elif isinstance(value, np.generic):
-        with writer.tuple_items(2):
-            writer.value("numpy-scalar")
-            with writer.tuple_items(2):
-                writer.value(value.dtype.str)
-                _write_nested_identity(writer, value.item(), active=active)
-    elif type(value) in (list, tuple):
-        tag = "list" if type(value) is list else "tuple"
-        _with_nested_container(
-            value,
-            active=active,
-            build=lambda: _write_sequence_identity(writer, tag, value, active=active),
-        )
-    elif type(value) is dict:
-        _with_nested_container(
-            value,
-            active=active,
-            build=lambda: _write_mapping_identity(writer, value, active=active),
-        )
-    elif type(value) is bytes:
-        _write_tagged_value(writer, "bytes", value)
-    elif type(value) is pd.Timestamp:
-        _write_tagged_value(writer, "timestamp", value)
-    elif type(value) is datetime:
-        _write_tagged_value(writer, "datetime", value)
-    elif type(value) is date:
-        _write_tagged_value(writer, "date", value)
-    elif type(value) is Decimal:
-        _write_tagged_value(writer, "decimal", value)
-    elif type(value) is float:
-        _write_tagged_value(writer, "float64-bits", struct.pack(">d", value))
-    elif value is None:
-        _write_tagged_value(writer, "none", None)
-    elif type(value) is bool:
-        _write_tagged_value(writer, "bool", value)
-    elif type(value) is int:
-        _write_tagged_value(writer, "int", value)
-    elif type(value) is str:
-        _write_tagged_value(writer, "string", value)
-    else:
-        raise ValueError("unsupported_dataset_fingerprint_value")
-
-
-def _write_tagged_value(
-    writer: CanonicalIdentityWriter, tag: str, value: object
-) -> None:
-    with writer.tuple_items(2):
-        writer.value(tag)
-        writer.value(value)
-
-
-def _write_sequence_identity(
-    writer: CanonicalIdentityWriter,
-    tag: str,
-    value: list[Any] | tuple[Any, ...],
-    *,
-    active: set[int],
-) -> None:
-    with writer.tuple_items(2):
-        writer.value(tag)
-        with writer.tuple_items(len(value)):
-            for item in value:
-                _write_nested_identity(writer, item, active=active)
-
-
-def _write_mapping_identity(
-    writer: CanonicalIdentityWriter,
-    value: dict[Any, Any],
-    *,
-    active: set[int],
-) -> None:
-    def emit_key(target: CanonicalIdentityWriter, key: object) -> None:
-        _write_nested_identity(target, key, active=active)
-
-    with writer.tuple_items(2):
-        writer.value("dict")
-        with writer.tuple_items(len(value)):
-            with writer.canonical_order(
-                len(value),
-                emit_key,
-                collision_error="dataset_fingerprint_mapping_key_collision",
-                mapping=value,
-            ) as (keys, order):
-                for index in order:
-                    with writer.tuple_items(2):
-                        _write_nested_identity(writer, keys[index], active=active)
-                        _write_nested_identity(
-                            writer,
-                            value[keys[index]],
-                            active=active,
-                        )
-
-
-def _write_ndarray_identity(
-    writer: CanonicalIdentityWriter,
-    value: np.ndarray,
-    *,
-    active: set[int],
-) -> None:
-    with writer.tuple_items(2):
-        writer.value("ndarray")
-        with writer.tuple_items(3):
-            writer.value(value.dtype.str)
-            writer.value(tuple(int(item) for item in value.shape))
-            _write_ndarray_values_identity(writer, value, active=active)
-
-
-def _write_ndarray_values_identity(
-    writer: CanonicalIdentityWriter,
-    value: np.ndarray,
-    *,
-    active: set[int],
-    dimension: int = 0,
-    index: tuple[int, ...] = (),
-) -> None:
-    if dimension == value.ndim:
-        item = value[index]
-        if isinstance(item, np.generic):
-            item = item.item()
-        _write_nested_identity(writer, item, active=active)
-        return
-    with writer.tuple_items(2):
-        writer.value("list")
-        with writer.tuple_items(value.shape[dimension]):
-            for offset in range(value.shape[dimension]):
-                _write_ndarray_values_identity(
-                    writer,
-                    value,
-                    active=active,
-                    dimension=dimension + 1,
-                    index=(*index, offset),
-                )
-
-
-def _write_arrow_map_identity(
-    writer: CanonicalIdentityWriter,
-    value: Any,
-    *,
-    data_type: pa.DataType,
-    active: set[int],
-) -> None:
-    if value is None:
-        with writer.tuple_items(2):
-            writer.value("arrow-map")
-            with writer.tuple_items(2):
-                writer.value(str(data_type))
-                writer.value(None)
-        return
-    if type(value) not in (list, tuple):
-        raise ValueError("unsupported_dataset_fingerprint_value")
-    for entry in value:
-        if type(entry) not in (list, tuple) or len(entry) != 2:
-            raise ValueError("unsupported_dataset_fingerprint_value")
-
-    def build() -> None:
-        def emit_entry(target: CanonicalIdentityWriter, index: int) -> None:
-            with target.tuple_items(2):
-                _write_nested_identity(
-                    target,
-                    value[index][0],
-                    active=active,
-                    data_type=data_type.key_type,
-                )
-                _write_nested_identity(
-                    target,
-                    value[index][1],
-                    active=active,
-                    data_type=data_type.item_type,
-                )
-
-        with writer.tuple_items(2):
-            writer.value("arrow-map")
-            with writer.tuple_items(2):
-                writer.value(str(data_type))
-                with writer.tuple_items(len(value)):
-                    with writer.canonical_order(len(value), emit_entry) as order:
-                        for index in order:
-                            emit_entry(writer, index)
-
-    _with_nested_container(value, active=active, build=build)
-
-
-def _with_nested_container(
-    value: Any, *, active: set[int], build: Callable[[], None]
-) -> None:
-    identity = id(value)
-    if identity in active:
-        raise ValueError("dataset_fingerprint_value_cycle")
-    active.add(identity)
-    try:
-        build()
-    finally:
-        active.remove(identity)

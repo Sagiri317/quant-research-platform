@@ -880,7 +880,10 @@ def _iter_pruned_interim_frames(
                             raise RuntimeError("runtime_memory_lease_transfer_mismatch")
                         chunk = owned.value
                     else:
-                        lease = yield pending_bound
+                        pending_handoff = yield (pending_bound, pending_lease)
+                        if pending_handoff is not pending_lease:
+                            raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+                        lease = pending_handoff
                         owned = None
                         chunk = pending_frame
                     if type(chunk) is not pd.DataFrame:
@@ -973,9 +976,9 @@ def _iter_pruned_interim_frames(
                         del pruned
                         del owned, chunk
                         pending_frame = None
-                        if pending_lease is not None:
+                        if pending_lease is not None and pending_lease is not lease:
                             pending_lease.close()
-                            pending_lease = None
+                        pending_lease = None
                         pending_frame = next_pending_frame
                         pending_lease = next_pending_lease
                         pending_bound = next_pending_bound

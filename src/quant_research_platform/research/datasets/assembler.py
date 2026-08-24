@@ -150,13 +150,7 @@ def _iter_joined_processed_chunks(
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
     base_data_id = _base_input_data_id(dataset_spec)
-    producer_bound = max(
-        1,
-        min(
-            max(1, policy.available_memory_bytes // 2),
-            max(1, policy.memory_budget_bytes // 2),
-        ),
-    )
+    producer_bound = max(1, policy.available_memory_bytes // 2)
     lease = yield producer_bound
     chunk_windows = _iter_research_chunk_windows_from_base_input(
         sessions[base_data_id],

@@ -12,7 +12,6 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
-import pyarrow.parquet as pq
 
 from quant_research_platform.artifacts._output_manifest import (
     validate_output_manifest_business_envelope,
@@ -26,6 +25,7 @@ from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKe
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
+    _opened_parquet,
     dataset_file_identity,
     parquet_decoded_working_set_bounds,
 )
@@ -230,8 +230,10 @@ def _read_prediction_output_bundle(
         ):
             raise ValueError("persisted_prediction_metadata_mismatch")
         primary_key = tuple(primary_key_value)
-        prediction_path = next(
-            path for path, _identity in members if path.name == "prediction.parquet"
+        prediction_path, prediction_identity = next(
+            (path, identity)
+            for path, identity in members
+            if path.name == "prediction.parquet"
         )
         try:
             key_index = ExactPrimaryKeyIndex(
@@ -254,7 +256,12 @@ def _read_prediction_output_bundle(
                 prediction_column=prediction_column,
                 resource_policy=policy,
             )
-            parquet = pq.ParquetFile(prediction_path)
+            parquet, _identity = stack.enter_context(
+                _opened_parquet(
+                    prediction_path,
+                    expected_identity=prediction_identity,
+                )
+            )
             expected_columns = (*primary_key, prediction_column)
             if tuple(parquet.schema_arrow.names) != expected_columns:
                 raise ValueError("persisted_prediction_columns_mismatch")

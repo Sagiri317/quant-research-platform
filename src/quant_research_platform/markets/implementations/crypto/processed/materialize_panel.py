@@ -17,13 +17,12 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     canonical_crypto_asset_id,
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
-    materialization_resources,
+    materialization_validation as validation,
+)
+from quant_research_platform.markets.implementations.crypto.processed import (
     panel_input_reducers,
     panels,
     source_ids,
-)
-from quant_research_platform.markets.implementations.crypto.processed import (
-    materialization_validation as validation,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
@@ -192,11 +191,6 @@ def _iter_panel_chunks(
                             state=order_state,
                             error="out_of_order_crypto_panel_dependency",
                         )
-                        materialization_resources.require_frame_within_budget(
-                            prepared_bars,
-                            target_bytes=resource_policy.available_memory_bytes,
-                            error="crypto_indivisible_reducer_unit_exceeds_payload_target",
-                        )
                         prepared_bar_bytes = pandas_frame_payload_bytes(prepared_bars)
                         if prepared_bar_bytes + 256 * 1024 > lease.reserved_bytes:
                             raise ValueError("crypto_panel_bound_invalid")
@@ -225,13 +219,6 @@ def _iter_panel_chunks(
                                 trade_continuity_state=trade_continuity_state,
                                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
                                 _output_stack=output_stack,
-                            )
-                            materialization_resources.require_frame_within_budget(
-                                output,
-                                target_bytes=resource_policy.available_memory_bytes,
-                                error=(
-                                    "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                                ),
                             )
                             output_bytes = pandas_frame_payload_bytes(output)
                             actual_bound = (

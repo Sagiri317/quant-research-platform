@@ -13,9 +13,6 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_PANEL_DATA_ID,
 )
 from quant_research_platform.markets.implementations.crypto.processed import (
-    materialization_resources,
-)
-from quant_research_platform.markets.implementations.crypto.processed import (
     materialization_validation as validation,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -214,9 +211,11 @@ def _iter_factor_chunks(
                                 .copy()
                             )
                             next_carry_bytes = pandas_frame_payload_bytes(next_carry)
+                            if next_carry_bytes > carry_bound:
+                                raise ValueError("crypto_factor_bound_invalid")
                             next_carry_lease.shrink_to(
                                 next_carry_bytes
-                                + min(64 * 1024, max(1, carry_bound // 2))
+                                + min(64 * 1024, carry_bound - next_carry_bytes)
                             )
                         except BaseException as primary:
                             try:
@@ -234,22 +233,8 @@ def _iter_factor_chunks(
                         next_carry_lease = None
                         if old_carry_lease is not None:
                             old_carry_lease.close()
-                        if (
-                            pandas_frame_payload_bytes(active_carry)
-                            > resource_policy.available_memory_bytes
-                        ):
-                            raise ValueError(
-                                "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                            )
                         if not output.empty:
                             result = output.loc[:, spec.required_columns]
-                            materialization_resources.require_frame_within_budget(
-                                result,
-                                target_bytes=resource_policy.available_memory_bytes,
-                                error=(
-                                    "crypto_indivisible_reducer_unit_exceeds_payload_target"
-                                ),
-                            )
                             result_bytes = pandas_frame_payload_bytes(result)
                             producer_payload_bytes = pandas_frame_payload_bytes(panel)
                             actual_bound = (

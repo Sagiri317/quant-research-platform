@@ -660,7 +660,7 @@ def _write_contents(
     )
     part_indices: dict[str, int] = {}
     saw_empty_schema = False
-    producer_bound: int | None = None
+    producer_bound: int | tuple[int, MemoryLease] | None = None
     chunk: pd.DataFrame | None = None
     declared: pd.DataFrame | None = None
     frame: pd.DataFrame | None = None
@@ -697,16 +697,39 @@ def _write_contents(
                     producer_bound = next(chunks)
                 except StopIteration:
                     break
-            if (
-                isinstance(producer_bound, bool)
-                or type(producer_bound) is not int
-                or producer_bound <= 0
-            ):
-                raise ValueError("invalid_dataset_producer_bound")
-            producer_lease = resource_policy.lease(
-                "storage.dataset.producer",
-                producer_bound,
-            )
+            if isinstance(producer_bound, tuple):
+                if len(producer_bound) != 2:
+                    raise ValueError("invalid_dataset_producer_handoff")
+                handoff_bound, handoff_lease = producer_bound
+                if (
+                    isinstance(handoff_bound, bool)
+                    or type(handoff_bound) is not int
+                    or handoff_bound <= 0
+                    or not isinstance(handoff_lease, MemoryLease)
+                ):
+                    raise ValueError("invalid_dataset_producer_handoff")
+                if (
+                    handoff_lease._root is not resource_policy
+                    or not handoff_lease.active
+                ):
+                    raise ValueError("invalid_dataset_producer_handoff")
+                if handoff_lease.reserved_bytes < handoff_bound:
+                    handoff_lease.grow(
+                        handoff_bound - handoff_lease.reserved_bytes
+                    )
+                handoff_lease.transfer("storage.dataset.producer")
+                producer_lease = handoff_lease
+            else:
+                if (
+                    isinstance(producer_bound, bool)
+                    or type(producer_bound) is not int
+                    or producer_bound <= 0
+                ):
+                    raise ValueError("invalid_dataset_producer_bound")
+                producer_lease = resource_policy.lease(
+                    "storage.dataset.producer",
+                    producer_bound,
+                )
             active_producer_leases.append(producer_lease)
             send = getattr(chunks, "send", None)
             if not callable(send):

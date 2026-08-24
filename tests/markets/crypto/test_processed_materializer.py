@@ -183,7 +183,7 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         target_chunk_bytes: int,
         **_kwargs,
     ):
-        assert target_chunk_bytes == policy.available_memory_bytes
+        assert target_chunk_bytes == policy.available_memory_bytes // 8
         assert current_runtime_resource_policy() is policy
         count = 1 if session.name == "bar" else 2
         with runtime_resource_policy_scope(session.resource_policy):
@@ -221,6 +221,11 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         materialization_validation,
         "_validate_ordered_key_stream_coverage",
         validate,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "_key_projection_view",
+        lambda session, **_kwargs: session,
     )
 
     materialization_validation.validate_existing_panel_materialization(
@@ -281,6 +286,11 @@ def test_existing_panel_validation_retires_policy_after_every_primary(
         materialization_validation,
         "_validate_ordered_key_stream_coverage",
         fail,
+    )
+    monkeypatch.setattr(
+        materialization_validation,
+        "_key_projection_view",
+        lambda current, **_kwargs: current,
     )
 
     with pytest.raises(primary_type) as raised:

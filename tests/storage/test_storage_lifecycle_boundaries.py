@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import subprocess
 from contextlib import contextmanager
@@ -939,6 +940,11 @@ def test_open_session_policy_entry_failure_precedes_inventory_construction(
 def test_opened_parquet_close_preserves_generator_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=8 * 1024 * 1024,
+    )
+
     class Handle:
         def __enter__(self) -> Handle:
             return self
@@ -948,6 +954,21 @@ def test_opened_parquet_close_preserves_generator_exit(
 
         def fileno(self) -> int:
             return 1
+
+        def tell(self) -> int:
+            return getattr(self, "position", 0)
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            if whence == 2:
+                self.position = 8 + offset
+            elif whence == 0:
+                self.position = offset
+            else:
+                self.position += offset
+            return self.position
+
+        def read(self, _size: int = -1) -> bytes:
+            return b"\0\0\0\0PAR1"
 
     class Parquet:
         def close(self) -> None:
@@ -967,9 +988,177 @@ def test_opened_parquet_close_preserves_generator_exit(
     )
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
 
-    with pytest.raises(GeneratorExit):
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(GeneratorExit):
+            with physical._opened_parquet(
+                Path("part.parquet"), expected_identity=None
+            ):
+                raise GeneratorExit()
+    assert policy.used_memory_bytes == 0
+
+
+def test_opened_parquet_reserves_footer_metadata_before_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=8 * 1024 * 1024,
+    )
+    footer_length = 1024
+    metadata_bound = (
+        physical._PARQUET_METADATA_FIXED_WORKSPACE_BYTES + 20 * footer_length
+    )
+    events: list[tuple[str, int]] = []
+    trailer = footer_length.to_bytes(4, "little") + b"PAR1"
+
+    class Handle:
+        size = footer_length + 8
+
+        def __init__(self) -> None:
+            self.position = 0
+            self.closed = False
+
+        def fileno(self) -> int:
+            return 1
+
+        def tell(self) -> int:
+            return self.position
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            if whence == 2:
+                self.position = self.size + offset
+            elif whence == 0:
+                self.position = offset
+            else:
+                self.position += offset
+            return self.position
+
+        def read(self, _size: int = -1) -> bytes:
+            return trailer
+
+        def close(self) -> None:
+            self.closed = True
+
+    handle = Handle()
+    metadata = SimpleNamespace(
+        st_dev=1,
+        st_ino=2,
+        st_size=handle.size,
+        st_mtime_ns=4,
+    )
+    monkeypatch.setattr(Path, "open", lambda *_a, **_k: handle)
+    monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
+    monkeypatch.setattr(
+        physical,
+        "dataset_file_identity",
+        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+    )
+
+    class Parquet:
+        def close(self) -> None:
+            events.append(("close", policy.used_memory_bytes))
+
+    def construct(_handle: object) -> Parquet:
+        events.append(("construct", policy.used_memory_bytes))
+        return Parquet()
+
+    monkeypatch.setattr(physical.pq, "ParquetFile", construct)
+
+    with runtime_resource_policy_scope(policy):
         with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
-            raise GeneratorExit()
+            events.append(("body", policy.used_memory_bytes))
+
+    assert events == [
+        ("construct", metadata_bound),
+        ("body", metadata_bound),
+        ("close", metadata_bound),
+    ]
+    assert handle.closed
+    assert policy.used_memory_bytes == 0
+
+
+def test_opened_parquet_rejects_metadata_before_constructor_and_releases_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=8 * 1024 * 1024,
+    )
+    footer_length = 1_433_016
+    trailer = footer_length.to_bytes(4, "little") + b"PAR1"
+    constructor_calls = 0
+
+    class Handle:
+        size = footer_length + 8
+
+        def __init__(self) -> None:
+            self.position = 0
+            self.closed = False
+
+        def fileno(self) -> int:
+            return 1
+
+        def tell(self) -> int:
+            return self.position
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            if whence == 2:
+                self.position = self.size + offset
+            elif whence == 0:
+                self.position = offset
+            else:
+                self.position += offset
+            return self.position
+
+        def read(self, _size: int = -1) -> bytes:
+            return trailer
+
+        def close(self) -> None:
+            self.closed = True
+
+    handle = Handle()
+    metadata = SimpleNamespace(
+        st_dev=1,
+        st_ino=2,
+        st_size=handle.size,
+        st_mtime_ns=4,
+    )
+    monkeypatch.setattr(Path, "open", lambda *_a, **_k: handle)
+    monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
+    monkeypatch.setattr(
+        physical,
+        "dataset_file_identity",
+        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+    )
+
+    def construct(_handle: object) -> object:
+        nonlocal constructor_calls
+        constructor_calls += 1
+        return object()
+
+    monkeypatch.setattr(physical.pq, "ParquetFile", construct)
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            with physical._opened_parquet(
+                Path("part.parquet"), expected_identity=None
+            ):
+                pass
+
+    assert constructor_calls == 0
+    assert handle.closed
+    assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (b"\0\0\0\0NOPE", (9).to_bytes(4, "little") + b"PAR1"),
+)
+def test_parquet_footer_rejects_invalid_trailer_without_constructor(
+    payload: bytes,
+) -> None:
+    with pytest.raises(ValueError, match="dataset_parquet_footer_invalid"):
+        physical._parquet_footer_length(io.BytesIO(payload))
 
 
 @pytest.mark.parametrize("primary_type", _PRIMARY_EXCEPTION_TYPES)
@@ -1039,6 +1228,21 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
         def fileno(self) -> int:
             return 1
 
+        def tell(self) -> int:
+            return getattr(self, "position", 0)
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            if whence == 2:
+                self.position = 8 + offset
+            elif whence == 0:
+                self.position = offset
+            else:
+                self.position += offset
+            return self.position
+
+        def read(self, _size: int = -1) -> bytes:
+            return b"\0\0\0\0PAR1"
+
         def close(self) -> None:
             raise OSError("raw_close_secondary")
 
@@ -1075,6 +1279,21 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
 
         def fileno(self) -> int:
             return 1
+
+        def tell(self) -> int:
+            return getattr(self, "position", 0)
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            if whence == 2:
+                self.position = 8 + offset
+            elif whence == 0:
+                self.position = offset
+            else:
+                self.position += offset
+            return self.position
+
+        def read(self, _size: int = -1) -> bytes:
+            return b"\0\0\0\0PAR1"
 
         def close(self) -> None:
             raise OSError("raw_close_failed")

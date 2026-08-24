@@ -217,13 +217,14 @@ def validate_panel_materialization(
             expected=expected_input_identities,
             error="crypto_panel_input_dataset_identity_mismatch",
         )
-        chunk_target_bytes = resource_policy.available_memory_bytes
+        chunk_target_bytes = _validation_chunk_target_bytes(resource_policy)
+        bar_view = _key_projection_view(
+            bar_session,
+            columns=("source_asset_id", "timestamp"),
+        )
         with (
             closing_iterator(
-                iter_dataset_chunks(
-                    bar_session,
-                    target_chunk_bytes=chunk_target_bytes,
-                )
+                iter_dataset_chunks(bar_view, target_chunk_bytes=chunk_target_bytes)
             ) as bar_chunks,
             closing_iterator(
                 _iter_panel_primary_key_chunks(
@@ -261,12 +262,13 @@ def validate_panel_dependent_materialization(
             expected=expected_input_identities,
             error="crypto_processed_input_dataset_identity_mismatch",
         )
-        chunk_target_bytes = resource_policy.available_memory_bytes
+        chunk_target_bytes = _validation_chunk_target_bytes(resource_policy)
         with closing_iterator(
             _iter_core_window_chunks(
                 panel_session,
                 time_window=time_window,
                 target_chunk_bytes=chunk_target_bytes,
+                columns=spec.primary_key,
             )
         ) as expected_chunks:
             _validate_receipt_key_coverage(
@@ -288,7 +290,7 @@ def _validate_receipt_key_coverage(
 ) -> None:
     if not primary_key:
         raise ValueError(error)
-    chunk_target_bytes = resource_policy.available_memory_bytes
+    chunk_target_bytes = _validation_chunk_target_bytes(resource_policy)
     receipt.session.verify()
     index = receipt.exact_primary_key_index
     for frame in expected:
@@ -339,11 +341,19 @@ def validate_existing_panel_materialization(
             expected=expected_input_identities,
             error="crypto_panel_input_dataset_identity_mismatch",
         )
-        chunk_target_bytes = resource_policy.available_memory_bytes
+        chunk_target_bytes = _validation_chunk_target_bytes(resource_policy)
+        bar_view = _key_projection_view(
+            bar_session,
+            columns=("source_asset_id", "timestamp"),
+        )
+        panel_view = _key_projection_view(
+            panel_session,
+            columns=spec.primary_key,
+        )
         with (
             closing_iterator(
                 iter_dataset_chunks(
-                    bar_session,
+                    bar_view,
                     target_chunk_bytes=chunk_target_bytes,
                 )
             ) as bar_chunks,
@@ -355,7 +365,7 @@ def validate_existing_panel_materialization(
             ) as expected_chunks,
             closing_iterator(
                 iter_dataset_chunks(
-                    panel_session,
+                    panel_view,
                     target_chunk_bytes=chunk_target_bytes,
                 )
             ) as actual_chunks,
@@ -373,6 +383,7 @@ def _iter_core_window_chunks(
     *,
     time_window: TimeWindow,
     target_chunk_bytes: int,
+    columns: tuple[str, ...] | None = None,
 ) -> Iterator[pd.DataFrame]:
     filters = tuple(
         item
@@ -385,8 +396,21 @@ def _iter_core_window_chunks(
         )
         or ()
     )
+    logical_columns = (
+        getattr(session, "logical_columns", ()) if columns is None else columns
+    )
+    physical_columns = tuple(
+        dict.fromkeys(
+            (
+                *logical_columns,
+                *(column for column, _operator, _value in filters),
+            )
+        )
+    )
     view = replace(
         session,
+        logical_columns=logical_columns,
+        physical_columns=physical_columns,
         time_window=time_window,
         parquet_filters=filters or None,
         owns_inventory=False,
@@ -401,6 +425,28 @@ def _iter_core_window_chunks(
         for frame in frames:
             if not frame.empty:
                 yield frame
+
+
+def _validation_chunk_target_bytes(
+    resource_policy: RuntimeResourcePolicy,
+) -> int:
+    return max(1, resource_policy.available_memory_bytes // 8)
+
+
+def _key_projection_view(
+    session: DatasetSession,
+    *,
+    columns: tuple[str, ...],
+) -> DatasetSession:
+    filter_columns = tuple(
+        column for column, _operator, _value in session.parquet_filters or ()
+    )
+    return replace(
+        session,
+        logical_columns=columns,
+        physical_columns=tuple(dict.fromkeys((*columns, *filter_columns))),
+        owns_inventory=False,
+    )
 
 
 def _validate_ordered_key_stream_coverage(
