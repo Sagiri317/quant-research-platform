@@ -644,39 +644,26 @@ def _scan_validated_text_evidence(
 ) -> str | None:
     if dataset_file_identity(path) != expected_identity:
         raise ValueError("validation_summary_evidence_identity_changed")
-    try:
-        with _opened_evidence(path, expected_identity) as handle:
-            try:
-                reason = evidence_text_stream_unsafe_reason(
-                    _iter_exact_evidence_chunks(handle, expected_identity.size)
-                )
-            finally:
-                primary = sys.exception()
-                try:
-                    if (
-                        dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-                        != expected_identity
-                    ):
-                        raise ValueError("validation_summary_evidence_identity_changed")
-                except BaseException as verify_error:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        "validation summary evidence verification also failed: "
-                        f"{type(verify_error).__name__}"
-                    )
-    finally:
-        primary = sys.exception()
+    with _opened_evidence(path, expected_identity) as handle:
         try:
-            if dataset_file_identity(path) != expected_identity:
-                raise ValueError("validation_summary_evidence_identity_changed")
-        except BaseException as verify_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "validation summary evidence verification also failed: "
-                f"{type(verify_error).__name__}"
+            reason = evidence_text_stream_unsafe_reason(
+                _iter_exact_evidence_chunks(handle, expected_identity.size)
             )
+        finally:
+            primary = sys.exception()
+            try:
+                if (
+                    dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+                    != expected_identity
+                ):
+                    raise ValueError("validation_summary_evidence_identity_changed")
+            except BaseException as verify_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "validation summary evidence verification also failed: "
+                    f"{type(verify_error).__name__}"
+                )
     return reason
 
 

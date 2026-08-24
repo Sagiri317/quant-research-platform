@@ -7,7 +7,12 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
+from quant_research_platform.runtime.resources import (
+    _OwnedValue,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.csmar import interim, raw_exports, raw_schemas
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _collect_raw_export(
@@ -16,14 +21,45 @@ def _collect_raw_export(
     *,
     chunksize: int = 1024,
 ) -> pd.DataFrame:
-    chunks = list(
-        raw_exports.iter_private_export_chunks(
-            path,
-            dataset=dataset,
-            chunksize=chunksize,
-        )
-    )
+    chunks = _collect_raw_chunks(path, dataset, chunksize=chunksize)
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+
+
+def _collect_raw_chunks(
+    path: Path,
+    dataset: str,
+    *,
+    chunksize: int,
+) -> list[pd.DataFrame]:
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    producer = raw_exports.iter_private_export_chunks_with_policy(
+        path,
+        dataset=dataset,
+        chunksize=chunksize,
+        resource_policy=policy,
+    )
+    chunks: list[pd.DataFrame] = []
+    with runtime_resource_policy_scope(policy):
+        try:
+            bound = next(producer)
+            while True:
+                lease = policy.lease("test.csmar.consumer", bound)
+                try:
+                    try:
+                        owned = producer.send(lease)
+                    except StopIteration:
+                        return chunks
+                    if not isinstance(owned, _OwnedValue):
+                        raise AssertionError("invalid_bound_first_output")
+                    chunks.append(owned.value)
+                    try:
+                        bound = producer.send(None)
+                    except StopIteration:
+                        return chunks
+                finally:
+                    lease.close()
+        finally:
+            producer.close()
 
 
 def test_raw_export_discovery_contract_keeps_csv_only(
@@ -46,7 +82,12 @@ def test_raw_export_discovery_contract_keeps_csv_only(
     txt_description.write_text("Clddt\tcalendar date\n", encoding="utf-8")
 
     assert raw_exports.SUPPORTED_RAW_EXPORT_SUFFIXES == {".csv"}
-    assert list(raw_exports.iter_raw_export_files(tmp_path)) == [csv_export]
+    assert [
+        path
+        for _dataset, path, _identity in raw_exports.dataset_files_with_identity_by_id(
+            tmp_path
+        )
+    ] == [csv_export]
     assert raw_schemas.expected_metadata_sidecar_path(
         csv_export
     ) == csv_export.with_suffix(
@@ -79,7 +120,11 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(tmp_path: Path) -> None
     audit = _audit_index_info_csv(index_path)
     raw = _collect_raw_export(index_path, "index_info")
     normalized = interim.normalize_raw_frame(raw, "index_info")
-    pruned, _ = interim.apply_output_column_rules(normalized, "index_info")
+    pruned, _ = interim._apply_output_column_rules_validated(
+        normalized,
+        "index_info",
+        overrides=interim._validated_column_overrides({}),
+    )
 
     assert audit == {
         "metadata_row_count": 1,
@@ -152,13 +197,7 @@ def test_index_info_parser_streams_bounded_chunks_without_a_full_frame_surface(
     ]
     pd.DataFrame(rows).to_csv(path, index=False)
 
-    chunks = list(
-        raw_exports.iter_private_export_chunks(
-            path,
-            dataset="index_info",
-            chunksize=1,
-        )
-    )
+    chunks = _collect_raw_chunks(path, "index_info", chunksize=1)
 
     assert [len(chunk) for chunk in chunks] == [1, 1, 1]
     assert pd.concat(chunks, ignore_index=True)["Indexcd"].tolist() == [
@@ -235,13 +274,7 @@ def test_non_index_raw_iteration_bounds_requested_chunks_across_text_widths(
         }
     ).to_csv(path, index=False)
 
-    chunks = list(
-        raw_exports.iter_private_export_chunks(
-            path,
-            dataset="trading_calendar",
-            chunksize=4,
-        )
-    )
+    chunks = _collect_raw_chunks(path, "trading_calendar", chunksize=4)
 
     assert all(0 < len(chunk) <= 4 for chunk in chunks)
     assert sum(map(len, chunks)) == 5

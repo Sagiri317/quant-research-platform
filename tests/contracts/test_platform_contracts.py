@@ -183,13 +183,13 @@ def test_storage_layout_uses_sealed_data_roots() -> None:
     assert not is_local_only_path(Path("/repo/docs/data/README.md"))
 
 
-def test_sanitizer_removes_local_paths_and_provider_source_markers() -> None:
+def test_sanitizer_redacts_local_path_preserves_provider_text() -> None:
     text = "failed with data/raw/csmar/export.csv vendor CSMAR row"
 
     sanitized = sanitize_shared_text(text)
 
     assert "data/raw/csmar" not in sanitized
-    assert "CSMAR" not in sanitized
+    assert "CSMAR" in sanitized
 
 
 def test_csmar_market_bars_daily_normalization_stays_source_local() -> None:
@@ -227,9 +227,10 @@ def test_csmar_market_bars_daily_normalization_stays_source_local() -> None:
         raw,
         frequency_ids.MARKET_BARS_DATA_ID,
     )
-    pruned, _ = csmar_interim.apply_output_column_rules(
+    pruned, _ = csmar_interim._apply_output_column_rules_validated(
         normalized,
         frequency_ids.MARKET_BARS_DATA_ID,
+        overrides=csmar_interim._validated_column_overrides({}),
     )
 
     assert pruned.loc[0, "source_asset_id"] == "000001"

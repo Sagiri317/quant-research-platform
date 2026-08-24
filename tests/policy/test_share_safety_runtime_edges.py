@@ -200,8 +200,8 @@ def test_sanitizer_rejects_local_output_paths(text: str) -> None:
     assert unsafe_for_share_reason(text) == "local_only_path"
 
 
-def test_sanitizer_redacts_shared_markers_stock_codes_and_credentials() -> None:
-    # Intentional fake provider/source marker for safety rejection tests.
+def test_sanitizer_redacts_path_and_credential_preserves_business_text() -> None:
+    # Sanitization is narrow; strict evidence scanners still own these markers.
     text = (
         "data/raw/csmar/export.csv stock code 600000.SH CSMAR vendor token=abcdef123456"  # noqa: E501
     )
@@ -209,9 +209,15 @@ def test_sanitizer_redacts_shared_markers_stock_codes_and_credentials() -> None:
     sanitized = sanitize_shared_text(text)
 
     assert "data/raw/csmar" not in sanitized
-    assert "600000" not in sanitized
-    assert "CSMAR" not in sanitized
+    assert "600000.SH" in sanitized
+    assert "CSMAR" in sanitized
     assert "abcdef123456" not in sanitized
+
+
+def test_sanitizer_preserves_ordinary_identifiers_and_business_text() -> None:
+    text = "600000 300001 provider_name=Acme business order 600000"
+
+    assert sanitize_shared_text(text) == text
 
 
 def test_stock_code_detector_does_not_flag_hash_payloads() -> None:
@@ -231,7 +237,7 @@ def test_stock_code_detector_does_not_flag_hash_payloads() -> None:
 )
 def test_stock_code_detector_covers_a_share_exchange_suffixes(text: str) -> None:
     assert unsafe_for_share_reason(text) == "stock_code_sample"
-    assert text not in sanitize_shared_text(text)
+    assert sanitize_shared_text(text) == text
 @pytest.mark.parametrize(
     ("text", "reason"),
     [
@@ -260,20 +266,16 @@ def test_unsafe_for_share_reason_covers_share_safety_markers(
         '{"provider_id": "choice"}',
     ],
 )
-def test_provider_source_fields_are_fully_sanitized_and_rejected(text: str) -> None:
+def test_provider_source_fields_are_rejected_but_not_rewritten(text: str) -> None:
     assert unsafe_for_share_reason(text) == "provider_source_marker"
-    sanitized = sanitize_shared_text(text)
-    assert "csmar" not in sanitized.lower()
-    assert "choice" not in sanitized.lower()
+    assert sanitize_shared_text(text) == text
 
 
-def test_row_sample_payload_is_fully_sanitized_and_rejected() -> None:
+def test_row_sample_payload_is_rejected_but_not_rewritten() -> None:
     text = 'row_samples=[{"asset_id":"000001","value":1.2}]'
 
     assert unsafe_for_share_reason(text) == "row_sample"
-    sanitized = sanitize_shared_text(text)
-    assert "000001" not in sanitized
-    assert "1.2" not in sanitized
+    assert sanitize_shared_text(text) == text
 
 
 def test_embedded_stock_code_run_token_is_rejected_but_date_id_is_allowed() -> None:
@@ -300,7 +302,11 @@ def test_share_safety_owns_report_and_handoff_text_markers(
     reason: str,
 ) -> None:
     assert unsafe_for_share_reason(text) == reason
-    assert text not in sanitize_shared_text(text)
+    sanitized = sanitize_shared_text(text)
+    if reason == "local_run_path":
+        assert sanitized == "[local-run-path]s1/summary.json"
+    else:
+        assert sanitized == text
 
 
 def test_logical_local_only_path_allowance_masks_only_the_path_value() -> None:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import weakref
+from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -14,7 +15,7 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.sources.binance import interim, raw_exports
+from quant_research_platform.sources.binance import ids, interim, raw_exports
 from quant_research_platform.sources.binance.interim import materialize_interim_data
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -101,13 +102,36 @@ def test_binance_interim_materializer_writes_source_datasets(tmp_path: Path) -> 
     assert depth["timestamp"].nunique() == 1
 
 
+@pytest.mark.parametrize("row_batch_size", (0, True, 1.5))
+def test_binance_materializer_rejects_invalid_row_batch_size_before_discovery(
+    tmp_path: Path,
+    row_batch_size: object,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    raw_root.mkdir(parents=True)
+    layout = StorageLayout(project_root=tmp_path)
+
+    with pytest.raises(ValueError, match="^invalid_binance_raw_row_batch_size$"):
+        materialize_interim_data(
+            layout=layout,
+            raw_root=raw_root,
+            data_ids=("market_bars_1m",),
+            row_batch_size=row_batch_size,  # type: ignore[arg-type]
+        )
+
+    assert not layout.interim_data_root(
+        ids.SOURCE_ID,
+        "market_bars_1m",
+    ).exists()
+
+
 def test_binance_file_discovery_occurs_inside_one_root_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed = []
 
-    def discover(_root: Path, *, verify_root):  # noqa: ANN001
+    def discover(_root: Path):
         observed.append(current_runtime_resource_policy())
         return {}
 
@@ -168,50 +192,97 @@ def test_binance_materializer_rejects_selected_root_replacement(
         )
 
 
-def test_binance_interim_iterator_reuses_active_root_at_creation() -> None:
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-
-    with runtime_resource_policy_scope(policy):
-        iterator = interim.iter_interim_frames(
-            data_id="market_bars_1m",
-            input_files=(),
-        )
-        assert tuple(iterator) == ()
-
-
-def test_binance_interim_iterator_reuses_active_root_at_delayed_consumption() -> None:
-    iterator = interim.iter_interim_frames(
-        data_id="market_bars_1m",
-        input_files=(),
-    )
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-
-    with runtime_resource_policy_scope(policy):
-        assert tuple(iterator) == ()
-
-
-def test_binance_interim_iterator_keeps_explicit_root_during_delayed_consumption(
+def test_binance_materializer_verifies_root_before_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-    observed = []
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    raw_path = raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl"
+    _append_jsonl(raw_path, _kline_envelope(0))
+    events: list[str] = []
 
-    def batches(*_args: object, resource_policy, **_kwargs: object):  # noqa: ANN001
-        observed.append((resource_policy, current_runtime_resource_policy()))
-        return iter(())
+    def verify_root() -> None:
+        events.append("final-verify")
+        raise ValueError("final_root_changed")
 
-    monkeypatch.setattr(interim, "_iter_raw_envelope_batches", batches)
-    iterator = interim.iter_interim_frames(
-        data_id="market_bars_1m",
-        input_files=(tmp_path / "unused.jsonl",),
-        resource_policy=policy,
-    )
+    @contextmanager
+    def raw_path_session(_root: Path):
+        yield verify_root
 
-    assert current_runtime_resource_policy() is None
-    assert len(tuple(iterator)) == 1
-    assert observed == [(policy, policy)]
-    assert current_runtime_resource_policy() is None
+    monkeypatch.setattr(interim, "_raw_path_session", raw_path_session)
+    real_write_dataset = interim.write_dataset
+
+    def observe_publication(*args, **kwargs):  # noqa: ANN002, ANN003
+        events.append("write-enter")
+        result = real_write_dataset(*args, **kwargs)
+        events.append("published")
+        return result
+
+    monkeypatch.setattr(interim, "write_dataset", observe_publication)
+
+    with pytest.raises(ValueError, match="final_root_changed"):
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=("market_bars_1m",),
+        )
+
+    assert events == ["write-enter", "final-verify"]
+
+
+@pytest.mark.parametrize(
+    ("data_id", "path_parts", "envelope_kind"),
+    (
+        (
+            "market_bars_1m",
+            ("spot", "klines", "BTCUSDT", "1m", "2026-07-06.jsonl"),
+            "kline",
+        ),
+        (
+            "aggregate_trades_tick",
+            ("spot", "agg_trades", "BTCUSDT", "2026-07-06.jsonl"),
+            "trade",
+        ),
+        (
+            "depth_levels_tick",
+            ("spot", "depth", "BTCUSDT", "2026-07-06.jsonl"),
+            "depth",
+        ),
+    ),
+)
+@pytest.mark.parametrize("row_batch_size", (1, 2))
+def test_binance_materializer_rejects_out_of_order_interim_before_publication(
+    tmp_path: Path,
+    data_id: str,
+    path_parts: tuple[str, ...],
+    envelope_kind: str,
+    row_batch_size: int,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    raw_path = raw_root.joinpath(*path_parts)
+    envelope_factory = {
+        "kline": _kline_envelope,
+        "trade": _trade_envelope,
+        "depth": _depth_envelope,
+    }[envelope_kind]
+    _append_jsonl(raw_path, envelope_factory(1))
+    _append_jsonl(raw_path, envelope_factory(0))
+
+    with pytest.raises(
+        ValueError,
+        match="out_of_order_binance_interim_dependency",
+    ):
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=(data_id,),
+            row_batch_size=row_batch_size,
+        )
+
+    assert not StorageLayout(project_root=tmp_path).interim_data_root(
+        ids.SOURCE_ID,
+        data_id,
+    ).exists()
 
 
 def test_binance_interim_materializer_writes_multiple_batches(
@@ -260,6 +331,55 @@ def test_binance_interim_materializer_writes_multiple_batches(
 
     assert chunk_lengths == [2, 2, 1]
     assert len(market_bars) == 5
+
+
+def test_binance_depth_materializer_parses_and_validates_order_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    path = raw_root / "spot" / "depth" / "BTCUSDT" / "2026-07-06.jsonl"
+    _append_jsonl(path, _depth_envelope(0))
+    raw_validations = 0
+    side_parses = 0
+    order_validations = 0
+    raw_validate = raw_exports._validate_depth_payload
+    parse_side = interim.depth_side_levels
+    validate_order = interim._validate_normalized_order
+
+    def count_raw(payload):  # noqa: ANN001, ANN202
+        nonlocal raw_validations
+        raw_validations += 1
+        return raw_validate(payload)
+
+    def count_side(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal side_parses
+        side_parses += 1
+        return parse_side(*args, **kwargs)
+
+    def count_order(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal order_validations
+        order_validations += 1
+        return validate_order(*args, **kwargs)
+
+    monkeypatch.setattr(raw_exports, "_validate_depth_payload", count_raw)
+    monkeypatch.setattr(interim, "depth_side_levels", count_side)
+    monkeypatch.setattr(interim, "_validate_normalized_order", count_order)
+
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    result = materialize_interim_data(
+        layout=StorageLayout(project_root=tmp_path),
+        raw_root=raw_root,
+        data_ids=("depth_levels_tick",),
+        row_batch_size=1,
+        resource_policy=policy,
+    )
+
+    assert result.artifact_roots["depth_levels_tick"].exists()
+    assert len(read_dataset(result.artifact_roots["depth_levels_tick"])) == 3
+    assert raw_validations == 0
+    assert side_parses == 2
+    assert order_validations == 1
 
 
 def test_binance_private_owner_state_is_bounded_after_many_batches(
@@ -569,94 +689,6 @@ def test_binance_interim_clears_previous_output_before_next_bound(
             lease.close()
 
     assert policy.used_memory_bytes == 0
-
-
-def test_binance_depth_interim_parses_and_validates_order_once(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    path = tmp_path / "depth.jsonl"
-    _append_jsonl(path, _depth_envelope(0))
-    raw_validations = 0
-    side_parses = 0
-    order_validations = 0
-    raw_validate = raw_exports._validate_depth_payload
-    parse_side = interim.depth_side_levels
-    validate_order = interim._validate_normalized_order
-
-    def count_raw(payload):  # noqa: ANN001, ANN202
-        nonlocal raw_validations
-        raw_validations += 1
-        return raw_validate(payload)
-
-    def count_side(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        nonlocal side_parses
-        side_parses += 1
-        return parse_side(*args, **kwargs)
-
-    def count_order(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        nonlocal order_validations
-        order_validations += 1
-        return validate_order(*args, **kwargs)
-
-    monkeypatch.setattr(raw_exports, "_validate_depth_payload", count_raw)
-    monkeypatch.setattr(interim, "depth_side_levels", count_side)
-    monkeypatch.setattr(interim, "_validate_normalized_order", count_order)
-
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-    chunks = tuple(
-        interim.iter_interim_frames(
-            data_id="depth_levels_tick",
-            input_files=(path,),
-            row_batch_size=1,
-            resource_policy=policy,
-        )
-    )
-
-    assert chunks
-    assert raw_validations == 0
-    assert side_parses == 2
-    assert order_validations == 1
-
-
-@pytest.mark.parametrize(
-    ("data_id", "path_parts", "envelope_kind"),
-    [
-        (
-            "aggregate_trades_tick",
-            ("spot", "agg_trades", "BTCUSDT", "2026-07-06.jsonl"),
-            "trade",
-        ),
-        (
-            "depth_levels_tick",
-            ("spot", "depth", "BTCUSDT", "2026-07-06.jsonl"),
-            "depth",
-        ),
-    ],
-)
-@pytest.mark.parametrize("row_batch_size", [1, 2])
-def test_binance_interim_rejects_global_order_reversal_independent_of_batch_size(
-    tmp_path: Path,
-    data_id: str,
-    path_parts: tuple[str, ...],
-    envelope_kind: str,
-    row_batch_size: int,
-) -> None:
-    path = tmp_path.joinpath(*path_parts)
-    envelope_factory = _trade_envelope if envelope_kind == "trade" else _depth_envelope
-    _append_jsonl(path, envelope_factory(1))
-    _append_jsonl(path, envelope_factory(0))
-
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-    with pytest.raises(ValueError, match="out_of_order_binance_interim_dependency"):
-        tuple(
-            interim.iter_interim_frames(
-                data_id=data_id,
-                input_files=(path,),
-                row_batch_size=row_batch_size,
-                resource_policy=policy,
-            )
-        )
 
 
 def test_binance_date_only_interim_end_includes_full_day(tmp_path: Path) -> None:

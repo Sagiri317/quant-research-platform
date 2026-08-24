@@ -256,100 +256,99 @@ def _read_prediction_output_bundle(
                 prediction_column=prediction_column,
                 resource_policy=policy,
             )
-            parquet, _identity = stack.enter_context(
-                _opened_parquet(
-                    prediction_path,
-                    expected_identity=prediction_identity,
-                )
-            )
-            expected_columns = (*primary_key, prediction_column)
-            if tuple(parquet.schema_arrow.names) != expected_columns:
-                raise ValueError("persisted_prediction_columns_mismatch")
-            test_start = metadata.get("test_start")
-            test_end = metadata.get("test_end")
-            if (
-                type(test_start) is not str
-                or not test_start
-                or (
-                    test_end is not None and (type(test_end) is not str or not test_end)
-                )
-            ):
-                raise ValueError("persisted_prediction_metadata_mismatch")
-            decoded_row_bytes, decode_fixed_bytes = (
-                parquet_decoded_working_set_bounds(parquet, expected_columns)
-            )
-            filter_row_bytes = 0 if time_window is None else decoded_row_bytes + 3
-            batch_row_bytes = decoded_row_bytes + filter_row_bytes
-            batch_headroom = (
-                policy.memory_budget_bytes - policy.used_memory_bytes
-            )
-            if decode_fixed_bytes + batch_row_bytes > batch_headroom:
-                raise MemoryError("runtime_memory_budget_exceeded")
-            batch_size = max(
-                1,
-                (batch_headroom - decode_fixed_bytes) // batch_row_bytes,
-            )
-            batch_working_bytes = decode_fixed_bytes + batch_size * batch_row_bytes
-            batches = iter(
-                parquet.iter_batches(
-                    batch_size=batch_size,
-                    use_threads=False,
-                )
-            )
-            while True:
-                with policy.lease(
-                    "artifacts.prediction.read.batch",
-                    batch_working_bytes,
-                ):
-                    try:
-                        batch = next(batches)
-                    except StopIteration:
-                        break
-                    table = pa.Table.from_batches([batch])
-                    timestamps = table.column("timestamp")
-                    if bool(
-                        pc.any(
-                            pc.less(timestamps, pa.scalar(pd.Timestamp(test_start)))
-                        ).as_py()
-                    ) or (
+            with _opened_parquet(
+                prediction_path,
+                expected_identity=prediction_identity,
+            ) as (parquet, _identity):
+                expected_columns = (*primary_key, prediction_column)
+                if tuple(parquet.schema_arrow.names) != expected_columns:
+                    raise ValueError("persisted_prediction_columns_mismatch")
+                test_start = metadata.get("test_start")
+                test_end = metadata.get("test_end")
+                if (
+                    type(test_start) is not str
+                    or not test_start
+                    or (
                         test_end is not None
-                        and bool(
-                            pc.any(
-                                pc.greater(
-                                    timestamps,
-                                    pa.scalar(pd.Timestamp(test_end)),
-                                )
-                            ).as_py()
-                        )
-                    ):
-                        raise ValueError("persisted_prediction_window_mismatch")
-                    duplicates = key_index.add_float_value_table(
-                        table,
-                        namespace="prediction-bundle-validation",
-                        value_column=prediction_column,
-                        payload_target_bytes=batch_working_bytes,
+                        and (type(test_end) is not str or not test_end)
                     )
-                    if duplicates:
-                        raise ValueError("duplicate_persisted_prediction_keys")
-                    if time_window is not None:
-                        keep = pc.and_(
-                            pc.greater_equal(
-                                timestamps,
-                                pa.scalar(pd.Timestamp(time_window.start)),
-                            ),
-                            pc.less_equal(
-                                timestamps,
-                                pa.scalar(pd.Timestamp(time_window.end)),
-                            ),
-                        )
-                        table = table.filter(keep)
-                    if table.num_rows:
-                        lookup.add_table(
+                ):
+                    raise ValueError("persisted_prediction_metadata_mismatch")
+                decoded_row_bytes, decode_fixed_bytes = (
+                    parquet_decoded_working_set_bounds(parquet, expected_columns)
+                )
+                filter_row_bytes = 0 if time_window is None else decoded_row_bytes + 3
+                batch_row_bytes = decoded_row_bytes + filter_row_bytes
+                batch_headroom = (
+                    policy.memory_budget_bytes - policy.used_memory_bytes
+                )
+                if decode_fixed_bytes + batch_row_bytes > batch_headroom:
+                    raise MemoryError("runtime_memory_budget_exceeded")
+                batch_size = max(
+                    1,
+                    (batch_headroom - decode_fixed_bytes) // batch_row_bytes,
+                )
+                batch_working_bytes = decode_fixed_bytes + batch_size * batch_row_bytes
+                batches = iter(
+                    parquet.iter_batches(
+                        batch_size=batch_size,
+                        use_threads=False,
+                    )
+                )
+                while True:
+                    with policy.lease(
+                        "artifacts.prediction.read.batch",
+                        batch_working_bytes,
+                    ):
+                        try:
+                            batch = next(batches)
+                        except StopIteration:
+                            break
+                        table = pa.Table.from_batches([batch])
+                        timestamps = table.column("timestamp")
+                        if bool(
+                            pc.any(
+                                pc.less(timestamps, pa.scalar(pd.Timestamp(test_start)))
+                            ).as_py()
+                        ) or (
+                            test_end is not None
+                            and bool(
+                                pc.any(
+                                    pc.greater(
+                                        timestamps,
+                                        pa.scalar(pd.Timestamp(test_end)),
+                                    )
+                                ).as_py()
+                            )
+                        ):
+                            raise ValueError("persisted_prediction_window_mismatch")
+                        duplicates = key_index.add_float_value_table(
                             table,
-                            payload_headroom_bytes=batch_working_bytes,
+                            namespace="prediction-bundle-validation",
+                            value_column=prediction_column,
+                            payload_target_bytes=batch_working_bytes,
                         )
-            if lookup.row_count == 0:
-                raise ValueError("empty_prediction_window")
+                        if duplicates:
+                            raise ValueError("duplicate_persisted_prediction_keys")
+                        if time_window is not None:
+                            keep = pc.and_(
+                                pc.greater_equal(
+                                    timestamps,
+                                    pa.scalar(pd.Timestamp(time_window.start)),
+                                ),
+                                pc.less_equal(
+                                    timestamps,
+                                    pa.scalar(pd.Timestamp(time_window.end)),
+                                ),
+                            )
+                            table = table.filter(keep)
+                        if table.num_rows:
+                            lookup.add_table(
+                                table,
+                                payload_headroom_bytes=batch_working_bytes,
+                            )
+                if lookup.row_count == 0:
+                    raise ValueError("empty_prediction_window")
         except Exception as exc:
             if isinstance(exc, ValueError):
                 raise

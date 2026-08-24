@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -33,7 +32,6 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.binance import ids
 from quant_research_platform.sources.binance.fields import field_role
 from quant_research_platform.sources.binance.raw_exports import (
-    _capture_raw_file_identity,
     _dataset_files_by_id_with_identity,
     _iter_raw_envelope_batches,
     _raw_path_session,
@@ -122,97 +120,6 @@ def interim_catalog() -> InterimDataCatalog:
     return InterimDataCatalog(interim_specs())
 
 
-def iter_interim_frames(
-    *,
-    data_id: str,
-    input_files: tuple[Path, ...],
-    row_batch_size: int = RAW_ROW_BATCH_SIZE,
-    start_date: str | None = None,
-    end_date: str | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Iterator[pd.DataFrame]:
-    input_files = _bind_interim_input_files(input_files)
-    bound_policy = resource_policy
-
-    def activate() -> Iterator[pd.DataFrame]:
-        policy = bound_policy or current_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy) as policy:
-            producer = _iter_owned_interim_frames(
-                data_id=data_id,
-                input_files=input_files,
-                row_batch_size=row_batch_size,
-                start_date=start_date,
-                end_date=end_date,
-                resource_policy=policy,
-            )
-            lease: MemoryLease | None = None
-            owned: object | None = None
-            try:
-                try:
-                    bound = next(producer)
-                except StopIteration:
-                    return
-                while True:
-                    lease = policy.lease("source.binance.interim", bound)
-                    try:
-                        owned = producer.send(lease)
-                    except StopIteration:
-                        lease.close()
-                        lease = None
-                        return
-                    if not isinstance(owned, _OwnedValue):
-                        raise TypeError("invalid_binance_owned_frame")
-                    if owned.lease is not lease:
-                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-                    lease.transfer("source.binance.interim.consumer")
-                    yield owned.value
-                    del owned
-                    try:
-                        bound = producer.send(None)
-                    except StopIteration:
-                        lease.close()
-                        lease = None
-                        return
-                    lease.close()
-                    lease = None
-            finally:
-                owned = None
-                primary = sys.exception()
-                first_failure: BaseException | None = None
-                close = getattr(producer, "close", None)
-                if close is not None:
-                    try:
-                        close()
-                    except BaseException as cleanup_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "Binance interim producer close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        else:
-                            first_failure = cleanup_error
-                if lease is not None:
-                    try:
-                        lease.close()
-                    except BaseException as cleanup_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "Binance interim lease close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        elif first_failure is None:
-                            first_failure = cleanup_error
-                        else:
-                            first_failure.add_note(
-                                "Binance interim lease close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                if first_failure is not None:
-                    raise first_failure
-
-    return activate()
-
-
 def _iter_owned_interim_frames(
     *,
     data_id: str,
@@ -224,10 +131,6 @@ def _iter_owned_interim_frames(
     verify_root: Callable[[], None] | None = None,
 ) -> Iterator[object]:
     _strict_data_ids((data_id,))
-    strict_positive_integer(
-        row_batch_size,
-        error="invalid_binance_raw_row_batch_size",
-    )
     if isinstance(input_files, str) or not isinstance(input_files, tuple | list):
         raise ValueError("invalid_binance_raw_input_files")
     bound_policy = resource_policy or current_runtime_resource_policy()
@@ -256,7 +159,6 @@ def _iter_owned_interim_frames(
                         resource_policy=policy,
                         validate_depth_payload=False,
                         expected_identity=expected_identity,
-                        verify_root=verify_root,
                     )
                 ) as raw_batches:
                     try:
@@ -354,6 +256,8 @@ def _iter_owned_interim_frames(
                 lease.shrink_to(empty_bytes + 64 * 1024)
                 yield _OwnedValue(empty, lease)
                 lease = None
+            if verify_root is not None:
+                verify_root()
 
     return activate()
 
@@ -386,6 +290,10 @@ def materialize_interim_data(
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> BinanceInterimImportResult:
     with runtime_resource_policy_scope(resource_policy) as policy:
+        strict_positive_integer(
+            row_batch_size,
+            error="invalid_binance_raw_row_batch_size",
+        )
         catalog = interim_catalog()
         source_raw_root = raw_root or layout.raw_source_root(ids.SOURCE_ID)
         written: dict[str, Path] = {}
@@ -394,7 +302,6 @@ def materialize_interim_data(
         with _raw_path_session(source_raw_root) as verify_root:
             files_by_data_id = _dataset_files_by_id_with_identity(
                 source_raw_root,
-                verify_root=verify_root,
             )
             for data_id in requested_data_ids:
                 spec = catalog.get(data_id)
@@ -422,21 +329,6 @@ def materialize_interim_data(
             artifact_roots=written,
             skipped=tuple(skipped),
         )
-
-
-def _bind_interim_input_files(
-    input_files: tuple[Path, ...],
-) -> tuple[Path | _RawInputFile, ...]:
-    bound: list[Path | _RawInputFile] = []
-    for input_file in input_files:
-        path = Path(input_file)
-        try:
-            path.lstat()
-        except FileNotFoundError:
-            bound.append(path)
-        else:
-            bound.append((path, _capture_raw_file_identity(path)))
-    return tuple(bound)
 
 
 def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:

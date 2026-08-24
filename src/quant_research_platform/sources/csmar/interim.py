@@ -297,19 +297,6 @@ def _bounded_mapping_snapshot(
     return snapshot
 
 
-def apply_output_column_rules(
-    frame: pd.DataFrame,
-    data_id: str,
-    *,
-    overrides: Mapping[str, Mapping[str, object]] | None = None,
-) -> tuple[pd.DataFrame, dict[str, object]]:
-    return _apply_output_column_rules_validated(
-        frame,
-        data_id,
-        overrides=_validated_column_overrides({} if overrides is None else overrides),
-    )
-
-
 def _apply_output_column_rules_validated(
     frame: pd.DataFrame,
     data_id: str,
@@ -549,97 +536,6 @@ def filter_by_source_date_range(
     return frame[mask].copy()
 
 
-def iter_interim_frames(
-    *,
-    data_id: str,
-    input_files: Iterable[Path],
-    start_date: str | None,
-    end_date: str | None,
-    overrides: dict[str, dict[str, object]] | None = None,
-    chunksize: int = 500_000,
-    pruning_reports: list[dict[str, object]] | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Iterator[pd.DataFrame]:
-    bound_policy = resource_policy
-    overrides = _validated_column_overrides({} if overrides is None else overrides)
-
-    def activate() -> Iterator[object]:
-        policy = bound_policy or current_runtime_resource_policy()
-        producer = _iter_interim_frames(
-            data_id=data_id,
-            input_files=input_files,
-            start_date=start_date,
-            end_date=end_date,
-            overrides=overrides,
-            chunksize=chunksize,
-            pruning_reports=pruning_reports,
-        )
-        with runtime_resource_policy_scope(policy) as policy:
-            try:
-                bound = next(producer)
-            except StopIteration:
-                return
-            lease: MemoryLease | None = None
-            try:
-                while True:
-                    lease = policy.lease("source.csmar.interim", bound)
-                    owned: object | None = None
-                    try:
-                        owned = producer.send(lease)
-                    except StopIteration:
-                        lease.close()
-                        lease = None
-                    if not isinstance(owned, _OwnedValue):
-                        break
-                    if owned.lease is not lease:
-                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-                    lease.transfer("source.csmar.interim.consumer")
-                    yield owned.value
-                    del owned
-                    try:
-                        bound = producer.send(None)
-                    except StopIteration:
-                        bound = None
-                    lease.close()
-                    lease = None
-                    if bound is None:
-                        break
-            finally:
-                owned = None
-                primary = sys.exception()
-                first_failure: BaseException | None = None
-                try:
-                    producer.close()
-                except BaseException as cleanup_error:
-                    if primary is None:
-                        first_failure = cleanup_error
-                    else:
-                        primary.add_note(
-                            "CSMAR interim producer close also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                if lease is not None:
-                    try:
-                        lease.close()
-                    except BaseException as cleanup_error:
-                        if primary is None and first_failure is None:
-                            first_failure = cleanup_error
-                        elif primary is not None:
-                            primary.add_note(
-                                "CSMAR interim lease close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        else:
-                            first_failure.add_note(
-                                "CSMAR interim lease close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                if first_failure is not None:
-                    raise first_failure
-
-    return activate()
-
-
 def _iter_interim_frames(
     *,
     data_id: str,
@@ -760,6 +656,8 @@ def _materialize_interim_data(
     resource_policy = current_runtime_resource_policy()
     if resource_policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
+    if type(chunksize) is not int or chunksize <= 0:
+        raise ValueError("invalid_csmar_chunksize")
     catalog = interim_catalog()
     source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
     overrides = (

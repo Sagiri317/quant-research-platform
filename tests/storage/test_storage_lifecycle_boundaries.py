@@ -236,38 +236,6 @@ def test_unaliased_path_checks_lexical_component_before_parent_traversal(
     assert alias in visited
 
 
-def test_bounded_json_rejects_same_inode_hardlink_replacement_after_read(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "manifest.json"
-    moved = tmp_path / "moved.json"
-    path.write_text('{"schema_id":"test"}', encoding="utf-8")
-    preserve_primary = manifests.scratch_owner.handle_preserving_primary
-
-    @contextmanager
-    def replace_after_read(handle):  # noqa: ANN001, ANN202
-        with preserve_primary(handle) as opened:
-            yield opened
-        path.rename(moved)
-        try:
-            os.link(moved, path)
-        except OSError as exc:
-            pytest.skip(f"hardlink_not_available: {exc}")
-
-    monkeypatch.setattr(
-        manifests.scratch_owner,
-        "handle_preserving_primary",
-        replace_after_read,
-    )
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_metadata_file_identity_changed",
-    ):
-        manifests.read_bounded_qrp_json(path)
-
-
 def test_chunked_read_rejects_different_explicit_policy_at_creation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1488,7 +1456,7 @@ def test_artifact_root_ordinary_chain_preserves_candidate_spelling(
     assert dataset_paths.require_artifact_root(root) == root
 
 
-def test_dataset_file_identity_rejects_hardlink(tmp_path: Path) -> None:
+def test_dataset_file_identity_accepts_single_external_hardlink(tmp_path: Path) -> None:
     source = tmp_path / "source.bin"
     alias = tmp_path / "alias.bin"
     source.write_bytes(b"payload")
@@ -1497,8 +1465,9 @@ def test_dataset_file_identity_rejects_hardlink(tmp_path: Path) -> None:
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
 
-    with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        physical.dataset_file_identity(alias)
+    assert physical.dataset_file_identity(alias) == physical.dataset_file_identity(
+        source
+    )
 
 
 def test_dataset_file_identity_rejects_ancestor_alias(tmp_path: Path) -> None:

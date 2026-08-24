@@ -7,7 +7,7 @@ import os
 import stat
 import sys
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -49,33 +49,17 @@ _RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
 _RawInputFile = tuple[Path, DatasetFileIdentity]
 
 
-def dataset_files_by_id(raw_root: Path) -> dict[str, tuple[Path, ...]]:
-    root = Path(raw_root)
-    files_by_id = _dataset_files_by_id_with_identity(root)
-    return {
-        data_id: tuple(path for path, _identity in files)
-        for data_id, files in files_by_id.items()
-    }
-
-
 def _dataset_files_by_id_with_identity(
     raw_root: Path,
-    *,
-    verify_root: Callable[[], None] | None = None,
 ) -> dict[str, tuple[_RawInputFile, ...]]:
     root = Path(raw_root)
-    session = (
-        _raw_path_session(root) if verify_root is None else nullcontext(verify_root)
-    )
-    with session as verify:
-        return {
-            data_id: _discover_raw_kind_files(
-                root,
-                raw_kind,
-                verify_root=verify,
-            )
-            for raw_kind, data_id in DATA_ID_BY_RAW_KIND.items()
-        }
+    return {
+        data_id: _discover_raw_kind_files(
+            root,
+            raw_kind,
+        )
+        for raw_kind, data_id in DATA_ID_BY_RAW_KIND.items()
+    }
 
 
 @contextmanager
@@ -113,7 +97,6 @@ def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
             raise ValueError(_RAW_IDENTITY_ERROR)
 
     try:
-        verify_root()
         yield verify_root
     finally:
         primary = sys.exception()
@@ -221,7 +204,6 @@ def _iter_raw_envelope_batches(
     resource_policy: RuntimeResourcePolicy,
     validate_depth_payload: bool = True,
     expected_identity: DatasetFileIdentity | None = None,
-    verify_root: Callable[[], None] | None = None,
 ) -> Iterator[object]:
     raw_path = Path(path)
     expected_identity = _capture_raw_file_identity(
@@ -232,8 +214,6 @@ def _iter_raw_envelope_batches(
         raise ValueError("empty_binance_raw_file")
     if raw_path.suffix != ".jsonl":
         raise ValueError("unsupported_binance_raw_file_extension")
-    if type(batch_size) is not int or batch_size <= 0:
-        raise ValueError("invalid_binance_raw_row_batch_size")
     raw_file_size = max(1, expected_identity.size)
     producer_bound = max(
         256 * 1024,
@@ -257,18 +237,14 @@ def _iter_raw_envelope_batches(
         raise
     try:
         _verify_raw_file_handle(
-            raw_path,
             handle,
             expected_identity=expected_identity,
-            verify_root=verify_root,
         )
         while True:
             lease = yield producer_bound
             _verify_raw_file_handle(
-                raw_path,
                 handle,
                 expected_identity=expected_identity,
-                verify_root=verify_root,
             )
             scan_bytes = min(_SCAN_BUFFER_BYTES, max(1, producer_bound))
             if scan_bytes + 64 * 1024 > lease.reserved_bytes:
@@ -317,10 +293,8 @@ def _iter_raw_envelope_batches(
                 if actual_bound > lease.reserved_bytes:
                     raise RuntimeError("binance_record_envelope_bound_invalid")
                 _verify_raw_file_handle(
-                    raw_path,
                     handle,
                     expected_identity=expected_identity,
-                    verify_root=verify_root,
                 )
                 yield _OwnedValue(tuple(batch), lease)
                 del batch
@@ -335,10 +309,8 @@ def _iter_raw_envelope_batches(
         first_failure: BaseException | None = None
         try:
             _verify_raw_file_handle(
-                raw_path,
                 handle,
                 expected_identity=expected_identity,
-                verify_root=verify_root,
             )
         except BaseException as verify_error:
             if primary is not None:
@@ -390,27 +362,16 @@ def _capture_raw_file_identity(
 
 
 def _verify_raw_file_handle(
-    path: Path,
     handle: Any,
     *,
     expected_identity: DatasetFileIdentity,
-    verify_root: Callable[[], None] | None,
 ) -> None:
-    if verify_root is not None:
-        verify_root()
     try:
         handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
     except (OSError, ValueError) as error:
         raise ValueError(_RAW_IDENTITY_ERROR) from error
     if handle_identity != expected_identity:
         raise ValueError(_RAW_IDENTITY_ERROR)
-    _capture_raw_file_identity(
-        path,
-        expected_identity=expected_identity,
-        missing_is_file_not_found=False,
-    )
-    if verify_root is not None:
-        verify_root()
 
 
 def _next_record_length(handle: Any, buffer: bytearray) -> int:
@@ -444,8 +405,6 @@ def _json_record_working_set_bytes(record_bytes: int) -> int:
 def _discover_raw_kind_files(
     root: Path,
     raw_kind: str,
-    *,
-    verify_root: Callable[[], None],
 ) -> tuple[_RawInputFile, ...]:
     if raw_kind == "klines":
         base = root / "spot" / "klines"
@@ -461,37 +420,29 @@ def _discover_raw_kind_files(
     files: list[_RawInputFile] = []
     for symbol_dir, symbol_metadata in _raw_directory_entries(
         base,
-        verify_root=verify_root,
     ):
         if not stat.S_ISDIR(symbol_metadata.st_mode):
             continue
         data_dir = symbol_dir if interval is None else symbol_dir / interval
         for path, metadata in _raw_directory_entries(
             data_dir,
-            verify_root=verify_root,
         ):
             if not stat.S_ISREG(metadata.st_mode):
                 continue
             if path.suffix != ".jsonl":
                 continue
-            verify_root()
             identity = _capture_raw_file_identity(
                 path,
                 missing_is_file_not_found=False,
             )
-            verify_root()
             files.append((path, identity))
     files.sort(key=lambda item: item[0])
-    verify_root()
     return tuple(files)
 
 
 def _raw_directory_entries(
     path: Path,
-    *,
-    verify_root: Callable[[], None],
 ) -> tuple[tuple[Path, os.stat_result], ...]:
-    verify_root()
     require_unaliased_path(path, error=_RAW_IDENTITY_ERROR)
     try:
         metadata = path.lstat()
@@ -514,7 +465,6 @@ def _raw_directory_entries(
         except OSError as error:
             raise ValueError(_RAW_IDENTITY_ERROR) from error
         _reject_raw_reparse(metadata)
-        verify_root()
         result.append((child, metadata))
     result.sort(key=lambda item: item[0])
     return tuple(result)

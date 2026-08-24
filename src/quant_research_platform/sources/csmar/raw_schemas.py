@@ -308,14 +308,8 @@ class _BoundedCsvRecords:
             )
             if identity is not None and identity != path_identity:
                 raise ValueError("csmar_raw_export_identity_changed")
-            try:
-                if dataset_file_identity(path) != path_identity:
-                    raise ValueError("csmar_raw_export_identity_changed")
-            except (OSError, ValueError) as exc:
-                raise ValueError("csmar_raw_export_identity_changed") from exc
             self._handle = handle
             self._identity = identity
-            self._path_identity = path_identity
             self._spool: object | None = None
             self._path = path
             self._limit_bytes = limit_bytes
@@ -811,22 +805,6 @@ class _BoundedCsvRecords:
                 failure.add_note(
                     "csmar raw handle close also failed: " f"{type(exc).__name__}"
                 )
-        try:
-            if dataset_file_identity(self._path) != self._path_identity:
-                raise ValueError("csmar_raw_export_identity_changed")
-        except BaseException as exc:
-            if primary is not None:
-                primary.add_note(
-                    "csmar raw path verification also failed: "
-                    f"{type(exc).__name__}"
-                )
-            elif failure is None:
-                failure = exc
-            else:
-                failure.add_note(
-                    "csmar raw path verification also failed: "
-                    f"{type(exc).__name__}"
-                )
         if self._spool is not None:
             spool = self._spool
             self._spool = None
@@ -1096,13 +1074,6 @@ def _inspect_raw_export_file_under_policy(
     metadata_identity = (
         raw_export_file_identity(metadata_path) if metadata_path.exists() else None
     )
-    if raw_export_file_identity(export_path) != export_identity:
-        raise ValueError("csmar_raw_export_identity_changed")
-    if metadata_identity is None:
-        if metadata_path.exists():
-            raise ValueError("csmar_raw_export_identity_changed")
-    elif raw_export_file_identity(metadata_path) != metadata_identity:
-        raise ValueError("csmar_raw_export_identity_changed")
     return RawExportInspection(
         path=export_path,
         dataset=dataset,

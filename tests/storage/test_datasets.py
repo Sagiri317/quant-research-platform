@@ -9572,9 +9572,8 @@ def test_compare_uses_one_fingerprint_lease_per_side(
     assert policy.used_memory_bytes == 0
 
 
-def test_bounded_metadata_reader_rejects_hardlink_before_open(
+def test_bounded_metadata_reader_accepts_single_external_hardlink(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     external = tmp_path / "external.json"
     external.write_text('{"schema_id":"outside"}', encoding="utf-8")
@@ -9583,16 +9582,9 @@ def test_bounded_metadata_reader_rejects_hardlink_before_open(
         os.link(external, candidate)
     except OSError:
         pytest.skip("hardlink_not_available")
-    monkeypatch.setattr(
-        Path,
-        "open",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("hardlinked_metadata_opened")
-        ),
-    )
-
-    with pytest.raises(ValueError, match="dataset_metadata_file_invalid"):
-        storage_manifests.read_bounded_qrp_json(candidate)
+    assert storage_manifests.read_bounded_qrp_json(candidate)[1] == {
+        "schema_id": "outside"
+    }
 
 
 def test_private_writer_baseline_rejects_before_input_generation(

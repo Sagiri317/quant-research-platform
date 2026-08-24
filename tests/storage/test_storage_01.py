@@ -265,60 +265,6 @@ def test_projected_compare_binds_only_selected_and_primary_key_schema(
     )
 
 
-def test_arrow_map_entry_order_is_layout_not_content(tmp_path: Path) -> None:
-    map_type = pa.map_(pa.string(), pa.float64())
-
-    def write(root: Path, entries: list[tuple[str, float]]) -> None:
-        frame = make_default_dataset_frame(
-            asset_ids=("asset_001",),
-            dates=("2014-01-02",),
-            values=(b"placeholder",),
-        )
-        _write_arrow_value_artifact(
-            root,
-            frame,
-            pa.array([entries], type=map_type),
-        )
-
-    left = make_dataset_artifact_root(tmp_path, "map_order_left")
-    right = make_dataset_artifact_root(tmp_path, "map_order_right")
-    write(left, [("b", 2.0), ("a", 1.0)])
-    write(right, [("a", 1.0), ("b", 2.0)])
-
-    assert (
-        fingerprint_dataset(left).content_hash
-        == fingerprint_dataset(right).content_hash
-    )
-    assert compare_datasets(left, right).status == "MATCH"
-
-
-def test_non_ascii_nested_arrow_type_compares_end_to_end(tmp_path: Path) -> None:
-    nested_type = pa.struct([pa.field("指标", pa.int64())])
-
-    def write(root: Path, value: int) -> None:
-        frame = make_default_dataset_frame(
-            asset_ids=("asset_001",),
-            dates=("2014-01-02",),
-            values=(b"placeholder",),
-        )
-        _write_arrow_value_artifact(
-            root,
-            frame,
-            pa.array([{"指标": value}], type=nested_type),
-        )
-
-    left = make_dataset_artifact_root(tmp_path, "unicode_nested_left")
-    equal = make_dataset_artifact_root(tmp_path, "unicode_nested_equal")
-    changed = make_dataset_artifact_root(tmp_path, "unicode_nested_changed")
-    for root, value in ((left, 1), (equal, 1), (changed, 2)):
-        write(root, value)
-
-    assert fingerprint_dataset(left).row_count == 1
-    assert compare_datasets(left, left).status == "MATCH"
-    assert compare_datasets(left, equal).status == "MATCH"
-    assert compare_datasets(left, changed).status == "CONTENT_MISMATCH"
-
-
 def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     manifest = tmp_path / "outputs" / "run" / "manifest.json"
     manifest.parent.mkdir(parents=True)

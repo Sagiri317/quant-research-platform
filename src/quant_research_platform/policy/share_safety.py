@@ -352,7 +352,7 @@ def contains_source_local_key(value: object) -> bool:
 
 
 def sanitize_shared_text(text: object) -> str:
-    """Return share-safe text for API, CLI, manifest, and report summaries."""
+    """Redact secrets and local implementation details from shared text."""
 
     result = str(text)
     result = _TRACEBACK_RE.sub("[traceback]", result)
@@ -364,14 +364,6 @@ def sanitize_shared_text(text: object) -> str:
     result = _POSIX_LOCAL_PATH_RE.sub("[local-path]", result)
     result = _ENVIRONMENT_PATH_RE.sub("[local-path]", result)
     result = _REPO_LOCAL_ONLY_PATH_RE.sub("[local-only-path]", result)
-    result = _ROW_SAMPLE_RE.sub("[row-sample]", result)
-    result = _ROW_SAMPLE_MARKER_RE.sub("[row-sample]", result)
-    result = _RAW_EXPORT_FILENAME_RE.sub("[raw-export]", result)
-    result = _SOURCE_LOCAL_KEY_RE.sub("[source-local-key]", result)
-    result = _RUNTIME_PAYLOAD_RE.sub("[runtime-payload]", result)
-    result = _PROVIDER_SOURCE_FIELD_RE.sub("[shared-marker]", result)
-    result = _PROVIDER_SOURCE_MARKER_RE.sub("[shared-marker]", result)
-    result = _STOCK_CODE_RE.sub("[asset-id]", result)
     return result
 
 

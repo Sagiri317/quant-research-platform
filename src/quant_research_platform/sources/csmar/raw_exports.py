@@ -13,7 +13,7 @@ import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from itertools import islice
+from itertools import groupby, islice
 from pathlib import Path
 
 import pandas as pd
@@ -351,41 +351,32 @@ def _raw_export_path_session(
             )
         )
         while True:
-            verify_root()
             try:
                 parent, dirnames, filenames = next(walker)
             except StopIteration:
-                verify_root()
                 return
-            verify_root()
             require_unaliased_path(parent, error="csmar_raw_export_identity_changed")
-            verify_root()
             for name in dirnames:
                 require_unaliased_path(
                     parent / name,
                     error="csmar_raw_export_identity_changed",
                 )
-                verify_root()
             dirnames.sort()
             for name in sorted(filenames):
                 path = parent / name
                 if path.suffix.lower() not in SUPPORTED_RAW_EXPORT_SUFFIXES:
                     continue
                 require_unaliased_path(path, error="csmar_raw_export_identity_changed")
-                verify_root()
                 if (
                     "[DES]" in path.name
                     or "__description__" in path.name
                     or ".metadata." in path.name
                 ):
                     continue
-                verify_root()
                 yield path
-                verify_root()
 
     try:
         require_unaliased_path(root, error="csmar_raw_export_identity_changed")
-        verify_root()
         yield iter_paths(), verify_root
     finally:
         primary = sys.exception()
@@ -399,50 +390,6 @@ def _raw_export_path_session(
                     "CSMAR raw export root verification also failed: "
                     f"{type(verify_error).__name__}"
                 )
-
-
-def iter_raw_export_files(
-    root: Path,
-    *,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Iterator[Path]:
-    """Yield supported raw exports in deterministic spill-backed order."""
-
-    bound_policy = resource_policy
-    raw_root = Path(root)
-
-    def iter_files() -> Iterator[Path]:
-        policy = bound_policy or current_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy):
-            with _raw_export_path_session(raw_root) as (paths, verify_root):
-                with ExactPrimaryKeyIndex(
-                    primary_key=("path",),
-                    timestamp_columns=(),
-                    scratch_parent=raw_root.parent,
-                ) as index:
-                    files = _iter_indexed_raw_export_files(
-                        raw_root,
-                        paths=paths,
-                        verify_root=verify_root,
-                        index=index,
-                        namespace="csmar-raw-export-paths",
-                    )
-                    for path, _identity in files:
-                        verify_root()
-                        yield path
-                        verify_root()
-
-    return iter_files()
-
-
-def inspect_raw_export(
-    path: Path,
-    *,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> RawExportIntakeResult:
-    """Inspect one raw export without writing metadata sidecars."""
-
-    return _inspect_raw_export_with_identity(path, resource_policy=resource_policy)
 
 
 def _inspect_raw_export_with_identity(
@@ -875,96 +822,6 @@ def _clean_index_info_source_codes(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def iter_private_export_chunks(
-    path: str | Path,
-    *,
-    dataset: str,
-    chunksize: int,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Iterable[pd.DataFrame]:
-    """Yield raw export chunks for large time-series files."""
-
-    if type(chunksize) is not int or chunksize <= 0:
-        raise ValueError("invalid_csmar_chunksize")
-
-    bound_policy = resource_policy
-
-    def activate() -> Iterator[pd.DataFrame]:
-        policy = bound_policy or current_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy) as policy:
-            chunks = iter_private_export_chunks_with_policy(
-                path,
-                dataset=dataset,
-                chunksize=chunksize,
-                resource_policy=policy,
-            )
-            active_lease: MemoryLease | None = None
-            try:
-                try:
-                    bound = next(chunks)
-                except StopIteration:
-                    return
-                while True:
-                    active_lease = policy.lease("source.csmar.raw", bound)
-                    try:
-                        owned = chunks.send(active_lease)
-                    except StopIteration:
-                        active_lease.close()
-                        active_lease = None
-                        return
-                    if not isinstance(owned, _OwnedValue):
-                        raise TypeError("invalid_csmar_owned_frame")
-                    if owned.lease is not active_lease:
-                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-                    active_lease.transfer("source.csmar.raw.consumer")
-                    yield owned.value
-                    del owned
-                    try:
-                        bound = chunks.send(None)
-                    except StopIteration:
-                        bound = None
-                    active_lease.close()
-                    active_lease = None
-                    if bound is None:
-                        break
-            finally:
-                owned = None
-                primary = sys.exception()
-                first_failure: BaseException | None = None
-                close = getattr(chunks, "close", None)
-                if close is not None:
-                    try:
-                        close()
-                    except BaseException as cleanup_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "CSMAR raw chunks close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        else:
-                            first_failure = cleanup_error
-                if active_lease is not None:
-                    try:
-                        active_lease.close()
-                    except BaseException as cleanup_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "CSMAR raw lease close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        elif first_failure is None:
-                            first_failure = cleanup_error
-                        else:
-                            first_failure.add_note(
-                                "CSMAR raw lease close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                if first_failure is not None:
-                    raise first_failure
-
-    return activate()
-
-
 def iter_private_export_chunks_with_policy(
     path: str | Path,
     *,
@@ -1212,18 +1069,15 @@ def dataset_files_with_identity_by_id(
                     files = _iter_indexed_raw_export_files(
                         root,
                         paths=paths,
-                        verify_root=verify_root,
                         index=index,
                         namespace="csmar-dataset-physical-exports",
                     )
                     for path, identity in files:
-                        verify_root()
                         result = _inspect_raw_export_with_identity(
                             path,
                             resource_policy=policy,
                             expected_identity=identity,
                         )
-                        verify_root()
                         if result.error is not None:
                             raise ValueError(
                                 "csmar_raw_export_inspection_failed"
@@ -1232,9 +1086,6 @@ def dataset_files_with_identity_by_id(
                             raise ValueError("csmar_raw_export_inspection_failed")
                         if result.inspection.missing_required_columns:
                             raise ValueError("csmar_raw_export_schema_invalid")
-                        if raw_export_file_identity(path) != identity:
-                            raise ValueError("csmar_raw_export_identity_changed")
-                        verify_root()
                         relative = path.relative_to(root).as_posix().encode("utf-8")
                         dataset = result.inspection.dataset.encode("utf-8")
                         identity_payload = b"\0".join(
@@ -1247,38 +1098,29 @@ def dataset_files_with_identity_by_id(
                             )
                         )
                         payload = dataset + b"\0" + relative + b"\0" + identity_payload
-                        verify_root()
                         index.add_identity_payloads(
                             namespace="csmar-dataset-paths",
                             payloads=((dataset + b"\0" + relative, payload),),
                         )
-                        verify_root()
                     payloads = iter(
                         index.identity_payload_values(namespace="csmar-dataset-paths")
                     )
-                    while True:
-                        verify_root()
-                        try:
-                            payload = next(payloads)
-                        except StopIteration:
-                            verify_root()
-                            return
-                        verify_root()
-                        dataset, relative, device, inode, size, modified_ns = (
-                            payload.split(b"\0")
-                        )
-                        path = root / relative.decode("utf-8")
-                        identity = DatasetFileIdentity(
-                            device=int(device),
-                            inode=int(inode),
-                            size=int(size),
-                            modified_ns=int(modified_ns),
-                        )
-                        verify_root()
-                        if raw_export_file_identity(path) != identity:
-                            raise ValueError("csmar_raw_export_identity_changed")
-                        verify_root()
-                        yield dataset.decode("utf-8"), path, identity
+                    for _, dataset_payloads in groupby(
+                        payloads,
+                        key=lambda payload: payload.split(b"\0", 1)[0],
+                    ):
+                        for payload in dataset_payloads:
+                            dataset, relative, device, inode, size, modified_ns = (
+                                payload.split(b"\0")
+                            )
+                            path = root / relative.decode("utf-8")
+                            identity = DatasetFileIdentity(
+                                device=int(device),
+                                inode=int(inode),
+                                size=int(size),
+                                modified_ns=int(modified_ns),
+                            )
+                            yield dataset.decode("utf-8"), path, identity
                         verify_root()
 
     return iter_files()
@@ -1288,39 +1130,30 @@ def _iter_indexed_raw_export_files(
     root: Path,
     *,
     paths: Iterator[Path],
-    verify_root: Callable[[], None],
     index: ExactPrimaryKeyIndex,
     namespace: str,
 ) -> Iterator[tuple[Path, DatasetFileIdentity]]:
     path_namespace = f"{namespace}-paths"
     for path in paths:
-        verify_root()
         identity = raw_export_file_identity(path)
-        verify_root()
         relative = path.relative_to(root).as_posix().encode("utf-8")
         payload = relative + b"\0" + _dataset_file_identity_bytes(identity)
-        verify_root()
         inserted = index.add_identity_payloads(
             namespace=namespace,
             payloads=((_raw_export_physical_key(identity), payload),),
         )
-        verify_root()
         if inserted != 1:
             raise ValueError("csmar_raw_export_identity_changed")
         index.add_identity_payloads(
             namespace=path_namespace,
             payloads=((relative, payload),),
         )
-        verify_root()
     payloads = iter(index.identity_payload_values(namespace=path_namespace))
     while True:
-        verify_root()
         try:
             payload = next(payloads)
         except StopIteration:
-            verify_root()
             return
-        verify_root()
         relative, device, inode, size, modified_ns = payload.split(b"\0")
         path = root / relative.decode("utf-8")
         identity = DatasetFileIdentity(
@@ -1329,52 +1162,10 @@ def _iter_indexed_raw_export_files(
             size=int(size),
             modified_ns=int(modified_ns),
         )
-        verify_root()
-        if raw_export_file_identity(path) != identity:
-            raise ValueError("csmar_raw_export_identity_changed")
-        verify_root()
         yield path, identity
-        verify_root()
 
 
 def _raw_export_physical_key(identity: DatasetFileIdentity) -> bytes:
     return b"\0".join(
         str(value).encode("ascii") for value in (identity.device, identity.inode)
     )
-
-
-def inspect_raw_export_tree(root: Path) -> Iterator[RawExportIntakeResult]:
-    """Inspect supported raw exports under a private raw directory."""
-
-    bound_policy = None
-    raw_root = Path(root)
-
-    def iter_inspections() -> Iterator[RawExportIntakeResult]:
-        policy = bound_policy or current_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy) as policy:
-            with _raw_export_path_session(raw_root) as (paths, verify_root):
-                with ExactPrimaryKeyIndex(
-                    primary_key=("path",),
-                    timestamp_columns=(),
-                    scratch_parent=raw_root.parent,
-                ) as index:
-                    files = _iter_indexed_raw_export_files(
-                        raw_root,
-                        paths=paths,
-                        verify_root=verify_root,
-                        index=index,
-                        namespace="csmar-inspection-physical-exports",
-                    )
-                    with closing_iterator(files):
-                        for path, identity in files:
-                            verify_root()
-                            result = _inspect_raw_export_with_identity(
-                                path,
-                                resource_policy=policy,
-                                expected_identity=identity,
-                            )
-                            verify_root()
-                            yield result
-                            verify_root()
-
-    return iter_inspections()

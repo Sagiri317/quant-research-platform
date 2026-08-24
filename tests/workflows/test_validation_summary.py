@@ -764,7 +764,7 @@ def test_read_validated_evidence_completes_regular_short_reads(
     assert validation_summary._scan_validated_text_evidence(path, identity) is None
 
 
-def test_validated_text_scan_rechecks_path_during_baseexception(
+def test_validated_text_scan_keeps_handle_identity_during_baseexception(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -801,7 +801,7 @@ def test_validated_text_scan_rechecks_path_during_baseexception(
         validation_summary._scan_validated_text_evidence(path, identity)
 
     assert caught.value is primary
-    assert path_rechecks == [path, path]
+    assert path_rechecks == [path]
 
 
 def test_build_validation_summary_consumes_storage_invalid_manifest_classification(

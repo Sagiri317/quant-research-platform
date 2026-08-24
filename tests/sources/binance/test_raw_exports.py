@@ -9,38 +9,17 @@ import pytest
 
 import quant_research_platform.sources.binance.raw_exports as raw_exports
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.sources.binance.raw_exports import (
-    dataset_files_by_id,
-    iter_raw_envelopes,
-)
+from quant_research_platform.sources.binance import ids
+from quant_research_platform.sources.binance.interim import materialize_interim_data
+from quant_research_platform.sources.binance.raw_exports import iter_raw_envelopes
 from quant_research_platform.sources.binance.validation import (
     strict_millisecond_timestamp,
 )
+from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
 
 
-def test_binance_dataset_files_by_id_groups_local_raw_jsonl(tmp_path: Path) -> None:
-    raw_root = tmp_path / "data" / "raw" / "binance"
-    kline_path = raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl"
-    trade_path = raw_root / "spot" / "agg_trades" / "BTCUSDT" / "2026-07-06.jsonl"
-    depth_path = raw_root / "spot" / "depth" / "BTCUSDT" / "2026-07-06.jsonl"
-    for path, data_kind in (
-        (kline_path, "klines"),
-        (trade_path, "agg_trades"),
-        (depth_path, "depth"),
-    ):
-        _write_jsonl(path, _envelope(data_kind=data_kind))
-
-    files = dataset_files_by_id(raw_root)
-
-    assert files == {
-        "market_bars_1m": (kline_path,),
-        "aggregate_trades_tick": (trade_path,),
-        "depth_levels_tick": (depth_path,),
-    }
-
-
-def test_binance_raw_identity_rejects_file_and_directory_aliases(
+def test_binance_materializer_rejects_file_alias_before_publication(
     tmp_path: Path,
 ) -> None:
     raw_root = tmp_path / "data" / "raw" / "binance"
@@ -54,10 +33,24 @@ def test_binance_raw_identity_rejects_file_and_directory_aliases(
         pytest.skip(f"filesystem symlink unavailable: {error}")
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
-        dataset_files_by_id(raw_root)
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=("market_bars_1m",),
+        )
+    assert not StorageLayout(project_root=tmp_path).interim_data_root(
+        ids.SOURCE_ID,
+        "market_bars_1m",
+    ).exists()
+
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
         tuple(iter_raw_envelopes(alias_file))
 
+
+def test_binance_materializer_rejects_directory_alias_before_publication(
+    tmp_path: Path,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
     outside_symbol = tmp_path / "outside-symbol" / "BTCUSDT"
     _write_jsonl(
         outside_symbol / "1m" / "2026-07-06.jsonl",
@@ -70,7 +63,15 @@ def test_binance_raw_identity_rejects_file_and_directory_aliases(
         pytest.skip(f"filesystem directory symlink unavailable: {error}")
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
-        dataset_files_by_id(raw_root)
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=("market_bars_1m",),
+        )
+    assert not StorageLayout(project_root=tmp_path).interim_data_root(
+        ids.SOURCE_ID,
+        "market_bars_1m",
+    ).exists()
 
 
 def test_binance_raw_reader_rejects_replacement_before_open(tmp_path: Path) -> None:
@@ -109,7 +110,7 @@ def test_binance_raw_reader_maps_capture_to_open_disappearance(
         tuple(iter_raw_envelopes(path))
 
 
-def test_binance_raw_reader_rejects_replacement_during_consumption(
+def test_binance_raw_reader_rejects_open_handle_mutation_during_consumption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -133,7 +134,7 @@ def test_binance_raw_reader_rejects_replacement_during_consumption(
         tuple(iter_raw_envelopes(path))
 
 
-def test_binance_raw_reader_rejects_replacement_after_output(
+def test_binance_raw_reader_rejects_open_handle_mutation_after_output(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "raw.jsonl"

@@ -1319,36 +1319,20 @@ def test_nested_float_primary_key_zero_keeps_bit_identity(
         ) == (1, 1, 0)
 
 
-@pytest.mark.parametrize(
-    ("data_type", "same_identity"),
-    ((pa.float16(), False), (pa.float32(), True), (pa.float64(), True)),
-)
-def test_top_level_float_primary_key_zero_identity_is_width_scoped(
-    tmp_path: Path,
+@pytest.mark.parametrize("data_type", (pa.float32(), pa.float64()))
+def test_top_level_float_primary_key_fingerprint_rejects_unsupported_width(
     data_type: pa.DataType,
-    same_identity: bool,
 ) -> None:
     table = pa.table({"key": pa.array([-0.0, 0.0], type=data_type)})
-    hashes = [
-        value
-        for batch in dataset_fingerprinting._iter_fingerprint_hashes(
-            table.to_pandas(),
-            target_bytes=1024**2,
-            arrow_schema=table.schema,
-            primary_key=("key",),
+    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
+        tuple(
+            dataset_fingerprinting._iter_fingerprint_hashes(
+                table.to_pandas(),
+                target_bytes=1024**2,
+                arrow_schema=table.schema,
+                primary_key=("key",),
+            )
         )
-        for value in batch
-    ]
-
-    with ExactPrimaryKeyIndex(
-        primary_key=("key",),
-        timestamp_columns=(),
-        scratch_parent=tmp_path,
-    ) as index:
-        duplicate_count = index.add_table(table)
-
-    assert bool(hashes[0] == hashes[1]) is same_identity
-    assert duplicate_count == int(same_identity)
 
 
 @pytest.mark.parametrize("nonfinite", (float("nan"), float("inf")))
@@ -2439,7 +2423,7 @@ def test_inventory_discovery_rejects_hardlinked_part_alias(tmp_path: Path) -> No
         _discovered_paths(data_root, spec={"partition_columns": []})
 
 
-def test_inventory_discovery_rejects_single_external_hardlink(tmp_path: Path) -> None:
+def test_inventory_discovery_accepts_single_external_hardlink(tmp_path: Path) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
     external = tmp_path / "external.parquet"
@@ -2450,8 +2434,7 @@ def test_inventory_discovery_rejects_single_external_hardlink(tmp_path: Path) ->
     except OSError:
         pytest.skip("hardlink_not_available")
 
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
-        _discovered_paths(data_root, spec={"partition_columns": []})
+    assert _discovered_paths(data_root, spec={"partition_columns": []}) == [part]
 
 
 def test_inventory_discovery_rejects_case_variant_parquet_suffix(

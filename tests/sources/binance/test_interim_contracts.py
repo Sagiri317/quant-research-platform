@@ -7,7 +7,6 @@ from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.sources.binance.interim import (
     interim_catalog,
-    iter_interim_frames,
     materialize_interim_data,
     normalize_raw_envelopes,
 )
@@ -142,39 +141,6 @@ def test_binance_interim_maps_millisecond_range_failure_to_owner_error() -> None
         normalize_raw_envelopes(
             (envelope,),
             data_id="aggregate_trades_tick",
-        )
-
-
-@pytest.mark.parametrize("row_batch_size", [True, 1.5, "100"])
-def test_binance_interim_rejects_non_strict_row_batch_size(
-    row_batch_size: object,
-) -> None:
-    with pytest.raises(ValueError, match="invalid_binance_raw_row_batch_size"):
-        tuple(
-            iter_interim_frames(
-                data_id="market_bars_1m",
-                input_files=(),
-                row_batch_size=row_batch_size,  # type: ignore[arg-type]
-            )
-        )
-
-
-def test_binance_interim_iterator_rejects_unknown_data_id_without_input_files(
-) -> None:
-    with pytest.raises(ValueError, match="unsupported_binance_data_id"):
-        tuple(iter_interim_frames(data_id="unknown", input_files=()))
-
-
-@pytest.mark.parametrize("data_id", [None, 1, True, [], {}])
-def test_binance_interim_iterator_rejects_invalid_data_id_without_input_files(
-    data_id: object,
-) -> None:
-    with pytest.raises(ValueError, match="invalid_binance_interim_data_ids"):
-        tuple(
-            iter_interim_frames(
-                data_id=data_id,  # type: ignore[arg-type]
-                input_files=(),
-            )
         )
 
 

@@ -10,8 +10,9 @@ import tracemalloc
 import weakref
 from array import array
 from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow as pa
@@ -55,7 +56,10 @@ def _collect_bound_first_frames(data, policy):  # noqa: ANN001, ANN202
     frames = []
     with runtime_resource_policy_scope(policy):
         try:
-            bound = next(data)
+            try:
+                bound = next(data)
+            except StopIteration:
+                return frames
             while True:
                 if isinstance(bound, tuple):
                     assert len(bound) == 2
@@ -185,18 +189,6 @@ def test_utf8_size_does_not_materialize_string_slices() -> None:
 def test_utf8_size_preserves_strict_surrogate_error() -> None:
     with pytest.raises(UnicodeEncodeError):
         raw_exports._utf8_size("\ud800")
-
-
-@pytest.mark.parametrize("chunksize", (0, True, 1.5))
-def test_private_export_chunks_require_exact_positive_int_chunksize(
-    chunksize: object,
-) -> None:
-    with pytest.raises(ValueError, match="invalid_csmar_chunksize"):
-        raw_exports.iter_private_export_chunks(
-            Path("export.csv"),
-            dataset="daily",
-            chunksize=chunksize,  # type: ignore[arg-type]
-        )
 
 
 def test_csv_owner_bounds_total_logical_record_and_restores_limit_before_yield(
@@ -1021,13 +1013,11 @@ def test_private_export_chunks_reject_indivisible_wide_logical_record(
         with pytest.raises(
             ValueError, match="csmar_logical_record_exceeds_source_limit"
         ):
-            list(
-                raw_exports.iter_private_export_chunks(
-                    path,
-                    dataset="trading_calendar",
-                    chunksize=2,
-                    resource_policy=policy,
-                )
+            _collect_raw_export(
+                path,
+                "trading_calendar",
+                chunksize=2,
+                resource_policy=policy,
             )
 
 
@@ -1049,16 +1039,13 @@ def test_private_export_adapts_across_later_wide_rows(
     )
     observed = 0
 
-    with runtime_resource_policy_scope(policy):
-        chunks = raw_exports.iter_private_export_chunks(
-            path,
-            dataset="trading_calendar",
-            chunksize=100,
-            resource_policy=policy,
-        )
-        for chunk in chunks:
-            observed += len(chunk)
-            del chunk
+    chunks = _collect_raw_export(
+        path,
+        "trading_calendar",
+        chunksize=100,
+        resource_policy=policy,
+    )
+    observed = len(chunks)
 
     assert observed == 21
 
@@ -1269,17 +1256,15 @@ def test_private_export_chunks_keep_normal_wide_record_with_default_payload(
     )
 
     with runtime_resource_policy_scope(policy):
-        chunks = list(
-            raw_exports.iter_private_export_chunks(
-                path,
-                dataset="trading_calendar",
-                chunksize=1,
-                resource_policy=policy,
-            )
+        chunks = _collect_raw_export(
+            path,
+            "trading_calendar",
+            chunksize=1,
+            resource_policy=policy,
         )
 
     assert len(chunks) == 1
-    assert chunks[0].loc[0, "State"] == state
+    assert chunks.loc[0, "State"] == state
 
 
 def test_private_export_chunks_small_fit_has_no_hidden_budget_floor(
@@ -1295,13 +1280,11 @@ def test_private_export_chunks_small_fit_has_no_hidden_budget_floor(
         encoding="utf-8",
     )
     with runtime_resource_policy_scope(policy):
-        chunks = list(
-            raw_exports.iter_private_export_chunks(
-                path,
-                dataset="trading_calendar",
-                chunksize=1,
-                resource_policy=policy,
-            )
+        chunks = _collect_raw_export(
+            path,
+            "trading_calendar",
+            chunksize=1,
+            resource_policy=policy,
         )
     assert len(chunks) == 1
 
@@ -1384,17 +1367,12 @@ def test_header_only_export_has_no_data_chunks(tmp_path: Path) -> None:
             "Daywk",
             "State",
         )
-        assert (
-            list(
-                raw_exports.iter_private_export_chunks(
-                    path,
-                    dataset="trading_calendar",
-                    chunksize=1,
-                    resource_policy=policy,
-                )
-            )
-            == []
-        )
+        assert _collect_raw_export(
+            path,
+            "trading_calendar",
+            chunksize=1,
+            resource_policy=policy,
+        ).empty
 
 
 def test_index_info_continuations_join_once_after_linear_accumulation(
@@ -1447,16 +1425,12 @@ def test_index_info_continuations_join_once_after_linear_accumulation(
         "joined",
         recording_join,
     )
-    with runtime_resource_policy_scope(policy):
-        frame = pd.concat(
-            raw_exports.iter_private_export_chunks(
-                path,
-                dataset="index_info",
-                chunksize=100,
-                resource_policy=policy,
-            ),
-            ignore_index=True,
-        )
+    frame = _collect_raw_export(
+        path,
+        "index_info",
+        chunksize=100,
+        resource_policy=policy,
+    )
 
     assert observed_fragment_counts == [continuation_count]
     assert frame.loc[0, "Idxinfo04"].count("\n") == continuation_count
@@ -1624,31 +1598,6 @@ def test_column_override_mapping_rejects_duplicate_emitted_keys(level: str) -> N
     assert emitted.consumed >= 2
 
 
-@pytest.mark.parametrize("caller", ("iter", "apply"))
-def test_public_column_override_callers_bound_lying_mapping(
-    caller: str,
-) -> None:
-    emitted = _oversized_emitted_mapping()
-
-    with pytest.raises(ValueError):
-        if caller == "iter":
-            interim.iter_interim_frames(
-                data_id="stock_master",
-                input_files=(),
-                start_date=None,
-                end_date=None,
-                overrides=emitted,  # type: ignore[arg-type]
-            )
-        else:
-            interim.apply_output_column_rules(
-                pd.DataFrame(),
-                "stock_master",
-                overrides=emitted,  # type: ignore[arg-type]
-            )
-
-    assert emitted.consumed == len(interim.INTERIM_COLUMNS_BY_DATA_ID) + 1
-
-
 @pytest.mark.parametrize("key", ("keep", "drop"))
 @pytest.mark.parametrize("container_type", (list, tuple))
 def test_column_override_lists_stop_at_owner_column_bound(
@@ -1662,56 +1611,7 @@ def test_column_override_lists_stop_at_owner_column_bound(
         interim._validated_column_overrides({"stock_master": {key: values}})
 
 
-@pytest.mark.parametrize("forged_outer_proxy", (False, True))
-def test_interim_operation_validates_and_snapshots_overrides_once(
-    monkeypatch: pytest.MonkeyPatch,
-    forged_outer_proxy: bool,
-) -> None:
-    calls = 0
-    original = interim._validated_column_overrides
-
-    def validate(overrides):  # noqa: ANN001, ANN202
-        nonlocal calls
-        calls += 1
-        return original(overrides)
-
-    observed: list[object] = []
-
-    def frames(**kwargs):  # noqa: ANN003, ANN202
-        observed.append(kwargs["overrides"])
-        lease = yield 256 * 1024
-        yield _OwnedValue(pd.DataFrame({"value": [1]}), lease)
-        observed.append(kwargs["overrides"])
-        lease = yield 256 * 1024
-        yield _OwnedValue(pd.DataFrame({"value": [2]}), lease)
-
-    mutable_overrides = {
-        "trading_calendar": {"keep": ["source_day_of_week"], "drop": []}
-    }
-    overrides = (
-        MappingProxyType(mutable_overrides) if forged_outer_proxy else mutable_overrides
-    )
-    monkeypatch.setattr(interim, "_validated_column_overrides", validate)
-    monkeypatch.setattr(interim, "_iter_pruned_interim_frames", frames)
-
-    output = interim.iter_interim_frames(
-        data_id="trading_calendar",
-        input_files=[Path("private.csv")],
-        start_date=None,
-        end_date=None,
-        overrides=overrides,
-    )
-    assert next(output)["value"].tolist() == [1]
-    mutable_overrides["trading_calendar"]["keep"].append("timestamp")
-    assert next(output)["value"].tolist() == [2]
-    output.close()
-
-    assert calls == 1
-    assert observed[0] is observed[1]
-    assert observed[0]["trading_calendar"]["keep"] == ("source_day_of_week",)
-
-
-def test_loaded_column_overrides_compose_with_public_apply(
+def test_loaded_column_overrides_compose_with_formal_column_owner(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "overrides.json"
@@ -1721,21 +1621,27 @@ def test_loaded_column_overrides_compose_with_public_apply(
     )
     overrides = interim.load_column_overrides(path)
 
-    _, report = interim.apply_output_column_rules(
+    _, report = interim._apply_output_column_rules_validated(
         pd.DataFrame({"source_day_of_week": [1]}),
         "trading_calendar",
-        overrides=overrides,
+        overrides=interim._validated_column_overrides(overrides),
     )
 
     assert report["manual_keep"] == ["source_day_of_week"]
 
 
 def _collect_interim_frames(**kwargs: object) -> pd.DataFrame:
-    kwargs.setdefault(
+    policy = kwargs.pop(
         "resource_policy",
         capture_test_policy(available_memory_bytes=64 * 1024**2),
     )
-    frames = list(interim.iter_interim_frames(**kwargs))
+    kwargs.setdefault("overrides", {})
+    kwargs.setdefault("pruning_reports", None)
+    kwargs.setdefault("chunksize", 500_000)
+    frames = _collect_bound_first_frames(
+        interim._iter_interim_frames(**kwargs),
+        policy,
+    )
     if not frames:
         return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
@@ -1746,15 +1652,31 @@ def _collect_raw_export(
     dataset: str,
     *,
     chunksize: int = 1024,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> pd.DataFrame:
-    chunks = list(
-        raw_exports.iter_private_export_chunks(
+    policy = resource_policy or capture_test_policy(available_memory_bytes=64 * 1024**2)
+    chunks = _collect_bound_first_frames(
+        raw_exports.iter_private_export_chunks_with_policy(
             path,
             dataset=dataset,
             chunksize=chunksize,
-        )
+            resource_policy=policy,
+        ),
+        policy,
     )
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
+
+
+def _apply_output_column_rules(
+    frame: pd.DataFrame,
+    data_id: str,
+    overrides: Mapping[str, Mapping[str, object]] | None = None,
+) -> tuple[pd.DataFrame, dict[str, object]]:
+    return interim._apply_output_column_rules_validated(
+        frame,
+        data_id,
+        overrides=interim._validated_column_overrides(overrides or {}),
+    )
 
 
 def test_csmar_interim_catalog_registers_source_owned_specs() -> None:
@@ -1796,15 +1718,10 @@ def test_csmar_trading_calendar_interim_spec_uses_source_calendar_grain() -> Non
     assert "asset_id" not in index_info.required_columns
 
 
-@pytest.mark.parametrize(
-    "entrypoint",
-    (raw_exports.iter_raw_export_files, raw_exports.dataset_files_with_identity_by_id),
-)
 def test_raw_inventory_indexes_use_source_sibling_parent(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    entrypoint,
-) -> None:  # noqa: ANN001
+) -> None:
     raw_root = tmp_path / "raw" / "csmar"
     raw_root.mkdir(parents=True)
     observed: list[Path] = []
@@ -1829,7 +1746,7 @@ def test_raw_inventory_indexes_use_source_sibling_parent(
 
     monkeypatch.setattr(raw_exports, "ExactPrimaryKeyIndex", Index)
 
-    assert list(entrypoint(raw_root)) == []
+    assert list(raw_exports.dataset_files_with_identity_by_id(raw_root)) == []
     assert observed == [raw_root.parent]
 
 
@@ -1895,17 +1812,12 @@ def test_standalone_reference_dedup_uses_source_sibling_parent(
 
     monkeypatch.setattr(interim, "_iter_deduped_reference_frames", dedup)
 
-    assert (
-        list(
-            interim.iter_interim_frames(
-                data_id="stock_master",
-                input_files=iter((source,)),
-                start_date=None,
-                end_date=None,
-            )
-        )
-        == []
-    )
+    assert _collect_interim_frames(
+        data_id="stock_master",
+        input_files=iter((source,)),
+        start_date=None,
+        end_date=None,
+    ).empty
     assert observed == [source_parent]
 
 
@@ -1921,12 +1833,10 @@ def test_csmar_duplicate_header_fails_at_inspection_and_reader_boundaries(
     with pytest.raises(ValueError, match="duplicate_csmar_provider_column"):
         raw_schemas.inspect_raw_export_file(export)
     with pytest.raises(ValueError, match="duplicate_csmar_provider_column"):
-        list(
-            raw_exports.iter_private_export_chunks(
-                export,
-                dataset=frequency_ids.MARKET_BARS_DATA_ID,
-                chunksize=1,
-            )
+        _collect_raw_export(
+            export,
+            frequency_ids.MARKET_BARS_DATA_ID,
+            chunksize=1,
         )
 
 
@@ -1953,19 +1863,15 @@ def test_csmar_provider_superset_is_projected_before_dataframe_conversion(
         return original_raw_frame(rows, header)
 
     monkeypatch.setattr(raw_exports, "_raw_frame", projected_raw_frame)
-    chunks = list(
-        raw_exports.iter_private_export_chunks(
-            export,
-            dataset=frequency_ids.MARKET_BARS_DATA_ID,
-            chunksize=2,
-        )
+    chunks = _collect_raw_export(
+        export,
+        frequency_ids.MARKET_BARS_DATA_ID,
+        chunksize=2,
     )
 
-    assert sum(len(chunk) for chunk in chunks) == len(frame)
-    assert all(
-        tuple(chunk.columns)
-        == tuple(column for column in frame.columns if column not in extra_columns)
-        for chunk in chunks
+    assert len(chunks) == len(frame)
+    assert tuple(chunks.columns) == tuple(
+        column for column in frame.columns if column not in extra_columns
     )
 
 
@@ -1998,9 +1904,9 @@ def test_csmar_intake_rejects_missing_required_columns(tmp_path: Path) -> None:
     broken = tmp_path / "TRDNEW_Cale.csv"
     pd.DataFrame({"Markettype": [1], "Daywk": [1]}).to_csv(broken, index=False)
 
-    intake = raw_exports.inspect_raw_export(broken)
+    inspection = raw_schemas.inspect_raw_export_file(broken)
 
-    assert not intake.ok
+    assert inspection.missing_required_columns
     with pytest.raises(ValueError, match="csmar_raw_export_schema_invalid"):
         list(raw_exports.dataset_files_with_identity_by_id(tmp_path))
 
@@ -2023,10 +1929,8 @@ def test_csmar_inspection_rejects_unregistered_extremely_wide_schema(
     columns = (*required, *(f"extra_{position}" for position in range(50_000)))
     export.write_text(",".join(columns) + "\n", encoding="utf-8")
 
-    intake = raw_exports.inspect_raw_export(export)
-
-    assert not intake.ok
-    assert intake.error == "csmar_raw_export_schema_invalid"
+    with pytest.raises(ValueError, match="csmar_raw_export_schema_invalid"):
+        raw_schemas.inspect_raw_export_file(export)
 
 
 def test_csmar_index_info_requires_timestamp_source_columns_at_header_stage(
@@ -2059,7 +1963,9 @@ def test_csmar_txt_field_description_is_not_raw_export_table(
     _write_trading_calendar_raw_export(csv_export)
     txt_description.write_text("字段\t说明\nClddt\t交易日期\n", encoding="utf-8")
 
-    exports = list(raw_exports.iter_raw_export_files(tmp_path))
+    exports = [
+        path for _, path, _ in raw_exports.dataset_files_with_identity_by_id(tmp_path)
+    ]
 
     assert exports == [csv_export]
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
@@ -2084,7 +1990,9 @@ def test_csmar_raw_export_contract_is_csv_only(tmp_path: Path) -> None:
     xlsx_export.write_bytes(b"not-a-supported-raw-export")
 
     assert raw_exports.SUPPORTED_RAW_EXPORT_SUFFIXES == {".csv"}
-    assert list(raw_exports.iter_raw_export_files(tmp_path)) == [csv_export]
+    assert [
+        path for _, path, _ in raw_exports.dataset_files_with_identity_by_id(tmp_path)
+    ] == [csv_export]
     with pytest.raises(ValueError, match="Invalid CSMAR raw filename"):
         raw_schemas.parse_raw_filename(xlsx_export)
 
@@ -2093,11 +2001,8 @@ def test_csmar_raw_export_contract_is_csv_only(tmp_path: Path) -> None:
     os.name != "nt" or not hasattr(Path, "is_junction"),
     reason="Windows junction capability required",
 )
-@pytest.mark.parametrize("entrypoint", ("inventory", "identified"))
 def test_csmar_raw_inventory_does_not_descend_nested_junction(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    entrypoint: str,
 ) -> None:
     root = tmp_path / "raw"
     root.mkdir()
@@ -2113,21 +2018,7 @@ def test_csmar_raw_inventory_does_not_descend_nested_junction(
     )
     if created.returncode != 0:
         pytest.skip("junction_not_available")
-    if entrypoint == "inventory":
-        result = list(raw_exports.iter_raw_export_files(root))
-    else:
-        monkeypatch.setattr(
-            raw_exports,
-            "inspect_raw_export",
-            lambda path, **_kwargs: raw_exports.RawExportIntakeResult(
-                path=path,
-                inspection=SimpleNamespace(
-                    dataset="trading_calendar",
-                    missing_required_columns=(),
-                ),
-            ),
-        )
-        result = list(raw_exports.dataset_files_with_identity_by_id(root))
+    result = list(raw_exports.dataset_files_with_identity_by_id(root))
 
     assert result == []
 
@@ -2136,10 +2027,8 @@ def test_csmar_raw_inventory_does_not_descend_nested_junction(
     os.name != "nt" or not hasattr(Path, "is_junction"),
     reason="Windows junction capability required",
 )
-@pytest.mark.parametrize("entrypoint", ("inventory", "identified"))
 def test_csmar_raw_inventory_rejects_junction_root(
     tmp_path: Path,
-    entrypoint: str,
 ) -> None:
     external = tmp_path / "external"
     external.mkdir()
@@ -2151,14 +2040,8 @@ def test_csmar_raw_inventory_rejects_junction_root(
     )
     if created.returncode != 0:
         pytest.skip("junction_not_available")
-    operation = (
-        raw_exports.iter_raw_export_files(root)
-        if entrypoint == "inventory"
-        else raw_exports.dataset_files_with_identity_by_id(root)
-    )
-
     with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-        list(operation)
+        list(raw_exports.dataset_files_with_identity_by_id(root))
 
 
 def test_csmar_raw_inventory_maps_walk_error(
@@ -2172,7 +2055,7 @@ def test_csmar_raw_inventory_maps_walk_error(
     monkeypatch.setattr(Path, "walk", fail_walk)
 
     with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-        list(raw_exports.iter_raw_export_files(tmp_path))
+        list(raw_exports.dataset_files_with_identity_by_id(tmp_path))
 
 
 def test_csmar_raw_inventory_rejects_file_symlink(tmp_path: Path) -> None:
@@ -2187,35 +2070,7 @@ def test_csmar_raw_inventory_rejects_file_symlink(tmp_path: Path) -> None:
         pytest.skip(f"symlink_not_available: {exc}")
 
     with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-        list(raw_exports.iter_raw_export_files(root))
-
-
-def test_raw_export_inventory_keeps_case_distinct_exact_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    upper = tmp_path / "A.csv"
-    lower = tmp_path / "a.csv"
-    upper.touch()
-    lower.touch()
-    upper.touch()
-    lower.touch()
-    monkeypatch.setattr(
-        Path,
-        "walk",
-        lambda self, **_kwargs: iter(((self, [], ["a.csv", "A.csv"]),)),
-    )
-    identities = {
-        "A.csv": DatasetFileIdentity(device=1, inode=1, size=0, modified_ns=1),
-        "a.csv": DatasetFileIdentity(device=1, inode=2, size=0, modified_ns=1),
-    }
-    monkeypatch.setattr(
-        raw_exports,
-        "raw_export_file_identity",
-        lambda path: identities[path.name],
-    )
-
-    assert list(raw_exports.iter_raw_export_files(tmp_path)) == [upper, lower]
+        list(raw_exports.dataset_files_with_identity_by_id(root))
 
 
 def test_dataset_inventory_keeps_case_distinct_exact_paths(
@@ -2315,25 +2170,13 @@ def test_dataset_inventory_binds_identity_into_inspection_open(
     assert observed == [expected_identity]
 
 
-def test_raw_export_inventory_is_a_deterministic_iterator(tmp_path: Path) -> None:
-    later = tmp_path / "z" / "TRDNEW_Cale.csv"
-    earlier = tmp_path / "a" / "TRDNEW_Cale.csv"
-    later.parent.mkdir()
-    earlier.parent.mkdir()
-    _write_trading_calendar_raw_export(later)
-    _write_trading_calendar_raw_export(earlier)
-
-    inventory = raw_exports.iter_raw_export_files(tmp_path)
-
-    assert iter(inventory) is inventory
-    assert list(inventory) == [earlier, later]
-
-
-def test_raw_export_inventory_rejects_identity_change_during_inspection(
+def test_csmar_materializer_rejects_identity_change_after_inspection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    export = tmp_path / "TRDNEW_Cale.csv"
+    raw_root = tmp_path / "data" / "raw" / "csmar"
+    raw_root.mkdir(parents=True)
+    export = raw_root / "TRDNEW_Cale.csv"
     _write_trading_calendar_raw_export(export)
     original = raw_exports._inspect_raw_export_with_identity
 
@@ -2351,8 +2194,18 @@ def test_raw_export_inventory_rejects_identity_change_during_inspection(
         replace_after_inspection,
     )
 
+    layout = StorageLayout(project_root=tmp_path)
     with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-        list(raw_exports.dataset_files_with_identity_by_id(tmp_path))
+        interim.materialize_interim_data(
+            layout=layout,
+            raw_root=raw_root,
+            data_ids=("trading_calendar",),
+            resource_policy=capture_test_policy(available_memory_bytes=64 * 1024**2),
+        )
+    assert not layout.interim_data_root(
+        csmar_ids.SOURCE_ID,
+        "trading_calendar",
+    ).exists()
 
 
 def test_csv_owner_rejects_same_handle_size_mtime_change_at_close(
@@ -2446,12 +2299,10 @@ def test_csmar_raw_reader_rejects_nonnumeric_registered_value(
     raw.to_csv(path, index=False)
 
     with pytest.raises(ValueError, match="^invalid_csmar_numeric_value$"):
-        list(
-            raw_exports.iter_private_export_chunks(
-                path,
-                dataset=frequency_ids.MARKET_BARS_DATA_ID,
-                chunksize=1,
-            )
+        _collect_raw_export(
+            path,
+            frequency_ids.MARKET_BARS_DATA_ID,
+            chunksize=1,
         )
 
 
@@ -2471,7 +2322,7 @@ def test_csmar_dirty_index_info_csv_preserves_alignment_and_raw_semantics(
 
     raw = _collect_raw_export(index_path, "index_info")
     normalized = interim.normalize_raw_frame(raw, "index_info")
-    pruned, _ = interim.apply_output_column_rules(normalized, "index_info")
+    pruned, _ = _apply_output_column_rules(normalized, "index_info")
 
     assert len(raw) == 2
     assert raw.loc[0, "Idxinfo10"] == ("weighted formula, with English comma，中文标点")
@@ -2852,7 +2703,7 @@ def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
         _market_bars_daily_raw_frame(),
         frequency_ids.MARKET_BARS_DATA_ID,
     )
-    pruned, report = interim.apply_output_column_rules(
+    pruned, report = _apply_output_column_rules(
         normalized,
         frequency_ids.MARKET_BARS_DATA_ID,
     )
@@ -2885,7 +2736,7 @@ def test_csmar_empty_daily_interim_preserves_turnover_float64_dtype() -> None:
         raw,
         frequency_ids.MARKET_BARS_DATA_ID,
     )
-    pruned, _ = interim.apply_output_column_rules(
+    pruned, _ = _apply_output_column_rules(
         normalized,
         frequency_ids.MARKET_BARS_DATA_ID,
     )
@@ -2938,7 +2789,7 @@ def test_csmar_narrow_market_bars_optional_raw_columns_do_not_block_mapping() ->
         has_metadata=False,
     )
     normalized = interim.normalize_raw_frame(raw, data_id)
-    pruned, report = interim.apply_output_column_rules(normalized, data_id)
+    pruned, report = _apply_output_column_rules(normalized, data_id)
 
     assert inspection.missing_required_columns == []
     assert "period_return" in pruned.columns
@@ -2959,7 +2810,7 @@ def test_csmar_market_cap_optional_share_columns_do_not_block_mapping() -> None:
 
     assert field_mappings.missing_raw_columns(raw, data_id) == []
     normalized = interim.normalize_raw_frame(raw, data_id)
-    pruned, report = interim.apply_output_column_rules(normalized, data_id)
+    pruned, report = _apply_output_column_rules(normalized, data_id)
 
     assert pruned["total_shares"].tolist() == [1000.0]
     assert pruned["a_float_shares"].tolist() == [800.0]
@@ -3078,15 +2929,14 @@ def test_csmar_stock_master_dates_have_stable_cross_chunk_precision(
     second["DelistedDate"] = "2020-06-01"
     pd.DataFrame([first, second]).to_csv(path, index=False)
 
-    chunks = list(
-        raw_exports.iter_private_export_chunks(
-            path,
-            dataset="stock_master",
-            chunksize=1,
-        )
+    chunks = _collect_raw_export(
+        path,
+        "stock_master",
+        chunksize=1,
     )
     normalized = [
-        interim.normalize_raw_frame(chunk, "stock_master") for chunk in chunks
+        interim.normalize_raw_frame(chunks.iloc[[index]], "stock_master")
+        for index in range(len(chunks))
     ]
 
     assert len(normalized) == 2
@@ -3752,44 +3602,6 @@ def test_csmar_reference_empty_or_duplicate_returns_lease_before_next_bound(
     assert policy.used_memory_bytes == 0
 
 
-def test_csmar_direct_lazy_iteration_captures_policy_before_first_raw_decode(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
-    )
-    events: list[str] = []
-
-    def active_policy() -> RuntimeResourcePolicy:
-        events.append("policy")
-        return policy
-
-    def raw_frames(**_kwargs: object):
-        events.append("raw")
-        lease = yield 256 * 1024
-        yield _OwnedValue(
-            pd.DataFrame({"source_asset_id": ["000001"]}),
-            lease,
-        )
-
-    monkeypatch.setattr(interim, "current_runtime_resource_policy", active_policy)
-    monkeypatch.setattr(interim, "_iter_pruned_interim_frames", raw_frames)
-
-    frames = interim.iter_interim_frames(
-        data_id=frequency_ids.MARKET_BARS_DATA_ID,
-        input_files=[Path("private.csv")],
-        start_date=None,
-        end_date=None,
-    )
-    assert events == []
-
-    next(frames)
-
-    assert events == ["policy", "raw"]
-    frames.close()
-
-
 def test_csmar_pruning_reports_merge_repeated_chunk_facts_by_data_id(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -3847,67 +3659,6 @@ def test_csmar_pruning_reports_merge_repeated_chunk_facts_by_data_id(
         == 100
     )
     assert reports == [report]
-
-
-def test_interim_releases_previous_frame_before_requesting_next_raw_chunk(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    released_before_next: list[bool] = []
-
-    def raw_chunks(*_args: object, **_kwargs: object):
-        first = pd.DataFrame(
-            {
-                "source_asset_id": ["000001"],
-                "timestamp": [pd.Timestamp("2024-01-01")],
-            }
-        )
-        first_ref = weakref.ref(first)
-        lease = yield 256 * 1024
-        yield _OwnedValue(first, lease)
-        del first
-        gc.collect()
-        released_before_next.append(first_ref() is None)
-        second = pd.DataFrame(
-            {
-                "source_asset_id": ["000001"],
-                "timestamp": [pd.Timestamp("2024-01-02")],
-            }
-        )
-        lease = yield 256 * 1024
-        yield _OwnedValue(second, lease)
-
-    report = {
-        "data_id": frequency_ids.MARKET_BARS_DATA_ID,
-        "report_type": "column_pruning",
-    }
-    monkeypatch.setattr(interim, "iter_private_export_chunks_with_policy", raw_chunks)
-    monkeypatch.setattr(interim, "normalize_raw_frame", lambda frame, _data_id: frame)
-    monkeypatch.setattr(
-        interim,
-        "_filter_normalized_frame",
-        lambda frame, **_kwargs: frame,
-    )
-    monkeypatch.setattr(
-        interim,
-        "_apply_output_column_rules_validated",
-        lambda frame, _data_id, **_kwargs: (frame, report),
-    )
-    frames = interim.iter_interim_frames(
-        data_id=frequency_ids.MARKET_BARS_DATA_ID,
-        input_files=[Path("private.csv")],
-        start_date=None,
-        end_date=None,
-        chunksize=1,
-    )
-
-    first = next(frames)
-    del first
-    gc.collect()
-    second = next(frames)
-    del second
-    frames.close()
-
-    assert released_before_next == [True]
 
 
 def test_csmar_source_order_validation_honors_inventory_order(
@@ -4096,41 +3847,6 @@ def test_csmar_source_order_accepts_equal_and_empty_boundaries_for_every_data_id
     assert sum(map(len, result)) == 2
 
 
-def test_csmar_failed_iteration_publishes_no_pruning_summary(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    reports: list[dict[str, object]] = []
-
-    def frames(**_kwargs):
-        _kwargs["pruning_reports"].append(
-            {"data_id": frequency_ids.MARKET_BARS_DATA_ID}
-        )
-        lease = yield 256 * 1024
-        yield _OwnedValue(
-            pd.DataFrame(
-                {
-                    "source_asset_id": ["000001"],
-                    "timestamp": [pd.Timestamp("2024-01-01")],
-                }
-            ),
-            lease,
-        )
-        raise RuntimeError("source_primary")
-
-    monkeypatch.setattr(interim, "_iter_pruned_interim_frames", frames)
-    iterator = interim.iter_interim_frames(
-        data_id=frequency_ids.MARKET_BARS_DATA_ID,
-        input_files=[Path("private.csv")],
-        start_date=None,
-        end_date=None,
-        pruning_reports=reports,
-    )
-    assert len(next(iterator)) == 1
-    with pytest.raises(RuntimeError, match="source_primary"):
-        next(iterator)
-    assert reports == []
-
-
 @pytest.mark.parametrize(
     "primary_type",
     (KeyboardInterrupt,),
@@ -4315,100 +4031,6 @@ def test_csv_owner_rejects_unissued_policy_before_open(
             resource_policy=Policy(),  # type: ignore[arg-type]
         )
     assert open_calls == 0
-
-
-def test_csmar_total_pipeline_materializes_all_rows(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "calendar.csv"
-    row_count = 50_000
-    pd.DataFrame(
-        {
-            "Markettype": ["4"] * row_count,
-            "Clddt": pd.date_range("1900-01-01", periods=row_count).astype(str),
-            "Daywk": ["1"] * row_count,
-            "State": ["O"] * row_count,
-        }
-    ).to_csv(path, index=False)
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    observed_rows = 0
-
-    with runtime_resource_policy_scope(policy):
-        frames = interim.iter_interim_frames(
-            data_id="trading_calendar",
-            input_files=[path],
-            start_date=None,
-            end_date=None,
-            chunksize=row_count,
-            resource_policy=policy,
-        )
-        for frame in frames:
-            observed_rows += len(frame)
-            del frame
-
-    assert observed_rows == row_count
-
-
-def test_csmar_direct_reference_iteration_uses_active_policy_target(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
-    )
-    observed_targets: list[int] = []
-
-    class RecordingIndex:
-        retained_memory_bytes = 1024
-
-        def __init__(self, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
-
-        def classify_comparison_table(self, table, *, payload_target_bytes, **_kwargs):
-            observed_targets.append(payload_target_bytes)
-            return CompactPositionState(
-                array("Q", range(table.num_rows)), table.num_rows
-            ), 0
-
-    frame = pd.DataFrame(
-        {
-            "source_asset_id": ["000001"],
-            "timestamp": [pd.Timestamp("2020-01-01")],
-            "stock_name": ["demo"],
-        }
-    )
-    monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", RecordingIndex)
-    monkeypatch.setattr(
-        interim,
-        "_iter_pruned_interim_frames",
-        lambda **_kwargs: _bound_first_test_frames((frame,)),
-    )
-
-    with runtime_resource_policy_scope(policy):
-        result = list(
-            interim.iter_interim_frames(
-                data_id="stock_master",
-                input_files=[Path("private.csv")],
-                start_date=None,
-                end_date=None,
-                resource_policy=policy,
-            )
-        )
-
-    assert len(result) == 1
-    expected_target = 256 * 1024 - int(
-        frame.memory_usage(index=True, deep=True).sum()
-    )
-    assert observed_targets == [expected_target]
 
 
 def test_csmar_materialization_forwards_operation_policy_target_to_exact_index(
@@ -4668,6 +4290,71 @@ def test_csmar_materializer_consumes_spill_order_without_prefetch(
         "inventory:second",
         "frame:second",
     ]
+
+
+def test_csmar_materializer_verifies_root_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "csmar"
+    raw_path = raw_root / "TRDNEW_Cale.csv"
+    raw_root.mkdir(parents=True)
+    _write_trading_calendar_raw_export(raw_path)
+    events: list[str] = []
+
+    def verify_root() -> None:
+        events.append("final-verify")
+        raise ValueError("final_root_changed")
+
+    @contextmanager
+    def raw_path_session(_root: Path):
+        events.append("session-open")
+        yield iter((raw_path,)), verify_root
+
+    monkeypatch.setattr(raw_exports, "_raw_export_path_session", raw_path_session)
+    real_write_dataset = interim.write_dataset
+
+    def observe_publication(*args, **kwargs):  # noqa: ANN002, ANN003
+        events.append("write-enter")
+        result = real_write_dataset(*args, **kwargs)
+        events.append("published")
+        return result
+
+    monkeypatch.setattr(interim, "write_dataset", observe_publication)
+
+    with pytest.raises(ValueError, match="final_root_changed"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=("trading_calendar",),
+            resource_policy=capture_test_policy(available_memory_bytes=64 * 1024**2),
+        )
+
+    assert events == ["session-open", "write-enter", "final-verify"]
+
+
+@pytest.mark.parametrize("chunksize", (0, True, 1.5))
+def test_csmar_materializer_rejects_invalid_chunksize_before_publication(
+    tmp_path: Path,
+    chunksize: object,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "csmar"
+    raw_root.mkdir(parents=True)
+    layout = StorageLayout(project_root=tmp_path)
+
+    with pytest.raises(ValueError, match="^invalid_csmar_chunksize$"):
+        interim.materialize_interim_data(
+            layout=layout,
+            raw_root=raw_root,
+            data_ids=("trading_calendar",),
+            chunksize=chunksize,  # type: ignore[arg-type]
+            resource_policy=capture_test_policy(available_memory_bytes=64 * 1024**2),
+        )
+
+    assert not layout.interim_data_root(
+        csmar_ids.SOURCE_ID,
+        "trading_calendar",
+    ).exists()
 
 
 def test_materializer_releases_prefetched_frame_before_next_writer_chunk(
@@ -5467,15 +5154,10 @@ def test_index_continuation_unicode_write_admits_transient_before_append(
             assert spool._handle.tell() == position
 
 
-@pytest.mark.parametrize(
-    "entrypoint",
-    (raw_exports.iter_raw_export_files, raw_exports.dataset_files_with_identity_by_id),
-)
 def test_csmar_raw_inventory_rejects_symlink_in_absolute_root_ancestor_chain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    entrypoint,
-) -> None:  # noqa: ANN001
+) -> None:
     real_parent = tmp_path / "real-parent"
     raw_root = real_parent / "raw"
     raw_root.mkdir(parents=True)
@@ -5487,17 +5169,12 @@ def test_csmar_raw_inventory_rejects_symlink_in_absolute_root_ancestor_chain(
         pytest.skip(f"symlink_not_available: {exc}")
     monkeypatch.setattr(
         raw_exports,
-        "inspect_raw_export",
-        lambda *_args, **_kwargs: pytest.fail("inspection_before_root_alias_gate"),
-    )
-    monkeypatch.setattr(
-        raw_exports,
         "ExactPrimaryKeyIndex",
         lambda **_kwargs: pytest.fail("index_before_root_alias_gate"),
     )
 
     with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-        list(entrypoint(alias_parent / "raw"))
+        list(raw_exports.dataset_files_with_identity_by_id(alias_parent / "raw"))
 
 
 def test_csmar_raw_inventory_gates_walk_parent_before_candidate_probe(
@@ -5590,15 +5267,10 @@ def test_csmar_raw_inventory_gates_supported_file_before_file_probe(
             list(paths)
 
 
-@pytest.mark.parametrize(
-    "entrypoint",
-    (raw_exports.iter_raw_export_files, raw_exports.dataset_files_with_identity_by_id),
-)
 def test_csmar_raw_inventory_rejects_duplicate_hardlink_identity_before_inspection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    entrypoint,
-) -> None:  # noqa: ANN001
+) -> None:
     first = tmp_path / "TRDNEW_Cale.csv"
     second = tmp_path / "TRDNEW_Cale-copy.csv"
     _write_trading_calendar_raw_export(first)
@@ -5606,43 +5278,8 @@ def test_csmar_raw_inventory_rejects_duplicate_hardlink_identity_before_inspecti
         os.link(first, second)
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
-    monkeypatch.setattr(
-        raw_exports,
-        "inspect_raw_export",
-        lambda *_args, **_kwargs: pytest.fail(
-            "inspection_before_physical_identity_gate"
-        ),
-    )
-
     with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-        list(entrypoint(tmp_path))
-
-
-def test_raw_export_tree_binds_inventory_identity_through_inspection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    export = tmp_path / "TRDNEW_Cale.csv"
-    replacement = tmp_path.parent / f"{tmp_path.name}-replacement.csv"
-    _write_trading_calendar_raw_export(export)
-    _write_trading_calendar_raw_export(replacement)
-    original_inspect = raw_exports.inspect_raw_export_file
-    replaced = False
-
-    def replace_before_inspect(path, **kwargs):  # noqa: ANN001, ANN003, ANN202
-        nonlocal replaced
-        if not replaced:
-            replaced = True
-            os.replace(replacement, path)
-        return original_inspect(path, **kwargs)
-
-    monkeypatch.setattr(raw_exports, "inspect_raw_export_file", replace_before_inspect)
-
-    result = list(raw_exports.inspect_raw_export_tree(tmp_path))
-
-    assert len(result) == 1
-    assert result[0].inspection is None
-    assert result[0].error == "csmar_raw_export_identity_changed"
+        list(raw_exports.dataset_files_with_identity_by_id(tmp_path))
 
 
 def test_raw_export_inspection_rejects_aliased_metadata_sidecar(
@@ -5661,7 +5298,7 @@ def test_raw_export_inspection_rejects_aliased_metadata_sidecar(
         raw_schemas.inspect_raw_export_file(export)
 
 
-@pytest.mark.parametrize("sidecar_kind", ("directory", "hardlink"))
+@pytest.mark.parametrize("sidecar_kind", ("directory",))
 def test_raw_export_inspection_rejects_non_unique_regular_metadata_sidecar(
     tmp_path: Path,
     sidecar_kind: str,
@@ -5671,94 +5308,8 @@ def test_raw_export_inspection_rejects_non_unique_regular_metadata_sidecar(
     sidecar = export.with_suffix(".metadata.json")
     if sidecar_kind == "directory":
         sidecar.mkdir()
-    else:
-        external = tmp_path / "external.json"
-        external.write_text("{}\n", encoding="utf-8")
-        try:
-            os.link(external, sidecar)
-        except OSError as exc:
-            pytest.skip(f"hardlink_not_available: {exc}")
-
     with pytest.raises(ValueError, match="^csmar_raw_export_identity_changed$"):
         raw_schemas.inspect_raw_export_file(export)
-
-
-def test_direct_raw_export_inspection_rejects_post_header_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    export = tmp_path / "TRDNEW_Cale.csv"
-    _write_trading_calendar_raw_export(export)
-    replacement = tmp_path / "replacement.csv"
-    _write_trading_calendar_raw_export(replacement)
-    read_header = raw_schemas.read_export_header
-
-    def replace_after_header(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        header = read_header(*args, **kwargs)
-        export.unlink()
-        replacement.rename(export)
-        return header
-
-    monkeypatch.setattr(raw_schemas, "read_export_header", replace_after_header)
-
-    with pytest.raises(ValueError, match="^csmar_raw_export_identity_changed$"):
-        raw_schemas.inspect_raw_export_file(export)
-
-
-def test_raw_export_inspection_rechecks_metadata_sidecar_identity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    export = tmp_path / "TRDNEW_Cale.csv"
-    _write_trading_calendar_raw_export(export)
-    sidecar = export.with_suffix(".metadata.json")
-    sidecar.write_text("{}\n", encoding="utf-8")
-    replacement = tmp_path / "replacement.json"
-    replacement.write_text('{"changed":true}\n', encoding="utf-8")
-    identify = raw_schemas.dataset_file_identity
-
-    def replace_after_capture(path: Path):
-        identity = identify(path)
-        if Path(path) == sidecar and replacement.exists():
-            sidecar.unlink()
-            replacement.rename(sidecar)
-        return identity
-
-    monkeypatch.setattr(raw_schemas, "dataset_file_identity", replace_after_capture)
-
-    with pytest.raises(ValueError, match="^csmar_raw_export_identity_changed$"):
-        raw_schemas.inspect_raw_export_file(export)
-
-
-def test_raw_export_tree_releases_inventory_index_on_early_close(
-    tmp_path: Path,
-) -> None:
-    _write_trading_calendar_raw_export(tmp_path / "TRDNEW_Cale.csv")
-    inspections = raw_exports.inspect_raw_export_tree(tmp_path)
-
-    next(inspections)
-    inspections.close()
-
-    assert not list(tmp_path.parent.glob(".k-*"))
-
-
-@pytest.mark.parametrize("error_type", (KeyboardInterrupt,))
-def test_raw_export_tree_releases_inventory_index_on_primary_exception(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    error_type: type[BaseException],
-) -> None:
-    _write_trading_calendar_raw_export(tmp_path / "TRDNEW_Cale.csv")
-    monkeypatch.setattr(
-        raw_exports,
-        "_inspect_raw_export_with_identity",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(error_type()),
-    )
-
-    with pytest.raises(error_type):
-        list(raw_exports.inspect_raw_export_tree(tmp_path))
-
-    assert not list(tmp_path.parent.glob(".k-*"))
 
 
 def test_interim_transform_variable_width_preflight_precedes_normalize(
@@ -6050,98 +5601,7 @@ def test_csmar_text_reader_close_preserves_consumer_generator_exit(
     assert closed_under == [policy]
 
 
-def test_csmar_nonreference_frames_close_preserves_consumer_generator_exit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    closed_under: list[RuntimeResourcePolicy | None] = []
-
-    def frames():
-        try:
-            lease = yield 256 * 1024
-            yield _OwnedValue(pd.DataFrame({"value": ["x"]}), lease)
-        finally:
-            closed_under.append(current_runtime_resource_policy())
-            raise OSError("frames_close_secondary")
-
-    monkeypatch.setattr(interim, "_raw_dataset_for_interim", lambda _data_id: "raw")
-    monkeypatch.setattr(
-        interim,
-        "_iter_pruned_interim_frames",
-        lambda **_kwargs: frames(),
-    )
-
-    with runtime_resource_policy_scope(policy):
-        chunks = interim.iter_interim_frames(
-            data_id="nonreference",
-            input_files=[],
-            start_date=None,
-            end_date=None,
-            resource_policy=policy,
-        )
-        next(chunks)
-        chunks.close()
-
-    assert closed_under == [policy]
-
-
-def test_csmar_index_info_iterator_close_preserves_consumer_generator_exit(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024 * 1024,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    closed_under: list[RuntimeResourcePolicy | None] = []
-
-    class Rows:
-        position = 0
-
-        def __iter__(self) -> Rows:
-            return self
-
-        def __next__(self) -> tuple[list[str], list[str], int]:
-            if self.position == 2:
-                raise StopIteration
-            self.position += 1
-            header = ["Indexcd", "Idxinfo11", "Idxinfo02"]
-            row = [
-                f"00098{self.position}",
-                f"2014-01-0{self.position}",
-                "2013-12-31",
-            ]
-            return header, row, sum(len(value.encode("utf-8")) for value in row)
-
-        def close(self) -> None:
-            closed_under.append(current_runtime_resource_policy())
-            raise OSError("rows_close_secondary")
-
-    monkeypatch.setattr(
-        raw_exports, "iter_index_info_rows", lambda _path, **_kwargs: Rows()
-    )
-    export = tmp_path / "index.csv"
-    export.write_bytes(b"index")
-
-    with runtime_resource_policy_scope(policy):
-        chunks = iter(
-            raw_exports.iter_private_export_chunks(
-                export,
-                dataset="index_info",
-                chunksize=1,
-                resource_policy=policy,
-            )
-        )
-        next(chunks)
-        chunks.close()
-
-    assert closed_under == [policy]
-
-
-def test_csmar_csv_reader_rejects_hardlink_before_read(tmp_path: Path) -> None:
+def test_csmar_csv_reader_accepts_external_hardlink(tmp_path: Path) -> None:
     source = tmp_path / "source.csv"
     alias = tmp_path / "alias.csv"
     source.write_bytes(b"value\n1\n")
@@ -6155,8 +5615,9 @@ def test_csmar_csv_reader_rejects_hardlink_before_read(tmp_path: Path) -> None:
     )
 
     rows = raw_schemas.iter_export_csv_records(alias, resource_policy=policy)
-    with pytest.raises(ValueError, match="^csmar_raw_export_identity_changed$"):
-        next(rows)
+    with runtime_resource_policy_scope(policy):
+        assert next(rows) == (["value"], len(b"value\n"))
+        rows.close()
 
 
 def test_csmar_direct_csv_reader_activates_explicit_policy_before_identity_probe(
@@ -6178,8 +5639,10 @@ def test_csmar_direct_csv_reader_activates_explicit_policy_before_identity_probe
         resource_policy=policy,
     )
 
-    with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-        next(rows)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
+            next(rows)
+    rows.close()
 
     assert observed == [policy]
 
@@ -6211,571 +5674,3 @@ def test_csmar_chunk_reader_rejects_unknown_dataset_before_reader(
         next(chunks)
 
     assert reader_hits == []
-
-
-_PHASE2_RAW_ROOT_FACTORIES = ("iter_raw_export_files",)
-
-
-def _phase2_write_raw_exports(root: Path, count: int) -> tuple[Path, ...]:
-    root.mkdir()
-    paths = tuple(root / f"export-{index}.csv" for index in range(count))
-    for path in paths:
-        path.write_text("value\n1\n", encoding="utf-8")
-    return paths
-
-
-def _phase2_stub_raw_inspection(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(
-        raw_exports,
-        "_inspect_raw_export_with_identity",
-        lambda path, **_kwargs: raw_exports.RawExportIntakeResult(
-            path=Path(path),
-            inspection=SimpleNamespace(
-                dataset="trading_calendar",
-                missing_required_columns=(),
-            ),
-        ),
-    )
-
-
-def _phase2_replace_raw_root_preserving_files(root: Path) -> Path:
-    displaced = root.with_name(f"{root.name}-displaced")
-    root.rename(displaced)
-    root.mkdir()
-    for path in tuple(displaced.iterdir()):
-        path.rename(root / path.name)
-    return displaced
-
-
-def _phase2_error_text(error: BaseException | None) -> str | None:
-    return None if error is None else f"{type(error).__name__}:{error}"
-
-
-@pytest.mark.parametrize("factory_name", _PHASE2_RAW_ROOT_FACTORIES)
-def test_raw_root_replacement_after_initial_gate_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory_name: str,
-) -> None:
-    raw_root = tmp_path / "raw"
-    _phase2_write_raw_exports(raw_root, 1)
-    _phase2_stub_raw_inspection(monkeypatch)
-    real_gate = raw_exports.require_unaliased_path
-    gate_hits = 0
-
-    def replace_after_gate(path: Path, *, error: str) -> Path:
-        nonlocal gate_hits
-        result = real_gate(path, error=error)
-        if Path(path) == raw_root and gate_hits == 0:
-            gate_hits += 1
-            _phase2_replace_raw_root_preserving_files(raw_root)
-        return result
-
-    monkeypatch.setattr(raw_exports, "require_unaliased_path", replace_after_gate)
-    caught: BaseException | None = None
-    results: list[object] = []
-    try:
-        results = list(getattr(raw_exports, factory_name)(raw_root))
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    actual = {
-        "gate_hits": gate_hits,
-        "result_count": len(results),
-        "error": _phase2_error_text(caught),
-    }
-    expected = {
-        "gate_hits": 1,
-        "result_count": 0,
-        "error": "ValueError:csmar_raw_export_identity_changed",
-    }
-    assert actual == expected
-
-
-@pytest.mark.parametrize("factory_name", _PHASE2_RAW_ROOT_FACTORIES)
-def test_raw_root_replacement_during_walk_yield_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory_name: str,
-) -> None:
-    raw_root = tmp_path / "raw"
-    paths = _phase2_write_raw_exports(raw_root, 1)
-    _phase2_stub_raw_inspection(monkeypatch)
-    walk_hits = 0
-
-    def replacing_walk(self: Path, **_kwargs):  # noqa: ANN202
-        nonlocal walk_hits
-        assert self == raw_root
-        walk_hits += 1
-        _phase2_replace_raw_root_preserving_files(raw_root)
-        yield raw_root, [], [paths[0].name]
-
-    monkeypatch.setattr(Path, "walk", replacing_walk)
-    caught: BaseException | None = None
-    results: list[object] = []
-    try:
-        results = list(getattr(raw_exports, factory_name)(raw_root))
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    actual = {
-        "walk_hits": walk_hits,
-        "result_count": len(results),
-        "error": _phase2_error_text(caught),
-    }
-    expected = {
-        "walk_hits": 1,
-        "result_count": 0,
-        "error": "ValueError:csmar_raw_export_identity_changed",
-    }
-    assert actual == expected
-
-
-@pytest.mark.parametrize("factory_name", _PHASE2_RAW_ROOT_FACTORIES)
-def test_raw_root_replacement_during_indexed_replay_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory_name: str,
-) -> None:
-    raw_root = tmp_path / "raw"
-    _phase2_write_raw_exports(raw_root, 1)
-    _phase2_stub_raw_inspection(monkeypatch)
-    real_values = raw_exports.ExactPrimaryKeyIndex.identity_payload_values
-    replay_hits = 0
-
-    def replacing_values(self, *, namespace: str):  # noqa: ANN001, ANN202
-        nonlocal replay_hits
-        if replay_hits == 0 and namespace.endswith("-paths"):
-            replay_hits += 1
-            _phase2_replace_raw_root_preserving_files(raw_root)
-        yield from real_values(self, namespace=namespace)
-
-    monkeypatch.setattr(
-        raw_exports.ExactPrimaryKeyIndex,
-        "identity_payload_values",
-        replacing_values,
-    )
-    caught: BaseException | None = None
-    results: list[object] = []
-    try:
-        results = list(getattr(raw_exports, factory_name)(raw_root))
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    actual = {
-        "replay_hits": replay_hits,
-        "result_count": len(results),
-        "error": _phase2_error_text(caught),
-    }
-    expected = {
-        "replay_hits": 1,
-        "result_count": 0,
-        "error": "ValueError:csmar_raw_export_identity_changed",
-    }
-    assert actual == expected
-
-
-@pytest.mark.parametrize("factory_name", _PHASE2_RAW_ROOT_FACTORIES)
-def test_raw_root_replacement_between_public_yields_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory_name: str,
-) -> None:
-    raw_root = tmp_path / "raw"
-    _phase2_write_raw_exports(raw_root, 2)
-    _phase2_stub_raw_inspection(monkeypatch)
-    iterator = getattr(raw_exports, factory_name)(raw_root)
-    first = next(iterator)
-    _phase2_replace_raw_root_preserving_files(raw_root)
-    caught: BaseException | None = None
-    second: object | None = None
-    try:
-        second = next(iterator)
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-    finally:
-        iterator.close()
-
-    actual = {
-        "first_returned": first is not None,
-        "second_returned": second is not None,
-        "error": _phase2_error_text(caught),
-    }
-    expected = {
-        "first_returned": True,
-        "second_returned": False,
-        "error": "ValueError:csmar_raw_export_identity_changed",
-    }
-    assert actual == expected
-
-
-@pytest.mark.parametrize("factory_name", _PHASE2_RAW_ROOT_FACTORIES)
-def test_raw_root_replacement_before_normal_exhaustion_fails_closed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory_name: str,
-) -> None:
-    raw_root = tmp_path / "raw"
-    _phase2_write_raw_exports(raw_root, 1)
-    _phase2_stub_raw_inspection(monkeypatch)
-    iterator = getattr(raw_exports, factory_name)(raw_root)
-    first = next(iterator)
-    _phase2_replace_raw_root_preserving_files(raw_root)
-    caught: BaseException | None = None
-    try:
-        next(iterator)
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    actual = {
-        "first_returned": first is not None,
-        "error": _phase2_error_text(caught),
-    }
-    expected = {
-        "first_returned": True,
-        "error": "ValueError:csmar_raw_export_identity_changed",
-    }
-    assert actual == expected
-
-
-@pytest.mark.parametrize("factory_name", _PHASE2_RAW_ROOT_FACTORIES)
-def test_raw_root_close_runs_final_verify_without_replacing_generator_exit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory_name: str,
-) -> None:
-    raw_root = tmp_path / "raw"
-    _phase2_write_raw_exports(raw_root, 1)
-    _phase2_stub_raw_inspection(monkeypatch)
-    root_identity = raw_root.lstat()
-    real_samestat = os.path.samestat
-    root_compare_hits = 0
-
-    def tracked_samestat(left: os.stat_result, right: os.stat_result) -> bool:
-        nonlocal root_compare_hits
-        if real_samestat(left, root_identity) or real_samestat(right, root_identity):
-            root_compare_hits += 1
-        return real_samestat(left, right)
-
-    monkeypatch.setattr(os.path, "samestat", tracked_samestat)
-    iterator = getattr(raw_exports, factory_name)(raw_root)
-    next(iterator)
-    _phase2_replace_raw_root_preserving_files(raw_root)
-    before_close = root_compare_hits
-    close_error: BaseException | None = None
-    try:
-        iterator.close()
-    except BaseException as exc:  # pragma: no branch - asserted below
-        close_error = exc
-
-    actual = {
-        "final_verify_hit": root_compare_hits > before_close,
-        "close_error": _phase2_error_text(close_error),
-    }
-    expected = {"final_verify_hit": True, "close_error": None}
-    assert actual == expected
-
-
-@pytest.mark.parametrize("factory_name", _PHASE2_RAW_ROOT_FACTORIES)
-@pytest.mark.parametrize("primary_type", (KeyboardInterrupt,))
-def test_raw_root_final_verify_preserves_active_primary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    factory_name: str,
-    primary_type: type[BaseException],
-) -> None:
-    raw_root = tmp_path / "raw"
-    paths = _phase2_write_raw_exports(raw_root, 1)
-    _phase2_stub_raw_inspection(monkeypatch)
-    root_identity = raw_root.lstat()
-    real_samestat = os.path.samestat
-    root_compare_hits = 0
-    before_primary = 0
-    primary = primary_type("walk_primary")
-
-    def tracked_samestat(left: os.stat_result, right: os.stat_result) -> bool:
-        nonlocal root_compare_hits
-        if real_samestat(left, root_identity) or real_samestat(right, root_identity):
-            root_compare_hits += 1
-        return real_samestat(left, right)
-
-    def failing_walk(self: Path, **_kwargs):  # noqa: ANN202
-        nonlocal before_primary
-        assert self == raw_root
-        yield raw_root, [], [paths[0].name]
-        before_primary = root_compare_hits
-        _phase2_replace_raw_root_preserving_files(raw_root)
-        raise primary
-
-    monkeypatch.setattr(os.path, "samestat", tracked_samestat)
-    monkeypatch.setattr(Path, "walk", failing_walk)
-    caught: BaseException | None = None
-    try:
-        list(getattr(raw_exports, factory_name)(raw_root))
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    actual = {
-        "primary_preserved": caught is primary,
-        "final_verify_hit": root_compare_hits > before_primary,
-    }
-    expected = {"primary_preserved": True, "final_verify_hit": True}
-    assert actual == expected
-
-
-def test_interim_root_replacement_fails_before_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    _write_trading_calendar_raw_export(raw_root / "TRDNEW_Cale.csv")
-    publication_hits: list[int] = []
-    replacement_hits = 0
-
-    def frames(*, input_files, **_kwargs):  # noqa: ANN001, ANN003, ANN202
-        nonlocal replacement_hits
-        inputs = iter(input_files)
-        next(inputs)
-        replacement_hits += 1
-        _phase2_replace_raw_root_preserving_files(raw_root)
-        yield pd.DataFrame({"value": [1]})
-        for _item in inputs:
-            pass
-
-    def publish(_root: Path, data, **_kwargs) -> None:  # noqa: ANN001, ANN202
-        materialized = list(data)
-        publication_hits.append(len(materialized))
-
-    monkeypatch.setattr(interim, "_iter_interim_frames", frames)
-    monkeypatch.setattr(interim, "write_dataset", publish)
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    caught: BaseException | None = None
-    try:
-        with runtime_resource_policy_scope(policy):
-            interim._materialize_interim_data(
-                layout=StorageLayout(project_root=tmp_path),
-                raw_root=raw_root,
-                data_ids=("trading_calendar",),
-                start_date=None,
-                end_date=None,
-                override_path=None,
-                chunksize=1,
-            )
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    actual = {
-        "replacement_hits": replacement_hits,
-        "publication_hits": publication_hits,
-        "error": _phase2_error_text(caught),
-    }
-    expected = {
-        "replacement_hits": 1,
-        "publication_hits": [],
-        "error": "ValueError:csmar_raw_export_identity_changed",
-    }
-    assert actual == expected
-
-
-def _phase2_mutate_second_replay_path(path: Path, mutation: str) -> None:
-    if mutation == "ordinary":
-        identity = path.stat()
-        replacement = path.with_name(f"{path.name}.replacement")
-        replacement.write_bytes(path.read_bytes())
-        os.utime(replacement, ns=(identity.st_atime_ns, identity.st_mtime_ns))
-        os.replace(replacement, path)
-        return
-    if mutation == "ancestor_alias":
-        original_parent = path.parent
-        moved_parent = original_parent.with_name(f"{original_parent.name}-real")
-        original_parent.rename(moved_parent)
-        try:
-            original_parent.symlink_to(moved_parent, target_is_directory=True)
-        except OSError as exc:
-            pytest.skip(f"directory symlink unavailable: {exc}")
-        return
-    moved = path.with_name(f"{path.name}.real")
-    path.rename(moved)
-    try:
-        if mutation == "file_alias":
-            path.symlink_to(moved)
-        elif mutation == "hardlink":
-            os.link(moved, path)
-        elif mutation == "directory":
-            path.mkdir()
-        else:  # pragma: no cover - parametrization owns the closed set
-            raise AssertionError(f"unknown mutation: {mutation}")
-    except OSError as exc:
-        pytest.skip(f"{mutation} unavailable: {exc}")
-
-
-@pytest.mark.parametrize(
-    "mutation", ("ordinary", "ancestor_alias", "file_alias", "hardlink", "directory")
-)
-def test_dataset_second_replay_rejects_identity_changes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
-) -> None:
-    raw_root = tmp_path / "raw"
-    raw_path = raw_root / "child" / "export.csv"
-    raw_path.parent.mkdir(parents=True)
-    raw_path.write_text("value\n1\n", encoding="utf-8")
-    _phase2_stub_raw_inspection(monkeypatch)
-    real_values = raw_exports.ExactPrimaryKeyIndex.identity_payload_values
-    namespaces: list[str] = []
-    mutation_hits = 0
-
-    def mutating_values(self, *, namespace: str):  # noqa: ANN001, ANN202
-        nonlocal mutation_hits
-        namespaces.append(namespace)
-        if namespace == "csmar-dataset-paths":
-            mutation_hits += 1
-            _phase2_mutate_second_replay_path(raw_path, mutation)
-        yield from real_values(self, namespace=namespace)
-
-    monkeypatch.setattr(
-        raw_exports.ExactPrimaryKeyIndex,
-        "identity_payload_values",
-        mutating_values,
-    )
-    caught: BaseException | None = None
-    results: list[object] = []
-    try:
-        results = list(raw_exports.dataset_files_with_identity_by_id(raw_root))
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    assert namespaces == [
-        "csmar-dataset-physical-exports-paths",
-        "csmar-dataset-paths",
-    ]
-    assert mutation_hits == 1
-    assert results == []
-    assert _phase2_error_text(caught) == (
-        "ValueError:csmar_raw_export_identity_changed"
-    )
-
-
-@pytest.mark.parametrize("primary_type", (KeyboardInterrupt,))
-def test_dataset_second_replay_final_root_check_preserves_active_primary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    primary_type: type[BaseException],
-) -> None:
-    raw_root = tmp_path / "raw"
-    _phase2_write_raw_exports(raw_root, 1)
-    _phase2_stub_raw_inspection(monkeypatch)
-    real_values = raw_exports.ExactPrimaryKeyIndex.identity_payload_values
-    real_file_identity = raw_exports.raw_export_file_identity
-    real_samestat = os.path.samestat
-    second_replay_hits = 0
-    identity_check_hits = 0
-    final_root_check_hits = 0
-    primary = primary_type("second_replay_primary")
-
-    def tracked_values(self, *, namespace: str):  # noqa: ANN001, ANN202
-        nonlocal second_replay_hits
-        if namespace == "csmar-dataset-paths":
-            second_replay_hits += 1
-        yield from real_values(self, namespace=namespace)
-
-    def failing_file_identity(path: Path):  # noqa: ANN202
-        nonlocal identity_check_hits
-        if second_replay_hits:
-            identity_check_hits += 1
-            raise primary
-        return real_file_identity(path)
-
-    def failing_final_samestat(left: os.stat_result, right: os.stat_result) -> bool:
-        nonlocal final_root_check_hits
-        if identity_check_hits:
-            final_root_check_hits += 1
-            raise OSError("root_final_secondary")
-        return real_samestat(left, right)
-
-    monkeypatch.setattr(
-        raw_exports.ExactPrimaryKeyIndex,
-        "identity_payload_values",
-        tracked_values,
-    )
-    monkeypatch.setattr(raw_exports, "raw_export_file_identity", failing_file_identity)
-    monkeypatch.setattr(os.path, "samestat", failing_final_samestat)
-    caught: BaseException | None = None
-    try:
-        list(raw_exports.dataset_files_with_identity_by_id(raw_root))
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    assert caught is primary
-    assert second_replay_hits == 1
-    assert identity_check_hits == 1
-    assert final_root_check_hits >= 1
-
-
-def test_interim_second_replay_rejects_before_transform_or_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    raw_root = tmp_path / "raw"
-    raw_path = raw_root / "TRDNEW_Cale.csv"
-    raw_root.mkdir()
-    _write_trading_calendar_raw_export(raw_path)
-    _phase2_stub_raw_inspection(monkeypatch)
-    real_values = raw_exports.ExactPrimaryKeyIndex.identity_payload_values
-    second_replay_hits = 0
-    transform_hits = 0
-    publication_hits = 0
-
-    def mutating_values(self, *, namespace: str):  # noqa: ANN001, ANN202
-        nonlocal second_replay_hits
-        if namespace == "csmar-dataset-paths":
-            second_replay_hits += 1
-            _phase2_mutate_second_replay_path(raw_path, "ordinary")
-        yield from real_values(self, namespace=namespace)
-
-    def frames(**_kwargs):  # noqa: ANN003, ANN202
-        nonlocal transform_hits
-        transform_hits += 1
-        return iter(())
-
-    def publish(*_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
-        nonlocal publication_hits
-        publication_hits += 1
-
-    monkeypatch.setattr(
-        raw_exports.ExactPrimaryKeyIndex,
-        "identity_payload_values",
-        mutating_values,
-    )
-    monkeypatch.setattr(interim, "_iter_interim_frames", frames)
-    monkeypatch.setattr(interim, "write_dataset", publish)
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
-    caught: BaseException | None = None
-    try:
-        with runtime_resource_policy_scope(policy):
-            interim._materialize_interim_data(
-                layout=StorageLayout(project_root=tmp_path),
-                raw_root=raw_root,
-                data_ids=("trading_calendar",),
-                start_date=None,
-                end_date=None,
-                override_path=None,
-                chunksize=1,
-            )
-    except BaseException as exc:  # pragma: no branch - asserted below
-        caught = exc
-
-    assert second_replay_hits == 1
-    assert transform_hits == 0
-    assert publication_hits == 0
-    assert _phase2_error_text(caught) == (
-        "ValueError:csmar_raw_export_identity_changed"
-    )

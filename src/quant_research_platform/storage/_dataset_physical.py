@@ -89,24 +89,9 @@ def dataset_file_identity(path: Path) -> DatasetFileIdentity:
         before = candidate.lstat()
     except OSError as exc:
         raise ValueError("invalid_dataset_part_files") from exc
-    if (
-        not stat.S_ISREG(before.st_mode)
-        or int(before.st_ino) <= 0
-        or int(before.st_nlink) != 1
-    ):
+    if not stat.S_ISREG(before.st_mode) or int(before.st_ino) <= 0:
         raise ValueError("invalid_dataset_part_files")
-    identity = dataset_file_identity_from_stat(before)
-    try:
-        after = candidate.lstat()
-    except OSError as exc:
-        raise ValueError("invalid_dataset_part_files") from exc
-    if (
-        not stat.S_ISREG(after.st_mode)
-        or int(after.st_nlink) != 1
-        or dataset_file_identity_from_stat(after) != identity
-    ):
-        raise ValueError("invalid_dataset_part_files")
-    return identity
+    return dataset_file_identity_from_stat(before)
 
 
 def inspect_dataset_part(
@@ -321,7 +306,7 @@ def _opened_parquet(
     handle = resolved.open("rb")
     try:
         before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-        if before != path_identity or dataset_file_identity(resolved) != before:
+        if before != path_identity:
             raise ValueError("dataset_file_identity_changed")
         footer_length = _parquet_footer_length(handle)
         with ExitStack() as parquet_stack:
@@ -341,7 +326,11 @@ def _opened_parquet(
                 primary = sys.exception()
                 if primary is not None:
                     try:
-                        os.fstat(handle.fileno())
+                        after = dataset_file_identity_from_stat(
+                            os.fstat(handle.fileno())
+                        )
+                        if after != before:
+                            raise ValueError("dataset_file_identity_changed")
                     except BaseException as verify_error:
                         primary.add_note(
                             "parquet handle verification also failed: "
@@ -369,7 +358,7 @@ def _opened_parquet(
                             )
                         raise
                     parquet_file.close()
-                    if after != before or dataset_file_identity(resolved) != before:
+                    if after != before:
                         raise ValueError("dataset_file_identity_changed")
     finally:
         primary = sys.exception()
@@ -379,17 +368,6 @@ def _opened_parquet(
                 handle.close()
             except BaseException as close_error:
                 first_error = close_error
-            try:
-                if dataset_file_identity(resolved) != path_identity:
-                    raise ValueError("dataset_file_identity_changed")
-            except BaseException as verify_error:
-                if first_error is None:
-                    first_error = verify_error
-                else:
-                    first_error.add_note(
-                        "parquet path verification also failed: "
-                        f"{type(verify_error).__name__}"
-                    )
             if first_error is not None:
                 raise first_error
 
@@ -400,13 +378,6 @@ def _opened_parquet(
                 primary.add_note(
                     "parquet handle close also failed: "
                     f"{type(close_error).__name__}"
-                )
-            try:
-                dataset_file_identity(resolved)
-            except BaseException as verify_error:
-                primary.add_note(
-                    "parquet path verification also failed: "
-                    f"{type(verify_error).__name__}"
                 )
 
 

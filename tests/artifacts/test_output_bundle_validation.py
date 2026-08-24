@@ -135,7 +135,7 @@ def test_validate_output_bundle_rejects_declared_hardlink_alias(
         validate_output_bundle(root)
 
 
-def test_validate_output_bundle_rejects_external_hardlink(tmp_path: Path) -> None:
+def test_validate_output_bundle_accepts_external_hardlink(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
     try:
@@ -143,8 +143,10 @@ def test_validate_output_bundle_rejects_external_hardlink(tmp_path: Path) -> Non
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
 
-    with pytest.raises(ValueError, match="output_member_physical_identity_invalid"):
-        validate_output_bundle(root)
+    manifest, members = validate_output_bundle(root)
+
+    assert manifest["files"] == ["prediction.parquet"]
+    assert members[1][0] == root / "prediction.parquet"
 
 
 def test_validate_output_bundle_rejects_symlinked_manifest(tmp_path: Path) -> None:

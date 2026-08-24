@@ -67,14 +67,13 @@ def read_bounded_qrp_json(
                 raise ValueError("dataset_metadata_file_identity_changed")
             raw = handle.read(_MAX_QRP_JSON_BYTES + 1)
             after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-        current = dataset_file_identity(candidate)
     except OSError as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     except ValueError as exc:
         raise ValueError("dataset_metadata_file_identity_changed") from exc
     if len(raw) > _MAX_QRP_JSON_BYTES:
         raise ValueError("dataset_metadata_file_too_large")
-    if before != identity or after != identity or current != identity:
+    if before != identity or after != identity:
         raise ValueError("dataset_metadata_file_identity_changed")
     return raw, parse_qrp_json_object(raw)
 
