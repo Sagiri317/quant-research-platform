@@ -4,16 +4,21 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.models.trial_selection as trial_selection
 from quant_research_platform.research._memory import _selected_frame_payload_bytes
 from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
 )
 from quant_research_platform.research.models.trial_selection import (
     evaluate_model_trial_metrics,
+    evaluate_model_trial_metrics_from_chunks,
     select_best_validation_trial,
     validate_trial_metric_columns,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    _OwnedValue,
+    runtime_resource_policy_scope,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 
 
@@ -358,3 +363,222 @@ def test_evaluate_model_trial_metrics_rejects_before_new_selection_copy() -> Non
             )
 
     assert policy.used_memory_bytes == 0
+
+
+def test_chunked_trial_metrics_match_exact_purge_and_tie_oracle() -> None:
+    dates = pd.date_range("2024-01-01", periods=6, freq="D")
+    frame = pd.DataFrame(
+        {
+            "timestamp": list(dates) + list(dates[[0, 1, 4, 5]]),
+            "asset_id": ["dense"] * 6 + ["sparse"] * 4,
+            "label": [1.0, 2.0, 2.0, 4.0, 5.0, 5.0, 1.0, 1.0, 3.0, 3.0],
+            "prediction": [1.0, 1.0, 2.0, 3.0, 5.0, 4.0, 1.0, 2.0, 2.0, 4.0],
+        }
+    )
+    expected = frame.iloc[[0, 1, 2, 3, 6, 7]].reset_index(drop=True)
+    oracle = evaluate_model_trial_metrics(
+        expected,
+        model_id="oracle",
+        label_column="label",
+        prediction_column="prediction",
+    )
+    chunks = (frame.iloc[:5].copy(), frame.iloc[5:].copy())
+
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        chunks,
+        model_id="streamed",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=2,
+    )
+
+    assert metrics["model_id"] == "streamed"
+    assert metrics["validation_rows"] == oracle["validation_rows"] == 6
+    for key in (
+        "validation_ic",
+        "validation_rankic",
+        "validation_mse",
+    ):
+        assert metrics[key] == pytest.approx(oracle[key])
+    assert metrics["validation_ic_reason"] == oracle["validation_ic_reason"]
+    assert metrics["validation_rankic_reason"] == oracle["validation_rankic_reason"]
+
+
+def test_chunked_trial_metrics_complete_when_aggregate_exceeds_target() -> None:
+    def make_chunk(chunk_index: int) -> pd.DataFrame:
+        start = chunk_index * 1000
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range(
+                    "2024-01-01", periods=1000, freq="min"
+                ),
+                "asset_id": [
+                    f"asset_{row % 10}" for row in range(start, start + 1000)
+                ],
+                "label": np.arange(start, start + 1000, dtype="float64"),
+                "prediction": np.arange(start, start + 1000, dtype="float64") + 0.25,
+            }
+        )
+
+    aggregate_bytes = 0
+
+    def chunks():
+        nonlocal aggregate_bytes
+        for chunk_index in range(80):
+            chunk = make_chunk(chunk_index)
+            aggregate_bytes += _selected_frame_payload_bytes(
+                chunk,
+                ["timestamp", "asset_id", "label", "prediction"],
+            )
+            yield chunk
+
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024**2,
+        explicit_cap_bytes=2 * 1024**2,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        metrics = evaluate_model_trial_metrics_from_chunks(
+            chunks(),
+            model_id="large_stream",
+            label_column="label",
+            prediction_column="prediction",
+            purge_gap_steps=0,
+        )
+
+    assert metrics["validation_rows"] == 80_000
+    assert metrics["validation_mse"] == pytest.approx(0.0625)
+    assert aggregate_bytes > 2 * 1024**2
+    assert policy.used_memory_bytes == 0
+
+
+def test_chunked_trial_metrics_releases_owned_chunk_on_primary_failure() -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=2 * 1024**2,
+        explicit_cap_bytes=1024 * 1024,
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=2, freq="D"),
+            "asset_id": ["asset"] * 2,
+            "label": [1.0, 2.0],
+            "prediction": [1.0, 2.0],
+        }
+    )
+
+    def failing_chunks():
+        lease = policy.lease("tests.metric.chunk", 1024)
+        yield _OwnedValue(frame, lease)
+        raise RuntimeError("metric_primary")
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(RuntimeError, match="metric_primary"):
+            evaluate_model_trial_metrics_from_chunks(
+                failing_chunks(),
+                model_id="failure",
+                label_column="label",
+                prediction_column="prediction",
+                purge_gap_steps=0,
+            )
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_chunked_trial_metrics_preserves_primary_when_scratch_cleanup_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    temporary_directory = trial_selection.tempfile.TemporaryDirectory
+
+    class FailingScratch(temporary_directory):
+        def __exit__(self, *args):  # noqa: ANN002
+            super().__exit__(*args)
+            raise RuntimeError("scratch_cleanup")
+
+    monkeypatch.setattr(trial_selection.tempfile, "TemporaryDirectory", FailingScratch)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=2, freq="D"),
+            "asset_id": ["asset"] * 2,
+            "label": [1.0, 2.0],
+            "prediction": [1.0, np.nan],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_trial_metric_values") as raised:
+        evaluate_model_trial_metrics_from_chunks(
+            (frame,),
+            model_id="scratch_failure",
+            label_column="label",
+            prediction_column="prediction",
+            purge_gap_steps=0,
+        )
+
+    assert raised.value.__notes__ == [
+        "model selection scratch cleanup also failed: RuntimeError"
+    ]
+
+
+@pytest.mark.parametrize("invalid_value", [np.nan, np.inf, -np.inf])
+def test_chunked_trial_metrics_rejects_nonfinite_values(invalid_value: float) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "asset_id": ["asset"] * 3,
+            "label": [1.0, 2.0, 3.0],
+            "prediction": [1.0, invalid_value, 3.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_trial_metric_values"):
+        evaluate_model_trial_metrics_from_chunks(
+            (frame,),
+            model_id="invalid",
+            label_column="label",
+            prediction_column="prediction",
+            purge_gap_steps=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("frame", "reason"),
+    [
+        (
+            pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2024-01-01"]),
+                    "asset_id": ["asset"],
+                    "label": [1.0],
+                    "prediction": [1.0],
+                }
+            ),
+            "insufficient_observations",
+        ),
+        (
+            pd.DataFrame(
+                {
+                    "timestamp": pd.date_range("2024-01-01", periods=3),
+                    "asset_id": ["asset"] * 3,
+                    "label": [1.0, 1.0, 1.0],
+                    "prediction": [2.0, 2.0, 2.0],
+                }
+            ),
+            "zero_variance",
+        ),
+    ],
+)
+def test_chunked_trial_metrics_preserves_undefined_reasons(
+    frame: pd.DataFrame,
+    reason: str,
+) -> None:
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (frame,),
+        model_id="undefined",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=0,
+    )
+
+    assert metrics["validation_ic"] is None
+    assert metrics["validation_rankic"] is None
+    assert metrics["validation_ic_reason"] == reason
+    assert metrics["validation_rankic_reason"] == reason

@@ -20,16 +20,13 @@ from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.labels.forward_returns import (
-    add_forward_return_labels,
+from quant_research_platform.research.models.trial_selection import (
+    evaluate_model_trial_metrics,
 )
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )
-from quant_research_platform.runtime.resources import (
-    pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
-)
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_prediction_inputs import (
@@ -195,26 +192,37 @@ def test_model_selection_compares_common_validation_primary_keys(
         model_selection_validation_end="2024-01-06",
     )
     validation_keys: list[tuple[tuple[pd.Timestamp, str], ...]] = []
-    original_metrics = prediction_runner.evaluate_model_trial_metrics
+    original_metrics = prediction_runner.evaluate_model_trial_metrics_from_chunks
 
     def chunks(columns, *, input_columns):  # noqa: ANN001
         del input_columns
         return (frame.loc[:, list(columns)],)
 
-    def record_validation_keys(validation, **kwargs):  # noqa: ANN001, ANN003
-        validation_keys.append(
-            tuple(
-                validation[["timestamp", "asset_id"]].itertuples(
-                    index=False,
-                    name=None,
+    def record_validation_keys(chunks, **kwargs):  # noqa: ANN001, ANN003
+        keys: list[tuple[pd.Timestamp, str]] = []
+
+        def observed_chunks():
+            for item in chunks:
+                frame_value = (
+                    item.value
+                    if isinstance(item, prediction_runner._OwnedValue)  # noqa: SLF001
+                    else item
                 )
-            )
-        )
-        return original_metrics(validation, **kwargs)
+                keys.extend(
+                    frame_value[["timestamp", "asset_id"]].itertuples(
+                        index=False,
+                        name=None,
+                    )
+                )
+                yield item
+
+        result = original_metrics(observed_chunks(), **kwargs)
+        validation_keys.append(tuple(keys))
+        return result
 
     monkeypatch.setattr(
         prediction_runner,
-        "evaluate_model_trial_metrics",
+        "evaluate_model_trial_metrics_from_chunks",
         record_validation_keys,
     )
 
@@ -232,6 +240,48 @@ def test_model_selection_compares_common_validation_primary_keys(
 
     assert len(validation_keys) == 2
     assert validation_keys[0] == validation_keys[1]
+
+
+def test_empty_validation_chunk_releases_its_lease() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"]),
+            "asset_id": ["asset"],
+            "factor_a": [1.0],
+            "label": [1.0],
+        }
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=2 * 1024**2,
+        explicit_cap_bytes=1024 * 1024,
+    )
+    candidate_spec = SimpleNamespace(
+        input_columns=("factor_a",),
+        label_column="label",
+    )
+    prediction_spec = SimpleNamespace(
+        sample_filter_mode="unfiltered",
+        prediction_column="prediction",
+    )
+    model_result = prediction_runner.fitting.ModelFitResult(
+        coefficients=np.array([0.0, 1.0]),
+        metadata={},
+    )
+
+    with prediction_runner.runtime_resource_policy_scope(policy):
+        result = list(
+            prediction_runner._iter_validation_prediction_chunks(  # noqa: SLF001
+                lambda: iter((frame,)),
+                prediction_spec=prediction_spec,
+                candidate_spec=candidate_spec,
+                model_result=model_result,
+                validation_start=pd.Timestamp("2024-01-02"),
+                validation_end=pd.Timestamp("2024-01-03"),
+            )
+        )
+
+    assert result == []
+    assert policy.used_memory_bytes == 0
 
 
 def test_model_selection_drops_candidate_model_alias_before_lease_close(
@@ -400,7 +450,7 @@ def test_model_selection_rejects_candidate_specific_non_finite_predictions(
     )
 
     with pytest.raises(ValueError, match="invalid_trial_metric_values"):
-        prediction_runner.evaluate_model_trial_metrics(
+        evaluate_model_trial_metrics(
             validation,
             model_id="candidate_model",
             label_column="label",
@@ -530,98 +580,6 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
         )
 
 
-@pytest.mark.parametrize("chunked", [False, True])
-@pytest.mark.parametrize(
-    ("purge_gap_steps", "expected_keys"),
-    [
-        (0, (("dense", 1), ("dense", 2), ("dense", 3), ("sparse", 1))),
-        (2, (("dense", 1),)),
-        (3, None),
-    ],
-)
-def test_model_selection_purges_each_assets_validation_tail_before_test_window(
-    chunked: bool,
-    purge_gap_steps: int,
-    expected_keys: tuple[tuple[str, int], ...] | None,
-) -> None:
-    dates = pd.date_range("2024-01-01", periods=6, freq="D")
-    dense = pd.DataFrame(
-        {
-            "timestamp": dates,
-            "asset_id": "dense",
-            "factor_a": np.arange(len(dates), dtype="float64"),
-            "adj_open": np.arange(10.0, 16.0),
-            "eligible": True,
-        }
-    )
-    sparse = pd.DataFrame(
-        {
-            "timestamp": dates[[0, 1, 4, 5]],
-            "asset_id": "sparse",
-            "factor_a": np.arange(4, dtype="float64"),
-            "adj_open": [20.0, 21.0, 50.0, 60.0],
-            "eligible": True,
-        }
-    )
-    labeled = add_forward_return_labels(
-        pd.concat([dense, sparse], ignore_index=True),
-        horizons=(1,),
-    )
-    sparse_validation_label = labeled.loc[
-        labeled["asset_id"].eq("sparse") & labeled["timestamp"].eq(dates[1]),
-        "forward_return_1d",
-    ].item()
-    assert sparse_validation_label == pytest.approx(60.0 / 50.0 - 1.0)
-
-    candidate_spec = _model(
-        "linear_model",
-        ("factor_a",),
-        label_column="forward_return_1d",
-        purge_gap_steps=purge_gap_steps,
-    )
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction_demo",
-        model_id=candidate_spec.model_id,
-        research_dataset_id="research_demo",
-        train_end="2024-01-01",
-        test_start="2024-01-05",
-        test_end="2024-01-06",
-        candidate_model_ids=("candidate_model",),
-        model_selection_validation_start="2024-01-02",
-        model_selection_validation_end="2024-01-04",
-    )
-    chunks = (
-        (
-            labeled.loc[labeled["asset_id"].eq("dense")],
-            labeled.loc[labeled["asset_id"].eq("sparse")],
-        )
-        if chunked
-        else (labeled,)
-    )
-
-    def validation_frame() -> pd.DataFrame:
-        return prediction_runner._validation_prediction_frame(
-            lambda: iter(chunks),
-            prediction_spec=prediction_spec,
-            candidate_spec=candidate_spec,
-            model_result=prediction_runner.fitting.ModelFitResult(
-                coefficients=np.array([0.0, 1.0]),
-                metadata={},
-            ),
-            validation_start=dates[1],
-            validation_end=dates[3],
-        )
-
-    if expected_keys is None:
-        with pytest.raises(ValueError, match="empty_model_selection_validation_window"):
-            validation_frame()
-        return
-    validation = validation_frame()
-    assert list(validation[["asset_id", "timestamp"]].itertuples(index=False)) == [
-        (asset_id, dates[date_position]) for asset_id, date_position in expected_keys
-    ]
-
-
 def test_prediction_runner_accepts_equivalent_timezone_representations() -> None:
     chunk = pd.DataFrame(
         {
@@ -646,99 +604,6 @@ def test_prediction_runner_accepts_equivalent_timezone_representations() -> None
         pd.Timestamp("2024-01-15T17:00:00"),
         pd.Timestamp("2024-01-15T17:01:00"),
     ]
-
-
-def test_validation_preflight_uses_window_payload_and_deep_identity_bytes(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dates = pd.date_range("2024-01-01", periods=102, freq="D")
-    outside = pd.DataFrame(
-        {
-            "timestamp": [dates[0]],
-            "asset_id": ["short"],
-            "factor_a": [1.0],
-            "label": [2.0],
-            "eligible": [True],
-        }
-    )
-    rows = [outside] * 1000
-    rows.extend(
-        [
-            pd.DataFrame(
-                {
-                    "timestamp": [date],
-                    "asset_id": ["asset-" + "x" * 5000],
-                    "factor_a": [1.0],
-                    "label": [2.0],
-                    "eligible": [True],
-                }
-            )
-            for date in dates[100:]
-        ]
-    )
-    candidate_spec = _model("long_identity", ("factor_a",))
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction_demo",
-        model_id=candidate_spec.model_id,
-        research_dataset_id="research_demo",
-        train_end="2023-12-31",
-        test_start="2024-01-01",
-        model_selection_validation_start="2024-04-10",
-        model_selection_validation_end="2024-04-11",
-    )
-    selected_output_bytes = sum(
-        prediction_runner._selected_frame_payload_bytes(  # noqa: SLF001
-            row,
-            ["timestamp", "asset_id", "label"],
-        )
-        + 8
-        for row in rows[-2:]
-    )
-    max_full_chunk_payload = max(pandas_frame_payload_bytes(row) for row in rows)
-    retained_bound = prediction_runner._validation_result_bound(  # noqa: SLF001
-        selected_output_bytes=selected_output_bytes,
-        max_selected_output_bytes=selected_output_bytes // 2,
-        max_full_chunk_payload=max_full_chunk_payload,
-        max_chunk_rows=1,
-        eligible_rows=2,
-        input_count=1,
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=2 * 1024**2,
-        explicit_cap_bytes=retained_bound + 4096,
-    )
-    original_copy = pd.DataFrame.copy
-
-    def admitted_copy(frame, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
-        if {"timestamp", "asset_id", "label"}.issubset(frame.columns):
-            assert policy.used_memory_bytes >= pandas_frame_payload_bytes(frame)
-        return original_copy(frame, *args, **kwargs)
-
-    monkeypatch.setattr(pd.DataFrame, "copy", admitted_copy)
-    with runtime_resource_policy_scope(policy):
-        result = prediction_runner._validation_prediction_frame(  # noqa: SLF001
-            lambda: iter(rows),
-            prediction_spec=prediction_spec,
-            candidate_spec=candidate_spec,
-            model_result=prediction_runner.fitting.ModelFitResult(
-                coefficients=np.array([0.0, 1.0]),
-                metadata={},
-            ),
-            validation_start=dates[100],
-            validation_end=dates[101],
-        )
-        if isinstance(result, prediction_runner._OwnedValue):  # noqa: SLF001
-            result_frame = result.value
-            expected_asset_ids = list(result_frame["asset_id"])
-            result.value = None
-            result_frame = None
-            result.lease.close()
-        else:
-            expected_asset_ids = list(result["asset_id"])
-            result = None
-            result_frame = None
-    assert expected_asset_ids == ["asset-" + "x" * 5000] * 2
-    assert policy.used_memory_bytes == 0
 
 
 def test_prediction_lazy_root_waits_for_chunks_and_metadata(monkeypatch) -> None:

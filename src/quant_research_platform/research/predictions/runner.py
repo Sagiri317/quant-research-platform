@@ -9,7 +9,6 @@ from dataclasses import replace
 import pandas as pd
 
 import quant_research_platform.research.models.fitting as fitting
-import quant_research_platform.research.models.validation_split as validation_split
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
@@ -20,7 +19,6 @@ from quant_research_platform.contracts.predictions import (
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research._memory import _selected_frame_payload_bytes
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.datasets.validation import (
     validate_prediction_input,
@@ -34,7 +32,7 @@ from quant_research_platform.research.models.trial_selection import (
     TEST_METRIC_COLUMNS,
     VALIDATION_METRIC_COLUMNS,
     build_model_selection_metadata,
-    evaluate_model_trial_metrics,
+    evaluate_model_trial_metrics_from_chunks,
     select_best_validation_trial,
 )
 from quant_research_platform.research.predictions.outputs import (
@@ -361,7 +359,6 @@ def _select_prediction_model_spec(
         model_lease = (
             owned_model.lease if isinstance(owned_model, _OwnedValue) else None
         )
-        validation_frame = None
         validation_read_columns = tuple(
             dict.fromkeys(
                 (
@@ -373,7 +370,7 @@ def _select_prediction_model_spec(
             )
         )
         try:
-            validation_frame = _validation_prediction_frame(
+            validation_chunks = _iter_validation_prediction_chunks(
                 lambda validation_columns=validation_read_columns: chunks(
                     validation_columns,
                     input_columns=common_validation_input_columns,
@@ -384,36 +381,16 @@ def _select_prediction_model_spec(
                 validation_start=validation_start,
                 validation_end=validation_end,
                 usable_input_columns=common_validation_input_columns,
-                purge_gap_steps=common_purge_gap_steps,
             )
-            try:
-                trial_metric_records.append(
-                    evaluate_model_trial_metrics(
-                        validation_frame.value
-                        if isinstance(validation_frame, _OwnedValue)
-                        else validation_frame,
-                        model_id=candidate_spec.model_id,
-                        label_column=label_column,
-                        prediction_column=prediction_spec.prediction_column,
-                    )
+            trial_metric_records.append(
+                evaluate_model_trial_metrics_from_chunks(
+                    validation_chunks,
+                    model_id=candidate_spec.model_id,
+                    label_column=label_column,
+                    prediction_column=prediction_spec.prediction_column,
+                    purge_gap_steps=common_purge_gap_steps,
                 )
-            except BaseException as primary:
-                if isinstance(validation_frame, _OwnedValue):
-                    validation_lease = validation_frame.lease
-                    validation_frame = None
-                    try:
-                        validation_lease.close()
-                    except BaseException as cleanup_error:
-                        primary.add_note(
-                            "validation lease release also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                raise
-            else:
-                if isinstance(validation_frame, _OwnedValue):
-                    validation_lease = validation_frame.lease
-                    validation_frame = None
-                    validation_lease.close()
+            )
         except BaseException as primary:
             model_result = None
             owned_model = None
@@ -477,7 +454,7 @@ def _prediction_train_read_columns(
     )
 
 
-def _validation_prediction_frame(
+def _iter_validation_prediction_chunks(
     chunks: Callable[[], Iterable[pd.DataFrame]],
     *,
     prediction_spec,
@@ -486,219 +463,89 @@ def _validation_prediction_frame(
     validation_start: pd.Timestamp,
     validation_end: pd.Timestamp,
     usable_input_columns: tuple[str, ...] | None = None,
-    purge_gap_steps: int | None = None,
-) -> pd.DataFrame | _OwnedValue[pd.DataFrame]:
+) -> Iterable[object]:
     predictor = prediction_callable(
         model_result.coefficients,
         candidate_spec.input_columns,
         model_result.prediction_model,
     )
-    retained_policy = current_runtime_resource_policy()
     output_columns = (
         "timestamp",
         "asset_id",
         candidate_spec.label_column,
     )
-    selected_output_bytes = 0
-    max_selected_output_bytes = 0
-    max_full_chunk_payload = 0
-    max_chunk_rows = 0
-    eligible_rows = 0
-    for chunk in chunks():
-        full_chunk_payload = pandas_frame_payload_bytes(chunk)
-        max_full_chunk_payload = max(max_full_chunk_payload, full_chunk_payload)
-        max_chunk_rows = max(max_chunk_rows, len(chunk))
-        index_bytes = int(chunk.index.memory_usage(deep=True))
-        chunk_bound = (
-            3 * full_chunk_payload
-            + index_bytes
-            + len(chunk)
-            * 8
-            * (len(usable_input_columns or candidate_spec.input_columns) + 6)
-        )
-        chunk_lease = None
-        if retained_policy is not None:
-            chunk_lease = retained_policy.lease(
-                "research.prediction.validation_preflight",
-                max(1, chunk_bound),
+    policy = current_runtime_resource_policy()
+    with closing_iterator(iter(chunks())) as source:
+        for chunk in source:
+            full_chunk_payload = pandas_frame_payload_bytes(chunk)
+            index_bytes = int(chunk.index.memory_usage(deep=True))
+            chunk_bound = (
+                3 * full_chunk_payload
+                + index_bytes
+                + len(chunk)
+                * 8
+                * (len(usable_input_columns or candidate_spec.input_columns) + 6)
             )
-        timestamps = None
-        validation = None
-        filtered = None
-        usable = None
-        try:
-            timestamps = _prediction_timestamps(chunk)
-            validation = chunk.loc[
-                (timestamps >= validation_start) & (timestamps <= validation_end)
-            ]
-            filtered, _filter_metadata = apply_filter_mode(
-                validation,
-                mode=prediction_spec.sample_filter_mode,
-                metadata_key="sample_filter_mode",
-            )
-            usable = filtered.dropna(
-                subset=[
-                    *(
-                        usable_input_columns
-                        if usable_input_columns is not None
-                        else candidate_spec.input_columns
-                    ),
-                    candidate_spec.label_column,
-                ]
-            )
-            if not usable.empty:
-                selected_columns = [
-                    column for column in output_columns if column in usable.columns
-                ]
-                selected_bytes = _selected_frame_payload_bytes(
-                    usable,
-                    selected_columns,
-                ) + 8 * len(usable)
-                selected_output_bytes += selected_bytes
-                max_selected_output_bytes = max(
-                    max_selected_output_bytes,
-                    selected_bytes,
+            chunk_lease = (
+                policy.lease(
+                    "research.prediction.validation.chunk",
+                    max(1, chunk_bound),
                 )
-                eligible_rows += int(len(usable))
-        except BaseException as primary:
-            timestamps = None
-            validation = None
-            filtered = None
-            usable = None
-            if chunk_lease is not None:
-                try:
-                    chunk_lease.close()
-                except BaseException as cleanup_error:
-                    primary.add_note(
-                        "validation preflight lease release also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-            raise
-        else:
-            timestamps = None
-            validation = None
-            filtered = None
-            usable = None
-            if chunk_lease is not None:
-                chunk_lease.close()
-    if eligible_rows == 0:
-        raise ValueError("empty_model_selection_validation_window")
-    retained_bound = _validation_result_bound(
-        selected_output_bytes=selected_output_bytes,
-        max_selected_output_bytes=max_selected_output_bytes,
-        max_full_chunk_payload=max_full_chunk_payload,
-        max_chunk_rows=max_chunk_rows,
-        eligible_rows=eligible_rows,
-        input_count=len(candidate_spec.input_columns),
-    )
-    validation_lease = None
-    if retained_policy is not None:
-        validation_lease = retained_policy.lease(
-            "research.prediction.validation",
-            retained_bound,
-        )
-    try:
-        output_frames: list[pd.DataFrame] = []
-        for chunk in chunks():
-            timestamps = _prediction_timestamps(chunk)
-            validation = chunk.loc[
-                (timestamps >= validation_start) & (timestamps <= validation_end)
-            ]
-            del timestamps
-            if validation.empty:
-                continue
-            filtered, _filter_metadata = apply_filter_mode(
-                validation,
-                mode=prediction_spec.sample_filter_mode,
-                metadata_key="sample_filter_mode",
+                if policy is not None
+                else None
             )
-            usable = filtered.dropna(
-                subset=[
-                    *(
-                        usable_input_columns
-                        if usable_input_columns is not None
-                        else candidate_spec.input_columns
-                    ),
-                    candidate_spec.label_column,
-                ]
-            )
-            if not usable.empty:
-                output = usable.loc[:, list(output_columns)].copy()
-                output[prediction_spec.prediction_column] = predictor(usable)
-                output_frames.append(output)
-        if not output_frames:
-            raise ValueError("empty_model_selection_validation_window")
-        result = pd.concat(output_frames, ignore_index=True)
-        output_frames = []
-        result = validation_split._purge_trailing_timestamps(
-            result,
-            (
-                candidate_spec.purge_gap_steps
-                if purge_gap_steps is None
-                else purge_gap_steps
-            ),
-            group_column="asset_id",
-        )
-        if result.empty:
-            raise ValueError("empty_model_selection_validation_window")
-        timestamps = None
-        validation = None
-        filtered = None
-        usable = None
-        output = None
-        if validation_lease is not None:
-            validation_lease.shrink_to(pandas_frame_payload_bytes(result))
-            validation_lease.transfer("research.model.selection.validation")
-            return _OwnedValue(result, validation_lease)
-        return result
-    except BaseException as primary:
-        if "timestamps" in locals():
-            del timestamps
-        validation = None
-        filtered = None
-        usable = None
-        output = None
-        output_frames = []
-        result = None
-        if validation_lease is not None:
             try:
-                validation_lease.close()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "validation lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-        raise
-
-
-def _validation_result_bound(
-    *,
-    selected_output_bytes: int,
-    max_selected_output_bytes: int,
-    max_full_chunk_payload: int,
-    max_chunk_rows: int,
-    eligible_rows: int,
-    input_count: int,
-) -> int:
-    working_columns = input_count + 6
-    window_filter_usable = 3 * max_full_chunk_payload
-    mask_and_matrix = (
-        max_chunk_rows * 8 * (working_columns + 3)
-        + eligible_rows * 8 * 4
-    )
-    output_frames = selected_output_bytes
-    concat_copy = output_frames
-    purge_copy = output_frames
-    peak_output = max_selected_output_bytes
-    return max(
-        1,
-        window_filter_usable
-        + mask_and_matrix
-        + output_frames
-        + concat_copy
-        + purge_copy
-        + peak_output,
-    )
+                timestamps = _prediction_timestamps(chunk)
+                validation = chunk.loc[
+                    (timestamps >= validation_start) & (timestamps <= validation_end)
+                ]
+                if not validation.empty:
+                    filtered, _filter_metadata = apply_filter_mode(
+                        validation,
+                        mode=prediction_spec.sample_filter_mode,
+                        metadata_key="sample_filter_mode",
+                    )
+                    usable = filtered.dropna(
+                        subset=[
+                            *(
+                                usable_input_columns
+                                if usable_input_columns is not None
+                                else candidate_spec.input_columns
+                            ),
+                            candidate_spec.label_column,
+                        ]
+                    )
+                    if not usable.empty:
+                        output = usable.loc[:, list(output_columns)].copy()
+                        output[prediction_spec.prediction_column] = predictor(usable)
+                        if chunk_lease is not None:
+                            output_bytes = pandas_frame_payload_bytes(output)
+                            if output_bytes > chunk_lease.reserved_bytes:
+                                raise ValueError(
+                                    "prediction_validation_working_set_exceeds_task_memory_budget"
+                                )
+                            chunk_lease.shrink_to(output_bytes)
+                            chunk_lease.transfer(
+                                "research.model.selection.metric.chunk"
+                            )
+                            item = _OwnedValue(output, chunk_lease)
+                        else:
+                            item = output
+                        del chunk, timestamps, validation, filtered, usable, output
+                        yield item
+            except BaseException as primary:
+                if chunk_lease is not None and chunk_lease.active:
+                    try:
+                        chunk_lease.close()
+                    except BaseException as cleanup_error:
+                        primary.add_note(
+                            "validation chunk lease release also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                raise
+            else:
+                if chunk_lease is not None and chunk_lease.active:
+                    chunk_lease.close()
 
 
 def _validate_prediction_window_order(spec) -> None:
