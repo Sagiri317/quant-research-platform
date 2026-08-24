@@ -834,7 +834,7 @@ def iter_private_export_chunks_with_policy(
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
     export_path = Path(path)
-    producer_bound = max(1, resource_policy.memory_budget_bytes // 2)
+    producer_bound = max(1, resource_policy.available_memory_bytes // 2)
     payload_lease_ref: list[MemoryLease | None] = [None]
 
     if dataset == "index_info":

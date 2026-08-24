@@ -5672,6 +5672,11 @@ def test_writer_bounds_raw_pandas_arrow_and_persisted_conversion(
         }
     )
     input_bytes = pandas_frame_payload_bytes(frame)
+    working_set_cap = (
+        dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+        + dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+        + 2 * input_bytes
+    )
     written_table_bytes: list[int] = []
     converted_frame_bytes: list[int] = []
     original_write = dataset_writing.write_parquet_file
@@ -5700,7 +5705,7 @@ def test_writer_bounds_raw_pandas_arrow_and_persisted_conversion(
         spec=make_processed_dataset_spec("bounded_writer"),
         resource_policy=capture_test_policy(
             available_memory_bytes=16 * 1024**2,
-            explicit_cap_bytes=8 * 1024 * 1024,
+            explicit_cap_bytes=working_set_cap,
         ),
     )
 
@@ -8470,7 +8475,10 @@ def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(
 ) -> None:
     path = tmp_path / "row-groups.parquet"
     table = pa.table({"value": ["x" * 4096] * 100})
-    policy = _writer_test_policy(working_headroom_bytes=64 * 1024)
+    page_headroom = (
+        table.nbytes + 2 * dataset_physical._PARQUET_NATIVE_METADATA_PAGE_BYTES
+    )
+    policy = _writer_test_policy(working_headroom_bytes=page_headroom)
     with runtime_resource_policy_scope(policy):
         dataset_writing.write_parquet_file(table, path)
         batches = tuple(
@@ -8478,7 +8486,7 @@ def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(
                 path,
                 expected_identity=None,
                 target_chunk_bytes=32 * 1024,
-                operation_headroom_bytes=64 * 1024,
+                operation_headroom_bytes=page_headroom,
                 columns=("value",),
                 source_batch_rows=1,
             )
@@ -9573,7 +9581,9 @@ def test_private_writer_baseline_rejects_before_input_generation(
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
+        explicit_cap_bytes=(
+            2 * dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+        ),
     )
     generated = False
 
