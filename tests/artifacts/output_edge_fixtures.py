@@ -14,7 +14,7 @@ from quant_research_platform.contracts.portfolios import PortfolioSpec, WeightCo
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
-from tests.helpers.report_output_frames import (
+from tests.helpers.output_frames import (
     make_artifact_signal_spec,
 )
 

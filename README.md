@@ -20,9 +20,9 @@ data/        本地数据占位；不提交 private data
 
 ## Managed operation
 
-一个 managed data-scale operation 先取得 host-local lock，只捕获一次 `available0`，默认 RAM budget 为 `available0` 的 70%；explicit cap 只能进一步降低它。每个数据规模 read/decode/allocation 在发生前做保守准入，流程保持 bounded；aggregate persisted output 可以超过 RAM budget 而 exact 完成。新 payload/workspace/output 只有一个 logical owner，在 producer/consumer 边界转移，不重复计费；owner-local context 退出时释放资源。
+一个 managed data-scale operation 先取得 host-local lock，只捕获一次 `available0`，默认 planning target 约为 `available0` 的 70%；explicit cap 只能进一步降低它。每个数据规模 read/decode/allocation 在发生前做保守准入，流程保持 bounded；aggregate persisted output 可以超过 RAM budget 而 exact 完成。主要 workflow stage 按顺序执行，前一 stage 释放 transient state 后，后一 stage 复用同一个 operation budget；只为当前 stage 中真正同时存活的 allocation 准入。新 payload/workspace/output 只有一个 logical owner，在 producer/consumer 边界转移，不重复计费；owner-local context 退出时释放资源。
 
-默认 single-process + native threads，只使用一层主要并行，线程数不超过物理核并可因预算下调。RSS 只由仓库外 fresh-child 观测，以 `available0` 为分母；`<=80%` 是 PASS candidate，`80%-82%` 是 AT_RISK，`>82%` 是 default FAIL，这些阈值不参与 production planning。
+默认 single-process + native threads，只使用一层主要并行，线程数不超过物理核并可因预算下调。70% 是一个合理的默认 planning target，不是逐字节或逐百分比的硬法律；约 80% 是工程上的大致安全包络。仓库外 fresh-child 的 RSS/CPU/I/O 观测只用于校准和验收，不是 runtime planning authority。小幅、稳定且可解释的包络 overshoot 应标为风险供用户判断，不由第二套 magic threshold 自动判死；这些观测也不参与 production planning。
 
 ## Storage and publication
 

@@ -13,20 +13,20 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 
-REPORT_SIGNAL_COLUMN = price_volume_window_column("mom", 20)
-REPORT_LABEL_COLUMN = forward_return_label_column(20)
+PRICE_VOLUME_SIGNAL_COLUMN = price_volume_window_column("mom", 20)
+FORWARD_RETURN_LABEL_COLUMN = forward_return_label_column(20)
 
 
-def make_report_prediction_output_frame(
+def make_price_volume_prediction_output_frame(
     *,
     with_metadata: bool = True,
     row_count: int = 1,
 ) -> pd.DataFrame:
-    frame = _reports_prediction_frame(row_count=row_count)
+    frame = _price_volume_prediction_frame(row_count=row_count)
     if with_metadata:
-        frame.attrs["model_metadata"] = _reports_model_metadata()
+        frame.attrs["model_metadata"] = _price_volume_model_metadata()
         frame.attrs["prediction_metadata"] = {
-            **_reports_prediction_metadata(),
+            **_price_volume_prediction_metadata(),
             "prediction_rows": row_count,
         }
     return frame
@@ -43,15 +43,15 @@ def make_artifact_prediction_output_frame(
     return frame
 
 
-def make_report_signal_spec() -> SignalSpec:
+def make_price_volume_signal_spec() -> SignalSpec:
     return SignalSpec(
-        signal_id=REPORT_SIGNAL_COLUMN,
-        source_column=REPORT_SIGNAL_COLUMN,
+        signal_id=PRICE_VOLUME_SIGNAL_COLUMN,
+        source_column=PRICE_VOLUME_SIGNAL_COLUMN,
         source_kind="factor",
     )
 
 
-def make_report_prediction_spec() -> PredictionSpec:
+def make_price_volume_prediction_spec() -> PredictionSpec:
     return PredictionSpec(
         prediction_id="pred-run",
         model_id="linear-demo",
@@ -81,8 +81,8 @@ def make_artifact_signal_spec() -> SignalSpec:
     )
 
 
-def make_report_evaluation_metrics_frame() -> pd.DataFrame:
-    return _evaluation_metrics_frame_from_values(_reports_evaluation_values())
+def make_price_volume_evaluation_metrics_frame() -> pd.DataFrame:
+    return _evaluation_metrics_frame_from_values(_price_volume_evaluation_values())
 
 
 def make_artifact_evaluation_metrics_frame() -> pd.DataFrame:
@@ -104,9 +104,9 @@ def _evaluation_metrics_frame_from_values(values: dict[str, object]) -> pd.DataF
     )
 
 
-def make_report_evaluation_grouped_label_values_frame() -> pd.DataFrame:
+def make_price_volume_evaluation_grouped_label_values_frame() -> pd.DataFrame:
     return _evaluation_grouped_label_values_frame_from_values(
-        _reports_evaluation_values()
+        _price_volume_evaluation_values()
     )
 
 
@@ -131,8 +131,8 @@ def _evaluation_grouped_label_values_frame_from_values(
     )
 
 
-def make_report_evaluation_ic_summary_frame() -> pd.DataFrame:
-    return _evaluation_ic_summary_frame_from_values(_reports_evaluation_values())
+def make_price_volume_evaluation_ic_summary_frame() -> pd.DataFrame:
+    return _evaluation_ic_summary_frame_from_values(_price_volume_evaluation_values())
 
 
 def make_artifact_evaluation_ic_summary_frame() -> pd.DataFrame:
@@ -162,9 +162,9 @@ def _evaluation_ic_summary_frame_from_values(values: dict[str, object]) -> pd.Da
     )
 
 
-def make_report_evaluation_group_spread_summary_frame() -> pd.DataFrame:
+def make_price_volume_evaluation_group_spread_summary_frame() -> pd.DataFrame:
     return _evaluation_group_spread_summary_frame_from_values(
-        _reports_evaluation_values()
+        _price_volume_evaluation_values()
     )
 
 
@@ -191,7 +191,7 @@ def _evaluation_group_spread_summary_frame_from_values(
     )
 
 
-def _reports_prediction_frame(*, row_count: int) -> pd.DataFrame:
+def _price_volume_prediction_frame(*, row_count: int) -> pd.DataFrame:
     assets = ["asset-a", "asset-b"][:row_count]
     scores = [0.25, 0.35][:row_count]
     return pd.DataFrame(
@@ -213,7 +213,7 @@ def _artifacts_prediction_frame() -> pd.DataFrame:
     )
 
 
-def _reports_model_metadata() -> dict[str, object]:
+def _price_volume_model_metadata() -> dict[str, object]:
     return {
         "model_algorithm": "linear_regression",
         "sample_filter_mode": "eligible",
@@ -228,11 +228,11 @@ def _reports_model_metadata() -> dict[str, object]:
         "test_end": "2014-01-03",
         "oos_start": "2014-01-03",
         "oos_end": "2014-01-03",
-        "input_factor_columns": [REPORT_SIGNAL_COLUMN],
+        "input_factor_columns": [PRICE_VOLUME_SIGNAL_COLUMN],
         "input_feature_columns": [],
-        "input_columns": [REPORT_SIGNAL_COLUMN],
+        "input_columns": [PRICE_VOLUME_SIGNAL_COLUMN],
         "input_count": 1,
-        "label_column": REPORT_LABEL_COLUMN,
+        "label_column": FORWARD_RETURN_LABEL_COLUMN,
         "hyperparameters": {},
         "resolved_hyperparameters": {},
         "random_seed": None,
@@ -244,11 +244,11 @@ def _reports_model_metadata() -> dict[str, object]:
             "version": "test",
         },
         "coefficient_count": 2,
-        "feature_importance": {REPORT_SIGNAL_COLUMN: 1.0},
+        "feature_importance": {PRICE_VOLUME_SIGNAL_COLUMN: 1.0},
     }
 
 
-def _reports_prediction_metadata() -> dict[str, object]:
+def _price_volume_prediction_metadata() -> dict[str, object]:
     return {
         "prediction_mode": "minimal_oos",
         "sample_filter_mode": "eligible",
@@ -264,7 +264,7 @@ def _reports_prediction_metadata() -> dict[str, object]:
         "effective_test_end": "2014-01-03",
         "is_oos": True,
         "is_final_oos_window": False,
-        "input_columns": [REPORT_SIGNAL_COLUMN],
+        "input_columns": [PRICE_VOLUME_SIGNAL_COLUMN],
         "input_count": 1,
         "prediction_column": "prediction_score",
     }
@@ -327,11 +327,11 @@ def _artifacts_prediction_metadata() -> dict[str, object]:
     }
 
 
-def _reports_evaluation_values() -> dict[str, object]:
+def _price_volume_evaluation_values() -> dict[str, object]:
     return {
         "timestamp": pd.Timestamp("2014-01-03"),
-        "signal": REPORT_SIGNAL_COLUMN,
-        "label": REPORT_LABEL_COLUMN,
+        "signal": PRICE_VOLUME_SIGNAL_COLUMN,
+        "label": FORWARD_RETURN_LABEL_COLUMN,
         "mean_label_value": 0.01,
     }
 

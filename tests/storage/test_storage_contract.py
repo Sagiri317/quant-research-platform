@@ -1,20 +1,12 @@
 from __future__ import annotations
 
-import json
 from dataclasses import replace
 from pathlib import Path
 
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
-from quant_research_platform.storage._dataset_schema import (
-    logical_dtype_metadata_bytes,
-    logical_dtype_payload_from_frame,
-)
 from quant_research_platform.storage.datasets import (
     compare_datasets,
     fingerprint_dataset,
@@ -26,45 +18,11 @@ from quant_research_platform.storage.manifests import (
     build_run_data_summary,
     write_manifest,
 )
-from tests.storage import low_level_fixtures
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
-    write_low_level_parquet_artifact,
 )
-
-
-def _write_arrow_value_artifact(
-    root: Path,
-    frame: pd.DataFrame,
-    value_array: pa.Array,
-) -> None:
-    write_low_level_parquet_artifact(
-        root,
-        frame,
-        primary_key=("market_id", "asset_id", "timestamp"),
-        partition_columns=("year",),
-    )
-    data_root = root / "data"
-    path = next(data_root.rglob("*.parquet"))
-    arrays = [
-        value_array if column == "value" else pa.array(frame[column])
-        for column in frame.columns
-    ]
-    logical_dtypes = logical_dtype_payload_from_frame(frame)
-    table = pa.Table.from_arrays(arrays, names=frame.columns).replace_schema_metadata(
-        {b"qrp.logical-dtypes": logical_dtype_metadata_bytes(logical_dtypes)}
-    )
-    pq.write_table(table, path)
-    spec = json.loads((root / "spec.json").read_text(encoding="utf-8"))
-    low_level_fixtures._write_runtime_manifest(
-        root,
-        data_root,
-        [path],
-        frame=frame,
-        spec=spec,
-    )
 
 
 def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(

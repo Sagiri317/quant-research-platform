@@ -14,19 +14,19 @@ from quant_research_platform.artifacts._output_manifest import (
 from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.artifacts.layout import output_bundle_root
 from quant_research_platform.contracts.outputs import OutputScope
-from tests.helpers.report_output_frames import (
+from tests.helpers.output_frames import (
     make_prediction_report_spec,
-    make_report_prediction_output_frame,
-    make_report_prediction_spec,
+    make_price_volume_prediction_output_frame,
+    make_price_volume_prediction_spec,
 )
 
 
 def _prediction_manifest_payload() -> dict[str, object]:
-    frame = make_report_prediction_output_frame()
+    frame = make_price_volume_prediction_output_frame()
     return output_manifest_payload(
         output_spec=make_prediction_report_spec(),
         metadata=prediction_output_metadata(
-            spec=make_report_prediction_spec(),
+            spec=make_price_volume_prediction_spec(),
             model_metadata=frame.attrs["model_metadata"],
             prediction_metadata=frame.attrs["prediction_metadata"],
         ),
@@ -65,7 +65,7 @@ def test_output_manifest_preserves_typed_identifier_values() -> None:
     payload = output_manifest_payload(
         output_spec=output_spec,
         metadata=prediction_output_metadata(
-            spec=make_report_prediction_spec(),
+            spec=make_price_volume_prediction_spec(),
             model_metadata=base_payload["metadata"]["model_metadata"],
             prediction_metadata=base_payload["metadata"]["prediction_metadata"],
         ),

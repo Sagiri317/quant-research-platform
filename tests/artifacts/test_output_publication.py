@@ -21,30 +21,30 @@ from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (
     make_output_edge_evaluation_diagnostics,
 )
-from tests.helpers.report_output_frames import (
+from tests.helpers.output_frames import (
     make_prediction_report_spec,
-    make_report_evaluation_group_spread_summary_frame,
-    make_report_evaluation_grouped_label_values_frame,
-    make_report_evaluation_ic_summary_frame,
-    make_report_evaluation_metrics_frame,
-    make_report_prediction_output_frame,
-    make_report_prediction_spec,
-    make_report_signal_spec,
+    make_price_volume_evaluation_group_spread_summary_frame,
+    make_price_volume_evaluation_grouped_label_values_frame,
+    make_price_volume_evaluation_ic_summary_frame,
+    make_price_volume_evaluation_metrics_frame,
+    make_price_volume_prediction_output_frame,
+    make_price_volume_prediction_spec,
+    make_price_volume_signal_spec,
 )
 
 
 def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) -> None:
-    frame = make_report_prediction_output_frame(row_count=2)
+    frame = make_price_volume_prediction_output_frame(row_count=2)
     materialized_root = write_prediction_outputs(
         frame,
-        spec=make_report_prediction_spec(),
+        spec=make_price_volume_prediction_spec(),
         output_spec=make_prediction_report_spec(),
         layout=StorageLayout(project_root=tmp_path / "materialized"),
     )
     chunked_writer = prediction_outputs._write_prediction_output_chunks
     chunked_root = chunked_writer(
         (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
-        spec=make_report_prediction_spec(),
+        spec=make_price_volume_prediction_spec(),
         output_spec=make_prediction_report_spec(),
         layout=StorageLayout(project_root=tmp_path / "chunked"),
         model_metadata=frame.attrs["model_metadata"],
@@ -61,11 +61,11 @@ def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) ->
 
 
 def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> None:
-    frame = make_report_prediction_output_frame()
+    frame = make_price_volume_prediction_output_frame()
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
         prediction_outputs._write_prediction_output_chunks(
             (frame.copy(), frame.copy()),
-            spec=make_report_prediction_spec(),
+            spec=make_price_volume_prediction_spec(),
             output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
             model_metadata=frame.attrs["model_metadata"],
@@ -85,8 +85,8 @@ def test_prediction_outputs_reject_existing_output_bundle_without_writes(
 
     with pytest.raises(OutputAlreadyExistsError):
         write_prediction_outputs(
-            make_report_prediction_output_frame(),
-            spec=make_report_prediction_spec(),
+            make_price_volume_prediction_output_frame(),
+            spec=make_price_volume_prediction_spec(),
             output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
         )
@@ -106,10 +106,10 @@ def test_evaluation_outputs_reject_existing_output_bundle_without_writes(
 
     with pytest.raises(OutputAlreadyExistsError):
         write_evaluation_outputs(
-            make_report_evaluation_metrics_frame(),
-            make_report_evaluation_grouped_label_values_frame(),
-            ic_summary=make_report_evaluation_ic_summary_frame(),
-            group_spread_summary=make_report_evaluation_group_spread_summary_frame(),
+            make_price_volume_evaluation_metrics_frame(),
+            make_price_volume_evaluation_grouped_label_values_frame(),
+            ic_summary=make_price_volume_evaluation_ic_summary_frame(),
+            group_spread_summary=make_price_volume_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=make_output_edge_evaluation_diagnostics(
                 min_timestamp="2014-01-03",
                 max_timestamp="2014-01-03",
@@ -143,8 +143,8 @@ def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
 
     with pytest.raises(RuntimeError, match="simulated_prediction_failure"):
         write_prediction_outputs(
-            make_report_prediction_output_frame(),
-            spec=make_report_prediction_spec(),
+            make_price_volume_prediction_output_frame(),
+            spec=make_price_volume_prediction_spec(),
             output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
         )
@@ -177,10 +177,10 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
 
     with pytest.raises(RuntimeError, match="simulated_evaluation_failure"):
         write_evaluation_outputs(
-            make_report_evaluation_metrics_frame(),
-            make_report_evaluation_grouped_label_values_frame(),
-            ic_summary=make_report_evaluation_ic_summary_frame(),
-            group_spread_summary=make_report_evaluation_group_spread_summary_frame(),
+            make_price_volume_evaluation_metrics_frame(),
+            make_price_volume_evaluation_grouped_label_values_frame(),
+            ic_summary=make_price_volume_evaluation_ic_summary_frame(),
+            group_spread_summary=make_price_volume_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=make_output_edge_evaluation_diagnostics(
                 min_timestamp="2014-01-03",
                 max_timestamp="2014-01-03",
@@ -209,7 +209,7 @@ def _evaluation_spec() -> EvaluationSpec:
         run_id="eval-run",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
-        signals=(make_report_signal_spec(),),
+        signals=(make_price_volume_signal_spec(),),
         label_columns=("forward_return_20d",),
     )
 

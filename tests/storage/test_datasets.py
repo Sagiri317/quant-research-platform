@@ -1735,7 +1735,7 @@ def test_dataset_file_batches_refresh_headroom_after_internal_release(
     )
 
 
-def test_legacy_oversized_row_group_rejects_before_first_arrow_pull(
+def test_metadata_free_oversized_row_group_rejects_before_first_arrow_pull(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2506,7 +2506,7 @@ def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -
 
     fingerprint = fingerprint_dataset(root)
     hash_columns = tuple(dict.fromkeys((*spec.primary_key, *spec.required_columns)))
-    legacy_readback = pd.concat(
+    reference_readback = pd.concat(
         tuple(
             pd.read_parquet(path)
             for path in sorted((root / "data").rglob("part-*.parquet"))
@@ -2514,7 +2514,7 @@ def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -
         ignore_index=True,
     )
     hashes = pd.util.hash_pandas_object(
-        legacy_readback.loc[:, list(hash_columns)],
+        reference_readback.loc[:, list(hash_columns)],
         index=False,
     ).to_numpy("uint64")
     expected = canonical_json_hash(

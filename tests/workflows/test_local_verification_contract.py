@@ -17,7 +17,7 @@ from tests.artifacts.output_edge_fixtures import (
     make_output_edge_prediction_spec,
     make_output_edge_report_spec,
 )
-from tests.helpers.report_output_frames import (
+from tests.helpers.output_frames import (
     make_artifact_evaluation_group_spread_summary_frame,
     make_artifact_evaluation_grouped_label_values_frame,
     make_artifact_evaluation_ic_summary_frame,

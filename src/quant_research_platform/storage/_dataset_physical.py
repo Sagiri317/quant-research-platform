@@ -455,33 +455,6 @@ def _target_batch_rows(
         columns,
         row_groups=selected_row_groups,
     )
-    if _decoded_row_bounds(parquet_file) is None:
-        legacy_rows = max(
-            (
-                int(parquet_file.metadata.row_group(index).num_rows)
-                for index in selected_row_groups
-            ),
-            default=1,
-        )
-        if operation_headroom_bytes is None:
-            return max(1, legacy_rows)
-        legacy_required = page_decode_bytes
-        if filtered:
-            legacy_required += max(
-                0,
-                _filter_working_set_bytes(
-                    source_batch_bytes=maximum_row_bytes,
-                    row_count=1,
-                    membership=membership,
-                    membership_max_scalar_bytes=membership_max_scalar_bytes,
-                )
-                - maximum_row_bytes,
-            )
-        if legacy_required > operation_headroom_bytes:
-            raise DatasetReadCapacityExceeded(
-                "dataset_working_set_exceeds_task_memory_budget"
-            )
-        return 1
     target_rows = max(1, target_chunk_bytes // maximum_row_bytes)
     if operation_headroom_bytes is None:
         return target_rows
@@ -520,6 +493,8 @@ def _target_batch_rows(
     if admitted == 0:
         raise DatasetReadCapacityExceeded(
             "dataset_filter_working_set_exceeds_task_memory_budget"
+            if filtered
+            else "dataset_working_set_exceeds_task_memory_budget"
         )
     return admitted
 

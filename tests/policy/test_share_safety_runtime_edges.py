@@ -166,11 +166,11 @@ def test_sanitizer_redacts_absolute_private_repo_path_as_one_token() -> None:
     [
         # Intentional fake provider/source marker for safety rejection tests.
         "/workspace/qrp/data/research/a_share/demo",
-        # intentional legacy-path negative case
+        # intentional unsafe-path negative case
         "/workspaces/qrp/reports/private_research/a_share/run",
         "/opt/qrp/data/processed/a_share/factor/demo",
         r"C:\repo\data\research\a_share\demo",
-        # intentional legacy-path negative case
+        # intentional unsafe-path negative case
         r"D:\repo\reports\private_research\a_share\run",
     ],
 )
@@ -188,14 +188,14 @@ def test_sanitizer_redacts_repo_private_absolute_paths(text: str) -> None:
 @pytest.mark.parametrize(
     "text",
     [
-        # intentional legacy-path negative case
+        # intentional unsafe-path negative case
         "reports/private_research/a_share/run",
-        # intentional legacy-path negative case
+        # intentional unsafe-path negative case
         "/workspace/qrp/reports/private_research/a_share/run",
     ],
 )
 def test_sanitizer_rejects_local_output_paths(text: str) -> None:
-    # intentional legacy-path negative case
+    # intentional unsafe-path negative case
     assert text.endswith("reports/private_research/a_share/run")
     assert unsafe_for_share_reason(text) == "local_only_path"
 

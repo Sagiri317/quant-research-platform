@@ -17,21 +17,21 @@ from quant_research_platform.artifacts._output_manifest import (
     prediction_output_metadata,
 )
 from quant_research_platform.storage._dataset_physical import dataset_file_identity
-from tests.helpers.report_output_frames import (
+from tests.helpers.output_frames import (
     make_prediction_report_spec,
-    make_report_prediction_output_frame,
-    make_report_prediction_spec,
+    make_price_volume_prediction_output_frame,
+    make_price_volume_prediction_spec,
 )
 
 
 def _write_bundle(root: Path) -> None:
     root.mkdir(parents=True)
-    frame = make_report_prediction_output_frame()
+    frame = make_price_volume_prediction_output_frame()
     files = ("prediction.parquet",)
     payload = output_manifest_payload(
         output_spec=make_prediction_report_spec(),
         metadata=prediction_output_metadata(
-            spec=make_report_prediction_spec(),
+            spec=make_price_volume_prediction_spec(),
             model_metadata=frame.attrs["model_metadata"],
             prediction_metadata=frame.attrs["prediction_metadata"],
         ),

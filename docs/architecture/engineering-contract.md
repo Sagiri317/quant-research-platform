@@ -10,11 +10,13 @@ QRP 使用 current-contract-only。Public machine contract、owner behavior、pe
 
 ## Resource lifecycle
 
-每个 top-level resource-bearing operation 在首次数据规模 read/decode/allocation 前只 admission 一次：host-local data-scale lock 保护一个 process-local active root；该 root 只捕获一次 OS available0，并固定 operation budget（`floor(available0 * 70%)` 与有效显式 cap 的最小值）和 root identity。Lease ledger 与 lexical lease state 随 owner 生命周期可变。
+每个 top-level resource-bearing operation 在首次数据规模 read/decode/allocation 前只 admission 一次：host-local data-scale lock 保护一个 process-local active root；该 root 只捕获一次 OS available0，并固定 operation planning target（默认约为 `available0 * 70%`，与有效显式 cap 取较小者）和 root identity。70% 是合理的默认规划余量，不是数学硬线。Lease ledger 与 lexical lease state 随 owner 生命周期可变。
 
-Nested owner 继承相同 root identity；different-policy nesting/parallel root fail closed。Lease 以 lexical owner context 管理，跨 producer/consumer 边界转移同一 logical owner，不重复计费；owner context 退出时释放资源。所有数据规模 allocation 在保守准入后进行并保持 bounded，aggregate persisted output 可以超过 RAM budget 而 exact 完成。
+Nested owner 继承相同 root identity；different-policy nesting/parallel root fail closed。Lease 以 lexical owner context 管理，跨 producer/consumer 边界转移同一 logical owner，不重复计费；owner context 退出时释放资源。主要 workflow stage 按顺序执行，前一 stage 释放 transient state 后，后一 stage 复用同一个 operation budget；只为当前 stage 中真正同时存活的 allocation 准入。所有数据规模 allocation 在保守准入后进行并保持 bounded，aggregate persisted output 可以超过 RAM budget 而 exact 完成。
 
 全部 raw、decoded、Arrow/Pandas、copy/index/sort/join、reducer/planner/model/native、output/writer/readback/spill/overlap state 共用该 bounded budget；新 payload/workspace/output 只有一个 logical owner，准入不足则按 owner 语义 shrink、release、spill 或 fail closed。不建立 universal deep-size framework。
+
+约 80% 是粗粒度的工程安全包络，不是逐字节硬线；小幅、稳定且可解释的 overshoot 由验收记录为风险供用户判断，不建立第二套分段阈值或更高的 magic threshold。仓库外 fresh-child 的 RSS/CPU/I/O 只用于校准和验收，不能成为 runtime planning authority。
 
 ## Owner、identity 与 publication
 

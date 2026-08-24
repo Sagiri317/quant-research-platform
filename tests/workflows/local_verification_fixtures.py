@@ -51,7 +51,7 @@ from quant_research_platform.workflows.local_verification import (
     LocalVerificationRunConfig,
 )
 from tests.helpers import frequency_ids
-from tests.helpers.report_output_frames import make_artifact_prediction_output_frame
+from tests.helpers.output_frames import make_artifact_prediction_output_frame
 
 MIB = 1024 * 1024
 GIB = 1024 * 1024 * 1024

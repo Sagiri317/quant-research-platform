@@ -30,10 +30,10 @@ from quant_research_platform.workflows.diagnostics import validation_summary
 from quant_research_platform.workflows.diagnostics.validation_summary import (
     build_validation_summary,
 )
-from tests.helpers.report_output_frames import (
+from tests.helpers.output_frames import (
     make_prediction_report_spec,
-    make_report_prediction_output_frame,
-    make_report_prediction_spec,
+    make_price_volume_prediction_output_frame,
+    make_price_volume_prediction_spec,
 )
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.low_level_fixtures import (
@@ -60,8 +60,8 @@ def _safe_output_bundle_contract(tmp_path: Path) -> dict[str, object]:
     root = tmp_path / "outputs" / output_id
     if not root.exists():
         write_prediction_outputs(
-            make_report_prediction_output_frame(),
-            spec=make_report_prediction_spec(),
+            make_price_volume_prediction_output_frame(),
+            spec=make_price_volume_prediction_spec(),
             output_spec=output_spec,
             layout=StorageLayout(project_root=tmp_path),
         )

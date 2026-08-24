@@ -40,7 +40,7 @@ from tests.artifacts.output_edge_fixtures import (
     make_output_edge_prediction_spec,
     make_output_edge_report_spec,
 )
-from tests.helpers.report_output_frames import (
+from tests.helpers.output_frames import (
     make_artifact_prediction_output_frame,
 )
 from tests.helpers.runtime_resources import capture_test_policy

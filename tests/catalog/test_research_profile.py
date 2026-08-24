@@ -112,18 +112,18 @@ def test_a_share_profile_materializes_exact_processed_dependency_source_window(
     assert "trading_calendar" in result.artifact_roots
 
     calls.clear()
-    legacy_result = profile.materialize_interim_data(
+    implicit_result = profile.materialize_interim_data(
         StorageLayout(project_root=tmp_path),
         tmp_path / "raw",
         "2014-01-02",
         "2014-01-03",
     )
 
-    legacy_policy = calls[0]["resource_policy"]
-    assert legacy_policy is not None
-    assert all(call["resource_policy"] is legacy_policy for call in calls)
-    assert legacy_policy is not policy
-    assert "trading_calendar" in legacy_result.artifact_roots
+    implicit_policy = calls[0]["resource_policy"]
+    assert implicit_policy is not None
+    assert all(call["resource_policy"] is implicit_policy for call in calls)
+    assert implicit_policy is not policy
+    assert "trading_calendar" in implicit_result.artifact_roots
 
 
 @pytest.mark.parametrize("profile_id", (None, "crypto_binance_1m"))

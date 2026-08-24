@@ -7,7 +7,7 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.research.evaluations import engine as evaluation_engine
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from tests.helpers.report_output_frames import make_artifact_signal_spec
+from tests.helpers.output_frames import make_artifact_signal_spec
 from tests.helpers.runtime_resources import capture_test_policy
 
 
