@@ -1046,50 +1046,6 @@ def test_low_level_fixture_requires_explicit_primary_key(tmp_path: Path) -> None
         )
 
 
-def test_exact_key_index_rejects_sub_page_cache_budget(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="invalid_exact_key_sqlite_cache_budget"):
-        ExactPrimaryKeyIndex(
-            primary_key=("asset_id",),
-            timestamp_columns=(),
-            scratch_parent=tmp_path,
-            sqlite_cache_bytes=512,
-        )
-
-
-def test_exact_key_index_sqlite_page_fits_declared_cache_budget(
-    tmp_path: Path,
-) -> None:
-    cache_bytes = 1024
-
-    with ExactPrimaryKeyIndex(
-        primary_key=("asset_id",),
-        timestamp_columns=(),
-        scratch_parent=tmp_path,
-        sqlite_cache_bytes=cache_bytes,
-    ) as index:
-        assert index._connection is not None
-        page_size = int(index._connection.execute("PRAGMA page_size").fetchone()[0])
-
-    assert page_size <= cache_bytes
-
-
-@pytest.mark.parametrize(
-    "cache_bytes",
-    (True, 1024.0, 8 * 1024 * 1024 + 1),
-)
-def test_exact_key_index_rejects_nonexact_or_oversized_cache_budget(
-    tmp_path: Path,
-    cache_bytes: object,
-) -> None:
-    with pytest.raises(ValueError, match="invalid_exact_key_sqlite_cache_budget"):
-        ExactPrimaryKeyIndex(
-            primary_key=("asset_id",),
-            timestamp_columns=(),
-            scratch_parent=tmp_path,
-            sqlite_cache_bytes=cache_bytes,  # type: ignore[arg-type]
-        )
-
-
 def test_exact_key_index_stores_primary_keys_once_and_category_values_only(
     tmp_path: Path,
 ) -> None:
@@ -1097,7 +1053,6 @@ def test_exact_key_index_stores_primary_keys_once_and_category_values_only(
         primary_key=("asset_id",),
         timestamp_columns=(),
         scratch_parent=tmp_path,
-        sqlite_cache_bytes=8 * 1024 * 1024,
     ) as index:
         index.add_table(pa.table({"asset_id": ["a", "b"]}))
         assert index._connection is not None
@@ -1169,16 +1124,16 @@ def test_exact_key_index_compares_persisted_row_values(
 ) -> None:
     left = pa.table(
         {
-            "asset_id": ["a", "b"],
-            "value": [1.0, None],
-            "nested": [[1, 2], [3]],
+            "asset_id": ["a", "b", "d"],
+            "value": [1.0, None, None],
+            "nested": [[1, 2], [3], [4]],
         }
     )
     right = pa.table(
         {
-            "asset_id": ["b", "c"],
-            "value": [None, float("inf")],
-            "nested": [[3], [4]],
+            "asset_id": ["b", "c", "d"],
+            "value": [2.0, float("inf"), None],
+            "nested": [[3], [4], [4]],
         }
     )
 
@@ -1208,7 +1163,7 @@ def test_exact_key_index_compares_persisted_row_values(
         assert index.comparison_counts(
             expected_namespace="left",
             actual_namespace="right",
-        ) == (1, 1, 0)
+        ) == (1, 1, 1)
         map_type = pa.map_(pa.string(), pa.int64())
         index.add_comparison_table(
             pa.table(

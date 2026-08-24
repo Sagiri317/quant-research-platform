@@ -539,7 +539,7 @@ def test_prediction_model_reservation_precedes_writer_startup(
         explicit_cap_bytes=8 * 1024 * 1024,
     )
     retained_model_bytes = 128 * 1024
-    writer_bytes = parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
+    writer_bytes = parquet_writers.EXACT_KEY_SQLITE_CACHE_BYTES
     original_enter = ExactPrimaryKeyIndex.__enter__
 
     def assert_model_reserved(index):  # noqa: ANN001, ANN202
@@ -678,7 +678,7 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
         def _observe(self, event: str) -> None:
             assert (
                 policy.used_memory_bytes
-                > parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
+                > parquet_writers.EXACT_KEY_SQLITE_CACHE_BYTES
             )
             events.append(event)
 

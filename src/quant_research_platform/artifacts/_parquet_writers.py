@@ -29,7 +29,7 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
 )
 from quant_research_platform.storage._dataset_key_tracking import (
-    EXACT_KEY_SQLITE_PAGE_BYTES,
+    EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
@@ -62,9 +62,7 @@ def write_parquet_chunks(
     require_unaliased_path(final_path.parent, error="invalid_output_write_path")
     require_free_disk_headroom(
         final_path.parent,
-        reserve_bytes=(
-            _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES + EXACT_KEY_SQLITE_PAGE_BYTES
-        ),
+        reserve_bytes=_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     )
     final_path.parent.mkdir(parents=True, exist_ok=True)
     require_unaliased_path(final_path, error="invalid_output_write_path")
@@ -86,7 +84,7 @@ def write_parquet_chunks(
     try:
         with _artifact_writer_fixed_reservation(
             writer_count=1,
-            index_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
+            index_bytes=EXACT_KEY_SQLITE_CACHE_BYTES,
         ):
             with closing_iterator(iter(frames)) as active_frames:
                 try:

@@ -27,9 +27,9 @@ from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
 )
 
-_MAX_SQLITE_CACHE_BYTES = 8 * 1024 * 1024
 _DISK_RESERVE_BATCH_BYTES = 1024**2
 EXACT_KEY_SQLITE_PAGE_BYTES = 1024
+EXACT_KEY_SQLITE_CACHE_BYTES = 1024**2
 _EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES = 8 * EXACT_KEY_SQLITE_PAGE_BYTES
 
 
@@ -65,20 +65,12 @@ class ExactPrimaryKeyIndex:
         timestamp_columns: Sequence[str],
         scratch_parent: Path,
         key_schema: pa.Schema | None = None,
-        sqlite_cache_bytes: int = EXACT_KEY_SQLITE_PAGE_BYTES,
     ) -> None:
         self._primary_key = tuple(str(column) for column in primary_key)
         self._timestamp_columns = frozenset(str(column) for column in timestamp_columns)
         self._scratch_parent = Path(scratch_parent)
         self._key_schema = key_schema
-        if (
-            isinstance(sqlite_cache_bytes, bool)
-            or not isinstance(sqlite_cache_bytes, int)
-            or sqlite_cache_bytes < 1024
-            or sqlite_cache_bytes > _MAX_SQLITE_CACHE_BYTES
-        ):
-            raise ValueError("invalid_exact_key_sqlite_cache_budget")
-        self._sqlite_cache_kib = sqlite_cache_bytes // 1024
+        self._sqlite_cache_kib = EXACT_KEY_SQLITE_CACHE_BYTES // 1024
         self._temporary_directory: Path | None = None
         self._connection: sqlite3.Connection | None = None
 
@@ -96,7 +88,7 @@ class ExactPrimaryKeyIndex:
     def retained_memory_bytes(self) -> int:
         """Return the Storage-controlled SQLite page-cache reserve."""
 
-        return self._sqlite_cache_kib * 1024
+        return EXACT_KEY_SQLITE_CACHE_BYTES
 
     def __enter__(self) -> ExactPrimaryKeyIndex:
         if self._connection is not None:
@@ -129,7 +121,7 @@ class ExactPrimaryKeyIndex:
                 error="invalid_storage_scratch_path",
             )
             connection = sqlite3.connect(self.database_path)
-            connection.execute("PRAGMA page_size=1024")
+            connection.execute(f"PRAGMA page_size={EXACT_KEY_SQLITE_PAGE_BYTES}")
             sqlite_page_limit = (
                 _EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES // EXACT_KEY_SQLITE_PAGE_BYTES
             )
@@ -677,18 +669,18 @@ class ExactPrimaryKeyIndex:
         if connection is None:
             raise RuntimeError("exact_primary_key_index_not_open")
         missing = connection.execute(
-            "SELECT COUNT(*) FROM exact_keys AS expected "
-            "WHERE expected.namespace = ? AND NOT EXISTS ("
-            "SELECT 1 FROM exact_keys AS actual "
-            "WHERE actual.namespace = ? AND actual.payload = expected.payload"
+            "SELECT COUNT(*) FROM ("
+            "SELECT payload FROM exact_keys WHERE namespace = ? "
+            "EXCEPT "
+            "SELECT payload FROM exact_keys WHERE namespace = ?"
             ")",
             (expected_namespace, actual_namespace),
         ).fetchone()
         extra = connection.execute(
-            "SELECT COUNT(*) FROM exact_keys AS actual "
-            "WHERE actual.namespace = ? AND NOT EXISTS ("
-            "SELECT 1 FROM exact_keys AS expected "
-            "WHERE expected.namespace = ? AND expected.payload = actual.payload"
+            "SELECT COUNT(*) FROM ("
+            "SELECT payload FROM exact_keys WHERE namespace = ? "
+            "EXCEPT "
+            "SELECT payload FROM exact_keys WHERE namespace = ?"
             ")",
             (actual_namespace, expected_namespace),
         ).fetchone()
@@ -708,15 +700,18 @@ class ExactPrimaryKeyIndex:
             expected_namespace=expected_namespace,
             actual_namespace=actual_namespace,
         )
-        changed = connection.execute(
-            "SELECT COUNT(*) FROM exact_keys AS expected "
-            "JOIN exact_keys AS actual ON actual.payload = expected.payload "
-            "WHERE expected.namespace = ? AND actual.namespace = ? "
-            "AND expected.value != actual.value",
+        pair_difference = connection.execute(
+            "SELECT COUNT(*) FROM ("
+            "SELECT payload, value FROM exact_keys WHERE namespace = ? "
+            "EXCEPT "
+            "SELECT payload, value FROM exact_keys WHERE namespace = ?"
+            ")",
             (expected_namespace, actual_namespace),
         ).fetchone()
-        assert changed is not None
-        return missing_count, extra_count, int(changed[0])
+        assert pair_difference is not None
+        changed_count = int(pair_difference[0]) - missing_count
+        assert changed_count >= 0
+        return missing_count, extra_count, changed_count
 
     def _payload_rows(
         self,

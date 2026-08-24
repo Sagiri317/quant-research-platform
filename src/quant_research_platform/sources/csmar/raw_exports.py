@@ -1061,11 +1061,18 @@ def dataset_files_with_identity_by_id(
         policy = bound_policy or current_runtime_resource_policy()
         with runtime_resource_policy_scope(policy) as policy:
             with _raw_export_path_session(root) as (paths, verify_root):
-                with ExactPrimaryKeyIndex(
+                index = ExactPrimaryKeyIndex(
                     primary_key=("dataset_path",),
                     timestamp_columns=(),
                     scratch_parent=root.parent,
-                ) as index:
+                )
+                with (
+                    policy.lease(
+                        "source.csmar.raw.identity.index",
+                        index.retained_memory_bytes,
+                    ),
+                    index,
+                ):
                     files = _iter_indexed_raw_export_files(
                         root,
                         paths=paths,

@@ -2793,25 +2793,6 @@ def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
     )
 
 
-def test_exact_key_index_honors_configured_sqlite_cache_budget(
-    tmp_path: Path,
-) -> None:
-    module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
-    )
-    with module.ExactPrimaryKeyIndex(
-        primary_key=("key",),
-        timestamp_columns=(),
-        scratch_parent=tmp_path,
-        sqlite_cache_bytes=12 * 1024,
-    ) as index:
-        assert index._connection is not None
-        cache_size = int(index._connection.execute("PRAGMA cache_size").fetchone()[0])
-        assert index.retained_memory_bytes == 12 * 1024
-
-    assert cache_size == -12
-
-
 def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
     tmp_path: Path,
 ) -> None:
@@ -9378,7 +9359,7 @@ def test_inspection_rejects_output_overlap_after_partition_traversal(
         retained_lease = policy.lease(
             "test.inspection.retained",
             policy.memory_budget_bytes
-            - dataset_inspection.EXACT_KEY_SQLITE_PAGE_BYTES
+            - dataset_inspection.EXACT_KEY_SQLITE_CACHE_BYTES
             - accumulated_state_bytes
             - 256,
         )
@@ -9439,7 +9420,7 @@ def test_inspection_admits_result_before_result_construction(
     assert after_runtime[0] > before_runtime[0]
     assert (
         after_runtime[0] - before_runtime[0]
-        >= dataset_inspection.EXACT_KEY_SQLITE_PAGE_BYTES
+        >= dataset_inspection.EXACT_KEY_SQLITE_CACHE_BYTES
     )
     assert at_construction[0] == after_runtime[0]
     assert policy.used_memory_bytes == 0

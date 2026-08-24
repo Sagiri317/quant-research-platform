@@ -16,7 +16,7 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._dataset_key_tracking import (
-    EXACT_KEY_SQLITE_PAGE_BYTES,
+    EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_observation import (
@@ -190,7 +190,7 @@ def _inspection_operation_bound(context: DatasetSession) -> int:
         )
         + 4096
     )
-    return EXACT_KEY_SQLITE_PAGE_BYTES + workspace_bound + result_bound
+    return EXACT_KEY_SQLITE_CACHE_BYTES + workspace_bound + result_bound
 
 
 def _inspection_result_bound(
@@ -299,7 +299,6 @@ def _inspection_runtime_metadata(
         timestamp_columns=timestamp_columns,
         scratch_parent=context.root.parent,
         key_schema=dataset_primary_key_schema(context, primary_key),
-        sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
     ) as key_index:
         observer = DatasetSummaryObserver(
             primary_key=primary_key,

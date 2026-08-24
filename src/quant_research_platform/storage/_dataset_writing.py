@@ -42,7 +42,7 @@ from quant_research_platform.storage._dataset_inventory import (
     DatasetSessionInventory,
 )
 from quant_research_platform.storage._dataset_key_tracking import (
-    EXACT_KEY_SQLITE_PAGE_BYTES,
+    EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_observation import (
@@ -96,7 +96,7 @@ _TIMESTAMP_PREPARATION_BYTES_PER_ROW = 256
 _ARROW_CELL_OVERHEAD_BYTES = 9
 _ARROW_FRAME_FIXED_BYTES = 4 * 1024
 _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES = (
-    EXACT_KEY_SQLITE_PAGE_BYTES + DATASET_INVENTORY_RESERVE_BYTES
+    EXACT_KEY_SQLITE_CACHE_BYTES + DATASET_INVENTORY_RESERVE_BYTES
 )
 
 
@@ -523,7 +523,6 @@ def _write_dataset_body(
                     primary_key=spec.primary_key,
                     timestamp_columns=timestamp_columns,
                     scratch_parent=temp_root,
-                    sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
                 ) as key_tracker,
             ):
                 accumulator = _write_contents(

@@ -472,7 +472,6 @@ def test_chunk_writer_disk_preflight_happens_before_first_pull(
     def reject(_path: Path, *, reserve_bytes: int) -> int:
         assert reserve_bytes == (
             parquet_writers._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
-            + parquet_writers.EXACT_KEY_SQLITE_PAGE_BYTES
         )
         raise OSError("disk_preflight")
 

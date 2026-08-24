@@ -27,7 +27,7 @@ from quant_research_platform.storage._dataset_inspection import (
     _release_owned_value,
 )
 from quant_research_platform.storage._dataset_key_tracking import (
-    EXACT_KEY_SQLITE_PAGE_BYTES,
+    EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage._dataset_paths import require_artifact_root
@@ -294,13 +294,12 @@ def _exact_comparison_counts(
 ) -> dict[str, int]:
     with resource_policy.lease(
         "storage.dataset.comparison.index",
-        EXACT_KEY_SQLITE_PAGE_BYTES,
+        EXACT_KEY_SQLITE_CACHE_BYTES,
     ):
         with ExactPrimaryKeyIndex(
             primary_key=primary_key,
             timestamp_columns=(),
             scratch_parent=left_root.parent,
-            sqlite_cache_bytes=EXACT_KEY_SQLITE_PAGE_BYTES,
         ) as index:
             _index_dataset_rows(
                 left_root,
