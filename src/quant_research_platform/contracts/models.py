@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from numbers import Integral
 from types import MappingProxyType
 
+import numpy as np
 import psutil
 
 from quant_research_platform.contracts.filtering import (
@@ -134,6 +134,44 @@ def _model_smoke_hyperparameters(algorithm: str) -> dict[str, object]:
     return dict(_model_algorithm_facts(algorithm).smoke_hyperparameters)
 
 
+def _freeze_model_value(value: object) -> object:
+    if isinstance(value, np.generic):
+        return _freeze_model_value(value.item())
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: _freeze_model_value(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_model_value(item) for item in value)
+    return value
+
+
+def _thaw_model_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_model_value(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_model_value(item) for item in value]
+    return value
+
+
+def _freeze_model_hyperparameters(
+    values: Mapping[str, object],
+) -> Mapping[str, object]:
+    frozen = _freeze_model_value(values)
+    if not isinstance(frozen, Mapping):
+        raise TypeError("model hyperparameters must be a mapping")
+    return frozen
+
+
+def _thaw_model_hyperparameters(
+    values: Mapping[str, object],
+) -> dict[str, object]:
+    thawed = _thaw_model_value(values)
+    if type(thawed) is not dict:
+        raise TypeError("model hyperparameters must be a mapping")
+    return thawed
+
+
 def _resolved_model_hyperparameters_match(
     algorithm: str,
     hyperparameters: dict[str, object],
@@ -188,6 +226,7 @@ class ModelSpec:
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
+        hyperparameters = _freeze_model_hyperparameters(self.hyperparameters)
         if self.contract_version != "0.1":
             raise ValueError("unsupported_model_contract_version")
         if not isinstance(self.model_algorithm, str) or not self.model_algorithm:
@@ -227,8 +266,8 @@ class ModelSpec:
             raise TypeError("random_seed must be an integer or None")
         if (
             self.random_seed is not None
-            and "random_state" in self.hyperparameters
-            and self.hyperparameters["random_state"] != self.random_seed
+            and "random_state" in hyperparameters
+            and hyperparameters["random_state"] != self.random_seed
         ):
             raise ValueError("model_random_seed_conflicts_with_random_state")
         if not isinstance(self.purge_gap_steps, int) or isinstance(
@@ -244,24 +283,7 @@ class ModelSpec:
             raise TypeError("max_train_rows must be an integer or None")
         if self.max_train_rows is not None and self.max_train_rows <= 0:
             raise ValueError("max_train_rows_must_be_positive")
-        object.__setattr__(
-            self,
-            "hyperparameters",
-            MappingProxyType(
-                {
-                    key: (
-                        int(value)
-                        if (
-                            key != "n_jobs"
-                            and isinstance(value, Integral)
-                            and not isinstance(value, bool)
-                        )
-                        else value
-                    )
-                    for key, value in self.hyperparameters.items()
-                }
-            ),
-        )
+        object.__setattr__(self, "hyperparameters", hyperparameters)
 
     @property
     def input_columns(self) -> tuple[str, ...]:

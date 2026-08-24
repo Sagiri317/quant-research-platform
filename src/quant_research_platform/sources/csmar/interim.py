@@ -22,7 +22,10 @@ from quant_research_platform.contracts.data import (
     InterimDataSpec,
 )
 from quant_research_platform.contracts.ids import SourceId
-from quant_research_platform.contracts.validation import strict_string_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_string_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -467,8 +470,10 @@ def normalize_raw_frame(
         result = mapped
         for column in ("listing_date", "delisting_date", "status_change_date"):
             if column in result.columns:
-                result[column] = pd.to_datetime(result[column], errors="coerce").astype(
-                    "datetime64[ns]"
+                result[column] = _parse_optional_csmar_date(
+                    result[column],
+                    column,
+                    error_code="invalid_stock_master_date",
                 )
         status_change = (
             result["status_change_date"]
@@ -487,11 +492,20 @@ def normalize_raw_frame(
         if "index_class" not in result.columns and "index_category" in result.columns:
             result["index_class"] = result["index_category"]
         if "base_point" in result.columns:
-            base_point = pd.to_numeric(result["base_point"], errors="coerce")
+            base_point_text = result["base_point"].astype("string").str.strip()
+            base_point = strict_finite_numeric_series(
+                result["base_point"].mask(base_point_text.eq("")),
+                error="invalid_index_info_base_point",
+                allow_null=True,
+            )
             result["base_point"] = base_point.mask(base_point.eq(-9666))
         for column in ("base_date", "start_date"):
             if column in result.columns:
-                result[column] = _parse_optional_index_info_date(result[column], column)
+                result[column] = _parse_optional_csmar_date(
+                    result[column],
+                    column,
+                    error_code="invalid_index_info_date",
+                )
         result["timestamp"] = result["start_date"].combine_first(result["base_date"])
         if result["timestamp"].isna().any():
             raise ValueError("missing_index_info_effective_timestamp")
@@ -502,12 +516,17 @@ def normalize_raw_frame(
     raise ValueError(f"unsupported_csmar_data_id: {data_id}")
 
 
-def _parse_optional_index_info_date(series: pd.Series, column: str) -> pd.Series:
+def _parse_optional_csmar_date(
+    series: pd.Series,
+    column: str,
+    *,
+    error_code: str,
+) -> pd.Series:
     text = series.astype("string").str.strip()
     parsed = pd.to_datetime(text.mask(text.eq("")), errors="coerce")
     invalid = text.notna() & text.ne("") & parsed.isna()
     if bool(invalid.any()):
-        raise ValueError(f"invalid_index_info_date: {column}")
+        raise ValueError(f"{error_code}: {column}")
     return parsed.astype("datetime64[ns]")
 
 

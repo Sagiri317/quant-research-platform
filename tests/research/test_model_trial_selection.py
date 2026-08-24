@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -194,6 +195,82 @@ def test_ic_weighted_rank_ensemble_fails_when_defined_weights_are_zero() -> None
             input_columns=("factor", "feature"),
             label_column="label",
         )
+
+
+def test_ic_weighted_rank_ensemble_rejects_rank_roundoff_zero() -> None:
+    frame = pd.DataFrame(
+        {
+            "factor": range(7),
+            "label": [0, 3, 5, 6, 4, 2, 1],
+        }
+    )
+
+    with pytest.raises(ValueError, match="all_ensemble_correlations_zero"):
+        ICWeightedRankEnsemble.fit(
+            frame,
+            input_columns=("factor",),
+            label_column="label",
+        )
+
+
+def test_ic_weighted_rank_ensemble_handles_per_timestamp_rank_denominators() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-01"] * 3 + ["2024-01-02"] * 6
+            ),
+            "factor": [0, 1, 2, 0, 1, 2, 3, 4, 5],
+            "label": [1, 2, 3, 3, 4, 6, 5, 2, 1],
+        }
+    )
+
+    with pytest.raises(ValueError, match="all_ensemble_correlations_zero"):
+        ICWeightedRankEnsemble.fit(
+            frame,
+            input_columns=("factor",),
+            label_column="label",
+        )
+
+
+def test_ic_weighted_rank_ensemble_keeps_exact_nonzero_near_roundoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "factor": range(7),
+            "label": range(7),
+        }
+    )
+    monkeypatch.setattr(
+        "quant_research_platform.research.models.rank_ensemble._pearson_correlation_result",
+        lambda *_args: (float(np.finfo(np.float64).eps), None),
+    )
+
+    ensemble = ICWeightedRankEnsemble.fit(
+        frame,
+        input_columns=("factor",),
+        label_column="label",
+    )
+
+    assert ensemble.weights.tolist() == [1.0]
+
+
+def test_ic_weighted_rank_ensemble_preserves_genuine_nonzero_rank_signal() -> None:
+    frame = pd.DataFrame(
+        {
+            "factor": range(7),
+            "label": [0, 1, 2, 3, 4, 6, 5],
+        }
+    )
+
+    ensemble = ICWeightedRankEnsemble.fit(
+        frame,
+        input_columns=("factor",),
+        label_column="label",
+    )
+
+    assert ensemble.columns == ("factor",)
+    assert ensemble.weights[0] > 0.0
 
 
 def test_ic_weighted_rank_ensemble_excludes_only_undefined_inputs() -> None:

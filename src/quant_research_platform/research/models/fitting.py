@@ -17,7 +17,10 @@ import quant_research_platform.research.models.feature_importance as feature_imp
 import quant_research_platform.research.models.supervised as supervised
 import quant_research_platform.research.models.validation_split as validation_split
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import (
+    ModelSpec,
+    _thaw_model_hyperparameters,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
@@ -184,11 +187,11 @@ def model_metadata(
         "input_columns": list(spec.input_columns),
         "input_count": len(spec.input_columns),
         "label_column": spec.label_column,
-        "hyperparameters": dict(spec.hyperparameters),
+        "hyperparameters": _thaw_model_hyperparameters(spec.hyperparameters),
         "resolved_hyperparameters": (
             supervised.resolved_model_hyperparameters(spec)
             if resolved_hyperparameters is None
-            else resolved_hyperparameters
+            else _thaw_model_hyperparameters(resolved_hyperparameters)
         ),
         "random_seed": spec.random_seed,
         "max_train_rows": spec.max_train_rows,

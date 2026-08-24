@@ -2807,6 +2807,40 @@ def test_csmar_index_info_dirty_csv_and_bad_dates_fail_closed(
         )
 
 
+@pytest.mark.parametrize("base_point", (None, "", "-9666"))
+def test_csmar_index_info_allows_missing_and_sentinel_base_point(
+    base_point: object,
+) -> None:
+    raw = pd.DataFrame(
+        {
+            "Indexcd": ["000985"],
+            "Idxinfo01": ["benchmark"],
+            "Idxinfo11": ["2014-01-02"],
+            "Idxinfo02": ["2013-12-31"],
+            "Idxinfo03": [base_point],
+        }
+    )
+
+    normalized = interim.normalize_raw_frame(raw, "index_info")
+
+    assert pd.isna(normalized.loc[0, "base_point"])
+
+
+def test_csmar_index_info_invalid_base_point_fails_closed() -> None:
+    raw = pd.DataFrame(
+        {
+            "Indexcd": ["000985"],
+            "Idxinfo01": ["benchmark"],
+            "Idxinfo11": ["2014-01-02"],
+            "Idxinfo02": ["2013-12-31"],
+            "Idxinfo03": ["not-a-number"],
+        }
+    )
+
+    with pytest.raises(ValueError, match="invalid_index_info_base_point"):
+        interim.normalize_raw_frame(raw, "index_info")
+
+
 def test_csmar_daily_interim_normalization_uses_source_asset_id_only() -> None:
     normalized = interim.normalize_raw_frame(
         _market_bars_daily_raw_frame(),
@@ -3015,6 +3049,17 @@ def test_csmar_stock_master_missing_effective_dates_fails_closed() -> None:
 
     with pytest.raises(ValueError, match="missing_stock_master_effective_timestamp"):
         interim.normalize_raw_frame(raw, "stock_master")
+
+
+@pytest.mark.parametrize("column", ("DelistedDate", "Statdt"))
+def test_csmar_stock_master_invalid_optional_date_fails_closed(
+    column: str,
+) -> None:
+    raw = _stock_master_raw_row("normal", "I1", "2020-01-01")
+    raw[column] = "not-a-date"
+
+    with pytest.raises(ValueError, match="invalid_stock_master_date"):
+        interim.normalize_raw_frame(pd.DataFrame([raw]), "stock_master")
 
 
 def test_csmar_stock_master_dates_have_stable_cross_chunk_precision(

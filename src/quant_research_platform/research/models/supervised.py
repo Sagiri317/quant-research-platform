@@ -12,6 +12,7 @@ from quant_research_platform.contracts.models import (
     _model_algorithm_facts,
     _model_default_hyperparameters,
     _resolved_model_thread_count,
+    _thaw_model_hyperparameters,
 )
 from quant_research_platform.runtime.resources import current_runtime_resource_policy
 
@@ -54,7 +55,7 @@ def _build_estimator(spec: ModelSpec) -> object:
 
 def resolved_model_hyperparameters(spec: ModelSpec) -> dict[str, object]:
     params = _model_default_hyperparameters(spec.model_algorithm)
-    params.update(spec.hyperparameters)
+    params.update(_thaw_model_hyperparameters(spec.hyperparameters))
     if spec.model_algorithm in _PARALLEL_MODEL_ALGORITHMS:
         params["n_jobs"] = _resolved_model_thread_count(params.get("n_jobs"))
     return params

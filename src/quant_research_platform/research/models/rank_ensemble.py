@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -10,6 +11,8 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import (
     _pearson_correlation_result,
 )
+
+_RANK_ZERO_ROUNDOFF_LIMIT = np.finfo(np.float64).eps
 
 
 @dataclass(frozen=True)
@@ -65,6 +68,20 @@ class ICWeightedRankEnsemble:
                     input_values[valid],
                     label_values[valid],
                 )
+                if (
+                    corr is not None
+                    # Rank values are exact rationals; only near-roundoff
+                    # results pay for the exact covariance check below.
+                    and abs(corr)
+                    <= _RANK_ZERO_ROUNDOFF_LIMIT * max(1, int(valid.sum()))
+                    and _exact_rank_covariance_is_zero(
+                        input_values,
+                        label_values,
+                        valid,
+                        denominator_bound=2 * len(frame),
+                    )
+                ):
+                    corr = 0.0
             if corr is None:
                 continue
             defined_columns.append(column)
@@ -104,3 +121,34 @@ def _rank_series(frame: pd.DataFrame, column: str) -> pd.Series:
             pct=True,
         )
     return frame[column].rank(method="average", pct=True)
+
+
+def _exact_rank_covariance_is_zero(
+    left_values: np.ndarray,
+    right_values: np.ndarray,
+    valid: np.ndarray,
+    *,
+    denominator_bound: int,
+) -> bool:
+    count = 0
+    left_sum = Fraction(0)
+    right_sum = Fraction(0)
+    product_sum = Fraction(0)
+    # pct average rank = (integer or half-integer) / group_count, and every
+    # group_count is at most len(frame), so 2 * len(frame) bounds its reduced
+    # denominator. The loop retains only four sufficient statistics.
+    for left_value, right_value, is_valid in zip(
+        left_values,
+        right_values,
+        valid,
+        strict=True,
+    ):
+        if not is_valid:
+            continue
+        left = Fraction(float(left_value)).limit_denominator(denominator_bound)
+        right = Fraction(float(right_value)).limit_denominator(denominator_bound)
+        count += 1
+        left_sum += left
+        right_sum += right
+        product_sum += left * right
+    return count >= 2 and count * product_sum == left_sum * right_sum

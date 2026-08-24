@@ -14,6 +14,7 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
+    resolved_model_hyperparameters,
 )
 from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
@@ -180,6 +181,58 @@ def test_model_metadata_records_resolved_parameters_and_backend_version() -> Non
         "package": "sklearn",
         "version": pytest.importorskip("sklearn").__version__,
     }
+
+
+def test_model_spec_snapshots_nested_parameters_and_thaws_backend_payload() -> None:
+    nested_list = [np.int64(1), np.float64(0.5)]
+    nested_dict = {"values": nested_list}
+    spec = ModelSpec(
+        model_id="linear_nested_parameters",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        hyperparameters={"nested": nested_dict},
+    )
+    nested_list[0] = 99
+    nested_dict["values"] = ["changed"]
+
+    resolved = resolved_model_hyperparameters(spec)
+    assert resolved == {"nested": {"values": [1, 0.5]}}
+    assert spec.hyperparameters["nested"]["values"] == (1, 0.5)  # type: ignore[index]
+
+    metadata = model_fitting.model_metadata(
+        spec,
+        filter_metadata={
+            "filter_columns_used": [],
+            "filter_definition": "none",
+            "rows_input": 1,
+            "rows_after_filter_mode": 1,
+        },
+        row_counts={
+            "rows_after_input_label_dropna": 1,
+            "train_start": "2024-01-01",
+            "train_end": "2024-01-01",
+        },
+        coefficient_count=1,
+    )
+    assert metadata["hyperparameters"] == resolved
+    resolved["nested"]["values"][0] = 7  # type: ignore[index]
+    assert spec.hyperparameters["nested"]["values"] == (1, 0.5)  # type: ignore[index]
+
+    backend_spec = ModelSpec(
+        model_id="hist_nested_parameters",
+        model_algorithm="hist_gradient_boosting_regressor",
+        input_factor_columns=("factor",),
+        input_feature_columns=("feature",),
+        label_column="label",
+        hyperparameters={
+            "monotonic_cst": [1, -1],
+            "max_iter": np.int64(2),
+        },
+    )
+    estimator = build_estimator_from_model_spec(backend_spec)
+    assert list(estimator.monotonic_cst) == [1, -1]
+    assert type(resolved_model_hyperparameters(backend_spec)["monotonic_cst"]) is list
 
 
 def test_prediction_accepts_actual_bounded_parallel_model_threads() -> None:

@@ -739,7 +739,7 @@ def test_model_threads_are_bound_to_physical_cores(
         build_estimator_from_model_spec(too_many)
 
 
-def test_model_threads_reject_numpy_integral_request() -> None:
+def test_model_threads_canonicalize_numpy_integral_request() -> None:
     spec = ModelSpec(
         model_id="forest_numpy_thread_request",
         model_algorithm="random_forest_regressor",
@@ -749,8 +749,7 @@ def test_model_threads_reject_numpy_integral_request() -> None:
         max_train_rows=8,
     )
 
-    with pytest.raises(ValueError, match="invalid_model_thread_count"):
-        build_estimator_from_model_spec(spec)
+    assert build_estimator_from_model_spec(spec).n_jobs == 1
 
 
 def test_model_threads_adapt_to_live_planning_headroom(
