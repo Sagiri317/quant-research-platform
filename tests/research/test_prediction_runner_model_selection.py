@@ -21,7 +21,7 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research.models.trial_selection import (
-    evaluate_model_trial_metrics,
+    evaluate_model_trial_metrics_from_chunks,
 )
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
@@ -450,11 +450,19 @@ def test_model_selection_rejects_candidate_specific_non_finite_predictions(
     )
 
     with pytest.raises(ValueError, match="invalid_trial_metric_values"):
-        evaluate_model_trial_metrics(
-            validation,
+        evaluate_model_trial_metrics_from_chunks(
+            (
+                validation.assign(
+                    timestamp=pd.date_range(
+                        "2024-01-01", periods=len(validation), freq="D"
+                    ),
+                    asset_id="asset",
+                ),
+            ),
             model_id="candidate_model",
             label_column="label",
             prediction_column="prediction",
+            purge_gap_steps=0,
         )
 
 

@@ -157,7 +157,6 @@ def _iter_owned_interim_frames(
                         input_file,
                         batch_size=row_batch_size,
                         resource_policy=policy,
-                        validate_depth_payload=False,
                         expected_identity=expected_identity,
                     )
                 ) as raw_batches:

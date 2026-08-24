@@ -10,7 +10,6 @@ from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
 )
 from quant_research_platform.research.models.trial_selection import (
-    evaluate_model_trial_metrics,
     evaluate_model_trial_metrics_from_chunks,
     select_best_validation_trial,
     validate_trial_metric_columns,
@@ -100,12 +99,22 @@ def test_select_best_validation_trial_fails_closed_on_bad_inputs() -> None:
         )
 
 
-def test_evaluate_model_trial_metrics_marks_one_row_correlation_undefined() -> None:
-    metrics = evaluate_model_trial_metrics(
-        pd.DataFrame({"label": [1.0], "prediction": [1.0]}),
+def test_chunked_trial_metrics_marks_one_row_correlation_undefined() -> None:
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (
+            pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(["2024-01-01"]),
+                    "asset_id": ["asset"],
+                    "label": [1.0],
+                    "prediction": [1.0],
+                }
+            ),
+        ),
         model_id="single_row",
         label_column="label",
         prediction_column="prediction",
+        purge_gap_steps=0,
     )
 
     assert metrics["validation_rows"] == 1
@@ -116,17 +125,24 @@ def test_evaluate_model_trial_metrics_marks_one_row_correlation_undefined() -> N
     assert metrics["validation_mse"] == 0.0
 
 
-def test_evaluate_model_trial_metrics_marks_constant_correlation_undefined() -> None:
-    metrics = evaluate_model_trial_metrics(
-        pd.DataFrame(
-            {
-                "label": [1.0, 1.0, 1.0],
-                "prediction": [2.0, 2.0, 2.0],
-            }
+def test_chunked_trial_metrics_marks_constant_correlation_undefined() -> None:
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (
+            pd.DataFrame(
+                {
+                    "timestamp": pd.date_range(
+                        "2024-01-01", periods=3, freq="D"
+                    ),
+                    "asset_id": ["asset"] * 3,
+                    "label": [1.0, 1.0, 1.0],
+                    "prediction": [2.0, 2.0, 2.0],
+                }
+            ),
         ),
         model_id="constant_window",
         label_column="label",
         prediction_column="prediction",
+        purge_gap_steps=0,
     )
 
     assert metrics["validation_ic"] is None
@@ -301,70 +317,6 @@ def test_ic_weighted_rank_ensemble_excludes_only_undefined_inputs() -> None:
     )
 
 
-def test_evaluate_model_trial_metrics_does_not_recharge_borrowed_input() -> None:
-    frame = pd.DataFrame(
-        {
-            "asset_id": ["asset-" + "x" * 5000] * 3,
-            "label": [1.0, 2.0, 3.0],
-            "prediction": [1.0, 2.5, 2.5],
-        }
-    )
-    selected_bytes = _selected_frame_payload_bytes(
-        frame,
-        ["label", "prediction"],
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=2 * 1024**2,
-        explicit_cap_bytes=(
-            2 * selected_bytes + len(frame) * 8 * 6 + len(frame) * 3 + 1024
-        ),
-    )
-
-    with runtime_resource_policy_scope(policy):
-        metrics = evaluate_model_trial_metrics(
-            frame,
-            model_id="borrowed_input",
-            label_column="label",
-            prediction_column="prediction",
-        )
-
-    assert metrics["validation_rows"] == 3
-    assert policy.used_memory_bytes == 0
-
-
-def test_evaluate_model_trial_metrics_rejects_before_new_selection_copy() -> None:
-    frame = pd.DataFrame(
-        {
-            "label": [1.0, 2.0, 3.0],
-            "prediction": [1.0, 2.5, 2.5],
-        }
-    )
-    selected_bytes = _selected_frame_payload_bytes(
-        frame,
-        ["label", "prediction"],
-    )
-    requested = (
-        selected_bytes * 2
-        + len(frame) * 8 * 6
-        + len(frame) * 3
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=2 * 1024**2,
-        explicit_cap_bytes=requested - 1,
-    )
-
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            evaluate_model_trial_metrics(
-                frame,
-                model_id="insufficient_selection_work",
-                label_column="label",
-                prediction_column="prediction",
-            )
-
-    assert policy.used_memory_bytes == 0
-
-
 def test_chunked_trial_metrics_match_exact_purge_and_tie_oracle() -> None:
     dates = pd.date_range("2024-01-01", periods=6, freq="D")
     frame = pd.DataFrame(
@@ -374,13 +326,6 @@ def test_chunked_trial_metrics_match_exact_purge_and_tie_oracle() -> None:
             "label": [1.0, 2.0, 2.0, 4.0, 5.0, 5.0, 1.0, 1.0, 3.0, 3.0],
             "prediction": [1.0, 1.0, 2.0, 3.0, 5.0, 4.0, 1.0, 2.0, 2.0, 4.0],
         }
-    )
-    expected = frame.iloc[[0, 1, 2, 3, 6, 7]].reset_index(drop=True)
-    oracle = evaluate_model_trial_metrics(
-        expected,
-        model_id="oracle",
-        label_column="label",
-        prediction_column="prediction",
     )
     chunks = (frame.iloc[:5].copy(), frame.iloc[5:].copy())
 
@@ -393,15 +338,12 @@ def test_chunked_trial_metrics_match_exact_purge_and_tie_oracle() -> None:
     )
 
     assert metrics["model_id"] == "streamed"
-    assert metrics["validation_rows"] == oracle["validation_rows"] == 6
-    for key in (
-        "validation_ic",
-        "validation_rankic",
-        "validation_mse",
-    ):
-        assert metrics[key] == pytest.approx(oracle[key])
-    assert metrics["validation_ic_reason"] == oracle["validation_ic_reason"]
-    assert metrics["validation_rankic_reason"] == oracle["validation_rankic_reason"]
+    assert metrics["validation_rows"] == 6
+    assert metrics["validation_ic"] == pytest.approx(0.7682733253465358)
+    assert metrics["validation_rankic"] == pytest.approx(0.5833333333333334)
+    assert metrics["validation_mse"] == pytest.approx(0.5)
+    assert metrics["validation_ic_reason"] is None
+    assert metrics["validation_rankic_reason"] is None
 
 
 def test_chunked_trial_metrics_complete_when_aggregate_exceeds_target() -> None:

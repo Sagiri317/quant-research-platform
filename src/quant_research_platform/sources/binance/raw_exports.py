@@ -14,11 +14,8 @@ from typing import Any
 import pandas as pd
 
 from quant_research_platform.runtime.resources import (
-    MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
-    current_runtime_resource_policy,
-    runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.validation import (
     first_present,
@@ -112,97 +109,11 @@ def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
                 raise
 
 
-def iter_raw_envelopes(
-    path: Path,
-    *,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Iterator[dict[str, Any]]:
-    raw_path = Path(path)
-    expected_identity = _capture_raw_file_identity(raw_path)
-    bound_policy = resource_policy
-
-    def activate() -> Iterator[dict[str, Any]]:
-        policy = bound_policy or current_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy) as policy:
-            chunks = _iter_raw_envelope_batches(
-                raw_path,
-                batch_size=1,
-                resource_policy=policy,
-                validate_depth_payload=True,
-                expected_identity=expected_identity,
-            )
-            lease: MemoryLease | None = None
-            try:
-                try:
-                    bound = next(chunks)
-                except StopIteration:
-                    return
-                while True:
-                    lease = policy.lease("source.binance.raw", bound)
-                    try:
-                        owned = chunks.send(lease)
-                    except StopIteration:
-                        lease.close()
-                        lease = None
-                        return
-                    if not isinstance(owned, _OwnedValue):
-                        raise TypeError("invalid_binance_owned_frame")
-                    if owned.lease is not lease:
-                        raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-                    lease.transfer("source.binance.raw.consumer")
-                    yield from owned.value
-                    del owned
-                    try:
-                        bound = chunks.send(None)
-                    except StopIteration:
-                        lease.close()
-                        lease = None
-                        return
-                    lease.close()
-                    lease = None
-            finally:
-                primary = sys.exception()
-                first_failure: BaseException | None = None
-                close = getattr(chunks, "close", None)
-                if close is not None:
-                    try:
-                        close()
-                    except BaseException as cleanup_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "Binance raw chunks close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        else:
-                            first_failure = cleanup_error
-                if lease is not None:
-                    try:
-                        lease.close()
-                    except BaseException as cleanup_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "Binance raw lease close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        elif first_failure is None:
-                            first_failure = cleanup_error
-                        else:
-                            first_failure.add_note(
-                                "Binance raw lease close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                if first_failure is not None:
-                    raise first_failure
-
-    return activate()
-
-
 def _iter_raw_envelope_batches(
     path: Path,
     *,
     batch_size: int,
     resource_policy: RuntimeResourcePolicy,
-    validate_depth_payload: bool = True,
     expected_identity: DatasetFileIdentity | None = None,
 ) -> Iterator[object]:
     raw_path = Path(path)
@@ -283,7 +194,6 @@ def _iter_raw_envelope_batches(
                             raw_path,
                             line_number=line_number,
                         ),
-                        validate_depth_payload=validate_depth_payload,
                     )
                 )
                 del raw
@@ -490,8 +400,6 @@ def _loads_json(text: str, path: Path, *, line_number: int | None = None) -> Any
 
 def _validate_envelope(
     envelope: Any,
-    *,
-    validate_depth_payload: bool = True,
 ) -> dict[str, Any]:
     if not isinstance(envelope, dict):
         raise ValueError("binance_raw_envelope_required")
@@ -532,8 +440,6 @@ def _validate_envelope(
             raise ValueError("unexpected_binance_interval")
         if not isinstance(payload, dict):
             raise ValueError("invalid_binance_depth_payload")
-        if validate_depth_payload:
-            _validate_depth_payload(payload)
     return envelope
 
 
@@ -607,46 +513,3 @@ def _validate_agg_trade_payload(payload: dict[str, Any]) -> None:
     )
     if aggregate < 0 or first < 0 or last < first:
         raise ValueError("invalid_binance_agg_trade_id_range")
-
-
-def _validate_depth_payload(payload: dict[str, Any]) -> None:
-    bids = _validate_depth_side(
-        payload.get("bids", ()),
-        side="bid",
-        error="invalid_binance_depth_bid",
-    )
-    asks = _validate_depth_side(
-        payload.get("asks", ()),
-        side="ask",
-        error="invalid_binance_depth_ask",
-    )
-    if bids is not None and asks is not None and bids >= asks:
-        raise ValueError("crossed_binance_depth_book")
-
-
-def _validate_depth_side(
-    raw_levels: object,
-    *,
-    side: str,
-    error: str,
-) -> float | None:
-    if raw_levels is None:
-        return None
-    if side not in {"bid", "ask"} or not isinstance(raw_levels, list | tuple):
-        raise ValueError(error)
-    first_price: float | None = None
-    previous_price: float | None = None
-    for raw_level in raw_levels:
-        if not isinstance(raw_level, list | tuple) or len(raw_level) != 2:
-            raise ValueError(error)
-        price = strict_positive_float(raw_level[0], error=error)
-        strict_non_negative_float(raw_level[1], error=error)
-        if previous_price is not None and (
-            (side == "bid" and price >= previous_price)
-            or (side == "ask" and price <= previous_price)
-        ):
-            raise ValueError(error)
-        if first_price is None:
-            first_price = price
-        previous_price = price
-    return first_price

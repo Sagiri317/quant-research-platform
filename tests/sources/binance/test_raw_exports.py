@@ -8,15 +8,65 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.sources.binance.raw_exports as raw_exports
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.runtime.resources import (
+    _OwnedValue,
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.binance import ids
 from quant_research_platform.sources.binance.interim import materialize_interim_data
-from quant_research_platform.sources.binance.raw_exports import iter_raw_envelopes
 from quant_research_platform.sources.binance.validation import (
     strict_millisecond_timestamp,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def _iter_test_raw_envelopes(
+    path: Path,
+    *,
+    resource_policy=None,  # noqa: ANN001
+):
+    raw_path = Path(path)
+    expected_identity = raw_exports._capture_raw_file_identity(raw_path)
+
+    def activate():  # noqa: ANN202
+        policy = resource_policy or current_runtime_resource_policy()
+        with runtime_resource_policy_scope(policy) as policy:
+            with closing_iterator(
+                raw_exports._iter_raw_envelope_batches(
+                    raw_path,
+                    batch_size=1,
+                    resource_policy=policy,
+                    expected_identity=expected_identity,
+                )
+            ) as batches:
+                try:
+                    bound = next(batches)
+                except StopIteration:
+                    return
+                while True:
+                    with policy.lease("tests.binance.raw", bound) as lease:
+                        try:
+                            owned = batches.send(lease)
+                        except StopIteration:
+                            return
+                        if not isinstance(owned, _OwnedValue):
+                            raise TypeError("invalid_binance_owned_frame")
+                        if owned.lease is not lease:
+                            raise RuntimeError(
+                                "runtime_memory_lease_transfer_mismatch"
+                            )
+                        lease.transfer("tests.binance.raw.consumer")
+                        yield from owned.value
+                        del owned
+                        try:
+                            bound = batches.send(None)
+                        except StopIteration:
+                            return
+
+    return activate()
 
 
 def test_binance_materializer_rejects_file_alias_before_publication(
@@ -44,7 +94,7 @@ def test_binance_materializer_rejects_file_alias_before_publication(
     ).exists()
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
-        tuple(iter_raw_envelopes(alias_file))
+        tuple(_iter_test_raw_envelopes(alias_file))
 
 
 def test_binance_materializer_rejects_directory_alias_before_publication(
@@ -80,7 +130,7 @@ def test_binance_raw_reader_rejects_replacement_before_open(tmp_path: Path) -> N
     _write_jsonl(path, _envelope(data_kind="klines"))
     _write_jsonl(replacement, _envelope(data_kind="klines"))
 
-    reader = iter_raw_envelopes(path)
+    reader = _iter_test_raw_envelopes(path)
     os.replace(replacement, path)
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
@@ -107,7 +157,7 @@ def test_binance_raw_reader_maps_capture_to_open_disappearance(
     monkeypatch.setattr(Path, "open", disappear_before_open)
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_reader_rejects_open_handle_mutation_during_consumption(
@@ -131,7 +181,7 @@ def test_binance_raw_reader_rejects_open_handle_mutation_during_consumption(
     monkeypatch.setattr(raw_exports, "_next_record_length", replace_before_read)
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_reader_rejects_open_handle_mutation_after_output(
@@ -141,7 +191,7 @@ def test_binance_raw_reader_rejects_open_handle_mutation_after_output(
     replacement = tmp_path / "replacement.jsonl"
     _write_jsonl(path, _envelope(data_kind="klines"))
     _write_jsonl(replacement, _envelope(data_kind="klines"))
-    reader = iter_raw_envelopes(path)
+    reader = _iter_test_raw_envelopes(path)
 
     assert next(reader)["data_kind"] == "klines"
     path.write_text(replacement.read_text(encoding="utf-8"), encoding="utf-8")
@@ -174,7 +224,7 @@ def test_binance_raw_reader_rejects_open_handle_identity_change(
     )
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_reader_preserves_primary_when_final_identity_fails(
@@ -194,7 +244,7 @@ def test_binance_raw_reader_preserves_primary_when_final_identity_fails(
     monkeypatch.setattr(raw_exports, "_validate_envelope", fail_after_mutation)
 
     with pytest.raises(KeyboardInterrupt) as caught:
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
     assert caught.value is primary
     assert any("ValueError" in note for note in primary.__notes__)
@@ -204,7 +254,7 @@ def test_binance_raw_exports_reads_canonical_envelopes(tmp_path: Path) -> None:
     path = tmp_path / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl"
     _write_jsonl(path, _envelope(data_kind="klines"))
 
-    rows = tuple(iter_raw_envelopes(path))
+    rows = tuple(_iter_test_raw_envelopes(path))
 
     assert len(rows) == 1
     assert rows[0]["source"] == "binance"
@@ -237,7 +287,7 @@ def test_binance_raw_export_rejects_oversized_record_before_json_decode(
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            tuple(raw_exports.iter_raw_envelopes(path, resource_policy=policy))
+            tuple(_iter_test_raw_envelopes(path, resource_policy=policy))
 
 
 @pytest.mark.parametrize(
@@ -256,7 +306,7 @@ def test_binance_raw_exports_rejects_bare_payloads(
     path.write_text(json.dumps(bare_payload) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="binance_raw_envelope_required"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_rows_reject_missing_empty_and_malformed_files(
@@ -269,11 +319,11 @@ def test_binance_raw_rows_reject_missing_empty_and_malformed_files(
     malformed.write_text("{bad json}\n", encoding="utf-8")
 
     with pytest.raises(FileNotFoundError):
-        tuple(iter_raw_envelopes(missing))
+        tuple(_iter_test_raw_envelopes(missing))
     with pytest.raises(ValueError, match="empty_binance_raw_file"):
-        tuple(iter_raw_envelopes(empty))
+        tuple(_iter_test_raw_envelopes(empty))
     with pytest.raises(ValueError, match="malformed_binance_raw_row"):
-        tuple(iter_raw_envelopes(malformed))
+        tuple(_iter_test_raw_envelopes(malformed))
 
 
 @pytest.mark.parametrize(
@@ -295,7 +345,7 @@ def test_binance_raw_exports_validates_envelope_contract(
     path.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=error):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 @pytest.mark.parametrize(
@@ -338,7 +388,7 @@ def test_binance_raw_exports_rejects_invalid_envelope_fields(
     path.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=error):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_exports_accepts_kline_payload_with_extra_fields(
@@ -349,7 +399,7 @@ def test_binance_raw_exports_accepts_kline_payload_with_extra_fields(
     envelope["payload"] = [*envelope["payload"], "extra"]
     path.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
 
-    rows = tuple(iter_raw_envelopes(path))
+    rows = tuple(_iter_test_raw_envelopes(path))
 
     assert rows[0]["payload"][-1] == "extra"
 
@@ -362,8 +412,8 @@ def test_binance_raw_exports_does_not_require_interval_for_trades_or_depth(
     _write_jsonl(trade_path, _envelope(data_kind="agg_trades"))
     _write_jsonl(depth_path, _envelope(data_kind="depth"))
 
-    assert tuple(iter_raw_envelopes(trade_path))[0]["data_kind"] == "agg_trades"
-    assert tuple(iter_raw_envelopes(depth_path))[0]["data_kind"] == "depth"
+    assert tuple(_iter_test_raw_envelopes(trade_path))[0]["data_kind"] == "agg_trades"
+    assert tuple(_iter_test_raw_envelopes(depth_path))[0]["data_kind"] == "depth"
 
 
 def test_binance_raw_exports_rejects_invalid_market_payload_values(
@@ -376,26 +426,14 @@ def test_binance_raw_exports_rejects_invalid_market_payload_values(
     kline["payload"] = payload
     _write_jsonl(kline_path, kline)
     with pytest.raises(ValueError, match="invalid_binance_kline_ohlc"):
-        tuple(iter_raw_envelopes(kline_path))
+        tuple(_iter_test_raw_envelopes(kline_path))
 
     trade_path = tmp_path / "bad-trade.jsonl"
     trade = _envelope(data_kind="agg_trades")
     trade["payload"] = {**trade["payload"], "f": 12, "l": 11}
     _write_jsonl(trade_path, trade)
     with pytest.raises(ValueError, match="invalid_binance_agg_trade_id_range"):
-        tuple(iter_raw_envelopes(trade_path))
-
-    depth_path = tmp_path / "bad-depth.jsonl"
-    depth = _envelope(data_kind="depth")
-    depth["payload"] = {
-        "lastUpdateId": 1,
-        "bids": [["101.0", "1.0"]],
-        "asks": [["100.0", "1.0"]],
-    }
-    _write_jsonl(depth_path, depth)
-    with pytest.raises(ValueError, match="crossed_binance_depth_book"):
-        tuple(iter_raw_envelopes(depth_path))
-
+        tuple(_iter_test_raw_envelopes(trade_path))
 
 def test_binance_raw_exports_rejects_taker_buy_volume_above_volume(
     tmp_path: Path,
@@ -408,7 +446,7 @@ def test_binance_raw_exports_rejects_taker_buy_volume_above_volume(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_volume"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_exports_rejects_taker_buy_quote_volume_above_quote_volume(
@@ -422,7 +460,7 @@ def test_binance_raw_exports_rejects_taker_buy_quote_volume_above_quote_volume(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_volume"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 @pytest.mark.parametrize("bad_trade_count", [True, 7.5, "7.0"])
@@ -438,7 +476,7 @@ def test_binance_raw_exports_rejects_bool_or_fractional_integer_payload_values(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_trade_count"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 @pytest.mark.parametrize("bad_value", ["NaN", "Infinity", "-Infinity"])
@@ -454,7 +492,7 @@ def test_binance_raw_exports_rejects_nan_or_infinite_numeric_payload_values(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_volume"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_exports_rejects_unhashable_data_kind_with_stable_error(
@@ -466,7 +504,7 @@ def test_binance_raw_exports_rejects_unhashable_data_kind_with_stable_error(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="unsupported_binance_data_kind"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 @pytest.mark.parametrize("bad_symbol", ["btcusdt", "BTC-USDT"])
@@ -480,7 +518,7 @@ def test_binance_raw_exports_rejects_non_canonical_symbols(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_raw_envelope_symbol"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 @pytest.mark.parametrize("bad_time", [True, 1783296000000.5, "1783296000000.0"])
@@ -496,7 +534,7 @@ def test_binance_raw_exports_rejects_invalid_millisecond_timestamps(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_open_time"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 @pytest.mark.parametrize("milliseconds", [0, 1783296000000])
@@ -543,7 +581,7 @@ def test_binance_raw_kline_maps_ns_range_failure_to_owner_error(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_open_time"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_aggregate_trade_maps_ns_range_failure_to_owner_error(
@@ -558,7 +596,7 @@ def test_binance_raw_aggregate_trade_maps_ns_range_failure_to_owner_error(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_agg_trade_timestamp"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_exports_rejects_kline_close_time_before_open_time(
@@ -572,7 +610,7 @@ def test_binance_raw_exports_rejects_kline_close_time_before_open_time(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_time_order"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_exports_rejects_non_minute_aligned_kline_open_time(
@@ -587,7 +625,7 @@ def test_binance_raw_exports_rejects_non_minute_aligned_kline_open_time(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_open_time_alignment"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_exports_rejects_wrong_one_minute_kline_close_time(
@@ -601,7 +639,7 @@ def test_binance_raw_exports_rejects_wrong_one_minute_kline_close_time(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_kline_close_time"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 @pytest.mark.parametrize("bad_timestamp", [None, True, 1783296001000.5, "bad"])
@@ -615,7 +653,7 @@ def test_binance_raw_exports_rejects_invalid_aggregate_trade_timestamp(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_agg_trade_timestamp"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_exports_rejects_non_bool_aggregate_trade_side(
@@ -627,29 +665,7 @@ def test_binance_raw_exports_rejects_non_bool_aggregate_trade_side(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError, match="invalid_binance_agg_trade_side"):
-        tuple(iter_raw_envelopes(path))
-
-
-@pytest.mark.parametrize(
-    ("levels", "error"),
-    [
-        ([["100.0", "1.0", "extra"]], "invalid_binance_depth_bid"),
-        ([["99.9", "1.0"], ["100.0", "1.0"]], "invalid_binance_depth_bid"),
-        ([["100.0", "1.0"], ["100.0", "2.0"]], "invalid_binance_depth_bid"),
-    ],
-)
-def test_binance_raw_exports_rejects_invalid_depth_levels(
-    tmp_path: Path,
-    levels: list[list[str]],
-    error: str,
-) -> None:
-    path = tmp_path / "bad-depth-levels.jsonl"
-    envelope = _envelope(data_kind="depth")
-    envelope["payload"] = {"lastUpdateId": 1, "bids": levels, "asks": []}
-    _write_jsonl(path, envelope)
-
-    with pytest.raises(ValueError, match=error):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def test_binance_raw_numeric_conversion_raises_contract_error_without_raw_value(
@@ -663,22 +679,11 @@ def test_binance_raw_numeric_conversion_raises_contract_error_without_raw_value(
     _write_jsonl(path, envelope)
 
     with pytest.raises(ValueError) as exc_info:
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
     message = str(exc_info.value)
     assert message == "invalid_binance_kline_volume"
     assert "not-a-number" not in message
-
-
-def test_binance_raw_exports_accepts_one_sided_depth_payload(
-    tmp_path: Path,
-) -> None:
-    path = tmp_path / "one-sided-depth.jsonl"
-    envelope = _envelope(data_kind="depth")
-    envelope["payload"] = {"lastUpdateId": 1, "bids": [["100.0", "1.0"]], "asks": []}
-    _write_jsonl(path, envelope)
-
-    assert tuple(iter_raw_envelopes(path))[0]["data_kind"] == "depth"
 
 
 def test_binance_raw_exports_rejects_missing_required_envelope_key(
@@ -690,7 +695,7 @@ def test_binance_raw_exports_rejects_missing_required_envelope_key(
     path.write_text(json.dumps(envelope) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="binance_raw_envelope_required"):
-        tuple(iter_raw_envelopes(path))
+        tuple(_iter_test_raw_envelopes(path))
 
 
 def _write_jsonl(path: Path, row: dict[str, object]) -> None:

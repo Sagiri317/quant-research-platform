@@ -340,17 +340,10 @@ def test_binance_depth_materializer_parses_and_validates_order_once(
     raw_root = tmp_path / "data" / "raw" / "binance"
     path = raw_root / "spot" / "depth" / "BTCUSDT" / "2026-07-06.jsonl"
     _append_jsonl(path, _depth_envelope(0))
-    raw_validations = 0
     side_parses = 0
     order_validations = 0
-    raw_validate = raw_exports._validate_depth_payload
     parse_side = interim.depth_side_levels
     validate_order = interim._validate_normalized_order
-
-    def count_raw(payload):  # noqa: ANN001, ANN202
-        nonlocal raw_validations
-        raw_validations += 1
-        return raw_validate(payload)
 
     def count_side(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         nonlocal side_parses
@@ -362,7 +355,6 @@ def test_binance_depth_materializer_parses_and_validates_order_once(
         order_validations += 1
         return validate_order(*args, **kwargs)
 
-    monkeypatch.setattr(raw_exports, "_validate_depth_payload", count_raw)
     monkeypatch.setattr(interim, "depth_side_levels", count_side)
     monkeypatch.setattr(interim, "_validate_normalized_order", count_order)
 
@@ -377,9 +369,90 @@ def test_binance_depth_materializer_parses_and_validates_order_once(
 
     assert result.artifact_roots["depth_levels_tick"].exists()
     assert len(read_dataset(result.artifact_roots["depth_levels_tick"])) == 3
-    assert raw_validations == 0
     assert side_parses == 2
     assert order_validations == 1
+
+
+@pytest.mark.parametrize(
+    ("payload", "error"),
+    (
+        (
+            {
+                "lastUpdateId": 1,
+                "bids": [["100.0", "1.0", "extra"]],
+                "asks": [],
+            },
+            "invalid_binance_depth_bid",
+        ),
+        (
+            {
+                "lastUpdateId": 1,
+                "bids": [["99.9", "1.0"], ["100.0", "1.0"]],
+                "asks": [],
+            },
+            "invalid_binance_depth_bid",
+        ),
+        (
+            {
+                "lastUpdateId": 1,
+                "bids": [["100.0", "1.0"], ["100.0", "2.0"]],
+                "asks": [],
+            },
+            "invalid_binance_depth_bid",
+        ),
+        (
+            {
+                "lastUpdateId": 1,
+                "bids": [["101.0", "1.0"]],
+                "asks": [["100.0", "1.0"]],
+            },
+            "crossed_binance_depth_book",
+        ),
+    ),
+)
+def test_binance_depth_materializer_rejects_invalid_levels(
+    tmp_path: Path,
+    payload: dict[str, object],
+    error: str,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    path = raw_root / "spot" / "depth" / "BTCUSDT" / "2026-07-06.jsonl"
+    envelope = _depth_envelope(0)
+    envelope["payload"] = payload
+    _append_jsonl(path, envelope)
+    layout = StorageLayout(project_root=tmp_path)
+
+    with pytest.raises(ValueError, match=error):
+        materialize_interim_data(
+            layout=layout,
+            raw_root=raw_root,
+            data_ids=("depth_levels_tick",),
+        )
+
+    assert not layout.interim_data_root(
+        ids.SOURCE_ID,
+        "depth_levels_tick",
+    ).exists()
+
+
+def test_binance_depth_materializer_accepts_one_sided_payload(tmp_path: Path) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    path = raw_root / "spot" / "depth" / "BTCUSDT" / "2026-07-06.jsonl"
+    envelope = _depth_envelope(0)
+    envelope["payload"] = {
+        "lastUpdateId": 1,
+        "bids": [["100.0", "1.0"]],
+        "asks": [],
+    }
+    _append_jsonl(path, envelope)
+
+    result = materialize_interim_data(
+        layout=StorageLayout(project_root=tmp_path),
+        raw_root=raw_root,
+        data_ids=("depth_levels_tick",),
+    )
+
+    assert len(read_dataset(result.artifact_roots["depth_levels_tick"])) == 1
 
 
 def test_binance_private_owner_state_is_bounded_after_many_batches(
@@ -521,7 +594,6 @@ def test_binance_raw_bound_pull_admits_scan_before_record_read(
         path,
         batch_size=1,
         resource_policy=policy,
-        validate_depth_payload=False,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
@@ -549,7 +621,6 @@ def test_binance_raw_output_suspension_has_no_scan_record_duplicate(
         path,
         batch_size=1,
         resource_policy=policy,
-        validate_depth_payload=False,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
@@ -588,7 +659,6 @@ def test_binance_raw_oversize_first_record_fails_before_read_or_decode(
         path,
         batch_size=1,
         resource_policy=policy,
-        validate_depth_payload=False,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
@@ -617,7 +687,6 @@ def test_binance_whitespace_only_fails_after_admission(
         path,
         batch_size=1,
         resource_policy=policy,
-        validate_depth_payload=False,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
@@ -642,7 +711,6 @@ def test_binance_blank_line_and_valid_row_share_one_admission(
         path,
         batch_size=1,
         resource_policy=policy,
-        validate_depth_payload=False,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)

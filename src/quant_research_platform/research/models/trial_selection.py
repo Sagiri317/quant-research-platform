@@ -16,7 +16,6 @@ from quant_research_platform.contracts.predictions import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research._memory import _selected_frame_payload_bytes
 from quant_research_platform.runtime.resources import (
     _OwnedValue,
     current_runtime_resource_policy,
@@ -206,78 +205,6 @@ def select_best_validation_trial(
         )
     )
     return str(ordered.iloc[0][trial_id_column])
-
-
-def evaluate_model_trial_metrics(
-    frame: pd.DataFrame,
-    *,
-    model_id: str,
-    label_column: str,
-    prediction_column: str,
-) -> dict[str, object]:
-    """Evaluate validation-only trial metrics."""
-
-    missing = sorted({label_column, prediction_column}.difference(frame.columns))
-    if missing:
-        raise ValueError(f"missing_trial_metric_columns: {', '.join(missing)}")
-    selected_output_bound = _selected_frame_payload_bytes(
-        frame,
-        [label_column, prediction_column],
-    )
-    usable_output_bound = selected_output_bound
-    numeric_vector_count = 6
-    numeric_working_bytes = len(frame) * 8 * numeric_vector_count
-    mask_working_bytes = len(frame) * 3
-    with ExitStack() as reservation:
-        policy = current_runtime_resource_policy()
-        if policy is not None:
-            reservation.enter_context(
-                policy.lease(
-                    "research.model.selection.metric",
-                    selected_output_bound
-                    + usable_output_bound
-                    + numeric_working_bytes
-                    + mask_working_bytes,
-                )
-            )
-        usable = None
-        label_values = None
-        prediction_values = None
-        try:
-            usable = frame.loc[:, [label_column, prediction_column]]
-            if usable.empty:
-                raise ValueError("empty_model_selection_validation_window")
-            for column in (label_column, prediction_column):
-                values = usable[column]
-                if not pd.api.types.is_numeric_dtype(
-                    values
-                ) or pd.api.types.is_bool_dtype(values):
-                    raise ValueError("invalid_trial_metric_values")
-            label_values = usable[label_column].astype("float64")
-            prediction_values = usable[prediction_column].astype("float64")
-            if (
-                bool(label_values.isna().any())
-                or bool(prediction_values.isna().any())
-                or not bool(np.isfinite(label_values).all())
-                or not bool(np.isfinite(prediction_values).all())
-            ):
-                raise ValueError("invalid_trial_metric_values")
-            record = _metric_record(
-                model_id=model_id,
-                labels=label_values.to_numpy(dtype="float64", copy=False),
-                predictions=prediction_values.to_numpy(
-                    dtype="float64", copy=False
-                ),
-            )
-        except BaseException:
-            usable = None
-            label_values = None
-            prediction_values = None
-            raise
-        usable = None
-        label_values = None
-        prediction_values = None
-        return record
 
 
 def evaluate_model_trial_metrics_from_chunks(
@@ -492,34 +419,6 @@ def _metric_batches(
             yield rows
     finally:
         cursor.close()
-
-
-def _metric_record(
-    *,
-    model_id: str,
-    labels: np.ndarray,
-    predictions: np.ndarray,
-) -> dict[str, object]:
-    raw = _MetricAccumulator()
-    raw.add(labels, predictions)
-    rank = _MetricAccumulator()
-    rank.add(
-        labels=pd.Series(labels).rank(method="average").to_numpy(dtype="float64"),
-        predictions=pd.Series(predictions)
-        .rank(method="average")
-        .to_numpy(dtype="float64"),
-    )
-    validation_ic, validation_ic_reason = raw.correlation()
-    validation_rankic, validation_rankic_reason = rank.correlation()
-    return {
-        "model_id": model_id,
-        "validation_rows": raw.count,
-        "validation_ic": validation_ic,
-        "validation_ic_reason": validation_ic_reason,
-        "validation_rankic": validation_rankic,
-        "validation_rankic_reason": validation_rankic_reason,
-        "validation_mse": raw.mean_squared_error,
-    }
 
 
 def build_model_selection_metadata(
