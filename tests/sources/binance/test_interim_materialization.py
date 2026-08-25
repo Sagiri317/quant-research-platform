@@ -125,21 +125,91 @@ def test_binance_materializer_rejects_invalid_row_batch_size_before_discovery(
     ).exists()
 
 
-def test_binance_file_discovery_occurs_inside_one_root_policy(
+def test_binance_materializer_discovers_only_requested_raw_kind(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed = []
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    raw_root.mkdir(parents=True)
+    discovered: list[str] = []
 
-    def discover(_root: Path):
-        observed.append(current_runtime_resource_policy())
-        return {}
+    def observe(
+        _root: Path,
+        *,
+        raw_kind: str,
+        index,
+        namespace: str,
+    ) -> int:  # noqa: ANN001
+        discovered.append(raw_kind)
+        assert current_runtime_resource_policy() is not None
+        return 0
 
-    monkeypatch.setattr(interim, "_dataset_files_by_id_with_identity", discover)
-    result = materialize_interim_data(layout=StorageLayout(project_root=tmp_path))
+    monkeypatch.setattr(interim, "_index_raw_kind_files", observe)
+    result = materialize_interim_data(
+        layout=StorageLayout(project_root=tmp_path),
+        raw_root=raw_root,
+        data_ids=("market_bars_1m",),
+    )
 
-    assert len(observed) == 1 and observed[0] is not None
-    assert not result.artifact_roots
+    assert discovered == ["klines"]
+    assert result.artifact_roots == {}
+
+
+def test_binance_materializer_rejects_relevant_member_addition_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    raw_path = raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl"
+    extra_path = raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-07.jsonl"
+    _append_jsonl(raw_path, _kline_envelope(0))
+    real_write_dataset = interim.write_dataset
+
+    def add_member(*args, **kwargs):  # noqa: ANN002, ANN003
+        _append_jsonl(extra_path, _kline_envelope(1))
+        return real_write_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "write_dataset", add_member)
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=("market_bars_1m",),
+        )
+
+    assert not StorageLayout(project_root=tmp_path).interim_data_root(
+        ids.SOURCE_ID,
+        "market_bars_1m",
+    ).exists()
+
+
+def test_binance_materializer_rejects_relevant_member_removal_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "binance"
+    raw_path = raw_root / "spot" / "klines" / "BTCUSDT" / "1m" / "2026-07-06.jsonl"
+    _append_jsonl(raw_path, _kline_envelope(0))
+    real_write_dataset = interim.write_dataset
+
+    def remove_member(*args, **kwargs):  # noqa: ANN002, ANN003
+        raw_path.unlink()
+        return real_write_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "write_dataset", remove_member)
+
+    with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
+        materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=raw_root,
+            data_ids=("market_bars_1m",),
+        )
+
+    assert not StorageLayout(project_root=tmp_path).interim_data_root(
+        ids.SOURCE_ID,
+        "market_bars_1m",
+    ).exists()
 
 
 def test_binance_materializer_rejects_discovery_to_open_replacement(

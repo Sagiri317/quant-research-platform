@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 import warnings
 from datetime import timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -328,6 +330,117 @@ def test_portfolio_streaming_stats_matches_full_across_fetch_boundary() -> None:
             )
     finally:
         portfolio_runner._close_portfolio_summary_state(summary_state)
+
+
+def test_portfolio_return_summary_checks_disk_before_sqlite_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def reject_disk(_path, *, reserve_bytes: int):  # noqa: ANN001
+        calls.append(reserve_bytes)
+        if len(calls) > 1:
+            raise OSError("portfolio_disk_preflight")
+
+    monkeypatch.setattr(
+        portfolio_runner,
+        "require_free_disk_headroom",
+        reject_disk,
+    )
+    returns = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-01")],
+            "signal": ["factor"],
+            "return_source_column": ["label"],
+            "portfolio_mode": ["long_short"],
+            "long_return": [0.01],
+            "short_return": [0.0],
+            "gross_portfolio_return": [0.01],
+            "turnover": [1.0],
+            "cost": [0.0],
+            "net_portfolio_return": [0.01],
+            "long_count": [1],
+            "short_count": [1],
+        }
+    )
+    state = portfolio_runner._PortfolioSummaryState()
+
+    with pytest.raises(OSError, match="portfolio_disk_preflight"):
+        portfolio_runner._append_portfolio_return_summary(state, returns)
+
+    assert len(calls) == 2
+    assert state.return_database is not None
+    assert (
+        state.return_database.execute("SELECT COUNT(*) FROM returns").fetchone()[0]
+        == 0
+    )
+    portfolio_runner._close_portfolio_summary_state(state)
+    assert state.return_database is None
+    assert state.return_scratch is None
+
+
+def test_portfolio_return_summary_grows_main_and_temp_page_caps_before_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def allow_disk(_path, *, reserve_bytes: int) -> None:  # noqa: ANN001
+        calls.append(reserve_bytes)
+
+    monkeypatch.setattr(
+        portfolio_runner,
+        "require_free_disk_headroom",
+        allow_disk,
+    )
+    database = sqlite3.connect(":memory:")
+    try:
+        database.execute(
+            f"PRAGMA page_size={portfolio_runner._PORTFOLIO_SQLITE_PAGE_BYTES}"
+        )
+        database.execute("PRAGMA temp_store=FILE")
+        portfolio_runner._admit_portfolio_disk_growth(
+            database,
+            Path("."),
+            row_count=0,
+        )
+        startup_caps = {
+            schema: int(
+                database.execute(f"PRAGMA {schema}.max_page_count").fetchone()[0]
+            )
+            for schema in ("main", "temp")
+        }
+        portfolio_runner._admit_portfolio_disk_growth(
+            database,
+            Path("."),
+            row_count=4096,
+        )
+        first_batch_caps = {
+            schema: int(
+                database.execute(f"PRAGMA {schema}.max_page_count").fetchone()[0]
+            )
+            for schema in ("main", "temp")
+        }
+        portfolio_runner._admit_portfolio_disk_growth(
+            database,
+            Path("."),
+            row_count=4096,
+        )
+        for schema, startup_cap in startup_caps.items():
+            assert (
+                int(
+                    database.execute(
+                        f"PRAGMA {schema}.max_page_count"
+                    ).fetchone()[0]
+                )
+                > startup_cap
+            )
+        assert (
+            int(database.execute("PRAGMA temp.max_page_count").fetchone()[0])
+            > first_batch_caps["temp"]
+        )
+        assert len(calls) == 3
+    finally:
+        database.close()
 
 
 def test_portfolio_summary_admits_before_frame_build_and_holds_lease(

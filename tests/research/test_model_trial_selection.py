@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -524,3 +526,112 @@ def test_chunked_trial_metrics_preserves_undefined_reasons(
     assert metrics["validation_rankic"] is None
     assert metrics["validation_ic_reason"] == reason
     assert metrics["validation_rankic_reason"] == reason
+
+
+def test_chunked_trial_metrics_checks_disk_before_sqlite_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    inserted: list[int] = []
+
+    def reject_disk(_path, *, reserve_bytes: int):  # noqa: ANN001
+        calls.append(reserve_bytes)
+        if len(calls) > 1:
+            raise OSError("validation_disk_preflight")
+
+    real_insert = trial_selection._insert_metric_chunk
+
+    def record_insert(*args, **kwargs):  # noqa: ANN002, ANN003
+        inserted.append(1)
+        return real_insert(*args, **kwargs)
+
+    monkeypatch.setattr(trial_selection, "require_free_disk_headroom", reject_disk)
+    monkeypatch.setattr(trial_selection, "_insert_metric_chunk", record_insert)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"]),
+            "asset_id": ["asset"],
+            "label": [1.0],
+            "prediction": [1.0],
+        }
+    )
+
+    with pytest.raises(OSError, match="validation_disk_preflight"):
+        evaluate_model_trial_metrics_from_chunks(
+            (frame.iloc[:0], frame),
+            model_id="disk_preflight",
+            label_column="label",
+            prediction_column="prediction",
+            purge_gap_steps=0,
+        )
+
+    assert len(calls) == 2
+    assert inserted == []
+
+
+def test_chunked_trial_metrics_grows_main_and_temp_page_caps_before_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def allow_disk(_path, *, reserve_bytes: int) -> None:  # noqa: ANN001
+        calls.append(reserve_bytes)
+
+    monkeypatch.setattr(
+        trial_selection,
+        "require_free_disk_headroom",
+        allow_disk,
+    )
+    with trial_selection._model_selection_scratch() as scratch:
+        with trial_selection._model_selection_database(scratch) as database:
+            database.execute(
+                f"PRAGMA page_size={trial_selection._MODEL_SELECTION_SQLITE_PAGE_BYTES}"
+            )
+            database.execute("PRAGMA temp_store=FILE")
+            trial_selection._admit_model_selection_disk_growth(
+                database,
+                Path(scratch),
+                row_count=0,
+            )
+            startup_caps = {
+                schema: int(
+                    database.execute(
+                        f"PRAGMA {schema}.max_page_count"
+                    ).fetchone()[0]
+                )
+                for schema in ("main", "temp")
+            }
+            trial_selection._admit_model_selection_disk_growth(
+                database,
+                Path(scratch),
+                row_count=4096,
+            )
+            first_batch_caps = {
+                schema: int(
+                    database.execute(
+                        f"PRAGMA {schema}.max_page_count"
+                    ).fetchone()[0]
+                )
+                for schema in ("main", "temp")
+            }
+            trial_selection._admit_model_selection_disk_growth(
+                database,
+                Path(scratch),
+                row_count=4096,
+            )
+            for schema, startup_cap in startup_caps.items():
+                assert (
+                    int(
+                        database.execute(
+                            f"PRAGMA {schema}.max_page_count"
+                        ).fetchone()[0]
+                    )
+                    > startup_cap
+                )
+            assert (
+                int(
+                    database.execute("PRAGMA temp.max_page_count").fetchone()[0]
+                )
+                > first_batch_caps["temp"]
+            )
+    assert len(calls) == 3

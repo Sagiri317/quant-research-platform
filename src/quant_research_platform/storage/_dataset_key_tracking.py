@@ -659,6 +659,37 @@ class ExactPrimaryKeyIndex:
                         f"{type(close_error).__name__}"
                     )
 
+    def identity_payload_count(self, *, namespace: str) -> int:
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("exact_primary_key_index_not_open")
+        if not isinstance(namespace, str) or not namespace:
+            raise ValueError("invalid_exact_key_namespace")
+        row = connection.execute(
+            "SELECT COUNT(*) FROM exact_keys WHERE namespace = ?",
+            (namespace,),
+        ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    def identity_payload_value(
+        self,
+        *,
+        namespace: str,
+        payload: bytes,
+    ) -> bytes | None:
+        connection = self._connection
+        if connection is None:
+            raise RuntimeError("exact_primary_key_index_not_open")
+        if not isinstance(namespace, str) or not namespace:
+            raise ValueError("invalid_exact_key_namespace")
+        row = connection.execute(
+            "SELECT value FROM exact_keys "
+            "WHERE namespace = ? AND payload = ?",
+            (namespace, bytes(payload)),
+        ).fetchone()
+        return None if row is None or row[0] is None else bytes(row[0])
+
     def difference_counts(
         self,
         *,

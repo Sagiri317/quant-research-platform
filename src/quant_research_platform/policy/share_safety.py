@@ -30,8 +30,10 @@ LOCAL_ONLY_DATA_LAYERS: tuple[str, ...] = (
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 _UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
 _POSIX_LOCAL_PATH_RE = re.compile(
-    r"(?i)(?<!\w)/(?:mnt/data|home|Users|workspace|workspaces|tmp|var/tmp|private/tmp)"
-    r"/[^\r\n\t\"'<>|]+"
+    r"(?i)(?<![\w:/])/(?!/)[^\r\n\t\"'<>|,\s]+"
+    r"(?:/[^\r\n\t\"'<>|,\s]+)*|"
+    r"(?<!:)//(?:mnt/data|home|Users|workspace|workspaces|tmp|"
+    r"var/tmp|private/tmp|etc|opt|srv)(?:/[^\r\n\t\"'<>|,\s]+)*"
 )
 _RETIRED_LOCAL_ONLY_REPORT_PATH_PATTERN = "|".join(
     re.escape(path_name) for path_name in _RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES
@@ -88,7 +90,7 @@ _PROVIDER_SOURCE_MARKER_RE = re.compile(
 )
 _CREDENTIAL_RE = re.compile(
     r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
-    r"[A-Za-z0-9._~+/=-]{8,}"
+    r"(?:\"[^\r\n\"]+\"|'[^\r\n']+'|[^\s,;\}\]\)\"']+)"
 )
 _CREDENTIAL_KEY_RE = re.compile(
     r"(?i)^(?:.*[_-])?(?:token|secret|credential|password|api[_-]?key)$"

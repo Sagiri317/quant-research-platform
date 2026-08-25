@@ -7,6 +7,7 @@ import tempfile
 from collections.abc import Collection, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -19,6 +20,7 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     _OwnedValue,
     current_runtime_resource_policy,
+    require_free_disk_headroom,
 )
 
 VALIDATION_METRIC_COLUMNS = ("validation_ic", "validation_rankic", "validation_mse")
@@ -28,6 +30,9 @@ VALIDATION_METRIC_REASON_COLUMNS = (
 )
 TEST_METRIC_COLUMNS = ("test_ic", "test_rankic", "test_mse")
 _MODEL_SELECTION_SQLITE_CACHE_BYTES = 64 * 1024
+_MODEL_SELECTION_SQLITE_PAGE_BYTES = 4096
+_MODEL_SELECTION_SQLITE_ROW_DISK_BYTES = 512
+_MODEL_SELECTION_SQLITE_STARTUP_BYTES = 64 * _MODEL_SELECTION_SQLITE_PAGE_BYTES
 _MODEL_SELECTION_METRIC_RESERVE_BYTES = 256 * 1024
 _MODEL_SELECTION_METRIC_BATCH_ROWS = 4096
 
@@ -228,11 +233,19 @@ def evaluate_model_trial_metrics_from_chunks(
             )
         with _model_selection_scratch() as scratch:
             with _model_selection_database(scratch) as database:
+                database.execute(
+                    f"PRAGMA page_size={_MODEL_SELECTION_SQLITE_PAGE_BYTES}"
+                )
                 database.execute("PRAGMA temp_store=FILE")
                 database.execute(
                     f"PRAGMA cache_size=-{_MODEL_SELECTION_SQLITE_CACHE_BYTES // 1024}"
                 )
                 database.execute("PRAGMA synchronous=NORMAL")
+                _admit_model_selection_disk_growth(
+                    database,
+                    Path(scratch),
+                    row_count=0,
+                )
                 database.execute(
                     "CREATE TABLE validation_rows ("
                     "row_id INTEGER PRIMARY KEY, "
@@ -249,7 +262,16 @@ def evaluate_model_trial_metrics_from_chunks(
                             item.lease if isinstance(item, _OwnedValue) else None
                         )
                         frame = item.value if isinstance(item, _OwnedValue) else item
+                        if frame.empty:
+                            if owned_lease is not None:
+                                owned_lease.close()
+                            continue
                         try:
+                            _admit_model_selection_disk_growth(
+                                database,
+                                Path(scratch),
+                                row_count=len(frame),
+                            )
                             _insert_metric_chunk(
                                 database,
                                 frame,
@@ -345,6 +367,36 @@ def evaluate_model_trial_metrics_from_chunks(
                     "validation_rankic_reason": validation_rankic_reason,
                     "validation_mse": raw.mean_squared_error,
                 }
+
+
+def _admit_model_selection_disk_growth(
+    database: sqlite3.Connection,
+    scratch_path: Path,
+    *,
+    row_count: int,
+) -> None:
+    growth_bytes = max(
+        _MODEL_SELECTION_SQLITE_STARTUP_BYTES,
+        max(1, row_count) * _MODEL_SELECTION_SQLITE_ROW_DISK_BYTES,
+    )
+    require_free_disk_headroom(
+        scratch_path,
+        reserve_bytes=2 * growth_bytes,
+    )
+    growth_pages = (
+        growth_bytes + _MODEL_SELECTION_SQLITE_PAGE_BYTES - 1
+    ) // _MODEL_SELECTION_SQLITE_PAGE_BYTES
+    for schema in ("main", "temp"):
+        current_pages = int(
+            database.execute(f"PRAGMA {schema}.page_count").fetchone()[0]
+        )
+        if row_count > 0 and schema == "temp":
+            current_pages = int(
+                database.execute("PRAGMA temp.max_page_count").fetchone()[0]
+            )
+        database.execute(
+            f"PRAGMA {schema}.max_page_count={current_pages + growth_pages}"
+        )
 
 
 def _insert_metric_chunk(

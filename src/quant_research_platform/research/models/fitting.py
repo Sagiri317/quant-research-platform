@@ -1356,6 +1356,10 @@ def _model_state_upper_bound_bytes(
         )
     elif algorithm == "xgboost_regressor":
         tree_count = _positive_model_int(params.get("n_estimators"), default=100)
+        tree_count *= _positive_model_int(
+            params.get("num_parallel_tree"),
+            default=1,
+        )
         depth_value = params.get("max_depth")
         leaves = _bounded_tree_nodes(
             rows,

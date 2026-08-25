@@ -11,7 +11,7 @@ import struct
 import sys
 import tempfile
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from itertools import groupby, islice
 from pathlib import Path
@@ -1051,6 +1051,7 @@ def dataset_files_with_identity_by_id(
     raw_root: Path,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
+    identity_index: ExactPrimaryKeyIndex | None = None,
 ) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
     """Yield inspected files with the identity bound during inspection."""
 
@@ -1061,18 +1062,22 @@ def dataset_files_with_identity_by_id(
         policy = bound_policy or current_runtime_resource_policy()
         with runtime_resource_policy_scope(policy) as policy:
             with _raw_export_path_session(root) as (paths, verify_root):
-                index = ExactPrimaryKeyIndex(
-                    primary_key=("dataset_path",),
-                    timestamp_columns=(),
-                    scratch_parent=root.parent,
-                )
-                with (
-                    policy.lease(
-                        "source.csmar.raw.identity.index",
-                        index.retained_memory_bytes,
-                    ),
-                    index,
-                ):
+                with ExitStack() as index_owner:
+                    if identity_index is None:
+                        index = ExactPrimaryKeyIndex(
+                            primary_key=("dataset_path",),
+                            timestamp_columns=(),
+                            scratch_parent=root.parent,
+                        )
+                        index_owner.enter_context(
+                            policy.lease(
+                                "source.csmar.raw.identity.index",
+                                index.retained_memory_bytes,
+                            )
+                        )
+                        index_owner.enter_context(index)
+                    else:
+                        index = identity_index
                     files = _iter_indexed_raw_export_files(
                         root,
                         paths=paths,
@@ -1170,6 +1175,30 @@ def _iter_indexed_raw_export_files(
             modified_ns=int(modified_ns),
         )
         yield path, identity
+
+
+def _verify_csmar_member_set(
+    root: Path,
+    index: ExactPrimaryKeyIndex,
+    *,
+    namespace: str = "csmar-dataset-physical-exports-paths",
+) -> None:
+    with _raw_export_path_session(root) as (paths, _verify_root):
+        current_count = 0
+        for path in paths:
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            expected = index.identity_payload_value(
+                namespace=namespace,
+                payload=relative,
+            )
+            actual = relative + b"\0" + _dataset_file_identity_bytes(
+                raw_export_file_identity(path)
+            )
+            if expected != actual:
+                raise ValueError("csmar_raw_export_identity_changed")
+            current_count += 1
+    if current_count != index.identity_payload_count(namespace=namespace):
+        raise ValueError("csmar_raw_export_identity_changed")
 
 
 def _raw_export_physical_key(identity: DatasetFileIdentity) -> bytes:

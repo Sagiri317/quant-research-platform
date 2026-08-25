@@ -625,6 +625,59 @@ def test_numpy_integral_tree_size_matches_native_parameter_and_state_bound() -> 
     assert fitted[0][2] == fitted[1][2]
 
 
+def test_xgboost_parallel_tree_count_scales_state_bound() -> None:
+    frame = make_filter_mode_frame().loc[:, ["timestamp", "factor", "label"]]
+    bounds = []
+    for parallel_trees in (1, np.int64(3)):
+        spec = ModelSpec(
+            model_id=f"xgb_parallel_{parallel_trees}",
+            model_algorithm="xgboost_regressor",
+            input_factor_columns=("factor",),
+            label_column="label",
+            sample_filter_mode="unfiltered",
+            hyperparameters={
+                "n_estimators": 2,
+                "num_parallel_tree": parallel_trees,
+                "max_depth": 2,
+            },
+            max_train_rows=len(frame),
+        )
+        bounds.append(model_fitting._model_state_upper_bound_bytes(frame, spec))  # noqa: SLF001
+
+    assert bounds[1] == 3 * bounds[0]
+
+
+@pytest.mark.parametrize("parallel_trees", (0, -1, True, 1.5))
+def test_xgboost_parallel_tree_count_rejects_before_fit(
+    parallel_trees: object,
+) -> None:
+    frame = make_filter_mode_frame().loc[:, ["timestamp", "factor", "label"]]
+    spec = ModelSpec(
+        model_id="xgb_invalid_parallel_tree",
+        model_algorithm="xgboost_regressor",
+        input_factor_columns=("factor",),
+        label_column="label",
+        sample_filter_mode="unfiltered",
+        hyperparameters={
+            "n_estimators": 1,
+            "num_parallel_tree": parallel_trees,
+        },
+        max_train_rows=len(frame),
+    )
+
+    class Estimator:
+        def fit(self, *_args, **_kwargs) -> None:  # noqa: ANN002, ANN003
+            raise AssertionError("xgboost fit entered before state validation")
+
+    with pytest.raises(ValueError, match="invalid_model_state_sizing_parameter"):
+        with runtime_resource_policy_scope():
+            model_fitting._fit_model_result_owned_from_frames(
+                (frame,),
+                spec,
+                estimator=Estimator(),
+            )
+
+
 @pytest.mark.parametrize(
     ("model_algorithm", "maximum_bytes"),
     [

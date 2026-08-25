@@ -5,7 +5,7 @@ from __future__ import annotations
 import stat
 import sys
 from array import array
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from itertools import groupby, islice
 from pathlib import Path
@@ -42,6 +42,7 @@ from quant_research_platform.sources.csmar.field_mappings import (
 from quant_research_platform.sources.csmar.fields import field_role
 from quant_research_platform.sources.csmar.ids import SOURCE_ID, market_bars_data_id
 from quant_research_platform.sources.csmar.raw_exports import (
+    _verify_csmar_member_set,
     dataset_files_with_identity_by_id,
     iter_private_export_chunks_with_policy,
 )
@@ -546,6 +547,7 @@ def _iter_interim_frames(
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
     scratch_parent: Path | None = None,
+    verify_members: Callable[[], None] | None = None,
 ) -> Iterator[object]:
     validated_overrides = {} if overrides is None else overrides
 
@@ -613,6 +615,8 @@ def _iter_interim_frames(
                 else:
                     with closing_iterator(frames):
                         yield from frames
+            if verify_members is not None:
+                verify_members()
         if pruning_reports is not None:
             for report in operation_reports:
                 _merge_pruning_report(pruning_reports, report)
@@ -672,45 +676,67 @@ def _materialize_interim_data(
     for data_id in data_ids:
         requested_by_raw[_raw_dataset_for_interim(data_id)] = data_id
     pending = set(data_ids)
-    indexed_files = dataset_files_with_identity_by_id(
+    require_unaliased_path(
         source_raw_root,
-        resource_policy=resource_policy,
+        error="csmar_raw_export_identity_changed",
     )
-    with closing_iterator(indexed_files):
-        for raw_dataset, group in groupby(indexed_files, key=lambda item: item[0]):
-            data_id = requested_by_raw.get(raw_dataset)
-            if data_id is None:
-                continue
-            input_files = ((item[1], item[2]) for item in group)
-            pending.discard(data_id)
-            spec = catalog.get(data_id)
-            artifact_root = require_artifact_root(
-                layout.interim_data_root(spec.source_id, spec.data_id)
-            )
-            frames = _iter_interim_frames(
-                data_id=data_id,
-                input_files=input_files,
-                start_date=start_date,
-                end_date=end_date,
-                overrides=overrides,
-                chunksize=chunksize,
-                pruning_reports=pruning_reports,
-                scratch_parent=artifact_root.parent,
-            )
-            with closing_iterator(frames):
-                try:
-                    write_dataset(
-                        artifact_root,
-                        frames,
-                        spec=spec,
-                        resource_policy=resource_policy,
-                    )
-                except ValueError as exc:
-                    if str(exc) != "empty_dataset_schema_missing":
-                        raise
-                    skipped.add(data_id)
+    identity_index = ExactPrimaryKeyIndex(
+        primary_key=("dataset_path",),
+        timestamp_columns=(),
+        scratch_parent=source_raw_root.parent,
+    )
+    with (
+        resource_policy.lease(
+            "source.csmar.raw.identity.index",
+            identity_index.retained_memory_bytes,
+        ),
+        identity_index,
+    ):
+        indexed_files = dataset_files_with_identity_by_id(
+            source_raw_root,
+            resource_policy=resource_policy,
+            identity_index=identity_index,
+        )
+
+        def verify_members() -> None:
+            _verify_csmar_member_set(source_raw_root, identity_index)
+
+        with closing_iterator(indexed_files):
+            for raw_dataset, group in groupby(indexed_files, key=lambda item: item[0]):
+                data_id = requested_by_raw.get(raw_dataset)
+                if data_id is None:
                     continue
-            written[data_id] = artifact_root
+                input_files = ((item[1], item[2]) for item in group)
+                pending.discard(data_id)
+                spec = catalog.get(data_id)
+                artifact_root = require_artifact_root(
+                    layout.interim_data_root(spec.source_id, spec.data_id)
+                )
+                frames = _iter_interim_frames(
+                    data_id=data_id,
+                    input_files=input_files,
+                    start_date=start_date,
+                    end_date=end_date,
+                    overrides=overrides,
+                    chunksize=chunksize,
+                    pruning_reports=pruning_reports,
+                    scratch_parent=artifact_root.parent,
+                    verify_members=verify_members,
+                )
+                with closing_iterator(frames):
+                    try:
+                        write_dataset(
+                            artifact_root,
+                            frames,
+                            spec=spec,
+                            resource_policy=resource_policy,
+                        )
+                    except ValueError as exc:
+                        if str(exc) != "empty_dataset_schema_missing":
+                            raise
+                        skipped.add(data_id)
+                        continue
+                written[data_id] = artifact_root
     skipped.update(pending)
 
     return InterimImportResult(

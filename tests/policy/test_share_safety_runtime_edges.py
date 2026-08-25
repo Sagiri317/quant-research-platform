@@ -129,6 +129,9 @@ def test_share_safety_failure_path_allows_logical_output_path() -> None:
         r"outputs/x/\\server\share\a.md",
         "outputs/x//workspace/qrp/a.md",
         "outputs/x/anaconda3/envs/private/a.md",
+        "/etc/passwd",
+        "/opt/qrp/data",
+        "/srv/qrp/run",
     ),
 )
 def test_failure_path_rejects_absolute_tokens(path: str) -> None:
@@ -150,6 +153,35 @@ def test_sanitizer_redacts_windows_unc_and_posix_paths() -> None:
     assert "/home/" not in sanitized
     assert "/Users/" not in sanitized
     assert "/tmp/" not in sanitized
+
+
+@pytest.mark.parametrize("path", ("/etc/passwd", "/opt/qrp/data", "/srv/qrp/run"))
+def test_sanitizer_redacts_general_posix_absolute_paths(path: str) -> None:
+    assert unsafe_for_share_reason(path) == "local_path"
+    assert path not in sanitize_shared_text(path)
+
+
+def test_sanitizer_redacts_punctuation_credential_without_url_corruption() -> None:
+    for text, secret in (
+        (
+            "api_key=!AbcdefghXYZ url=https://example.com/api/v1 provider=Acme",
+            "!AbcdefghXYZ",
+        ),
+        (
+            'api_key="!AbcdefghXYZ" url=https://example.com/api/v1 provider=Acme',
+            "!AbcdefghXYZ",
+        ),
+        (
+            "api_key='!AbcdefghXYZ' url=https://example.com/api/v1 provider=Acme",
+            "!AbcdefghXYZ",
+        ),
+    ):
+        assert unsafe_for_share_reason(text) == "credential"
+        sanitized = sanitize_shared_text(text)
+
+        assert secret not in sanitized
+        assert "https://example.com/api/v1" in sanitized
+        assert "provider=Acme" in sanitized
 
 
 def test_sanitizer_redacts_absolute_private_repo_path_as_one_token() -> None:

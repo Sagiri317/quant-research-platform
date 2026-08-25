@@ -29,9 +29,11 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
     strict_symbol,
 )
+from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import (
     DatasetFileIdentity,
+    _dataset_file_identity_bytes,
     dataset_file_identity,
     dataset_file_identity_from_stat,
 )
@@ -44,19 +46,6 @@ DATA_ID_BY_RAW_KIND = {
 _SCAN_BUFFER_BYTES = 64 * 1024
 _RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
 _RawInputFile = tuple[Path, DatasetFileIdentity]
-
-
-def _dataset_files_by_id_with_identity(
-    raw_root: Path,
-) -> dict[str, tuple[_RawInputFile, ...]]:
-    root = Path(raw_root)
-    return {
-        data_id: _discover_raw_kind_files(
-            root,
-            raw_kind,
-        )
-        for raw_kind, data_id in DATA_ID_BY_RAW_KIND.items()
-    }
 
 
 @contextmanager
@@ -312,72 +301,142 @@ def _json_record_working_set_bytes(record_bytes: int) -> int:
     return raw_and_text + decoded_and_normalized
 
 
-def _discover_raw_kind_files(
+def _raw_kind_location(
     root: Path,
     raw_kind: str,
-) -> tuple[_RawInputFile, ...]:
+) -> tuple[Path, str | None]:
     if raw_kind == "klines":
-        base = root / "spot" / "klines"
-        interval = "1m"
+        return root / "spot" / "klines", "1m"
     elif raw_kind == "agg_trades":
-        base = root / "spot" / "agg_trades"
-        interval = None
+        return root / "spot" / "agg_trades", None
     elif raw_kind == "depth":
-        base = root / "spot" / "depth"
-        interval = None
+        return root / "spot" / "depth", None
     else:
         raise ValueError(f"unsupported_binance_raw_kind: {raw_kind}")
-    files: list[_RawInputFile] = []
-    for symbol_dir, symbol_metadata in _raw_directory_entries(
-        base,
-    ):
+
+
+def _iter_raw_kind_files(
+    root: Path,
+    raw_kind: str,
+) -> Iterator[Path]:
+    base, interval = _raw_kind_location(root, raw_kind)
+    for symbol_dir, symbol_metadata in _iter_raw_directory_entries(base):
         if not stat.S_ISDIR(symbol_metadata.st_mode):
             continue
         data_dir = symbol_dir if interval is None else symbol_dir / interval
-        for path, metadata in _raw_directory_entries(
-            data_dir,
-        ):
+        for path, metadata in _iter_raw_directory_entries(data_dir):
             if not stat.S_ISREG(metadata.st_mode):
                 continue
             if path.suffix != ".jsonl":
                 continue
-            identity = _capture_raw_file_identity(
-                path,
-                missing_is_file_not_found=False,
-            )
-            files.append((path, identity))
-    files.sort(key=lambda item: item[0])
-    return tuple(files)
+            yield path
 
 
-def _raw_directory_entries(
+def _iter_raw_directory_entries(
     path: Path,
-) -> tuple[tuple[Path, os.stat_result], ...]:
+) -> Iterator[tuple[Path, os.stat_result]]:
     require_unaliased_path(path, error=_RAW_IDENTITY_ERROR)
     try:
         metadata = path.lstat()
     except FileNotFoundError:
-        return ()
+        return
     except OSError as error:
         raise ValueError(_RAW_IDENTITY_ERROR) from error
     _reject_raw_reparse(metadata)
     if not stat.S_ISDIR(metadata.st_mode):
-        return ()
+        return
     try:
-        children = tuple(path.iterdir())
+        children = path.iterdir()
     except OSError as error:
         raise ValueError(_RAW_IDENTITY_ERROR) from error
-    result: list[tuple[Path, os.stat_result]] = []
-    for child in children:
-        require_unaliased_path(child, error=_RAW_IDENTITY_ERROR)
-        try:
-            metadata = child.lstat()
-        except OSError as error:
-            raise ValueError(_RAW_IDENTITY_ERROR) from error
-        _reject_raw_reparse(metadata)
-        result.append((child, metadata))
-    result.sort(key=lambda item: item[0])
-    return tuple(result)
+    try:
+        for child in children:
+            require_unaliased_path(child, error=_RAW_IDENTITY_ERROR)
+            try:
+                metadata = child.lstat()
+            except OSError as error:
+                raise ValueError(_RAW_IDENTITY_ERROR) from error
+            _reject_raw_reparse(metadata)
+            yield child, metadata
+    except OSError as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+
+
+def _index_raw_kind_files(
+    root: Path,
+    *,
+    raw_kind: str,
+    index: ExactPrimaryKeyIndex,
+    namespace: str,
+) -> int:
+    """Index one requested raw kind without retaining its directory listing."""
+
+    discovered = 0
+
+    def payloads() -> Iterator[tuple[bytes, bytes]]:
+        nonlocal discovered
+        for path in _iter_raw_kind_files(Path(root), raw_kind):
+            identity = _capture_raw_file_identity(
+                path,
+                missing_is_file_not_found=False,
+            )
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            discovered += 1
+            yield relative, relative + b"\0" + _dataset_file_identity_bytes(identity)
+
+    inserted = index.add_identity_payloads(
+        namespace=namespace,
+        payloads=payloads(),
+    )
+    if inserted != discovered:
+        raise ValueError(_RAW_IDENTITY_ERROR)
+    return discovered
+
+
+def _iter_indexed_raw_kind_files(
+    root: Path,
+    *,
+    index: ExactPrimaryKeyIndex,
+    namespace: str,
+) -> Iterator[_RawInputFile]:
+    for payload in index.identity_payload_values(namespace=namespace):
+        relative, device, inode, size, modified_ns = payload.split(b"\0")
+        yield (
+            Path(root) / relative.decode("utf-8"),
+            DatasetFileIdentity(
+                device=int(device),
+                inode=int(inode),
+                size=int(size),
+                modified_ns=int(modified_ns),
+            ),
+        )
+
+
+def _verify_indexed_raw_kind_files(
+    root: Path,
+    *,
+    raw_kind: str,
+    index: ExactPrimaryKeyIndex,
+    namespace: str,
+    expected_count: int,
+) -> None:
+    current_count = 0
+    for path in _iter_raw_kind_files(Path(root), raw_kind):
+        identity = _capture_raw_file_identity(
+            path,
+            missing_is_file_not_found=False,
+        )
+        relative = path.relative_to(root).as_posix().encode("utf-8")
+        expected = index.identity_payload_value(
+            namespace=namespace,
+            payload=relative,
+        )
+        actual = relative + b"\0" + _dataset_file_identity_bytes(identity)
+        if expected != actual:
+            raise ValueError(_RAW_IDENTITY_ERROR)
+        current_count += 1
+    if current_count != expected_count:
+        raise ValueError(_RAW_IDENTITY_ERROR)
 
 
 def _reject_raw_reparse(metadata: os.stat_result) -> None:

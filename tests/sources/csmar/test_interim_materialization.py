@@ -4084,6 +4084,7 @@ def test_csmar_materialization_forwards_operation_policy_target_to_exact_index(
         raising=False,
     )
     monkeypatch.setattr(interim, "ExactPrimaryKeyIndex", RecordingIndex)
+    monkeypatch.setattr(interim, "_verify_csmar_member_set", lambda *_args: None)
 
     def dataset_files(_root, **kwargs):  # noqa: ANN001, ANN003
         dataset_policies.append(kwargs["resource_policy"])
@@ -4333,6 +4334,67 @@ def test_csmar_materializer_verifies_root_before_publication(
     assert events == ["session-open", "write-enter", "final-verify"]
 
 
+def test_csmar_materializer_rejects_member_addition_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "csmar" / "provider_exports"
+    raw_root.mkdir(parents=True)
+    raw_path = raw_root / "TRDNEW_Cale.csv"
+    extra_path = raw_root / "TRDNEW_Cale_extra.csv"
+    _write_trading_calendar_raw_export(raw_path)
+    real_write_dataset = interim.write_dataset
+
+    def add_member(*args, **kwargs):  # noqa: ANN002, ANN003
+        extra_path.write_bytes(raw_path.read_bytes())
+        return real_write_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "write_dataset", add_member)
+
+    with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=tmp_path / "data" / "raw" / "csmar",
+            data_ids=("trading_calendar",),
+            chunksize=1,
+        )
+
+    assert not StorageLayout(project_root=tmp_path).interim_data_root(
+        csmar_ids.SOURCE_ID,
+        "trading_calendar",
+    ).exists()
+
+
+def test_csmar_materializer_rejects_member_removal_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "data" / "raw" / "csmar" / "provider_exports"
+    raw_root.mkdir(parents=True)
+    raw_path = raw_root / "TRDNEW_Cale.csv"
+    _write_trading_calendar_raw_export(raw_path)
+    real_write_dataset = interim.write_dataset
+
+    def remove_member(*args, **kwargs):  # noqa: ANN002, ANN003
+        raw_path.unlink()
+        return real_write_dataset(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "write_dataset", remove_member)
+
+    with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(project_root=tmp_path),
+            raw_root=tmp_path / "data" / "raw" / "csmar",
+            data_ids=("trading_calendar",),
+            chunksize=1,
+        )
+
+    assert not StorageLayout(project_root=tmp_path).interim_data_root(
+        csmar_ids.SOURCE_ID,
+        "trading_calendar",
+    ).exists()
+
+
 @pytest.mark.parametrize("chunksize", (0, True, 1.5))
 def test_csmar_materializer_rejects_invalid_chunksize_before_publication(
     tmp_path: Path,
@@ -4570,6 +4632,7 @@ def test_csmar_market_bars_daily_materializer_streams_chunks_to_storage(
         _: Path,
         *,
         resource_policy: RuntimeResourcePolicy,
+        **_kwargs: object,
     ):  # noqa: ANN202
         nonlocal raw_index_calls
         raw_index_calls += 1

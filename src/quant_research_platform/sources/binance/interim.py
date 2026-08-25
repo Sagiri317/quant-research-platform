@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,10 +32,13 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.binance import ids
 from quant_research_platform.sources.binance.fields import field_role
 from quant_research_platform.sources.binance.raw_exports import (
-    _dataset_files_by_id_with_identity,
+    DATA_ID_BY_RAW_KIND,
+    _index_raw_kind_files,
+    _iter_indexed_raw_kind_files,
     _iter_raw_envelope_batches,
     _raw_path_session,
     _RawInputFile,
+    _verify_indexed_raw_kind_files,
 )
 from quant_research_platform.sources.binance.validation import (
     depth_side_levels,
@@ -51,6 +54,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_integer,
     strict_symbol,
 )
+from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
 from quant_research_platform.storage._dataset_writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -123,7 +127,7 @@ def interim_catalog() -> InterimDataCatalog:
 def _iter_owned_interim_frames(
     *,
     data_id: str,
-    input_files: tuple[Path | _RawInputFile, ...],
+    input_files: Iterable[Path | _RawInputFile],
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
     start_date: str | None = None,
     end_date: str | None = None,
@@ -131,7 +135,7 @@ def _iter_owned_interim_frames(
     verify_root: Callable[[], None] | None = None,
 ) -> Iterator[object]:
     _strict_data_ids((data_id,))
-    if isinstance(input_files, str) or not isinstance(input_files, tuple | list):
+    if isinstance(input_files, str):
         raise ValueError("invalid_binance_raw_input_files")
     bound_policy = resource_policy or current_runtime_resource_policy()
 
@@ -141,12 +145,17 @@ def _iter_owned_interim_frames(
             empty_schema_frame: pd.DataFrame | None = None
             last_key: tuple[object, ...] | None = None
             lease: MemoryLease | None = None
-            ordered_input_files = tuple(
-                sorted(
-                    input_files,
-                    key=lambda entry: entry[0] if isinstance(entry, tuple) else entry,
+            if isinstance(input_files, tuple | list):
+                ordered_input_files: Iterable[Path | _RawInputFile] = tuple(
+                    sorted(
+                        input_files,
+                        key=lambda entry: entry[0]
+                        if isinstance(entry, tuple)
+                        else entry,
+                    )
                 )
-            )
+            else:
+                ordered_input_files = input_files
             for input_entry in ordered_input_files:
                 if isinstance(input_entry, tuple):
                     input_file, expected_identity = input_entry
@@ -299,30 +308,71 @@ def materialize_interim_data(
         skipped: list[str] = []
         requested_data_ids = _strict_data_ids(data_ids)
         with _raw_path_session(source_raw_root) as verify_root:
-            files_by_data_id = _dataset_files_by_id_with_identity(
-                source_raw_root,
-            )
             for data_id in requested_data_ids:
                 spec = catalog.get(data_id)
-                input_files = files_by_data_id.get(data_id, ())
-                if not input_files:
-                    skipped.append(data_id)
-                    continue
                 artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
-                write_dataset(
-                    artifact_root,
-                    _iter_owned_interim_frames(
-                        data_id=data_id,
-                        input_files=input_files,
-                        row_batch_size=row_batch_size,
-                        start_date=start_date,
-                        end_date=end_date,
-                        resource_policy=policy,
-                        verify_root=verify_root,
-                    ),
-                    spec=spec,
-                    resource_policy=policy,
+                raw_kind = next(
+                    kind
+                    for kind, mapped_data_id in DATA_ID_BY_RAW_KIND.items()
+                    if mapped_data_id == data_id
                 )
+                namespace = f"binance-raw-{raw_kind}"
+                index = ExactPrimaryKeyIndex(
+                    primary_key=("relative_path",),
+                    timestamp_columns=(),
+                    scratch_parent=artifact_root.parent,
+                )
+                with (
+                    policy.lease(
+                        "source.binance.raw.identity.index",
+                        index.retained_memory_bytes,
+                    ),
+                    index,
+                ):
+                    expected_count = _index_raw_kind_files(
+                        source_raw_root,
+                        raw_kind=raw_kind,
+                        index=index,
+                        namespace=namespace,
+                    )
+                    if expected_count == 0:
+                        skipped.append(data_id)
+                        continue
+
+                    def verify_snapshot(
+                        *,
+                        raw_kind: str = raw_kind,
+                        index: ExactPrimaryKeyIndex = index,
+                        namespace: str = namespace,
+                        expected_count: int = expected_count,
+                    ) -> None:
+                        verify_root()
+                        _verify_indexed_raw_kind_files(
+                            source_raw_root,
+                            raw_kind=raw_kind,
+                            index=index,
+                            namespace=namespace,
+                            expected_count=expected_count,
+                        )
+
+                    write_dataset(
+                        artifact_root,
+                        _iter_owned_interim_frames(
+                            data_id=data_id,
+                            input_files=_iter_indexed_raw_kind_files(
+                                source_raw_root,
+                                index=index,
+                                namespace=namespace,
+                            ),
+                            row_batch_size=row_batch_size,
+                            start_date=start_date,
+                            end_date=end_date,
+                            resource_policy=policy,
+                            verify_root=verify_snapshot,
+                        ),
+                        spec=spec,
+                        resource_policy=policy,
+                    )
                 written[data_id] = artifact_root
         return BinanceInterimImportResult(
             artifact_roots=written,

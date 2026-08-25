@@ -52,6 +52,7 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -61,6 +62,9 @@ _PORTFOLIO_PERIOD_WORKING_BYTES = 4096
 _PORTFOLIO_STATS_BATCH_ROWS = 4096
 _PORTFOLIO_STATE_FIXED_WORKING_BYTES = 64 * 1024
 _PORTFOLIO_STATE_PER_SIGNAL_BYTES = 16 * 1024
+_PORTFOLIO_SQLITE_PAGE_BYTES = 4096
+_PORTFOLIO_SQLITE_ROW_DISK_BYTES = 1024
+_PORTFOLIO_SQLITE_STARTUP_BYTES = 64 * _PORTFOLIO_SQLITE_PAGE_BYTES
 
 
 @dataclass(frozen=True)
@@ -959,9 +963,17 @@ def _append_portfolio_return_summary(
 ) -> None:
     if summary_state.return_database is None:
         scratch = tempfile.TemporaryDirectory(prefix="qrp-portfolio-summary-")
+        database: sqlite3.Connection | None = None
         try:
             database = sqlite3.connect(
                 str(Path(scratch.name) / "returns.sqlite"),
+            )
+            database.execute(f"PRAGMA page_size={_PORTFOLIO_SQLITE_PAGE_BYTES}")
+            database.execute("PRAGMA temp_store=FILE")
+            _admit_portfolio_disk_growth(
+                database,
+                Path(scratch.name),
+                row_count=0,
             )
             database.execute(
                 """
@@ -982,14 +994,37 @@ def _append_portfolio_return_summary(
                 "CREATE INDEX returns_signal_time ON returns(signal, timestamp_ns)"
             )
             database.commit()
-        except BaseException:
-            scratch.cleanup()
+        except BaseException as primary:
+            if database is not None:
+                try:
+                    database.close()
+                except BaseException as close_error:
+                    primary.add_note(
+                        "portfolio return database close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+            try:
+                scratch.cleanup()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "portfolio return scratch cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
             raise
         summary_state.return_scratch = scratch
         summary_state.return_database = database
 
     database = summary_state.return_database
     assert database is not None
+    scratch = summary_state.return_scratch
+    assert scratch is not None
+
+    _admit_portfolio_disk_growth(
+        database,
+        Path(scratch.name),
+        row_count=len(frame),
+    )
+
     def database_rows() -> Iterable[tuple[object, ...]]:
         for row in frame.itertuples(index=False, name=None):
             (
@@ -1028,6 +1063,36 @@ def _append_portfolio_return_summary(
         database_rows(),
     )
     database.commit()
+
+
+def _admit_portfolio_disk_growth(
+    database: sqlite3.Connection,
+    scratch_path: Path,
+    *,
+    row_count: int,
+) -> None:
+    growth_bytes = max(
+        _PORTFOLIO_SQLITE_STARTUP_BYTES,
+        max(1, row_count) * _PORTFOLIO_SQLITE_ROW_DISK_BYTES,
+    )
+    require_free_disk_headroom(
+        scratch_path,
+        reserve_bytes=2 * growth_bytes,
+    )
+    growth_pages = (
+        growth_bytes + _PORTFOLIO_SQLITE_PAGE_BYTES - 1
+    ) // _PORTFOLIO_SQLITE_PAGE_BYTES
+    for schema in ("main", "temp"):
+        current_pages = int(
+            database.execute(f"PRAGMA {schema}.page_count").fetchone()[0]
+        )
+        if row_count > 0 and schema == "temp":
+            current_pages = int(
+                database.execute("PRAGMA temp.max_page_count").fetchone()[0]
+            )
+        database.execute(
+            f"PRAGMA {schema}.max_page_count={current_pages + growth_pages}"
+        )
 
 
 def _ordered_performance_stats(
