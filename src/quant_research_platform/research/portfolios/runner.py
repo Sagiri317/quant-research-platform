@@ -1409,6 +1409,18 @@ def _portfolio_summary_outputs(
     summary_state: _PortfolioSummaryState,
 ) -> dict[str, pd.DataFrame]:
     try:
+        database = summary_state.return_database
+        scratch = summary_state.return_scratch
+        if database is not None and scratch is not None:
+            aggregate_row_count = int(
+                database.execute("SELECT COUNT(*) FROM returns").fetchone()[0]
+            )
+            if aggregate_row_count:
+                _admit_portfolio_disk_growth(
+                    database,
+                    Path(scratch.name),
+                    row_count=aggregate_row_count,
+                )
         policy = summary_state.resource_policy
         if policy is not None:
             summary_state.summary_lease = policy.lease(

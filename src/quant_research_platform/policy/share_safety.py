@@ -89,11 +89,16 @@ _PROVIDER_SOURCE_MARKER_RE = re.compile(
     r"raw[-_ ]?source[-_ ]?marker)\b"
 )
 _CREDENTIAL_RE = re.compile(
-    r"(?i)\b(?:token|secret|credential|password|api[_-]?key)\s*[:=]\s*"
+    r"(?i)\b(?:token|secret|credential|password|api[_-]?key|private[_-]?key)\s*[:=]\s*"
     r"(?:\"[^\r\n\"]+\"|'[^\r\n']+'|[^\s,;\}\]\)\"']+)"
 )
 _CREDENTIAL_KEY_RE = re.compile(
-    r"(?i)^(?:.*[_-])?(?:token|secret|credential|password|api[_-]?key)$"
+    r"(?i)^(?:.*[_-])?(?:token|secret|credential|password|api[_-]?key|"
+    r"authorization|auth|private[_-]?key)$"
+)
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)\b(?:authorization|auth)\s*[:=]\s*"
+    r"['\"]?(?:bearer|basic)\s+[^\s,;\}\]\)\"']+['\"]?"
 )
 _TRACEBACK_RE = re.compile(r"(?is)Traceback \(most recent call last\):.*")
 _RAW_EXPORT_FILENAME_RE = re.compile(
@@ -242,7 +247,7 @@ def unsafe_for_share_reason(
     value = str(text)
     if _TRACEBACK_RE.search(value):
         return "traceback"
-    if _CREDENTIAL_RE.search(value):
+    if _CREDENTIAL_RE.search(value) or _AUTHORIZATION_RE.search(value):
         return "credential"
     if _LOCAL_RUN_PATH_RE.search(value):
         return "local_run_path"
@@ -359,6 +364,7 @@ def sanitize_shared_text(text: object) -> str:
     result = str(text)
     result = _TRACEBACK_RE.sub("[traceback]", result)
     result = _CREDENTIAL_RE.sub("[credential]", result)
+    result = _AUTHORIZATION_RE.sub("[credential]", result)
     result = _LOCAL_RUN_PATH_RE.sub("[local-run-path]", result)
     result = _ABSOLUTE_REPO_LOCAL_ONLY_PATH_RE.sub("[local-only-path]", result)
     result = _WINDOWS_DRIVE_PATH_RE.sub("[local-path]", result)
@@ -422,7 +428,7 @@ def internal_artifact_metadata_unsafe_reason(
         return "absolute_path"
     if _RAW_EXPORT_FILENAME_RE.search(text):
         return "raw_export_filename"
-    if _CREDENTIAL_RE.search(text):
+    if _CREDENTIAL_RE.search(text) or _AUTHORIZATION_RE.search(text):
         return "credential"
     if _STOCK_CODE_RE.search(text):
         return "stock_code_sample"

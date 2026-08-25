@@ -449,6 +449,7 @@ def _write_dataset_body(
     lease_cleanup_failed = False
     active_producer_leases: list[MemoryLease] = []
     active_producer_values: list[_OwnedValue[pd.DataFrame]] = []
+    pending_result: _OwnedValue[DatasetInspection] | None = None
 
     def close_input_once() -> None:
         nonlocal input_cleanup_failed, input_closed
@@ -501,6 +502,7 @@ def _write_dataset_body(
             raise first_failure
 
     def _writer(temp_root: Path) -> _OwnedValue[DatasetInspection]:
+        nonlocal pending_result
         try:
             if (
                 resource_policy.memory_budget_bytes
@@ -604,7 +606,8 @@ def _write_dataset_body(
                         raise ValueError("dataset_write_result_bound_invalid")
                     result_lease.shrink_to(result_bytes)
                     session.close()
-                    return _OwnedValue(result, result_lease)
+                    pending_result = _OwnedValue(result, result_lease)
+                    return pending_result
                 except BaseException as primary:
                     result = None
                     try:
@@ -624,11 +627,22 @@ def _write_dataset_body(
 
     try:
         try:
-            return atomic_write_directory(final_root, _writer)
+            published = atomic_write_directory(final_root, _writer)
+            pending_result = None
+            return published
         except OutputAlreadyExistsError as exc:
             raise ValueError("dataset_exists") from exc
     finally:
-        close_input_and_active_leases()
+        result_to_release = pending_result
+        pending_result = None
+        try:
+            if result_to_release is not None:
+                _release_owned_value(
+                    result_to_release,
+                    owner="storage.dataset.write.result",
+                )
+        finally:
+            close_input_and_active_leases()
 
 
 def _write_contents(

@@ -9511,6 +9511,48 @@ def test_private_writer_owned_result_retains_one_lease(
     assert policy.used_memory_bytes == 0
 
 
+def test_private_writer_releases_result_when_publish_loses_race(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "publish_race")
+    policy = _writer_test_policy()
+    real_atomic_write_directory = dataset_writing.atomic_write_directory
+
+    def publish_after_writer(final_root, writer):  # noqa: ANN001
+        def race_writer(temp_root):  # noqa: ANN001
+            result = writer(temp_root)
+            final_root.mkdir()
+            (final_root / "winner").write_text("winner", encoding="utf-8")
+            return result
+
+        return real_atomic_write_directory(final_root, race_writer)
+
+    monkeypatch.setattr(
+        dataset_writing,
+        "atomic_write_directory",
+        publish_after_writer,
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="dataset_exists") as raised:
+            dataset_writing.write_dataset(
+                root,
+                _bound_first_frames((make_default_dataset_frame(),)),
+                spec=make_processed_dataset_spec("publish_race"),
+                resource_policy=policy,
+            )
+        assert policy.used_memory_bytes == 0
+        assert policy.state == "ACTIVE"
+        assert "runtime memory lease leaked" not in getattr(
+            raised.value,
+            "__notes__",
+            (),
+        )
+
+    assert (root / "winner").read_text(encoding="utf-8") == "winner"
+    assert not list(tmp_path.glob(".a-*"))
+
+
 def test_compare_uses_one_fingerprint_lease_per_side(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

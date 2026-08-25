@@ -184,6 +184,36 @@ def test_sanitizer_redacts_punctuation_credential_without_url_corruption() -> No
         assert "provider=Acme" in sanitized
 
 
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"Authorization": "Bearer abc123"},
+        {"auth": "Basic abc123"},
+        {"private_key": "secret-key"},
+    ),
+)
+def test_evidence_rejects_structured_credential_keys(
+    payload: dict[str, str],
+) -> None:
+    assert evidence_json_value_unsafe_reason(payload) == "credential"
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        "Authorization: Bearer abc123",
+        "auth=Basic abc123",
+        'Authorization="Bearer abc123"',
+        "private_key=!AbcdefghXYZ",
+    ),
+)
+def test_sanitizer_redacts_explicit_authorization_and_private_key(
+    text: str,
+) -> None:
+    assert unsafe_for_share_reason(text) == "credential"
+    assert sanitize_shared_text(text) == "[credential]"
+
+
 def test_sanitizer_redacts_absolute_private_repo_path_as_one_token() -> None:
     text = "/workspace/qrp/data/research/a_share/demo/_manifest/manifest.json"
 
@@ -250,6 +280,23 @@ def test_sanitizer_preserves_ordinary_identifiers_and_business_text() -> None:
     text = "600000 300001 provider_name=Acme business order 600000"
 
     assert sanitize_shared_text(text) == text
+
+
+def test_share_safety_preserves_noncredential_counterexamples() -> None:
+    safe_texts = (
+        "authorization model",
+        "basic factor model",
+        "https://example.com/api/v1?mode=basic",
+    )
+    for text in safe_texts:
+        assert unsafe_for_share_reason(text) is None
+        assert evidence_json_value_unsafe_reason({"message": text}) is None
+        assert sanitize_shared_text(text) == text
+
+    public_key = {"public_key": "ssh-ed25519 AAAAexample"}
+    assert unsafe_for_share_reason(str(public_key)) is None
+    assert evidence_json_value_unsafe_reason(public_key) is None
+    assert sanitize_shared_text(str(public_key)) == str(public_key)
 
 
 def test_stock_code_detector_does_not_flag_hash_payloads() -> None:

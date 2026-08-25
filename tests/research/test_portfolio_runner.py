@@ -443,6 +443,115 @@ def test_portfolio_return_summary_grows_main_and_temp_page_caps_before_insert(
         database.close()
 
 
+def test_portfolio_return_summary_admits_cumulative_query_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    phases: list[str] = []
+
+    def allow_disk(_path, *, reserve_bytes: int) -> None:  # noqa: ANN001
+        calls.append(reserve_bytes)
+
+    real_ordered_stats = portfolio_runner._ordered_performance_stats
+
+    def observe_ordered_stats(summary_state):  # noqa: ANN001
+        phases.append("query")
+        return real_ordered_stats(summary_state)
+
+    monkeypatch.setattr(portfolio_runner, "require_free_disk_headroom", allow_disk)
+    monkeypatch.setattr(
+        portfolio_runner,
+        "_ordered_performance_stats",
+        observe_ordered_stats,
+    )
+    rows = 4096
+    returns = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="min"),
+            "signal": ["factor"] * rows,
+            "return_source_column": ["label"] * rows,
+            "portfolio_mode": ["long_short"] * rows,
+            "long_return": [0.01] * rows,
+            "short_return": [0.0] * rows,
+            "gross_portfolio_return": [0.01] * rows,
+            "turnover": [1.0] * rows,
+            "cost": [0.0] * rows,
+            "net_portfolio_return": [0.01] * rows,
+            "long_count": [1] * rows,
+            "short_count": [1] * rows,
+        }
+    )
+    state = portfolio_runner._PortfolioSummaryState()
+    try:
+        portfolio_runner._append_portfolio_return_summary(state, returns)
+        portfolio_runner._append_portfolio_return_summary(state, returns)
+        portfolio_runner._portfolio_summary_outputs(state)
+        assert phases == ["query"]
+        assert calls[-1] >= (
+            2
+            * 2
+            * rows
+            * portfolio_runner._PORTFOLIO_SQLITE_ROW_DISK_BYTES
+        )
+        assert calls[-1] > calls[-2]
+    finally:
+        portfolio_runner._close_portfolio_summary_state(state)
+
+
+def test_portfolio_return_summary_rejects_cumulative_disk_before_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    query_calls: list[str] = []
+
+    def reject_aggregate_disk(_path, *, reserve_bytes: int) -> None:  # noqa: ANN001
+        calls.append(reserve_bytes)
+        if len(calls) == 3:
+            raise OSError("portfolio_aggregate_disk_preflight")
+
+    real_ordered_stats = portfolio_runner._ordered_performance_stats
+
+    def observe_ordered_stats(summary_state):  # noqa: ANN001
+        query_calls.append("ordered")
+        return real_ordered_stats(summary_state)
+
+    monkeypatch.setattr(
+        portfolio_runner,
+        "require_free_disk_headroom",
+        reject_aggregate_disk,
+    )
+    monkeypatch.setattr(
+        portfolio_runner,
+        "_ordered_performance_stats",
+        observe_ordered_stats,
+    )
+    returns = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-01")],
+            "signal": ["factor"],
+            "return_source_column": ["label"],
+            "portfolio_mode": ["long_short"],
+            "long_return": [0.01],
+            "short_return": [0.0],
+            "gross_portfolio_return": [0.01],
+            "turnover": [1.0],
+            "cost": [0.0],
+            "net_portfolio_return": [0.01],
+            "long_count": [1],
+            "short_count": [1],
+        }
+    )
+    state = portfolio_runner._PortfolioSummaryState()
+    try:
+        with pytest.raises(OSError, match="portfolio_aggregate_disk_preflight"):
+            portfolio_runner._append_portfolio_return_summary(state, returns)
+            portfolio_runner._portfolio_summary_outputs(state)
+        assert len(calls) == 3
+        assert query_calls == []
+    finally:
+        portfolio_runner._close_portfolio_summary_state(state)
+
+
 def test_portfolio_summary_admits_before_frame_build_and_holds_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

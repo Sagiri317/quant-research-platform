@@ -292,10 +292,18 @@ def evaluate_model_trial_metrics_from_chunks(
                             if owned_lease is not None:
                                 owned_lease.close()
                 database.commit()
-                if database.execute(
-                    "SELECT 1 FROM validation_rows LIMIT 1"
-                ).fetchone() is None:
+                validation_row_count = int(
+                    database.execute(
+                        "SELECT COUNT(*) FROM validation_rows"
+                    ).fetchone()[0]
+                )
+                if validation_row_count == 0:
                     raise ValueError("empty_model_selection_validation_window")
+                _admit_model_selection_disk_growth(
+                    database,
+                    Path(scratch),
+                    row_count=validation_row_count,
+                )
                 if purge_gap_steps > 0:
                     database.execute(
                         "DELETE FROM validation_rows "

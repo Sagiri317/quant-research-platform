@@ -396,6 +396,105 @@ def test_chunked_trial_metrics_complete_when_aggregate_exceeds_target() -> None:
     assert policy.used_memory_bytes == 0
 
 
+def test_chunked_trial_metrics_admits_cumulative_query_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    phases: list[str] = []
+
+    def allow_disk(_path, *, reserve_bytes: int) -> None:  # noqa: ANN001
+        calls.append(reserve_bytes)
+
+    real_metric_batches = trial_selection._metric_batches
+
+    def observe_metric_batches(database, query):  # noqa: ANN001
+        phases.append("metrics")
+        yield from real_metric_batches(database, query)
+
+    monkeypatch.setattr(
+        trial_selection,
+        "require_free_disk_headroom",
+        allow_disk,
+    )
+    monkeypatch.setattr(
+        trial_selection,
+        "_metric_batches",
+        observe_metric_batches,
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=1000, freq="min"),
+            "asset_id": ["asset"] * 1000,
+            "label": np.arange(1000, dtype="float64"),
+            "prediction": np.arange(1000, dtype="float64") + 0.25,
+        }
+    )
+
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (frame, frame.copy()),
+        model_id="cumulative_disk",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=0,
+    )
+
+    assert metrics["validation_rows"] == 2000
+    assert len(phases) == 2
+    assert calls[-1] >= (
+        2 * 2000 * trial_selection._MODEL_SELECTION_SQLITE_ROW_DISK_BYTES
+    )
+    assert calls[-1] > calls[-2]
+
+
+def test_chunked_trial_metrics_rejects_cumulative_disk_before_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+    query_calls: list[str] = []
+
+    def reject_aggregate_disk(_path, *, reserve_bytes: int) -> None:  # noqa: ANN001
+        calls.append(reserve_bytes)
+        if len(calls) == 4:
+            raise OSError("validation_aggregate_disk_preflight")
+
+    real_metric_batches = trial_selection._metric_batches
+
+    def observe_metric_batches(database, query):  # noqa: ANN001
+        query_calls.append(query)
+        yield from real_metric_batches(database, query)
+
+    monkeypatch.setattr(
+        trial_selection,
+        "require_free_disk_headroom",
+        reject_aggregate_disk,
+    )
+    monkeypatch.setattr(
+        trial_selection,
+        "_metric_batches",
+        observe_metric_batches,
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=1000, freq="min"),
+            "asset_id": ["asset"] * 1000,
+            "label": np.arange(1000, dtype="float64"),
+            "prediction": np.arange(1000, dtype="float64") + 0.25,
+        }
+    )
+
+    with pytest.raises(OSError, match="validation_aggregate_disk_preflight"):
+        evaluate_model_trial_metrics_from_chunks(
+            (frame, frame.copy()),
+            model_id="cumulative_disk_failure",
+            label_column="label",
+            prediction_column="prediction",
+            purge_gap_steps=0,
+        )
+
+    assert len(calls) == 4
+    assert query_calls == []
+
+
 def test_chunked_trial_metrics_releases_owned_chunk_on_primary_failure() -> None:
     policy = capture_test_policy(
         available_memory_bytes=2 * 1024**2,

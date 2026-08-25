@@ -109,6 +109,19 @@ def test_output_manifest_rejects_unsafe_free_form_metadata_before_publish(
         validate_output_manifest_business_envelope(payload)
 
 
+@pytest.mark.parametrize("key", ("Authorization", "auth", "private_key"))
+def test_output_manifest_rejects_structured_credentials_before_publish(
+    key: str,
+) -> None:
+    payload = _prediction_manifest_payload()
+    model_metadata = payload["metadata"]["model_metadata"]
+    model_metadata["hyperparameters"][key] = "secret-value"
+    model_metadata["resolved_hyperparameters"][key] = "secret-value"
+
+    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+        validate_output_manifest_business_envelope(payload)
+
+
 @pytest.mark.parametrize(
     ("mutation", "error"),
     (
