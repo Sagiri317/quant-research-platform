@@ -45,7 +45,8 @@ from quant_research_platform.research._memory import (
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.filtering import apply_filter_mode
 from quant_research_platform.research.portfolios.engine import (
-    construct_portfolio_positions,
+    _construct_portfolio_positions,
+    _PortfolioTemporalState,
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -733,8 +734,7 @@ def _iter_portfolio_output_chunks(
     source_columns_by_kind,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> Iterable[dict[str, pd.DataFrame]]:
-    context = pd.DataFrame()
-    context_periods = max(1, int(spec.execution_lag_steps) + 1)
+    temporal_state = _PortfolioTemporalState()
     saw_rows = False
     rolling_lease: MemoryLease | None = None
     input_cleanup = ExitStack()
@@ -750,34 +750,28 @@ def _iter_portfolio_output_chunks(
             policy = current_runtime_resource_policy()
             if resource_policy is not None and policy is not resource_policy:
                 raise RuntimeError("runtime_resource_policy_conflict")
-            input_bytes = pandas_frame_payload_bytes(
-                context
-            ) + pandas_frame_payload_bytes(chunk)
-            row_count = len(context) + len(chunk)
+            input_bytes = pandas_frame_payload_bytes(chunk)
+            row_count = len(chunk)
             signal_count = max(1, len(spec.signals))
-            combined_frame_bytes = 0 if context.empty else input_bytes
             validated_panel_bytes = input_bytes
             sorted_panel_bytes = input_bytes
             row_output_bytes = row_count * signal_count * _PORTFOLIO_ROW_WORKING_BYTES
             period_output_bytes = (
-                (context_periods + 1) * signal_count * _PORTFOLIO_PERIOD_WORKING_BYTES
+                (int(spec.execution_lag_steps) + 2)
+                * signal_count
+                * _PORTFOLIO_PERIOD_WORKING_BYTES
             )
-            timestamp_state_bytes = len(chunk) * (
-                np.dtype("datetime64[ns]").itemsize
-                + np.dtype(np.intp).itemsize
-                + np.dtype(np.bool_).itemsize
+            state_bytes = _portfolio_temporal_state_bytes(temporal_state)
+            state_growth_bytes = (
+                row_count * (signal_count + 1) * _PORTFOLIO_ROW_WORKING_BYTES
             )
-            selection_bytes = row_output_bytes + period_output_bytes
-            next_context_bytes = input_bytes
             operation_bytes = (
-                combined_frame_bytes
+                state_bytes
+                + state_growth_bytes
                 + validated_panel_bytes
                 + sorted_panel_bytes
                 + row_output_bytes
                 + period_output_bytes
-                + timestamp_state_bytes
-                + selection_bytes
-                + next_context_bytes
             )
             if resource_policy is not None and policy is not None:
                 if rolling_lease is None:
@@ -790,69 +784,42 @@ def _iter_portfolio_output_chunks(
                 else:
                     rolling_lease.shrink_to(operation_bytes)
                 rolling_lease.transfer("research.portfolio.operation")
-            actual_timestamps = _timestamp_set(chunk)
-            working = _combine_context_and_chunk(context, chunk)
-            result = construct_portfolio_positions(
-                working,
+            result = _construct_portfolio_positions(
+                chunk,
                 spec,
                 source_columns_by_kind=source_columns_by_kind,
+                temporal_state=temporal_state,
+                resource_lease=rolling_lease,
             )
             output = {
-                "positions": _select_actual_timestamps(
-                    result.positions,
-                    actual_timestamps,
-                ),
-                "turnover": _select_actual_timestamps(
-                    result.turnover,
-                    actual_timestamps,
-                ),
-                "cost_breakdown": _select_actual_timestamps(
-                    result.cost_breakdown,
-                    actual_timestamps,
-                ),
-                "portfolio_returns": _select_actual_timestamps(
-                    result.portfolio_returns,
-                    actual_timestamps,
-                ),
-                "diagnostics": _select_actual_timestamps(
-                    result.diagnostics,
-                    actual_timestamps,
-                ),
-                "capacity_diagnostics": _select_actual_timestamps(
-                    result.capacity_diagnostics,
-                    actual_timestamps,
-                ),
-                "numeric_exposure_diagnostics": _select_actual_timestamps(
-                    result.numeric_exposure_diagnostics,
-                    actual_timestamps,
-                ),
-                "categorical_exposure_diagnostics": _select_actual_timestamps(
-                    result.categorical_exposure_diagnostics,
-                    actual_timestamps,
+                "positions": result.positions,
+                "turnover": result.turnover,
+                "cost_breakdown": result.cost_breakdown,
+                "portfolio_returns": result.portfolio_returns,
+                "diagnostics": result.diagnostics,
+                "capacity_diagnostics": result.capacity_diagnostics,
+                "numeric_exposure_diagnostics": result.numeric_exposure_diagnostics,
+                "categorical_exposure_diagnostics": (
+                    result.categorical_exposure_diagnostics
                 ),
             }
-            next_context = _trailing_timestamp_context(
-                working,
-                periods=context_periods,
-            )
             output_bytes = sum(
                 pandas_frame_payload_bytes(frame) for frame in output.values()
             )
-            retained_context_bytes = pandas_frame_payload_bytes(next_context)
-            del actual_timestamps, result, working, chunk
-            context = next_context
+            retained_state_bytes = _portfolio_temporal_state_bytes(temporal_state)
+            del result, chunk
             if rolling_lease is not None:
-                retained_bytes = output_bytes + retained_context_bytes
+                retained_bytes = output_bytes + retained_state_bytes
                 if retained_bytes > rolling_lease.reserved_bytes:
                     rolling_lease.grow(retained_bytes - rolling_lease.reserved_bytes)
                 else:
                     rolling_lease.shrink_to(retained_bytes)
-                rolling_lease.transfer("research.portfolio.output_context")
+                rolling_lease.transfer("research.portfolio.output_state")
             yield output
-            del output, next_context
+            del output
             if rolling_lease is not None:
-                rolling_lease.shrink_to(retained_context_bytes)
-                rolling_lease.transfer("research.portfolio.context")
+                rolling_lease.shrink_to(retained_state_bytes)
+                rolling_lease.transfer("research.portfolio.temporal_state")
     finally:
         primary = sys.exception()
         first_failure: BaseException | None = None
@@ -1724,16 +1691,6 @@ def _portfolio_concentration_summary(
     return pd.DataFrame.from_records(records, columns=columns)
 
 
-def _combine_context_and_chunk(
-    context: pd.DataFrame,
-    chunk: pd.DataFrame,
-) -> pd.DataFrame:
-    if context.empty:
-        return chunk
-    # Bounded context carries only recent timestamps for lag/turnover continuity.
-    return pd.concat([context, chunk], ignore_index=True)
-
-
 def _timestamp_set(frame: pd.DataFrame) -> pd.DatetimeIndex:
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="invalid_portfolio_timestamp_values"
@@ -1741,24 +1698,16 @@ def _timestamp_set(frame: pd.DataFrame) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(timestamps.unique()).sort_values()
 
 
-def _select_actual_timestamps(
-    frame: pd.DataFrame,
-    actual_timestamps: pd.DatetimeIndex,
-) -> pd.DataFrame:
-    if frame.empty:
-        return frame.copy()
-    timestamps = strict_timestamp_series(
-        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+def _portfolio_temporal_state_bytes(state: _PortfolioTemporalState) -> int:
+    position_count = sum(
+        len(positions)
+        for signals in state.previous_positions.values()
+        for positions in signals.values()
     )
-    return frame.loc[timestamps.isin(actual_timestamps)].copy()
-
-
-def _trailing_timestamp_context(frame: pd.DataFrame, *, periods: int) -> pd.DataFrame:
-    timestamps = strict_timestamp_series(
-        frame["timestamp"], error="invalid_portfolio_timestamp_values"
+    return (
+        pandas_frame_payload_bytes(state.lag_history)
+        + position_count * _PORTFOLIO_ROW_WORKING_BYTES
     )
-    trailing = pd.DatetimeIndex(timestamps.unique()).sort_values()[-periods:]
-    return frame.loc[timestamps.isin(trailing)].copy()
 
 
 def _empty_summary_frame(columns: Iterable[str]) -> pd.DataFrame:

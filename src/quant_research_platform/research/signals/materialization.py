@@ -5,15 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 
-import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_timestamp_series,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
@@ -25,7 +26,39 @@ def normalize_signal_frame(
     *,
     timestamp_column: str = "timestamp",
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
+    resource_lease: MemoryLease | None = None,
 ) -> pd.DataFrame:
+    working_bytes = _signal_normalization_working_bytes(frame, signals)
+    policy = current_runtime_resource_policy()
+    reservation = (
+        policy.lease("research.signal.normalize", working_bytes)
+        if policy is not None and resource_lease is None
+        else nullcontext()
+    )
+    with reservation:
+        result = frame.copy()
+        for signal in signals:
+            _validate_signal_source_kind(signal, source_columns_by_kind)
+            result[signal.signal_id] = _normalize_signal_values(
+                result,
+                signal=signal,
+                timestamp_column=timestamp_column,
+            )
+        consumed_sources = {
+            signal.source_column
+            for signal in signals
+            if signal.source_column != signal.signal_id
+            and signal.source_column in frame.columns
+        }
+        if not consumed_sources:
+            return result
+        return result.drop(columns=sorted(consumed_sources))
+
+
+def _signal_normalization_working_bytes(
+    frame: pd.DataFrame,
+    signals: tuple[SignalSpec, ...],
+) -> int:
     row_count = len(frame)
     index_bytes = int(frame.index.memory_usage(deep=True))
     float_series_bytes = index_bytes + 8 * row_count
@@ -70,27 +103,7 @@ def normalize_signal_frame(
         and signal.source_column in frame.columns
     }
     drop_output_bytes = result_bytes if consumed_sources else 0
-    policy = current_runtime_resource_policy()
-    reservation = (
-        policy.lease(
-            "research.signal.normalize",
-            result_bytes + transform_bytes + drop_output_bytes,
-        )
-        if policy is not None
-        else nullcontext()
-    )
-    with reservation:
-        result = frame.copy()
-        for signal in signals:
-            _validate_signal_source_kind(signal, source_columns_by_kind)
-            result[signal.signal_id] = _normalize_signal_values(
-                result,
-                signal=signal,
-                timestamp_column=timestamp_column,
-            )
-        if not consumed_sources:
-            return result
-        return result.drop(columns=sorted(consumed_sources))
+    return result_bytes + transform_bytes + drop_output_bytes
 
 
 def _validate_signal_source_kind(
@@ -142,30 +155,3 @@ def _normalize_signal_values(
     elif signal.direction != "higher_is_better":
         raise ValueError(f"unsupported_signal_direction: {signal.direction}")
     return values
-
-
-def _stable_zscore(values: pd.Series) -> pd.Series:
-    source = values.to_numpy(dtype="float64", na_value=np.nan)
-    output = np.full(len(source), np.nan, dtype="float64")
-    valid = np.isfinite(source)
-    if int(valid.sum()) < 2:
-        return pd.Series(output, index=values.index)
-    finite = source[valid]
-    differences = finite - finite[0]
-    if np.isfinite(differences).all():
-        centered = differences - differences.mean()
-    else:
-        scale = float(np.max(np.abs(finite)))
-        if scale == 0:
-            return pd.Series(output, index=values.index)
-        normalized = finite / scale
-        centered = normalized - normalized.mean()
-    scale = float(np.max(np.abs(centered)))
-    if scale == 0:
-        return pd.Series(output, index=values.index)
-    centered = centered / scale
-    std = float(np.sqrt(np.dot(centered, centered) / len(finite)))
-    if std == 0:
-        return pd.Series(output, index=values.index)
-    output[valid] = centered / std
-    return pd.Series(output, index=values.index)

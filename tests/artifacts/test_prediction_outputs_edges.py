@@ -1226,7 +1226,7 @@ def test_model_selection_candidate_trial_exact_mutation_matrix(
     elif mutation == "trial_validation_rows_zero":
         trials[0]["validation_rows"] = 0
         trials[0]["validation_ic"] = None
-        trials[0]["validation_ic_reason"] = "insufficient_observations"
+        trials[0]["validation_ic_reason"] = "no_valid_observations"
     elif mutation == "trial_metric_defined_insufficient_rows":
         trials[0]["validation_rows"] = 1
     elif mutation == "trial_metric_wrong_reason_insufficient_rows":

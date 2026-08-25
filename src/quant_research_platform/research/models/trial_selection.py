@@ -5,13 +5,17 @@ from __future__ import annotations
 import sqlite3
 import tempfile
 from collections.abc import Collection, Iterable, Iterator
-from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from contextlib import ExitStack, closing, contextmanager
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _add_correlation_aggregate,
+    _pearson_correlation_from_moments,
+    _summarize_correlation_aggregates,
+)
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
 )
@@ -34,7 +38,102 @@ _MODEL_SELECTION_SQLITE_PAGE_BYTES = 4096
 _MODEL_SELECTION_SQLITE_ROW_DISK_BYTES = 512
 _MODEL_SELECTION_SQLITE_STARTUP_BYTES = 64 * _MODEL_SELECTION_SQLITE_PAGE_BYTES
 _MODEL_SELECTION_METRIC_RESERVE_BYTES = 256 * 1024
-_MODEL_SELECTION_METRIC_BATCH_ROWS = 4096
+_CROSS_SECTIONAL_METRIC_QUERY = """
+WITH ranked AS (
+    SELECT
+        row_id,
+        timestamp_ns,
+        label,
+        prediction,
+        FIRST_VALUE(label) OVER (
+            PARTITION BY timestamp_ns ORDER BY row_id
+        ) AS label_reference,
+        FIRST_VALUE(prediction) OVER (
+            PARTITION BY timestamp_ns ORDER BY row_id
+        ) AS prediction_reference,
+        RANK() OVER (
+            PARTITION BY timestamp_ns ORDER BY label
+        ) AS label_rank,
+        RANK() OVER (
+            PARTITION BY timestamp_ns ORDER BY prediction
+        ) AS prediction_rank,
+        COUNT(*) OVER (
+            PARTITION BY timestamp_ns, label
+        ) AS label_tie_count,
+        COUNT(*) OVER (
+            PARTITION BY timestamp_ns, prediction
+        ) AS prediction_tie_count,
+        COUNT(*) OVER (
+            PARTITION BY timestamp_ns
+        ) AS timestamp_count
+    FROM validation_rows
+), differences AS (
+    SELECT
+        *,
+        label - label_reference AS label_difference,
+        prediction - prediction_reference AS prediction_difference
+    FROM ranked
+), scaled AS (
+    SELECT
+        *,
+        MAX(ABS(label_difference)) OVER (
+            PARTITION BY timestamp_ns
+        ) AS label_difference_scale,
+        MAX(ABS(prediction_difference)) OVER (
+            PARTITION BY timestamp_ns
+        ) AS prediction_difference_scale,
+        MAX(ABS(label)) OVER (
+            PARTITION BY timestamp_ns
+        ) AS label_raw_scale,
+        MAX(ABS(prediction)) OVER (
+            PARTITION BY timestamp_ns
+        ) AS prediction_raw_scale
+    FROM differences
+), normalized AS (
+    SELECT
+        timestamp_ns,
+        label,
+        prediction,
+        CASE
+            WHEN label_difference_scale = 0 THEN 0.0
+            WHEN label_difference_scale <= 1.7976931348623157e308
+                THEN label_difference / label_difference_scale
+            ELSE label / label_raw_scale
+        END AS label_value,
+        CASE
+            WHEN prediction_difference_scale = 0 THEN 0.0
+            WHEN prediction_difference_scale <= 1.7976931348623157e308
+                THEN prediction_difference / prediction_difference_scale
+            ELSE prediction / prediction_raw_scale
+        END AS prediction_value,
+        (
+            CAST(label_rank AS REAL)
+            + (CAST(label_tie_count AS REAL) - 1.0) / 2.0
+        ) / CAST(timestamp_count AS REAL) AS label_rank_value,
+        (
+            CAST(prediction_rank AS REAL)
+            + (CAST(prediction_tie_count AS REAL) - 1.0) / 2.0
+        ) / CAST(timestamp_count AS REAL) AS prediction_rank_value
+    FROM scaled
+)
+SELECT
+    timestamp_ns,
+    COUNT(*) AS observation_count,
+    SUM((prediction - label) * (prediction - label)) AS squared_error,
+    SUM(label_value) AS label_sum,
+    SUM(prediction_value) AS prediction_sum,
+    SUM(label_value * label_value) AS label_square_sum,
+    SUM(prediction_value * prediction_value) AS prediction_square_sum,
+    SUM(label_value * prediction_value) AS label_prediction_sum,
+    SUM(label_rank_value) AS label_rank_sum,
+    SUM(prediction_rank_value) AS prediction_rank_sum,
+    SUM(label_rank_value * label_rank_value) AS label_rank_square_sum,
+    SUM(prediction_rank_value * prediction_rank_value) AS prediction_rank_square_sum,
+    SUM(label_rank_value * prediction_rank_value) AS label_prediction_rank_sum
+FROM normalized
+GROUP BY timestamp_ns
+ORDER BY timestamp_ns
+"""
 
 
 @contextmanager
@@ -74,151 +173,6 @@ def _model_selection_database(
         raise
     else:
         database.close()
-
-
-@dataclass(slots=True)
-class _MetricAccumulator:
-    count: int = 0
-    label_mean: float = 0.0
-    prediction_mean: float = 0.0
-    label_m2: float = 0.0
-    prediction_m2: float = 0.0
-    covariance: float = 0.0
-    squared_error: float = 0.0
-    label_scale: float = 1.0
-    prediction_scale: float = 1.0
-    label_min: float | None = None
-    label_max: float | None = None
-    prediction_min: float | None = None
-    prediction_max: float | None = None
-
-    def add(
-        self,
-        labels: np.ndarray,
-        predictions: np.ndarray,
-    ) -> None:
-        batch_count = len(labels)
-        if batch_count == 0:
-            return
-        batch_label_min = float(labels.min())
-        batch_label_max = float(labels.max())
-        batch_prediction_min = float(predictions.min())
-        batch_prediction_max = float(predictions.max())
-        label_scale = max(abs(batch_label_min), abs(batch_label_max))
-        prediction_scale = max(abs(batch_prediction_min), abs(batch_prediction_max))
-        if label_scale == 0:
-            label_scale = 1.0
-        if prediction_scale == 0:
-            prediction_scale = 1.0
-        if self.count == 0:
-            self.label_scale = label_scale
-            self.prediction_scale = prediction_scale
-        else:
-            previous_label_scale = self.label_scale
-            previous_prediction_scale = self.prediction_scale
-            if (
-                label_scale < previous_label_scale
-                and self.label_min == self.label_max == 0
-            ):
-                self.label_scale = label_scale
-            elif label_scale > previous_label_scale:
-                factor = previous_label_scale / label_scale
-                if self.label_mean:
-                    self.label_mean *= factor
-                if self.label_m2:
-                    self.label_m2 *= factor * factor
-                self.label_scale = label_scale
-            if (
-                prediction_scale < previous_prediction_scale
-                and self.prediction_min == self.prediction_max == 0
-            ):
-                self.prediction_scale = prediction_scale
-            elif prediction_scale > previous_prediction_scale:
-                factor = previous_prediction_scale / prediction_scale
-                if self.prediction_mean:
-                    self.prediction_mean *= factor
-                if self.prediction_m2:
-                    self.prediction_m2 *= factor * factor
-                self.prediction_scale = prediction_scale
-            if self.covariance:
-                self.covariance *= (
-                    previous_label_scale / self.label_scale
-                    * previous_prediction_scale
-                    / self.prediction_scale
-                )
-        normalized_labels = labels / self.label_scale
-        normalized_predictions = predictions / self.prediction_scale
-        label_mean = float(normalized_labels.mean())
-        prediction_mean = float(normalized_predictions.mean())
-        centered_labels = normalized_labels - label_mean
-        centered_predictions = normalized_predictions - prediction_mean
-        label_m2 = float(np.dot(centered_labels, centered_labels))
-        prediction_m2 = float(np.dot(centered_predictions, centered_predictions))
-        covariance = float(np.dot(centered_labels, centered_predictions))
-        self.squared_error += float(np.square(predictions - labels).sum())
-        if self.count == 0:
-            self.count = batch_count
-            self.label_mean = label_mean
-            self.prediction_mean = prediction_mean
-            self.label_m2 = label_m2
-            self.prediction_m2 = prediction_m2
-            self.covariance = covariance
-        else:
-            previous_count = self.count
-            total_count = previous_count + batch_count
-            overlap = previous_count * batch_count / total_count
-            label_delta = label_mean - self.label_mean
-            prediction_delta = prediction_mean - self.prediction_mean
-            self.label_m2 += label_m2 + label_delta * label_delta * overlap
-            self.prediction_m2 += (
-                prediction_m2 + prediction_delta * prediction_delta * overlap
-            )
-            self.covariance += covariance + label_delta * prediction_delta * overlap
-            self.label_mean += label_delta * batch_count / total_count
-            self.prediction_mean += prediction_delta * batch_count / total_count
-            self.count = total_count
-        self.label_min = (
-            batch_label_min
-            if self.label_min is None
-            else min(self.label_min, batch_label_min)
-        )
-        self.label_max = (
-            batch_label_max
-            if self.label_max is None
-            else max(self.label_max, batch_label_max)
-        )
-        self.prediction_min = (
-            batch_prediction_min
-            if self.prediction_min is None
-            else min(self.prediction_min, batch_prediction_min)
-        )
-        self.prediction_max = (
-            batch_prediction_max
-            if self.prediction_max is None
-            else max(self.prediction_max, batch_prediction_max)
-        )
-
-    def correlation(self) -> tuple[float | None, str | None]:
-        if self.count < 2:
-            return None, "insufficient_observations"
-        if (
-            self.label_min == self.label_max
-            or self.prediction_min == self.prediction_max
-        ):
-            return None, "zero_variance"
-        denominator = np.sqrt(self.label_m2 * self.prediction_m2)
-        if denominator == 0:
-            return None, "zero_variance"
-        if not np.isfinite(denominator):
-            return None, "nonfinite_result"
-        value = float(self.covariance / denominator)
-        if not np.isfinite(value):
-            return None, "nonfinite_result"
-        return value, None
-
-    @property
-    def mean_squared_error(self) -> float:
-        return float(self.squared_error / self.count)
 
 
 def validate_trial_metric_columns(
@@ -399,61 +353,126 @@ def evaluate_model_trial_metrics_from_chunks(
                     "SELECT 1 FROM validation_rows LIMIT 1"
                 ).fetchone() is None:
                     raise ValueError("empty_model_selection_validation_window")
-                raw = _MetricAccumulator()
-                for rows in _metric_batches(
-                    database,
-                    "SELECT label, prediction FROM validation_rows ORDER BY row_id",
-                ):
-                    raw.add(
-                        np.fromiter(
-                            (row[0] for row in rows),
-                            dtype="float64",
-                            count=len(rows),
-                        ),
-                        np.fromiter(
-                            (row[1] for row in rows),
-                            dtype="float64",
-                            count=len(rows),
-                        ),
-                    )
-                rank = _MetricAccumulator()
-                rank_query = (
-                    "SELECT label_rank, prediction_rank FROM ("
-                    "SELECT row_id, "
-                    "CAST(RANK() OVER (ORDER BY label) AS REAL) + "
-                    "(CAST(COUNT(*) OVER (PARTITION BY label) AS REAL) - 1.0) "
-                    "/ 2.0 "
-                    "AS label_rank, "
-                    "CAST(RANK() OVER (ORDER BY prediction) AS REAL) + "
-                    "(CAST(COUNT(*) OVER (PARTITION BY prediction) AS REAL) - 1.0) "
-                    "/ 2.0 "
-                    "AS prediction_rank FROM validation_rows"
-                    ") ORDER BY row_id"
-                )
-                for rows in _metric_batches(database, rank_query):
-                    rank.add(
-                        np.fromiter(
-                            (row[0] for row in rows),
-                            dtype="float64",
-                            count=len(rows),
-                        ),
-                        np.fromiter(
-                            (row[1] for row in rows),
-                            dtype="float64",
-                            count=len(rows),
-                        ),
-                    )
-                validation_ic, validation_ic_reason = raw.correlation()
-                validation_rankic, validation_rankic_reason = rank.correlation()
+                (
+                    validation_rows,
+                    validation_mse,
+                    validation_ic,
+                    validation_ic_reason,
+                    validation_rankic,
+                    validation_rankic_reason,
+                ) = _cross_sectional_metric_summary(database)
                 return {
                     "model_id": model_id,
-                    "validation_rows": raw.count,
+                    "validation_rows": validation_rows,
                     "validation_ic": validation_ic,
                     "validation_ic_reason": validation_ic_reason,
                     "validation_rankic": validation_rankic,
                     "validation_rankic_reason": validation_rankic_reason,
-                    "validation_mse": raw.mean_squared_error,
+                    "validation_mse": validation_mse,
                 }
+
+
+def _cross_sectional_metric_summary(
+    database: sqlite3.Connection,
+) -> tuple[int, float, float | None, str | None, float | None, str | None]:
+    stats: dict[str, float | int] = {
+        "ic_count": 0,
+        "ic_mean": 0.0,
+        "ic_m2": 0.0,
+        "ic_positive": 0,
+        "ic_min": None,
+        "ic_max": None,
+        "rankic_count": 0,
+        "rankic_mean": 0.0,
+        "rankic_m2": 0.0,
+        "rankic_positive": 0,
+        "rankic_min": None,
+        "rankic_max": None,
+    }
+    row_count = 0
+    squared_error = 0.0
+    with closing(database.execute(_CROSS_SECTIONAL_METRIC_QUERY)) as rows:
+        for row in rows:
+            (
+                _timestamp,
+                timestamp_rows,
+                timestamp_squared_error,
+                label_sum,
+                prediction_sum,
+                label_square_sum,
+                prediction_square_sum,
+                label_prediction_sum,
+                label_rank_sum,
+                prediction_rank_sum,
+                label_rank_square_sum,
+                prediction_rank_square_sum,
+                label_prediction_rank_sum,
+            ) = row
+            count = int(timestamp_rows)
+            row_count += count
+            squared_error += float(timestamp_squared_error)
+            ic = _pearson_correlation_from_sums(
+                count=count,
+                left_sum=float(label_sum),
+                right_sum=float(prediction_sum),
+                left_square_sum=float(label_square_sum),
+                right_square_sum=float(prediction_square_sum),
+                cross_sum=float(label_prediction_sum),
+            )[0]
+            rankic = _pearson_correlation_from_sums(
+                count=count,
+                left_sum=float(label_rank_sum),
+                right_sum=float(prediction_rank_sum),
+                left_square_sum=float(label_rank_square_sum),
+                right_square_sum=float(prediction_rank_square_sum),
+                cross_sum=float(label_prediction_rank_sum),
+            )[0]
+            _add_correlation_aggregate(stats, "ic", ic)
+            _add_correlation_aggregate(stats, "rankic", rankic)
+    ic = _trial_correlation_summary(stats, "ic")
+    rankic = _trial_correlation_summary(stats, "rankic")
+    return (
+        row_count,
+        squared_error / row_count,
+        ic[0],
+        ic[1],
+        rankic[0],
+        rankic[1],
+    )
+
+
+def _pearson_correlation_from_sums(
+    *,
+    count: int,
+    left_sum: float,
+    right_sum: float,
+    left_square_sum: float,
+    right_square_sum: float,
+    cross_sum: float,
+) -> tuple[float | None, str | None]:
+    return _pearson_correlation_from_moments(
+        count=count,
+        left_m2=left_square_sum - left_sum * left_sum / count,
+        right_m2=right_square_sum - right_sum * right_sum / count,
+        covariance=cross_sum - left_sum * right_sum / count,
+    )
+
+
+def _trial_correlation_summary(
+    stats: dict[str, float | int],
+    prefix: str,
+) -> tuple[float | None, str | None]:
+    result = _summarize_correlation_aggregates(
+        count=int(stats[f"{prefix}_count"]),
+        mean=float(stats[f"{prefix}_mean"]),
+        m2=float(stats[f"{prefix}_m2"]),
+        positive_count=int(stats[f"{prefix}_positive"]),
+        minimum=stats[f"{prefix}_min"],
+        maximum=stats[f"{prefix}_max"],
+    )
+    if int(result["valid_count"]) == 0:
+        return None, str(result["reason"])
+    return float(result["mean"]), None
 
 
 def _admit_model_selection_disk_growth(
@@ -546,18 +565,6 @@ def _insert_metric_chunk(
             )
         ),
     )
-
-
-def _metric_batches(
-    database: sqlite3.Connection,
-    query: str,
-) -> Iterable[list[tuple[float, float]]]:
-    cursor = database.execute(query)
-    try:
-        while rows := cursor.fetchmany(_MODEL_SELECTION_METRIC_BATCH_ROWS):
-            yield rows
-    finally:
-        cursor.close()
 
 
 def build_model_selection_metadata(

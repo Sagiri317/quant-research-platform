@@ -34,7 +34,7 @@ from quant_research_platform.markets.implementations.a_share.research_profiles i
 
 
 def test_platform_field_catalog_does_not_own_a_share_specific_fields() -> None:
-    platform_fields = set(platform_field_catalog().list_names())
+    platform_fields = {spec.name for spec in platform_field_catalog().list()}
 
     assert (
         not {

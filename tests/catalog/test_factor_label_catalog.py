@@ -24,7 +24,7 @@ from tests.helpers import frequency_ids
 def test_a_share_price_volume_factor_definitions_have_input_requirements() -> None:
     catalog = factor_definitions.factor_catalog()
     definitions = catalog.list()
-    registered_fields = set(field_catalog().list_names())
+    registered_fields = {spec.name for spec in field_catalog().list()}
 
     assert tuple(definition.output_column for definition in definitions) == (
         price_volume_factor_columns()

@@ -24,5 +24,6 @@ def test_catalog_fields_owns_platform_canonical_fields_only() -> None:
     assert catalog.get(names.source_id).role is ColumnRole.SOURCE
     assert catalog.get(names.source_asset_id).role is ColumnRole.SOURCE
 
+    catalog_names = {spec.name for spec in catalog.list()}
     for market_specific_field in ("is_st", "is_pt", "limit_status", "can_enter"):
-        assert market_specific_field not in catalog.list_names()
+        assert market_specific_field not in catalog_names

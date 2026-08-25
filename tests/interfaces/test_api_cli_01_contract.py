@@ -247,7 +247,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
     }
 
     def list_factors(profile) -> FactorCatalogResponse:
-        assert profile.fields.list_names()
+        assert profile.fields.list()
         calls["list_factors"].append(())
         return FactorCatalogResponse(
             api_version="0.1",
@@ -255,7 +255,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
         )
 
     def list_labels(profile) -> LabelCatalogResponse:
-        assert profile.fields.list_names()
+        assert profile.fields.list()
         calls["list_labels"].append(())
         return LabelCatalogResponse(
             api_version="0.1",

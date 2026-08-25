@@ -10,6 +10,9 @@ from quant_research_platform.compute.dataframe.constraints import (
     apply_tradability_constraints,
     tradability_diagnostic_counts,
 )
+from quant_research_platform.compute.dataframe.cross_section import (
+    _ordinal_rank_bounds,
+)
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     POSITION_COLUMNS,
 )
@@ -61,23 +64,45 @@ def build_signal_positions(
         valid_mask &= can_enter | has_previous
 
     eligible_indices = np.flatnonzero(valid_mask)
-    sorted_indices = eligible_indices[
-        np.argsort(signal_values[eligible_indices], kind="mergesort")
-    ]
     positions: dict[str, float] = {}
     fallback_reason = ""
     long_count = 0
     short_count = 0
     minimum_count = 1 if weight_config.portfolio_mode == "long_only" else 2
-    if len(sorted_indices) >= minimum_count:
-        long_count = selection_count(len(sorted_indices), weight_config.top_quantile)
-        short_count = (
+    if len(eligible_indices) >= minimum_count:
+        eligible_values = signal_values[eligible_indices]
+        lower_ranks, upper_ranks = _ordinal_rank_bounds(eligible_values)
+        observation_count = len(eligible_indices)
+        target_long_count = selection_count(
+            observation_count,
+            weight_config.top_quantile,
+        )
+        target_short_count = (
             0
             if weight_config.portfolio_mode == "long_only"
-            else selection_count(len(sorted_indices), weight_config.bottom_quantile)
+            else selection_count(observation_count, weight_config.bottom_quantile)
         )
-        if long_count + short_count <= len(sorted_indices):
-            long_leg = sorted_indices[-long_count:]
+        varies = not (
+            bool(np.all(lower_ranks == 1))
+            and bool(np.all(upper_ranks == observation_count))
+        )
+        if varies and target_long_count + target_short_count <= observation_count:
+            long_leg = eligible_indices[
+                upper_ranks >= observation_count - target_long_count + 1
+            ]
+            short_leg = eligible_indices[lower_ranks <= target_short_count]
+            strictly_separated = (
+                weight_config.portfolio_mode == "long_only"
+                or float(signal_values[short_leg].max())
+                < float(signal_values[long_leg].min())
+            )
+        else:
+            long_leg = np.array([], dtype=np.intp)
+            short_leg = np.array([], dtype=np.intp)
+            strictly_separated = False
+        if len(long_leg) and strictly_separated:
+            long_count = len(long_leg)
+            short_count = len(short_leg)
             risk_array = risk_values(timestamp_frame, weight_config)
             long_weights, long_fallback = _leg_weights(
                 asset_values=asset_values[long_leg],
@@ -91,12 +116,12 @@ def build_signal_positions(
                 ({}, "")
                 if weight_config.portfolio_mode == "long_only"
                 else _leg_weights(
-                    asset_values=asset_values[sorted_indices[:short_count]],
-                    signal_values=signal_values[sorted_indices[:short_count]],
+                    asset_values=asset_values[short_leg],
+                    signal_values=signal_values[short_leg],
                     risk_values=(
                         None
                         if risk_array is None
-                        else risk_array[sorted_indices[:short_count]]
+                        else risk_array[short_leg]
                     ),
                     signal=signal,
                     weight_config=weight_config,
@@ -169,11 +194,9 @@ def _leg_weights(
     if weight_config.method == "equal_weight_quantile":
         raw = np.ones(len(asset_values), dtype="float64")
     elif weight_config.method == "rank_weighted_quantile":
-        raw = (
-            np.arange(len(asset_values), 0, -1, dtype="float64")
-            if sign < 0
-            else np.arange(1, len(asset_values) + 1, dtype="float64")
-        )
+        lower_ranks, upper_ranks = _ordinal_rank_bounds(signal_values)
+        ranks = (lower_ranks + upper_ranks) / 2.0
+        raw = len(asset_values) + 1.0 - ranks if sign < 0 else ranks
     elif weight_config.method == "zscore_weighted_quantile":
         differences = signal_values - signal_values[0]
         if np.isfinite(differences).all():

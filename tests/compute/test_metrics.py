@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -133,3 +134,32 @@ def test_compute_grouped_label_values_does_not_group_assigned_pairs(
     )
 
     assert result["group"].tolist() == [1, 2, 3, 1, 2, 3]
+
+
+def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None:
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="label")
+    frame = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-01"] * 4,
+            "asset": ["d", "c", "b", "a"],
+            "factor": [0.0, 1.0, 1.0, 2.0],
+            "label": [0.0, 1.0, 3.0, 4.0],
+        }
+    )
+
+    _, grouped = compute_ic_and_grouped_label_values(frame, spec, n_groups=4)
+    _, permuted = compute_ic_and_grouped_label_values(
+        frame.iloc[::-1].assign(asset=["w", "x", "y", "z"]),
+        spec,
+        n_groups=4,
+    )
+    _, tiny = compute_ic_and_grouped_label_values(
+        frame.iloc[:2].assign(factor=[0.0, np.nextafter(0.0, 1.0)]),
+        spec,
+        n_groups=2,
+    )
+
+    assert grouped["group"].tolist() == [1, 2, 4]
+    assert grouped["n_obs"].tolist() == [1, 2, 1]
+    pd.testing.assert_frame_equal(grouped, permuted)
+    assert tiny["group"].tolist() == [1, 2]

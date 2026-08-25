@@ -13,6 +13,7 @@ import pandas as pd
 from quant_research_platform.compute.dataframe.cross_section import (
     GROUP_SPREAD_SUMMARY_COLUMNS,
     IC_SUMMARY_COLUMNS,
+    _add_correlation_aggregate,
     _summarize_correlation_aggregates,
     compute_ic_and_grouped_label_values,
 )
@@ -30,6 +31,7 @@ from quant_research_platform.research._memory import (
     iter_complete_time_sized_frames,
 )
 from quant_research_platform.research.signals.materialization import (
+    _signal_normalization_working_bytes,
     normalize_signal_frame,
 )
 from quant_research_platform.runtime.resources import (
@@ -160,8 +162,8 @@ class _EvaluationStreamingState:
                         "rankic_max": None,
                     }
                     self._ic[key] = stats
-                _add_correlation(stats, "ic", ic)
-                _add_correlation(stats, "rankic", rankic)
+                _add_correlation_aggregate(stats, "ic", ic)
+                _add_correlation_aggregate(stats, "rankic", rankic)
         if not grouped_label_values.empty:
             self._grouped_rows += len(grouped_label_values)
             current_key: tuple[object, object, object] | None = None
@@ -341,35 +343,6 @@ class _EvaluationStreamingState:
             n_groups=self._n_groups,
             skipped_timestamp_count=self._skipped_timestamp_count,
         )
-
-
-def _add_correlation(
-    stats: dict[str, float | int],
-    prefix: str,
-    value: object,
-) -> None:
-    if pd.isna(value):
-        return
-    numeric = float(value)
-    count = int(stats[f"{prefix}_count"]) + 1
-    mean_key = f"{prefix}_mean"
-    m2_key = f"{prefix}_m2"
-    delta = numeric - float(stats[mean_key])
-    mean = float(stats[mean_key]) + delta / count
-    stats[mean_key] = mean
-    stats[m2_key] += delta * (numeric - mean)
-    stats[f"{prefix}_count"] = count
-    stats[f"{prefix}_positive"] += int(numeric > 0)
-    stats[f"{prefix}_min"] = (
-        numeric
-        if stats[f"{prefix}_min"] is None
-        else min(float(stats[f"{prefix}_min"]), numeric)
-    )
-    stats[f"{prefix}_max"] = (
-        numeric
-        if stats[f"{prefix}_max"] is None
-        else max(float(stats[f"{prefix}_max"]), numeric)
-    )
 
 
 def _correlation_summary(
@@ -796,22 +769,33 @@ def _evaluation_batch_peak_bytes(
         )
         for compute_columns in compute_columns_by_label
     ]
-    retained_output_bound = sum(
+    output_bounds = [
         _evaluation_output_bound(
             frame,
             signal_count=signal_count,
             n_groups=n_groups,
         )
         for _ in compute_columns_by_label
+    ]
+    retained_before_kernel = 0
+    kernel_peak = 0
+    for kernel_bound, output_bound in zip(
+        kernel_bounds,
+        output_bounds,
+        strict=True,
+    ):
+        kernel_peak = max(kernel_peak, retained_before_kernel + kernel_bound)
+        retained_before_kernel += output_bound
+    concat_peak = (
+        retained_before_kernel
+        + max(64 * 1024, retained_before_kernel * 2)
+        if len(output_bounds) > 1
+        else 0
     )
-    concat_sort_bound = max(64 * 1024, retained_output_bound * 2)
-    return (
-        max(kernel_bounds)
-        + retained_output_bound
-        + concat_sort_bound
-        + max(1, int(frame["timestamp"].nunique()))
-        * _EVALUATION_TIMESTAMP_FACT_BYTES
+    diagnostics_bytes = max(1, int(frame["timestamp"].nunique())) * (
+        _EVALUATION_TIMESTAMP_FACT_BYTES
     )
+    return max(kernel_peak, concat_peak) + diagnostics_bytes
 
 
 def _iter_evaluation_compute_batches(
@@ -916,15 +900,21 @@ def _iter_evaluation_work_frames(
         normalized_bound = projection_bytes + added_signal_bytes
         normalized_lease = resource_policy.lease(
             "research.evaluation.projection",
-            normalized_bound,
+            projection_bytes,
         )
         try:
+            projected = frame.loc[:, selected]
+            normalized_lease.grow(
+                _signal_normalization_working_bytes(projected, spec.signals)
+            )
             normalized = normalize_signal_frame(
-                frame.loc[:, selected],
+                projected,
                 signals=spec.signals,
                 timestamp_column="timestamp",
                 source_columns_by_kind=source_columns_by_kind,
+                resource_lease=normalized_lease,
             )
+            del projected
             normalized_bytes = pandas_frame_payload_bytes(normalized)
             if normalized_bytes > normalized_bound:
                 raise ValueError(

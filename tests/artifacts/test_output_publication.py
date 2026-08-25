@@ -194,16 +194,6 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
     assert list(output_bundle.parent.glob(".eval-run.tmp-*")) == []
 
 
-def test_output_already_exists_error_review_safe_summary_is_path_free() -> None:
-    summary = OutputAlreadyExistsError(
-        "failed with provider-internal detail"
-    ).to_review_safe_summary()
-
-    assert summary == {"status": "failed", "failure_code": "output_already_exists"}
-    assert "C:" not in str(summary)
-    assert "csmar" not in str(summary).lower()
-
-
 def _evaluation_spec() -> EvaluationSpec:
     return EvaluationSpec(
         run_id="eval-run",

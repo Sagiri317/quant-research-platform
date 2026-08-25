@@ -11,7 +11,6 @@ from quant_research_platform.storage.datasets import (
     fingerprint_dataset,
     write_dataset,
 )
-from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.manifests import (
     build_layer_summary,
     build_run_data_summary,
@@ -198,13 +197,6 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
         write_manifest(manifest, {"schema_id": "qrp-output-manifest"})
 
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
-
-
-def test_output_already_exists_error_review_safe_summary() -> None:
-    assert OutputAlreadyExistsError().to_review_safe_summary() == {
-        "status": "failed",
-        "failure_code": "output_already_exists",
-    }
 
 
 def test_build_layer_summary_detects_missing_dataset_manifests(tmp_path: Path) -> None:

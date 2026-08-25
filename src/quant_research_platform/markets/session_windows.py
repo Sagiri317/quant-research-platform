@@ -77,22 +77,6 @@ class SessionWindowPlanner:
         owned = normalized.copy(deep=True)
         object.__setattr__(self, "sessions", owned)
 
-    @classmethod
-    def from_sessions(
-        cls,
-        sessions: Iterable[object],
-        *,
-        target_core_session_count: int,
-        warmup_sessions: int = 0,
-        lookahead_sessions: int = 0,
-    ) -> SessionWindowPlanner:
-        return cls(
-            sessions=sessions,
-            target_core_session_count=target_core_session_count,
-            warmup_sessions=warmup_sessions,
-            lookahead_sessions=lookahead_sessions,
-        )
-
     def windows(
         self,
         time_window: TimeWindow,

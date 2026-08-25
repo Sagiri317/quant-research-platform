@@ -42,10 +42,6 @@ class DatasetSummaryObserver:
         duplicates = self.exact_key_index.add_table(table)
         self._observe_frame(frame, duplicates=duplicates)
 
-    def observe_frame(self, frame: pd.DataFrame) -> None:
-        duplicates = self.exact_key_index.add_frame(frame)
-        self._observe_frame(frame, duplicates=duplicates)
-
     def summary_payload(self) -> dict[str, Any]:
         return {
             "date_min": date_string(self.date_min),

@@ -11,10 +11,6 @@ class WriteRejectedError(ValueError):
     def __init__(self, message: str | None = None) -> None:
         super().__init__(message or self.failure_code)
 
-    def to_review_safe_summary(self) -> dict[str, str]:
-        return {"status": "failed", "failure_code": self.failure_code}
-
-
 class OutputAlreadyExistsError(WriteRejectedError):
     """Raised when a 0.1 writer would overwrite an existing output."""
 

@@ -117,7 +117,7 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
                     _average_ranks(label_valid),
                 )
                 groups = _assign_groups_array(signal_valid, n_groups)
-                for group in range(1, int(groups.max()) + 1):
+                for group in np.unique(groups):
                     group_mask = groups == group
                     grouped_records.append(
                         {
@@ -173,15 +173,31 @@ def _pearson_correlation_result(
     right_centered = _scaled_centered_values(right_values)
     if left_centered is None or right_centered is None:
         return None, "zero_variance"
-    denominator = np.sqrt(
-        float(np.dot(left_centered, left_centered))
-        * float(np.dot(right_centered, right_centered))
+    return _pearson_correlation_from_moments(
+        count=len(left_values),
+        left_m2=float(np.dot(left_centered, left_centered)),
+        right_m2=float(np.dot(right_centered, right_centered)),
+        covariance=float(np.dot(left_centered, right_centered)),
     )
+
+
+def _pearson_correlation_from_moments(
+    *,
+    count: int,
+    left_m2: float,
+    right_m2: float,
+    covariance: float,
+) -> tuple[float | None, str | None]:
+    if count < 2:
+        return None, "insufficient_observations"
+    if left_m2 <= 0 or right_m2 <= 0:
+        return None, "zero_variance"
+    denominator = np.sqrt(left_m2 * right_m2)
     if denominator == 0:
         return None, "zero_variance"
     if not np.isfinite(denominator):
         return None, "nonfinite_result"
-    value = float(np.dot(left_centered, right_centered) / denominator)
+    value = float(covariance / denominator)
     if not np.isfinite(value):
         return None, "nonfinite_result"
     return value, None
@@ -205,16 +221,46 @@ def _scaled_centered_values(values: np.ndarray) -> np.ndarray | None:
     return centered / scale
 
 
+def _stable_zscore(values: pd.Series) -> pd.Series:
+    source = values.to_numpy(dtype="float64", na_value=np.nan)
+    output = np.full(len(source), np.nan, dtype="float64")
+    valid = np.isfinite(source)
+    if int(valid.sum()) < 2:
+        return pd.Series(output, index=values.index)
+    centered = _scaled_centered_values(source[valid])
+    if centered is None:
+        return pd.Series(output, index=values.index)
+    std = float(np.sqrt(np.dot(centered, centered) / len(centered)))
+    if std == 0:
+        return pd.Series(output, index=values.index)
+    output[valid] = centered / std
+    return pd.Series(output, index=values.index)
+
+
 def _assign_groups_array(values: np.ndarray, n_groups: int) -> np.ndarray:
-    ranks = np.empty(len(values), dtype="float64")
-    ranks[np.argsort(values, kind="mergesort")] = np.arange(1, len(values) + 1)
+    lower_ranks, upper_ranks = _ordinal_rank_bounds(values)
+    ranks = (lower_ranks + upper_ranks) / 2.0
     group_count = min(n_groups, len(values))
     zero_based = np.floor((ranks - 1.0) * group_count / len(ranks))
     return np.clip(zero_based.astype("int64") + 1, 1, group_count)
 
 
+def _ordinal_rank_bounds(values: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Return one-based ordinal rank bounds without splitting equal values."""
+
+    _, inverse, counts = np.unique(
+        np.asarray(values, dtype="float64"),
+        return_inverse=True,
+        return_counts=True,
+    )
+    upper_by_class = np.cumsum(counts, dtype="int64")
+    lower_by_class = upper_by_class - counts + 1
+    return lower_by_class[inverse], upper_by_class[inverse]
+
+
 def _average_ranks(values: np.ndarray) -> np.ndarray:
-    return pd.Series(values).rank(method="average").to_numpy(dtype="float64")
+    lower_ranks, upper_ranks = _ordinal_rank_bounds(values)
+    return (lower_ranks + upper_ranks) / 2.0
 
 
 def _safe_ratio(numerator: float, denominator: float, *, valid_count: int) -> float:
@@ -273,6 +319,35 @@ def _summarize_correlation_aggregates(
             ratio=ratio,
         ),
     }
+
+
+def _add_correlation_aggregate(
+    stats: dict[str, float | int],
+    prefix: str,
+    value: object,
+) -> None:
+    if pd.isna(value):
+        return
+    numeric = float(value)
+    count = int(stats[f"{prefix}_count"]) + 1
+    mean_key = f"{prefix}_mean"
+    m2_key = f"{prefix}_m2"
+    delta = numeric - float(stats[mean_key])
+    mean = float(stats[mean_key]) + delta / count
+    stats[mean_key] = mean
+    stats[m2_key] += delta * (numeric - mean)
+    stats[f"{prefix}_count"] = count
+    stats[f"{prefix}_positive"] += int(numeric > 0)
+    stats[f"{prefix}_min"] = (
+        numeric
+        if stats[f"{prefix}_min"] is None
+        else min(float(stats[f"{prefix}_min"]), numeric)
+    )
+    stats[f"{prefix}_max"] = (
+        numeric
+        if stats[f"{prefix}_max"] is None
+        else max(float(stats[f"{prefix}_max"]), numeric)
+    )
 
 
 def _correlation_ratio_reason(

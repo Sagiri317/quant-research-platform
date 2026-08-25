@@ -77,6 +77,9 @@ def _stream_weighted_portfolio_from_validated_panel(
     tradability_config: TradabilityConfig | None = None,
     cost_config: CostConfig | None = None,
     return_source_column: str | None = None,
+    previous_positions: dict[
+        tuple[object, ...], dict[str, dict[str, float]]
+    ] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Stream positions, turnover, costs, and portfolio returns."""
 
@@ -117,7 +120,8 @@ def _stream_weighted_portfolio_from_validated_panel(
     turnover_records: list[dict[str, object]] = []
     cost_records: list[dict[str, object]] = []
     return_records: list[dict[str, object]] = []
-    previous_positions: dict[tuple[object, ...], dict[str, dict[str, float]]] = {}
+    if previous_positions is None:
+        previous_positions = {}
     for group_key, timestamp_frame in panel.groupby(group_columns, sort=True):
         group_values = normalize_group_key(group_key, group_columns)
         timestamp = group_values[spec.timestamp_column]

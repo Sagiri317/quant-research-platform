@@ -14,6 +14,9 @@ from quant_research_platform.artifacts._output_common_validation import (
     validate_metadata_row_count_chain,
 )
 from quant_research_platform.contracts._json import render_qrp_json_object
+from quant_research_platform.contracts.evaluations import (
+    CORRELATION_SUMMARY_REASON_CODES,
+)
 from quant_research_platform.contracts.models import (
     ModelSpec,
     _resolved_model_hyperparameters_match,
@@ -86,9 +89,7 @@ _MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
         "validation_mse",
     }
 )
-_MODEL_SELECTION_REASON_CODES = frozenset(
-    {"insufficient_observations", "zero_variance", "nonfinite_result"}
-)
+_MODEL_SELECTION_REASON_CODES = CORRELATION_SUMMARY_REASON_CODES
 _PREDICTION_METADATA_KEYS = frozenset(
     {
         "prediction_mode",
@@ -349,11 +350,11 @@ def validate_model_selection_metadata_shape(metadata: object) -> None:
             if reason is not None and reason not in _MODEL_SELECTION_REASON_CODES:
                 raise ValueError("invalid_model_metadata")
             if validation_rows < 2:
-                if value is not None or reason != "insufficient_observations":
+                if value is not None or reason != "no_valid_observations":
                     raise ValueError("invalid_model_metadata")
                 continue
             if value is None:
-                if reason is None or reason == "insufficient_observations":
+                if reason is None:
                     raise ValueError("invalid_model_metadata")
             else:
                 numeric_value = require_finite_metadata_number(

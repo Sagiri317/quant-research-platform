@@ -22,9 +22,11 @@ from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
 )
 from quant_research_platform.research.features.transforms import (
+    _feature_transform_working_bytes,
     apply_feature_transforms,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
     current_runtime_resource_policy,
@@ -340,17 +342,26 @@ def _join_processed_inputs(
             raise ValueError("empty_research_dataset_inputs")
         base_key_state.close()
         base_keys = None
-        transformed = _apply_feature_transforms(assembled, dataset_spec)
-        if transformed is not assembled:
-            transformed_bytes = _frame_bytes(transformed)
+        if dataset_spec.feature_transforms:
             transformed_state = ExitStack()
             try:
-                transformed_state.enter_context(
+                transformed_lease = transformed_state.enter_context(
                     policy.lease(
                         "research.assembly.transformed",
-                        transformed_bytes,
+                        _feature_transform_working_bytes(
+                            assembled,
+                            dataset_spec.feature_transforms,
+                        ),
                     )
                 )
+                transformed = _apply_feature_transforms(
+                    assembled,
+                    dataset_spec,
+                    resource_lease=transformed_lease,
+                )
+                transformed_lease.shrink_to(_frame_bytes(transformed))
+                transformed_lease.transfer("research.assembly.transformed")
+                assembled_state.close()
             except BaseException as primary:
                 try:
                     transformed_state.close()
@@ -360,7 +371,6 @@ def _join_processed_inputs(
                         f"{type(cleanup_error).__name__}"
                     )
                 raise
-            assembled_state.close()
             assembled = transformed
             assembled_state = transformed_state.pop_all()
 
@@ -794,10 +804,16 @@ def _generated_feature_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, 
 def _apply_feature_transforms(
     frame: pd.DataFrame,
     dataset_spec: ResearchDatasetSpec,
+    *,
+    resource_lease: MemoryLease | None = None,
 ) -> pd.DataFrame:
     if not dataset_spec.feature_transforms:
         return frame
-    return apply_feature_transforms(frame, dataset_spec.feature_transforms)
+    return apply_feature_transforms(
+        frame,
+        dataset_spec.feature_transforms,
+        resource_lease=resource_lease,
+    )
 
 
 def _input_dataset_identities(

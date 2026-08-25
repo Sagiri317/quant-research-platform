@@ -89,6 +89,41 @@ def test_validated_stream_keeps_long_only_rows_without_short_leg() -> None:
     assert diagnostics["short_count"].tolist() == [0, 0]
 
 
+def test_ordinal_portfolio_has_no_tied_signal_and_keeps_cutoff_ties() -> None:
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+
+    def result(signals: list[float], assets: list[str]):
+        panel = validate_compute_panel(
+            pd.DataFrame(
+                {
+                    "timestamp": ["2026-01-01"] * len(signals),
+                    "asset": assets,
+                    "factor": signals,
+                    "forward_return": np.linspace(-0.03, 0.03, len(signals)),
+                }
+            ),
+            spec,
+        )
+        return simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+            panel,
+            spec,
+            WeightConfig(top_quantile=0.2, bottom_quantile=0.2),
+            return_source_column="forward_return",
+        )
+
+    tied = result([1.0] * 4, ["a", "b", "c", "d"])
+    cutoff = result([0.0, 0.0, 1.0, 2.0, 3.0, 3.0], list("abcdef"))
+    renamed = result(
+        [3.0, 0.0, 2.0, 0.0, 3.0, 1.0],
+        ["u", "v", "w", "x", "y", "z"],
+    )
+
+    assert tied[0]["position"].tolist() == [0.0]
+    assert tied[2]["gross_portfolio_return"].tolist() == [0.0]
+    assert sorted(cutoff[0]["position"].tolist()) == [-0.5, -0.5, 0.5, 0.5]
+    assert sorted(renamed[0]["position"].tolist()) == [-0.5, -0.5, 0.5, 0.5]
+
+
 def test_validated_stream_rejects_disappeared_held_asset() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
     panel = validate_compute_panel(
@@ -367,6 +402,37 @@ def test_performance_variance_uses_exact_variation_state() -> None:
     assert constant["sharpe_like_reason"] == "zero_denominator"
     assert tiny["volatility_net_portfolio_return"] > 0.0
     assert np.isfinite(float(tiny["sharpe_like"]))
+
+
+def test_performance_higher_moments_are_scale_invariant() -> None:
+    def summarize(values: np.ndarray) -> pd.Series:
+        return summarize_performance(
+            pd.DataFrame(
+                {
+                    "timestamp": pd.date_range("2026-01-01", periods=len(values)),
+                    "signal": ["factor"] * len(values),
+                    "gross_portfolio_return": values,
+                    "net_portfolio_return": values,
+                    "cost": np.zeros(len(values)),
+                    "turnover": np.ones(len(values)),
+                }
+            )
+        ).iloc[0]
+
+    expected = summarize(np.array([0.0, 1.0, 2.0, 4.0]))
+    tiny = summarize(np.array([0.0, 1.0, 2.0, 4.0]) * 1e-200)
+    huge = summarize(np.array([0.0, 1.0, 2.0, 4.0]) * 1e200)
+    constant = summarize(np.full(4, 1e200))
+
+    for actual in (tiny, huge):
+        assert actual["skew"] == pytest.approx(expected["skew"])
+        assert actual["kurtosis"] == pytest.approx(expected["kurtosis"])
+        assert pd.isna(actual["skew_reason"])
+        assert pd.isna(actual["kurtosis_reason"])
+    assert pd.isna(constant["skew"])
+    assert constant["skew_reason"] == "zero_variance"
+    assert pd.isna(constant["kurtosis"])
+    assert constant["kurtosis_reason"] == "zero_variance"
 
 
 @pytest.mark.parametrize(

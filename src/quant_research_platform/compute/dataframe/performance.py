@@ -106,14 +106,13 @@ def _new_performance_stats() -> dict[str, object]:
         "cumulative_gross": 0.0,
         "net_sum": 0.0,
         "cumulative_net": 0.0,
-        "net_square_sum": 0.0,
         "net_scale": 1.0,
         "net_mean_scaled": 0.0,
         "net_m2_scaled": 0.0,
+        "net_m3_scaled": 0.0,
+        "net_m4_scaled": 0.0,
         "net_min": None,
         "net_max": None,
-        "downside_sum": 0.0,
-        "downside_square_sum": 0.0,
         "downside_scale": 1.0,
         "downside_mean_scaled": 0.0,
         "downside_m2_scaled": 0.0,
@@ -142,8 +141,6 @@ def _new_performance_stats() -> dict[str, object]:
         "current_loss_streak": 0,
         "max_consecutive_wins": 0,
         "max_consecutive_losses": 0,
-        "net_sum_cubes": 0.0,
-        "net_sum_quads": 0.0,
     }
 
 
@@ -193,19 +190,6 @@ def _update_performance_stats_batch(
     stats["periods"] = period_offset + count
     stats["gross_sum"] = float(stats["gross_sum"]) + float(gross.sum())
     stats["net_sum"] = previous_net + float(net.sum())
-    stats["net_square_sum"] = float(stats["net_square_sum"]) + float(
-        np.square(net).sum()
-    )
-    stats["net_sum_cubes"] = float(stats["net_sum_cubes"]) + float(
-        np.power(net, 3).sum()
-    )
-    stats["net_sum_quads"] = float(stats["net_sum_quads"]) + float(
-        np.power(net, 4).sum()
-    )
-    stats["downside_sum"] = float(stats["downside_sum"]) + float(downside.sum())
-    stats["downside_square_sum"] = float(stats["downside_square_sum"]) + float(
-        np.square(downside).sum()
-    )
     stats["wins"] = int(stats["wins"]) + int(wins.sum())
     stats["losses"] = int(stats["losses"]) + int(losses.sum())
     stats["win_sum"] = float(stats["win_sum"]) + float(net[wins].sum())
@@ -615,20 +599,16 @@ def _moment_result(
         return None, "insufficient_observations"
     if stats["net_min"] == stats["net_max"]:
         return None, "zero_variance"
-    mean = float(stats["net_sum"]) / count
-    m2 = _central_moment(stats, mean, 2)
-    if m2 == 0:
-        m2 = _scaled_population_variance(stats, "net", count)
+    m2 = float(stats["net_m2_scaled"]) / count
     if not np.isfinite(m2):
         return None, "nonfinite_result"
     if m2 <= 0:
         return None, "zero_variance"
     if order == 3:
-        value = np.sqrt(count * (count - 1)) / (count - 2) * _central_moment(
-            stats, mean, 3
-        ) / m2**1.5
+        m3 = float(stats["net_m3_scaled"]) / count
+        value = np.sqrt(count * (count - 1)) / (count - 2) * m3 / m2**1.5
     else:
-        m4 = _central_moment(stats, mean, 4)
+        m4 = float(stats["net_m4_scaled"]) / count
         g2 = m4 / m2**2 - 3.0
         value = ((count - 1) / ((count - 2) * (count - 3))) * (
             (count + 1) * g2 + 6.0
@@ -636,27 +616,6 @@ def _moment_result(
     if not np.isfinite(value):
         return None, "nonfinite_result"
     return float(value), None
-
-
-def _central_moment(stats: dict[str, object], mean: float, order: int) -> float:
-    count = int(stats["periods"])
-    if order == 2:
-        raw = float(stats["net_square_sum"]) / count
-        return raw - 2 * mean * float(stats["net_sum"]) / count + mean**2
-    if order == 3:
-        return (
-            float(stats["net_sum_cubes"]) / count
-            - 3 * mean * float(stats["net_square_sum"]) / count
-            + 3 * mean**2 * float(stats["net_sum"]) / count
-            - mean**3
-        )
-    return (
-        float(stats["net_sum_quads"]) / count
-        - 4 * mean * float(stats["net_sum_cubes"]) / count
-        + 6 * mean**2 * float(stats["net_square_sum"]) / count
-        - 4 * mean**3 * float(stats["net_sum"]) / count
-        + mean**4
-    )
 
 
 def _update_scaled_variance(
@@ -682,7 +641,7 @@ def _update_scaled_variance(
         and batch_scale < previous_scale
     ):
         current_scale = batch_scale
-    if current_scale != previous_scale:
+    if previous_count and current_scale != previous_scale:
         factor = previous_scale / current_scale
         if stats[f"{prefix}_mean_scaled"]:
             stats[f"{prefix}_mean_scaled"] = (
@@ -690,26 +649,84 @@ def _update_scaled_variance(
             )
         if stats[f"{prefix}_m2_scaled"]:
             stats[f"{prefix}_m2_scaled"] = (
-                float(stats[f"{prefix}_m2_scaled"]) * factor * factor
+                float(stats[f"{prefix}_m2_scaled"]) * factor**2
             )
-        stats[f"{prefix}_scale"] = current_scale
+        if prefix == "net":
+            if stats["net_m3_scaled"]:
+                stats["net_m3_scaled"] = (
+                    float(stats["net_m3_scaled"]) * factor**3
+                )
+            if stats["net_m4_scaled"]:
+                stats["net_m4_scaled"] = (
+                    float(stats["net_m4_scaled"]) * factor**4
+                )
+    stats[f"{prefix}_scale"] = current_scale
     normalized = values / current_scale
     batch_mean = float(normalized.mean())
     centered = normalized - batch_mean
-    batch_m2 = float(np.dot(centered, centered))
+    if prefix == "net":
+        centered_square = np.square(centered)
+        batch_m2 = float(centered_square.sum())
+        batch_m3 = float((centered_square * centered).sum())
+        batch_m4 = float(np.square(centered_square).sum())
+    else:
+        batch_m2 = float(np.dot(centered, centered))
     if previous_count == 0:
         stats[f"{prefix}_mean_scaled"] = batch_mean
         stats[f"{prefix}_m2_scaled"] = batch_m2
+        if prefix == "net":
+            stats["net_m3_scaled"] = batch_m3
+            stats["net_m4_scaled"] = batch_m4
     else:
         total = previous_count + count
-        overlap = previous_count * count / total
-        delta = batch_mean - float(stats[f"{prefix}_mean_scaled"])
-        stats[f"{prefix}_m2_scaled"] = float(
-            stats[f"{prefix}_m2_scaled"]
-        ) + batch_m2 + delta * delta * overlap
-        stats[f"{prefix}_mean_scaled"] = float(
-            stats[f"{prefix}_mean_scaled"]
-        ) + delta * count / total
+        previous_mean = float(stats[f"{prefix}_mean_scaled"])
+        previous_m2 = float(stats[f"{prefix}_m2_scaled"])
+        delta = batch_mean - previous_mean
+        stats[f"{prefix}_m2_scaled"] = math.fsum(
+            (
+                previous_m2,
+                batch_m2,
+                delta**2 * previous_count * count / total,
+            )
+        )
+        stats[f"{prefix}_mean_scaled"] = previous_mean + delta * count / total
+        if prefix == "net":
+            previous_m3 = float(stats["net_m3_scaled"])
+            previous_m4 = float(stats["net_m4_scaled"])
+            stats["net_m3_scaled"] = math.fsum(
+                (
+                    previous_m3,
+                    batch_m3,
+                    delta**3
+                    * previous_count
+                    * count
+                    * (previous_count - count)
+                    / total**2,
+                    3
+                    * delta
+                    * (previous_count * batch_m2 - count * previous_m2)
+                    / total,
+                )
+            )
+            stats["net_m4_scaled"] = math.fsum(
+                (
+                    previous_m4,
+                    batch_m4,
+                    delta**4
+                    * previous_count
+                    * count
+                    * (previous_count**2 - previous_count * count + count**2)
+                    / total**3,
+                    6
+                    * delta**2
+                    * (previous_count**2 * batch_m2 + count**2 * previous_m2)
+                    / total**2,
+                    4
+                    * delta
+                    * (previous_count * batch_m3 - count * previous_m3)
+                    / total,
+                )
+            )
     stats[f"{prefix}_min"] = (
         batch_min
         if stats[f"{prefix}_min"] is None
@@ -720,19 +737,6 @@ def _update_scaled_variance(
         if stats[f"{prefix}_max"] is None
         else max(float(stats[f"{prefix}_max"]), batch_max)
     )
-
-
-def _scaled_population_variance(
-    stats: dict[str, object],
-    prefix: str,
-    count: int,
-) -> float:
-    if stats[f"{prefix}_min"] == stats[f"{prefix}_max"]:
-        return 0.0
-    variance = float(stats[f"{prefix}_m2_scaled"]) / count
-    if not np.isfinite(variance):
-        return np.nan
-    return variance * float(stats[f"{prefix}_scale"]) ** 2
 
 
 def _scaled_population_std(

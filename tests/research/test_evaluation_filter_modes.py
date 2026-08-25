@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.evaluations.engine as evaluation_engine
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -23,6 +24,86 @@ from tests.research.filter_mode_fixtures import (
     make_filter_mode_frame,
     sort_filter_mode_evaluation_frame,
 )
+
+
+def test_managed_evaluation_accepts_true_peak_and_rejects_before_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-01"]),
+            "asset_id": ["a", "b"],
+            "raw": [1.0, 2.0],
+            "label": [-0.01, 0.01],
+        }
+    )
+    spec = EvaluationSpec(
+        run_id="lease_peak",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(
+            SignalSpec(
+                signal_id="signal",
+                source_kind="factor",
+                source_column="raw",
+            ),
+        ),
+        label_columns=("label",),
+        filter_mode="unfiltered",
+        n_groups=2,
+    )
+
+    policy = capture_test_policy(
+        available_memory_bytes=1024**2,
+        explicit_cap_bytes=3088,
+    )
+    with runtime_resource_policy_scope(policy):
+        outputs = list(
+            _iter_evaluation_output_chunks(
+                (frame,),
+                spec=spec,
+                signal_columns=("signal",),
+                label_columns=("label",),
+                n_groups=2,
+                asset_column="asset_id",
+                source_columns_by_kind={"factor": ("raw",)},
+                resource_policy=policy,
+            )
+        )
+    assert len(outputs) == 1
+    assert policy.used_memory_bytes == 0
+
+    called: list[bool] = []
+
+    def reject_kernel(*_args, **_kwargs):
+        called.append(True)
+        raise AssertionError("evaluation kernel allocated before admission")
+
+    monkeypatch.setattr(
+        evaluation_engine,
+        "compute_ic_and_grouped_label_values",
+        reject_kernel,
+    )
+    insufficient = capture_test_policy(
+        available_memory_bytes=1024**2,
+        explicit_cap_bytes=3087,
+    )
+    with runtime_resource_policy_scope(insufficient):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            list(
+                _iter_evaluation_output_chunks(
+                    (frame,),
+                    spec=spec,
+                    signal_columns=("signal",),
+                    label_columns=("label",),
+                    n_groups=2,
+                    asset_column="asset_id",
+                    source_columns_by_kind={"factor": ("raw",)},
+                    resource_policy=insufficient,
+                )
+            )
+    assert called == []
+    assert insufficient.used_memory_bytes == 0
 
 
 def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() -> None:

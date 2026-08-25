@@ -24,7 +24,7 @@ def test_normalize_session_dates_returns_sorted_unique_daily_timestamps() -> Non
 def test_session_window_planner_owns_normalized_session_state() -> None:
     sessions = normalize_session_dates(pd.date_range("2014-01-01", periods=10))
 
-    planner = SessionWindowPlanner.from_sessions(
+    planner = SessionWindowPlanner(
         sessions,
         target_core_session_count=2,
     )
@@ -33,15 +33,11 @@ def test_session_window_planner_owns_normalized_session_state() -> None:
     assert planner.sessions.equals(sessions)
 
 
-@pytest.mark.parametrize("factory", (False, True))
-def test_session_window_planner_isolated_from_mutation_before_windows(
-    factory: bool,
-) -> None:
+def test_session_window_planner_isolated_from_mutation_before_windows() -> None:
     sessions = pd.date_range("2014-01-01", periods=3)
-    planner = (
-        SessionWindowPlanner.from_sessions(sessions, target_core_session_count=1)
-        if factory
-        else SessionWindowPlanner(sessions=sessions, target_core_session_count=1)
+    planner = SessionWindowPlanner(
+        sessions=sessions,
+        target_core_session_count=1,
     )
     sessions._data._ndarray[0] = np.datetime64("2099-01-01")  # noqa: SLF001
 
@@ -61,7 +57,7 @@ def test_session_window_planner_isolated_from_mutation_before_windows(
 
 def test_session_window_iterator_isolated_from_mutation_between_pulls() -> None:
     sessions = pd.date_range("2014-01-01", periods=3)
-    planner = SessionWindowPlanner.from_sessions(
+    planner = SessionWindowPlanner(
         sessions,
         target_core_session_count=1,
     )
@@ -81,10 +77,7 @@ def test_session_window_iterator_isolated_from_mutation_between_pulls() -> None:
     )
 
 
-@pytest.mark.parametrize("factory", (False, True))
-def test_session_window_planner_rejects_hostile_datetime_index_subclass(
-    factory: bool,
-) -> None:
+def test_session_window_planner_rejects_hostile_datetime_index_subclass() -> None:
     class AliasingArray(np.ndarray):
         def copy(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
             return self
@@ -112,16 +105,10 @@ def test_session_window_planner_rejects_hostile_datetime_index_subclass(
     sessions = AliasingDatetimeIndex(pd.date_range("2014-01-01", periods=3))
 
     with pytest.raises(ValueError, match="^invalid_session_dates$"):
-        if factory:
-            SessionWindowPlanner.from_sessions(
-                sessions,
-                target_core_session_count=1,
-            )
-        else:
-            SessionWindowPlanner(
-                sessions=sessions,
-                target_core_session_count=1,
-            )
+        SessionWindowPlanner(
+            sessions=sessions,
+            target_core_session_count=1,
+        )
 
 
 @pytest.mark.parametrize(
@@ -143,7 +130,7 @@ def test_session_dates_reject_invalid_values(sessions: object) -> None:
 
 def test_session_window_planner_maps_non_trading_bounds_inside_closed_window() -> None:
     windows = tuple(
-        SessionWindowPlanner.from_sessions(
+        SessionWindowPlanner(
             ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-10"],
             target_core_session_count=2,
         ).windows(TimeWindow("2014-01-04", "2014-01-11"), reason="research_assembly")
@@ -161,7 +148,7 @@ def test_session_window_planner_maps_non_trading_bounds_inside_closed_window() -
 
 
 def test_session_window_planner_fails_closed_when_window_has_no_sessions() -> None:
-    planner = SessionWindowPlanner.from_sessions(
+    planner = SessionWindowPlanner(
         ["2014-01-02", "2014-01-03"],
         target_core_session_count=1,
     )
@@ -173,7 +160,7 @@ def test_session_window_planner_fails_closed_when_window_has_no_sessions() -> No
 def test_session_window_planner_validates_at_call_time_and_returns_lazy_iterator() -> (
     None
 ):
-    planner = SessionWindowPlanner.from_sessions(
+    planner = SessionWindowPlanner(
         ["2014-01-02", "2014-01-03"],
         target_core_session_count=1,
     )
@@ -187,7 +174,7 @@ def test_session_window_planner_validates_at_call_time_and_returns_lazy_iterator
     assert next(windows).core_sessions == (pd.Timestamp("2014-01-02"),)
 
 
-def test_session_window_planner_normalizes_factory_input_once(
+def test_session_window_planner_normalizes_input_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     normalize = session_windows.normalize_session_dates
@@ -200,7 +187,7 @@ def test_session_window_planner_normalizes_factory_input_once(
 
     monkeypatch.setattr(session_windows, "normalize_session_dates", observe)
 
-    planner = SessionWindowPlanner.from_sessions(
+    planner = SessionWindowPlanner(
         ["2014-01-03", "2014-01-02"],
         target_core_session_count=1,
     )
@@ -211,7 +198,7 @@ def test_session_window_planner_normalizes_factory_input_once(
 
 def test_session_window_planner_covers_core_sessions_once() -> None:
     windows = tuple(
-        SessionWindowPlanner.from_sessions(
+        SessionWindowPlanner(
             [
                 "2014-01-02",
                 "2014-01-03",
@@ -243,7 +230,7 @@ def test_session_window_planner_covers_core_sessions_once() -> None:
 
 def test_session_window_planner_core_window_may_cross_years() -> None:
     windows = tuple(
-        SessionWindowPlanner.from_sessions(
+        SessionWindowPlanner(
             ["2014-12-31", "2015-01-05"],
             target_core_session_count=2,
         ).windows(TimeWindow("2014-12-31", "2015-01-05"), reason="panel_next_session")
@@ -263,7 +250,7 @@ def test_session_windows_map_non_trading_bounds_and_cover_core_once() -> None:
         "2015-01-08",
     ]
     windows = tuple(
-        SessionWindowPlanner.from_sessions(
+        SessionWindowPlanner(
             sessions,
             target_core_session_count=2,
             warmup_sessions=1,
@@ -288,7 +275,7 @@ def test_session_windows_map_non_trading_bounds_and_cover_core_once() -> None:
 
 
 def test_session_windows_fail_closed_when_time_window_has_no_sessions() -> None:
-    planner = SessionWindowPlanner.from_sessions(
+    planner = SessionWindowPlanner(
         ["2015-01-05", "2015-01-06"],
         target_core_session_count=1,
     )
@@ -330,8 +317,8 @@ def test_session_windows_reject_non_strict_session_counts(
         )
 
 
-def test_session_windows_owns_snapshot_from_factory_return() -> None:
-    planner = SessionWindowPlanner.from_sessions(
+def test_session_windows_owns_snapshot_for_iterator() -> None:
+    planner = SessionWindowPlanner(
         ["2015-01-05", "2015-01-06"],
         target_core_session_count=1,
     )

@@ -31,7 +31,6 @@ import quant_research_platform.storage._dataset_fingerprinting as dataset_finger
 import quant_research_platform.storage._dataset_inspection as dataset_inspection
 import quant_research_platform.storage._dataset_inventory as dataset_inventory
 import quant_research_platform.storage._dataset_key_tracking as dataset_key_tracking
-import quant_research_platform.storage._dataset_observation as dataset_observation
 import quant_research_platform.storage._dataset_physical as dataset_physical
 import quant_research_platform.storage._dataset_reading as dataset_reading
 import quant_research_platform.storage._dataset_schema as dataset_schema
@@ -3791,37 +3790,6 @@ def test_iter_bounded_frame_chunks_reuses_bounded_frame_storage() -> None:
         )
         for chunk in chunks
     )
-
-
-def test_numeric_summary_observer_skips_non_float_columns_and_preserves_width(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    observed_dtypes: list[np.dtype[object]] = []
-    original_isinf = dataset_observation.np.isinf
-
-    def record_isinf(values: np.ndarray) -> np.ndarray:
-        observed_dtypes.append(values.dtype)
-        return original_isinf(values)
-
-    monkeypatch.setattr(dataset_observation.np, "isinf", record_isinf)
-    observer = dataset_observation.DatasetSummaryObserver(
-        primary_key=("key",),
-        timestamp_column=None,
-        column_roles={"key": "key", "integer": "factor", "floating": "label"},
-        exact_key_index=SimpleNamespace(add_frame=lambda _frame: 0),
-    )
-    frame = pd.DataFrame(
-        {
-            "key": [1, 2],
-            "integer": pd.Series([1, 2], dtype="int64"),
-            "floating": pd.Series([1.0, np.inf], dtype="float32"),
-        }
-    )
-
-    observer.observe_frame(frame)
-
-    assert observed_dtypes == [np.dtype("float32")]
-    assert observer.non_finite_count_summary == {"floating": 1}
 
 
 def test_public_storage_operations_delegate_admission_to_storage_owner(

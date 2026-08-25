@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sqlite3
+import tracemalloc
 from pathlib import Path
 
 import numpy as np
@@ -121,9 +123,9 @@ def test_chunked_trial_metrics_marks_one_row_correlation_undefined() -> None:
 
     assert metrics["validation_rows"] == 1
     assert metrics["validation_ic"] is None
-    assert metrics["validation_ic_reason"] == "insufficient_observations"
+    assert metrics["validation_ic_reason"] == "no_valid_observations"
     assert metrics["validation_rankic"] is None
-    assert metrics["validation_rankic_reason"] == "insufficient_observations"
+    assert metrics["validation_rankic_reason"] == "no_valid_observations"
     assert metrics["validation_mse"] == 0.0
 
 
@@ -132,10 +134,8 @@ def test_chunked_trial_metrics_marks_constant_correlation_undefined() -> None:
         (
             pd.DataFrame(
                 {
-                    "timestamp": pd.date_range(
-                        "2024-01-01", periods=3, freq="D"
-                    ),
-                    "asset_id": ["asset"] * 3,
+                    "timestamp": pd.to_datetime(["2024-01-01"] * 3),
+                    "asset_id": ["a", "b", "c"],
                     "label": [1.0, 1.0, 1.0],
                     "prediction": [2.0, 2.0, 2.0],
                 }
@@ -148,17 +148,17 @@ def test_chunked_trial_metrics_marks_constant_correlation_undefined() -> None:
     )
 
     assert metrics["validation_ic"] is None
-    assert metrics["validation_ic_reason"] == "zero_variance"
+    assert metrics["validation_ic_reason"] == "no_valid_observations"
     assert metrics["validation_rankic"] is None
-    assert metrics["validation_rankic_reason"] == "zero_variance"
+    assert metrics["validation_rankic_reason"] == "no_valid_observations"
 
 
 def test_chunked_trial_metrics_preserves_tiny_nonconstant_variation() -> None:
     values = np.array([0.0, 1e-320, 2e-320])
     frame = pd.DataFrame(
         {
-            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
-            "asset_id": ["asset"] * 3,
+            "timestamp": pd.to_datetime(["2024-01-01"] * 3),
+            "asset_id": ["a", "b", "c"],
             "label": values,
             "prediction": values,
         }
@@ -175,6 +175,108 @@ def test_chunked_trial_metrics_preserves_tiny_nonconstant_variation() -> None:
     assert metrics["validation_ic_reason"] is None
     assert metrics["validation_rankic"] == pytest.approx(1.0)
     assert metrics["validation_rankic_reason"] is None
+
+
+def test_chunked_trial_metrics_uses_equal_weight_cross_sectional_ic() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 3),
+            "asset_id": ["a", "b", "c"] * 2,
+            "label": [1.0, 2.0, 3.0, 101.0, 102.0, 103.0],
+            "prediction": [1.0, 2.0, 3.0, -3.0, -2.0, -1.0],
+        }
+    )
+
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (frame.iloc[:2], frame.iloc[2:5], frame.iloc[5:]),
+        model_id="cross_sectional",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=0,
+    )
+
+    assert metrics["validation_ic"] == pytest.approx(1.0)
+    assert metrics["validation_rankic"] == pytest.approx(1.0)
+
+
+def test_chunked_trial_metrics_discard_undefined_timestamps_across_partitions() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-01"] * 3
+                + ["2024-01-02"]
+                + ["2024-01-03"] * 3
+                + ["2024-01-04"] * 3
+            ),
+            "asset_id": ["a", "b", "c", "a", "a", "b", "c", "a", "b", "c"],
+            "label": [1.0, 2.0, 3.0, 2.0, 5.0, 5.0, 5.0, 1.0, 2.0, 3.0],
+            "prediction": [
+                1.0,
+                2.0,
+                3.0,
+                4.0,
+                1.0,
+                2.0,
+                3.0,
+                3.0,
+                2.0,
+                1.0,
+            ],
+        }
+    )
+
+    whole = evaluate_model_trial_metrics_from_chunks(
+        (frame,),
+        model_id="mixed",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=0,
+    )
+    partitioned = evaluate_model_trial_metrics_from_chunks(
+        (frame.iloc[:2], frame.iloc[2:6], frame.iloc[6:8], frame.iloc[8:]),
+        model_id="mixed",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=0,
+    )
+
+    assert partitioned == whole
+    assert whole["validation_rows"] == 10
+    assert whole["validation_mse"] == pytest.approx(4.1)
+    assert whole["validation_ic"] == pytest.approx(0.0)
+    assert whole["validation_rankic"] == pytest.approx(0.0)
+    assert whole["validation_ic_reason"] is None
+    assert whole["validation_rankic_reason"] is None
+
+
+def test_cross_sectional_metric_summary_does_not_materialize_one_timestamp() -> None:
+    row_count = 50_000
+    database = sqlite3.connect(":memory:")
+    try:
+        database.execute(
+            "CREATE TABLE validation_rows ("
+            "row_id INTEGER PRIMARY KEY, asset_id, timestamp_ns INTEGER NOT NULL, "
+            "label REAL NOT NULL, prediction REAL NOT NULL)"
+        )
+        database.executemany(
+            "INSERT INTO validation_rows(asset_id, timestamp_ns, label, prediction) "
+            "VALUES (?, ?, ?, ?)",
+            (
+                (f"asset_{index}", 1, float(index), float(index))
+                for index in range(row_count)
+            ),
+        )
+        tracemalloc.start()
+        metrics = trial_selection._cross_sectional_metric_summary(database)
+        _current, peak_bytes = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+        database.close()
+
+    assert metrics[0] == row_count
+    assert metrics[2] == pytest.approx(1.0)
+    assert metrics[4] == pytest.approx(1.0)
+    assert peak_bytes < 256 * 1024
 
 
 def test_select_best_validation_trial_excludes_undefined_candidates() -> None:
@@ -365,8 +467,8 @@ def test_chunked_trial_metrics_match_exact_purge_and_tie_oracle() -> None:
 
     assert metrics["model_id"] == "streamed"
     assert metrics["validation_rows"] == 6
-    assert metrics["validation_ic"] == pytest.approx(0.7682733253465358)
-    assert metrics["validation_rankic"] == pytest.approx(0.5833333333333334)
+    assert metrics["validation_ic"] == pytest.approx(-1.0)
+    assert metrics["validation_rankic"] == pytest.approx(-1.0)
     assert metrics["validation_mse"] == pytest.approx(0.5)
     assert metrics["validation_ic_reason"] is None
     assert metrics["validation_rankic_reason"] is None
@@ -424,16 +526,16 @@ def test_chunked_trial_metrics_admits_cumulative_query_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[int] = []
-    phases: list[str] = []
+    metric_kernel_calls: list[bool] = []
 
     def allow_disk(_path, *, reserve_bytes: int) -> None:  # noqa: ANN001
         calls.append(reserve_bytes)
 
-    real_metric_batches = trial_selection._metric_batches
+    real_metric_kernel = trial_selection._cross_sectional_metric_summary
 
-    def observe_metric_batches(database, query):  # noqa: ANN001
-        phases.append("metrics")
-        yield from real_metric_batches(database, query)
+    def observe_metric_kernel(database):  # noqa: ANN001
+        metric_kernel_calls.append(True)
+        return real_metric_kernel(database)
 
     monkeypatch.setattr(
         trial_selection,
@@ -442,8 +544,8 @@ def test_chunked_trial_metrics_admits_cumulative_query_workspace(
     )
     monkeypatch.setattr(
         trial_selection,
-        "_metric_batches",
-        observe_metric_batches,
+        "_cross_sectional_metric_summary",
+        observe_metric_kernel,
     )
     frame = pd.DataFrame(
         {
@@ -463,7 +565,7 @@ def test_chunked_trial_metrics_admits_cumulative_query_workspace(
     )
 
     assert metrics["validation_rows"] == 2000
-    assert len(phases) == 2
+    assert metric_kernel_calls == [True]
     assert calls[-1] >= (
         2 * 2000 * trial_selection._MODEL_SELECTION_SQLITE_ROW_DISK_BYTES
     )
@@ -481,11 +583,9 @@ def test_chunked_trial_metrics_rejects_cumulative_disk_before_query(
         if len(calls) == 4:
             raise OSError("validation_aggregate_disk_preflight")
 
-    real_metric_batches = trial_selection._metric_batches
-
-    def observe_metric_batches(database, query):  # noqa: ANN001
-        query_calls.append(query)
-        yield from real_metric_batches(database, query)
+    def observe_metric_kernel(_database):  # noqa: ANN001
+        query_calls.append("metrics")
+        raise AssertionError("metric kernel ran before disk preflight")
 
     monkeypatch.setattr(
         trial_selection,
@@ -494,8 +594,8 @@ def test_chunked_trial_metrics_rejects_cumulative_disk_before_query(
     )
     monkeypatch.setattr(
         trial_selection,
-        "_metric_batches",
-        observe_metric_batches,
+        "_cross_sectional_metric_summary",
+        observe_metric_kernel,
     )
     frame = pd.DataFrame(
         {
@@ -618,18 +718,18 @@ def test_chunked_trial_metrics_rejects_nonfinite_values(invalid_value: float) ->
                     "prediction": [1.0],
                 }
             ),
-            "insufficient_observations",
+            "no_valid_observations",
         ),
         (
             pd.DataFrame(
                 {
-                    "timestamp": pd.date_range("2024-01-01", periods=3),
-                    "asset_id": ["asset"] * 3,
+                    "timestamp": pd.to_datetime(["2024-01-01"] * 3),
+                    "asset_id": ["a", "b", "c"],
                     "label": [1.0, 1.0, 1.0],
                     "prediction": [2.0, 2.0, 2.0],
                 }
             ),
-            "zero_variance",
+            "no_valid_observations",
         ),
     ],
 )

@@ -4,12 +4,13 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
-import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
@@ -20,11 +21,13 @@ def apply_feature_transforms(
     transforms: tuple[FeatureTransformSpec, ...],
     *,
     timestamp_column: str = "timestamp",
+    resource_lease: MemoryLease | None = None,
 ) -> pd.DataFrame:
     return _apply_feature_transforms_to_copy(
         frame,
         transforms,
         timestamp_column=timestamp_column,
+        resource_lease=resource_lease,
     )
 
 
@@ -33,13 +36,39 @@ def _apply_feature_transforms_to_copy(
     transforms: tuple[FeatureTransformSpec, ...],
     *,
     timestamp_column: str,
+    resource_lease: MemoryLease | None,
 ) -> pd.DataFrame:
+    working_bytes = _feature_transform_working_bytes(frame, transforms)
+    policy = current_runtime_resource_policy()
+    reservation = (
+        policy.lease("research.feature.transform", working_bytes)
+        if policy is not None and resource_lease is None
+        else nullcontext()
+    )
+    with reservation:
+        result = frame.copy()
+        for transform in transforms:
+            _apply_feature_transform_to_owned_frame(
+                result,
+                transform,
+                timestamp_column=timestamp_column,
+            )
+        if pandas_frame_payload_bytes(result) > _feature_transform_output_bytes(
+            frame,
+            transforms,
+        ):
+            raise ValueError("research_feature_working_set_exceeds_task_memory_budget")
+        return result
+
+
+def _feature_transform_working_bytes(
+    frame: pd.DataFrame,
+    transforms: tuple[FeatureTransformSpec, ...],
+) -> int:
     row_count = len(frame)
     index_bytes = int(frame.index.memory_usage(deep=True))
     vector_bytes = index_bytes + row_count * 8
-    output_bound = pandas_frame_payload_bytes(frame) + row_count * 8 * sum(
-        len(transform.output_columns) for transform in transforms
-    )
+    output_bound = _feature_transform_output_bytes(frame, transforms)
     workspace_bound = max(
         (
             _feature_transform_workspace_bytes(
@@ -51,26 +80,16 @@ def _apply_feature_transforms_to_copy(
         ),
         default=0,
     )
-    policy = current_runtime_resource_policy()
-    reservation = (
-        policy.lease(
-            "research.feature.transform",
-            output_bound + workspace_bound,
-        )
-        if policy is not None
-        else nullcontext()
+    return output_bound + workspace_bound
+
+
+def _feature_transform_output_bytes(
+    frame: pd.DataFrame,
+    transforms: tuple[FeatureTransformSpec, ...],
+) -> int:
+    return pandas_frame_payload_bytes(frame) + len(frame) * 8 * sum(
+        len(transform.output_columns) for transform in transforms
     )
-    with reservation:
-        result = frame.copy()
-        for transform in transforms:
-            _apply_feature_transform_to_owned_frame(
-                result,
-                transform,
-                timestamp_column=timestamp_column,
-            )
-        if pandas_frame_payload_bytes(result) > output_bound:
-            raise ValueError("research_feature_working_set_exceeds_task_memory_budget")
-        return result
 
 
 def _feature_transform_workspace_bytes(
@@ -211,33 +230,6 @@ def _zscore(
 ) -> pd.Series:
     del values
     return grouped.transform(_stable_zscore)
-
-
-def _stable_zscore(values: pd.Series) -> pd.Series:
-    source = values.to_numpy(dtype="float64", na_value=np.nan)
-    output = np.full(len(source), np.nan, dtype="float64")
-    valid = np.isfinite(source)
-    if int(valid.sum()) < 2:
-        return pd.Series(output, index=values.index)
-    finite = source[valid]
-    differences = finite - finite[0]
-    if np.isfinite(differences).all():
-        centered = differences - differences.mean()
-    else:
-        scale = float(np.max(np.abs(finite)))
-        if scale == 0:
-            return pd.Series(output, index=values.index)
-        normalized = finite / scale
-        centered = normalized - normalized.mean()
-    scale = float(np.max(np.abs(centered)))
-    if scale == 0:
-        return pd.Series(output, index=values.index)
-    centered = centered / scale
-    std = float(np.sqrt(np.dot(centered, centered) / len(finite)))
-    if std == 0:
-        return pd.Series(output, index=values.index)
-    output[valid] = centered / std
-    return pd.Series(output, index=values.index)
 
 
 def _apply_fillna(

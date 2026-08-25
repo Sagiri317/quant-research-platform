@@ -118,17 +118,6 @@ class RawExportIntakeResult:
     inspection: RawExportInspection | None = None
     error: str | None = None
 
-    @property
-    def ok(self) -> bool:
-        """Return whether inspection succeeded."""
-
-        return (
-            self.error is None
-            and self.inspection is not None
-            and not self.inspection.missing_required_columns
-        )
-
-
 class _IndexInfoContinuationSpool:
     """Bounded private scratch for malformed physical-row continuations."""
 

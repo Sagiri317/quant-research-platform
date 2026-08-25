@@ -4,7 +4,6 @@ import sqlite3
 import warnings
 from datetime import timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -24,12 +23,14 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import (
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
+    WeightConfig,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.engine import (
     compute_exposure_summary,
+    construct_portfolio_positions,
     summarize_concentration,
     summarize_period_breakdown,
 )
@@ -711,7 +712,7 @@ def test_portfolio_state_admission_precedes_source_pull_and_reopens(
         assert portfolio_runner.current_runtime_resource_policy() is reopened
 
 
-def test_portfolio_output_chunks_keep_one_lease_across_context_and_output(
+def test_portfolio_output_chunks_keep_one_lease_across_state_and_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = PortfolioSpec(
@@ -760,41 +761,16 @@ def test_portfolio_output_chunks_keep_one_lease_across_context_and_output(
         lease_starts.append(current.used_memory_bytes)
         return original_lease(current, owner, reserved_bytes)
 
-    def fake_construct(working, _spec, *, source_columns_by_kind):  # noqa: ANN001
-        output = working.loc[:, ["timestamp"]].copy()
-        output["value"] = 1.0
-        return SimpleNamespace(
-            **{
-                name: output.copy()
-                for name in (
-                    "positions",
-                    "turnover",
-                    "cost_breakdown",
-                    "portfolio_returns",
-                    "diagnostics",
-                    "capacity_diagnostics",
-                    "numeric_exposure_diagnostics",
-                    "categorical_exposure_diagnostics",
-                )
-            }
-        )
-
     monkeypatch.setattr(
         portfolio_runner.RuntimeResourcePolicy,
         "lease",
         observe_lease,
     )
-    monkeypatch.setattr(
-        portfolio_runner,
-        "construct_portfolio_positions",
-        fake_construct,
-    )
-
     with runtime_resource_policy_scope(policy):
         output_chunks = portfolio_runner._iter_portfolio_output_chunks(
             chunks,
             spec,
-            source_columns_by_kind={},
+            source_columns_by_kind={"factor": ("signal",)},
             resource_policy=policy,
         )
         assert next(output_chunks)
@@ -806,6 +782,204 @@ def test_portfolio_output_chunks_keep_one_lease_across_context_and_output(
 
     assert lease_starts == [0]
     assert policy.used_memory_bytes == 0
+
+
+def test_managed_portfolio_accepts_true_peak_and_rejects_before_kernel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-04"] * 3),
+            "asset_id": ["A", "B", "D"],
+            "raw": [1.0, 1.0, 1.0],
+            "forward_return": [0.4, -0.2, 0.0],
+        }
+    )
+    spec = PortfolioSpec(
+        portfolio_id="lease_peak",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(
+            SignalSpec(
+                signal_id="signal",
+                source_kind="factor",
+                source_column="raw",
+            ),
+        ),
+        return_source_column="forward_return",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
+        execution_lag_steps=1,
+        weight_config=WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+    )
+
+    policy = capture_test_policy(
+        available_memory_bytes=1024**2,
+        explicit_cap_bytes=31314,
+    )
+    with runtime_resource_policy_scope(policy):
+        outputs = list(
+            portfolio_runner._iter_portfolio_output_chunks(
+                (frame,),
+                spec,
+                source_columns_by_kind={"factor": ("raw",)},
+                resource_policy=policy,
+            )
+        )
+    assert len(outputs) == 1
+    assert policy.used_memory_bytes == 0
+
+    called: list[bool] = []
+
+    def reject_kernel(*_args, **_kwargs):
+        called.append(True)
+        raise AssertionError("portfolio kernel allocated before admission")
+
+    monkeypatch.setattr(
+        portfolio_runner,
+        "_construct_portfolio_positions",
+        reject_kernel,
+    )
+    insufficient = capture_test_policy(
+        available_memory_bytes=1024**2,
+        explicit_cap_bytes=31313,
+    )
+    with runtime_resource_policy_scope(insufficient):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            list(
+                portfolio_runner._iter_portfolio_output_chunks(
+                    (frame,),
+                    spec,
+                    source_columns_by_kind={"factor": ("raw",)},
+                    resource_policy=insufficient,
+                )
+            )
+    assert called == []
+    assert insufficient.used_memory_bytes == 0
+
+
+def _assert_portfolio_chunks_match_full(
+    frame: pd.DataFrame,
+    spec: PortfolioSpec,
+    chunk_timestamp_counts: tuple[int, ...],
+) -> None:
+    full = construct_portfolio_positions(
+        frame,
+        spec,
+        source_columns_by_kind={"factor": ("raw",)},
+    )
+    timestamp_groups = [
+        group.copy() for _, group in frame.groupby("timestamp", sort=True)
+    ]
+    chunks: list[pd.DataFrame] = []
+    offset = 0
+    for count in chunk_timestamp_counts:
+        chunks.append(pd.concat(timestamp_groups[offset : offset + count]))
+        offset += count
+    assert offset == len(timestamp_groups)
+    output_chunks = list(
+        portfolio_runner._iter_portfolio_output_chunks(
+            chunks,
+            spec,
+            source_columns_by_kind={"factor": ("raw",)},
+            resource_policy=None,
+        )
+    )
+    for output_name in (
+        "positions",
+        "turnover",
+        "cost_breakdown",
+        "portfolio_returns",
+        "diagnostics",
+        "capacity_diagnostics",
+        "numeric_exposure_diagnostics",
+        "categorical_exposure_diagnostics",
+    ):
+        actual = pd.concat(
+            [chunk[output_name] for chunk in output_chunks],
+            ignore_index=True,
+        )
+        expected = getattr(full, output_name).reset_index(drop=True)
+        pd.testing.assert_frame_equal(actual, expected)
+
+
+@pytest.mark.parametrize("chunk_timestamp_counts", [(1, 1, 1, 1), (2, 2), (1, 3)])
+def test_sparse_portfolio_temporal_state_matches_full_across_chunk_partitions(
+    chunk_timestamp_counts: tuple[int, ...],
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["A", "B", "C", "D", "B", "D", "A", "B", "D"],
+            "timestamp": pd.to_datetime(
+                [
+                    "2026-01-01",
+                    "2026-01-01",
+                    "2026-01-02",
+                    "2026-01-02",
+                    "2026-01-03",
+                    "2026-01-03",
+                    "2026-01-04",
+                    "2026-01-04",
+                    "2026-01-04",
+                ]
+            ),
+            "raw": [10.0, -10.0, -2.0, 2.0, -5.0, 5.0, 1.0, 1.0, 1.0],
+            "forward_return": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.4, -0.2, 0.0],
+        }
+    )
+    spec = PortfolioSpec(
+        portfolio_id="sparse",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(
+            SignalSpec(
+                signal_id="signal",
+                source_kind="factor",
+                source_column="raw",
+            ),
+        ),
+        return_source_column="forward_return",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
+        execution_lag_steps=1,
+        weight_config=WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+    )
+
+    _assert_portfolio_chunks_match_full(frame, spec, chunk_timestamp_counts)
+
+
+@pytest.mark.parametrize("execution_lag_steps", [0, 1, 2])
+def test_dense_portfolio_temporal_state_matches_full_for_lag_zero_one_n(
+    execution_lag_steps: int,
+) -> None:
+    timestamps = pd.date_range("2026-02-01", periods=6, freq="D")
+    frame = pd.DataFrame(
+        {
+            "timestamp": np.repeat(timestamps, 3),
+            "asset_id": ["A", "B", "C"] * 6,
+            "raw": [
+                float((step + asset) % 5)
+                for step in range(6)
+                for asset in range(3)
+            ],
+            "forward_return": [0.01, -0.02, 0.03] * 6,
+        }
+    )
+    spec = PortfolioSpec(
+        portfolio_id=f"lag_{execution_lag_steps}",
+        market_id=MarketId("a_share"),
+        research_dataset_id="demo",
+        signals=(
+            SignalSpec(
+                signal_id="signal",
+                source_kind="factor",
+                source_column="raw",
+            ),
+        ),
+        return_source_column="forward_return",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
+        execution_lag_steps=execution_lag_steps,
+    )
+
+    _assert_portfolio_chunks_match_full(frame, spec, (2, 1, 3))
 
 
 def test_portfolio_runner_accepts_equivalent_timezone_representations() -> None:
