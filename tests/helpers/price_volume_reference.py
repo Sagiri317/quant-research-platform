@@ -11,7 +11,6 @@ from tests.helpers.panel_keys import DEFAULT_PANEL_KEY_COLUMNS
 KEY_COLUMNS = DEFAULT_PANEL_KEY_COLUMNS
 FLOAT_RTOL = 1e-10
 FLOAT_ATOL = 1e-12
-REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE = 1e-12
 MOMENTUM_20D_COLUMN = price_volume_window_column("mom", 20)
 REVERSAL_1D_COLUMN = price_volume_window_column("rev", 1)
 
@@ -347,14 +346,25 @@ def reference_qrp_window_moment(values: np.ndarray, method: str) -> float:
     if not np.isfinite(numeric).all():
         return float("nan")
     counts = len(numeric)
-    centered = numeric - numeric.mean()
+    if np.min(numeric) == np.max(numeric):
+        return 0.0 if method == "std" else float("nan")
+    scale = float(np.max(np.abs(numeric)))
+    if scale == 0:
+        return 0.0 if method == "std" else float("nan")
+    normalized = numeric / scale
+    centered = normalized - normalized.mean()
+    centered_scale = float(np.max(np.abs(centered)))
+    if centered_scale == 0:
+        return 0.0 if method == "std" else float("nan")
+    centered = centered / centered_scale
+    unit_scale = scale * centered_scale
     if method == "std":
         if counts < 2:
             return float("nan")
         variance = np.sum(centered * centered) / (counts - 1)
-        return float(np.sqrt(max(variance, 0.0)))
+        return float(np.sqrt(max(variance, 0.0)) * unit_scale)
     moment_2 = float(np.mean(centered * centered))
-    if moment_2 <= REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE:
+    if moment_2 == 0:
         return float("nan")
     if method == "skew":
         if counts < 3:

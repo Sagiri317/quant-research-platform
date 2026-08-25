@@ -281,17 +281,26 @@ def _iter_complete_time_sized_frames_impl(
                     raise ValueError(
                         "research_indivisible_time_unit_exceeds_task_memory_budget"
                     )
-                pending = _OwnedValue(
-                    tail.copy(),
-                    resource_policy.lease(
-                        "research.time.pending",
-                        tail_bytes,
-                    ),
+                pending_lease = resource_policy.lease(
+                    "research.time.pending",
+                    tail_bytes,
                 )
-                if _frame_bytes(pending.value) > tail_bytes:
-                    raise ValueError(
-                        "research_indivisible_time_unit_exceeds_task_memory_budget"
-                    )
+                try:
+                    pending_value = tail.copy()
+                    if _frame_bytes(pending_value) > tail_bytes:
+                        raise ValueError(
+                            "research_indivisible_time_unit_exceeds_task_memory_budget"
+                        )
+                    pending = _OwnedValue(pending_value, pending_lease)
+                except BaseException as primary:
+                    try:
+                        pending_lease.close()
+                    except BaseException as cleanup_error:
+                        primary.add_note(
+                            "research pending lease release also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                    raise
                 pending_timestamp = last_timestamp
 
         if pending is None:

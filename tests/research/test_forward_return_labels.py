@@ -94,25 +94,17 @@ def test_forward_return_short_history_long_horizon_is_all_nan() -> None:
     assert result[forward_return_label_column(5)].isna().all()
 
 
-def test_forward_return_labels_treat_non_finite_prices_as_invalid() -> None:
+def test_forward_return_labels_reject_nonfinite_prices() -> None:
     panel = make_synthetic_market_panel(sessions=6, assets=("asset_a",))
     ordered_dates = panel.sort_values("timestamp")["timestamp"].tolist()
     panel.loc[panel["timestamp"].eq(ordered_dates[1]), "adj_open"] = np.inf
     panel.loc[panel["timestamp"].eq(ordered_dates[3]), "adj_open"] = np.inf
 
-    result = (
+    with pytest.raises(ValueError, match="invalid_forward_return_price"):
         add_forward_return_labels(
             panel.sample(frac=1.0, random_state=23),
             horizons=(1,),
         )
-        .sort_values(["asset_id", "timestamp"])
-        .reset_index(drop=True)
-    )
-
-    one_step_label = forward_return_label_column(1)
-    assert pd.isna(result.loc[0, one_step_label])
-    assert pd.isna(result.loc[1, one_step_label])
-    assert not np.isinf(result[[one_step_label]].to_numpy(dtype="float64")).any()
 
 
 def test_forward_return_minute_contiguous_labels_do_not_cross_gap() -> None:

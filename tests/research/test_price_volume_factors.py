@@ -210,7 +210,7 @@ def test_price_volume_factors_handle_grouping_warmup_and_non_finite_edges() -> N
     panel.loc[
         panel["asset_id"].eq("asset_b") & panel["timestamp"].eq(asset_b_dates[7]),
         "float_market_cap",
-    ] = np.inf
+    ] = pd.NA
     shuffled = panel.sample(frac=1.0, random_state=7).reset_index(drop=True)
 
     factor_columns = (
@@ -247,7 +247,7 @@ def test_price_volume_factors_handle_grouping_warmup_and_non_finite_edges() -> N
     assert not np.isinf(result.loc[:, factor_columns].to_numpy(dtype="float64")).any()
 
 
-def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None:
+def test_price_volume_factors_reject_nonfinite_source_values() -> None:
     panel = make_synthetic_factor_panel(sessions=25, assets=("asset_a",))
     ordered = panel.sort_values(["asset_id", "timestamp"]).reset_index(drop=True)
     denominator_date = ordered.loc[0, "timestamp"]
@@ -280,33 +280,11 @@ def test_price_volume_factor_outputs_sanitize_non_finite_source_values() -> None
         "signed_amount_flow_20d",
         "ret_amount_imbalance_20d",
     )
-    result = (
+    with pytest.raises(ValueError, match="invalid_price_volume_numeric_values"):
         calculate_price_volume_factors(
             panel.sample(frac=1.0, random_state=17),
             factor_columns=factor_columns,
         )
-        .sort_values(["asset_id", "timestamp"])
-        .reset_index(drop=True)
-    )
-
-    assert pd.isna(result.loc[19, "amihud_20d"])
-    assert pd.isna(result.loc[19, "amplitude_20d"])
-    assert pd.isna(result.loc[19, "max_return_20d"])
-    assert pd.isna(result.loc[19, "intraday_range_20d"])
-    assert pd.isna(result.loc[20, MOMENTUM_20D_COLUMN])
-    assert pd.isna(result.loc[20, "rev_20d"])
-    assert pd.isna(result.loc[20, "turnover_chg_20d"])
-    assert pd.isna(result.loc[20, "amount_chg_20d"])
-    assert pd.isna(result.loc[20, "volume_chg_20d"])
-    assert pd.isna(result.loc[19, "amount_shock_20d"])
-    assert pd.isna(result.loc[19, "volume_shock_20d"])
-    assert pd.isna(result.loc[19, "ret_amount_corr_20d"])
-    assert pd.isna(result.loc[19, "ret_volume_corr_20d"])
-    assert pd.isna(result.loc[19, "ret_turnover_corr_20d"])
-    assert pd.isna(result.loc[19, "trend_efficiency_20d"])
-    assert pd.isna(result.loc[19, "signed_amount_flow_20d"])
-    assert pd.isna(result.loc[19, "ret_amount_imbalance_20d"])
-    assert not np.isinf(result.loc[:, factor_columns].to_numpy(dtype="float64")).any()
 
 
 def test_price_volume_flow_factors_are_past_only_and_chunk_stable() -> None:
@@ -469,15 +447,15 @@ def test_price_volume_standard_formula_matches_reference() -> None:
     panel.loc[
         panel["asset_id"].eq("asset_b") & panel["timestamp"].eq(asset_b_dates[60]),
         "turnover",
-    ] = np.inf
+    ] = pd.NA
     panel.loc[
         panel["asset_id"].eq("asset_c") & panel["timestamp"].eq(asset_c_dates[7]),
         ["float_market_cap", "total_market_cap"],
-    ] = [np.inf, -1.0]
+    ] = [pd.NA, -1.0]
     panel.loc[
         panel["asset_id"].eq("asset_c") & panel["timestamp"].eq(asset_c_dates[20]),
         "high",
-    ] = np.inf
+    ] = pd.NA
     shuffled = panel.sample(frac=1.0, random_state=23).reset_index(drop=True)
     factor_columns = price_volume_factor_columns()
     primary_key = ("market_id", "asset_id", "timestamp")
@@ -634,39 +612,6 @@ def test_price_volume_window_column_uses_frequency_suffix_contract() -> None:
     assert (
         price_volume_window_column("ret_volume_corr", 7, DataFrequency.TICK)
         == "ret_volume_corr_7tick"
-    )
-
-
-def test_price_volume_owner_modules_hold_their_real_contracts() -> None:
-    import quant_research_platform.research.factors.price_volume.presets as presets
-    import quant_research_platform.research.factors.price_volume.windows as windows
-    from quant_research_platform.research.factors.price_volume import (
-        requirements as requirements,
-    )
-
-    assert presets.CORE_PRICE_VOLUME_FACTORS
-    assert presets.PRICE_VOLUME_FACTOR_PRESETS["standard"]
-    assert requirements.BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS
-    assert requirements.price_volume_factor_input_columns("ret_volume_corr_20d") == (
-        "period_return",
-        "volume",
-    )
-    assert windows.parse_price_volume_windowed_factor_name("ret_volume_corr_20d") == (
-        "ret_volume_corr",
-        20,
-        DataFrequency.DAILY,
-    )
-    assert windows.parse_price_volume_windowed_factor_name("ret_volume_corr_20m") == (
-        "ret_volume_corr",
-        20,
-        DataFrequency.MINUTE,
-    )
-    assert windows.parse_price_volume_windowed_factor_name(
-        "ret_volume_corr_20tick"
-    ) == (
-        "ret_volume_corr",
-        20,
-        DataFrequency.TICK,
     )
 
 

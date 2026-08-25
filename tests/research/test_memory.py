@@ -256,6 +256,48 @@ def test_complete_time_frames_reserve_pending_before_next_input_pull() -> None:
         )
 
 
+def test_pending_tail_admits_before_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-01-01")],
+            "value": ["tail"],
+        }
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1024 * 1024,
+    )
+    events: list[str] = []
+    real_lease = RuntimeResourcePolicy.lease
+    real_copy = pd.DataFrame.copy
+
+    def observe_lease(root, owner, reserved_bytes):  # noqa: ANN001
+        if owner == "research.time.pending":
+            events.append("lease")
+        return real_lease(root, owner, reserved_bytes)
+
+    def observe_copy(current, *args, **kwargs):  # noqa: ANN001
+        if "lease" not in events:
+            events.append("copy_before_lease")
+        else:
+            events.append("copy")
+        return real_copy(current, *args, **kwargs)
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", observe_lease)
+    monkeypatch.setattr(pd.DataFrame, "copy", observe_copy)
+
+    with runtime_resource_policy_scope(policy):
+        list(
+            iter_complete_time_sized_frames(
+                iter((frame,)),
+                timestamp_column="timestamp",
+            )
+        )
+
+    assert events == ["lease", "copy"]
+    assert policy.used_memory_bytes == 0
+
+
 def test_time_chunk_admission_precedes_timestamp_conversion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

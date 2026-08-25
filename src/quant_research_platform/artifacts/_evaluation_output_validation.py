@@ -17,15 +17,12 @@ from quant_research_platform.artifacts._output_common_validation import (
     require_signal_metadata_list,
     validate_filter_metadata,
 )
-from quant_research_platform.compute.dataframe.cross_section import (
+from quant_research_platform.contracts.evaluations import (
     CORRELATION_RAW_REASON_CODES,
     CORRELATION_SUMMARY_REASON_CODES,
     GROUP_SPREAD_REASON_CODES,
-)
-from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
-    strict_finite_or_null_numeric_series,
     strict_non_negative_count_series,
     strict_positive_group_series,
 )
@@ -34,7 +31,10 @@ from quant_research_platform.contracts.filtering import (
     required_filter_columns,
 )
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 
 EVALUATION_METRICS_COLUMNS = (
     "timestamp",
@@ -361,7 +361,11 @@ def validate_evaluation_artifact_structure(
                 not pd.api.types.is_numeric_dtype(values) and not values.isna().all()
             ):
                 raise ValueError("invalid_evaluation_numeric_values")
-            strict_finite_or_null_numeric_series(frame[column])
+            strict_finite_numeric_series(
+                frame[column],
+                error="invalid_evaluation_numeric_values",
+                allow_null=True,
+            )
     for column in ("ic", "rankic"):
         if bool(metrics[column].dropna().abs().gt(1.0).any()):
             raise ValueError("invalid_evaluation_correlation_values")

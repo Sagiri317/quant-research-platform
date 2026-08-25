@@ -380,6 +380,20 @@ def test_zero_zscore_leg_uses_equal_weight_fallback() -> None:
     assert fallback == "equal_weight_fallback"
 
 
+def test_tiny_nonconstant_zscore_leg_does_not_falsely_fallback() -> None:
+    weights, fallback = position_math._leg_weights(
+        asset_values=np.array(["A", "B", "C"]),
+        signal_values=np.array([1e-320, 2e-320, 3e-320]),
+        risk_values=None,
+        signal="signal",
+        weight_config=WeightConfig(method="zscore_weighted_quantile"),
+        sign=1.0,
+    )
+
+    assert weights == {"A": 0.5, "B": 0.0, "C": 0.5}
+    assert fallback == ""
+
+
 def test_position_validation_rejects_shape_and_key_ambiguity() -> None:
     valid = pd.DataFrame(
         {

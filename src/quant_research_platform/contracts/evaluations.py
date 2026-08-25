@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -15,10 +14,27 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.signals import _cross_signal_id_column_overlaps
-from quant_research_platform.contracts.validation import _validate_column_tuple
+from quant_research_platform.contracts.validation import (
+    _validate_column_tuple,
+    strict_finite_numeric_series,
+)
 
 if TYPE_CHECKING:
     from quant_research_platform.contracts.signals import SignalSpec as _SignalSpec
+
+
+CORRELATION_RAW_REASON_CODES = frozenset(
+    {"insufficient_observations", "zero_variance", "nonfinite_result"}
+)
+CORRELATION_SUMMARY_REASON_CODES = frozenset(
+    {
+        "no_valid_observations",
+        "insufficient_observations",
+        "zero_variance",
+        "nonfinite_result",
+    }
+)
+GROUP_SPREAD_REASON_CODES = frozenset({"no_group_transitions"})
 
 
 @dataclass(frozen=True)
@@ -108,7 +124,7 @@ def strict_non_negative_count_series(
     *,
     error: str = "invalid_evaluation_observation_counts",
 ) -> pd.Series:
-    numeric = _strict_numeric_series(values, error=error, allow_null=False)
+    numeric = strict_finite_numeric_series(values, error=error)
     if numeric.lt(0).any() or numeric.mod(1).ne(0).any():
         raise ValueError(error)
     if values.map(lambda value: isinstance(value, bool)).any():
@@ -134,31 +150,6 @@ def strict_non_negative_count_value(
 ) -> int:
     series = strict_non_negative_count_series(pd.Series([value]), error=error)
     return int(series.iloc[0])
-
-
-def strict_finite_or_null_numeric_series(
-    values: pd.Series,
-    *,
-    error: str = "invalid_evaluation_numeric_values",
-) -> pd.Series:
-    return _strict_numeric_series(values, error=error, allow_null=True)
-
-
-def _strict_numeric_series(
-    values: pd.Series,
-    *,
-    error: str,
-    allow_null: bool,
-) -> pd.Series:
-    if values.map(lambda value: isinstance(value, bool)).any():
-        raise ValueError(error)
-    numeric = pd.to_numeric(values, errors="coerce")
-    if not allow_null and numeric.isna().any():
-        raise ValueError(error)
-    finite = numeric.dropna().map(math.isfinite)
-    if not bool(finite.all()):
-        raise ValueError(error)
-    return numeric
 
 
 def _validate_signals(signals: tuple[_SignalSpec, ...]) -> None:

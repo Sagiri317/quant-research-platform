@@ -153,6 +153,30 @@ def test_chunked_trial_metrics_marks_constant_correlation_undefined() -> None:
     assert metrics["validation_rankic_reason"] == "zero_variance"
 
 
+def test_chunked_trial_metrics_preserves_tiny_nonconstant_variation() -> None:
+    values = np.array([0.0, 1e-320, 2e-320])
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D"),
+            "asset_id": ["asset"] * 3,
+            "label": values,
+            "prediction": values,
+        }
+    )
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (frame.iloc[:1], frame.iloc[1:]),
+        model_id="tiny_window",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=0,
+    )
+
+    assert metrics["validation_ic"] == pytest.approx(1.0)
+    assert metrics["validation_ic_reason"] is None
+    assert metrics["validation_rankic"] == pytest.approx(1.0)
+    assert metrics["validation_rankic_reason"] is None
+
+
 def test_select_best_validation_trial_excludes_undefined_candidates() -> None:
     selected = select_best_validation_trial(
         pd.DataFrame(

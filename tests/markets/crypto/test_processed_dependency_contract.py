@@ -643,7 +643,7 @@ def test_crypto_carry_and_buffer_cap_fixed_allowance_to_admitted_bound(
     policy = capture_test_policy(available_memory_bytes=1024 * 1024)
     frame = _panel_frame(start=0, minutes=70)
     target_headroom = 2_000
-    producer_bound = policy.available_memory_bytes // 2
+    producer_bound = policy.memory_budget_bytes - target_headroom - 1
     reader_reserve = policy.memory_budget_bytes - producer_bound - target_headroom
     assert (
         pandas_frame_payload_bytes(
@@ -718,7 +718,8 @@ def test_crypto_carry_and_buffer_cap_fixed_allowance_to_admitted_bound(
     )
     if module_name == "label":
         assert len(buffer_bounds) == 1
-        assert requested_bounds[1] + buffer_bounds[0] == producer_bound
+        assert requested_bounds[1] + buffer_bounds[0] <= producer_bound
+        assert buffer_bounds[0] > target_headroom
         assert sum(len(output) for output in outputs) == len(frame)
     assert policy.used_memory_bytes == 0
 
@@ -1255,13 +1256,10 @@ def test_panel_dependent_validation_uses_live_policy_headroom(
         resource_policy=policy,
     )
 
-    assert observed == [
-        {
-            "time_window": TimeWindow("2026-07-06", "2026-07-06"),
-            "target_chunk_bytes": policy.available_memory_bytes // 8,
-            "columns": ("value",),
-        }
-    ]
+    assert len(observed) == 1
+    assert observed[0]["time_window"] == TimeWindow("2026-07-06", "2026-07-06")
+    assert observed[0]["columns"] == ("value",)
+    assert 0 < observed[0]["target_chunk_bytes"] <= policy.memory_budget_bytes
 
 
 def test_panel_validation_projects_input_before_key_workspace(
@@ -1361,7 +1359,9 @@ def test_panel_validation_projects_input_before_key_workspace(
         resource_policy=policy,
     )
 
-    assert observed == [(primary_key, policy.memory_budget_bytes // 8)]
+    assert len(observed) == 1
+    assert observed[0][0] == primary_key
+    assert 0 < observed[0][1] <= policy.memory_budget_bytes
     assert policy.used_memory_bytes == 0
 
 

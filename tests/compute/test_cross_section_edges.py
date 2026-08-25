@@ -6,6 +6,7 @@ import pytest
 from quant_research_platform.compute.dataframe.cross_section import (
     _assign_groups_array,
     _average_ranks,
+    _pearson_correlation_result,
     compute_ic_and_grouped_label_values,
     compute_ic_and_grouped_label_values_from_validated_panel,
 )
@@ -63,3 +64,12 @@ def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> N
 def test_dataframe_cross_section_numeric_helpers() -> None:
     assert _assign_groups_array(np.array([3.0, 1.0, 2.0]), 5).tolist() == [3, 1, 2]
     assert _average_ranks(np.array([2.0, 2.0, 1.0])).tolist() == [2.5, 2.5, 1.0]
+
+
+def test_pearson_preserves_tiny_nonconstant_variation() -> None:
+    values = np.array([1e-320, 2e-320, 3e-320])
+
+    correlation, reason = _pearson_correlation_result(values, values)
+
+    assert correlation == pytest.approx(1.0)
+    assert reason is None

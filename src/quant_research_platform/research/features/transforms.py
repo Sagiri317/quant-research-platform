@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.features import FeatureTransformSpec
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -145,7 +147,11 @@ def _apply_feature_transform_to_owned_frame(
     ):
         if source_column not in result:
             raise ValueError(f"missing_feature_transform_source: {source_column}")
-        values = pd.to_numeric(result[source_column], errors="coerce")
+        values = strict_finite_numeric_series(
+            result[source_column],
+            error=f"invalid_feature_transform_source: {source_column}",
+            allow_null=True,
+        ).astype("float64")
         transformed = _transform_values(
             values,
             timestamps=result[timestamp_column],
@@ -203,9 +209,35 @@ def _zscore(
     values: pd.Series,
     grouped: pd.core.groupby.SeriesGroupBy,
 ) -> pd.Series:
-    mean = grouped.transform("mean")
-    std = grouped.transform(lambda item: item.std(ddof=0))
-    return (values - mean) / std.mask(std.eq(0))
+    del values
+    return grouped.transform(_stable_zscore)
+
+
+def _stable_zscore(values: pd.Series) -> pd.Series:
+    source = values.to_numpy(dtype="float64", na_value=np.nan)
+    output = np.full(len(source), np.nan, dtype="float64")
+    valid = np.isfinite(source)
+    if int(valid.sum()) < 2:
+        return pd.Series(output, index=values.index)
+    finite = source[valid]
+    differences = finite - finite[0]
+    if np.isfinite(differences).all():
+        centered = differences - differences.mean()
+    else:
+        scale = float(np.max(np.abs(finite)))
+        if scale == 0:
+            return pd.Series(output, index=values.index)
+        normalized = finite / scale
+        centered = normalized - normalized.mean()
+    scale = float(np.max(np.abs(centered)))
+    if scale == 0:
+        return pd.Series(output, index=values.index)
+    centered = centered / scale
+    std = float(np.sqrt(np.dot(centered, centered) / len(finite)))
+    if std == 0:
+        return pd.Series(output, index=values.index)
+    output[valid] = centered / std
+    return pd.Series(output, index=values.index)
 
 
 def _apply_fillna(

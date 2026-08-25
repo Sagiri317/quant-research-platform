@@ -128,14 +128,11 @@ def test_streaming_ic_summary_matches_stable_canonical_values(
             abs=1e-12,
         )
     for column in ("icir", "rankicir"):
-        if expected_std <= 1e-8:
-            assert pd.isna(streaming[column])
-        else:
-            assert streaming[column] == pytest.approx(
-                expected_ratio,
-                rel=1e-9,
-                abs=1e-12,
-            )
+        assert streaming[column] == pytest.approx(
+            expected_ratio,
+            rel=1e-8,
+            abs=1e-12,
+        )
 
 
 def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:

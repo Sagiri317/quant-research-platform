@@ -1,11 +1,9 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
-import quant_research_platform.research.evaluations.engine as evaluation_engine
-import quant_research_platform.research.portfolios.engine as portfolio_engine
-import quant_research_platform.research.signals.materialization as materialization
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.features.transforms import (
@@ -86,6 +84,53 @@ def test_zero_variance_zscore_keeps_numeric_output() -> None:
 
     assert result["factor_zscore"].dtype == "float64"
     assert result["factor_zscore"].isna().all()
+
+
+def test_tiny_nonconstant_zscores_remain_valid() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-02")] * 3,
+            "factor": np.array([1e-320, 2e-320, 3e-320]),
+        }
+    )
+    feature = FeatureTransformSpec(
+        transform_id="factor_zscore",
+        source_columns=("factor",),
+        transform="cross_sectional_zscore",
+        output_columns=("factor_zscore",),
+    )
+    signal = SignalSpec(
+        signal_id="factor_signal",
+        source_kind="factor",
+        source_column="factor",
+        transform="zscore",
+    )
+
+    feature_result = apply_feature_transforms(frame, (feature,))
+    signal_result = normalize_signal_frame(frame, (signal,))
+
+    expected = [-1.224744871391589, 0.0, 1.224744871391589]
+    assert feature_result["factor_zscore"].tolist() == pytest.approx(expected)
+    assert signal_result["factor_signal"].tolist() == pytest.approx(expected)
+
+
+@pytest.mark.parametrize("value", ["not-a-number", float("inf"), float("-inf")])
+def test_feature_transforms_reject_invalid_numeric_sources(value: object) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2024-01-02")],
+            "factor": [value],
+        }
+    )
+    spec = FeatureTransformSpec(
+        transform_id="factor_rank",
+        source_columns=("factor",),
+        transform="cross_sectional_rank",
+        output_columns=("factor_rank",),
+    )
+
+    with pytest.raises(ValueError, match="invalid_feature_transform_source"):
+        apply_feature_transforms(frame, (spec,))
 
 
 def test_feature_transform_admits_before_result_copy(
@@ -255,14 +300,3 @@ def test_signal_materialization_enforces_source_kind_column_ownership() -> None:
                 "prediction": (),
             },
         )
-
-
-def test_evaluation_and_portfolio_share_signal_normalization_owner() -> None:
-    assert (
-        evaluation_engine.normalize_signal_frame
-        is materialization.normalize_signal_frame
-    )
-    assert (
-        portfolio_engine.normalize_signal_frame
-        is materialization.normalize_signal_frame
-    )

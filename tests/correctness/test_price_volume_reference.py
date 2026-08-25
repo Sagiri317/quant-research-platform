@@ -28,7 +28,6 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from tests.helpers.price_volume_reference import (
     KEY_COLUMNS,
-    REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE,
     assert_frame_matches_reference,
     pandas_window_moment_by_asset,
     reference_price_volume_factors,
@@ -115,74 +114,26 @@ def test_price_volume_qrp_moment_contract_edge_windows() -> None:
     assert pd.isna(asset_a_rows.loc[19, "skew_20d"])
     assert pd.isna(asset_a_rows.loc[19, "kurt_20d"])
     assert asset_a_rows.loc[24:44, "vol_20d"].notna().all()
-    assert asset_a_rows.loc[24:44, ["skew_20d", "kurt_20d"]].isna().all().all()
+    assert asset_a_rows.loc[24, ["skew_20d", "kurt_20d"]].isna().all()
+    assert asset_a_rows.loc[25:44, ["skew_20d", "kurt_20d"]].notna().all().all()
 
 
-def test_price_volume_moments_apply_qrp_near_zero_policy() -> None:
-    panel = synthetic_price_volume_panel(sessions=12, assets=("asset_a", "asset_b"))
-    asset_a = panel["asset_id"].eq("asset_a")
-    asset_b = panel["asset_id"].eq("asset_b")
-    panel.loc[asset_a, "period_return"] = [
-        1_000_000.0,
-        1_000_000.0000000001,
-        1_000_000.0,
-        1_000_000.0000000001,
-        1_000_000.0000000001,
-        *[1_000_000.0] * 7,
-    ]
-    panel.loc[asset_a, "turnover"] = panel.loc[asset_a, "period_return"]
-    panel.loc[asset_b, "period_return"] = [
-        0.9999999379513019,
-        0.999999985798791,
-        0.9999997798638084,
-        1.0000000345234172,
-        1.0000001128020557,
-        *[1.0] * 7,
-    ]
-    panel.loc[asset_b, "turnover"] = panel.loc[asset_b, "period_return"]
-    factor_columns = ("vol_5d", "skew_5d", "kurt_5d", "turnover_vol_5d")
+def test_price_volume_moments_distinguish_constant_from_tiny_variation() -> None:
+    panel = synthetic_price_volume_panel(sessions=6, assets=("asset_a",))
+    panel.loc[:4, "period_return"] = 0.0
+    panel.loc[5, "period_return"] = -1e-320
+    panel.loc[:, "turnover"] = panel["period_return"]
 
     result = calculate_price_volume_factors(
         panel,
-        factor_columns=factor_columns,
-    ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
+        factor_columns=("vol_5d", "downside_vol_5d", "skew_5d", "kurt_5d"),
+    ).sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
 
-    assert_frame_matches_reference(
-        result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-        reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-    )
-    ordered = result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
-    asset_a_rows = ordered[ordered["asset_id"].eq("asset_a")].reset_index(drop=True)
-    asset_b_rows = ordered[ordered["asset_id"].eq("asset_b")].reset_index(drop=True)
-    assert pd.notna(asset_a_rows.loc[4, "vol_5d"])
-    assert asset_a_rows.loc[4, ["skew_5d", "kurt_5d"]].isna().all()
-    assert asset_b_rows.loc[4, "vol_5d"] > 0.0
-    assert asset_b_rows.loc[4, ["skew_5d", "kurt_5d"]].isna().all()
-
-
-def test_price_volume_moments_use_qrp_formula_above_near_zero_threshold() -> None:
-    panel = synthetic_price_volume_panel(sessions=12, assets=("asset_a",))
-    first_window = [-3e-6, -1e-6, 0.0, 1e-6, 5e-6]
-    panel.loc[:4, "period_return"] = first_window
-    panel.loc[:4, "turnover"] = [0.01 + value for value in first_window]
-    factor_columns = ("vol_5d", "skew_5d", "kurt_5d", "turnover_vol_5d")
-
-    result = calculate_price_volume_factors(
-        panel,
-        factor_columns=factor_columns,
-    ).loc[:, [*KEY_COLUMNS, *factor_columns]]
-    reference = reference_price_volume_factors(panel, factor_columns=factor_columns)
-    first_window_series = pd.Series(first_window, dtype="float64")
-    moment_2 = float(((first_window_series - first_window_series.mean()) ** 2).mean())
-
-    assert moment_2 > REFERENCE_ROLLING_MOMENT_NEAR_ZERO_VARIANCE
-    assert_frame_matches_reference(
-        result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-        reference.sort_values(list(KEY_COLUMNS)).reset_index(drop=True),
-    )
-    ordered = result.sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
-    assert ordered.loc[4, ["skew_5d", "kurt_5d"]].notna().all()
+    assert result.loc[4, "vol_5d"] == 0.0
+    assert result.loc[4, ["skew_5d", "kurt_5d"]].isna().all()
+    assert result.loc[5, "vol_5d"] > 0.0
+    assert result.loc[5, "downside_vol_5d"] > 0.0
+    assert result.loc[5, ["skew_5d", "kurt_5d"]].notna().all()
 
 
 def test_price_volume_well_conditioned_moments_cross_check_pandas() -> None:
@@ -242,20 +193,28 @@ def test_price_volume_well_conditioned_moments_cross_check_pandas() -> None:
     )
 
 
-def test_reference_qrp_window_moment_distinguishes_threshold_sides() -> None:
-    below = pd.Series([0.0, 0.1e-6, 0.2e-6, 0.3e-6, 0.4e-6])
-    above = pd.Series([-3e-6, -1e-6, 0.0, 1e-6, 5e-6])
+def test_reference_qrp_window_moment_distinguishes_constant_from_variation() -> None:
+    constant = pd.Series([0.0] * 5)
+    varied = pd.Series([0.0, 0.1e-6, 0.2e-6, 0.3e-6, 0.4e-6])
     groups = pd.Series(["asset_a"] * 5)
 
-    below_skew = reference_qrp_window_moment_by_asset(below, groups, 5, "skew").iloc[-1]
-    below_kurt = reference_qrp_window_moment_by_asset(below, groups, 5, "kurt").iloc[-1]
-    above_skew = reference_qrp_window_moment_by_asset(above, groups, 5, "skew").iloc[-1]
-    above_kurt = reference_qrp_window_moment_by_asset(above, groups, 5, "kurt").iloc[-1]
+    constant_skew = reference_qrp_window_moment_by_asset(
+        constant, groups, 5, "skew"
+    ).iloc[-1]
+    constant_kurt = reference_qrp_window_moment_by_asset(
+        constant, groups, 5, "kurt"
+    ).iloc[-1]
+    varied_skew = reference_qrp_window_moment_by_asset(
+        varied, groups, 5, "skew"
+    ).iloc[-1]
+    varied_kurt = reference_qrp_window_moment_by_asset(
+        varied, groups, 5, "kurt"
+    ).iloc[-1]
 
-    assert pd.isna(below_skew)
-    assert pd.isna(below_kurt)
-    assert pd.notna(above_skew)
-    assert pd.notna(above_kurt)
+    assert pd.isna(constant_skew)
+    assert pd.isna(constant_kurt)
+    assert pd.notna(varied_skew)
+    assert pd.notna(varied_kurt)
 
 
 def test_price_volume_uses_past_rows_only_for_past_timestamps() -> None:

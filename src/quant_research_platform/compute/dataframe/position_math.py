@@ -175,12 +175,14 @@ def _leg_weights(
             else np.arange(1, len(asset_values) + 1, dtype="float64")
         )
     elif weight_config.method == "zscore_weighted_quantile":
-        std = float(np.std(signal_values, ddof=0))
-        raw = (
-            np.abs(signal_values - float(np.mean(signal_values))) / std
-            if std > 0
-            else signal_values * 0
-        )
+        differences = signal_values - signal_values[0]
+        if np.isfinite(differences).all():
+            centered = differences - differences.mean()
+        else:
+            scale = float(np.max(np.abs(signal_values)))
+            normalized = signal_values / scale if scale else signal_values
+            centered = normalized - normalized.mean()
+        raw = np.abs(centered)
     elif weight_config.method == "signal_abs_weighted_quantile":
         raw = np.abs(signal_values)
     else:

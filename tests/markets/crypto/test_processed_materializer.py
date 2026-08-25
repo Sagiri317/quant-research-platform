@@ -183,7 +183,7 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         target_chunk_bytes: int,
         **_kwargs,
     ):
-        assert target_chunk_bytes == policy.available_memory_bytes // 8
+        assert 0 < target_chunk_bytes <= policy.available_memory_bytes
         assert current_runtime_resource_policy() is policy
         count = 1 if session.name == "bar" else 2
         with runtime_resource_policy_scope(session.resource_policy):

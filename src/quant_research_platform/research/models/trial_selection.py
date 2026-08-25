@@ -85,6 +85,12 @@ class _MetricAccumulator:
     prediction_m2: float = 0.0
     covariance: float = 0.0
     squared_error: float = 0.0
+    label_scale: float = 1.0
+    prediction_scale: float = 1.0
+    label_min: float | None = None
+    label_max: float | None = None
+    prediction_min: float | None = None
+    prediction_max: float | None = None
 
     def add(
         self,
@@ -94,10 +100,58 @@ class _MetricAccumulator:
         batch_count = len(labels)
         if batch_count == 0:
             return
-        label_mean = float(labels.mean())
-        prediction_mean = float(predictions.mean())
-        centered_labels = labels - label_mean
-        centered_predictions = predictions - prediction_mean
+        batch_label_min = float(labels.min())
+        batch_label_max = float(labels.max())
+        batch_prediction_min = float(predictions.min())
+        batch_prediction_max = float(predictions.max())
+        label_scale = max(abs(batch_label_min), abs(batch_label_max))
+        prediction_scale = max(abs(batch_prediction_min), abs(batch_prediction_max))
+        if label_scale == 0:
+            label_scale = 1.0
+        if prediction_scale == 0:
+            prediction_scale = 1.0
+        if self.count == 0:
+            self.label_scale = label_scale
+            self.prediction_scale = prediction_scale
+        else:
+            previous_label_scale = self.label_scale
+            previous_prediction_scale = self.prediction_scale
+            if (
+                label_scale < previous_label_scale
+                and self.label_min == self.label_max == 0
+            ):
+                self.label_scale = label_scale
+            elif label_scale > previous_label_scale:
+                factor = previous_label_scale / label_scale
+                if self.label_mean:
+                    self.label_mean *= factor
+                if self.label_m2:
+                    self.label_m2 *= factor * factor
+                self.label_scale = label_scale
+            if (
+                prediction_scale < previous_prediction_scale
+                and self.prediction_min == self.prediction_max == 0
+            ):
+                self.prediction_scale = prediction_scale
+            elif prediction_scale > previous_prediction_scale:
+                factor = previous_prediction_scale / prediction_scale
+                if self.prediction_mean:
+                    self.prediction_mean *= factor
+                if self.prediction_m2:
+                    self.prediction_m2 *= factor * factor
+                self.prediction_scale = prediction_scale
+            if self.covariance:
+                self.covariance *= (
+                    previous_label_scale / self.label_scale
+                    * previous_prediction_scale
+                    / self.prediction_scale
+                )
+        normalized_labels = labels / self.label_scale
+        normalized_predictions = predictions / self.prediction_scale
+        label_mean = float(normalized_labels.mean())
+        prediction_mean = float(normalized_predictions.mean())
+        centered_labels = normalized_labels - label_mean
+        centered_predictions = normalized_predictions - prediction_mean
         label_m2 = float(np.dot(centered_labels, centered_labels))
         prediction_m2 = float(np.dot(centered_predictions, centered_predictions))
         covariance = float(np.dot(centered_labels, centered_predictions))
@@ -109,24 +163,49 @@ class _MetricAccumulator:
             self.label_m2 = label_m2
             self.prediction_m2 = prediction_m2
             self.covariance = covariance
-            return
-        previous_count = self.count
-        total_count = previous_count + batch_count
-        overlap = previous_count * batch_count / total_count
-        label_delta = label_mean - self.label_mean
-        prediction_delta = prediction_mean - self.prediction_mean
-        self.label_m2 += label_m2 + label_delta * label_delta * overlap
-        self.prediction_m2 += (
-            prediction_m2 + prediction_delta * prediction_delta * overlap
+        else:
+            previous_count = self.count
+            total_count = previous_count + batch_count
+            overlap = previous_count * batch_count / total_count
+            label_delta = label_mean - self.label_mean
+            prediction_delta = prediction_mean - self.prediction_mean
+            self.label_m2 += label_m2 + label_delta * label_delta * overlap
+            self.prediction_m2 += (
+                prediction_m2 + prediction_delta * prediction_delta * overlap
+            )
+            self.covariance += covariance + label_delta * prediction_delta * overlap
+            self.label_mean += label_delta * batch_count / total_count
+            self.prediction_mean += prediction_delta * batch_count / total_count
+            self.count = total_count
+        self.label_min = (
+            batch_label_min
+            if self.label_min is None
+            else min(self.label_min, batch_label_min)
         )
-        self.covariance += covariance + label_delta * prediction_delta * overlap
-        self.label_mean += label_delta * batch_count / total_count
-        self.prediction_mean += prediction_delta * batch_count / total_count
-        self.count = total_count
+        self.label_max = (
+            batch_label_max
+            if self.label_max is None
+            else max(self.label_max, batch_label_max)
+        )
+        self.prediction_min = (
+            batch_prediction_min
+            if self.prediction_min is None
+            else min(self.prediction_min, batch_prediction_min)
+        )
+        self.prediction_max = (
+            batch_prediction_max
+            if self.prediction_max is None
+            else max(self.prediction_max, batch_prediction_max)
+        )
 
     def correlation(self) -> tuple[float | None, str | None]:
         if self.count < 2:
             return None, "insufficient_observations"
+        if (
+            self.label_min == self.label_max
+            or self.prediction_min == self.prediction_max
+        ):
+            return None, "zero_variance"
         denominator = np.sqrt(self.label_m2 * self.prediction_m2)
         if denominator == 0:
             return None, "zero_variance"

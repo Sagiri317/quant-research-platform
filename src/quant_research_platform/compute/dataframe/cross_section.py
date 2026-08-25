@@ -20,18 +20,6 @@ IC_RESULT_COLUMNS = [
     "ic_reason",
     "rankic_reason",
 ]
-CORRELATION_RAW_REASON_CODES = frozenset(
-    {"insufficient_observations", "zero_variance", "nonfinite_result"}
-)
-CORRELATION_SUMMARY_REASON_CODES = frozenset(
-    {
-        "no_valid_observations",
-        "insufficient_observations",
-        "zero_variance",
-        "nonfinite_result",
-    }
-)
-GROUP_SPREAD_REASON_CODES = frozenset({"no_group_transitions"})
 IC_SUMMARY_COLUMNS = [
     "signal",
     "label",
@@ -179,8 +167,12 @@ def _pearson_correlation_result(
     left_values: np.ndarray,
     right_values: np.ndarray,
 ) -> tuple[float | None, str | None]:
-    left_centered = left_values - left_values.mean()
-    right_centered = right_values - right_values.mean()
+    if len(left_values) < 2:
+        return None, "insufficient_observations"
+    left_centered = _scaled_centered_values(left_values)
+    right_centered = _scaled_centered_values(right_values)
+    if left_centered is None or right_centered is None:
+        return None, "zero_variance"
     denominator = np.sqrt(
         float(np.dot(left_centered, left_centered))
         * float(np.dot(right_centered, right_centered))
@@ -193,6 +185,24 @@ def _pearson_correlation_result(
     if not np.isfinite(value):
         return None, "nonfinite_result"
     return value, None
+
+
+def _scaled_centered_values(values: np.ndarray) -> np.ndarray | None:
+    values = np.asarray(values, dtype="float64")
+    reference = values[0]
+    differences = values - reference
+    if np.isfinite(differences).all():
+        centered = differences - differences.mean()
+    else:
+        scale = float(np.max(np.abs(values)))
+        if scale == 0:
+            return None
+        normalized = values / scale
+        centered = normalized - normalized.mean()
+    scale = float(np.max(np.abs(centered)))
+    if scale == 0:
+        return None
+    return centered / scale
 
 
 def _assign_groups_array(values: np.ndarray, n_groups: int) -> np.ndarray:
@@ -212,7 +222,7 @@ def _safe_ratio(numerator: float, denominator: float, *, valid_count: int) -> fl
         valid_count < 2
         or not np.isfinite(numerator)
         or not np.isfinite(denominator)
-        or np.isclose(denominator, 0.0)
+        or denominator == 0
     ):
         return np.nan
     return float(numerator / denominator)
@@ -224,6 +234,8 @@ def _summarize_correlation_aggregates(
     mean: float,
     m2: float,
     positive_count: int,
+    minimum: float | None = None,
+    maximum: float | None = None,
 ) -> dict[str, float | int | str | None]:
     if count == 0:
         return {
@@ -235,7 +247,9 @@ def _summarize_correlation_aggregates(
             "reason": "no_valid_observations",
             "ratio_reason": "no_valid_observations",
         }
-    if not np.isfinite(mean) or not np.isfinite(m2):
+    if minimum is not None and maximum is not None and minimum == maximum:
+        std = 0.0
+    elif not np.isfinite(mean) or not np.isfinite(m2):
         std = np.nan
     else:
         variance = m2 / count
@@ -274,6 +288,6 @@ def _correlation_ratio_reason(
         return "insufficient_observations"
     if not np.isfinite(mean) or not np.isfinite(std):
         return "nonfinite_result"
-    if np.isclose(std, 0.0):
+    if std == 0:
         return "zero_variance"
     return "nonfinite_result"

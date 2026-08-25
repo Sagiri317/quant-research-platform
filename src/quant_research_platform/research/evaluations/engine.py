@@ -150,10 +150,14 @@ class _EvaluationStreamingState:
                         "ic_mean": 0.0,
                         "ic_m2": 0.0,
                         "ic_positive": 0,
+                        "ic_min": None,
+                        "ic_max": None,
                         "rankic_count": 0,
                         "rankic_mean": 0.0,
                         "rankic_m2": 0.0,
                         "rankic_positive": 0,
+                        "rankic_min": None,
+                        "rankic_max": None,
                     }
                     self._ic[key] = stats
                 _add_correlation(stats, "ic", ic)
@@ -356,6 +360,16 @@ def _add_correlation(
     stats[m2_key] += delta * (numeric - mean)
     stats[f"{prefix}_count"] = count
     stats[f"{prefix}_positive"] += int(numeric > 0)
+    stats[f"{prefix}_min"] = (
+        numeric
+        if stats[f"{prefix}_min"] is None
+        else min(float(stats[f"{prefix}_min"]), numeric)
+    )
+    stats[f"{prefix}_max"] = (
+        numeric
+        if stats[f"{prefix}_max"] is None
+        else max(float(stats[f"{prefix}_max"]), numeric)
+    )
 
 
 def _correlation_summary(
@@ -368,6 +382,8 @@ def _correlation_summary(
         mean=float(stats[f"{prefix}_mean"]),
         m2=float(stats[f"{prefix}_m2"]),
         positive_count=int(stats[f"{prefix}_positive"]),
+        minimum=stats[f"{prefix}_min"],
+        maximum=stats[f"{prefix}_max"],
     )
     result["count"] = result["valid_count"]
     return result

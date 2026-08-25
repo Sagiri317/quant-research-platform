@@ -107,8 +107,18 @@ def _new_performance_stats() -> dict[str, object]:
         "net_sum": 0.0,
         "cumulative_net": 0.0,
         "net_square_sum": 0.0,
+        "net_scale": 1.0,
+        "net_mean_scaled": 0.0,
+        "net_m2_scaled": 0.0,
+        "net_min": None,
+        "net_max": None,
         "downside_sum": 0.0,
         "downside_square_sum": 0.0,
+        "downside_scale": 1.0,
+        "downside_mean_scaled": 0.0,
+        "downside_m2_scaled": 0.0,
+        "downside_min": None,
+        "downside_max": None,
         "wins": 0,
         "losses": 0,
         "win_sum": 0.0,
@@ -178,6 +188,8 @@ def _update_performance_stats_batch(
     downside = np.minimum(net, 0.0)
     wins = net > 0
     losses = net < 0
+    _update_scaled_variance(stats, "net", net)
+    _update_scaled_variance(stats, "downside", downside)
     stats["periods"] = period_offset + count
     stats["gross_sum"] = float(stats["gross_sum"]) + float(gross.sum())
     stats["net_sum"] = previous_net + float(net.sum())
@@ -465,13 +477,8 @@ def _performance_summary_record(
 ) -> dict[str, object]:
     periods = int(stats["periods"])
     mean_net = float(stats["net_sum"]) / periods
-    volatility = _population_std(
-        float(stats["net_square_sum"]), mean_net, periods
-    )
-    downside_mean = float(stats["downside_sum"]) / periods
-    downside_volatility = _population_std(
-        float(stats["downside_square_sum"]), downside_mean, periods
-    )
+    volatility = _scaled_population_std(stats, "net", periods)
+    downside_volatility = _scaled_population_std(stats, "downside", periods)
     max_drawdown = float(stats["max_drawdown"])
     drawdown_recovery_index = stats["drawdown_recovery_index"]
     end_index = (
@@ -606,8 +613,12 @@ def _moment_result(
     minimum = 3 if order == 3 else 4
     if count < minimum:
         return None, "insufficient_observations"
+    if stats["net_min"] == stats["net_max"]:
+        return None, "zero_variance"
     mean = float(stats["net_sum"]) / count
     m2 = _central_moment(stats, mean, 2)
+    if m2 == 0:
+        m2 = _scaled_population_variance(stats, "net", count)
     if not np.isfinite(m2):
         return None, "nonfinite_result"
     if m2 <= 0:
@@ -648,9 +659,91 @@ def _central_moment(stats: dict[str, object], mean: float, order: int) -> float:
     )
 
 
-def _population_std(square_sum: float, mean: float, count: int) -> float:
-    variance = max(0.0, square_sum / count - mean * mean)
-    return math.sqrt(variance)
+def _update_scaled_variance(
+    stats: dict[str, object],
+    prefix: str,
+    values: np.ndarray,
+) -> None:
+    count = len(values)
+    batch_min = float(values.min())
+    batch_max = float(values.max())
+    batch_scale = max(abs(batch_min), abs(batch_max))
+    if batch_scale == 0:
+        batch_scale = 1.0
+    previous_count = int(stats["periods"])
+    previous_scale = float(stats[f"{prefix}_scale"])
+    current_scale = batch_scale if previous_count == 0 else max(
+        previous_scale,
+        batch_scale,
+    )
+    if (
+        previous_count
+        and stats[f"{prefix}_min"] == stats[f"{prefix}_max"] == 0.0
+        and batch_scale < previous_scale
+    ):
+        current_scale = batch_scale
+    if current_scale != previous_scale:
+        factor = previous_scale / current_scale
+        if stats[f"{prefix}_mean_scaled"]:
+            stats[f"{prefix}_mean_scaled"] = (
+                float(stats[f"{prefix}_mean_scaled"]) * factor
+            )
+        if stats[f"{prefix}_m2_scaled"]:
+            stats[f"{prefix}_m2_scaled"] = (
+                float(stats[f"{prefix}_m2_scaled"]) * factor * factor
+            )
+        stats[f"{prefix}_scale"] = current_scale
+    normalized = values / current_scale
+    batch_mean = float(normalized.mean())
+    centered = normalized - batch_mean
+    batch_m2 = float(np.dot(centered, centered))
+    if previous_count == 0:
+        stats[f"{prefix}_mean_scaled"] = batch_mean
+        stats[f"{prefix}_m2_scaled"] = batch_m2
+    else:
+        total = previous_count + count
+        overlap = previous_count * count / total
+        delta = batch_mean - float(stats[f"{prefix}_mean_scaled"])
+        stats[f"{prefix}_m2_scaled"] = float(
+            stats[f"{prefix}_m2_scaled"]
+        ) + batch_m2 + delta * delta * overlap
+        stats[f"{prefix}_mean_scaled"] = float(
+            stats[f"{prefix}_mean_scaled"]
+        ) + delta * count / total
+    stats[f"{prefix}_min"] = (
+        batch_min
+        if stats[f"{prefix}_min"] is None
+        else min(float(stats[f"{prefix}_min"]), batch_min)
+    )
+    stats[f"{prefix}_max"] = (
+        batch_max
+        if stats[f"{prefix}_max"] is None
+        else max(float(stats[f"{prefix}_max"]), batch_max)
+    )
+
+
+def _scaled_population_variance(
+    stats: dict[str, object],
+    prefix: str,
+    count: int,
+) -> float:
+    if stats[f"{prefix}_min"] == stats[f"{prefix}_max"]:
+        return 0.0
+    variance = float(stats[f"{prefix}_m2_scaled"]) / count
+    if not np.isfinite(variance):
+        return np.nan
+    return variance * float(stats[f"{prefix}_scale"]) ** 2
+
+
+def _scaled_population_std(
+    stats: dict[str, object],
+    prefix: str,
+    count: int,
+) -> float:
+    scaled_variance = float(stats[f"{prefix}_m2_scaled"]) / count
+    if not np.isfinite(scaled_variance):
+        return np.nan
+    return math.sqrt(scaled_variance) * float(stats[f"{prefix}_scale"])
 
 
 def _validate_returns_frame(

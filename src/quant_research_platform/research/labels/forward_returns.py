@@ -16,7 +16,10 @@ from quant_research_platform.contracts.data import (
     horizon_unit_suffix,
 )
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.research.time_series.contiguity import (
     contiguous_segment_ids,
     iter_grouped_timestamps,
@@ -44,7 +47,11 @@ def add_forward_return_labels(
         execution_price_column=execution_price_column,
     )
     result = frame.sort_values([asset_column, date_column]).copy()
-    price = pd.to_numeric(result[execution_price_column], errors="coerce")
+    price = strict_finite_numeric_series(
+        result[execution_price_column],
+        error="invalid_forward_return_price",
+        allow_null=True,
+    ).astype("float64")
     grouped_price = price.groupby(result[asset_column], sort=False)
     if require_contiguous:
         if expected_interval is None:

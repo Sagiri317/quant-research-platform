@@ -7,6 +7,8 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
+
 from .columns import price_volume_window_column
 from .presets import price_volume_factor_columns
 from .requirements import (
@@ -152,27 +154,27 @@ def calculate_price_volume_factors(
         for window in required_windows
     )
     price = (
-        pd.to_numeric(result[price_column], errors="coerce")
+        _numeric(result[price_column])
         if needs_price
         else None
     )
     returns = (
-        pd.to_numeric(result[return_column], errors="coerce")
+        _numeric(result[return_column])
         if needs_returns
         else None
     )
     amount = (
-        pd.to_numeric(result[amount_column], errors="coerce")
+        _numeric(result[amount_column])
         if needs_amount
         else None
     )
     volume = (
-        pd.to_numeric(result[volume_column], errors="coerce")
+        _numeric(result[volume_column])
         if needs_volume
         else None
     )
     turnover = (
-        pd.to_numeric(result[turnover_column], errors="coerce")
+        _numeric(result[turnover_column])
         if needs_turnover
         else None
     )
@@ -446,10 +448,9 @@ def calculate_price_volume_factors(
         for window in required_windows
     ):
         amplitude = (
-            pd.to_numeric(result[high_column], errors="coerce")
-            - pd.to_numeric(result[low_column], errors="coerce")
+            _numeric(result[high_column]) - _numeric(result[low_column])
         ) / valid_denominator(
-            pd.to_numeric(result[prev_close_column], errors="coerce")
+            _numeric(result[prev_close_column])
         )
         amplitude = finite_or_nan(amplitude)
     for window in required_windows:
@@ -478,8 +479,7 @@ def calculate_price_volume_factors(
         for window in required_windows
     ):
         intraday_range = (
-            pd.to_numeric(result[high_column], errors="coerce")
-            - pd.to_numeric(result[low_column], errors="coerce")
+            _numeric(result[high_column]) - _numeric(result[low_column])
         ) / valid_denominator(price)
         intraday_range = finite_or_nan(intraday_range)
     for window in required_windows:
@@ -501,3 +501,11 @@ def calculate_price_volume_factors(
     for column in output_columns:
         result[column] = finite_or_nan(result[column])
     return result
+
+
+def _numeric(values: pd.Series) -> pd.Series:
+    return strict_finite_numeric_series(
+        values,
+        error="invalid_price_volume_numeric_values",
+        allow_null=True,
+    ).astype("float64")

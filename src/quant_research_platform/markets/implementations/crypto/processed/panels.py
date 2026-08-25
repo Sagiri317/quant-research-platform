@@ -10,7 +10,10 @@ from contextlib import ExitStack
 import pandas as pd
 from pandas.api.types import is_bool_dtype
 
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_ID,
     canonical_crypto_asset_id,
@@ -470,9 +473,11 @@ def _required_numeric(frame: pd.DataFrame, column: str, *, error: str) -> pd.Ser
 
 
 def _numeric_not_bool(frame: pd.DataFrame, column: str, *, error: str) -> pd.Series:
-    if frame[column].map(lambda value: isinstance(value, bool)).any():
-        raise ValueError(error)
-    return pd.to_numeric(frame[column], errors="coerce")
+    return strict_finite_numeric_series(
+        frame[column],
+        error=error,
+        allow_null=True,
+    ).astype("float64")
 
 
 def _strict_non_negative_integer_column(
@@ -496,7 +501,10 @@ def _validate_depth_level_values(frame: pd.DataFrame) -> None:
     for side in frame["side"]:
         if not isinstance(side, str) or side not in {"bid", "ask"}:
             raise ValueError("invalid_crypto_depth_side")
-    levels = pd.to_numeric(frame["level"], errors="coerce")
+    levels = strict_finite_numeric_series(
+        frame["level"],
+        error="invalid_crypto_depth_level",
+    )
     if (
         levels.isna().any()
         or levels.le(0).any()
@@ -588,9 +596,11 @@ def _stabilize_panel_schema(frame: pd.DataFrame) -> pd.DataFrame:
             "quote_observed",
         }:
             continue
-        result[column] = pd.to_numeric(result[column], errors="coerce").astype(
-            "float64"
-        )
+        result[column] = strict_finite_numeric_series(
+            result[column],
+            error="invalid_crypto_panel_numeric",
+            allow_null=True,
+        ).astype("float64")
     return result
 
 

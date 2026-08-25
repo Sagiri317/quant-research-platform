@@ -4,7 +4,7 @@
 
 ## Authority and product boundary
 
-规范优先级为：用户本轮指令、当前 Goal、本文档、live code/tests/config/runtime 事实。历史提交和旧报告只能作为线索，不替代当前证据；不得覆盖无法解释的 WIP。
+任务边界按 explicit task envelope -> ignored `.run/` 相关控制文件 -> `AGENTS.md` -> engineering standard 绑定；live code/tests/config/runtime 只提供当前事实。历史提交和旧报告只能作为线索，不替代当前证据；不得覆盖无法解释的 WIP。
 
 QRP 是本地量化研究平台：
 

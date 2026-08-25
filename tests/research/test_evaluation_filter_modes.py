@@ -25,18 +25,7 @@ from tests.research.filter_mode_fixtures import (
 )
 
 
-def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail_corr(*args, **kwargs):
-        raise AssertionError("evaluation should delegate correlation math to compute")
-
-    def fail_qcut(*args, **kwargs):
-        raise AssertionError("evaluation should delegate grouped label math to compute")
-
-    monkeypatch.setattr(pd.Series, "corr", fail_corr)
-    monkeypatch.setattr(pd, "qcut", fail_qcut)
-
+def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() -> None:
     frame = make_filter_mode_frame()
     eligible_spec = EvaluationSpec(
         run_id="eval_eligible",

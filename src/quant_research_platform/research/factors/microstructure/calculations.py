@@ -5,6 +5,7 @@ from __future__ import annotations
 import pandas as pd
 from pandas.api.types import is_bool_dtype
 
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
 from quant_research_platform.research.time_series.contiguity import (
     contiguous_segment_ids,
 )
@@ -100,7 +101,11 @@ def calculate_microstructure_factors(
 
 
 def _numeric(frame: pd.DataFrame, column: str) -> pd.Series:
-    return pd.to_numeric(frame[column], errors="coerce")
+    return strict_finite_numeric_series(
+        frame[column],
+        error=f"invalid_microstructure_numeric: {column}",
+        allow_null=True,
+    ).astype("float64")
 
 
 def _strict_bool_series(series: pd.Series) -> pd.Series:

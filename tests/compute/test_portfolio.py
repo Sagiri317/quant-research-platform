@@ -344,6 +344,31 @@ def test_summarize_performance_reports_common_portfolio_diagnostics() -> None:
     assert row["cost_to_gross_return"] == pytest.approx(0.0045 / 0.05)
 
 
+def test_performance_variance_uses_exact_variation_state() -> None:
+    def make_returns(values: np.ndarray) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": pd.date_range("2026-01-01", periods=len(values)),
+                "signal": ["factor"] * len(values),
+                "gross_portfolio_return": values,
+                "net_portfolio_return": values,
+                "cost": np.zeros(len(values)),
+                "turnover": np.ones(len(values)),
+            }
+        )
+
+    constant = summarize_performance(make_returns(np.full(3, 1e16))).iloc[0]
+    tiny = summarize_performance(
+        make_returns(np.array([0.0, 1e-320, 2e-320]))
+    ).iloc[0]
+
+    assert constant["volatility_net_portfolio_return"] == 0.0
+    assert pd.isna(constant["sharpe_like"])
+    assert constant["sharpe_like_reason"] == "zero_denominator"
+    assert tiny["volatility_net_portfolio_return"] > 0.0
+    assert np.isfinite(float(tiny["sharpe_like"]))
+
+
 @pytest.mark.parametrize(
     ("values", "payoff_reason", "profit_factor", "profit_factor_reason"),
     [

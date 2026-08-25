@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import nullcontext
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.signals import SignalSpec
@@ -133,9 +134,7 @@ def _normalize_signal_values(
         )
     elif signal.transform == "zscore":
         grouped = values.groupby(group_timestamps, sort=False)
-        mean = grouped.transform("mean")
-        std = grouped.transform(lambda item: item.std(ddof=0))
-        values = (values - mean) / std.replace(0, pd.NA)
+        values = grouped.transform(_stable_zscore)
     elif signal.transform != "identity":
         raise ValueError(f"unsupported_signal_transform: {signal.transform}")
     if signal.direction == "lower_is_better":
@@ -143,3 +142,30 @@ def _normalize_signal_values(
     elif signal.direction != "higher_is_better":
         raise ValueError(f"unsupported_signal_direction: {signal.direction}")
     return values
+
+
+def _stable_zscore(values: pd.Series) -> pd.Series:
+    source = values.to_numpy(dtype="float64", na_value=np.nan)
+    output = np.full(len(source), np.nan, dtype="float64")
+    valid = np.isfinite(source)
+    if int(valid.sum()) < 2:
+        return pd.Series(output, index=values.index)
+    finite = source[valid]
+    differences = finite - finite[0]
+    if np.isfinite(differences).all():
+        centered = differences - differences.mean()
+    else:
+        scale = float(np.max(np.abs(finite)))
+        if scale == 0:
+            return pd.Series(output, index=values.index)
+        normalized = finite / scale
+        centered = normalized - normalized.mean()
+    scale = float(np.max(np.abs(centered)))
+    if scale == 0:
+        return pd.Series(output, index=values.index)
+    centered = centered / scale
+    std = float(np.sqrt(np.dot(centered, centered) / len(finite)))
+    if std == 0:
+        return pd.Series(output, index=values.index)
+    output[valid] = centered / std
+    return pd.Series(output, index=values.index)
