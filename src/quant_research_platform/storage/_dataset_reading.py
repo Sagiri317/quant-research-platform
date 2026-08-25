@@ -53,7 +53,6 @@ from quant_research_platform.storage._dataset_paths import (
     timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage._dataset_physical import (
-    _PARQUET_NATIVE_METADATA_PAGE_BYTES,
     DatasetFileIdentity,
     DatasetPartMetadata,
     PreparedMembershipValues,
@@ -844,7 +843,6 @@ def open_dataset_session(
                 selected = path in prune_paths_for_time_window(
                     data_root, (path,), spec=spec_payload, time_window=time_window
                 )
-                session_lease.grow(_PARQUET_NATIVE_METADATA_PAGE_BYTES)
                 inventory.observe(
                     path,
                     inspect_dataset_part(path),
@@ -1031,7 +1029,6 @@ def _build_dataset_session(
     observed_rows = 0
     observed_file_bytes = 0
     observed_partition_rows: dict[str, int] = {}
-    session_lease.grow(_PARQUET_NATIVE_METADATA_PAGE_BYTES)
     for path, metadata in inventory.iter_entries():
         if physical_schema_from_schema(metadata.schema) != schema:
             raise ValueError("dataset_schema_mismatch")

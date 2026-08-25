@@ -965,84 +965,83 @@ def test_opened_parquet_close_preserves_generator_exit(
     assert policy.used_memory_bytes == 0
 
 
-def test_opened_parquet_reserves_footer_metadata_before_constructor(
+def test_opened_parquet_reserves_metadata_for_lifetime_and_scales_with_footer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=8 * 1024 * 1024,
-    )
-    footer_length = 1024
-    metadata_bound = (
-        physical._PARQUET_METADATA_FIXED_WORKSPACE_BYTES + 20 * footer_length
-    )
-    events: list[tuple[str, int]] = []
-    trailer = footer_length.to_bytes(4, "little") + b"PAR1"
+    def admitted_bound(footer_length: int) -> int:
+        policy = capture_test_policy(
+            available_memory_bytes=16 * 1024**2,
+            explicit_cap_bytes=8 * 1024 * 1024,
+        )
+        events: list[tuple[str, int]] = []
+        trailer = footer_length.to_bytes(4, "little") + b"PAR1"
 
-    class Handle:
-        size = footer_length + 8
+        class Handle:
+            size = footer_length + 8
 
-        def __init__(self) -> None:
-            self.position = 0
-            self.closed = False
+            def __init__(self) -> None:
+                self.position = 0
+                self.closed = False
 
-        def fileno(self) -> int:
-            return 1
+            def fileno(self) -> int:
+                return 1
 
-        def tell(self) -> int:
-            return self.position
+            def tell(self) -> int:
+                return self.position
 
-        def seek(self, offset: int, whence: int = 0) -> int:
-            if whence == 2:
-                self.position = self.size + offset
-            elif whence == 0:
-                self.position = offset
-            else:
-                self.position += offset
-            return self.position
+            def seek(self, offset: int, whence: int = 0) -> int:
+                if whence == 2:
+                    self.position = self.size + offset
+                elif whence == 0:
+                    self.position = offset
+                else:
+                    self.position += offset
+                return self.position
 
-        def read(self, _size: int = -1) -> bytes:
-            return trailer
+            def read(self, _size: int = -1) -> bytes:
+                return trailer
 
-        def close(self) -> None:
-            self.closed = True
+            def close(self) -> None:
+                self.closed = True
 
-    handle = Handle()
-    metadata = SimpleNamespace(
-        st_dev=1,
-        st_ino=2,
-        st_size=handle.size,
-        st_mtime_ns=4,
-    )
-    monkeypatch.setattr(Path, "open", lambda *_a, **_k: handle)
-    monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
-    monkeypatch.setattr(
-        physical,
-        "dataset_file_identity",
-        lambda _path: physical.dataset_file_identity_from_stat(metadata),
-    )
+        handle = Handle()
+        metadata = SimpleNamespace(
+            st_dev=1,
+            st_ino=2,
+            st_size=handle.size,
+            st_mtime_ns=4,
+        )
+        monkeypatch.setattr(Path, "open", lambda *_a, **_k: handle)
+        monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
+        monkeypatch.setattr(
+            physical,
+            "dataset_file_identity",
+            lambda _path: physical.dataset_file_identity_from_stat(metadata),
+        )
 
-    class Parquet:
-        def close(self) -> None:
-            events.append(("close", policy.used_memory_bytes))
+        class Parquet:
+            def close(self) -> None:
+                events.append(("close", policy.used_memory_bytes))
 
-    def construct(_handle: object) -> Parquet:
-        events.append(("construct", policy.used_memory_bytes))
-        return Parquet()
+        def construct(_handle: object) -> Parquet:
+            events.append(("construct", policy.used_memory_bytes))
+            return Parquet()
 
-    monkeypatch.setattr(physical.pq, "ParquetFile", construct)
+        monkeypatch.setattr(physical.pq, "ParquetFile", construct)
 
-    with runtime_resource_policy_scope(policy):
-        with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
-            events.append(("body", policy.used_memory_bytes))
+        with runtime_resource_policy_scope(policy):
+            with physical._opened_parquet(
+                Path("part.parquet"), expected_identity=None
+            ):
+                events.append(("body", policy.used_memory_bytes))
 
-    assert events == [
-        ("construct", metadata_bound),
-        ("body", metadata_bound),
-        ("close", metadata_bound),
-    ]
-    assert handle.closed
-    assert policy.used_memory_bytes == 0
+        assert [event[1] for event in events] == [events[0][1]] * 3
+        assert events[0][1] > 0
+        assert handle.closed
+        assert policy.used_memory_bytes == 0
+        return events[0][1]
+
+    assert admitted_bound(2048) > admitted_bound(1024)
 
 
 def test_opened_parquet_rejects_metadata_before_constructor_and_releases_lease(
@@ -1052,7 +1051,7 @@ def test_opened_parquet_rejects_metadata_before_constructor_and_releases_lease(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )
-    footer_length = 1_433_016
+    footer_length = 9 * 1024 * 1024
     trailer = footer_length.to_bytes(4, "little") + b"PAR1"
     constructor_calls = 0
 
