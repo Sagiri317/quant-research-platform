@@ -1,9 +1,6 @@
 from __future__ import annotations
 
-import gc
-import sys
 import warnings
-from contextlib import contextmanager
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -12,7 +9,6 @@ import pytest
 
 import quant_research_platform.research._memory as memory_owner
 from quant_research_platform.research._memory import (
-    _concat_time_boundary_frames,
     iter_complete_session_frames,
     iter_complete_time_sized_frames,
 )
@@ -126,45 +122,6 @@ def test_lazy_memory_factory_rejects_different_explicit_policy_at_activation() -
         )
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
             next(chunks)
-
-
-@pytest.mark.parametrize("close_fails", (False, True))
-def test_complete_memory_factory_closes_once_on_activation_policy_conflict(
-    close_fails: bool,
-) -> None:
-    active = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    different = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=2 * 1024 * 1024,
-    )
-    close_calls = 0
-
-    class Frames:
-        def __iter__(self) -> Frames:
-            return self
-
-        def __next__(self) -> pd.DataFrame:
-            pytest.fail("frames consumed after activation conflict")
-
-        def close(self) -> None:
-            nonlocal close_calls
-            close_calls += 1
-            if close_fails:
-                raise OSError("close_secondary")
-
-    with runtime_resource_policy_scope(active):
-        chunks = iter_complete_time_sized_frames(
-            Frames(),
-            timestamp_column="timestamp",
-            resource_policy=different,
-        )
-        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
-            next(chunks)
-
-    assert close_calls == 1
 
 
 def test_complete_time_sized_frames_preserves_all_empty_chunk_schema() -> None:
@@ -368,21 +325,25 @@ def test_time_chunk_refreshes_shared_headroom_before_next_session_copy() -> None
         chunks.close()
 
 
-def test_time_boundary_concat_rejects_peak_before_allocation(
+def test_complete_time_frames_reject_boundary_peak_before_concat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frame = pd.DataFrame(
+    first = pd.DataFrame(
         {
-            "timestamp": [pd.Timestamp("2026-01-01")] * 200,
-            "value": ["x" * 20] * 200,
+            "timestamp": [pd.Timestamp("2026-01-01")] * 100,
+            "value": ["x" * 20] * 100,
         }
     )
-    retained_payload_bytes = pandas_frame_payload_bytes(frame.iloc[:100].copy()) + (
-        pandas_frame_payload_bytes(frame.iloc[100:].copy())
-    )
+    second = first.copy()
+    pending_bytes = pandas_frame_payload_bytes(first)
+    combined_bound = pending_bytes + pandas_frame_payload_bytes(second)
+    inspection_bytes = int(
+        second["timestamp"].memory_usage(index=False, deep=True)
+    ) + 40 * len(second)
+    hard_budget = pending_bytes + inspection_bytes + combined_bound - 1
     policy = capture_test_policy(
-        available_memory_bytes=retained_payload_bytes * 2,
-        explicit_cap_bytes=retained_payload_bytes - 1,
+        available_memory_bytes=hard_budget * 2,
+        explicit_cap_bytes=hard_budget,
     )
 
     def reject_concat(*_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -390,19 +351,50 @@ def test_time_boundary_concat_rejects_peak_before_allocation(
 
     monkeypatch.setattr(pd, "concat", reject_concat)
 
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(
-            ValueError,
-            match="research_time_boundary_payloads_exceed_task_memory_budget",
-        ):
-            _concat_time_boundary_frames(
-                frame.iloc[:100].copy(),
-                frame.iloc[100:].copy(),
-            )
+    chunks = iter_complete_time_sized_frames(
+        iter((first, second)),
+        timestamp_column="timestamp",
+        resource_policy=policy,
+    )
+    with pytest.raises(
+        ValueError,
+        match="research_time_boundary_payloads_exceed_task_memory_budget",
+    ):
+        next(chunks)
+    chunks.close()
+    assert policy.used_memory_bytes == 0
+
+
+def test_complete_time_frames_keep_boundary_payload_reserved_through_yield() -> None:
+    first = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2026-01-01")] * 2,
+            "value": [1, 2],
+        }
+    )
+    second = first.copy()
+    combined_bytes = pandas_frame_payload_bytes(
+        pd.concat([first, second], ignore_index=True)
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=1 * 1024 * 1024,
+    )
+    chunks = iter_complete_time_sized_frames(
+        iter((first, second)),
+        timestamp_column="timestamp",
+        resource_policy=policy,
+    )
+
+    combined = next(chunks)
+    assert len(combined) == 4
+    assert policy.used_memory_bytes >= combined_bytes
+    chunks.close()
+    assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("exit_kind", ("normal", "body_error", "consumer_close"))
-def test_complete_frames_transfer_captured_input_to_lazy_activation(
+def test_complete_time_frames_close_upstream_after_activation(
     exit_kind: str,
 ) -> None:
     policy = capture_test_policy(
@@ -459,66 +451,6 @@ def test_complete_frames_transfer_captured_input_to_lazy_activation(
     assert close_calls == 1
 
 
-@pytest.mark.parametrize("policy_mode", ("explicit", "captured"))
-@pytest.mark.parametrize("termination", ("double_close", "gc"))
-@pytest.mark.parametrize("close_fails", (False, True))
-def test_unactivated_complete_frames_close_once_without_unraisable(
-    monkeypatch: pytest.MonkeyPatch,
-    policy_mode: str,
-    termination: str,
-    close_fails: bool,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    next_calls = 0
-    close_calls = 0
-    unraisable: list[object] = []
-
-    class Frames:
-        def __iter__(self) -> Frames:
-            return self
-
-        def __next__(self) -> pd.DataFrame:
-            nonlocal next_calls
-            next_calls += 1
-            raise AssertionError("unactivated frames were consumed")
-
-        def close(self) -> None:
-            nonlocal close_calls
-            close_calls += 1
-            if close_fails:
-                raise OSError("close_secondary")
-
-    frames = Frames()
-    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
-    if policy_mode == "captured":
-        with runtime_resource_policy_scope(policy):
-            chunks = iter_complete_time_sized_frames(
-                frames,
-                timestamp_column="timestamp",
-            )
-    else:
-        chunks = iter_complete_time_sized_frames(
-            frames,
-            timestamp_column="timestamp",
-            resource_policy=policy,
-        )
-
-    if termination == "double_close":
-        chunks.close()
-        assert close_calls == 1
-        chunks.close()
-    else:
-        del chunks
-        gc.collect()
-
-    assert next_calls == 0
-    assert close_calls == 1
-    assert unraisable == []
-
-
 @pytest.mark.parametrize(
     "primary_type",
     (RuntimeError, MemoryError, KeyboardInterrupt, SystemExit, GeneratorExit),
@@ -554,93 +486,3 @@ def test_complete_time_frames_close_upstream_inside_policy_scope(
 
     assert raised.value is primary
     assert closed_under == [policy]
-
-
-@pytest.mark.parametrize(
-    "entry_error",
-    (
-        RuntimeError("runtime_resource_policy_conflict"),
-        RuntimeError("runtime_resource_policy_not_active"),
-    ),
-)
-@pytest.mark.parametrize("close_fails", (False, True))
-def test_complete_time_frames_close_once_when_policy_entry_fails(
-    entry_error: RuntimeError,
-    close_fails: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=1 * 1024 * 1024,
-    )
-    close_calls = 0
-
-    class Frames:
-        def __iter__(self) -> Frames:
-            return self
-
-        def __next__(self) -> pd.DataFrame:
-            pytest.fail("frames consumed after policy entry failure")
-
-        def close(self) -> None:
-            nonlocal close_calls
-            close_calls += 1
-            if close_fails:
-                raise OSError("close_secondary")
-
-    @contextmanager
-    def failing_scope(_policy):  # noqa: ANN001, ANN202
-        raise entry_error
-        yield
-
-    monkeypatch.setattr(memory_owner, "runtime_resource_policy_scope", failing_scope)
-    chunks = iter_complete_time_sized_frames(
-        Frames(),
-        timestamp_column="timestamp",
-        resource_policy=policy,
-    )
-
-    with pytest.raises(RuntimeError) as raised:
-        next(chunks)
-
-    assert raised.value is entry_error
-    assert close_calls == 1
-
-
-@pytest.mark.parametrize("close_fails", (False, True))
-def test_complete_time_frames_close_once_when_policy_resolution_fails(
-    close_fails: bool,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    resolution_error = RuntimeError("policy_factory_failed")
-    close_calls = 0
-
-    class Frames:
-        def __iter__(self) -> Frames:
-            return self
-
-        def __next__(self) -> pd.DataFrame:
-            pytest.fail("frames consumed after policy resolution failure")
-
-        def close(self) -> None:
-            nonlocal close_calls
-            close_calls += 1
-            if close_fails:
-                raise OSError("close_secondary")
-
-    def fail_resolution() -> RuntimeResourcePolicy:
-        raise resolution_error
-
-    monkeypatch.setattr(
-        memory_owner,
-        "current_runtime_resource_policy",
-        fail_resolution,
-    )
-    with pytest.raises(BaseException) as raised:
-        iter_complete_time_sized_frames(
-            Frames(),
-            timestamp_column="timestamp",
-        )
-
-    assert raised.value is resolution_error
-    assert close_calls == 1

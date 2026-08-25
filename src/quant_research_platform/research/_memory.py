@@ -12,6 +12,7 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -72,20 +73,14 @@ def iter_complete_time_sized_frames(
 ) -> Iterator[pd.DataFrame]:
     """Yield chunks without splitting any timestamp session across inputs."""
 
-    with ExitStack() as pending_capture_cleanup:
-        pending_capture_cleanup.enter_context(closing_iterator(frames))
-        bound_policy = resource_policy or current_runtime_resource_policy()
-        activation_cleanup = pending_capture_cleanup.pop_all()
+    bound_policy = resource_policy or current_runtime_resource_policy()
 
     def activate() -> Iterator[pd.DataFrame]:
-        with ExitStack() as pending_entry_cleanup:
-            pending_entry_cleanup.enter_context(activation_cleanup)
-            with runtime_resource_policy_scope(bound_policy):
-                with pending_entry_cleanup.pop_all():
-                    yield from _iter_complete_time_sized_frames_impl(
-                        frames,
-                        timestamp_column=timestamp_column,
-                    )
+        with runtime_resource_policy_scope(bound_policy), closing_iterator(frames):
+            yield from _iter_complete_time_sized_frames_impl(
+                frames,
+                timestamp_column=timestamp_column,
+            )
 
     return activate()
 
@@ -151,12 +146,11 @@ def _iter_complete_time_sized_frames_impl(
     resource_policy = current_runtime_resource_policy()
     if resource_policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    pending: pd.DataFrame | None = None
+    pending: _OwnedValue[pd.DataFrame] | None = None
     pending_timestamp: pd.Timestamp | None = None
     emitted_max: pd.Timestamp | None = None
     saw_empty = False
     first_empty: pd.DataFrame | None = None
-    pending_reservation = ExitStack()
 
     try:
         for frame in frames:
@@ -225,36 +219,43 @@ def _iter_complete_time_sized_frames_impl(
                             and timestamps.iloc[first_stop] == current_min
                         ):
                             first_stop += 1
-                        combined = _concat_time_boundary_frames(
-                            pending,
-                            frame.iloc[:first_stop],
-                        )
-                        pending_reservation.close()
-                        pending_reservation = ExitStack()
-                        combined_bytes = _frame_bytes(combined)
-                        pending_reservation.enter_context(
-                            resource_policy.lease(
-                                "research.time.pending",
-                                combined_bytes,
+                        right = frame.iloc[:first_stop]
+                        combined_bound = _frame_bytes(
+                            pending.value
+                        ) + _frame_bytes(right)
+                        if (
+                            resource_policy.used_memory_bytes + combined_bound
+                            > resource_policy.memory_budget_bytes
+                        ):
+                            raise ValueError(
+                                "research_time_boundary_payloads_exceed_task_memory_budget"
                             )
+                        pending.lease.grow(combined_bound)
+                        combined = pd.concat(
+                            [pending.value, right],
+                            ignore_index=True,
                         )
-                        pending = combined
+                        combined_bytes = _frame_bytes(combined)
+                        if combined_bytes > combined_bound:
+                            raise ValueError(
+                                "research_time_boundary_payloads_exceed_task_memory_budget"
+                            )
+                        pending.value = combined
+                        pending.lease.shrink_to(combined_bytes)
                         if first_stop == len(frame):
                             continue
-                        yield pending
+                        yield pending.value
                         emitted_max = pending_timestamp
+                        pending.lease.close()
                         pending = None
                         pending_timestamp = None
-                        pending_reservation.close()
-                        pending_reservation = ExitStack()
                         start = first_stop
                     else:
-                        yield pending
+                        yield pending.value
                         emitted_max = pending_timestamp
+                        pending.lease.close()
                         pending = None
                         pending_timestamp = None
-                        pending_reservation.close()
-                        pending_reservation = ExitStack()
 
                 last_timestamp = pd.Timestamp(timestamps.iloc[-1])
                 last_start = len(frame) - 1
@@ -280,14 +281,14 @@ def _iter_complete_time_sized_frames_impl(
                     raise ValueError(
                         "research_indivisible_time_unit_exceeds_task_memory_budget"
                     )
-                pending_reservation.enter_context(
+                pending = _OwnedValue(
+                    tail.copy(),
                     resource_policy.lease(
                         "research.time.pending",
                         tail_bytes,
-                    )
+                    ),
                 )
-                pending = tail.copy()
-                if _frame_bytes(pending) > tail_bytes:
+                if _frame_bytes(pending.value) > tail_bytes:
                     raise ValueError(
                         "research_indivisible_time_unit_exceeds_task_memory_budget"
                     )
@@ -297,32 +298,10 @@ def _iter_complete_time_sized_frames_impl(
             if saw_empty and first_empty is not None:
                 yield first_empty.iloc[0:0].copy()
             return
-        yield pending
+        yield pending.value
     finally:
-        pending_reservation.close()
-
-
-def _concat_time_boundary_frames(
-    left: pd.DataFrame,
-    right: pd.DataFrame,
-) -> pd.DataFrame:
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
-    retained_payload_bytes = _frame_bytes(left) + _frame_bytes(right)
-    if (
-        policy.used_memory_bytes + retained_payload_bytes
-        > policy.memory_budget_bytes
-    ):
-        raise ValueError("research_time_boundary_payloads_exceed_task_memory_budget")
-    with policy.lease("research.time.boundary", retained_payload_bytes):
-        result = pd.concat([left, right], ignore_index=True)
-        if _frame_bytes(result) > retained_payload_bytes:
-            raise ValueError(
-                "research_time_boundary_payloads_exceed_task_memory_budget"
-            )
-    return result
-
+        if pending is not None:
+            pending.lease.close()
 
 def _frame_bytes(frame: pd.DataFrame) -> int:
     return pandas_frame_payload_bytes(frame)

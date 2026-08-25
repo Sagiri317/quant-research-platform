@@ -4,6 +4,7 @@ import sqlite3
 import warnings
 from datetime import timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import numpy as np
@@ -708,6 +709,103 @@ def test_portfolio_state_admission_precedes_source_pull_and_reopens(
     reopened = capture_test_policy(available_memory_bytes=4 * 1024 * 1024)
     with runtime_resource_policy_scope(reopened):
         assert portfolio_runner.current_runtime_resource_policy() is reopened
+
+
+def test_portfolio_output_chunks_keep_one_lease_across_context_and_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = PortfolioSpec(
+        portfolio_id="portfolio_demo",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(
+            SignalSpec(
+                signal_id="signal",
+                source_column="signal",
+                source_kind="factor",
+            ),
+        ),
+        return_source_column="forward_return",
+        rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
+        execution_lag_steps=0,
+    )
+    chunks = iter(
+        (
+            pd.DataFrame(
+                {
+                    "timestamp": [pd.Timestamp("2024-01-01")],
+                    "asset_id": ["asset"],
+                    "signal": [1.0],
+                    "forward_return": [0.01],
+                }
+            ),
+            pd.DataFrame(
+                {
+                    "timestamp": [pd.Timestamp("2024-01-02")],
+                    "asset_id": ["asset"],
+                    "signal": [1.0],
+                    "forward_return": [0.02],
+                }
+            ),
+        )
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=4 * 1024 * 1024,
+        explicit_cap_bytes=128 * 1024,
+    )
+    lease_starts: list[int] = []
+    original_lease = portfolio_runner.RuntimeResourcePolicy.lease
+
+    def observe_lease(current, owner, reserved_bytes):  # noqa: ANN001
+        lease_starts.append(current.used_memory_bytes)
+        return original_lease(current, owner, reserved_bytes)
+
+    def fake_construct(working, _spec, *, source_columns_by_kind):  # noqa: ANN001
+        output = working.loc[:, ["timestamp"]].copy()
+        output["value"] = 1.0
+        return SimpleNamespace(
+            **{
+                name: output.copy()
+                for name in (
+                    "positions",
+                    "turnover",
+                    "cost_breakdown",
+                    "portfolio_returns",
+                    "diagnostics",
+                    "capacity_diagnostics",
+                    "numeric_exposure_diagnostics",
+                    "categorical_exposure_diagnostics",
+                )
+            }
+        )
+
+    monkeypatch.setattr(
+        portfolio_runner.RuntimeResourcePolicy,
+        "lease",
+        observe_lease,
+    )
+    monkeypatch.setattr(
+        portfolio_runner,
+        "construct_portfolio_positions",
+        fake_construct,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        output_chunks = portfolio_runner._iter_portfolio_output_chunks(
+            chunks,
+            spec,
+            source_columns_by_kind={},
+            resource_policy=policy,
+        )
+        assert next(output_chunks)
+        assert policy.used_memory_bytes > 0
+        assert next(output_chunks)
+        assert policy.used_memory_bytes > 0
+        with pytest.raises(StopIteration):
+            next(output_chunks)
+
+    assert lease_starts == [0]
+    assert policy.used_memory_bytes == 0
 
 
 def test_portfolio_runner_accepts_equivalent_timezone_representations() -> None:

@@ -734,9 +734,9 @@ def _iter_portfolio_output_chunks(
     resource_policy: RuntimeResourcePolicy | None,
 ) -> Iterable[dict[str, pd.DataFrame]]:
     context = pd.DataFrame()
-    context_reservation = ExitStack()
     context_periods = max(1, int(spec.execution_lag_steps) + 1)
     saw_rows = False
+    rolling_lease: MemoryLease | None = None
     input_cleanup = ExitStack()
     active_chunks = input_cleanup.enter_context(
         closing_iterator(iter(chunks))
@@ -746,8 +746,6 @@ def _iter_portfolio_output_chunks(
         for chunk in active_chunks:
             if chunk.empty:
                 continue
-            context_reservation.close()
-            context_reservation = ExitStack()
             saw_rows = True
             policy = current_runtime_resource_policy()
             if resource_policy is not None and policy is not resource_policy:
@@ -781,89 +779,90 @@ def _iter_portfolio_output_chunks(
                 + selection_bytes
                 + next_context_bytes
             )
-            with ExitStack() as operation_reservation:
-                if policy is not None:
-                    operation_reservation.enter_context(
-                        policy.lease(
-                            "research.portfolio.operation",
-                            operation_bytes,
-                        )
+            if resource_policy is not None and policy is not None:
+                if rolling_lease is None:
+                    rolling_lease = policy.lease(
+                        "research.portfolio.operation",
+                        operation_bytes,
                     )
-                actual_timestamps = _timestamp_set(chunk)
-                working = _combine_context_and_chunk(context, chunk)
-                result = construct_portfolio_positions(
-                    working,
-                    spec,
-                    source_columns_by_kind=source_columns_by_kind,
-                )
-                output = {
-                    "positions": _select_actual_timestamps(
-                        result.positions,
-                        actual_timestamps,
-                    ),
-                    "turnover": _select_actual_timestamps(
-                        result.turnover,
-                        actual_timestamps,
-                    ),
-                    "cost_breakdown": _select_actual_timestamps(
-                        result.cost_breakdown,
-                        actual_timestamps,
-                    ),
-                    "portfolio_returns": _select_actual_timestamps(
-                        result.portfolio_returns,
-                        actual_timestamps,
-                    ),
-                    "diagnostics": _select_actual_timestamps(
-                        result.diagnostics,
-                        actual_timestamps,
-                    ),
-                    "capacity_diagnostics": _select_actual_timestamps(
-                        result.capacity_diagnostics,
-                        actual_timestamps,
-                    ),
-                    "numeric_exposure_diagnostics": _select_actual_timestamps(
-                        result.numeric_exposure_diagnostics,
-                        actual_timestamps,
-                    ),
-                    "categorical_exposure_diagnostics": _select_actual_timestamps(
-                        result.categorical_exposure_diagnostics,
-                        actual_timestamps,
-                    ),
-                }
-                next_context = _trailing_timestamp_context(
-                    working,
-                    periods=context_periods,
-                )
-                output_bytes = sum(
-                    pandas_frame_payload_bytes(frame) for frame in output.values()
-                )
-                retained_context_bytes = pandas_frame_payload_bytes(next_context)
-                del actual_timestamps, result, working, chunk
-                operation_reservation.close()
-                context = next_context
-                if resource_policy is not None:
-                    context_reservation.enter_context(
-                        resource_policy.lease(
-                            "research.portfolio.context",
-                            retained_context_bytes,
-                        )
-                    )
-                with ExitStack() as output_reservation:
-                    if policy is not None:
-                        output_reservation.enter_context(
-                            policy.lease("research.portfolio.output", output_bytes)
-                        )
-                    yield output
-                del output, next_context
+                elif operation_bytes > rolling_lease.reserved_bytes:
+                    rolling_lease.grow(operation_bytes - rolling_lease.reserved_bytes)
+                else:
+                    rolling_lease.shrink_to(operation_bytes)
+                rolling_lease.transfer("research.portfolio.operation")
+            actual_timestamps = _timestamp_set(chunk)
+            working = _combine_context_and_chunk(context, chunk)
+            result = construct_portfolio_positions(
+                working,
+                spec,
+                source_columns_by_kind=source_columns_by_kind,
+            )
+            output = {
+                "positions": _select_actual_timestamps(
+                    result.positions,
+                    actual_timestamps,
+                ),
+                "turnover": _select_actual_timestamps(
+                    result.turnover,
+                    actual_timestamps,
+                ),
+                "cost_breakdown": _select_actual_timestamps(
+                    result.cost_breakdown,
+                    actual_timestamps,
+                ),
+                "portfolio_returns": _select_actual_timestamps(
+                    result.portfolio_returns,
+                    actual_timestamps,
+                ),
+                "diagnostics": _select_actual_timestamps(
+                    result.diagnostics,
+                    actual_timestamps,
+                ),
+                "capacity_diagnostics": _select_actual_timestamps(
+                    result.capacity_diagnostics,
+                    actual_timestamps,
+                ),
+                "numeric_exposure_diagnostics": _select_actual_timestamps(
+                    result.numeric_exposure_diagnostics,
+                    actual_timestamps,
+                ),
+                "categorical_exposure_diagnostics": _select_actual_timestamps(
+                    result.categorical_exposure_diagnostics,
+                    actual_timestamps,
+                ),
+            }
+            next_context = _trailing_timestamp_context(
+                working,
+                periods=context_periods,
+            )
+            output_bytes = sum(
+                pandas_frame_payload_bytes(frame) for frame in output.values()
+            )
+            retained_context_bytes = pandas_frame_payload_bytes(next_context)
+            del actual_timestamps, result, working, chunk
+            context = next_context
+            if rolling_lease is not None:
+                retained_bytes = output_bytes + retained_context_bytes
+                if retained_bytes > rolling_lease.reserved_bytes:
+                    rolling_lease.grow(retained_bytes - rolling_lease.reserved_bytes)
+                else:
+                    rolling_lease.shrink_to(retained_bytes)
+                rolling_lease.transfer("research.portfolio.output_context")
+            yield output
+            del output, next_context
+            if rolling_lease is not None:
+                rolling_lease.shrink_to(retained_context_bytes)
+                rolling_lease.transfer("research.portfolio.context")
     finally:
         primary = sys.exception()
         first_failure: BaseException | None = None
         try:
-            context_reservation.close()
+            if rolling_lease is not None:
+                rolling_lease.close()
         except BaseException as cleanup_error:
             if primary is not None:
                 primary.add_note(
-                    "portfolio context reservation release also failed: "
+                    "portfolio rolling lease release also failed: "
                     f"{type(cleanup_error).__name__}"
                 )
             else:
