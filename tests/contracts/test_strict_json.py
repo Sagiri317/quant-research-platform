@@ -168,17 +168,6 @@ def test_canonical_identity_writer_matches_existing_bytes_and_exact_peak_gate() 
         writer.finish()
 
 
-def test_canonical_identity_writer_tuple_item_count_is_conceptual() -> None:
-    json_owner = importlib.import_module("quant_research_platform.contracts._json")
-    writer = json_owner.CanonicalIdentityWriter(max_bytes=None)
-
-    with writer.tuple_items(2):
-        writer.value("left")
-        writer.value(7)
-
-    assert writer.finish() == canonical_identity_bytes(("left", 7))
-
-
 def test_bounded_direct_mapping_rejects_before_copying_all_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -199,25 +188,6 @@ def test_bounded_direct_mapping_rejects_before_copying_all_keys(
     with pytest.raises(ValueError, match="canonical_identity_exceeds_max_bytes"):
         writer.value(value)
     assert encoded_keys <= 64
-
-
-def test_manual_writer_uses_contract_nesting_limit() -> None:
-    json_owner = importlib.import_module("quant_research_platform.contracts._json")
-
-    def write_nested(writer: object, level: int) -> None:
-        with writer.tuple_items(1):
-            if level:
-                write_nested(writer, level - 1)
-            else:
-                writer.value(None)
-
-    accepted = json_owner.CanonicalIdentityWriter(max_bytes=None)
-    write_nested(accepted, json_owner._MAX_NESTING_DEPTH - 1)
-    assert accepted.finish()
-
-    writer = json_owner.CanonicalIdentityWriter(max_bytes=None)
-    with pytest.raises(ValueError, match="canonical_json_recursion_limit"):
-        write_nested(writer, json_owner._MAX_NESTING_DEPTH)
 
 
 @pytest.mark.parametrize(

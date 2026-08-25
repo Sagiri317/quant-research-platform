@@ -394,8 +394,6 @@ class CanonicalIdentityWriter:
         "_scheduling_heuristic_bytes",
         "_buffer",
         "_finished",
-        "_manual_base_depth",
-        "_manual_counts",
         "_max_bytes",
         "_root_count",
     )
@@ -407,8 +405,6 @@ class CanonicalIdentityWriter:
         self._scheduling_heuristic_bytes = 0
         self._buffer = bytearray()
         self._finished = False
-        self._manual_base_depth = 0
-        self._manual_counts: list[list[int]] = []
         self._max_bytes = max_bytes
         self._root_count = 0
 
@@ -416,27 +412,8 @@ class CanonicalIdentityWriter:
         self._claim_item()
         self._write_value(
             value,
-            depth=self._manual_base_depth + len(self._manual_counts),
+            depth=0,
         )
-
-    @contextmanager
-    def tuple_items(self, item_count: int):  # type: ignore[no-untyped-def]
-        if type(item_count) is not int or item_count < 0:
-            raise ValueError("canonical_identity_item_count_invalid")
-        if self._manual_base_depth + len(self._manual_counts) > _MAX_NESTING_DEPTH:
-            raise ValueError("canonical_json_recursion_limit")
-        self._claim_item()
-        length_offset, payload_start = self._start_frame(b"u")
-        self._append(_uint64(item_count))
-        state = [item_count, 0]
-        self._manual_counts.append(state)
-        try:
-            yield self
-            if state[1] != state[0]:
-                raise ValueError("canonical_identity_item_count_mismatch")
-        finally:
-            self._manual_counts.pop()
-        self._finish_frame(length_offset, payload_start)
 
     @contextmanager
     def canonical_order(
@@ -465,16 +442,13 @@ class CanonicalIdentityWriter:
         offsets = array("Q")
         order = array("Q")
         checkpoint = len(self._buffer)
-        saved_counts = self._manual_counts
-        saved_base_depth = self._manual_base_depth
         saved_root_count = self._root_count
+        prepared = False
         try:
             if mapping is not None:
                 keys = tuple(mapping)
                 if len(keys) != item_count:
                     raise RuntimeError("canonical_identity_mapping_changed")
-            self._manual_base_depth += len(saved_counts)
-            self._manual_counts = []
             offsets.append(checkpoint)
             for index in range(item_count):
                 self._root_count = 0
@@ -497,25 +471,19 @@ class CanonicalIdentityWriter:
             ):
                 raise ValueError(collision_error)
             del self._buffer[checkpoint:]
-            self._manual_counts = saved_counts
-            self._manual_base_depth = saved_base_depth
             self._root_count = saved_root_count
+            prepared = True
             yield order if keys is None else (keys, order)
         finally:
-            if (
-                len(self._buffer) > checkpoint
-                and self._manual_counts is not saved_counts
-            ):
+            if not prepared and len(self._buffer) > checkpoint:
                 del self._buffer[checkpoint:]
-            self._manual_counts = saved_counts
-            self._manual_base_depth = saved_base_depth
             self._root_count = saved_root_count
             self._release_scheduling_heuristic(scheduling_heuristic_bytes)
 
     def finish(self) -> bytes:
         if self._finished:
             raise RuntimeError("canonical_identity_writer_finished")
-        if self._manual_counts or self._root_count != 1:
+        if self._root_count != 1:
             raise ValueError("canonical_identity_single_value_required")
         self._require_capacity(len(self._buffer))
         payload = bytes(self._buffer)
@@ -526,15 +494,9 @@ class CanonicalIdentityWriter:
     def _claim_item(self) -> None:
         if self._finished:
             raise RuntimeError("canonical_identity_writer_finished")
-        if self._manual_counts:
-            state = self._manual_counts[-1]
-            state[1] += 1
-            if state[1] > state[0]:
-                raise ValueError("canonical_identity_item_count_mismatch")
-        else:
-            self._root_count += 1
-            if self._root_count > 1:
-                raise ValueError("canonical_identity_single_value_required")
+        self._root_count += 1
+        if self._root_count > 1:
+            raise ValueError("canonical_identity_single_value_required")
 
     def _write_value(self, value: object, *, depth: int) -> None:
         if depth > _MAX_NESTING_DEPTH:
