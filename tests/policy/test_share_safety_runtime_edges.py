@@ -110,6 +110,15 @@ def test_json_share_safety_retains_key_context_after_escape_decoding() -> None:
     )
 
 
+def test_typed_identifiers_are_not_free_text_stock_guesses() -> None:
+    assert unsafe_for_share_reason("run_000001") == "stock_code_sample"
+    assert evidence_json_value_unsafe_reason({"run_id": "run_000001"}) is None
+    assert (
+        evidence_json_value_unsafe_reason({"message": "run_000001"})
+        == "stock_sample"
+    )
+
+
 def test_share_safety_failure_path_allows_logical_output_path() -> None:
     assert (
         evidence_json_value_unsafe_reason(

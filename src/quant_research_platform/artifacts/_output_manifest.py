@@ -23,12 +23,14 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
 )
-from quant_research_platform.contracts.outputs import OutputSpec
+from quant_research_platform.contracts.outputs import (
+    OutputSpec,
+    validate_output_identifier,
+)
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.policy.identifiers import validate_output_identifier
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )

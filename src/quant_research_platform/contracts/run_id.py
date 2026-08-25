@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from quant_research_platform.policy.identifiers import validate_run_identifier
+import re
+
+_RUN_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
 
 class RunIdValidationError(ValueError):
@@ -12,7 +14,6 @@ class RunIdValidationError(ValueError):
 def validate_run_id(value: str) -> str:
     """Return a validated run id or raise ``RunIdValidationError``."""
 
-    try:
-        return validate_run_identifier(value)
-    except ValueError as exc:
-        raise RunIdValidationError("invalid_run_id") from exc
+    if not isinstance(value, str) or _RUN_IDENTIFIER_RE.fullmatch(value) is None:
+        raise RunIdValidationError("invalid_run_id")
+    return value

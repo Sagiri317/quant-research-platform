@@ -104,14 +104,14 @@ def test_local_verification_run_root_writes_seed_run_json(
 
     module._prepare_run_root(
         run_root,
-        run_id="local_verification_output",
+        run_id="run_000001",
         repo_root=repo_root,
     )
 
     assert run_root.is_dir()
     payload = module._read_run_json(run_root)
     assert payload["schema_id"] == "qrp-run"
-    assert payload["run_id"] == "local_verification_output"
+    assert payload["run_id"] == "run_000001"
     assert payload["root_ownership"] == {
         "owner": "local_verification",
         "workflow_id": "local_verification",

@@ -8,6 +8,9 @@ from collections.abc import Iterable, Mapping
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from quant_research_platform.contracts.outputs import validate_output_identifier
+from quant_research_platform.contracts.run_id import validate_run_id
+
 LOCAL_ONLY_ROOTS: tuple[str, ...] = (
     "data/raw",
     "data/interim",
@@ -318,6 +321,22 @@ def evidence_json_value_unsafe_reason(
     *,
     key: str | None = None,
 ) -> str | None:
+    if key == "run_id":
+        if not isinstance(value, str):
+            return "invalid_run_id"
+        try:
+            validate_run_id(value)
+        except ValueError:
+            return "invalid_run_id"
+        return None
+    if key in {"output_id", "output_definition_id"}:
+        if not isinstance(value, str):
+            return "invalid_output_id"
+        try:
+            validate_output_identifier(value)
+        except ValueError:
+            return "invalid_output_id"
+        return None
     if key is not None:
         if _CREDENTIAL_KEY_RE.fullmatch(key):
             return "credential"
