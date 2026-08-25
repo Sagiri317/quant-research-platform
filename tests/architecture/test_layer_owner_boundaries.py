@@ -37,7 +37,6 @@ LAYER_BOUNDARIES = {
         "quant_research_platform.artifacts",
         "quant_research_platform.catalog",
         "quant_research_platform.compute",
-        "quant_research_platform.contracts",
         "quant_research_platform.interfaces",
         "quant_research_platform.markets",
         "quant_research_platform.reports",
