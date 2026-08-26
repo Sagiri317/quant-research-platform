@@ -84,4 +84,4 @@ Persisted identity 以 schema、dtype、PK、lineage 和 exact equality 为准�
 
 - 修改后运行覆盖本次行为的最窄、非破坏性检查；默认 `pytest -q` 使用项目的 non-slow 选择，完整测试必须显式覆盖默认过滤器。
 - Package acceptance 从仓库外 clean export 开始：构建 fresh sdist，从解出的 sdist 构建 wheel，在仓库外隔离环境安装，再从 empty CWD 做 CLI/API smoke；editable checkout 或直接从源码路径导入不算通过。
-- 不 force push、rebase、amend、reset、restore、clean、stash 或合并到 main；不覆盖其他 agent 的改动。`.run/` 为 ignored local state，永不 stage/commit。
+- 不 force push、rebase、amend、reset、restore、clean、stash；仅在 explicit task envelope 明确授权时合并到 main；不覆盖其他 agent 的改动。`.run/` 为 ignored local state，永不 stage/commit。
