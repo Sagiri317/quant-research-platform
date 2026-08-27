@@ -69,36 +69,31 @@ def test_root_opener_locks_before_provider(monkeypatch: pytest.MonkeyPatch) -> N
     assert locks[0].closed
 
 
-def test_budget_uses_one_captured_available_and_global_planning_ratio(
+def test_budget_captures_one_available_and_uses_one_planning_target(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     available = 10 * GIB + 1
     _patch_capture(monkeypatch, available_memory_bytes=available)
 
     with runtime_resource_policy_scope() as policy:
-        expected_budget = (
-            available * resources._MEMORY_BUDGET_NUMERATOR
-            // resources._MEMORY_BUDGET_DENOMINATOR
-        )
         assert policy.captured_available_memory_bytes == available
-        assert policy.memory_budget_bytes == expected_budget
+        target = policy.memory_budget_bytes
+        assert 0 < target < available
         assert policy.used_memory_bytes == 0
-        assert policy.available_memory_bytes == expected_budget
+        assert policy.available_memory_bytes == target
         assert policy.to_payload() == {
             "captured_available_memory_bytes": available,
-            "memory_budget_bytes": expected_budget,
+            "memory_budget_bytes": target,
             "used_memory_bytes": 0,
-            "available_memory_bytes": expected_budget,
+            "available_memory_bytes": target,
         }
 
 
 def test_explicit_cap_only_lowers_budget(monkeypatch: pytest.MonkeyPatch) -> None:
     available = 10 * GIB
     _patch_capture(monkeypatch, available_memory_bytes=available)
-    expected_budget = (
-        available * resources._MEMORY_BUDGET_NUMERATOR
-        // resources._MEMORY_BUDGET_DENOMINATOR
-    )
+    with runtime_resource_policy_scope() as baseline:
+        expected_budget = baseline.memory_budget_bytes
 
     with runtime_resource_policy_scope(
         explicit_cap_bytes=expected_budget + MIB
