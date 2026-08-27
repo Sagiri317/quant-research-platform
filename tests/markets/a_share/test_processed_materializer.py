@@ -1251,21 +1251,19 @@ def test_materialize_processed_data_forced_tiny_chunks_equal_default_output(
             TimeWindow("2014-01-02", "2014-02-28"),
             256,
         ),
-        pytest.param(
+        (
             "price_volume",
             "factor",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
             64,
-            marks=pytest.mark.slow,
         ),
-        pytest.param(
+        (
             "forward_returns",
             "label",
             "2014-08-29",
             TimeWindow("2014-01-02", "2014-02-28"),
             64,
-            marks=pytest.mark.slow,
         ),
     ],
 )

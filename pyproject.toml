@@ -40,12 +40,9 @@ python_files = ["test_*.py"]
 addopts = [
   "--import-mode=importlib",
   "--strict-markers",
-  "-m",
-  "not slow",
 ]
 markers = [
   "guardrails: tests that enforce approved safety and scope boundaries",
-  "slow: tests that are materially slower than the fast path",
 ]
 
 [tool.ruff]

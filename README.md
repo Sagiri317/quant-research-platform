@@ -51,11 +51,10 @@ qrp research-datasets requirements <dataset_id>
 ```text
 conda run -n <env> ruff check .
 conda run -n <env> pytest -q
-conda run -n <env> pytest -q -o "addopts=--import-mode=importlib --strict-markers" tests
 conda run -n <env> python -m build --no-isolation --sdist --wheel --outdir <run-dir>
 ```
 
-默认 `pytest -q` 使用项目的 non-slow 选择；第二条 pytest 命令显式覆盖默认过滤器以运行 full suite。Package acceptance 必须从仓库外 clean export 构建 fresh sdist，再从解出的 sdist 构建 wheel，在仓库外 isolated environment 安装，最后从 empty CWD 做 CLI/API smoke；editable checkout 或直接从源码路径导入不算通过。
+默认 `pytest -q` 运行全部测试。Package acceptance 必须从仓库外 clean export 构建 fresh sdist，再从解出的 sdist 构建 wheel，在仓库外 isolated environment 安装，最后从 empty CWD 做 CLI/API smoke；editable checkout 或直接从源码路径导入不算通过。
 
 ## 数据安全
 
