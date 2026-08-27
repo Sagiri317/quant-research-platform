@@ -8,9 +8,6 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
-from quant_research_platform.markets.implementations.a_share.factors import (
-    definitions as factor_definitions,
-)
 from quant_research_platform.markets.implementations.a_share.fields import (
     field_catalog,
 )
@@ -23,8 +20,9 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_PROCESSED_DATA_ID,
     market_context_data_id,
 )
-from quant_research_platform.markets.implementations.a_share.labels import (
-    definitions as label_definitions,
+from quant_research_platform.markets.implementations.a_share.processed.catalog import (
+    _registered_factor_columns,
+    _registered_label_columns,
 )
 from quant_research_platform.research.factors.price_volume.columns import (
     price_volume_window_column,
@@ -140,20 +138,3 @@ def _research_dataset_column_roles(
             continue
         roles[column] = fields.get(column).role
     return roles
-
-
-def _registered_factor_columns() -> tuple[str, ...]:
-    return tuple(
-        definition.output_column
-        for definition in factor_definitions.factor_catalog().list()
-    )
-
-
-def _registered_label_columns() -> tuple[str, ...]:
-    return tuple(
-        definition.output_column
-        for definition in sorted(
-            label_definitions.label_catalog().list(),
-            key=lambda item: item.horizon,
-        )
-    )

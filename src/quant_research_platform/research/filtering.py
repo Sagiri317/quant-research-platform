@@ -58,12 +58,7 @@ def _filter_mode_scope(
     if mode == "unfiltered":
         filtered = frame
     else:
-        mask_bytes = int(frame.index.memory_usage(deep=True)) + len(frame)
-        output_bytes = pandas_frame_payload_bytes(frame)
-        working_bytes = max(
-            output_bytes + mask_bytes,
-            2 * mask_bytes,
-        )
+        working_bytes = _filter_working_set_bound(frame, mode=mode)
         if policy is not None and (
             policy.used_memory_bytes + working_bytes
             > policy.memory_budget_bytes
@@ -128,3 +123,21 @@ def _validated_bool_mask(frame: pd.DataFrame, column: str) -> pd.Series:
         if not bool(invalid.any()):
             return series.eq(1)
     raise ValueError(f"invalid_filter_column_dtype: {column}")
+
+
+def _filter_working_set_bound(frame: pd.DataFrame, *, mode: str) -> int:
+    """Bound the new mask and filtered-frame allocations before filtering."""
+
+    filter_count = len(required_filter_columns(mode))
+    if not filter_count:
+        return 0
+    index_bytes = int(frame.index.memory_usage(deep=True))
+    mask_bytes = index_bytes + len(frame)
+    output_index_expansion = 0
+    if isinstance(frame.index, pd.RangeIndex):
+        materialized_index_bytes = len(frame) * int(frame.index.dtype.itemsize)
+        output_index_expansion = max(0, materialized_index_bytes - index_bytes)
+    return max(
+        2 * mask_bytes if filter_count > 1 else mask_bytes,
+        pandas_frame_payload_bytes(frame) + mask_bytes + output_index_expansion,
+    )

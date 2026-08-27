@@ -23,7 +23,10 @@ from quant_research_platform.research.datasets.io import iter_research_dataset_c
 from quant_research_platform.research.datasets.validation import (
     validate_prediction_input,
 )
-from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.filtering import (
+    _filter_working_set_bound,
+    apply_filter_mode,
+)
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
     preflight_model_specs,
@@ -485,6 +488,13 @@ def _iter_validation_prediction_chunks(
                 + len(chunk)
                 * 8
                 * (len(usable_input_columns or candidate_spec.input_columns) + 6)
+            )
+            chunk_bound = max(
+                chunk_bound,
+                _filter_working_set_bound(
+                    chunk,
+                    mode=prediction_spec.sample_filter_mode,
+                ),
             )
             chunk_lease = (
                 policy.lease(

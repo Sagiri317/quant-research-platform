@@ -809,9 +809,21 @@ def test_managed_portfolio_accepts_true_peak_and_rejects_before_kernel(
         weight_config=WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
     )
 
+    lease_requests: list[int] = []
+    original_lease = portfolio_runner.RuntimeResourcePolicy.lease
+
+    def observe_lease(current, owner, reserved_bytes):  # noqa: ANN001
+        lease_requests.append(reserved_bytes)
+        return original_lease(current, owner, reserved_bytes)
+
+    monkeypatch.setattr(
+        portfolio_runner.RuntimeResourcePolicy,
+        "lease",
+        observe_lease,
+    )
     policy = capture_test_policy(
         available_memory_bytes=1024**2,
-        explicit_cap_bytes=31314,
+        explicit_cap_bytes=1024**2,
     )
     with runtime_resource_policy_scope(policy):
         outputs = list(
@@ -824,6 +836,8 @@ def test_managed_portfolio_accepts_true_peak_and_rejects_before_kernel(
         )
     assert len(outputs) == 1
     assert policy.used_memory_bytes == 0
+    assert lease_requests
+    formal_bound = lease_requests[0]
 
     called: list[bool] = []
 
@@ -838,7 +852,7 @@ def test_managed_portfolio_accepts_true_peak_and_rejects_before_kernel(
     )
     insufficient = capture_test_policy(
         available_memory_bytes=1024**2,
-        explicit_cap_bytes=31313,
+        explicit_cap_bytes=formal_bound - 1,
     )
     with runtime_resource_policy_scope(insufficient):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):

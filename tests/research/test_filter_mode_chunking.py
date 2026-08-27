@@ -133,10 +133,10 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
     assert len(baseline_outputs) == 2
     assert baseline_policy.used_memory_bytes == 0
 
-    original_frame_bytes = memory_owner._frame_bytes
+    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
     monkeypatch.setattr(
         memory_owner,
-        "_frame_bytes",
+        "pandas_frame_payload_bytes",
         lambda chunk: 5_000 * original_frame_bytes(chunk),
     )
     forced_policy = capture_test_policy(
@@ -600,10 +600,10 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
         available_memory_bytes=128 * 1024 * 1024,
         explicit_cap_bytes=64 * 1024 * 1024,
     )
-    original_frame_bytes = memory_owner._frame_bytes
+    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
     monkeypatch.setattr(
         memory_owner,
-        "_frame_bytes",
+        "pandas_frame_payload_bytes",
         lambda chunk: 10_000 * original_frame_bytes(chunk),
     )
     estimator = build_estimator_from_model_spec(spec)
@@ -677,10 +677,10 @@ def test_prediction_forced_tiny_resource_chunks_match_default(
         available_memory_bytes=128 * 1024 * 1024,
         explicit_cap_bytes=64 * 1024 * 1024,
     )
-    original_frame_bytes = memory_owner._frame_bytes
+    original_frame_bytes = memory_owner.pandas_frame_payload_bytes
     monkeypatch.setattr(
         memory_owner,
-        "_frame_bytes",
+        "pandas_frame_payload_bytes",
         lambda chunk: 5_000 * original_frame_bytes(chunk),
     )
     result = prediction_frame_from_artifact(

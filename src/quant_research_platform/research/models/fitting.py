@@ -36,7 +36,7 @@ from quant_research_platform.runtime.resources import (
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class ModelFitResult:
     coefficients: np.ndarray
     metadata: dict[str, object]

@@ -114,28 +114,34 @@ def test_json_share_safety_retains_key_context_after_escape_decoding() -> None:
 def test_typed_identifiers_are_not_free_text_stock_guesses() -> None:
     assert unsafe_for_share_reason("run_000001") == "stock_code_sample"
     assert evidence_json_value_unsafe_reason({"run_id": "run_000001"}) is None
+    for data_id in ("dataset_600000", "stock_master", "market_bars_1m"):
+        assert evidence_json_value_unsafe_reason({"data_id": data_id}) is None
     assert (
         evidence_json_value_unsafe_reason({"message": "run_000001"})
         == "stock_sample"
     )
+    assert (
+        evidence_json_value_unsafe_reason({"message": "dataset_600000"})
+        == "stock_sample"
+    )
+    assert evidence_json_value_unsafe_reason({"source_id": "csmar"}) == "vendor_marker"
 
 
-def test_typed_identifier_policy_is_consistent_across_json_jsonl_and_plain_text(
-) -> None:
+def test_typed_identifier_policy_is_scoped_to_structured_fields() -> None:
     payload = {
         "model_id": "model_000001",
+        "data_id": "dataset_600000",
         "research_dataset_id": "research_dataset_600000",
         "signal_id": "signal_300001",
         "run_id": "run_000001",
         "output_id": "output_000001",
     }
     assert evidence_json_value_unsafe_reason(payload) is None
-    jsonl = "{" + ",".join(
-        f'"{key}": "{value}"' for key, value in payload.items()
-    ) + "}"
-    assert evidence_text_stream_unsafe_reason((jsonl.encode("utf-8"),)) is None
-    plain = "\n".join(f"{key}: {value}" for key, value in payload.items())
-    assert evidence_text_unsafe_reason(plain) is None
+    assert (
+        evidence_text_stream_unsafe_reason((b'{"message":"dataset_600000"}',))
+        == "stock_sample"
+    )
+    assert evidence_text_unsafe_reason("message: dataset_600000") == "stock_sample"
 
 
 def test_share_safety_failure_path_allows_logical_output_path() -> None:

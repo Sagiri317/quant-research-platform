@@ -10,7 +10,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.fields import platform_entity_time_key
-from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.columns import ColumnRole, FieldSpec, LogicalType
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
@@ -33,6 +33,51 @@ from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value", "error"),
+    (
+        ("name", "", "field_name_required"),
+        ("dtype", "", "field_dtype_required"),
+        ("role", "bogus", "unsupported_field_role"),
+        ("logical_type", "bogus", "unsupported_field_logical_type"),
+        ("nullable", 1, "field_nullable_must_be_boolean"),
+        ("description", None, "field_description_must_be_string"),
+    ),
+)
+def test_field_spec_validates_all_fields_before_inference(
+    field_name: str,
+    value: object,
+    error: str,
+) -> None:
+    kwargs: dict[str, object] = {
+        "name": "value",
+        "role": ColumnRole.FACTOR,
+        "dtype": "float64",
+        "logical_type": None,
+        "nullable": False,
+        "description": "",
+    }
+    kwargs[field_name] = value
+
+    with pytest.raises(ValueError, match=error):
+        FieldSpec(**kwargs)  # type: ignore[arg-type]
+
+
+def test_field_spec_canonicalizes_enums_before_inference() -> None:
+    inferred = FieldSpec(name="market_id", role="key", dtype="string")
+    explicit = FieldSpec(
+        name="created_at",
+        role="timestamp",
+        dtype="datetime64[ns]",
+        logical_type="timestamp",
+    )
+
+    assert inferred.role is ColumnRole.KEY
+    assert inferred.logical_type is LogicalType.STRING_ID
+    assert explicit.role is ColumnRole.TIMESTAMP
+    assert explicit.logical_type is LogicalType.TIMESTAMP
 
 
 def test_platform_contracts_import_without_pyarrow() -> None:

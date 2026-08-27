@@ -809,7 +809,7 @@ def test_research_join_preflights_merged_output_allocation(
     )
     monkeypatch.setattr(
         assembler_module,
-        "_frame_bytes",
+        "pandas_frame_payload_bytes",
         lambda frame: {
             ("id",): 100,
             ("id", "left"): 200,

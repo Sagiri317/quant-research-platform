@@ -41,14 +41,29 @@ class FieldSpec:
     description: str = ""
 
     def __post_init__(self) -> None:
-        if self.schema_version != "0.1":
+        if type(self.schema_version) is not str or self.schema_version != "0.1":
             raise ValueError("unsupported_field_schema_version")
-        if self.logical_type is None:
-            object.__setattr__(
-                self,
-                "logical_type",
-                infer_logical_type(dtype=self.dtype, role=self.role),
-            )
+        if type(self.name) is not str or not self.name:
+            raise ValueError("field_name_required")
+        if type(self.dtype) is not str or not self.dtype:
+            raise ValueError("field_dtype_required")
+        try:
+            role = ColumnRole(self.role)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("unsupported_field_role") from exc
+        if type(self.nullable) is not bool:
+            raise ValueError("field_nullable_must_be_boolean")
+        if type(self.description) is not str:
+            raise ValueError("field_description_must_be_string")
+        if self.logical_type is not None:
+            try:
+                logical_type = LogicalType(self.logical_type)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("unsupported_field_logical_type") from exc
+        else:
+            logical_type = infer_logical_type(dtype=self.dtype, role=role)
+        object.__setattr__(self, "role", role)
+        object.__setattr__(self, "logical_type", logical_type)
 
 
 def infer_logical_type(*, dtype: str, role: ColumnRole) -> LogicalType:

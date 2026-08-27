@@ -169,7 +169,7 @@ def _iter_joined_processed_chunks(
                 time_window=chunk_window,
                 base_data_id=base_data_id,
             )
-            chunk_bytes = _frame_bytes(chunk)
+            chunk_bytes = pandas_frame_payload_bytes(chunk)
             if chunk_bytes + 256 * 1024 > lease.reserved_bytes:
                 raise ValueError("research_joined_bound_invalid")
             validate_research_dataset(chunk, dataset_spec)
@@ -182,7 +182,7 @@ def _iter_joined_processed_chunks(
                     list(dataset_spec.primary_key),
                     ignore_index=True,
                 )
-            output_bytes = _frame_bytes(output)
+            output_bytes = pandas_frame_payload_bytes(output)
             actual_bound = chunk_bytes + output_bytes + 256 * 1024
             if actual_bound > lease.reserved_bytes:
                 raise ValueError("research_joined_bound_invalid")
@@ -226,7 +226,7 @@ def _join_processed_inputs(
                 time_window=time_window,
             )
             input_frame = owned_input.value
-            input_bytes = _frame_bytes(input_frame)
+            input_bytes = pandas_frame_payload_bytes(input_frame)
             input_state = ExitStack()
             input_state.callback(
                 _release_owned_value,
@@ -246,7 +246,7 @@ def _join_processed_inputs(
                         next_base_keys = input_frame.loc[
                             :, list(dataset_spec.primary_key)
                         ].copy()
-                        if _frame_bytes(next_base_keys) > input_bytes:
+                        if pandas_frame_payload_bytes(next_base_keys) > input_bytes:
                             raise ValueError(
                                 "research_known_join_payloads_exceed_task_memory_budget"
                             )
@@ -268,8 +268,8 @@ def _join_processed_inputs(
                     continue
 
                 assert base_keys is not None
-                assembled_bytes = _frame_bytes(assembled)
-                base_key_bytes = _frame_bytes(base_keys)
+                assembled_bytes = pandas_frame_payload_bytes(assembled)
+                base_key_bytes = pandas_frame_payload_bytes(base_keys)
                 output_bound = assembled_bytes + input_bytes
                 output_state = ExitStack()
                 try:
@@ -310,7 +310,7 @@ def _join_processed_inputs(
                             how="left",
                             validate="one_to_one",
                         )
-                    if _frame_bytes(merged) > output_bound:
+                    if pandas_frame_payload_bytes(merged) > output_bound:
                         raise ValueError(
                             "research_known_join_payloads_exceed_task_memory_budget"
                         )
@@ -359,7 +359,7 @@ def _join_processed_inputs(
                     dataset_spec,
                     resource_lease=transformed_lease,
                 )
-                transformed_lease.shrink_to(_frame_bytes(transformed))
+                transformed_lease.shrink_to(pandas_frame_payload_bytes(transformed))
                 transformed_lease.transfer("research.assembly.transformed")
                 assembled_state.close()
             except BaseException as primary:
@@ -374,13 +374,13 @@ def _join_processed_inputs(
             assembled = transformed
             assembled_state = transformed_state.pop_all()
 
-        projection_bound = _frame_bytes(assembled)
+        projection_bound = pandas_frame_payload_bytes(assembled)
         with policy.lease(
             "research.assembly.projection",
             projection_bound,
         ):
             output = assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
-            if _frame_bytes(output) > projection_bound:
+            if pandas_frame_payload_bytes(output) > projection_bound:
                 raise ValueError(
                     "research_known_join_payloads_exceed_task_memory_budget"
                 )
@@ -417,8 +417,6 @@ def _join_processed_inputs(
             raise first_failure
 
 
-def _frame_bytes(frame: pd.DataFrame) -> int:
-    return pandas_frame_payload_bytes(frame)
 
 
 def _iter_research_chunk_windows_from_base_input(

@@ -8,6 +8,7 @@ import pytest
 import quant_research_platform.research.filtering as filtering_owner
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
+    _filter_working_set_bound,
     apply_filter_mode,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
@@ -87,6 +88,77 @@ def test_filter_mode_scope_owns_filtered_frame_until_exit() -> None:
             assert metadata["rows_after_filter_mode"] == 1
             assert policy.used_memory_bytes > 0
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    ("index", "eligible", "expected_index_type"),
+    (
+        (pd.RangeIndex(4), [True, True, True, True], "RangeIndex"),
+        (
+            pd.RangeIndex(1000),
+            [index % 3 != 2 for index in range(1000)],
+            "Index",
+        ),
+        (
+            pd.Index(range(1000), name="asset_row"),
+            [index % 3 != 2 for index in range(1000)],
+            "Index",
+        ),
+        (pd.RangeIndex(0), [], "RangeIndex"),
+        (pd.RangeIndex(1000), [False] * 1000, "RangeIndex"),
+    ),
+)
+def test_filter_mode_scope_uses_formal_bound_before_materialization(
+    index: pd.Index,
+    eligible: list[bool],
+    expected_index_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frame = pd.DataFrame(
+        {"eligible": pd.array(eligible, dtype="bool")},
+        index=index,
+    )
+    bound = _filter_working_set_bound(frame, mode="eligible")
+
+    accepted = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=bound,
+    )
+    with runtime_resource_policy_scope(accepted):
+        with _filter_mode_scope(
+            frame,
+            mode="eligible",
+            metadata_key="filter_mode",
+        ) as (filtered, _metadata):
+            assert type(filtered.index).__name__ == expected_index_type
+            assert filtering_owner.pandas_frame_payload_bytes(filtered) <= bound
+    assert accepted.used_memory_bytes == 0
+
+    rejected = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=bound - 1,
+    )
+    called = False
+
+    def materialize(*_args: object, **_kwargs: object) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("filter_materialized_before_bound_admission")
+
+    monkeypatch.setattr(filtering_owner, "apply_filter_mode", materialize)
+    with runtime_resource_policy_scope(rejected):
+        with pytest.raises(
+            ValueError,
+            match="research_filter_working_set_exceeds_task_memory_budget",
+        ):
+            with _filter_mode_scope(
+                frame,
+                mode="eligible",
+                metadata_key="filter_mode",
+            ):
+                pytest.fail("formal bound minus one was admitted")
+    assert not called
+    assert rejected.used_memory_bytes == 0
 
 
 def test_filter_mode_scope_drops_its_filtered_alias_before_close() -> None:

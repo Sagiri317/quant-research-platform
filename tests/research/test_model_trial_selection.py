@@ -441,7 +441,10 @@ def test_ic_weighted_rank_ensemble_uses_equal_time_rankic_aggregation() -> None:
     )
 
     assert ensemble.columns == ("factor", "inverse")
-    assert ensemble.weights.tolist() == pytest.approx([0.5, -0.5])
+    assert type(ensemble.weights) is tuple
+    with pytest.raises(TypeError):
+        ensemble.weights[0] = 0.0  # type: ignore[index]
+    assert ensemble.weights == pytest.approx((0.5, -0.5))
 
 
 def test_ic_weighted_rank_ensemble_keeps_exact_nonzero_near_roundoff(
@@ -464,7 +467,7 @@ def test_ic_weighted_rank_ensemble_keeps_exact_nonzero_near_roundoff(
         label_column="label",
     )
 
-    assert ensemble.weights.tolist() == [1.0]
+    assert ensemble.weights == (1.0,)
 
 
 def test_ic_weighted_rank_ensemble_preserves_genuine_nonzero_rank_signal() -> None:
@@ -502,7 +505,7 @@ def test_ic_weighted_rank_ensemble_excludes_only_undefined_inputs() -> None:
 
     assert ensemble.columns == ("factor",)
     assert ensemble.coefficient_count == 1
-    assert ensemble.weights.tolist() == pytest.approx([1.0])
+    assert ensemble.weights == pytest.approx((1.0,))
     assert ensemble.predict(frame).tolist() == pytest.approx(
         [0.25, 0.5, 0.75, 1.0]
     )

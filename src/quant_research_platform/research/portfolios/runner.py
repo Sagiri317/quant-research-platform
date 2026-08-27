@@ -43,7 +43,10 @@ from quant_research_platform.research._memory import (
     iter_complete_session_frames,
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
-from quant_research_platform.research.filtering import apply_filter_mode
+from quant_research_platform.research.filtering import (
+    _filter_working_set_bound,
+    apply_filter_mode,
+)
 from quant_research_platform.research.portfolios.engine import (
     _construct_portfolio_positions,
     _PortfolioTemporalState,
@@ -578,6 +581,13 @@ def _iter_prediction_joined_chunks(
                 positions_bytes = chunk_rows * np.dtype(np.intp).itemsize
                 join_hash_bytes = chunk_rows * (32 + 16 * len(primary_key))
                 joined_output_bytes = chunk_bytes + chunk_index_bytes + 8 * chunk_rows
+                joined_output_bytes = max(
+                    joined_output_bytes,
+                    _filter_working_set_bound(
+                        chunk,
+                        mode=sample_filter_mode,
+                    ),
+                )
                 chunk_working_bytes = (
                     timestamp_bytes
                     + required_mask_bytes
@@ -653,6 +663,13 @@ def _iter_prediction_lookup_joined_chunks(
             required_mask_bytes = index_bytes + row_count
             required_output_bytes = frame_bytes
             output_frame_bytes = frame_bytes + index_bytes + 8 * row_count
+            output_frame_bytes = max(
+                output_frame_bytes,
+                _filter_working_set_bound(
+                    chunk,
+                    mode=sample_filter_mode,
+                ),
+            )
             policy = current_runtime_resource_policy()
             with ExitStack() as chunk_state:
                 if policy is not None:

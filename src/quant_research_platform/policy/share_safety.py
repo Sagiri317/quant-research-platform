@@ -76,19 +76,7 @@ _TYPED_IDENTIFIER_KEYS = frozenset(
         "research_dataset_id",
         "run_id",
         "signal_id",
-        "source_id",
     }
-)
-_TYPED_IDENTIFIER_RE = re.compile(
-    r"(?i)^(?:data|factor|label|market|model|output|portfolio|prediction|"
-    r"research_dataset|run|signal|source)_[a-z0-9][a-z0-9._-]*$"
-)
-_TYPED_IDENTIFIER_TEXT_RE = re.compile(
-    r"(?i)(?P<key>\b(?:data_id|factor_id|label_id|market_id|model_id|"
-    r"output_definition_id|output_id|portfolio_id|prediction_id|"
-    r"research_dataset_id|run_id|signal_id|source_id)\b[`\"']?\s*[:=]\s*[`\"']?)"
-    r"(?P<value>(?:data|factor|label|market|model|output|portfolio|prediction|"
-    r"research_dataset|run|signal|source)_[a-z0-9][a-z0-9._-]*)",
 )
 _ROW_SAMPLE_RE = re.compile(
     r"(?is)[\"']?\brow[-_ ]?samples?\b[\"']?\s*[:=]\s*"
@@ -317,7 +305,6 @@ def evidence_text_unsafe_reason(
     *,
     allow_logical_local_only_path: bool = False,
 ) -> str | None:
-    text = _mask_typed_identifier_text(text)
     shared_reason = unsafe_for_share_reason(
         text,
         allow_logical_local_only_path=allow_logical_local_only_path,
@@ -366,9 +353,10 @@ def evidence_json_value_unsafe_reason(
         except ValueError:
             return "invalid_output_id"
         return None
-    if key in _TYPED_IDENTIFIER_KEYS and isinstance(value, str):
-        if _TYPED_IDENTIFIER_RE.fullmatch(value) is not None:
-            return None
+    if key in _TYPED_IDENTIFIER_KEYS:
+        if isinstance(value, str):
+            reason = evidence_text_unsafe_reason(value)
+            return None if reason == "stock_sample" else reason
     if key is not None:
         if _CREDENTIAL_KEY_RE.fullmatch(key):
             return "credential"
@@ -443,12 +431,7 @@ def internal_artifact_metadata_unsafe_reason(
 
     if key is not None and key.lower() in _ROW_SAMPLE_KEYS and value:
         return "row_sample"
-    if (
-        key in _TYPED_IDENTIFIER_KEYS
-        and isinstance(value, str)
-        and _TYPED_IDENTIFIER_RE.fullmatch(value) is not None
-    ):
-        return None
+    typed_identifier = key in _TYPED_IDENTIFIER_KEYS
     if isinstance(value, Mapping):
         for item_key, item in value.items():
             reason = internal_artifact_metadata_unsafe_reason(
@@ -488,12 +471,5 @@ def internal_artifact_metadata_unsafe_reason(
     if _CREDENTIAL_RE.search(text) or _AUTHORIZATION_RE.search(text):
         return "credential"
     if _STOCK_CODE_RE.search(text):
-        return "stock_code_sample"
+        return None if typed_identifier else "stock_code_sample"
     return None
-
-
-def _mask_typed_identifier_text(value: str) -> str:
-    return _TYPED_IDENTIFIER_TEXT_RE.sub(
-        lambda match: match.group("key") + "typed-id",
-        value,
-    )

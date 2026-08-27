@@ -581,7 +581,9 @@ def _run_local_verification_with_policy(
     seed_payload = _read_run_json(run_root)
     run_payload = {
         **seed_payload,
-        "completed_at": _utc_now(),
+        "completed_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        ),
         "status": status_payload,
         "code": {},
         "config": {
@@ -884,7 +886,9 @@ def _run_json_path(run_root: Path) -> Path:
 
 
 def _write_seed_run_json(run_root: Path, *, run_id: str) -> Path:
-    created_at = _utc_now()
+    created_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+        "+00:00", "Z"
+    )
     return write_json_evidence(
         _run_json_path(run_root),
         {
@@ -1080,7 +1084,3 @@ def _validated_output_members(
     ):
         raise ValueError("validation_summary_output_member_invalid")
     return members
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

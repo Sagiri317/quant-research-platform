@@ -36,7 +36,6 @@ from quant_research_platform.storage._dataset_reading import (
 )
 from quant_research_platform.storage.atomic import atomic_write_chunks
 
-_INVENTORY_KEYS = frozenset({"schema_id", "datasets"})
 _INVENTORY_ITEM_KEYS = frozenset(
     {
         "artifact_id",
@@ -147,21 +146,6 @@ def write_schema_inventory(
     return atomic_write_chunks(output, chunks(), encoding="utf-8")
 
 
-def summarize_schema_inventory_payload(
-    value: object,
-) -> dict[str, object]:
-    """Validate and summarize one complete schema inventory without coercion."""
-
-    payload = validate_schema_inventory_payload(value)
-    datasets = payload["datasets"]
-    return {
-        "schema_id": "qrp-schema-inventory-summary",
-        "dataset_count": len(datasets),
-        "total_row_count": sum(item["row_count"] for item in datasets),
-        "schema_hash": _schema_inventory_summary_hash(datasets),
-    }
-
-
 def summarize_schema_inventory(
     project_root: Path,
     *,
@@ -189,35 +173,6 @@ def summarize_schema_inventory(
         "total_row_count": total_rows,
         "schema_hash": digest.hexdigest(),
     }
-
-
-def validate_schema_inventory_payload(
-    value: object,
-) -> dict[str, list[dict[str, Any]] | str]:
-    """Validate the exact Workflow-owned schema-inventory grammar."""
-
-    if type(value) is not dict or set(value) != _INVENTORY_KEYS:
-        raise ValueError("schema_inventory_fields_invalid")
-    if value["schema_id"] != "qrp-schema-inventory":
-        raise ValueError("schema_inventory_schema_id_invalid")
-    datasets = value["datasets"]
-    if type(datasets) is not list or not datasets:
-        raise ValueError("schema_inventory_datasets_required")
-    validated: list[dict[str, Any]] = []
-    logical_roots: list[str] = []
-    identities: set[tuple[str, str, str, str]] = set()
-    for item in datasets:
-        validated_item = _validate_schema_inventory_item(item)
-        logical_root = validated_item["logical_relative_root"]
-        identity = _logical_identifiers(logical_root)
-        if logical_root in logical_roots or identity in identities:
-            raise ValueError("schema_inventory_dataset_duplicate")
-        logical_roots.append(logical_root)
-        identities.add(identity)
-        validated.append(validated_item)
-    if logical_roots != sorted(logical_roots):
-        raise ValueError("schema_inventory_dataset_order_invalid")
-    return {"schema_id": "qrp-schema-inventory", "datasets": validated}
 
 
 def _validate_schema_inventory_item(value: object) -> dict[str, Any]:
@@ -692,13 +647,6 @@ def _schema_hash(
             "partition_columns": list(partition_columns),
         },
     )
-
-
-def _schema_inventory_summary_hash(items: Iterable[dict[str, Any]]) -> str:
-    digest = hashlib.sha256()
-    for item in items:
-        _update_schema_inventory_summary_hash(digest, item)
-    return digest.hexdigest()
 
 
 def _update_schema_inventory_summary_hash(

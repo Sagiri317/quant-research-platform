@@ -27,7 +27,7 @@ def _iter_contiguous_session_frames(
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    frame_bytes = _frame_bytes(frame)
+    frame_bytes = pandas_frame_payload_bytes(frame)
     remaining = policy.memory_budget_bytes - policy.used_memory_bytes
     if frame_bytes <= remaining:
         yield frame
@@ -45,7 +45,7 @@ def _iter_contiguous_session_frames(
                 session_stop < len(frame) and timestamps.iloc[session_stop] == session
             ):
                 session_stop += 1
-            session_bound = _frame_bytes(frame.iloc[stop:session_stop])
+            session_bound = pandas_frame_payload_bytes(frame.iloc[stop:session_stop])
             if output_bound + session_bound > remaining:
                 if stop == start:
                     raise ValueError(
@@ -56,7 +56,7 @@ def _iter_contiguous_session_frames(
             stop = session_stop
         with policy.lease("research.time.output", output_bound):
             output = frame.iloc[start:stop].copy()
-            if _frame_bytes(output) > output_bound:
+            if pandas_frame_payload_bytes(output) > output_bound:
                 raise ValueError(
                     "research_indivisible_time_unit_exceeds_task_memory_budget"
                 )
@@ -197,7 +197,7 @@ def _iter_complete_time_sized_frames_impl(
                         kind="mergesort",
                         ignore_index=True,
                     )
-                    if _frame_bytes(frame) > sort_bytes:
+                    if pandas_frame_payload_bytes(frame) > sort_bytes:
                         raise ValueError(
                             "research_indivisible_time_unit_exceeds_task_memory_budget"
                         )
@@ -220,9 +220,9 @@ def _iter_complete_time_sized_frames_impl(
                         ):
                             first_stop += 1
                         right = frame.iloc[:first_stop]
-                        combined_bound = _frame_bytes(
+                        combined_bound = pandas_frame_payload_bytes(
                             pending.value
-                        ) + _frame_bytes(right)
+                        ) + pandas_frame_payload_bytes(right)
                         if (
                             resource_policy.used_memory_bytes + combined_bound
                             > resource_policy.memory_budget_bytes
@@ -235,7 +235,7 @@ def _iter_complete_time_sized_frames_impl(
                             [pending.value, right],
                             ignore_index=True,
                         )
-                        combined_bytes = _frame_bytes(combined)
+                        combined_bytes = pandas_frame_payload_bytes(combined)
                         if combined_bytes > combined_bound:
                             raise ValueError(
                                 "research_time_boundary_payloads_exceed_task_memory_budget"
@@ -273,7 +273,7 @@ def _iter_complete_time_sized_frames_impl(
                     )
                     emitted_max = pd.Timestamp(prefix_timestamps.iloc[-1])
                 tail = frame.iloc[last_start:]
-                tail_bytes = _frame_bytes(tail)
+                tail_bytes = pandas_frame_payload_bytes(tail)
                 if (
                     resource_policy.used_memory_bytes + tail_bytes
                     > resource_policy.memory_budget_bytes
@@ -287,7 +287,7 @@ def _iter_complete_time_sized_frames_impl(
                 )
                 try:
                     pending_value = tail.copy()
-                    if _frame_bytes(pending_value) > tail_bytes:
+                    if pandas_frame_payload_bytes(pending_value) > tail_bytes:
                         raise ValueError(
                             "research_indivisible_time_unit_exceeds_task_memory_budget"
                         )
@@ -312,10 +312,6 @@ def _iter_complete_time_sized_frames_impl(
         if pending is not None:
             pending.lease.close()
 
-def _frame_bytes(frame: pd.DataFrame) -> int:
-    return pandas_frame_payload_bytes(frame)
-
-
 def _selected_frame_payload_bytes(
     frame: pd.DataFrame,
     columns: tuple[str, ...] | list[str],
@@ -338,4 +334,4 @@ def _time_chunk_operation_bytes(
 def _time_sort_working_set_bytes(frame: pd.DataFrame) -> int:
     row_count = len(frame)
     index_bytes = row_count * np.dtype(np.intp).itemsize
-    return 2 * _frame_bytes(frame) + 2 * index_bytes
+    return 2 * pandas_frame_payload_bytes(frame) + 2 * index_bytes

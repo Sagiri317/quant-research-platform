@@ -264,7 +264,9 @@ def _build_validation_summary(
             "checked_count": len(layer_summaries),
         },
         "share_safety_scan": safety,
-        "created_at": _utc_now(),
+        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        ),
     }
     for root, initial_identity, inspection_error, _facts in _iter_staged_inspections(
         database,
@@ -832,7 +834,6 @@ def _validate_layer_summary_graph(
         declared_failed_all,
     )
 
-
 def _merge_profile(target: dict[str, int], value: object) -> None:
     profile = cast(Mapping[str, int], value)
     for key, item in profile.items():
@@ -856,7 +857,3 @@ def _inspection_identity_hash(value: DatasetInspection) -> str:
             "manifest": value.manifest,
         }
     )
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")

@@ -40,7 +40,7 @@ class ICWeightedRankEnsembleFactory:
 @dataclass(frozen=True)
 class ICWeightedRankEnsemble:
     columns: tuple[str, ...]
-    weights: np.ndarray
+    weights: tuple[float, ...]
     coefficient_count: int
 
     @classmethod
@@ -85,13 +85,13 @@ class ICWeightedRankEnsemble:
             raise ValueError("all_ensemble_correlations_zero")
         return cls(
             columns=tuple(defined_columns),
-            weights=values / normalizer,
+            weights=tuple(float(value) for value in values / normalizer),
             coefficient_count=len(defined_columns),
         )
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         ranks = _rank_frame_columns(frame, self.columns)
-        return ranks @ self.weights
+        return ranks @ np.asarray(self.weights, dtype="float64")
 
 
 def _rank_frame_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:

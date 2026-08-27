@@ -255,7 +255,9 @@ def build_layer_summary(
         "invalid_dataset_manifests": invalid,
         "failed_dataset_validations": failed,
         "layer_validation_status": status,
-        "created_at": _utc_now(),
+        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        ),
     }
     return payload
 
@@ -278,13 +280,11 @@ def build_run_data_summary(
         "layers": layers,
         "run_validation_status": "PASS" if not failed else "FAIL",
         "failed_layers": failed,
-        "created_at": _utc_now(),
+        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
+            "+00:00", "Z"
+        ),
     }
     return payload
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _require_schema_id(payload: object) -> None:

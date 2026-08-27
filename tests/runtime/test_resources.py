@@ -69,29 +69,45 @@ def test_root_opener_locks_before_provider(monkeypatch: pytest.MonkeyPatch) -> N
     assert locks[0].closed
 
 
-def test_budget_is_exact_seventy_percent_floor(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_capture(monkeypatch, available_memory_bytes=10 * GIB + 1)
+def test_budget_uses_one_captured_available_and_global_planning_ratio(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    available = 10 * GIB + 1
+    _patch_capture(monkeypatch, available_memory_bytes=available)
 
     with runtime_resource_policy_scope() as policy:
-        assert policy.captured_available_memory_bytes == 10 * GIB + 1
-        assert policy.memory_budget_bytes == 7 * GIB
+        expected_budget = (
+            available * resources._MEMORY_BUDGET_NUMERATOR
+            // resources._MEMORY_BUDGET_DENOMINATOR
+        )
+        assert policy.captured_available_memory_bytes == available
+        assert policy.memory_budget_bytes == expected_budget
         assert policy.used_memory_bytes == 0
-        assert policy.available_memory_bytes == 7 * GIB
+        assert policy.available_memory_bytes == expected_budget
         assert policy.to_payload() == {
-            "captured_available_memory_bytes": 10 * GIB + 1,
-            "memory_budget_bytes": 7 * GIB,
+            "captured_available_memory_bytes": available,
+            "memory_budget_bytes": expected_budget,
             "used_memory_bytes": 0,
-            "available_memory_bytes": 7 * GIB,
+            "available_memory_bytes": expected_budget,
         }
 
 
 def test_explicit_cap_only_lowers_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_capture(monkeypatch)
+    available = 10 * GIB
+    _patch_capture(monkeypatch, available_memory_bytes=available)
+    expected_budget = (
+        available * resources._MEMORY_BUDGET_NUMERATOR
+        // resources._MEMORY_BUDGET_DENOMINATOR
+    )
 
-    with runtime_resource_policy_scope(explicit_cap_bytes=20 * GIB) as high:
-        assert high.memory_budget_bytes == 7 * GIB
-    with runtime_resource_policy_scope(explicit_cap_bytes=2 * GIB) as low:
-        assert low.memory_budget_bytes == 2 * GIB
+    with runtime_resource_policy_scope(
+        explicit_cap_bytes=expected_budget + MIB
+    ) as high:
+        assert high.memory_budget_bytes == expected_budget
+    with runtime_resource_policy_scope(
+        explicit_cap_bytes=expected_budget - MIB
+    ) as low:
+        assert low.memory_budget_bytes == expected_budget - MIB
 
 
 @pytest.mark.parametrize("explicit_cap_bytes", (True, 0, -1, 1.0, "1"))
