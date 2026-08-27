@@ -119,7 +119,10 @@ def strict_millisecond_timestamp(value: object, *, error: str) -> pd.Timestamp:
 def strict_iso_timestamp(value: object, *, error: str) -> pd.Timestamp:
     if not isinstance(value, str) or not _has_utc_offset(value):
         raise ValueError(error)
-    timestamp = pd.to_datetime(value, utc=True, errors="coerce")
+    try:
+        timestamp = pd.to_datetime(value, utc=True, errors="raise")
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(error) from exc
     if pd.isna(timestamp):
         raise ValueError(error)
     return pd.Timestamp(timestamp)

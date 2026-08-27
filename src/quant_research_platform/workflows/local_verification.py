@@ -93,8 +93,7 @@ from quant_research_platform.storage.manifests import (
     replace_qrp_json,
 )
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
-    open_schema_inventory_payload,
-    summarize_schema_inventory_payload,
+    summarize_schema_inventory,
 )
 from quant_research_platform.workflows.diagnostics.validation_summary import (
     build_validation_summary,
@@ -541,17 +540,13 @@ def _run_local_verification_with_policy(
                 total_row_count=total_row_count,
             )
         else:
-            with open_schema_inventory_payload(
+            schema_inventory_summary = summarize_schema_inventory(
                 run_root,
                 important_null_count_columns=(
                     config.profile.schema_inventory_important_columns()
                 ),
                 resource_policy=resource_policy,
-            ) as schema_inventory:
-                schema_inventory_summary = summarize_schema_inventory_payload(
-                    schema_inventory
-                )
-            del schema_inventory
+            )
             schema_inventory_summary = validate_schema_inventory_summary(
                 schema_inventory_summary,
                 validation_status=str(validation_summary["status"]),

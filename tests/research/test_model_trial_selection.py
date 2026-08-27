@@ -153,6 +153,66 @@ def test_chunked_trial_metrics_marks_constant_correlation_undefined() -> None:
     assert metrics["validation_rankic_reason"] == "no_valid_observations"
 
 
+@pytest.mark.parametrize("row_count", [2, 3, 10, 500, 2048])
+def test_chunked_trial_metrics_rejects_ordinal_alpha_for_all_ties(
+    row_count: int,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"] * row_count),
+            "asset_id": [f"asset_{index}" for index in range(row_count)],
+            "label": np.ones(row_count),
+            "prediction": np.ones(row_count),
+        }
+    )
+
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (frame,),
+        model_id="all_ties",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=0,
+    )
+
+    assert metrics["validation_rankic"] is None
+    assert metrics["validation_rankic_reason"] == "no_valid_observations"
+
+
+@pytest.mark.parametrize("scale", [1e-200, 1e-150, 1.0, 1e200])
+def test_chunked_trial_metrics_scales_mse_without_false_zero_or_inf(
+    scale: float,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=2),
+            "asset_id": ["a", "b"],
+            "label": [0.0, 0.0],
+            "prediction": [scale, 2 * scale],
+        }
+    )
+
+    if scale in {1e-200, 1e200}:
+        with pytest.raises(ValueError, match="model_selection_mse_unrepresentable"):
+            evaluate_model_trial_metrics_from_chunks(
+                (frame,),
+                model_id="mse_scale",
+                label_column="label",
+                prediction_column="prediction",
+                purge_gap_steps=0,
+            )
+        return
+
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (frame,),
+        model_id="mse_scale",
+        label_column="label",
+        prediction_column="prediction",
+        purge_gap_steps=0,
+    )
+    assert metrics["validation_mse"] == pytest.approx(2.5 * scale**2)
+    assert metrics["validation_mse"] != 0.0
+
+
 def test_chunked_trial_metrics_preserves_tiny_nonconstant_variation() -> None:
     values = np.array([0.0, 1e-320, 2e-320])
     frame = pd.DataFrame(
@@ -362,23 +422,26 @@ def test_ic_weighted_rank_ensemble_rejects_rank_roundoff_zero() -> None:
         )
 
 
-def test_ic_weighted_rank_ensemble_handles_per_timestamp_rank_denominators() -> None:
+def test_ic_weighted_rank_ensemble_uses_equal_time_rankic_aggregation() -> None:
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
                 ["2024-01-01"] * 3 + ["2024-01-02"] * 6
             ),
             "factor": [0, 1, 2, 0, 1, 2, 3, 4, 5],
+            "inverse": [0, -1, -2, 0, -1, -2, -3, -4, -5],
             "label": [1, 2, 3, 3, 4, 6, 5, 2, 1],
         }
     )
 
-    with pytest.raises(ValueError, match="all_ensemble_correlations_zero"):
-        ICWeightedRankEnsemble.fit(
-            frame,
-            input_columns=("factor",),
-            label_column="label",
-        )
+    ensemble = ICWeightedRankEnsemble.fit(
+        frame,
+        input_columns=("factor", "inverse"),
+        label_column="label",
+    )
+
+    assert ensemble.columns == ("factor", "inverse")
+    assert ensemble.weights.tolist() == pytest.approx([0.5, -0.5])
 
 
 def test_ic_weighted_rank_ensemble_keeps_exact_nonzero_near_roundoff(

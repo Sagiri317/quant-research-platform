@@ -21,6 +21,7 @@ from quant_research_platform.contracts.models import (
     ModelSpec,
     _thaw_model_hyperparameters,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
@@ -371,8 +372,9 @@ def fit_linear_coefficients(
                         y = usable.loc[:, spec.label_column].to_numpy(
                             dtype="float64", copy=False
                         )
-                        usable_timestamps = pd.to_datetime(
-                            usable["timestamp"], errors="coerce"
+                        usable_timestamps = strict_timestamp_series(
+                            usable["timestamp"],
+                            error="invalid_model_training_timestamp",
                         )
                         chunk_start = date_string(usable_timestamps.min())
                         chunk_end = date_string(usable_timestamps.max())
@@ -968,7 +970,10 @@ def _collect_training_frame_owned(
         train_start = None
         train_end = None
         if not training.empty:
-            timestamps = pd.to_datetime(training["timestamp"], errors="coerce")
+            timestamps = strict_timestamp_series(
+                training["timestamp"],
+                error="invalid_model_training_timestamp",
+            )
             train_start = date_string(timestamps.min())
             train_end = date_string(timestamps.max())
         timestamps = None

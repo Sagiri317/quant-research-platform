@@ -12,7 +12,11 @@ from quant_research_platform.contracts.filtering import (
     validate_sample_filter_mode,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import (
+    _validate_column_tuple,
+    _validate_non_empty_string,
+    strict_finite_numeric_series,
+)
 
 PREDICTION_SCORE_COLUMN = "prediction_score"
 PREDICTION_PRIMARY_KEY = ("timestamp", "asset_id")
@@ -45,17 +49,43 @@ class PredictionSpec:
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if self.contract_version != "0.1":
+        if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_prediction_contract_version")
         validate_run_id(self.prediction_id)
+        _validate_non_empty_string(self.model_id, "model_id_required")
+        _validate_non_empty_string(
+            self.research_dataset_id,
+            "research_dataset_id_required",
+        )
+        for field_name in ("train_end", "test_start"):
+            value = _iso_date(getattr(self, field_name), field_name)
+            object.__setattr__(self, field_name, value.isoformat())
+        if self.test_end is not None:
+            test_end = _iso_date(self.test_end, "test_end")
+            object.__setattr__(self, "test_end", test_end.isoformat())
+        if date.fromisoformat(self.train_end) >= date.fromisoformat(
+            self.test_start
+        ):
+            raise ValueError("prediction_train_end_must_precede_test_start")
+        if self.test_end is not None and date.fromisoformat(
+            self.test_end
+        ) < date.fromisoformat(self.test_start):
+            raise ValueError("prediction_test_end_must_not_precede_test_start")
+        _validate_non_empty_string(self.prediction_column, "prediction_column_required")
+        _validate_column_tuple(self.primary_key, "prediction_primary_key")
         if (
             self.prediction_column != PREDICTION_SCORE_COLUMN
             or self.primary_key != PREDICTION_PRIMARY_KEY
         ):
             raise ValueError("prediction_output_columns_must_be_fixed")
-        if self.prediction_mode != "minimal_oos":
+        if (
+            type(self.prediction_mode) is not str
+            or self.prediction_mode != "minimal_oos"
+        ):
             raise ValueError("unsupported_prediction_mode")
         validate_sample_filter_mode(self.sample_filter_mode, owner="prediction")
+        if type(self.is_oos) is not bool or type(self.is_final_oos_window) is not bool:
+            raise TypeError("prediction_window_flags_must_be_boolean")
         if not self.is_oos:
             raise ValueError("prediction_must_be_oos")
         if self.test_end is None and not self.is_final_oos_window:
@@ -89,6 +119,11 @@ def _validate_prediction_output_values(
 
 def _validate_model_selection_contract(spec: PredictionSpec) -> None:
     candidate_model_ids = spec.candidate_model_ids
+    _validate_column_tuple(
+        candidate_model_ids,
+        "candidate_model_ids",
+        required=False,
+    )
     if any(
         not isinstance(model_id, str) or not model_id
         for model_id in candidate_model_ids
@@ -98,7 +133,10 @@ def _validate_model_selection_contract(spec: PredictionSpec) -> None:
         raise ValueError("candidate_model_ids_must_not_contain_duplicates")
     if spec.model_id in candidate_model_ids:
         raise ValueError("candidate_model_ids_must_not_include_model_id")
-    if spec.model_selection_metric not in MODEL_SELECTION_METRIC_DIRECTIONS:
+    if (
+        type(spec.model_selection_metric) is not str
+        or spec.model_selection_metric not in MODEL_SELECTION_METRIC_DIRECTIONS
+    ):
         raise ValueError("invalid_model_selection_metric")
     if not candidate_model_ids:
         return
@@ -128,5 +166,5 @@ def _validate_model_selection_contract(spec: PredictionSpec) -> None:
 def _iso_date(value: str, field_name: str) -> date:
     try:
         return date.fromisoformat(value)
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid_{field_name}") from exc

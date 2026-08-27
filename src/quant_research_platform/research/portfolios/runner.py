@@ -1691,13 +1691,6 @@ def _portfolio_concentration_summary(
     return pd.DataFrame.from_records(records, columns=columns)
 
 
-def _timestamp_set(frame: pd.DataFrame) -> pd.DatetimeIndex:
-    timestamps = strict_timestamp_series(
-        frame["timestamp"], error="invalid_portfolio_timestamp_values"
-    )
-    return pd.DatetimeIndex(timestamps.unique()).sort_values()
-
-
 def _portfolio_temporal_state_bytes(state: _PortfolioTemporalState) -> int:
     position_count = sum(
         len(positions)

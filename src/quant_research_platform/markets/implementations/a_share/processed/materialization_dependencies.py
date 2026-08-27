@@ -11,6 +11,7 @@ from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow, require_date_window
+from quant_research_platform.contracts.validation import require_non_negative_int
 from quant_research_platform.markets.implementations.a_share.factors import (
     calculations as factor_calculations,
 )
@@ -37,9 +38,6 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     materialize_labels as materialize_labels,
-)
-from quant_research_platform.markets.session_windows import (
-    require_non_negative_session_offset,
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -209,10 +207,10 @@ def _session_offset_time_window(
     lookahead_sessions: int,
 ) -> TimeWindow:
     require_date_window(time_window, context="a_share_dependency_session_offset")
-    require_non_negative_session_offset(
+    require_non_negative_int(
         lookback_sessions, error="invalid_a_share_session_offset"
     )
-    require_non_negative_session_offset(
+    require_non_negative_int(
         lookahead_sessions, error="invalid_a_share_session_offset"
     )
     if len(sessions) == 0 or (lookback_sessions <= 0 and lookahead_sessions <= 0):

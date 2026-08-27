@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 from collections.abc import Collection, Iterable, Iterator
 from contextlib import ExitStack, closing, contextmanager
+from math import log
 from pathlib import Path
 
 import numpy as np
@@ -45,12 +46,6 @@ WITH ranked AS (
         timestamp_ns,
         label,
         prediction,
-        FIRST_VALUE(label) OVER (
-            PARTITION BY timestamp_ns ORDER BY row_id
-        ) AS label_reference,
-        FIRST_VALUE(prediction) OVER (
-            PARTITION BY timestamp_ns ORDER BY row_id
-        ) AS prediction_reference,
         RANK() OVER (
             PARTITION BY timestamp_ns ORDER BY label
         ) AS label_rank,
@@ -67,72 +62,21 @@ WITH ranked AS (
             PARTITION BY timestamp_ns
         ) AS timestamp_count
     FROM validation_rows
-), differences AS (
-    SELECT
-        *,
-        label - label_reference AS label_difference,
-        prediction - prediction_reference AS prediction_difference
-    FROM ranked
-), scaled AS (
-    SELECT
-        *,
-        MAX(ABS(label_difference)) OVER (
-            PARTITION BY timestamp_ns
-        ) AS label_difference_scale,
-        MAX(ABS(prediction_difference)) OVER (
-            PARTITION BY timestamp_ns
-        ) AS prediction_difference_scale,
-        MAX(ABS(label)) OVER (
-            PARTITION BY timestamp_ns
-        ) AS label_raw_scale,
-        MAX(ABS(prediction)) OVER (
-            PARTITION BY timestamp_ns
-        ) AS prediction_raw_scale
-    FROM differences
-), normalized AS (
-    SELECT
-        timestamp_ns,
-        label,
-        prediction,
-        CASE
-            WHEN label_difference_scale = 0 THEN 0.0
-            WHEN label_difference_scale <= 1.7976931348623157e308
-                THEN label_difference / label_difference_scale
-            ELSE label / label_raw_scale
-        END AS label_value,
-        CASE
-            WHEN prediction_difference_scale = 0 THEN 0.0
-            WHEN prediction_difference_scale <= 1.7976931348623157e308
-                THEN prediction_difference / prediction_difference_scale
-            ELSE prediction / prediction_raw_scale
-        END AS prediction_value,
-        (
-            CAST(label_rank AS REAL)
-            + (CAST(label_tie_count AS REAL) - 1.0) / 2.0
-        ) / CAST(timestamp_count AS REAL) AS label_rank_value,
-        (
-            CAST(prediction_rank AS REAL)
-            + (CAST(prediction_tie_count AS REAL) - 1.0) / 2.0
-        ) / CAST(timestamp_count AS REAL) AS prediction_rank_value
-    FROM scaled
 )
 SELECT
     timestamp_ns,
-    COUNT(*) AS observation_count,
-    SUM((prediction - label) * (prediction - label)) AS squared_error,
-    SUM(label_value) AS label_sum,
-    SUM(prediction_value) AS prediction_sum,
-    SUM(label_value * label_value) AS label_square_sum,
-    SUM(prediction_value * prediction_value) AS prediction_square_sum,
-    SUM(label_value * prediction_value) AS label_prediction_sum,
-    SUM(label_rank_value) AS label_rank_sum,
-    SUM(prediction_rank_value) AS prediction_rank_sum,
-    SUM(label_rank_value * label_rank_value) AS label_rank_square_sum,
-    SUM(prediction_rank_value * prediction_rank_value) AS prediction_rank_square_sum,
-    SUM(label_rank_value * prediction_rank_value) AS label_prediction_rank_sum
-FROM normalized
-GROUP BY timestamp_ns
-ORDER BY timestamp_ns
+    label,
+    prediction,
+    (
+        CAST(label_rank AS REAL)
+        + (CAST(label_tie_count AS REAL) - 1.0) / 2.0
+    ) / CAST(timestamp_count AS REAL) AS label_rank_value,
+    (
+        CAST(prediction_rank AS REAL)
+        + (CAST(prediction_tie_count AS REAL) - 1.0) / 2.0
+    ) / CAST(timestamp_count AS REAL) AS prediction_rank_value
+FROM ranked
+ORDER BY timestamp_ns, row_id
 """
 
 
@@ -390,50 +334,59 @@ def _cross_sectional_metric_summary(
         "rankic_max": None,
     }
     row_count = 0
-    squared_error = 0.0
+    squared_errors = _ScaledSquareAccumulator()
+    current_timestamp: int | None = None
+    timestamp_state: _TimestampMetricState | None = None
     with closing(database.execute(_CROSS_SECTIONAL_METRIC_QUERY)) as rows:
-        for row in rows:
-            (
-                _timestamp,
-                timestamp_rows,
-                timestamp_squared_error,
-                label_sum,
-                prediction_sum,
-                label_square_sum,
-                prediction_square_sum,
-                label_prediction_sum,
-                label_rank_sum,
-                prediction_rank_sum,
-                label_rank_square_sum,
-                prediction_rank_square_sum,
-                label_prediction_rank_sum,
-            ) = row
-            count = int(timestamp_rows)
-            row_count += count
-            squared_error += float(timestamp_squared_error)
-            ic = _pearson_correlation_from_sums(
-                count=count,
-                left_sum=float(label_sum),
-                right_sum=float(prediction_sum),
-                left_square_sum=float(label_square_sum),
-                right_square_sum=float(prediction_square_sum),
-                cross_sum=float(label_prediction_sum),
-            )[0]
-            rankic = _pearson_correlation_from_sums(
-                count=count,
-                left_sum=float(label_rank_sum),
-                right_sum=float(prediction_rank_sum),
-                left_square_sum=float(label_rank_square_sum),
-                right_square_sum=float(prediction_rank_square_sum),
-                cross_sum=float(label_prediction_rank_sum),
-            )[0]
-            _add_correlation_aggregate(stats, "ic", ic)
-            _add_correlation_aggregate(stats, "rankic", rankic)
+        for (
+            timestamp_ns,
+            label,
+            prediction,
+            label_rank,
+            prediction_rank,
+        ) in rows:
+            timestamp_ns = int(timestamp_ns)
+            if current_timestamp != timestamp_ns:
+                if timestamp_state is not None:
+                    row_count += timestamp_state.count
+                    _add_correlation_aggregate(
+                        stats,
+                        "ic",
+                        timestamp_state.correlation()[0],
+                    )
+                    _add_correlation_aggregate(
+                        stats,
+                        "rankic",
+                        timestamp_state.rank.result()[0],
+                    )
+                current_timestamp = timestamp_ns
+                timestamp_state = _TimestampMetricState()
+            assert timestamp_state is not None
+            label = float(label)
+            prediction = float(prediction)
+            residual = prediction - label
+            if not np.isfinite(residual):
+                raise ValueError("model_selection_mse_unrepresentable")
+            timestamp_state.update(
+                label,
+                prediction,
+                float(label_rank),
+                float(prediction_rank),
+            )
+            squared_errors.add(residual)
+    if timestamp_state is not None:
+        row_count += timestamp_state.count
+        _add_correlation_aggregate(stats, "ic", timestamp_state.correlation()[0])
+        _add_correlation_aggregate(
+            stats,
+            "rankic",
+            timestamp_state.rank.result()[0],
+        )
     ic = _trial_correlation_summary(stats, "ic")
     rankic = _trial_correlation_summary(stats, "rankic")
     return (
         row_count,
-        squared_error / row_count,
+        squared_errors.result(row_count),
         ic[0],
         ic[1],
         rankic[0],
@@ -441,21 +394,134 @@ def _cross_sectional_metric_summary(
     )
 
 
-def _pearson_correlation_from_sums(
-    *,
-    count: int,
-    left_sum: float,
-    right_sum: float,
-    left_square_sum: float,
-    right_square_sum: float,
-    cross_sum: float,
-) -> tuple[float | None, str | None]:
-    return _pearson_correlation_from_moments(
-        count=count,
-        left_m2=left_square_sum - left_sum * left_sum / count,
-        right_m2=right_square_sum - right_sum * right_sum / count,
-        covariance=cross_sum - left_sum * right_sum / count,
+class _TimestampMetricState:
+    __slots__ = (
+        "count",
+        "ic",
+        "rank",
     )
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.ic = _ScaledCorrelation()
+        self.rank = _ScaledCorrelation()
+
+    def update(
+        self,
+        label: float,
+        prediction: float,
+        label_rank: float,
+        prediction_rank: float,
+    ) -> None:
+        self.ic.update(label, prediction)
+        self.rank.update(label_rank, prediction_rank)
+        self.count += 1
+
+    def correlation(self) -> tuple[float | None, str | None]:
+        return self.ic.result()
+
+
+class _ScaledCorrelation:
+    __slots__ = (
+        "count",
+        "left_scale",
+        "right_scale",
+        "left_mean",
+        "right_mean",
+        "left_m2",
+        "right_m2",
+        "covariance",
+    )
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.left_scale = 0.0
+        self.right_scale = 0.0
+        self.left_mean = 0.0
+        self.right_mean = 0.0
+        self.left_m2 = 0.0
+        self.right_m2 = 0.0
+        self.covariance = 0.0
+
+    def update(self, left: float, right: float) -> None:
+        left_magnitude = abs(left)
+        if left_magnitude > self.left_scale:
+            ratio = (
+                self.left_scale / left_magnitude
+                if self.left_scale
+                else 0.0
+            )
+            self.left_mean *= ratio
+            self.left_m2 *= ratio * ratio
+            self.covariance *= ratio
+            self.left_scale = left_magnitude
+        right_magnitude = abs(right)
+        if right_magnitude > self.right_scale:
+            ratio = (
+                self.right_scale / right_magnitude
+                if self.right_scale
+                else 0.0
+            )
+            self.right_mean *= ratio
+            self.right_m2 *= ratio * ratio
+            self.covariance *= ratio
+            self.right_scale = right_magnitude
+        normalized_left = left / self.left_scale if self.left_scale else 0.0
+        normalized_right = right / self.right_scale if self.right_scale else 0.0
+        count = self.count + 1
+        left_delta = normalized_left - self.left_mean
+        right_delta = normalized_right - self.right_mean
+        self.left_mean += left_delta / count
+        self.right_mean += right_delta / count
+        self.left_m2 += left_delta * (normalized_left - self.left_mean)
+        self.right_m2 += right_delta * (normalized_right - self.right_mean)
+        self.covariance += left_delta * (normalized_right - self.right_mean)
+        self.count = count
+
+    def result(self) -> tuple[float | None, str | None]:
+        return _pearson_correlation_from_moments(
+            count=self.count,
+            left_m2=self.left_m2,
+            right_m2=self.right_m2,
+            covariance=self.covariance,
+        )
+
+
+class _ScaledSquareAccumulator:
+    __slots__ = ("scale", "scaled_sum")
+
+    def __init__(self) -> None:
+        self.scale = 0.0
+        self.scaled_sum = 0.0
+
+    def add(self, value: float) -> None:
+        magnitude = abs(value)
+        if magnitude == 0.0:
+            return
+        if self.scale == 0.0:
+            self.scale = magnitude
+            self.scaled_sum = 1.0
+            return
+        if magnitude > self.scale:
+            ratio = self.scale / magnitude
+            self.scaled_sum = self.scaled_sum * ratio * ratio + 1.0
+            self.scale = magnitude
+            return
+        self.scaled_sum += (magnitude / self.scale) ** 2
+
+    def result(self, count: int) -> float:
+        if count <= 0 or self.scale == 0.0:
+            return 0.0
+        mean_scaled_square = self.scaled_sum / count
+        log_result = 2.0 * log(self.scale) + log(mean_scaled_square)
+        if log_result > log(float(np.finfo(np.float64).max)) or log_result < log(
+            float(np.nextafter(0.0, 1.0))
+        ):
+            raise ValueError("model_selection_mse_unrepresentable")
+        result = self.scale * self.scale * mean_scaled_square
+        if result == 0.0 or not np.isfinite(result):
+            raise ValueError("model_selection_mse_unrepresentable")
+        return float(result)
 
 
 def _trial_correlation_summary(

@@ -17,7 +17,7 @@ from decimal import Decimal
 from inspect import currentframe
 from pathlib import Path
 from time import perf_counter
-from types import SimpleNamespace
+from types import MappingProxyType, SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -6934,7 +6934,7 @@ def test_dataset_schema_rejects_mutated_spec_invariants(
     elif case == "key_role":
         roles = dict(spec.column_roles)
         roles["asset_id"] = ColumnRole.FACTOR
-        object.__setattr__(spec, "column_roles", roles)
+        object.__setattr__(spec, "column_roles", MappingProxyType(roles))
     elif case == "unpartitioned_timestamp":
         object.__setattr__(spec, "partition_columns", ())
     else:

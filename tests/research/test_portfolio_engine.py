@@ -21,7 +21,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.engine import (
-    construct_portfolio_positions,
+    _construct_portfolio_positions,
 )
 from quant_research_platform.research.portfolios.runner import (
     build_portfolio_result_from_research_dataset,
@@ -71,7 +71,7 @@ def test_portfolio_engine_produces_required_signal_artifacts() -> None:
         cost_config=CostConfig(slippage_bps=10.0),
     )
 
-    result = construct_portfolio_positions(frame, spec)
+    result = _construct_portfolio_positions(frame, spec, source_columns_by_kind=None)
 
     assert set(result.positions["signal"]) == {"risk_signal"}
     assert result.turnover["turnover"].tolist() == pytest.approx([2.0, 0.0])
@@ -122,7 +122,7 @@ def test_portfolio_engine_reports_buy_sell_cost_breakdown() -> None:
         ),
     )
 
-    result = construct_portfolio_positions(frame, spec)
+    result = _construct_portfolio_positions(frame, spec, source_columns_by_kind=None)
     first_cost = result.cost_breakdown.iloc[0]
     second_cost = result.cost_breakdown.iloc[1]
 
@@ -164,7 +164,7 @@ def test_portfolio_engine_long_only_positions_do_not_short_assets() -> None:
         ),
     )
 
-    result = construct_portfolio_positions(frame, spec)
+    result = _construct_portfolio_positions(frame, spec, source_columns_by_kind=None)
 
     assert result.positions["position"].ge(0.0).all()
     assert result.positions["position"].sum() == pytest.approx(1.0)
@@ -207,7 +207,7 @@ def test_portfolio_engine_keeps_two_signal_inputs_separate() -> None:
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )
 
-    result = construct_portfolio_positions(frame, spec)
+    result = _construct_portfolio_positions(frame, spec, source_columns_by_kind=None)
 
     assert set(result.positions["signal"]) == {"raw_a", "ranked_raw_b"}
     assert set(result.portfolio_returns["signal"]) == {"raw_a", "ranked_raw_b"}
@@ -242,7 +242,7 @@ def test_portfolio_engine_applies_execution_lag_steps_to_signal_scores() -> None
         weight_config=WeightConfig(top_quantile=0.25, bottom_quantile=0.25),
     )
 
-    result = construct_portfolio_positions(frame, spec)
+    result = _construct_portfolio_positions(frame, spec, source_columns_by_kind=None)
 
     assert result.portfolio_returns["timestamp"].tolist() == [
         pd.Timestamp("2024-01-02"),
@@ -282,7 +282,7 @@ def test_portfolio_engine_rejects_keys_before_execution_lag_groupby(
     )
 
     with pytest.raises(ValueError):
-        construct_portfolio_positions(frame, spec)
+        _construct_portfolio_positions(frame, spec, source_columns_by_kind=None)
 
 
 def test_portfolio_spec_rejects_unsupported_rebalance_frequency() -> None:

@@ -17,6 +17,7 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.share_safety import is_local_only_path
 
 _YEAR_PARTITION_PATTERN = re.compile(r"^year=([0-9]{4})$")
@@ -29,9 +30,10 @@ def partition_timestamp_series(
 ) -> pd.Series:
     if timestamp_column not in frame:
         raise ValueError("missing_partition_timestamp_column")
-    timestamp = frame[timestamp_column]
-    if not pd.api.types.is_datetime64_any_dtype(timestamp):
-        timestamp = pd.to_datetime(timestamp, errors="raise")
+    timestamp = strict_timestamp_series(
+        frame[timestamp_column],
+        error="invalid_partition_timestamp",
+    )
     if timestamp.isna().any():
         raise ValueError("missing_partition_timestamp_column")
     return timestamp

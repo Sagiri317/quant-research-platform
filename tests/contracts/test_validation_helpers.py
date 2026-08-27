@@ -114,6 +114,17 @@ def test_strict_timestamp_series_rejects_invalid_or_null_values() -> None:
         )
 
 
+@pytest.mark.parametrize("value", [True, 1, 1.5, 20240101, object()])
+def test_strict_timestamp_series_rejects_non_datetime_numeric_or_object_values(
+    value: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_contract_timestamp"):
+        validation.strict_timestamp_series(
+            pd.Series([value]),
+            error="invalid_contract_timestamp",
+        )
+
+
 def test_strict_timestamp_series_returns_naive_utc_for_aware_values() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")

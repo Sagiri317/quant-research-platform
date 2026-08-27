@@ -25,6 +25,7 @@ from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_string_series,
+    strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
@@ -416,8 +417,9 @@ def normalize_raw_frame(
     if data_id == MARKET_BARS_DATA_ID:
         result = mapped
         result["limit_status"] = result["limit_status"].astype("float64")
-        result["trade_date"] = pd.to_datetime(result["trade_date"]).astype(
-            "datetime64[ns]"
+        result["trade_date"] = strict_timestamp_series(
+            result["trade_date"],
+            error="invalid_csmar_trade_date",
         )
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
@@ -436,8 +438,9 @@ def normalize_raw_frame(
         return result
     if data_id == "adjustment":
         result = mapped
-        result["trade_date"] = pd.to_datetime(result["trade_date"]).astype(
-            "datetime64[ns]"
+        result["trade_date"] = strict_timestamp_series(
+            result["trade_date"],
+            error="invalid_csmar_adjustment_date",
         )
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
@@ -446,9 +449,10 @@ def normalize_raw_frame(
         return result
     if data_id == "market_cap":
         result = mapped
-        result["share_change_date"] = pd.to_datetime(
-            result["share_change_date"]
-        ).astype("datetime64[ns]")
+        result["share_change_date"] = strict_timestamp_series(
+            result["share_change_date"],
+            error="invalid_csmar_market_cap_date",
+        )
         result["timestamp"] = result["share_change_date"]
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
@@ -510,12 +514,15 @@ def _parse_optional_csmar_date(
     *,
     error_code: str,
 ) -> pd.Series:
-    text = series.astype("string").str.strip()
-    parsed = pd.to_datetime(text.mask(text.eq("")), errors="coerce")
-    invalid = text.notna() & text.ne("") & parsed.isna()
-    if bool(invalid.any()):
-        raise ValueError(f"{error_code}: {column}")
-    return parsed.astype("datetime64[ns]")
+    text = series.copy()
+    blank = text.map(
+        lambda value: isinstance(value, str) and not value.strip()
+    )
+    return strict_timestamp_series(
+        text.mask(blank),
+        error=f"{error_code}: {column}",
+        allow_null=True,
+    )
 
 
 def filter_by_source_date_range(
@@ -528,7 +535,11 @@ def filter_by_source_date_range(
     if start_date is None and end_date is None:
         return frame
     column = _date_column(data_id)
-    timestamps = pd.to_datetime(frame[column], errors="coerce")
+    timestamps = strict_timestamp_series(
+        frame[column],
+        error=f"invalid_{data_id}_source_timestamp",
+        allow_null=True,
+    )
     mask = pd.Series(True, index=frame.index)
     if start_date is not None:
         mask &= timestamps >= pd.Timestamp(start_date)
@@ -1367,9 +1378,10 @@ def _column_roles(
 
 def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame
-    result["calendar_date"] = pd.to_datetime(
-        result["calendar_date"], errors="raise"
-    ).astype("datetime64[ns]")
+    result["calendar_date"] = strict_timestamp_series(
+        result["calendar_date"],
+        error="invalid_trading_calendar_date",
+    )
     result["source_market_type"] = pd.to_numeric(
         result["source_market_type"],
         errors="raise",

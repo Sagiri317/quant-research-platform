@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-import warnings
-from datetime import timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import numpy as np
 import pandas as pd
@@ -29,8 +26,8 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.engine import (
+    _construct_portfolio_positions,
     compute_exposure_summary,
-    construct_portfolio_positions,
     summarize_concentration,
     summarize_period_breakdown,
 )
@@ -862,7 +859,7 @@ def _assert_portfolio_chunks_match_full(
     spec: PortfolioSpec,
     chunk_timestamp_counts: tuple[int, ...],
 ) -> None:
-    full = construct_portfolio_positions(
+    full = _construct_portfolio_positions(
         frame,
         spec,
         source_columns_by_kind={"factor": ("raw",)},
@@ -980,36 +977,6 @@ def test_dense_portfolio_temporal_state_matches_full_for_lag_zero_one_n(
     )
 
     _assert_portfolio_chunks_match_full(frame, spec, (2, 1, 3))
-
-
-def test_portfolio_runner_accepts_equivalent_timezone_representations() -> None:
-    frame = pd.DataFrame(
-        {
-            "timestamp": [
-                pd.Timestamp(
-                    "2024-01-15T12:00:00",
-                    tz=timezone(timedelta(hours=1)),
-                ),
-                pd.Timestamp(
-                    "2024-01-15T12:01:00",
-                    tz=ZoneInfo("Europe/Berlin"),
-                ),
-            ]
-        }
-    )
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        timestamps = portfolio_runner._timestamp_set(frame)
-
-    assert timestamps.equals(
-        pd.DatetimeIndex(
-            [
-                pd.Timestamp("2024-01-15T11:00:00"),
-                pd.Timestamp("2024-01-15T11:01:00"),
-            ]
-        )
-    )
 
 
 def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_gaps(

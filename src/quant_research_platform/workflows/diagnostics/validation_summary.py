@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import io
+import json
 import os
+import sqlite3
 import sys
+import tempfile
 from collections.abc import Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, closing, contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
@@ -15,8 +18,8 @@ from quant_research_platform.artifacts._output_bundle_validation import (
     validate_output_bundle,
 )
 from quant_research_platform.contracts._json import (
-    bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
+    canonical_json_hash,
 )
 from quant_research_platform.policy.check_status import require_status
 from quant_research_platform.policy.share_safety import (
@@ -119,99 +122,24 @@ def _build_validation_summary(
         output_bundle_expectations
     ):
         raise ValueError("validation_summary_output_bundle_declaration_duplicate")
-    inspection_slot_bytes = sys.getsizeof([]) + len(dataset_roots) * sys.getsizeof(None)
-    inspection_slot_bytes += len(dataset_roots) * sys.getsizeof((None, None, None))
-    inspection_slot_bytes += sys.getsizeof([])
-    inspection_slot_bytes += len(dataset_roots) * sys.getsizeof(None)
-    inspection_slot_bytes += len(dataset_roots) * sys.getsizeof((None, None))
-    try:
-        retained_state.enter_context(
-            resource_policy.lease(
-                "workflow.validation.inspection_slots",
-                inspection_slot_bytes,
-            )
-        )
-    except MemoryError:
-        raise ValueError(
-            "validation_summary_payload_exceeds_task_memory_budget"
-        ) from None
-    inspection_results: list[
-        tuple[Path, DatasetInspection | None, str | None] | None
-    ] = [None] * len(dataset_roots)
-    inspection: DatasetInspection | None = None
-    for index, root in enumerate(dataset_roots):
-        logical_layer = dataset_layer_from_path(root)
-        if logical_layer not in RUN_RESULT_DATASET_LAYERS:
+    for root in dataset_roots:
+        if dataset_layer_from_path(root) not in RUN_RESULT_DATASET_LAYERS:
             raise ValueError("validation_summary_dataset_layer_invalid")
-        try:
-            with open_dataset_session(
-                root,
-                columns=None,
-                time_window=None,
-                require_consumable=False,
-                resource_policy=resource_policy,
-            ) as context:
-                owned = _inspect_dataset_session_owned(
-                    context,
-                    resource_policy=resource_policy,
-                )
-            inspection = owned.value
-
-            def release_inspection(owned=owned, index=index) -> None:  # noqa: ANN001
-                nonlocal inspection
-                inspection = None
-                inspection_results[index] = None
-                _release_owned_value(
-                    owned,
-                    owner="workflow.validation.inspection.result",
-                )
-
-            retained_state.callback(release_inspection)
-        except (OSError, ValueError):
-            try:
-                manifest = read_dataset_manifest_evidence(root)
-            except FileNotFoundError:
-                inspection_results[index] = (root, None, "missing")
-            except (OSError, ValueError):
-                inspection_results[index] = (root, None, "invalid")
-            else:
-                if manifest:
-                    raise ValueError(
-                        "validation_summary_dataset_inspection_failed"
-                    ) from None
-                inspection_results[index] = (root, None, "invalid")
-            continue
-        inspection_results[index] = (root, inspection, None)
-
-    dataset_inspections = [
-        (root, inspection)
-        for result in inspection_results
-        if result is not None
-        for root, inspection, error in (result,)
-        if error is None and inspection is not None
-    ]
-    summary_headroom = resource_policy.available_memory_bytes
-    if summary_headroom <= 0:
-        raise ValueError("validation_summary_payload_exceeds_task_memory_budget")
-    summary_bound_bytes = _validation_summary_graph_upper_bound_bytes(
-        dataset_roots=dataset_roots,
-        dataset_inspections=dataset_inspections,
-        layer_summaries=layer_summaries,
-        validated_output_members=validated_output_members,
-        output_bundle_expectations=output_bundle_expectations,
-        max_bytes=summary_headroom,
+    stage_directory = retained_state.enter_context(
+        tempfile.TemporaryDirectory(prefix="qrp-validation-summary-")
     )
-    try:
-        retained_state.enter_context(
-            resource_policy.lease(
-                "workflow.validation.summary",
-                summary_bound_bytes,
-            )
-        )
-    except MemoryError:
-        raise ValueError(
-            "validation_summary_payload_exceeds_task_memory_budget"
-        ) from None
+    database = sqlite3.connect(Path(stage_directory) / "summary.sqlite")
+    retained_state.callback(database.close)
+    database.execute("PRAGMA journal_mode=DELETE")
+    database.execute("PRAGMA synchronous=NORMAL")
+    database.execute("PRAGMA temp_store=FILE")
+    database.execute("PRAGMA cache_size=-64")
+    _stage_dataset_inspections(
+        database,
+        dataset_roots,
+        resource_policy=resource_policy,
+    )
+    database.commit()
 
     dataset_failures: list[str] = []
     null_failures: list[str] = []
@@ -223,92 +151,49 @@ def _build_validation_summary(
     label_nan_profile: dict[str, int] = {}
     missing_dataset_manifests: list[str] = []
     invalid_dataset_manifests: list[str] = []
-    observed_layer_datasets: dict[str, list[dict[str, object]]] = {}
-    observed_layer_missing: dict[str, list[str]] = {}
-    observed_layer_invalid: dict[str, list[str]] = {}
-    for result in inspection_results:
-        assert result is not None
-        root, inspection, inspection_error = result
+    for root, _inspection_identity, inspection_error, facts in _iter_staged_inspections(
+        database,
+        dataset_roots,
+    ):
         logical_layer = dataset_layer_from_path(root)
-        observed_layer_datasets.setdefault(logical_layer, [])
-        observed_layer_missing.setdefault(logical_layer, [])
-        observed_layer_invalid.setdefault(logical_layer, [])
         manifest_logical_path = logical_path(
             root / "_manifest" / "manifest.json",
             markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
         )
         if inspection_error is not None:
-            failures = (
-                missing_dataset_manifests
-                if inspection_error == "missing"
-                else invalid_dataset_manifests
-            )
-            observed = (
-                observed_layer_missing
-                if inspection_error == "missing"
-                else observed_layer_invalid
-            )
-            failures.append(manifest_logical_path)
-            observed[logical_layer].append(manifest_logical_path)
+            if inspection_error == "missing":
+                missing_dataset_manifests.append(manifest_logical_path)
+            else:
+                invalid_dataset_manifests.append(manifest_logical_path)
             continue
-        assert inspection is not None
-        manifest = inspection.manifest
-        data_id = manifest["data_id"]
-        try:
-            validate_dataset_manifest_consumable(manifest)
-            manifest_consumable = True
-        except ValueError:
-            manifest_consumable = False
-        if require_status(manifest.get("validation_status")) != "PASS":
+        assert facts is not None
+        data_id = str(facts["data_id"])
+        manifest_consumable = bool(facts["manifest_consumable"])
+        if facts["validation_status"] != "PASS":
             dataset_failures.append(data_id)
         # This existing failure class covers an invalid required PK-null fact;
         # an absent fact is never interpreted as an observed zero count.
-        try:
-            validate_dataset_primary_key_null_summary(manifest)
-        except ValueError:
+        if not facts["null_summary_valid"]:
             null_failures.append(data_id)
-        if manifest["duplicate_primary_key_count"] > 0:
+        if int(facts["duplicate_primary_key_count"]) > 0:
             duplicate_failures.append(data_id)
-        non_finite = cast(
-            Mapping[str, int],
-            manifest.get("non_finite_count_summary"),
-        )
+        non_finite = cast(Mapping[str, int], facts["non_finite_count_summary"])
         if any(count > 0 for count in non_finite.values()):
             non_finite_failures.append(data_id)
         if not manifest_consumable and data_id not in dataset_failures:
             dataset_failures.append(data_id)
-        effective_validation_status = "PASS" if manifest_consumable else "FAIL"
-        observed_layer_datasets[logical_layer].append(
-            {
-                "data_id": data_id,
-                "manifest_path": manifest_logical_path,
-                "manifest_summary": {
-                    "row_count": manifest["row_count"],
-                    "date_min": manifest.get("date_min"),
-                    "date_max": manifest.get("date_max"),
-                    "partition_count": manifest["partition_count"],
-                    "duplicate_primary_key_count": manifest[
-                        "duplicate_primary_key_count"
-                    ],
-                    "validation_status": effective_validation_status,
-                },
-            }
-        )
-        if logical_layer in {
-            "processed",
-            "research",
-        } and contains_source_local_key(manifest):
+        if logical_layer in {"processed", "research"} and facts["source_local_key"]:
             source_local_leaks.append(data_id)
         date_ranges.append(
             {
                 "data_id": data_id,
-                "date_min": manifest.get("date_min"),
-                "date_max": manifest.get("date_max"),
-                "partition_count": manifest.get("partition_count"),
+                "date_min": facts["date_min"],
+                "date_max": facts["date_max"],
+                "partition_count": int(facts["partition_count"]),
             }
         )
-        _merge_profile(factor_nan_profile, manifest.get("factor_nan_profile"))
-        _merge_profile(label_nan_profile, manifest.get("label_nan_profile"))
+        _merge_profile(factor_nan_profile, facts["factor_nan_profile"])
+        _merge_profile(label_nan_profile, facts["label_nan_profile"])
 
     (
         layer_failures,
@@ -316,10 +201,11 @@ def _build_validation_summary(
         declared_invalid_manifests,
         declared_failed_datasets,
     ) = _validate_layer_summary_graph(
+        database,
         layer_summaries,
-        observed_layer_datasets=observed_layer_datasets,
-        observed_layer_missing=observed_layer_missing,
-        observed_layer_invalid=observed_layer_invalid,
+        logical_layers=tuple(
+            sorted({dataset_layer_from_path(root) for root in dataset_roots})
+        ),
     )
     if (
         missing_dataset_manifests != declared_missing_manifests
@@ -380,12 +266,12 @@ def _build_validation_summary(
         "share_safety_scan": safety,
         "created_at": _utc_now(),
     }
-    bounded_rendered_qrp_json_object_size(
-        summary,
-        lazy_arrays={},
-        max_bytes=summary_bound_bytes,
-    )
-    for root, initial_inspection in dataset_inspections:
+    for root, initial_identity, inspection_error, _facts in _iter_staged_inspections(
+        database,
+        dataset_roots,
+    ):
+        if inspection_error is not None or initial_identity is None:
+            continue
         owned_final = None
         final_inspection = None
         try:
@@ -402,7 +288,10 @@ def _build_validation_summary(
                         resource_policy=resource_policy,
                     )
                     final_inspection = owned_final.value
-                    unchanged = final_inspection == initial_inspection
+                    unchanged = (
+                        _inspection_identity_hash(final_inspection)
+                        == initial_identity
+                    )
             except BaseException:
                 if owned_final is not None:
                     final_inspection = None
@@ -430,78 +319,147 @@ def _build_validation_summary(
     return summary
 
 
-def _validation_summary_graph_upper_bound_bytes(
-    *,
+def _stage_dataset_inspections(
+    database: sqlite3.Connection,
     dataset_roots: tuple[Path, ...],
-    dataset_inspections: list[tuple[Path, DatasetInspection]],
-    layer_summaries: tuple[dict[str, object], ...],
-    validated_output_members: tuple[tuple[Path, DatasetFileIdentity], ...],
-    output_bundle_expectations: tuple[tuple[Path, str, str, str], ...],
-    max_bytes: int,
-) -> int:
-    manifests = tuple(inspection.manifest for _root, inspection in dataset_inspections)
-    layer_bytes = 0
-    for summary in layer_summaries:
-        layer_bytes += bounded_rendered_qrp_json_object_size(
-            summary,
-            lazy_arrays={},
-            max_bytes=max_bytes - layer_bytes,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+) -> None:
+    database.execute(
+        "CREATE TABLE inspections ("
+        "root_index INTEGER PRIMARY KEY, "
+        "logical_layer TEXT NOT NULL, "
+        "manifest_path TEXT NOT NULL, "
+        "identity_hash TEXT, "
+        "inspection_error TEXT, "
+        "facts_json TEXT"
+        ")"
+    )
+    for root_index, root in enumerate(dataset_roots):
+        logical_layer = dataset_layer_from_path(root)
+        manifest_logical_path = logical_path(
+            root / "_manifest" / "manifest.json",
+            markers=RUN_RESULT_LOGICAL_PATH_MARKERS,
         )
-    text_characters = sum(len(os.fspath(root)) for root in dataset_roots)
-    text_characters += len("/_manifest/manifest.json") * len(dataset_roots)
-    text_characters += sum(
-        len(os.fspath(path)) for path, _identity in validated_output_members
-    )
-    text_characters += sum(
-        len(os.fspath(root)) + len(run_id) + len(output_id) + len(definition_id)
-        for root, run_id, output_id, definition_id in output_bundle_expectations
-    )
-    dataset_count = len(dataset_roots)
-    layer_count = len(layer_summaries)
-    member_count = len(validated_output_members)
-    profile_entries = sum(
-        len(cast(Mapping[str, int], manifest.get(profile)))
-        for manifest in manifests
-        for profile in ("factor_nan_profile", "label_nan_profile")
-    )
-    mapping_count = 6 + 3 * dataset_count + layer_count + member_count
-    mapping_entries = (
-        27
-        + 12 * dataset_count
-        + 10 * layer_count
-        + 2 * member_count
-        + profile_entries
-    )
-    list_count = 14 + 3 * layer_count
-    list_slots = (
-        32 + 16 * dataset_count + 12 * layer_count + 4 * member_count
-    )
-    empty_mapping_bytes = sys.getsizeof({})
-    mapping_entry_bytes = sys.getsizeof({"": None}) - empty_mapping_bytes
-    empty_list_bytes = sys.getsizeof([])
-    list_slot_bytes = sys.getsizeof([None]) - empty_list_bytes
-    container_bytes = (
-        mapping_count * empty_mapping_bytes
-        + mapping_entries * mapping_entry_bytes
-        + list_count * empty_list_bytes
-        + list_slots * list_slot_bytes
-    )
-    text_bytes = text_characters * 4 + (
-        len(dataset_roots) + len(validated_output_members)
-    ) * sys.getsizeof("")
-    scalar_size = max(sys.getsizeof(None), sys.getsizeof(0), sys.getsizeof(0.0))
-    scalar_bytes = scalar_size * (27 + 10 * dataset_count + profile_entries)
-    created_at_bytes = sys.getsizeof("0" * 32)
-    total = (
-        layer_bytes
-        + text_bytes
-        + container_bytes
-        + scalar_bytes
-        + created_at_bytes
-    )
-    if total > max_bytes:
-        raise MemoryError("runtime_memory_budget_exceeded")
-    return total
+        inspection_identity: str | None = None
+        inspection_error: str | None = None
+        facts: dict[str, object] | None = None
+        inspection: DatasetInspection | None = None
+        owned = None
+        try:
+            try:
+                with open_dataset_session(
+                    root,
+                    columns=None,
+                    time_window=None,
+                    require_consumable=False,
+                    resource_policy=resource_policy,
+                ) as context:
+                    owned = _inspect_dataset_session_owned(
+                        context,
+                        resource_policy=resource_policy,
+                    )
+                    inspection = owned.value
+                    inspection_identity = _inspection_identity_hash(inspection)
+                    manifest = inspection.manifest
+                    try:
+                        validate_dataset_manifest_consumable(manifest)
+                        manifest_consumable = True
+                    except ValueError:
+                        manifest_consumable = False
+                    try:
+                        validate_dataset_primary_key_null_summary(manifest)
+                        null_summary_valid = True
+                    except ValueError:
+                        null_summary_valid = False
+                    non_finite = manifest.get("non_finite_count_summary", {})
+                    if not isinstance(non_finite, Mapping):
+                        non_finite = {}
+                    factor_profile = manifest.get("factor_nan_profile", {})
+                    if not isinstance(factor_profile, Mapping):
+                        factor_profile = {}
+                    label_profile = manifest.get("label_nan_profile", {})
+                    if not isinstance(label_profile, Mapping):
+                        label_profile = {}
+                    facts = {
+                        "data_id": manifest["data_id"],
+                        "manifest_consumable": manifest_consumable,
+                        "row_count": manifest["row_count"],
+                        "validation_status": require_status(
+                            manifest.get("validation_status")
+                        ),
+                        "null_summary_valid": null_summary_valid,
+                        "duplicate_primary_key_count": manifest[
+                            "duplicate_primary_key_count"
+                        ],
+                        "non_finite_count_summary": dict(non_finite),
+                        "date_min": manifest.get("date_min"),
+                        "date_max": manifest.get("date_max"),
+                        "partition_count": manifest["partition_count"],
+                        "source_local_key": contains_source_local_key(manifest),
+                        "factor_nan_profile": dict(factor_profile),
+                        "label_nan_profile": dict(label_profile),
+                    }
+            except (OSError, ValueError):
+                try:
+                    manifest = read_dataset_manifest_evidence(root)
+                except FileNotFoundError:
+                    inspection_identity = None
+                    inspection_error = "missing"
+                except (OSError, ValueError):
+                    inspection_identity = None
+                    inspection_error = "invalid"
+                else:
+                    if manifest:
+                        raise ValueError(
+                            "validation_summary_dataset_inspection_failed"
+                        ) from None
+                    inspection_identity = None
+                    inspection_error = "invalid"
+        finally:
+            if owned is not None:
+                inspection = None
+                _release_owned_value(
+                    owned,
+                    owner="workflow.validation.inspection.result",
+                )
+        database.execute(
+            "INSERT INTO inspections("
+            "root_index, logical_layer, manifest_path, identity_hash, "
+            "inspection_error, facts_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                root_index,
+                logical_layer,
+                manifest_logical_path,
+                inspection_identity,
+                inspection_error,
+                None
+                if facts is None
+                else json.dumps(
+                    facts,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
+        )
+
+
+def _iter_staged_inspections(
+    database: sqlite3.Connection,
+    dataset_roots: tuple[Path, ...],
+) -> Iterator[tuple[Path, str | None, str | None, dict[str, object] | None]]:
+    with closing(database.execute(
+        "SELECT root_index, identity_hash, inspection_error, facts_json "
+        "FROM inspections ORDER BY root_index"
+    )) as rows:
+        for root_index, identity_hash, inspection_error, facts_json in rows:
+            yield (
+                dataset_roots[int(root_index)],
+                identity_hash,
+                inspection_error,
+                None if facts_json is None else json.loads(facts_json),
+            )
 
 
 def _share_safety_scan(
@@ -711,67 +669,149 @@ def _opened_evidence(
 
 
 def _validate_layer_summary_graph(
+    database: sqlite3.Connection,
     layer_summaries: tuple[dict[str, object], ...],
     *,
-    observed_layer_datasets: dict[str, list[dict[str, object]]],
-    observed_layer_missing: dict[str, list[str]],
-    observed_layer_invalid: dict[str, list[str]],
+    logical_layers: tuple[str, ...],
 ) -> tuple[list[str], list[str], list[str], list[str]]:
-    logical_layers = sorted(
-        set(observed_layer_datasets)
-        .union(observed_layer_missing)
-        .union(observed_layer_invalid)
-    )
     if len(layer_summaries) != len(logical_layers):
         raise ValueError("validation_summary_layer_declaration_mismatch")
     layer_failures: list[str] = []
-    declared_missing: list[str] = []
-    declared_invalid: list[str] = []
-    declared_failed: list[str] = []
+    declared_missing_all: list[str] = []
+    declared_invalid_all: list[str] = []
+    declared_failed_all: list[str] = []
     for summary, logical_layer in zip(layer_summaries, logical_layers, strict=True):
         if type(summary) is not dict or set(summary) != _LAYER_SUMMARY_KEYS:
             raise ValueError("validation_summary_layer_invalid")
         if type(summary["created_at"]) is not str or not summary["created_at"]:
             raise ValueError("validation_summary_layer_invalid")
         require_status(summary["layer_validation_status"])
-        datasets = sorted(
-            observed_layer_datasets.get(logical_layer, []),
-            key=lambda item: str(item["manifest_path"]),
-        )
-        missing = sorted(observed_layer_missing.get(logical_layer, []))
-        invalid = sorted(observed_layer_invalid.get(logical_layer, []))
-        failed = [
-            str(item["data_id"])
-            for item in datasets
-            if item["manifest_summary"]["validation_status"] != "PASS"
-        ]
-        date_mins = [
-            str(item["manifest_summary"]["date_min"])
-            for item in datasets
-            if item["manifest_summary"]["date_min"] is not None
-        ]
-        date_maxs = [
-            str(item["manifest_summary"]["date_max"])
-            for item in datasets
-            if item["manifest_summary"]["date_max"] is not None
-        ]
+        declared_datasets = summary["datasets"]
+        declared_missing = summary["missing_dataset_manifests"]
+        declared_invalid = summary["invalid_dataset_manifests"]
+        declared_failed = summary["failed_dataset_validations"]
+        if not all(
+            type(value) is list
+            for value in (
+                declared_datasets,
+                declared_missing,
+                declared_invalid,
+                declared_failed,
+            )
+        ):
+            raise ValueError("validation_summary_layer_invalid")
+        dataset_count = 0
+        total_rows = 0
+        date_min: str | None = None
+        date_max: str | None = None
+        failed_count = 0
+        with closing(database.execute(
+            "SELECT root_index, manifest_path, facts_json "
+            "FROM inspections WHERE logical_layer = ? "
+            "AND inspection_error IS NULL ORDER BY manifest_path",
+            (logical_layer,),
+        )) as rows:
+            for _root_index, manifest_path, facts_json in rows:
+                facts = json.loads(facts_json)
+                item = {
+                    "data_id": facts["data_id"],
+                    "manifest_path": manifest_path,
+                    "manifest_summary": {
+                        "row_count": int(facts["row_count"]),
+                        "date_min": facts["date_min"],
+                        "date_max": facts["date_max"],
+                        "partition_count": int(facts["partition_count"]),
+                        "duplicate_primary_key_count": int(
+                            facts["duplicate_primary_key_count"]
+                        ),
+                        "validation_status": (
+                            "PASS" if facts["manifest_consumable"] else "FAIL"
+                        ),
+                    },
+                }
+                if dataset_count >= len(declared_datasets):
+                    raise ValueError("validation_summary_layer_declaration_mismatch")
+                try:
+                    matches = canonical_identity_bytes(
+                        declared_datasets[dataset_count]
+                    ) == canonical_identity_bytes(item)
+                except ValueError as exc:
+                    raise ValueError("validation_summary_layer_invalid") from exc
+                if not matches:
+                    raise ValueError("validation_summary_layer_declaration_mismatch")
+                dataset_count += 1
+                total_rows += int(facts["row_count"])
+                if facts["date_min"] is not None:
+                    date_min = (
+                        str(facts["date_min"])
+                        if date_min is None
+                        else min(date_min, str(facts["date_min"]))
+                    )
+                if facts["date_max"] is not None:
+                    date_max = (
+                        str(facts["date_max"])
+                        if date_max is None
+                        else max(date_max, str(facts["date_max"]))
+                    )
+                if not facts["manifest_consumable"]:
+                    if (
+                        failed_count >= len(declared_failed)
+                        or declared_failed[failed_count] != str(facts["data_id"])
+                    ):
+                        raise ValueError(
+                            "validation_summary_layer_declaration_mismatch"
+                        )
+                    failed_count += 1
+        if dataset_count != len(declared_datasets) or failed_count != len(
+            declared_failed
+        ):
+            raise ValueError("validation_summary_layer_declaration_mismatch")
+
+        for error_name, declared in (
+            ("missing", declared_missing),
+            ("invalid", declared_invalid),
+        ):
+            observed_count = 0
+            with closing(database.execute(
+                "SELECT manifest_path FROM inspections "
+                "WHERE logical_layer = ? AND inspection_error = ? "
+                "ORDER BY manifest_path",
+                (logical_layer, error_name),
+            )) as rows:
+                for manifest_path, in rows:
+                    if (
+                        observed_count >= len(declared)
+                        or declared[observed_count] != manifest_path
+                    ):
+                        raise ValueError(
+                            "validation_summary_layer_declaration_mismatch"
+                        )
+                    observed_count += 1
+            if observed_count != len(declared):
+                raise ValueError("validation_summary_layer_declaration_mismatch")
+
         expected = {
             "logical_layer": logical_layer,
-            "dataset_count": len(datasets),
-            "datasets": datasets,
-            "total_rows": sum(
-                int(item["manifest_summary"]["row_count"]) for item in datasets
-            ),
-            "date_min": min(date_mins) if date_mins else None,
-            "date_max": max(date_maxs) if date_maxs else None,
-            "missing_dataset_manifests": missing,
-            "invalid_dataset_manifests": invalid,
-            "failed_dataset_validations": failed,
+            "dataset_count": dataset_count,
+            "total_rows": total_rows,
+            "date_min": date_min,
+            "date_max": date_max,
+            "missing_dataset_manifests": declared_missing,
+            "invalid_dataset_manifests": declared_invalid,
+            "failed_dataset_validations": declared_failed,
             "layer_validation_status": (
-                "PASS" if not missing and not invalid and not failed else "FAIL"
+                "PASS"
+                if not declared_missing
+                and not declared_invalid
+                and not declared_failed
+                else "FAIL"
             ),
         }
-        observed = {key: item for key, item in summary.items() if key != "created_at"}
+        observed = {
+            key: item
+            for key, item in summary.items()
+            if key not in {"created_at", "datasets"}
+        }
         try:
             matches = canonical_identity_bytes(observed) == canonical_identity_bytes(
                 expected
@@ -782,16 +822,40 @@ def _validate_layer_summary_graph(
             raise ValueError("validation_summary_layer_declaration_mismatch")
         if expected["layer_validation_status"] != "PASS":
             layer_failures.append(logical_layer)
-        declared_missing.extend(missing)
-        declared_invalid.extend(invalid)
-        declared_failed.extend(failed)
-    return layer_failures, declared_missing, declared_invalid, declared_failed
+        declared_missing_all.extend(declared_missing)
+        declared_invalid_all.extend(declared_invalid)
+        declared_failed_all.extend(declared_failed)
+    return (
+        layer_failures,
+        declared_missing_all,
+        declared_invalid_all,
+        declared_failed_all,
+    )
 
 
 def _merge_profile(target: dict[str, int], value: object) -> None:
     profile = cast(Mapping[str, int], value)
     for key, item in profile.items():
         target[key] = target.get(key, 0) + item
+
+
+def _inspection_identity_hash(value: DatasetInspection) -> str:
+    return canonical_json_hash(
+        {
+            "root": value.root.as_posix(),
+            "data_root": value.data_root.as_posix(),
+            "spec": value.spec,
+            "columns": list(value.columns),
+            "schema_hash": value.schema_hash,
+            "file_count": value.file_count,
+            "row_count": value.row_count,
+            "partitions": list(value.partitions),
+            "partition_row_counts": value.partition_row_counts,
+            "date_min": value.date_min,
+            "date_max": value.date_max,
+            "manifest": value.manifest,
+        }
+    )
 
 
 def _utc_now() -> str:

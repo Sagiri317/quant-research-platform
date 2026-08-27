@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import pickle
 from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -490,7 +490,7 @@ def test_manifest_writer_rejects_invalid_schema_identity(
     assert not path.exists()
 
 
-def test_data_spec_snapshots_caller_roles_as_an_exact_dict() -> None:
+def test_data_spec_snapshots_caller_roles_as_an_immutable_mapping() -> None:
     roles = {
         "asset_id": ColumnRole.KEY,
         "timestamp": ColumnRole.TIMESTAMP,
@@ -505,11 +505,12 @@ def test_data_spec_snapshots_caller_roles_as_an_exact_dict() -> None:
     )
     roles["value"] = ColumnRole.FEATURE
 
-    assert type(spec.column_roles) is dict
+    assert type(spec.column_roles) is MappingProxyType
     assert tuple(spec.column_roles) == ("asset_id", "timestamp")
     assert spec.required_columns == ("asset_id", "timestamp")
     assert replace(spec).column_roles == spec.column_roles
-    assert pickle.loads(pickle.dumps(spec)) == spec
+    with pytest.raises(TypeError):
+        spec.column_roles["value"] = ColumnRole.FEATURE  # type: ignore[index]
 
 
 def test_data_spec_validates_schema_version_before_snapshotting_roles() -> None:

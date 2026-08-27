@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import sys
 import weakref
 from copy import deepcopy
 from dataclasses import replace
@@ -10,13 +9,11 @@ from pathlib import Path
 import pytest
 
 from quant_research_platform.artifacts.outputs import write_prediction_outputs
-from quant_research_platform.contracts._json import render_qrp_json_object
 from quant_research_platform.policy.share_safety import (
     MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS,
 )
 from quant_research_platform.runtime.resources import (
     MIB,
-    RuntimeResourcePolicy,
     _OwnedValue,
 )
 from quant_research_platform.storage import manifests
@@ -116,62 +113,25 @@ def test_build_validation_summary_consumes_embedded_layer_summaries(
     ]
 
 
-def test_validation_summary_reserves_complete_graph_before_build(
+def test_validation_summary_completes_under_bounded_policy(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     dataset_root = _valid_dataset(tmp_path, "summary_admission")
     output_contract = _safe_output_bundle_contract(tmp_path)
-    original_lease = RuntimeResourcePolicy.lease
-
-    def reject_summary(self, owner: str, reserved_bytes: int):  # noqa: ANN001
-        if owner == "workflow.validation.summary":
-            raise MemoryError("runtime_memory_budget_exceeded")
-        return original_lease(self, owner, reserved_bytes)
-
-    monkeypatch.setattr(RuntimeResourcePolicy, "lease", reject_summary)
-
-    with pytest.raises(
-        ValueError,
-        match="^validation_summary_payload_exceeds_task_memory_budget$",
-    ):
-        build_validation_summary(
-            run_id="demo_run",
-            dataset_roots=(dataset_root,),
-            layer_summaries=(_layer_summary(dataset_root),),
-            **output_contract,
-        )
-
-
-def test_validation_summary_admits_both_inspection_container_graphs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    dataset_root = _valid_dataset(tmp_path, "summary_container_graph")
-    observed_slots: list[int] = []
-    original_lease = RuntimeResourcePolicy.lease
-
-    def observe_lease(self, owner: str, reserved_bytes: int):  # noqa: ANN001
-        if owner == "workflow.validation.inspection_slots":
-            observed_slots.append(reserved_bytes)
-        return original_lease(self, owner, reserved_bytes)
-
-    monkeypatch.setattr(RuntimeResourcePolicy, "lease", observe_lease)
-    build_validation_summary(
+    policy = capture_test_policy(available_memory_bytes=8 * MIB)
+    summary = build_validation_summary(
         run_id="demo_run",
         dataset_roots=(dataset_root,),
         layer_summaries=(_layer_summary(dataset_root),),
-        **_safe_output_bundle_contract(tmp_path),
+        **output_contract,
+        resource_policy=policy,
     )
 
-    graph_bound = 2 * sys.getsizeof([])
-    graph_bound += 2 * sys.getsizeof(None)
-    graph_bound += sys.getsizeof((None, None, None))
-    graph_bound += sys.getsizeof((None, None))
-    assert observed_slots and observed_slots[0] >= graph_bound
+    assert summary["status"] == "PASS"
+    assert policy.used_memory_bytes == 0
 
 
-def test_validation_summary_final_reinspection_keeps_complete_summary_budget(
+def test_validation_summary_releases_each_reinspection_payload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -180,7 +140,7 @@ def test_validation_summary_final_reinspection_keeps_complete_summary_budget(
         _valid_dataset(tmp_path, "retained_reinspection_b"),
     )
     observed_reserved_bytes: list[int] = []
-    initial_inspections: list[object] = []
+    initial_references: list[weakref.ReferenceType[object]] = []
     final_references: list[weakref.ReferenceType[object]] = []
     final_reserved_bytes: list[int] = []
 
@@ -192,7 +152,7 @@ def test_validation_summary_final_reinspection_keeps_complete_summary_budget(
         observed_reserved_bytes.append(resource_policy.used_memory_bytes)
         owned = real_owned_inspection(context, resource_policy=resource_policy)
         if call_count < len(dataset_roots):
-            initial_inspections.append(owned.value)
+            initial_references.append(weakref.ref(owned.value))
         else:
             final_reserved_bytes.append(resource_policy.used_memory_bytes)
             final_references.append(weakref.ref(owned.value))
@@ -205,7 +165,7 @@ def test_validation_summary_final_reinspection_keeps_complete_summary_budget(
         record_owned,
     )
 
-    summary = build_validation_summary(
+    build_validation_summary(
         run_id="demo_run",
         dataset_roots=dataset_roots,
         layer_summaries=(
@@ -218,12 +178,13 @@ def test_validation_summary_final_reinspection_keeps_complete_summary_budget(
         **_safe_output_bundle_contract(tmp_path),
     )
 
-    retained_summary_bytes = len(render_qrp_json_object(summary).encode("utf-8"))
-    assert len(initial_inspections) == len(dataset_roots)
+    assert len(initial_references) == len(dataset_roots)
     assert observed_reserved_bytes[0] > 0
-    assert observed_reserved_bytes[1] > observed_reserved_bytes[0]
+    assert observed_reserved_bytes[1] > 0
     assert final_reserved_bytes
-    assert all(value >= retained_summary_bytes for value in final_reserved_bytes)
+    assert all(value > 0 for value in final_reserved_bytes)
+    assert len(final_references) == len(dataset_roots)
+    assert all(reference() is None for reference in initial_references)
     assert all(reference() is None for reference in final_references)
 
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,6 +33,18 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.workflows.diagnostics import schema_inventory
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def _collect_inventory(
+    root: Path,
+    *,
+    important_null_count_columns: tuple[str, ...] = (),
+) -> dict[str, object]:
+    with schema_inventory.iter_schema_inventory_items(
+        root,
+        important_null_count_columns=important_null_count_columns,
+    ) as items:
+        return {"schema_id": "qrp-schema-inventory", "datasets": list(items)}
 
 
 @pytest.mark.skipif(
@@ -161,49 +173,9 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
         ),
     )
 
-    with schema_inventory.open_schema_inventory_payload(tmp_path) as payload:
-        payload = deepcopy(payload)
+    payload = _collect_inventory(tmp_path)
 
     assert payload["datasets"][0]["duplicate_primary_key_count"] == 0
-
-
-def test_schema_inventory_closes_chunks_on_retained_consumer_error(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = pd.DataFrame({"timestamp": pd.to_datetime(["2026-01-01"])})
-    closed: list[bool] = []
-
-    def chunks():
-        try:
-            yield frame
-        finally:
-            closed.append(True)
-
-    def fail_in_consumer(*_args, **_kwargs):
-        raise KeyError("hostile_consumer_error")
-
-    monkeypatch.setattr(
-        schema_inventory,
-        "iter_dataset_chunks",
-        lambda *_a, **_k: chunks(),
-    )
-    monkeypatch.setattr(schema_inventory.pd, "to_datetime", fail_in_consumer)
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-    )
-
-    with pytest.raises(KeyError) as retained:
-        schema_inventory._aggregate_dataset_stats(
-            SimpleNamespace(retained_memory_bytes=0),
-            ("timestamp",),
-            (),
-            important_null_count_columns=frozenset(),
-            exact_duplicate_count=0,
-            resource_policy=policy,
-        )
-
-    assert retained.value.__traceback__ is not None
-    assert closed == [True]
 
 
 def test_schema_inventory_captures_one_policy_for_all_datasets(
@@ -250,20 +222,20 @@ def test_schema_inventory_captures_one_policy_for_all_datasets(
     )
     monkeypatch.setattr(schema_inventory, "_inventory_item", inventory_item)
 
-    with schema_inventory.open_schema_inventory_payload(tmp_path) as payload:
-        payload = deepcopy(payload)
+    payload = _collect_inventory(tmp_path)
 
     assert captures["count"] == 1
     assert observed_policies == [policy, policy]
     assert observed_reserved_bytes[0] == 0
-    assert observed_reserved_bytes[1] > 0
+    assert observed_reserved_bytes[1] == 0
+    assert policy.used_memory_bytes == 0
     assert [item["logical_relative_root"] for item in payload["datasets"]] == [
         "dataset-a",
         "dataset-b",
     ]
 
 
-def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
+def test_schema_inventory_cli_keeps_one_policy_through_stream_write(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -277,27 +249,16 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
         lambda **_kwargs: policy,
     )
 
-    @contextmanager
-    def inventory(_root: Path, *, resource_policy=None):  # type: ignore[no-untyped-def]
+    def write(_root: Path, _output: Path, *, resource_policy=None) -> Path:
         assert resource_policy is policy
         with policy.lease("test.schema.inventory", 64):
-            try:
-                yield {"schema_id": "qrp-schema-inventory", "datasets": []}
-            finally:
-                cleanup_states.append(policy.state)
+            observed.append(resource_policy)
+            observed_reserved.append(policy.used_memory_bytes)
+            cleanup_states.append(policy.state)
+            _output.write_text("{}", encoding="utf-8")
+        return _output
 
-    monkeypatch.setattr(private_cli, "open_schema_inventory_payload", inventory)
-
-    def write(
-        _path: Path,
-        _payload: object,
-    ) -> Path:
-        observed.append(current_runtime_resource_policy())
-        observed_reserved.append(policy.used_memory_bytes)
-        _path.write_text("{}", encoding="utf-8")
-        return _path
-
-    monkeypatch.setattr(private_cli, "atomic_write_json", write)
+    monkeypatch.setattr(private_cli, "write_schema_inventory", write)
     private_cli.schema_inventory(tmp_path, tmp_path / "inventory.json")
 
     assert observed == [policy]
@@ -306,7 +267,7 @@ def test_schema_inventory_cli_keeps_one_policy_through_atomic_write(
     assert policy.used_memory_bytes == 0
 
 
-def test_schema_inventory_rejects_accumulated_items_over_budget(
+def test_schema_inventory_streams_accumulated_items_over_budget(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -324,26 +285,40 @@ def test_schema_inventory_rejects_accumulated_items_over_budget(
         "_iter_dataset_artifact_roots",
         lambda _root: (tmp_path / "dataset-a", tmp_path / "dataset-b"),
     )
+    base_item = _valid_inventory_payload()["datasets"][0]
+    artifact_roots = tuple(tmp_path / f"dataset-{index:03d}" for index in range(100))
+    monkeypatch.setattr(
+        schema_inventory,
+        "_iter_dataset_artifact_roots",
+        lambda _root: artifact_roots,
+    )
+
     def inventory_item(_project_root, artifact_root, **kwargs):  # noqa: ANN001, ANN202
+        item = deepcopy(base_item)
+        artifact_id = artifact_root.name
+        item["artifact_id"] = artifact_id
+        item["logical_relative_root"] = (
+            f"data/processed/a_share/factor/{artifact_id}"
+        )
+        item["warnings"] = ["w" * 1000]
         kwargs["retained_items"].enter_context(
             kwargs["resource_policy"].lease("schema.inventory.items", 500)
         )
-        return (
-            {
-                "logical_relative_root": artifact_root.name,
-                "payload": "x" * 500,
-            },
-            500,
-        )
+        return item, 500
 
     monkeypatch.setattr(schema_inventory, "_inventory_item", inventory_item)
 
-    with pytest.raises(
-        ValueError,
-        match="schema_inventory_payload_exceeds_task_memory_budget",
-    ):
-        with schema_inventory.open_schema_inventory_payload(tmp_path):
-            pass
+    output = tmp_path / "inventory.json"
+    schema_inventory.write_schema_inventory(
+        tmp_path,
+        output,
+        resource_policy=policy,
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert len(payload["datasets"]) == len(artifact_roots)
+    assert output.stat().st_size > policy.memory_budget_bytes
+    assert policy.used_memory_bytes == 0
 
 
 def test_schema_inventory_item_state_is_admitted_before_aggregation(
@@ -470,8 +445,8 @@ def test_schema_inventory_rejects_replacement_between_open_and_stats(
         ValueError,
         match="dataset_(spec|manifest)_identity_changed",
     ):
-        with schema_inventory.open_schema_inventory_payload(tmp_path):
-            pass
+        with schema_inventory.iter_schema_inventory_items(tmp_path) as items:
+            tuple(items)
 
     assert open_count == 1
 
@@ -542,8 +517,8 @@ def test_schema_inventory_rejects_forged_storage_summary(
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=error):
-        with schema_inventory.open_schema_inventory_payload(tmp_path):
-            pass
+        with schema_inventory.iter_schema_inventory_items(tmp_path) as items:
+            tuple(items)
 
 
 @pytest.mark.parametrize("value", (True, 1, ""))
@@ -555,7 +530,7 @@ def test_schema_inventory_rejects_important_column_coercion(
         ValueError,
         match="schema_inventory_important_columns_invalid",
     ):
-        with schema_inventory.open_schema_inventory_payload(
+        with schema_inventory.iter_schema_inventory_items(
             tmp_path,
             important_null_count_columns=(value,),  # type: ignore[arg-type]
         ):

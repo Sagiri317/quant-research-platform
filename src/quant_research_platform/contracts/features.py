@@ -29,21 +29,21 @@ class FeatureTransformSpec:
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if self.contract_version != "0.1":
+        if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_feature_transform_contract_version")
-        if not isinstance(self.transform_id, str) or not self.transform_id:
+        if type(self.transform_id) is not str or not self.transform_id:
             raise ValueError("feature_transform_id_required")
         _validate_column_tuple(self.source_columns, "source_columns")
         _validate_column_tuple(self.output_columns, "output_columns")
         if len(self.source_columns) != len(self.output_columns):
             raise ValueError("feature_transform_source_output_count_mismatch")
         if (
-            not isinstance(self.transform, str)
+            type(self.transform) is not str
             or self.transform not in FEATURE_TRANSFORMS
         ):
             raise ValueError("unsupported_feature_transform")
         if (
-            not isinstance(self.fillna_policy, str)
+            type(self.fillna_policy) is not str
             or self.fillna_policy not in FILLNA_POLICIES
         ):
             raise ValueError("unsupported_feature_transform_fillna_policy")
@@ -53,7 +53,11 @@ class FeatureTransformSpec:
                 "feature_transform_raw_factor_passthrough: " + ", ".join(overlap)
             )
         if self.winsorize_quantiles is not None:
-            validated_winsorize_quantiles(self.winsorize_quantiles)
+            object.__setattr__(
+                self,
+                "winsorize_quantiles",
+                validated_winsorize_quantiles(self.winsorize_quantiles),
+            )
         elif self.transform in {
             "winsorize",
             "winsorized_zscore",

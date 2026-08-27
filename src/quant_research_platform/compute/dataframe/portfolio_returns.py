@@ -42,31 +42,6 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 
-def simulate_weighted_long_short_returns_and_cost_from_validated_panel(
-    panel: pd.DataFrame,
-    spec: ComputePanelSpec,
-    weight_config: WeightConfig,
-    *,
-    segment_columns: tuple[str, ...] = (),
-    portfolio_signals: tuple[str, ...] | None = None,
-    tradability_config: TradabilityConfig | None = None,
-    cost_config: CostConfig | None = None,
-    return_source_column: str | None = None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Simulate returns and cost breakdown artifacts."""
-
-    return _stream_weighted_portfolio_from_validated_panel(
-        panel,
-        spec,
-        weight_config,
-        segment_columns=segment_columns,
-        portfolio_signals=portfolio_signals,
-        tradability_config=tradability_config,
-        cost_config=cost_config,
-        return_source_column=return_source_column,
-    )
-
-
 def _stream_weighted_portfolio_from_validated_panel(
     panel: pd.DataFrame,
     spec: ComputePanelSpec,

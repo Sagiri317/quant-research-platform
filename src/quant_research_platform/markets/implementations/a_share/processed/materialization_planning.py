@@ -19,6 +19,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow, require_date_window
+from quant_research_platform.contracts.validation import require_non_negative_int
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
 )
@@ -27,9 +28,6 @@ from quant_research_platform.markets.implementations.a_share.fields import (
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     materialization_io as materialization_io,
-)
-from quant_research_platform.markets.session_windows import (
-    require_non_negative_session_offset,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
@@ -184,7 +182,7 @@ def iter_active_materialization_batches(
         if type(valid_bar_offsets) is not tuple or len(valid_bar_offsets) != 2:
             raise ValueError("invalid_valid_bar_offset")
         for offset in valid_bar_offsets:
-            require_non_negative_session_offset(
+            require_non_negative_int(
                 offset, error="invalid_valid_bar_offset"
             )
     if (
@@ -534,10 +532,10 @@ def session_batch_window(
     warmup_sessions: int = 0,
     lookahead_sessions: int = 0,
 ) -> TimeWindow:
-    require_non_negative_session_offset(
+    require_non_negative_int(
         warmup_sessions, error="invalid_a_share_session_offset"
     )
-    require_non_negative_session_offset(
+    require_non_negative_int(
         lookahead_sessions, error="invalid_a_share_session_offset"
     )
     first_session = current_sessions[0]
@@ -635,8 +633,8 @@ def bounded_valid_bar_key_coverage(
 ) -> _OwnedValue[pd.DataFrame]:
     """Query current assets' exact sparse boundary from one built disk index."""
 
-    require_non_negative_session_offset(lookback_bars, error="invalid_valid_bar_offset")
-    require_non_negative_session_offset(
+    require_non_negative_int(lookback_bars, error="invalid_valid_bar_offset")
+    require_non_negative_int(
         lookahead_bars, error="invalid_valid_bar_offset"
     )
     if not asset_ids:
@@ -789,10 +787,10 @@ def available_trading_sessions(
     resource_policy: RuntimeResourcePolicy,
 ) -> _OwnedValue[pd.DatetimeIndex]:
     require_date_window(time_window, context="a_share_trading_sessions")
-    require_non_negative_session_offset(
+    require_non_negative_int(
         lookback_sessions, error="invalid_a_share_session_offset"
     )
-    require_non_negative_session_offset(
+    require_non_negative_int(
         lookahead_sessions, error="invalid_a_share_session_offset"
     )
     calendar_root = layout.interim_data_root(source_id, "trading_calendar")

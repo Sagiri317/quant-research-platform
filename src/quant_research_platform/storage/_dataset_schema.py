@@ -277,11 +277,7 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
         "dataset_partition_columns_invalid",
         allow_empty=True,
     )
-    column_roles_are_valid_mapping = (
-        type(spec.column_roles) is MappingProxyType
-        if type(spec) is ResearchDatasetSpec
-        else type(spec.column_roles) is dict
-    )
+    column_roles_are_valid_mapping = type(spec.column_roles) is MappingProxyType
     if not column_roles_are_valid_mapping or not spec.column_roles:
         raise ValueError("dataset_column_roles_invalid")
     if any(

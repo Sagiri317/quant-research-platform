@@ -9,8 +9,11 @@ from types import MappingProxyType
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
-from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.validation import _validate_column_tuple
+from quant_research_platform.contracts.ids import MarketId, validate_market_id
+from quant_research_platform.contracts.validation import (
+    _validate_column_tuple,
+    _validate_non_empty_string,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -28,20 +31,35 @@ class ResearchDatasetSpec(DataSpec):
     key_coverage: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        if type(self.column_roles) not in (dict, MappingProxyType) or any(
-            type(column) is not str or not column or type(role) is not ColumnRole
-            for column, role in self.column_roles.items()
-        ):
-            raise ValueError("invalid_research_column_roles")
         super().__post_init__()
+        object.__setattr__(self, "market_id", validate_market_id(self.market_id))
+        if type(self.input_data_ids) is tuple and not self.input_data_ids:
+            raise ValueError(
+                f"base_input_data_id_not_in_inputs: {self.base_input_data_id}"
+            )
+        _validate_column_tuple(self.input_data_ids, "input_data_ids")
+        _validate_non_empty_string(
+            self.base_input_data_id,
+            "base_input_data_id_required",
+        )
+        if type(self.feature_transforms) is not tuple:
+            raise ValueError("feature_transforms_must_be_tuple")
+        if any(
+            type(transform) is not FeatureTransformSpec
+            for transform in self.feature_transforms
+        ):
+            raise ValueError("feature_transforms_invalid")
         object.__setattr__(
             self,
             "column_roles",
-            MappingProxyType(self.column_roles),
+            MappingProxyType(dict(self.column_roles)),
         )
-        if type(self.key_coverage) not in (dict, MappingProxyType) or any(
-            type(data_id) is not str for data_id in self.key_coverage
+        if not isinstance(self.key_coverage, Mapping) or any(
+            type(data_id) is not str or not data_id
+            for data_id in self.key_coverage
         ):
+            raise ValueError("invalid_research_key_coverage")
+        if any(type(policy) is not str for policy in self.key_coverage.values()):
             raise ValueError("invalid_research_key_coverage")
         if self.base_input_data_id not in self.input_data_ids:
             raise ValueError(

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from uuid import uuid4
 
@@ -31,6 +31,15 @@ def atomic_write_text(
     *,
     encoding: str = "utf-8",
 ) -> Path:
+    return atomic_write_chunks(path, (text,), encoding=encoding)
+
+
+def atomic_write_chunks(
+    path: Path,
+    chunks: Iterable[str],
+    *,
+    encoding: str = "utf-8",
+) -> Path:
     final_path, temp_path = _prepare_file_target(path)
     claimed_temp = False
     try:
@@ -41,7 +50,10 @@ def atomic_write_text(
                 final_path.parent,
                 error="invalid_storage_write_path",
             )
-            handle.write(text)
+            for chunk in chunks:
+                if not isinstance(chunk, str):
+                    raise TypeError("atomic_text_chunk_required")
+                handle.write(chunk)
             handle.flush()
             os.fsync(handle.fileno())
         require_unaliased_path(final_path.parent, error="invalid_storage_write_path")

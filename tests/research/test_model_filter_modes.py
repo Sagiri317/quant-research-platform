@@ -27,6 +27,10 @@ from quant_research_platform.markets.implementations.a_share.labels.definitions 
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
+from quant_research_platform.research.models.validation_split import (
+    apply_training_controls,
+    trim_training_buffer,
+)
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     pandas_frame_payload_bytes,
@@ -40,6 +44,60 @@ from tests.research.filter_mode_fixtures import (
     make_filter_mode_frame,
     make_filter_mode_prediction_output_scores,
 )
+
+
+@pytest.mark.parametrize("bad_timestamp", [1, 1.5, 20240101, "invalid", None])
+@pytest.mark.parametrize("purge_gap_steps", [0, 1, 3])
+def test_training_controls_reject_invalid_timestamps_before_selection(
+    bad_timestamp: object,
+    purge_gap_steps: int,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": [bad_timestamp, "2024-01-02"],
+            "asset_id": ["asset_a", "asset_a"],
+            "factor": [1.0, 2.0],
+            "label": [1.0, 2.0],
+        }
+    )
+    spec = ModelSpec(
+        model_id="invalid_timestamp_controls",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        purge_gap_steps=purge_gap_steps,
+        max_train_rows=1,
+    )
+
+    for control in (trim_training_buffer, apply_training_controls):
+        with pytest.raises(ValueError, match="invalid_model_training_timestamp"):
+            control(frame, spec)
+
+
+def test_training_controls_parse_supported_date_strings_without_epoch_guessing(
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": ["20240101", "2024-01-02"],
+            "asset_id": ["asset_a", "asset_a"],
+            "factor": [1.0, 2.0],
+            "label": [1.0, 2.0],
+        }
+    )
+    spec = ModelSpec(
+        model_id="string_timestamp_controls",
+        model_algorithm="linear_regression",
+        input_factor_columns=("factor",),
+        label_column="label",
+        max_train_rows=2,
+    )
+
+    for control in (trim_training_buffer, apply_training_controls):
+        result = control(frame, spec)
+        assert result["timestamp"].tolist() == [
+            pd.Timestamp("2024-01-01"),
+            pd.Timestamp("2024-01-02"),
+        ]
 
 
 def test_filter_columns_cannot_be_features() -> None:

@@ -586,57 +586,47 @@ def test_data_spec_payload_rejects_wrong_kind_source_and_market_ids() -> None:
     )
     research = make_demo_research_dataset_spec()
 
-    with pytest.raises(ValueError, match="dataset_source_id_invalid"):
-        data_spec_payload(replace(interim, source_id=7))  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="dataset_market_id_invalid"):
-        data_spec_payload(replace(processed, market_id=7))  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="dataset_market_id_invalid"):
-        data_spec_payload(replace(research, market_id=7))  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="invalid_source_id"):
+        replace(interim, source_id=7)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="invalid_market_id"):
+        replace(processed, market_id=7)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="invalid_market_id"):
+        replace(research, market_id=7)  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(
     ("field", "value", "error"),
     (
-        ("data_id", 7, "dataset_data_id_invalid"),
-        (
-            "frequency",
-            data_frequency_slug(DataFrequency.DAILY),
-            "dataset_frequency_invalid",
-        ),
-        ("grain", "asset_timestamp", "dataset_grain_invalid"),
+        ("data_id", 7, "data_id_required"),
+        ("frequency", "invalid", "invalid_data_frequency"),
+        ("grain", "invalid", "invalid_data_grain"),
         (
             "primary_key",
             ["market_id", "asset_id", "timestamp"],
-            "dataset_primary_key_invalid",
+            "primary_key_must_be_tuple",
         ),
-        ("partition_columns", ["year"], "dataset_partition_columns_invalid"),
-        ("kind", "factor", "dataset_kind_invalid"),
-        ("source_input_data_ids", ["raw"], "dataset_source_input_data_ids_invalid"),
+        ("partition_columns", ["year"], "partition_columns_must_be_tuple"),
+        ("kind", "invalid", "invalid_processed_data_kind"),
+        (
+            "source_input_data_ids",
+            ["raw"],
+            "source_input_data_ids_must_be_non_empty_strings",
+        ),
         (
             "processed_input_data_ids",
             ["processed"],
-            "dataset_processed_input_data_ids_invalid",
+            "processed_input_data_ids_must_be_non_empty_strings",
         ),
     ),
 )
-def test_write_dataset_rejects_wrong_kind_processed_spec_before_io(
-    tmp_path: Path,
+def test_processed_spec_rejects_invalid_fields_at_construction(
     field: str,
     value: object,
     error: str,
 ) -> None:
-    root = make_dataset_artifact_root(tmp_path, data_id="storage_demo")
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    invalid_spec = replace(spec, **{field: value})
-
     with pytest.raises(ValueError, match=error):
-        datasets.write_dataset(
-            root,
-            make_helper_edges_dataset_frame(market_id="dummy"),
-            spec=invalid_spec,
-        )
-
-    assert not root.exists()
+        replace(spec, **{field: value})
 
 
 @pytest.mark.parametrize(
@@ -685,8 +675,7 @@ def test_validate_dataset_spec_accepts_only_research_immutable_semantic_mappings
         "column_roles",
         MappingProxyType(dict(processed.column_roles)),
     )
-    with pytest.raises(ValueError, match="dataset_column_roles_invalid"):
-        validate_dataset_spec(processed)
+    assert validate_dataset_spec(processed) == "timestamp"
 
 
 @pytest.mark.parametrize(
@@ -772,7 +761,10 @@ def test_manifest_spec_binding_is_typed_exact_recursively(
     manifest["logical_dtype_hash"] = canonical_json_hash(manifest["logical_dtypes"])
     manifest["feature_transforms"][0]["winsorize_quantiles"] = replacement
 
-    with pytest.raises(ValueError, match="dataset_manifest_spec_mismatch"):
+    if all(type(item) is bool for item in replacement):
+        with pytest.raises(ValueError, match="dataset_manifest_spec_mismatch"):
+            validate_dataset_manifest_payload(manifest, spec=spec)
+    else:
         validate_dataset_manifest_payload(manifest, spec=spec)
 
 

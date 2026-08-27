@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -11,11 +12,15 @@ from quant_research_platform.contracts.filtering import (
     EvaluationFilterMode,
     validate_evaluation_filter_mode,
 )
-from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.signals import _cross_signal_id_column_overlaps
+from quant_research_platform.contracts.signals import (
+    SignalSpec,
+    _cross_signal_id_column_overlaps,
+)
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
+    _validate_non_empty_string,
     strict_finite_numeric_series,
 )
 
@@ -52,9 +57,14 @@ class EvaluationSpec:
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if self.contract_version != "0.1":
+        if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_evaluation_contract_version")
         validate_run_id(self.run_id)
+        object.__setattr__(self, "market_id", validate_market_id(self.market_id))
+        _validate_non_empty_string(
+            self.research_dataset_id,
+            "research_dataset_id_required",
+        )
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_signals(self.signals)
         _validate_column_tuple(self.label_columns, "label_columns")
@@ -73,6 +83,8 @@ class EvaluationSpec:
         if self.n_groups < 2:
             raise ValueError("evaluation_n_groups_too_small")
         _validate_signal_label_separation(self.signals, self.label_columns)
+        if type(self.run_type) is not str or not self.run_type:
+            raise ValueError("evaluation_run_type_required")
 
 
 @dataclass(frozen=True)
@@ -95,9 +107,16 @@ class EvaluationDiagnostics:
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if self.contract_version != "0.1":
+        if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_evaluation_contract_version")
         validate_evaluation_filter_mode(self.filter_mode)
+        _validate_column_tuple(
+            self.filter_columns_used,
+            "filter_columns_used",
+            required=False,
+        )
+        if type(self.filter_definition) is not str or not self.filter_definition:
+            raise ValueError("evaluation_filter_definition_required")
         count_fields = (
             "rows_input",
             "rows_after_filter_mode",
@@ -117,6 +136,21 @@ class EvaluationDiagnostics:
             raise ValueError("invalid_evaluation_diagnostics_count: n_groups")
         if self.n_groups < 2:
             raise ValueError("evaluation_diagnostics_n_groups_too_small")
+        for field_name in ("min_timestamp", "max_timestamp"):
+            value = getattr(self, field_name)
+            if value is not None:
+                try:
+                    parsed = date.fromisoformat(value)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(f"invalid_evaluation_{field_name}") from exc
+                if parsed.isoformat() != value:
+                    raise ValueError(f"invalid_evaluation_{field_name}")
+        if (
+            self.min_timestamp is not None
+            and self.max_timestamp is not None
+            and self.min_timestamp > self.max_timestamp
+        ):
+            raise ValueError("invalid_evaluation_timestamp_range")
 
 
 def strict_non_negative_count_series(
@@ -153,8 +187,12 @@ def strict_non_negative_count_value(
 
 
 def _validate_signals(signals: tuple[_SignalSpec, ...]) -> None:
+    if type(signals) is not tuple:
+        raise ValueError("evaluation_signals_must_be_tuple")
     if not signals:
         raise ValueError("evaluation_signals_required")
+    if any(type(signal) is not SignalSpec for signal in signals):
+        raise ValueError("evaluation_signals_invalid")
     signal_ids = [signal.signal_id for signal in signals]
     if len(set(signal_ids)) != len(signal_ids):
         raise ValueError("evaluation_signal_ids_must_not_contain_duplicates")

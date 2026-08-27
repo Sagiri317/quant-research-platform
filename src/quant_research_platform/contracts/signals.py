@@ -33,16 +33,27 @@ class SignalSpec:
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if self.contract_version != "0.1":
+        if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_signal_contract_version")
-        if not isinstance(self.signal_id, str) or not self.signal_id:
+        if type(self.signal_id) is not str or not self.signal_id:
             raise ValueError("signal_id_required")
-        if self.source_kind not in {"factor", "feature", "prediction"}:
+        if type(self.source_kind) is not str or self.source_kind not in {
+            "factor",
+            "feature",
+            "prediction",
+        }:
             raise ValueError("unsupported_signal_source_kind")
-        if not isinstance(self.source_column, str) or not self.source_column:
+        if type(self.source_column) is not str or not self.source_column:
             raise ValueError("signal_source_column_required")
-        if self.direction not in {"higher_is_better", "lower_is_better"}:
+        if type(self.direction) is not str or self.direction not in {
+            "higher_is_better",
+            "lower_is_better",
+        }:
             raise ValueError("unsupported_signal_direction")
-        if self.transform not in {"identity", "rank", "zscore"}:
+        if type(self.transform) is not str or self.transform not in {
+            "identity",
+            "rank",
+            "zscore",
+        }:
             raise ValueError("unsupported_signal_transform")
         reject_filter_input_columns((self.signal_id, self.source_column))

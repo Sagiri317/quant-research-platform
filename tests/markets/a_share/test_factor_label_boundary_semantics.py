@@ -19,7 +19,7 @@ from quant_research_platform.markets.implementations.a_share.labels.definitions 
 )
 from quant_research_platform.research.models import validation_split
 from quant_research_platform.research.portfolios.engine import (
-    construct_portfolio_positions,
+    _construct_portfolio_positions,
 )
 
 pytestmark = pytest.mark.guardrails
@@ -132,7 +132,7 @@ def test_eight_bars_bind_factor_signal_entry_exit_and_return_attribution() -> No
     )[0]
 
     observation = dates[5]
-    result = construct_portfolio_positions(
+    result = _construct_portfolio_positions(
         frame.loc[frame["timestamp"].le(observation)],
         spec,
         source_columns_by_kind={"factor": ("mom_5d",)},
@@ -185,7 +185,7 @@ def test_default_daily_portfolio_uses_one_day_realized_capital_returns() -> None
         ),
     )[0]
 
-    result = construct_portfolio_positions(
+    result = _construct_portfolio_positions(
         frame,
         spec,
         source_columns_by_kind={"factor": ("signal",)},

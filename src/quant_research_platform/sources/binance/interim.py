@@ -20,6 +20,7 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -459,7 +460,10 @@ def _filter_time_window(
 ) -> pd.DataFrame:
     if frame.empty or (start_date is None and end_date is None):
         return frame
-    timestamps = pd.to_datetime(frame["timestamp"], errors="coerce")
+    timestamps = strict_timestamp_series(
+        frame["timestamp"],
+        error="invalid_binance_interim_timestamp",
+    )
     mask = pd.Series(True, index=frame.index)
     start, end, end_inclusive = _timestamp_filter_interval(
         start_date=start_date,

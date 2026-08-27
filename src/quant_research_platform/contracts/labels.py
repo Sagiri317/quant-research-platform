@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.ids import MarketId, validate_market_id
 
 
 @dataclass(frozen=True)
@@ -23,17 +23,20 @@ class LabelDefinition:
     definition_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if not self.label_id:
+        if type(self.label_id) is not str or not self.label_id:
             raise ValueError("label_id_required")
-        if not self.family:
+        object.__setattr__(self, "market_id", validate_market_id(self.market_id))
+        if type(self.family) is not str or not self.family:
             raise ValueError("label_family_required")
-        if not self.input_columns:
+        if type(self.input_columns) is not tuple or not self.input_columns:
             raise ValueError("label_input_columns_required")
-        if any(not column for column in self.input_columns):
+        if any(type(column) is not str or not column for column in self.input_columns):
             raise ValueError("label_input_column_required")
-        if not self.output_column:
+        if len(set(self.input_columns)) != len(self.input_columns):
+            raise ValueError("label_input_columns_must_not_contain_duplicates")
+        if type(self.output_column) is not str or not self.output_column:
             raise ValueError("label_output_column_required")
-        if not self.label_timing:
+        if type(self.label_timing) is not str or not self.label_timing:
             raise ValueError("label_timing_required")
         if not isinstance(self.horizon, int) or isinstance(self.horizon, bool):
             raise ValueError("label_horizon_must_be_positive")
@@ -43,11 +46,11 @@ class LabelDefinition:
             raise ValueError("label_lookahead_must_be_positive")
         if self.lookahead <= 0:
             raise ValueError("label_lookahead_must_be_positive")
-        if not self.entry_rule:
+        if type(self.entry_rule) is not str or not self.entry_rule:
             raise ValueError("label_entry_rule_required")
-        if not self.exit_rule:
+        if type(self.exit_rule) is not str or not self.exit_rule:
             raise ValueError("label_exit_rule_required")
-        if not self.definition_version:
+        if type(self.definition_version) is not str or not self.definition_version:
             raise ValueError("label_definition_version_required")
         if self.definition_version != "0.1":
             raise ValueError("unsupported_label_definition_version")

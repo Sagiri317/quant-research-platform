@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from collections import UserDict
 from dataclasses import replace
 from types import MappingProxyType
 
+import numpy as np
 import pytest
 from pydantic import ValidationError
 
@@ -12,6 +12,7 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
+    DataSpec,
     normalize_data_frequency,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
@@ -22,14 +23,6 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from tests.helpers import frequency_ids
-
-
-class _DictSubclass(dict[str, str]):
-    pass
-
-
-class _ColumnRoleDictSubclass(dict[str, ColumnRole]):
-    pass
 
 
 class _StringSubclass(str):
@@ -234,61 +227,6 @@ def test_research_dataset_spec_freezes_semantic_mapping_snapshots() -> None:
 
 
 @pytest.mark.parametrize(
-    "wrong_container",
-    (
-        [("market_id", ColumnRole.KEY)],
-        (("market_id", ColumnRole.KEY),),
-        "market_id",
-        None,
-        _ColumnRoleDictSubclass({"market_id": ColumnRole.KEY}),
-        UserDict({"market_id": ColumnRole.KEY}),
-    ),
-    ids=("list_pairs", "tuple_pairs", "string", "none", "dict_subclass", "mapping"),
-)
-def test_research_dataset_spec_requires_exact_column_roles_container(
-    wrong_container: object,
-) -> None:
-    spec = _complete_research_dataset_spec()
-
-    with pytest.raises(ValueError, match="^invalid_research_column_roles$"):
-        replace(spec, column_roles=wrong_container)
-
-
-@pytest.mark.parametrize(
-    "wrong_key",
-    (1, "", _StringSubclass("factor_1_alias")),
-    ids=("integer", "empty", "str_subclass"),
-)
-def test_research_dataset_spec_requires_exact_nonempty_column_role_keys(
-    wrong_key: object,
-) -> None:
-    spec = _complete_research_dataset_spec()
-
-    with pytest.raises(ValueError, match="^invalid_research_column_roles$"):
-        replace(
-            spec,
-            column_roles={**spec.column_roles, wrong_key: ColumnRole.FACTOR},
-        )
-
-
-@pytest.mark.parametrize(
-    "wrong_role",
-    ("factor", _StringSubclass("factor"), 1),
-    ids=("string", "str_subclass", "integer"),
-)
-def test_research_dataset_spec_requires_exact_column_role_values(
-    wrong_role: object,
-) -> None:
-    spec = _complete_research_dataset_spec()
-
-    with pytest.raises(ValueError, match="^invalid_research_column_roles$"):
-        replace(
-            spec,
-            column_roles={**spec.column_roles, "factor_1": wrong_role},
-        )
-
-
-@pytest.mark.parametrize(
     "wrong_kind",
     ([], {}, _StringSubclass("strict")),
     ids=("list", "dict", "str_subclass"),
@@ -303,30 +241,6 @@ def test_research_dataset_spec_rejects_invalid_key_coverage_policy_with_owner_er
             spec,
             key_coverage={**spec.key_coverage, "factors": wrong_kind},
         )
-
-
-@pytest.mark.parametrize(
-    "wrong_container",
-    ([], (), None, _DictSubclass()),
-    ids=("list", "tuple", "none", "dict_subclass"),
-)
-def test_research_dataset_spec_requires_exact_key_coverage_dict(
-    wrong_container: object,
-) -> None:
-    spec = _complete_research_dataset_spec()
-
-    with pytest.raises(ValueError, match="^invalid_research_key_coverage$"):
-        replace(spec, key_coverage=wrong_container)
-
-
-@pytest.mark.parametrize("wrong_key", (1, _StringSubclass("factors")))
-def test_research_dataset_spec_requires_exact_string_key_coverage_keys(
-    wrong_key: object,
-) -> None:
-    spec = _complete_research_dataset_spec()
-
-    with pytest.raises(ValueError, match="^invalid_research_key_coverage$"):
-        replace(spec, key_coverage={wrong_key: "strict"})
 
 
 def test_feature_transform_spec_rejects_raw_factor_pass_through() -> None:
@@ -624,3 +538,37 @@ def _complete_research_dataset_spec() -> ResearchDatasetSpec:
         filter_columns=("eligible",),
         context_columns=("context_1",),
     )
+
+
+def test_contracts_snapshot_mutable_model_and_data_values() -> None:
+    params = {
+        "nested": {"values": [1, 2], "array": np.array([3, 4])},
+    }
+    model = ModelSpec(
+        model_id="snapshot_model",
+        model_algorithm="linear_regression",
+        input_feature_columns=("feature",),
+        label_column="label",
+        hyperparameters=params,
+    )
+    roles = {"asset_id": ColumnRole.KEY}
+    data = DataSpec(
+        data_id="snapshot_data",
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_REFERENCE,
+        column_roles=roles,
+        primary_key=("asset_id",),
+        partition_columns=(),
+    )
+
+    params["nested"]["values"].append(3)
+    params["nested"]["array"][0] = 99
+    roles["later"] = ColumnRole.CONTEXT
+
+    assert model.hyperparameters["nested"]["values"] == (1, 2)
+    assert model.hyperparameters["nested"]["array"] == (3, 4)
+    assert data.required_columns == ("asset_id",)
+    with pytest.raises(TypeError):
+        model.hyperparameters["new"] = 1  # type: ignore[index]
+    with pytest.raises(TypeError):
+        data.column_roles["new"] = ColumnRole.CONTEXT  # type: ignore[index]

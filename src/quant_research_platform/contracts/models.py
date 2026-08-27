@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from math import isfinite
 from types import MappingProxyType
 
 import numpy as np
@@ -14,7 +15,10 @@ from quant_research_platform.contracts.filtering import (
     reject_filter_input_columns,
     validate_sample_filter_mode,
 )
-from quant_research_platform.contracts.validation import _validate_column_tuple
+from quant_research_platform.contracts.validation import (
+    _validate_column_tuple,
+    _validate_non_empty_string,
+)
 
 
 @dataclass(frozen=True)
@@ -116,6 +120,8 @@ _PARALLEL_MODEL_ALGORITHMS = frozenset(
 
 
 def _model_algorithm_facts(algorithm: str) -> _ModelAlgorithmFacts:
+    if type(algorithm) is not str:
+        raise ValueError("unsupported_model_algorithm")
     try:
         return _MODEL_ALGORITHM_FACTS[algorithm]
     except KeyError as exc:
@@ -137,13 +143,26 @@ def _model_smoke_hyperparameters(algorithm: str) -> dict[str, object]:
 def _freeze_model_value(value: object) -> object:
     if isinstance(value, np.generic):
         return _freeze_model_value(value.item())
+    if isinstance(value, np.ndarray):
+        return _freeze_model_value(value.tolist())
     if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _freeze_model_value(item) for key, item in value.items()}
-        )
+        frozen: dict[str, object] = {}
+        for key, item in value.items():
+            if type(key) is not str:
+                raise TypeError("model hyperparameter mapping keys must be strings")
+            frozen[key] = _freeze_model_value(item)
+        return MappingProxyType(frozen)
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_model_value(item) for item in value)
-    return value
+    if value is None or type(value) is bool or type(value) is int:
+        return value
+    if type(value) is float:
+        if not isfinite(value):
+            raise ValueError("model hyperparameter values must be finite")
+        return value
+    if type(value) is str:
+        return value
+    raise TypeError("unsupported_model_hyperparameter_value")
 
 
 def _thaw_model_value(value: object) -> object:
@@ -227,10 +246,11 @@ class ModelSpec:
 
     def __post_init__(self) -> None:
         hyperparameters = _freeze_model_hyperparameters(self.hyperparameters)
-        if self.contract_version != "0.1":
+        if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_model_contract_version")
-        if not isinstance(self.model_algorithm, str) or not self.model_algorithm:
-            raise ValueError("model_algorithm_required")
+        _validate_non_empty_string(self.model_id, "model_id_required")
+        _validate_non_empty_string(self.model_algorithm, "model_algorithm_required")
+        facts = _model_algorithm_facts(self.model_algorithm)
         validate_sample_filter_mode(self.sample_filter_mode, owner="model")
         _validate_column_tuple(
             self.input_factor_columns,
@@ -242,10 +262,9 @@ class ModelSpec:
             "input_feature_columns",
             required=False,
         )
-        facts = _MODEL_ALGORITHM_FACTS.get(self.model_algorithm)
+        _validate_non_empty_string(self.label_column, "model_label_column_required")
         if (
-            facts is not None
-            and facts.input_kind == "single_factor_input"
+            facts.input_kind == "single_factor_input"
             and (len(self.input_factor_columns) != 1 or self.input_feature_columns)
         ):
             raise ValueError("single_factor_input_requires_one_factor_and_no_features")

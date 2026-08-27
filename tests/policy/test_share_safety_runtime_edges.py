@@ -10,6 +10,7 @@ from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
     evidence_json_value_unsafe_reason,
     evidence_text_stream_unsafe_reason,
+    evidence_text_unsafe_reason,
     sanitize_shared_text,
     unsafe_for_share_reason,
 )
@@ -117,6 +118,24 @@ def test_typed_identifiers_are_not_free_text_stock_guesses() -> None:
         evidence_json_value_unsafe_reason({"message": "run_000001"})
         == "stock_sample"
     )
+
+
+def test_typed_identifier_policy_is_consistent_across_json_jsonl_and_plain_text(
+) -> None:
+    payload = {
+        "model_id": "model_000001",
+        "research_dataset_id": "research_dataset_600000",
+        "signal_id": "signal_300001",
+        "run_id": "run_000001",
+        "output_id": "output_000001",
+    }
+    assert evidence_json_value_unsafe_reason(payload) is None
+    jsonl = "{" + ",".join(
+        f'"{key}": "{value}"' for key, value in payload.items()
+    ) + "}"
+    assert evidence_text_stream_unsafe_reason((jsonl.encode("utf-8"),)) is None
+    plain = "\n".join(f"{key}: {value}" for key, value in payload.items())
+    assert evidence_text_unsafe_reason(plain) is None
 
 
 def test_share_safety_failure_path_allows_logical_output_path() -> None:

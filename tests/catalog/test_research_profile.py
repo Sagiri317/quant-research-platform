@@ -11,7 +11,7 @@ from quant_research_platform.markets.implementations.a_share import (
     research_scenarios,
 )
 from quant_research_platform.research.portfolios.engine import (
-    construct_portfolio_positions,
+    _construct_portfolio_positions,
 )
 from quant_research_platform.runtime.resources import (
     _OwnedValue,
@@ -326,7 +326,7 @@ def test_a_share_factor_and_prediction_portfolios_apply_formal_masks() -> None:
     )
 
     for spec in specs:
-        result = construct_portfolio_positions(
+        result = _construct_portfolio_positions(
             frame,
             spec,
             source_columns_by_kind={

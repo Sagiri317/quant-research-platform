@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import sys
+import hashlib
 from collections.abc import Collection, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import date
@@ -13,8 +13,11 @@ import pandas as pd
 
 from quant_research_platform.contracts._json import (
     bounded_rendered_qrp_json_object_size,
+    canonical_identity_bytes,
     canonical_json_hash,
+    render_qrp_json_object,
 )
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
@@ -31,6 +34,7 @@ from quant_research_platform.storage._dataset_reading import (
     iter_dataset_chunks,
     open_dataset_session,
 )
+from quant_research_platform.storage.atomic import atomic_write_chunks
 
 _INVENTORY_KEYS = frozenset({"schema_id", "datasets"})
 _INVENTORY_ITEM_KEYS = frozenset(
@@ -59,13 +63,13 @@ _LOWER_HEX = frozenset("0123456789abcdef")
 
 
 @contextmanager
-def open_schema_inventory_payload(
+def iter_schema_inventory_items(
     project_root: Path,
     *,
     important_null_count_columns: Collection[str] | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
-) -> Iterator[dict[str, Any]]:
-    """Retain sanitized schema metadata through its one consumer."""
+) -> Iterator[Iterator[dict[str, Any]]]:
+    """Yield one validated inventory item at a time."""
 
     with runtime_resource_policy_scope(resource_policy) as policy:
         root = Path(project_root)
@@ -86,56 +90,61 @@ def open_schema_inventory_payload(
             *(data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)),
         ):
             require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
-        with ExitStack() as retained:
-            items: list[dict[str, Any]] = []
-            retained_item_bytes = 0
+        def generate() -> Iterator[dict[str, Any]]:
             for artifact_root in _iter_dataset_artifact_roots(root):
-                try:
-                    item, item_bytes = _inventory_item(
-                        root,
-                        artifact_root,
-                        important_null_count_columns=important_columns,
-                        resource_policy=policy,
-                        retained_items=retained,
-                    )
-                except MemoryError:
-                    raise ValueError(
-                        "schema_inventory_payload_exceeds_task_memory_budget"
-                    ) from None
-                items.append(item)
-                retained_item_bytes += item_bytes
-            if not items:
-                raise ValueError("schema_inventory_no_datasets_found")
-            render_bound = 128 + retained_item_bytes + 2 * len(items)
-            try:
-                retained.enter_context(
-                    policy.lease(
-                        "schema.inventory.consumer_overlap",
-                        render_bound + len(items) * sys.getsizeof(None),
-                    )
+                with ExitStack() as item_state:
+                    try:
+                        item, _item_bytes = _inventory_item(
+                            root,
+                            artifact_root,
+                            important_null_count_columns=important_columns,
+                            resource_policy=policy,
+                            retained_items=item_state,
+                        )
+                    except MemoryError:
+                        raise ValueError(
+                            "schema_inventory_payload_exceeds_task_memory_budget"
+                        ) from None
+                    yield item
+
+        yield generate()
+
+
+def write_schema_inventory(
+    project_root: Path,
+    output: Path,
+    *,
+    important_null_count_columns: Collection[str] | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> Path:
+    """Stream a deterministic schema inventory through atomic publication."""
+
+    def chunks() -> Iterator[str]:
+        previous_root: str | None = None
+        found = False
+        yield '{\n  "datasets": ['
+        with iter_schema_inventory_items(
+            project_root,
+            important_null_count_columns=important_null_count_columns,
+            resource_policy=resource_policy,
+        ) as items:
+            for item in items:
+                _validate_schema_inventory_item(item)
+                logical_root = item["logical_relative_root"]
+                if previous_root is not None and logical_root <= previous_root:
+                    raise ValueError("schema_inventory_dataset_order_invalid")
+                previous_root = logical_root
+                rendered = render_qrp_json_object(item)
+                prefix = "\n" if not found else ",\n"
+                found = True
+                yield prefix + "\n".join(
+                    "  " + line for line in rendered.splitlines()
                 )
-            except MemoryError:
-                raise ValueError(
-                    "schema_inventory_payload_exceeds_task_memory_budget"
-                ) from None
-            payload = {
-                "schema_id": "qrp-schema-inventory",
-                "datasets": sorted(
-                    items,
-                    key=lambda item: item["logical_relative_root"],
-                ),
-            }
-            try:
-                bounded_rendered_qrp_json_object_size(
-                    payload,
-                    lazy_arrays={},
-                    max_bytes=render_bound,
-                )
-            except (MemoryError, ValueError):
-                raise ValueError(
-                    "schema_inventory_payload_exceeds_task_memory_budget"
-                ) from None
-            yield payload
+        if not found:
+            raise ValueError("schema_inventory_no_datasets_found")
+        yield '\n  ],\n  "schema_id": "qrp-schema-inventory"\n}\n'
+
+    return atomic_write_chunks(output, chunks(), encoding="utf-8")
 
 
 def summarize_schema_inventory_payload(
@@ -149,19 +158,36 @@ def summarize_schema_inventory_payload(
         "schema_id": "qrp-schema-inventory-summary",
         "dataset_count": len(datasets),
         "total_row_count": sum(item["row_count"] for item in datasets),
-        "schema_hash": canonical_json_hash(
-            [
-                {
-                    "artifact_id": item["artifact_id"],
-                    "layer": item["layer"],
-                    "kind": item["kind"],
-                    "logical_relative_root": item["logical_relative_root"],
-                    "schema_hash": item["schema_hash"],
-                    "row_count": item["row_count"],
-                }
-                for item in datasets
-            ]
-        ),
+        "schema_hash": _schema_inventory_summary_hash(datasets),
+    }
+
+
+def summarize_schema_inventory(
+    project_root: Path,
+    *,
+    important_null_count_columns: Collection[str] | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> dict[str, object]:
+    count = 0
+    total_rows = 0
+    digest = hashlib.sha256()
+    with iter_schema_inventory_items(
+        project_root,
+        important_null_count_columns=important_null_count_columns,
+        resource_policy=resource_policy,
+    ) as items:
+        for item in items:
+            _validate_schema_inventory_item(item)
+            count += 1
+            total_rows += int(item["row_count"])
+            _update_schema_inventory_summary_hash(digest, item)
+    if count == 0:
+        raise ValueError("schema_inventory_no_datasets_found")
+    return {
+        "schema_id": "qrp-schema-inventory-summary",
+        "dataset_count": count,
+        "total_row_count": total_rows,
+        "schema_hash": digest.hexdigest(),
     }
 
 
@@ -574,8 +600,9 @@ def _aggregate_dataset_stats(
             for column in frame.columns:
                 dtypes.setdefault(str(column), str(frame[column].dtype))
             if "timestamp" in frame.columns:
-                timestamps = pd.to_datetime(
-                    frame["timestamp"], errors="coerce"
+                timestamps = strict_timestamp_series(
+                    frame["timestamp"],
+                    error="schema_inventory_invalid_timestamp",
                 ).dropna()
                 if not timestamps.empty:
                     year_counts = timestamps.dt.year.astype(str).value_counts()
@@ -665,3 +692,28 @@ def _schema_hash(
             "partition_columns": list(partition_columns),
         },
     )
+
+
+def _schema_inventory_summary_hash(items: Iterable[dict[str, Any]]) -> str:
+    digest = hashlib.sha256()
+    for item in items:
+        _update_schema_inventory_summary_hash(digest, item)
+    return digest.hexdigest()
+
+
+def _update_schema_inventory_summary_hash(
+    digest: hashlib._Hash,
+    item: dict[str, Any],
+) -> None:
+    identity = canonical_identity_bytes(
+        {
+            "artifact_id": item["artifact_id"],
+            "layer": item["layer"],
+            "kind": item["kind"],
+            "logical_relative_root": item["logical_relative_root"],
+            "schema_hash": item["schema_hash"],
+            "row_count": item["row_count"],
+        }
+    )
+    digest.update(len(identity).to_bytes(8, byteorder="big"))
+    digest.update(identity)

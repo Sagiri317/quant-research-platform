@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Iterable
+from datetime import date, datetime
 from typing import Any
 
 import numpy as np
@@ -16,12 +17,25 @@ def _validate_column_tuple(
     *,
     required: bool = True,
 ) -> None:
+    if type(columns) is not tuple:
+        raise ValueError(f"{field_name}_must_be_tuple")
     if required and not columns:
         raise ValueError(f"{field_name}_required")
-    if any(not isinstance(column, str) or not column for column in columns):
+    if any(type(column) is not str or not column for column in columns):
         raise ValueError(f"{field_name}_must_be_non_empty_strings")
     if len(set(columns)) != len(columns):
         raise ValueError(f"{field_name}_must_not_contain_duplicates")
+
+
+def _validate_non_empty_string(value: object, error: str) -> str:
+    if type(value) is not str or not value:
+        raise ValueError(error)
+    return value
+
+
+def require_non_negative_int(value: object, *, error: str) -> None:
+    if type(value) is not int or value < 0:
+        raise ValueError(error)
 
 
 def strict_string_series(
@@ -92,6 +106,15 @@ def strict_timestamp_series(
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
+    if any(
+        not is_null and not _is_supported_timestamp_scalar(value)
+        for value, is_null in zip(
+            series.tolist(),
+            null_mask.tolist(),
+            strict=True,
+        )
+    ):
+        raise ValueError(error)
     if pd.api.types.is_datetime64_dtype(series.dtype):
         try:
             return pd.Series(
@@ -108,7 +131,7 @@ def strict_timestamp_series(
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            parsed = pd.to_datetime(series, errors="coerce", format="mixed")
+            parsed = pd.to_datetime(series, errors="raise", format="mixed")
     except (TypeError, ValueError, OverflowError, Warning):
         return _strict_timestamp_series_fallback(
             series,
@@ -160,10 +183,8 @@ def _strict_timestamp_series_fallback(
                     parsed_values.append(pd.NaT)
                     continue
                 timestamp = pd.Timestamp(
-                    pd.to_datetime(value, errors="coerce", format="mixed")
+                    pd.to_datetime(value, errors="raise", format="mixed")
                 )
-                if pd.isna(timestamp):
-                    raise ValueError(error)
                 timestamp_offset = timestamp.utcoffset()
                 timestamp_aware = timestamp_offset is not None
                 if aware is None:
@@ -315,6 +336,13 @@ def _is_hashable(value: object) -> bool:
     except TypeError:
         return False
     return True
+
+
+def _is_supported_timestamp_scalar(value: object) -> bool:
+    return isinstance(value, (str, date, datetime, np.datetime64)) and not isinstance(
+        value,
+        bool,
+    )
 
 
 def _is_null_scalar(value: object) -> bool:

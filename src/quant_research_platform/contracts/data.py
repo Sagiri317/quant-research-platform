@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from types import MappingProxyType
 
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.contracts.ids import (
+    MarketId,
+    SourceId,
+    validate_market_id,
+    validate_source_id,
+)
+from quant_research_platform.contracts.validation import (
+    _validate_column_tuple,
+    _validate_non_empty_string,
+)
 
 
 class DataFrequency(StrEnum):
@@ -38,10 +49,34 @@ def normalize_data_frequency(value: DataFrequency | str) -> DataFrequency:
 
     if isinstance(value, DataFrequency):
         return value
+    if type(value) is not str:
+        raise ValueError(f"invalid_data_frequency: {value}")
     try:
-        return DataFrequency(str(value))
+        return DataFrequency(value)
     except ValueError as exc:
         raise ValueError(f"invalid_data_frequency: {value}") from exc
+
+
+def normalize_data_grain(value: DataGrain | str) -> DataGrain:
+    if isinstance(value, DataGrain):
+        return value
+    if type(value) is not str:
+        raise ValueError(f"invalid_data_grain: {value}")
+    try:
+        return DataGrain(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid_data_grain: {value}") from exc
+
+
+def normalize_processed_data_kind(value: ProcessedDataKind | str) -> ProcessedDataKind:
+    if isinstance(value, ProcessedDataKind):
+        return value
+    if type(value) is not str:
+        raise ValueError(f"invalid_processed_data_kind: {value}")
+    try:
+        return ProcessedDataKind(value)
+    except ValueError as exc:
+        raise ValueError(f"invalid_processed_data_kind: {value}") from exc
 
 
 def data_frequency_slug(value: DataFrequency | str) -> str:
@@ -76,24 +111,53 @@ def require_supported_data_frequency(
 @dataclass(frozen=True, kw_only=True)
 class DataSpec:
     data_id: str
-    frequency: DataFrequency
-    grain: DataGrain
-    column_roles: dict[str, ColumnRole]
+    frequency: DataFrequency | str
+    grain: DataGrain | str
+    column_roles: Mapping[str, ColumnRole | str]
     primary_key: tuple[str, ...]
     partition_columns: tuple[str, ...]
     schema_version: str = "0.1"
     required_columns: tuple[str, ...] = field(init=False)
 
     def __post_init__(self) -> None:
-        if self.schema_version != "0.1":
+        if type(self.schema_version) is not str or self.schema_version != "0.1":
             raise ValueError("unsupported_schema_version")
-        column_roles = dict(self.column_roles)
-        object.__setattr__(self, "column_roles", column_roles)
+        _validate_non_empty_string(self.data_id, "data_id_required")
+        frequency = normalize_data_frequency(self.frequency)
+        grain = normalize_data_grain(self.grain)
+        if not isinstance(self.column_roles, Mapping):
+            raise ValueError("column_roles_required")
+        column_roles: dict[str, ColumnRole] = {}
+        try:
+            for column, role in self.column_roles.items():
+                if type(column) is not str or not column:
+                    raise ValueError("column_roles_must_use_non_empty_string_keys")
+                try:
+                    column_roles[column] = (
+                        role if type(role) is ColumnRole else ColumnRole(role)
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("column_roles_must_use_supported_roles") from exc
+        except AttributeError as exc:
+            raise ValueError("column_roles_required") from exc
+        if not column_roles:
+            raise ValueError("column_roles_required")
+        _validate_column_tuple(self.primary_key, "primary_key")
+        _validate_column_tuple(
+            self.partition_columns,
+            "partition_columns",
+            required=False,
+        )
+        if self.partition_columns not in ((), ("year",)):
+            raise ValueError("unsupported_partitioning")
         missing = [
             column for column in self.primary_key if column not in column_roles
         ]
         if missing:
             raise ValueError(f"missing_primary_key_columns: {', '.join(missing)}")
+        object.__setattr__(self, "frequency", frequency)
+        object.__setattr__(self, "grain", grain)
+        object.__setattr__(self, "column_roles", MappingProxyType(column_roles))
         object.__setattr__(self, "required_columns", tuple(column_roles))
 
 
@@ -101,10 +165,31 @@ class DataSpec:
 class InterimDataSpec(DataSpec):
     source_id: SourceId
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "source_id", validate_source_id(self.source_id))
+
 
 @dataclass(frozen=True, kw_only=True)
 class ProcessedDataSpec(DataSpec):
     market_id: MarketId
-    kind: ProcessedDataKind
+    kind: ProcessedDataKind | str
     source_input_data_ids: tuple[str, ...] = ()
     processed_input_data_ids: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        object.__setattr__(self, "market_id", validate_market_id(self.market_id))
+        object.__setattr__(self, "kind", normalize_processed_data_kind(self.kind))
+        for field_name, values in (
+            ("source_input_data_ids", self.source_input_data_ids),
+            ("processed_input_data_ids", self.processed_input_data_ids),
+        ):
+            _validate_string_tuple(values, field_name)
+
+
+def _validate_string_tuple(values: object, field_name: str) -> None:
+    if type(values) is not tuple or any(
+        type(value) is not str or not value for value in values
+    ):
+        raise ValueError(f"{field_name}_must_be_non_empty_strings")

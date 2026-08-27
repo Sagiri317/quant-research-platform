@@ -66,31 +66,17 @@ class _PortfolioTemporalState:
     ] = field(default_factory=dict)
 
 
-def construct_portfolio_positions(
-    frame: pd.DataFrame,
-    spec: PortfolioSpec,
-    *,
-    source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
-) -> PortfolioComputationResult:
-    """Construct portfolio diagnostics from normalized SignalSpec scores."""
-
-    return _construct_portfolio_positions(
-        frame,
-        spec,
-        source_columns_by_kind=source_columns_by_kind,
-        temporal_state=_PortfolioTemporalState(),
-    )
-
-
 def _construct_portfolio_positions(
     frame: pd.DataFrame,
     spec: PortfolioSpec,
     *,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None,
-    temporal_state: _PortfolioTemporalState,
+    temporal_state: _PortfolioTemporalState | None = None,
     resource_lease: MemoryLease | None = None,
 ) -> PortfolioComputationResult:
 
+    if temporal_state is None:
+        temporal_state = _PortfolioTemporalState()
     if (
         normalize_rebalance_frequency(spec.rebalance_frequency)
         not in SUPPORTED_REBALANCE_FREQUENCIES

@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.run_id import validate_run_id
 
 _OUTPUT_IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,127}$")
@@ -43,8 +43,15 @@ class OutputDefinition:
     scope: OutputScope
 
     def __post_init__(self) -> None:
+        if type(self.display_name) is not str or not self.display_name:
+            raise ValueError("output_display_name_required")
+        if type(self.run_type) is not str or not self.run_type:
+            raise ValueError("output_run_type_required")
         validate_output_identifier(self.output_definition_id)
-        OutputScope(self.scope)
+        try:
+            object.__setattr__(self, "scope", OutputScope(self.scope))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_output_scope") from exc
 
 
 @dataclass(frozen=True)
@@ -57,9 +64,15 @@ class OutputSpec:
     scope: OutputScope
 
     def __post_init__(self) -> None:
-        OutputScope(self.scope)
+        try:
+            object.__setattr__(self, "scope", OutputScope(self.scope))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_output_scope") from exc
         validate_output_identifier(self.output_id)
         validate_output_identifier(self.output_definition_id)
         if self.output_id == self.output_definition_id:
             raise ValueError("output_id_must_identify_instance")
         validate_run_id(self.run_id)
+        object.__setattr__(self, "market_id", validate_market_id(self.market_id))
+        if type(self.run_type) is not str or not self.run_type:
+            raise ValueError("output_run_type_required")

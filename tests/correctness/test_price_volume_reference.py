@@ -16,7 +16,6 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
-from quant_research_platform.markets.session_windows import SessionWindow
 from quant_research_platform.research.factors.price_volume.calculations import (
     calculate_price_volume_factors,
 )
@@ -299,14 +298,8 @@ def test_price_volume_factor_read_window_expands_for_sparse_asset_history() -> N
             & pd.to_datetime(panel["timestamp"]).dt.normalize().isin(missing_sessions)
         )
     ].copy()
-    first_core = sessions[130]
-    window = SessionWindow(
-        core=TimeWindow(first_core.date(), sessions[135].date()),
-        read=TimeWindow(sessions[110].date(), sessions[135].date()),
-        core_sessions=sessions[130:136],
-        read_sessions=sessions[110:136],
-        reason="factor_warmup",
-    )
+    core_sessions = sessions[130:136]
+    read_window = TimeWindow(sessions[110].date(), sessions[135].date())
 
     expanded = factor_calculations.factor_read_window_for_panel(
         panel.loc[:, ["asset_id", "timestamp"]],
@@ -315,12 +308,12 @@ def test_price_volume_factor_read_window_expands_for_sparse_asset_history() -> N
             for definition in factor_definitions.factor_definitions()
             if definition.output_column == "mom_20d"
         ),
-        read_window=window.read,
-        core_sessions=window.core_sessions,
+        read_window=read_window,
+        core_sessions=core_sessions,
     )
 
     assert expanded.start == sessions[92].date()
-    assert expanded.end == window.read.end
+    assert expanded.end == read_window.end
 
 
 @pytest.mark.parametrize(
@@ -416,13 +409,8 @@ def test_forward_return_label_read_window_expands_for_sparse_asset_future() -> N
             & pd.to_datetime(panel["timestamp"]).dt.normalize().isin(missing_sessions)
         )
     ].copy()
-    window = SessionWindow(
-        core=TimeWindow(sessions[35].date(), sessions[39].date()),
-        read=TimeWindow(sessions[35].date(), sessions[50].date()),
-        core_sessions=sessions[35:40],
-        read_sessions=sessions[35:51],
-        reason="label_lookahead",
-    )
+    core_sessions = sessions[35:40]
+    read_window = TimeWindow(sessions[35].date(), sessions[50].date())
 
     expanded = label_calculations.label_read_window_for_panel(
         panel.loc[:, ["asset_id", "timestamp"]],
@@ -431,11 +419,11 @@ def test_forward_return_label_read_window_expands_for_sparse_asset_future() -> N
             for definition in label_definitions.label_definitions()
             if definition.output_column == "forward_return_10d"
         ),
-        read_window=window.read,
-        core_sessions=window.core_sessions,
+        read_window=read_window,
+        core_sessions=core_sessions,
     )
 
-    assert expanded.start == window.read.start
+    assert expanded.start == read_window.start
     assert expanded.end == sessions[61].date()
 
 
@@ -539,26 +527,17 @@ def calculate_in_session_chunks(
         (0, split_session_index),
         (split_session_index, len(sessions)),
     ):
-        core_sessions = set(sessions[start_index:end_index])
+        core_sessions = sessions[start_index:end_index]
         read_start_index = max(0, start_index - warmup_sessions)
-        window = SessionWindow(
-            core=TimeWindow(
-                sessions[start_index].date(),
-                sessions[end_index - 1].date(),
-            ),
-            read=TimeWindow(
-                sessions[read_start_index].date(),
-                sessions[end_index - 1].date(),
-            ),
-            core_sessions=sessions[start_index:end_index],
-            read_sessions=sessions[read_start_index:end_index],
-            reason="factor_warmup",
+        read_window = TimeWindow(
+            sessions[read_start_index].date(),
+            sessions[end_index - 1].date(),
         )
         read_window = factor_calculations.factor_read_window_for_panel(
             ordered.loc[:, ["asset_id", "timestamp"]],
             definitions=definitions,
-            read_window=window.read,
-            core_sessions=window.core_sessions,
+            read_window=read_window,
+            core_sessions=core_sessions,
         )
         read_mask = (
             pd.to_datetime(ordered["timestamp"])
@@ -601,26 +580,17 @@ def calculate_in_session_chunks_by_size(
     parts = []
     for start_index in range(0, len(sessions), chunk_size):
         end_index = min(start_index + chunk_size, len(sessions))
-        core_sessions = set(sessions[start_index:end_index])
+        core_sessions = sessions[start_index:end_index]
         read_start_index = max(0, start_index - warmup_sessions)
-        window = SessionWindow(
-            core=TimeWindow(
-                sessions[start_index].date(),
-                sessions[end_index - 1].date(),
-            ),
-            read=TimeWindow(
-                sessions[read_start_index].date(),
-                sessions[end_index - 1].date(),
-            ),
-            core_sessions=sessions[start_index:end_index],
-            read_sessions=sessions[read_start_index:end_index],
-            reason="factor_warmup",
+        read_window = TimeWindow(
+            sessions[read_start_index].date(),
+            sessions[end_index - 1].date(),
         )
         read_window = factor_calculations.factor_read_window_for_panel(
             ordered.loc[:, ["asset_id", "timestamp"]],
             definitions=definitions,
-            read_window=window.read,
-            core_sessions=window.core_sessions,
+            read_window=read_window,
+            core_sessions=core_sessions,
         )
         read_mask = (
             pd.to_datetime(ordered["timestamp"])
@@ -663,26 +633,17 @@ def calculate_forward_returns_in_session_chunks(
     max_lookahead = label_calculations.label_lookahead_bars(definitions)
     for start_index in range(0, len(sessions), chunk_size):
         end_index = min(start_index + chunk_size, len(sessions))
-        core_sessions = set(sessions[start_index:end_index])
+        core_sessions = sessions[start_index:end_index]
         read_end_index = min(len(sessions), end_index + max_lookahead)
-        window = SessionWindow(
-            core=TimeWindow(
-                sessions[start_index].date(),
-                sessions[end_index - 1].date(),
-            ),
-            read=TimeWindow(
-                sessions[start_index].date(),
-                sessions[read_end_index - 1].date(),
-            ),
-            core_sessions=sessions[start_index:end_index],
-            read_sessions=sessions[start_index:read_end_index],
-            reason="label_lookahead",
+        read_window = TimeWindow(
+            sessions[start_index].date(),
+            sessions[read_end_index - 1].date(),
         )
         read_window = label_calculations.label_read_window_for_panel(
             ordered.loc[:, ["asset_id", "timestamp"]],
             definitions=definitions,
-            read_window=window.read,
-            core_sessions=window.core_sessions,
+            read_window=read_window,
+            core_sessions=core_sessions,
         )
         read_mask = (
             pd.to_datetime(ordered["timestamp"])

@@ -11,7 +11,7 @@ from quant_research_platform.contracts.data import (
     normalize_data_frequency,
 )
 from quant_research_platform.contracts.filtering import reject_filter_input_columns
-from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.signals import (
     SignalSpec,
     _cross_signal_id_column_overlaps,
@@ -72,9 +72,12 @@ class WeightConfig:
     risk_column: str | None = None
 
     def __post_init__(self) -> None:
-        if self.method not in WEIGHT_METHODS:
+        if type(self.method) is not str or self.method not in WEIGHT_METHODS:
             raise ValueError(f"method must be one of {sorted(WEIGHT_METHODS)}.")
-        if self.portfolio_mode not in PORTFOLIO_MODES:
+        if (
+            type(self.portfolio_mode) is not str
+            or self.portfolio_mode not in PORTFOLIO_MODES
+        ):
             raise ValueError(
                 f"portfolio_mode must be one of {sorted(PORTFOLIO_MODES)}."
             )
@@ -112,11 +115,17 @@ class TradabilityConfig:
         _validate_optional_column_name(self.eligibility_column, "eligibility_column")
         _validate_optional_column_name(self.can_enter_column, "can_enter_column")
         _validate_optional_column_name(self.can_exit_column, "can_exit_column")
-        if self.blocked_entry_policy not in BLOCKED_ENTRY_POLICIES:
+        if (
+            type(self.blocked_entry_policy) is not str
+            or self.blocked_entry_policy not in BLOCKED_ENTRY_POLICIES
+        ):
             raise ValueError(
                 f"blocked_entry_policy must be one of {sorted(BLOCKED_ENTRY_POLICIES)}."
             )
-        if self.blocked_exit_policy not in BLOCKED_EXIT_POLICIES:
+        if (
+            type(self.blocked_exit_policy) is not str
+            or self.blocked_exit_policy not in BLOCKED_EXIT_POLICIES
+        ):
             raise ValueError(
                 f"blocked_exit_policy must be one of {sorted(BLOCKED_EXIT_POLICIES)}."
             )
@@ -138,6 +147,8 @@ class CostConfig:
         _validate_nonnegative(self.slippage_bps, "slippage_bps")
         if self.spread_bps is not None:
             _validate_nonnegative(self.spread_bps, "spread_bps")
+        if self.impact_model is not None and type(self.impact_model) is not str:
+            raise ValueError("unsupported_portfolio_impact_model")
         if self.impact_model is not None:
             raise ValueError("unsupported_portfolio_impact_model")
 
@@ -205,8 +216,17 @@ class PortfolioSpec:
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if self.contract_version != "0.1":
+        if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_portfolio_contract_version")
+        if type(self.portfolio_id) is not str or not self.portfolio_id:
+            raise ValueError("portfolio_id_required")
+        object.__setattr__(self, "market_id", validate_market_id(self.market_id))
+        if type(self.research_dataset_id) is not str or not self.research_dataset_id:
+            raise ValueError("research_dataset_id_required")
+        if type(self.signals) is not tuple:
+            raise ValueError("portfolio_signals_must_be_tuple")
+        if any(type(signal) is not SignalSpec for signal in self.signals):
+            raise ValueError("portfolio_signals_invalid")
         if not self.signals:
             raise ValueError("portfolio_signals_required")
         signal_ids = [signal.signal_id for signal in self.signals]
@@ -220,10 +240,7 @@ class PortfolioSpec:
             raise ValueError(
                 "portfolio_signal_id_column_overlap: " + ", ".join(overlaps)
             )
-        if (
-            not isinstance(self.return_source_column, str)
-            or not self.return_source_column
-        ):
+        if type(self.return_source_column) is not str or not self.return_source_column:
             raise ValueError("portfolio_return_source_column_required")
         object.__setattr__(
             self,
@@ -237,6 +254,8 @@ class PortfolioSpec:
             raise TypeError("execution_lag_steps must be an integer")
         if self.execution_lag_steps < 0:
             raise ValueError("execution_lag_steps_must_be_nonnegative")
+        if type(self.run_type) is not str or not self.run_type:
+            raise ValueError("portfolio_run_type_required")
         reject_filter_input_columns((*signal_ids, *signal_columns))
         invalid_labels = sorted(
             set((*signal_ids, *signal_columns)).intersection(

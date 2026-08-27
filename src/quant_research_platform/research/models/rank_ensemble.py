@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from dataclasses import dataclass
-from fractions import Fraction
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
+    _average_ranks,
     _pearson_correlation_result,
 )
-
-_RANK_ZERO_ROUNDOFF_LIMIT = np.finfo(np.float64).eps
+from quant_research_platform.contracts.validation import strict_timestamp_series
 
 
 @dataclass(frozen=True)
@@ -53,39 +53,30 @@ class ICWeightedRankEnsemble:
     ) -> ICWeightedRankEnsemble:
         weights = []
         defined_columns: list[str] = []
-        label = _rank_series(frame, label_column)
-        label_values = label.to_numpy(dtype="float64", copy=False)
         for column in input_columns:
-            input_values = _rank_series(frame, column).to_numpy(
-                dtype="float64",
-                copy=False,
-            )
-            valid = np.isfinite(input_values) & np.isfinite(label_values)
-            if int(valid.sum()) < 2:
-                corr = None
-            else:
-                corr, _reason = _pearson_correlation_result(
-                    input_values[valid],
-                    label_values[valid],
+            timestamp_correlations: list[float] = []
+            for timestamp_frame in _cross_section_groups(frame):
+                input_values = timestamp_frame[column].to_numpy(
+                    dtype="float64",
+                    copy=False,
                 )
-                if (
-                    corr is not None
-                    # Rank values are exact rationals; only near-roundoff
-                    # results pay for the exact covariance check below.
-                    and abs(corr)
-                    <= _RANK_ZERO_ROUNDOFF_LIMIT * max(1, int(valid.sum()))
-                    and _exact_rank_covariance_is_zero(
-                        input_values,
-                        label_values,
-                        valid,
-                        denominator_bound=2 * len(frame),
-                    )
-                ):
-                    corr = 0.0
-            if corr is None:
+                label_values = timestamp_frame[label_column].to_numpy(
+                    dtype="float64",
+                    copy=False,
+                )
+                valid = np.isfinite(input_values) & np.isfinite(label_values)
+                if int(valid.sum()) < 2:
+                    continue
+                corr, _reason = _pearson_correlation_result(
+                    _average_ranks(input_values[valid]),
+                    _average_ranks(label_values[valid]),
+                )
+                if corr is not None:
+                    timestamp_correlations.append(corr)
+            if not timestamp_correlations:
                 continue
             defined_columns.append(column)
-            weights.append(float(corr))
+            weights.append(float(np.mean(timestamp_correlations)))
         if not weights:
             raise ValueError("all_ensemble_correlations_undefined")
         values = np.asarray(weights, dtype="float64")
@@ -105,7 +96,11 @@ class ICWeightedRankEnsemble:
 
 def _rank_frame_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
     if "timestamp" in frame:
-        ranked = frame.groupby("timestamp", sort=False)[list(columns)].rank(
+        timestamps = strict_timestamp_series(
+            frame["timestamp"],
+            error="invalid_rank_ensemble_timestamp",
+        )
+        ranked = frame.groupby(timestamps, sort=False)[list(columns)].rank(
             method="average",
             pct=True,
         )
@@ -114,41 +109,13 @@ def _rank_frame_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.nda
     return ranked.to_numpy(dtype="float64", copy=False)
 
 
-def _rank_series(frame: pd.DataFrame, column: str) -> pd.Series:
-    if "timestamp" in frame:
-        return frame.groupby("timestamp", sort=False)[column].rank(
-            method="average",
-            pct=True,
-        )
-    return frame[column].rank(method="average", pct=True)
-
-
-def _exact_rank_covariance_is_zero(
-    left_values: np.ndarray,
-    right_values: np.ndarray,
-    valid: np.ndarray,
-    *,
-    denominator_bound: int,
-) -> bool:
-    count = 0
-    left_sum = Fraction(0)
-    right_sum = Fraction(0)
-    product_sum = Fraction(0)
-    # pct average rank = (integer or half-integer) / group_count, and every
-    # group_count is at most len(frame), so 2 * len(frame) bounds its reduced
-    # denominator. The loop retains only four sufficient statistics.
-    for left_value, right_value, is_valid in zip(
-        left_values,
-        right_values,
-        valid,
-        strict=True,
-    ):
-        if not is_valid:
-            continue
-        left = Fraction(float(left_value)).limit_denominator(denominator_bound)
-        right = Fraction(float(right_value)).limit_denominator(denominator_bound)
-        count += 1
-        left_sum += left
-        right_sum += right
-        product_sum += left * right
-    return count >= 2 and count * product_sum == left_sum * right_sum
+def _cross_section_groups(frame: pd.DataFrame) -> Iterator[pd.DataFrame]:
+    if "timestamp" not in frame:
+        yield frame
+        return
+    timestamps = strict_timestamp_series(
+        frame["timestamp"],
+        error="invalid_rank_ensemble_timestamp",
+    )
+    for _, group in frame.groupby(timestamps, sort=True):
+        yield group

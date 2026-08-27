@@ -10,7 +10,7 @@ from quant_research_platform.compute.dataframe.performance import (
     summarize_performance,
 )
 from quant_research_platform.compute.dataframe.portfolio_returns import (
-    simulate_weighted_long_short_returns_and_cost_from_validated_panel,
+    _stream_weighted_portfolio_from_validated_panel,
 )
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
@@ -47,7 +47,7 @@ def test_validated_stream_applies_turnover_costs_and_keeps_market_neutrality() -
     panel, spec = _validated_ranking_panel()
 
     positions, turnover, returns, _diagnostics, _costs = (
-        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        _stream_weighted_portfolio_from_validated_panel(
             panel,
             spec,
             WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
@@ -69,7 +69,7 @@ def test_validated_stream_keeps_long_only_rows_without_short_leg() -> None:
     panel, spec = _validated_ranking_panel()
 
     _positions, turnover, returns, diagnostics, _costs = (
-        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        _stream_weighted_portfolio_from_validated_panel(
             panel,
             spec,
             WeightConfig(
@@ -104,7 +104,7 @@ def test_ordinal_portfolio_has_no_tied_signal_and_keeps_cutoff_ties() -> None:
             ),
             spec,
         )
-        return simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        return _stream_weighted_portfolio_from_validated_panel(
             panel,
             spec,
             WeightConfig(top_quantile=0.2, bottom_quantile=0.2),
@@ -140,7 +140,7 @@ def test_validated_stream_rejects_disappeared_held_asset() -> None:
     )
 
     with pytest.raises(ValueError, match="held_asset_missing_from_portfolio_frame"):
-        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        _stream_weighted_portfolio_from_validated_panel(
             panel,
             spec,
             WeightConfig(portfolio_mode="long_only", top_quantile=0.5),
@@ -154,7 +154,7 @@ def test_validated_stream_requires_explicit_return_source_column() -> None:
     panel, spec = _validated_ranking_panel()
 
     with pytest.raises(ValueError, match="portfolio_return_source_column_required"):
-        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        _stream_weighted_portfolio_from_validated_panel(
             panel,
             spec,
             WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
@@ -165,14 +165,14 @@ def test_validated_stream_validates_only_an_extra_return_source() -> None:
     panel, spec = _validated_ranking_panel()
 
     with pytest.raises(ValueError, match="panel is missing columns"):
-        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        _stream_weighted_portfolio_from_validated_panel(
             panel,
             spec,
             WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
             return_source_column="missing_return",
         )
     with pytest.raises(TypeError, match="return source column 'extra_return'"):
-        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        _stream_weighted_portfolio_from_validated_panel(
             panel.assign(extra_return=["0.01"] * len(panel)),
             spec,
             WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
@@ -184,7 +184,7 @@ def test_validated_stream_applies_detailed_cost_components() -> None:
     panel, spec = _validated_ranking_panel()
 
     _positions, _turnover, returns, _diagnostics, costs = (
-        simulate_weighted_long_short_returns_and_cost_from_validated_panel(
+        _stream_weighted_portfolio_from_validated_panel(
             panel,
             spec,
             WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),

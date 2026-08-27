@@ -15,7 +15,13 @@ from quant_research_platform.research.evaluations.engine import (
     _EvaluationStreamingState,
     _iter_evaluation_output_chunks,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.research.signals.materialization import (
+    normalize_signal_frame,
+)
+from quant_research_platform.runtime.resources import (
+    pandas_frame_payload_bytes,
+    runtime_resource_policy_scope,
+)
 from tests.helpers.research_specs import (
     make_signal_spec,
 )
@@ -53,9 +59,24 @@ def test_managed_evaluation_accepts_true_peak_and_rejects_before_kernel(
         n_groups=2,
     )
 
+    normalized = normalize_signal_frame(
+        frame.loc[:, ["timestamp", "asset_id", "raw", "label"]],
+        spec.signals,
+        source_columns_by_kind={"factor": ("raw",)},
+    )
+    formal_bound = (
+        2 * pandas_frame_payload_bytes(normalized)
+        + evaluation_engine._EVALUATION_TIMESTAMP_FACT_BYTES
+        + evaluation_engine._evaluation_kernel_bytes(
+            normalized,
+            compute_columns=("timestamp", "asset_id", "signal", "label"),
+            signal_count=1,
+            n_groups=2,
+        )
+    )
     policy = capture_test_policy(
         available_memory_bytes=1024**2,
-        explicit_cap_bytes=3088,
+        explicit_cap_bytes=formal_bound,
     )
     with runtime_resource_policy_scope(policy):
         outputs = list(
@@ -86,7 +107,7 @@ def test_managed_evaluation_accepts_true_peak_and_rejects_before_kernel(
     )
     insufficient = capture_test_policy(
         available_memory_bytes=1024**2,
-        explicit_cap_bytes=3087,
+        explicit_cap_bytes=formal_bound - 1,
     )
     with runtime_resource_policy_scope(insufficient):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):

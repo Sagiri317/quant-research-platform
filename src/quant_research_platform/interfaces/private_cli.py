@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import ExitStack
 from pathlib import Path
 from typing import Annotated
 
@@ -13,9 +12,8 @@ from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
-    open_schema_inventory_payload,
+    write_schema_inventory,
 )
 from quant_research_platform.workflows.local_verification import (
     LocalVerificationRunConfig,
@@ -67,15 +65,11 @@ def schema_inventory(
         raise typer.Exit(code=2)
     try:
         with runtime_resource_policy_scope(None) as policy:
-            with ExitStack() as inventory_stack:
-                inventory = inventory_stack.enter_context(
-                    open_schema_inventory_payload(
-                        project_root,
-                        resource_policy=policy,
-                    )
-                )
-                atomic_write_json(output, inventory)
-                inventory_stack.close()
+            write_schema_inventory(
+                project_root,
+                output,
+                resource_policy=policy,
+            )
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
