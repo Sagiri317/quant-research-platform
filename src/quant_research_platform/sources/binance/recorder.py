@@ -583,26 +583,33 @@ def _http_get_json(
     params: dict[str, str] | None = None,
 ) -> tuple[Any, str, int]:
     try:
-        response = httpx.get(
+        with httpx.stream(
+            "GET",
             base_url + path,
             params=params,
             headers={
                 "Accept": "application/json",
+                "Accept-Encoding": "identity",
                 "User-Agent": "qrp-binance-recorder/0.1",
             },
             timeout=REST_REQUEST_TIMEOUT_SECONDS,
-        )
+        ) as response:
+            try:
+                response.raise_for_status()
+            except httpx.HTTPStatusError as exc:
+                raise OSError("binance_recorder_rest_status_error") from exc
+            content_encoding = response.headers.get("Content-Encoding", "identity")
+            if content_encoding.lower() not in {"", "identity"}:
+                raise ValueError("binance_recorder_rest_content_encoding_invalid")
+            raw = bytearray()
+            for chunk in response.iter_raw(chunk_size=64 * 1024):
+                if len(chunk) > MAX_REST_RESPONSE_BYTES - len(raw):
+                    raise ValueError("binance_recorder_rest_response_too_large")
+                raw.extend(chunk)
     except httpx.TimeoutException as exc:
         raise TimeoutError("binance_recorder_rest_timeout") from exc
     except httpx.HTTPError as exc:
         raise OSError("binance_recorder_rest_request_failed") from exc
-    try:
-        response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        raise OSError("binance_recorder_rest_status_error") from exc
-    raw = response.content
-    if len(raw) > MAX_REST_RESPONSE_BYTES:
-        raise ValueError("binance_recorder_rest_response_too_large")
     try:
         payload = json.loads(raw.decode("utf-8", errors="strict"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:

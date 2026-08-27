@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import heapq
 import json
+import os
 import sqlite3
 import sys
 import tempfile
@@ -41,6 +42,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_non_negative_float,
     strict_non_negative_integer,
 )
+from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
 
 _FILE_MANIFEST_KEYS = frozenset(
@@ -62,6 +64,24 @@ _FILE_MANIFEST_KEYS = frozenset(
 _LOWER_HEX = frozenset("0123456789abcdef")
 _HASH_BUFFER_BYTES = 64 * 1024
 _LEVEL_BYTES = 256
+
+
+class _DigestingReader:
+    def __init__(self, handle: Any) -> None:
+        self._handle = handle
+        self._digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._handle.read(size)
+        self._digest.update(chunk)
+        return chunk
+
+    def drain(self) -> None:
+        while self.read(_HASH_BUFFER_BYTES):
+            pass
+
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
 
 
 @dataclass
@@ -277,6 +297,7 @@ def _validate_file_manifest(value: object, *, markets: set[str]) -> None:
         path is None
         or path.is_absolute()
         or ".." in path.parts
+        or not path.name.endswith(".jsonl.gz")
         or value.get("venue") != "binance"
         or value.get("symbol") != "BTCUSDT"
         or value.get("market") not in markets
@@ -312,21 +333,8 @@ def _capture_run_files(
     manifest: dict[str, Any],
     policy: RuntimeResourcePolicy,
 ) -> tuple[_RunFile, ...]:
-    root_resolved = root.resolve()
-    actual_paths: set[str] = set()
-    for path in root.rglob("*.jsonl.gz"):
-        if not path.is_file():
-            continue
-        resolved = path.resolve()
-        try:
-            resolved.relative_to(root_resolved)
-        except ValueError as exc:
-            raise ValueError("binance_replay_file_path_invalid") from exc
-        _capture_raw_file_identity(path, missing_is_file_not_found=False)
-        actual_paths.add(path.relative_to(root).as_posix())
     declared_paths = {item["path"] for item in manifest["files"]}
-    if actual_paths != declared_paths:
-        raise ValueError("binance_replay_file_manifest_mismatch")
+    _verify_exact_run_tree(root, declared_paths)
     result = []
     for metadata in manifest["files"]:
         path = root / metadata["path"]
@@ -337,6 +345,53 @@ def _capture_run_files(
             raise ValueError("binance_replay_file_identity_mismatch")
         result.append(_RunFile(dict(metadata), identity))
     return tuple(result)
+
+
+def _verify_exact_run_tree(root: Path, declared_paths: set[str]) -> None:
+    declared = {Path(value) for value in declared_paths}
+    allowed_files = {Path("run.json"), *declared}
+    allowed_directories = {Path(".")}
+    for path in declared:
+        allowed_directories.update(
+            parent for parent in path.parents if parent != Path(".")
+        )
+    seen_files: set[Path] = set()
+    pending = [Path(".")]
+    while pending:
+        relative_directory = pending.pop()
+        directory = (
+            root if relative_directory == Path(".") else root / relative_directory
+        )
+        require_unaliased_path(directory, error="binance_replay_file_path_invalid")
+        try:
+            entries = os.scandir(directory)
+        except OSError as exc:
+            raise ValueError("binance_replay_file_manifest_mismatch") from exc
+        with entries:
+            for entry in entries:
+                relative = (
+                    Path(entry.name)
+                    if relative_directory == Path(".")
+                    else relative_directory / entry.name
+                )
+                path = Path(entry.path)
+                require_unaliased_path(path, error="binance_replay_file_path_invalid")
+                if relative in allowed_directories:
+                    if not entry.is_dir(follow_symlinks=False):
+                        raise ValueError("binance_replay_file_manifest_mismatch")
+                    pending.append(relative)
+                elif relative in allowed_files:
+                    if not entry.is_file(follow_symlinks=False):
+                        raise ValueError("binance_replay_file_manifest_mismatch")
+                    seen_files.add(relative)
+                else:
+                    raise ValueError("binance_replay_file_manifest_mismatch")
+    if (
+        seen_files != allowed_files
+        or {path.as_posix() for path in seen_files if path != Path("run.json")}
+        != declared_paths
+    ):
+        raise ValueError("binance_replay_file_manifest_mismatch")
 
 
 def _sha256_file(
@@ -403,7 +458,8 @@ def _iter_raw_file(
         raise ValueError("binance_replay_raw_file_open_failed") from exc
     try:
         _verify_raw_file_handle(raw_handle, expected_identity=item.identity)
-        gzip_handle = gzip.GzipFile(fileobj=raw_handle, mode="rb")
+        digesting_handle = _DigestingReader(raw_handle)
+        gzip_handle = gzip.GzipFile(fileobj=digesting_handle, mode="rb")
         try:
             count = 0
             minimum: int | None = None
@@ -451,8 +507,21 @@ def _iter_raw_file(
             ):
                 raise ValueError("binance_replay_file_manifest_mismatch")
         finally:
-            gzip_handle.close()
-        _verify_raw_file_handle(raw_handle, expected_identity=item.identity)
+            primary = sys.exception()
+            try:
+                gzip_handle.close()
+                digesting_handle.drain()
+                if digesting_handle.hexdigest() != metadata["sha256"]:
+                    raise ValueError("binance_replay_file_identity_mismatch")
+                _verify_raw_file_handle(raw_handle, expected_identity=item.identity)
+            except BaseException as verify_error:
+                if primary is not None and not isinstance(primary, GeneratorExit):
+                    primary.add_note(
+                        "Binance consumed-file verification also failed: "
+                        f"{type(verify_error).__name__}"
+                    )
+                else:
+                    raise
     finally:
         raw_handle.close()
 
