@@ -25,6 +25,10 @@ from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
     PredictionSpec,
 )
+from quant_research_platform.contracts.time import (
+    is_intraday_time_value,
+    time_value_isoformat,
+)
 from quant_research_platform.contracts.validation import strict_timestamp_series
 
 _MODEL_METADATA_BASE_KEYS = frozenset(
@@ -196,9 +200,10 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         )
     if metadata["random_seed"] is not None and type(metadata["random_seed"]) is not int:
         raise ValueError("invalid_model_metadata")
-    if type(metadata["hyperparameters"]) is not dict or type(
-        metadata["resolved_hyperparameters"]
-    ) is not dict:
+    if (
+        type(metadata["hyperparameters"]) is not dict
+        or type(metadata["resolved_hyperparameters"]) is not dict
+    ):
         raise ValueError("invalid_model_metadata")
     try:
         render_qrp_json_object(
@@ -324,10 +329,7 @@ def validate_model_selection_metadata_shape(metadata: object) -> None:
         raise ValueError("invalid_model_metadata")
     trial_model_ids: list[str] = []
     for trial in trial_metrics:
-        if (
-            type(trial) is not dict
-            or set(trial) != _MODEL_SELECTION_TRIAL_METRIC_KEYS
-        ):
+        if type(trial) is not dict or set(trial) != _MODEL_SELECTION_TRIAL_METRIC_KEYS:
             raise ValueError("invalid_model_metadata")
         trial_model_ids.append(
             require_metadata_string(trial, "model_id", "invalid_model_metadata")
@@ -392,9 +394,10 @@ def validate_prediction_output_metadata_shape(
     require_optional_metadata_string(
         metadata, "test_end", "output_manifest_metadata_invalid"
     )
-    if type(metadata["is_oos"]) is not bool or type(
-        metadata["is_final_oos_window"]
-    ) is not bool:
+    if (
+        type(metadata["is_oos"]) is not bool
+        or type(metadata["is_final_oos_window"]) is not bool
+    ):
         raise ValueError("output_manifest_metadata_invalid")
     require_metadata_string_list(
         metadata, "primary_key", "output_manifest_metadata_invalid"
@@ -410,8 +413,7 @@ def validate_prediction_output_metadata_shape(
         raise ValueError("output_manifest_metadata_invalid") from exc
     if (
         model_metadata["sample_filter_mode"] != metadata["sample_filter_mode"]
-        or prediction_metadata["sample_filter_mode"]
-        != metadata["sample_filter_mode"]
+        or prediction_metadata["sample_filter_mode"] != metadata["sample_filter_mode"]
         or prediction_metadata["prediction_mode"] != metadata["prediction_mode"]
         or prediction_metadata["prediction_column"] != metadata["prediction_column"]
         or prediction_metadata["train_end"] != metadata["train_end"]
@@ -563,9 +565,10 @@ def validate_prediction_metadata_shape(
         "invalid_prediction_metadata",
         allow_empty=True,
     )
-    if type(metadata["is_oos"]) is not bool or type(
-        metadata["is_final_oos_window"]
-    ) is not bool:
+    if (
+        type(metadata["is_oos"]) is not bool
+        or type(metadata["is_final_oos_window"]) is not bool
+    ):
         raise ValueError("invalid_prediction_metadata")
     return metadata
 
@@ -638,8 +641,7 @@ def validate_model_selection_metadata_consistency(
     if model_selection["selection_metric"] != spec.model_selection_metric:
         raise ValueError("model_metadata_inconsistent")
     if (
-        model_selection["validation_start"]
-        != spec.model_selection_validation_start
+        model_selection["validation_start"] != spec.model_selection_validation_start
         or model_selection["validation_end"] != spec.model_selection_validation_end
     ):
         raise ValueError("model_metadata_inconsistent")
@@ -662,7 +664,10 @@ def validate_prediction_metadata_consistency(
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="prediction_metadata_inconsistent"
     )
-    effective_test_end = pd.Timestamp(timestamps.max()).date().isoformat()
+    effective_test_end = time_value_isoformat(
+        pd.Timestamp(timestamps.max()),
+        date_only=not is_intraday_time_value(spec.test_start),
+    )
     validate_prediction_metadata_consistency_from_summary(
         metadata,
         spec=spec,

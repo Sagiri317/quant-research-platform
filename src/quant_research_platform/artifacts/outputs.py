@@ -24,14 +24,24 @@ from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.resources import (
+    RuntimeResourcePolicy,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def _write_in_resource_root(writer: Callable[[], Path]) -> Path:
-    if current_runtime_resource_policy() is not None:
+def _write_in_resource_root(
+    writer: Callable[[], Path],
+    *,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> Path:
+    active = current_runtime_resource_policy()
+    if resource_policy is not None:
+        if active is not resource_policy:
+            raise RuntimeError("runtime_resource_policy_conflict")
+        return writer()
+    if active is not None:
         raise RuntimeError("runtime_resource_policy_competing_root")
     with runtime_resource_policy_scope(None):
         return writer()
@@ -46,6 +56,7 @@ def write_prediction_outputs(
     output_chunks: Iterable[pd.DataFrame] | None = None,
     model_metadata: Mapping[str, object] | None = None,
     prediction_metadata_factory: Callable[[], Mapping[str, object]] | None = None,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Path:
     return _write_in_resource_root(
         lambda: _write_prediction_outputs(
@@ -56,7 +67,8 @@ def write_prediction_outputs(
             output_chunks=output_chunks,
             model_metadata=model_metadata,
             prediction_metadata_factory=prediction_metadata_factory,
-        )
+        ),
+        resource_policy=resource_policy,
     )
 
 

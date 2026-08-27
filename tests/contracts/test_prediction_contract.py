@@ -34,6 +34,32 @@ def test_prediction_spec_accepts_model_selection_contract_fields() -> None:
     assert spec.model_selection_metric == "validation_mse"
 
 
+def test_prediction_spec_accepts_intraday_windows_and_normalizes_utc() -> None:
+    spec = PredictionSpec(
+        prediction_id="intraday_prediction",
+        model_id="linear_model",
+        research_dataset_id="intraday_research",
+        train_end="2026-08-27T09:00:00+08:00",
+        test_start="2026-08-27T09:00:00.100+08:00",
+        test_end="2026-08-27T09:00:01+08:00",
+    )
+
+    assert spec.train_end == "2026-08-27T01:00:00"
+    assert spec.test_start == "2026-08-27T01:00:00.100000"
+    assert spec.test_end == "2026-08-27T01:00:01"
+
+
+def test_prediction_spec_rejects_mixed_date_and_intraday_windows() -> None:
+    with pytest.raises(ValueError, match="mixed_time_window_bounds"):
+        PredictionSpec(
+            prediction_id="mixed_window_prediction",
+            model_id="linear_model",
+            research_dataset_id="intraday_research",
+            train_end="2026-08-26",
+            test_start="2026-08-27T00:00:00",
+        )
+
+
 def test_prediction_spec_rejects_invalid_model_selection_candidates() -> None:
     kwargs = {
         "prediction_id": "prediction_demo",

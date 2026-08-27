@@ -21,6 +21,7 @@ from quant_research_platform.artifacts._output_common_validation import (
 from quant_research_platform.contracts.predictions import (
     _validate_prediction_output_values,
 )
+from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
@@ -56,6 +57,7 @@ def write_parquet_chunks(
     required: tuple[str, ...],
     key_columns: tuple[str, ...],
     compression: str,
+    date_only: bool = False,
 ) -> _PredictionOutputWriteSummary:
     final_path = Path(path)
     reject_if_exists(final_path)
@@ -98,9 +100,7 @@ def write_parquet_chunks(
                             key_columns=key_columns,
                         )
                     )
-                    handle = scratch_owner.open_owned_scratch_file(
-                        temp_path
-                    )
+                    handle = scratch_owner.open_owned_scratch_file(temp_path)
                     claimed_temp = True
                     with scratch_owner.handle_preserving_primary(handle):
                         require_unaliased_path(
@@ -141,10 +141,9 @@ def write_parquet_chunks(
                                                 selected["timestamp"],
                                                 error="prediction_metadata_inconsistent",
                                             )
-                                            current_end = (
-                                                pd.Timestamp(timestamps.max())
-                                                .date()
-                                                .isoformat()
+                                            current_end = time_value_isoformat(
+                                                pd.Timestamp(timestamps.max()),
+                                                date_only=date_only,
                                             )
                                             if (
                                                 effective_test_end is None
@@ -161,12 +160,10 @@ def write_parquet_chunks(
                                                 table_state,
                                                 batch_rows,
                                                 writer_memory,
-                                            ) = (
-                                                _artifact_table_write_state(
-                                                    table,
-                                                    previous_metadata=decoded_metadata,
-                                                    retained_memory=writer_memory,
-                                                )
+                                            ) = _artifact_table_write_state(
+                                                table,
+                                                previous_metadata=decoded_metadata,
+                                                retained_memory=writer_memory,
                                             )
                                             writer_state.enter_context(table_state)
                                             decoded_metadata = dict(
@@ -389,8 +386,7 @@ def _artifact_writer_fixed_reservation(
         stack.enter_context(
             policy.lease(
                 "artifacts.parquet.fixed",
-                index_bytes
-                + writer_count * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+                index_bytes + writer_count * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
             )
         )
         if policy.available_memory_bytes <= 0:
@@ -412,9 +408,7 @@ def _artifact_frame_reservation(
         input_charge = 0 if payload_already_reserved else payload_bytes
         row_count = 0 if frame is None else len(frame)
         column_count = 0 if frame is None else len(frame.columns)
-        index_bytes = (
-            0 if frame is None else int(frame.index.memory_usage(deep=True))
-        )
+        index_bytes = 0 if frame is None else int(frame.index.memory_usage(deep=True))
         arrow_bytes = payload_bytes + row_count * 9 * column_count
         timestamp_bytes = (
             index_bytes + 9 * row_count if "timestamp" in key_columns else 0

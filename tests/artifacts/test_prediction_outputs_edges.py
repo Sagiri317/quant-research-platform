@@ -97,6 +97,32 @@ def test_public_artifact_writer_rejects_an_unrelated_active_root(
     assert writes == 0
 
 
+def test_public_artifact_writer_reuses_its_explicit_active_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "artifact"
+    policy = capture_test_policy(available_memory_bytes=1024**2)
+
+    def write(*_args, **_kwargs) -> Path:
+        assert current_runtime_resource_policy() is policy
+        target.mkdir()
+        return target
+
+    monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
+
+    with runtime_resource_policy_scope(policy):
+        assert (
+            outputs.write_prediction_outputs(
+                spec=object(),  # type: ignore[arg-type]
+                output_spec=object(),  # type: ignore[arg-type]
+                layout=object(),  # type: ignore[arg-type]
+                resource_policy=policy,
+            )
+            == target
+        )
+
+
 def _valid_prediction_output_metadata_with_selection() -> dict[str, object]:
     spec = PredictionSpec(
         prediction_id="prediction_demo",
@@ -463,6 +489,24 @@ def test_prediction_chunk_writer_rejects_cross_chunk_duplicate_and_cleans_scratc
     assert not final_path.exists()
     assert not list(tmp_path.glob(".k-*"))
     assert not list(tmp_path.glob(".*.tmp"))
+
+
+def test_prediction_chunk_writer_preserves_intraday_effective_end(
+    tmp_path: Path,
+) -> None:
+    frame = make_artifact_prediction_output_frame().assign(
+        timestamp=pd.to_datetime(["2024-01-02T12:34:56.700"])
+    )
+
+    summary = parquet_writers.write_parquet_chunks(
+        (frame,),
+        tmp_path / "prediction.parquet",
+        required=tuple(frame.columns),
+        key_columns=("timestamp", "asset_id"),
+        compression="zstd",
+    )
+
+    assert summary.effective_test_end == "2024-01-02T12:34:56.700000"
 
 
 def test_prediction_chunk_writer_persists_widest_decoded_row_bound(

@@ -62,6 +62,28 @@ def time_window_timestamp_interval(
     return start, end, False
 
 
+def time_value_isoformat(
+    value: date | datetime,
+    *,
+    preserve_datetime: bool = False,
+    date_only: bool = False,
+) -> str:
+    """Format one normalized contract time without losing intraday precision."""
+
+    if isinstance(value, datetime):
+        normalized = _normalize_datetime(value)
+        if date_only or (not preserve_datetime and normalized.time() == time.min):
+            return normalized.date().isoformat()
+        return normalized.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    raise ValueError("invalid_time_value")
+
+
+def is_intraday_time_value(value: date | datetime | str) -> bool:
+    return isinstance(_coerce_bound(value), datetime)
+
+
 def _coerce_bound(value: date | datetime | str) -> date | datetime:
     if isinstance(value, datetime):
         return _normalize_datetime(value)

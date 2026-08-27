@@ -21,6 +21,7 @@ from quant_research_platform.contracts.models import (
     ModelSpec,
     _thaw_model_hyperparameters,
 )
+from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research._memory import (
@@ -376,8 +377,12 @@ def fit_linear_coefficients(
                             usable["timestamp"],
                             error="invalid_model_training_timestamp",
                         )
-                        chunk_start = date_string(usable_timestamps.min())
-                        chunk_end = date_string(usable_timestamps.max())
+                        chunk_start = time_value_isoformat(
+                            pd.Timestamp(usable_timestamps.min())
+                        )
+                        chunk_end = time_value_isoformat(
+                            pd.Timestamp(usable_timestamps.max())
+                        )
                         train_start = (
                             chunk_start
                             if train_start is None
@@ -974,8 +979,8 @@ def _collect_training_frame_owned(
                 training["timestamp"],
                 error="invalid_model_training_timestamp",
             )
-            train_start = date_string(timestamps.min())
-            train_end = date_string(timestamps.max())
+            train_start = time_value_isoformat(pd.Timestamp(timestamps.min()))
+            train_end = time_value_isoformat(pd.Timestamp(timestamps.max()))
         timestamps = None
         if result_lease is not None and has_identity:
             result_lease.shrink_to(pandas_frame_payload_bytes(training))
@@ -1432,10 +1437,6 @@ def fit_linear_coefficients_from_tsqr(
         with threadpool_limits(limits=1, user_api="blas"):
             beta, *_ = np.linalg.lstsq(r_factor, qt_y, rcond=None)
         return beta
-
-
-def date_string(value: pd.Timestamp) -> str:
-    return pd.Timestamp(value).date().isoformat()
 
 
 def _strict_non_negative_count_value(value: object) -> int:

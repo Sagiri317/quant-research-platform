@@ -43,7 +43,9 @@ from quant_research_platform.storage._dataset_paths import (
     timestamp_column_from_spec_payload,
 )
 
-_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset({"input_dataset_identities"})
+_DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset(
+    {"input_dataset_identities", "source_artifact_identity"}
+)
 _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
     {
         "schema_version",
@@ -91,6 +93,9 @@ _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
 )
 _DATASET_INPUT_IDENTITY_KEYS = frozenset(
     {"data_id", "manifest_hash", "spec_hash"}
+)
+_SOURCE_ARTIFACT_IDENTITY_KEYS = frozenset(
+    {"schema_id", "artifact_id", "manifest_hash"}
 )
 _DATASET_SPEC_COMMON_KEYS = frozenset(
     {
@@ -175,6 +180,8 @@ def merge_dataset_instance_metadata(
             raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
         if key == "input_dataset_identities":
             metadata[key] = _validate_input_dataset_identities_metadata(value)
+        elif key == "source_artifact_identity":
+            metadata[key] = _validate_source_artifact_identity(value)
     result.update(metadata)
     return result
 
@@ -205,18 +212,44 @@ def _validate_input_dataset_identity_payload(
         raise ValueError("invalid_input_dataset_identities_metadata")
     return {
         "data_id": expected_data_id,
-        "spec_hash": _require_identity_hash(value["spec_hash"]),
-        "manifest_hash": _require_identity_hash(value["manifest_hash"]),
+        "spec_hash": _require_identity_hash(
+            value["spec_hash"], error="invalid_input_dataset_identities_metadata"
+        ),
+        "manifest_hash": _require_identity_hash(
+            value["manifest_hash"], error="invalid_input_dataset_identities_metadata"
+        ),
     }
 
 
-def _require_identity_hash(value: Any) -> str:
+def _validate_source_artifact_identity(value: Any) -> dict[str, str]:
+    if not isinstance(value, Mapping) or set(value) != _SOURCE_ARTIFACT_IDENTITY_KEYS:
+        raise ValueError("invalid_source_artifact_identity")
+    schema_id = value["schema_id"]
+    artifact_id = value["artifact_id"]
+    if (
+        not isinstance(schema_id, str)
+        or not schema_id
+        or "/" in schema_id
+        or not isinstance(artifact_id, str)
+        or not artifact_id
+    ):
+        raise ValueError("invalid_source_artifact_identity")
+    return {
+        "schema_id": schema_id,
+        "artifact_id": artifact_id,
+        "manifest_hash": _require_identity_hash(
+            value["manifest_hash"], error="invalid_source_artifact_identity"
+        ),
+    }
+
+
+def _require_identity_hash(value: Any, *, error: str) -> str:
     if (
         not isinstance(value, str)
         or len(value) != 64
         or any(character not in _LOWER_HEX for character in value)
     ):
-        raise ValueError("invalid_input_dataset_identities_metadata")
+        raise ValueError(error)
     return value
 
 
@@ -250,6 +283,8 @@ def validate_dataset_manifest_instance_metadata(
         _validate_input_dataset_identities_metadata(
             manifest["input_dataset_identities"]
         )
+    if "source_artifact_identity" in manifest:
+        _validate_source_artifact_identity(manifest["source_artifact_identity"])
 
 
 def validate_dataset_spec(spec: DataSpec) -> str | None:
@@ -1269,10 +1304,9 @@ def validate_dataset_manifest_payload(
         | {"schema_id"}
     )
     actual_keys = set(manifest)
-    if actual_keys not in (
-        expected_keys,
-        expected_keys | _DATASET_INSTANCE_METADATA_ALLOWED_KEYS,
-    ):
+    if not expected_keys.issubset(actual_keys) or not (
+        actual_keys - expected_keys
+    ).issubset(_DATASET_INSTANCE_METADATA_ALLOWED_KEYS):
         raise ValueError("dataset_manifest_fields_invalid")
     for key in set(spec) - {"schema_id"}:
         try:

@@ -20,5 +20,6 @@ dependencies:
   - wheel>=0.45,<1
   - ruff>=0.15,<0.16
   - httpx>=0.28,<1
+  - websockets>=16,<17
   - xgboost>=3,<4
   - lightgbm>=4.6,<5

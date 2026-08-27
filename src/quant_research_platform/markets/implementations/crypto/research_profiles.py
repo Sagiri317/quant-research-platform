@@ -12,6 +12,12 @@ from quant_research_platform.markets.implementations.crypto.fields import (
 )
 from quant_research_platform.markets.implementations.crypto.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    HFT_FACTOR_COLUMNS,
+    HFT_FACTOR_DATA_ID,
+    HFT_LABEL_COLUMNS,
+    HFT_LABEL_DATA_ID,
+    HFT_PANEL_DATA_ID,
+    HFT_RESEARCH_DATASET_ID,
     MARKET_ID,
     MARKET_PANEL_DATA_ID,
     MICROSTRUCTURE_FORWARD_RETURNS_DATASET_ID,
@@ -19,6 +25,10 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 )
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
+)
+from quant_research_platform.markets.implementations.crypto.processed.catalog import (
+    HFT_PANEL_CONTEXT_COLUMNS,
+    HFT_PRIMARY_KEY,
 )
 from quant_research_platform.research.factors.microstructure.columns import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
@@ -73,6 +83,55 @@ def build_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
 
 def build_research_dataset_catalog() -> ResearchDatasetCatalog:
     return ResearchDatasetCatalog(build_research_dataset_specs())
+
+
+def build_hft_research_dataset_catalog() -> ResearchDatasetCatalog:
+    columns = (
+        *HFT_PRIMARY_KEY,
+        *HFT_FACTOR_COLUMNS,
+        *HFT_LABEL_COLUMNS,
+        "eligible",
+        *HFT_PANEL_CONTEXT_COLUMNS,
+    )
+    roles = {
+        column: (
+            ColumnRole.FACTOR
+            if column in HFT_FACTOR_COLUMNS
+            else ColumnRole.LABEL
+            if column in HFT_LABEL_COLUMNS
+            else ColumnRole.UNIVERSE
+            if column == "eligible"
+            else ColumnRole.TIMESTAMP
+            if column == "timestamp"
+            else ColumnRole.KEY
+            if column in HFT_PRIMARY_KEY
+            else ColumnRole.CONTEXT
+        )
+        for column in columns
+    }
+    return ResearchDatasetCatalog(
+        (
+            ResearchDatasetSpec(
+                data_id=HFT_RESEARCH_DATASET_ID,
+                market_id=MARKET_ID,
+                input_data_ids=(
+                    HFT_PANEL_DATA_ID,
+                    HFT_FACTOR_DATA_ID,
+                    HFT_LABEL_DATA_ID,
+                ),
+                base_input_data_id=HFT_PANEL_DATA_ID,
+                factor_columns=HFT_FACTOR_COLUMNS,
+                label_columns=HFT_LABEL_COLUMNS,
+                filter_columns=("eligible",),
+                context_columns=HFT_PANEL_CONTEXT_COLUMNS,
+                frequency=DataFrequency.TICK,
+                grain=DataGrain.RESEARCH_ROW,
+                column_roles=roles,
+                primary_key=HFT_PRIMARY_KEY,
+                partition_columns=("year",),
+            ),
+        )
+    )
 
 
 def _column_roles(columns: tuple[str, ...]) -> dict[str, ColumnRole]:

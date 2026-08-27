@@ -5,7 +5,10 @@ from __future__ import annotations
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.markets.implementations.crypto.ids import MARKET_ID
+from quant_research_platform.markets.implementations.crypto.ids import (
+    HFT_LABEL_HORIZONS_MS,
+    MARKET_ID,
+)
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
@@ -35,5 +38,31 @@ def label_catalog() -> LabelCatalog:
             CRYPTO_FORWARD_RETURN_HORIZONS,
             CRYPTO_FORWARD_RETURN_COLUMNS,
             strict=True,
+        )
+    )
+
+
+def hft_label_catalog() -> LabelCatalog:
+    return LabelCatalog(
+        LabelDefinition(
+            label_id=column,
+            market_id=MARKET_ID,
+            family=(
+                "futures_mid_direction"
+                if "direction" in column
+                else "futures_mid_return"
+            ),
+            input_columns=("mid",),
+            output_column=column,
+            label_timing="same_valid_segment_exact_future_grid_mid",
+            horizon=horizon // 100,
+            lookahead=horizon // 100,
+            entry_rule="current_valid_book_grid_mid",
+            exit_rule=f"same_segment_valid_book_grid_mid_{horizon}ms",
+        )
+        for horizon in HFT_LABEL_HORIZONS_MS
+        for column in (
+            f"future_mid_return_{horizon}ms",
+            f"future_mid_direction_{horizon}ms",
         )
     )

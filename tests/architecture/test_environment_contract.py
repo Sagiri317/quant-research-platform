@@ -12,6 +12,7 @@ ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
 
 RUNTIME_DEPENDENCIES = {
     "fastapi",
+    "httpx",
     "numpy",
     "pandas",
     "pyarrow",
@@ -22,10 +23,10 @@ RUNTIME_DEPENDENCIES = {
     "xgboost",
     "lightgbm",
     "typer",
+    "websockets",
 }
 DEV_DEPENDENCIES = {
     "build",
-    "httpx",
     "pytest",
     "ruff",
 }

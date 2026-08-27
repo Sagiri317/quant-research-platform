@@ -398,6 +398,60 @@ def test_write_dataset_merges_exact_input_dataset_identities(tmp_path: Path) -> 
     assert inspection.manifest["input_dataset_identities"] == identities
 
 
+def test_write_dataset_merges_exact_source_artifact_identity(tmp_path: Path) -> None:
+    root = make_dataset_artifact_root(tmp_path, "source_artifact_identity")
+    source_identity = {
+        "schema_id": "qrp-binance-recorder",
+        "artifact_id": "run-1",
+        "manifest_hash": "a" * 64,
+    }
+
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("source_artifact_identity"),
+        instance_metadata={
+            "input_dataset_identities": {
+                "demo_input": _input_dataset_identity_payload()
+            },
+            "source_artifact_identity": source_identity,
+        },
+    )
+
+    inspection = inspect_dataset(root)
+    assert inspection.manifest["source_artifact_identity"] == source_identity
+
+
+@pytest.mark.parametrize(
+    "source_identity",
+    (
+        {},
+        {
+            "schema_id": "qrp-binance-recorder",
+            "artifact_id": "run-1",
+            "manifest_hash": "bad",
+        },
+        {
+            "schema_id": "qrp-binance-recorder",
+            "artifact_id": "run-1",
+            "manifest_hash": "a" * 64,
+            "extra": "x",
+        },
+    ),
+)
+def test_write_dataset_rejects_malformed_source_artifact_identity(
+    tmp_path: Path,
+    source_identity: object,
+) -> None:
+    with pytest.raises(ValueError, match="invalid_source_artifact_identity"):
+        write_dataset(
+            make_dataset_artifact_root(tmp_path, "bad_source_artifact_identity"),
+            make_default_dataset_frame(),
+            spec=make_processed_dataset_spec("bad_source_artifact_identity"),
+            instance_metadata={"source_artifact_identity": source_identity},
+        )
+
+
 @pytest.mark.parametrize(
     "identities",
     [

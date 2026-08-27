@@ -20,6 +20,10 @@ from quant_research_platform.contracts.predictions import (
     PredictionSpec,
     _validate_prediction_output_values,
 )
+from quant_research_platform.contracts.time import (
+    is_intraday_time_value,
+    time_value_isoformat,
+)
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research._memory import (
@@ -72,8 +76,7 @@ class PredictionResult:
             if primary is None:
                 raise
             primary.add_note(
-                "prediction result cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
+                f"prediction result cleanup also failed: {type(cleanup_error).__name__}"
             )
 
 
@@ -213,13 +216,21 @@ class _PredictionBuildState:
     def record_input_dropna_rows(self, row_count: int) -> None:
         self.rows_after_dropna += int(row_count)
 
-    def record_prediction_output(self, output: pd.DataFrame) -> None:
+    def record_prediction_output(
+        self,
+        output: pd.DataFrame,
+        *,
+        spec: PredictionSpec,
+    ) -> None:
         if output.empty:
             return
         timestamps = strict_timestamp_series(
             output["timestamp"], error="invalid_prediction_timestamp_values"
         )
-        current_end = date_string(timestamps.max())
+        current_end = time_value_isoformat(
+            pd.Timestamp(timestamps.max()),
+            date_only=not is_intraday_time_value(spec.test_start),
+        )
         if self.effective_test_end is None or pd.Timestamp(current_end) > pd.Timestamp(
             self.effective_test_end
         ):
@@ -287,10 +298,7 @@ def _iter_prediction_output_frames(
                 ) + (8 * row_count)
                 model_matrix_bytes = 8 * row_count * (len(input_columns) + 1)
                 working_bytes = (
-                    mask_bytes
-                    + test_frame_bytes
-                    + output_bytes
-                    + model_matrix_bytes
+                    mask_bytes + test_frame_bytes + output_bytes + model_matrix_bytes
                 )
                 if policy is not None and (
                     policy.used_memory_bytes + working_bytes
@@ -309,16 +317,16 @@ def _iter_prediction_output_frames(
                 test_frame = None
                 output = None
                 try:
-                    usable_mask = filtered.loc[:, list(input_columns)].notna().all(
-                        axis=1
+                    usable_mask = (
+                        filtered.loc[:, list(input_columns)].notna().all(axis=1)
                     )
                     build_state.record_input_dropna_rows(int(usable_mask.sum()))
-                    usable_mask &= (
-                        filtered["timestamp"] >= pd.Timestamp(spec.test_start)
+                    usable_mask &= filtered["timestamp"] >= pd.Timestamp(
+                        spec.test_start
                     )
                     if spec.test_end is not None:
-                        usable_mask &= (
-                            filtered["timestamp"] <= pd.Timestamp(spec.test_end)
+                        usable_mask &= filtered["timestamp"] <= pd.Timestamp(
+                            spec.test_end
                         )
                     test_frame = filtered.loc[usable_mask, list(usable_columns)]
                     if test_frame.empty:
@@ -335,7 +343,7 @@ def _iter_prediction_output_frames(
                         primary_key=spec.primary_key,
                         prediction_column=spec.prediction_column,
                     )
-                    build_state.record_prediction_output(output)
+                    build_state.record_prediction_output(output, spec=spec)
                     retained_bytes = pandas_frame_payload_bytes(output)
                     if working_lease is not None:
                         working_lease.shrink_to(retained_bytes)
@@ -390,9 +398,7 @@ def prediction_callable(
                 prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
             ):
                 columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
-            predicted = prediction_model.predict(
-                frame.loc[:, list(columns)]
-            )
+            predicted = prediction_model.predict(frame.loc[:, list(columns)])
             return np.asarray(predicted, dtype="float64")
 
         return predict_from_model
@@ -411,10 +417,6 @@ def _validate_oos_split(spec: PredictionSpec) -> None:
         spec.test_start
     ):
         raise ValueError("prediction_test_end_must_not_precede_test_start")
-
-
-def date_string(value: pd.Timestamp) -> str:
-    return pd.Timestamp(value).date().isoformat()
 
 
 def _iter_prediction_work_frames(
@@ -437,8 +439,7 @@ def _iter_prediction_work_frames(
             selected_bytes = _selected_frame_payload_bytes(frame, selected)
             policy = current_runtime_resource_policy()
             if policy is not None and (
-                policy.used_memory_bytes + selected_bytes
-                > policy.memory_budget_bytes
+                policy.used_memory_bytes + selected_bytes > policy.memory_budget_bytes
             ):
                 raise ValueError("prediction_working_set_exceeds_task_memory_budget")
             projection_lease = None

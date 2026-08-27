@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
 
 import pandas as pd
 
@@ -12,6 +11,7 @@ from quant_research_platform.contracts.filtering import (
     validate_sample_filter_mode,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
+from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
@@ -57,20 +57,31 @@ class PredictionSpec:
             self.research_dataset_id,
             "research_dataset_id_required",
         )
-        for field_name in ("train_end", "test_start"):
-            value = _iso_date(getattr(self, field_name), field_name)
-            object.__setattr__(self, field_name, value.isoformat())
+        train_end = _time_bound(self.train_end, "train_end")
+        test_start = _time_bound(self.test_start, "test_start")
+        _require_same_bound_kind(train_end, test_start)
+        object.__setattr__(
+            self,
+            "train_end",
+            time_value_isoformat(train_end, preserve_datetime=True),
+        )
+        object.__setattr__(
+            self,
+            "test_start",
+            time_value_isoformat(test_start, preserve_datetime=True),
+        )
         if self.test_end is not None:
-            test_end = _iso_date(self.test_end, "test_end")
-            object.__setattr__(self, "test_end", test_end.isoformat())
-        if date.fromisoformat(self.train_end) >= date.fromisoformat(
-            self.test_start
-        ):
+            test_end = _time_bound(self.test_end, "test_end")
+            _require_same_bound_kind(test_start, test_end)
+            if test_end < test_start:
+                raise ValueError("prediction_test_end_must_not_precede_test_start")
+            object.__setattr__(
+                self,
+                "test_end",
+                time_value_isoformat(test_end, preserve_datetime=True),
+            )
+        if train_end >= test_start:
             raise ValueError("prediction_train_end_must_precede_test_start")
-        if self.test_end is not None and date.fromisoformat(
-            self.test_end
-        ) < date.fromisoformat(self.test_start):
-            raise ValueError("prediction_test_end_must_not_precede_test_start")
         _validate_non_empty_string(self.prediction_column, "prediction_column_required")
         _validate_column_tuple(self.primary_key, "prediction_primary_key")
         if (
@@ -145,16 +156,19 @@ def _validate_model_selection_contract(spec: PredictionSpec) -> None:
         or spec.model_selection_validation_end is None
     ):
         raise ValueError("model_selection_validation_window_required")
-    train_end = _iso_date(spec.train_end, "train_end")
-    test_start = _iso_date(spec.test_start, "test_start")
-    validation_start = _iso_date(
+    train_end = _time_bound(spec.train_end, "train_end")
+    test_start = _time_bound(spec.test_start, "test_start")
+    validation_start = _time_bound(
         spec.model_selection_validation_start,
         "model_selection_validation_start",
     )
-    validation_end = _iso_date(
+    validation_end = _time_bound(
         spec.model_selection_validation_end,
         "model_selection_validation_end",
     )
+    _require_same_bound_kind(train_end, validation_start)
+    _require_same_bound_kind(validation_start, validation_end)
+    _require_same_bound_kind(validation_end, test_start)
     if train_end >= validation_start:
         raise ValueError("model_selection_window_must_follow_train_window")
     if validation_start > validation_end:
@@ -163,8 +177,13 @@ def _validate_model_selection_contract(spec: PredictionSpec) -> None:
         raise ValueError("model_selection_window_must_precede_test_window")
 
 
-def _iso_date(value: str, field_name: str) -> date:
+def _time_bound(value: object, field_name: str):
     try:
-        return date.fromisoformat(value)
+        return TimeWindow(value, value).start  # type: ignore[arg-type]
     except (TypeError, ValueError) as exc:
         raise ValueError(f"invalid_{field_name}") from exc
+
+
+def _require_same_bound_kind(left: object, right: object) -> None:
+    if type(left) is not type(right):
+        raise ValueError("mixed_time_window_bounds")

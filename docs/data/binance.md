@@ -58,9 +58,80 @@ data/raw/binance/spot/agg_trades/<symbol>/*.jsonl
 data/raw/binance/spot/depth/<symbol>/*.jsonl
 ```
 
-These paths are local input layout only. They do not define public API, public CLI, or durable research output.
-`sources/binance` runtime 只读取这些本地 JSONL 文件，不联网、不读取 API key
-或 secret，也不把 connector 调用逻辑写入 repo runtime。
+These paths are the legacy local-envelope input layout only. They do not define
+public API, public CLI, or durable research output. This importer path does not
+perform network collection. The separate recorder-run contract below uses only
+unauthenticated Binance public market-data endpoints and never reads API keys or
+secrets.
+
+## Recorder Run Contract
+
+Formal HFT replay accepts exactly one recorder root containing one `run.json` and
+only the gzip JSONL members declared by that manifest. It never discovers input by
+glob-joining multiple runs.
+
+The current recorder keeps only streams with live consumers:
+
+```text
+Spot diff depth @ 100ms
+USDⓈ-M Futures diff depth @ 100ms
+USDⓈ-M Futures aggregate trades
+```
+
+RPI depth, book ticker, force order, mark price and auxiliary statistics are not
+part of the current recorder contract because the implemented research chain does
+not consume them.
+
+Each raw record contains:
+
+```text
+capture_seq
+receive_time
+receive_monotonic_ns
+connection_id
+segment_id       # depth and snapshot only
+payload          # lossless exchange payload
+```
+
+`capture_seq` has one owner: the serialized run writer. Every manifest member is
+bound by exact path, market, stream, data kind, row count, capture-sequence range,
+maximum uncompressed record bytes, compressed bytes and SHA-256. Replay verifies
+the manifest, exact member set, hashes and physical identities before and after
+use. Missing capture sequence never falls back to timestamp order.
+
+Depth reconnects create a new `connection_id` and `segment_id`. The matching REST
+snapshot is bound to that same identity; replay indexes snapshots on bounded local
+scratch and never treats reconnect segments as continuous. Spot bootstraps on
+`lastUpdateId + 1`; Futures bootstraps on `lastUpdateId` and then requires
+`pu == previous u`. Zero quantity deletes a level. Price identity uses integer
+ticks, not binary-float equality. A gap, crossed book, one-sided book or insufficient
+known depth emits an explicit invalid boundary; no stale book is silently reused.
+
+The following clocks remain distinct through PANEL lineage:
+
+```text
+exchange event time (E)
+Futures transaction time (T)
+local receive UTC time
+local monotonic receive time
+capture sequence
+segment identity
+```
+
+The implemented HFT data chain is:
+
+```text
+one recorder run
+-> deterministic Futures L2 events
+-> persisted 100ms PANEL sufficient statistics
+-> FACTOR and LABEL derived only from persisted PANEL
+-> standard ResearchDataset
+-> standard ModelSpec / fitting / prediction / artifact
+-> event-time taker and estimated-queue public-L2 maker diagnostics
+```
+
+The recorder uses the bounded `websockets` runtime for public streams and `httpx`
+for public REST metadata/snapshots. It has no authenticated endpoint or order API.
 
 ## Interim Datasets
 

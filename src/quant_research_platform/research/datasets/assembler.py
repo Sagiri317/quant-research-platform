@@ -130,11 +130,19 @@ def _assemble_research_dataset_from_sessions(
         for session in input_sessions.values():
             session.verify()
 
+    instance_metadata: dict[str, object] = {
+        "input_dataset_identities": input_identities,
+    }
+    base_manifest = input_sessions[spec.base_input_data_id].manifest
+    if "source_artifact_identity" in base_manifest:
+        instance_metadata["source_artifact_identity"] = base_manifest[
+            "source_artifact_identity"
+        ]
     write_dataset(
         artifact_root,
         chunks,
         spec=spec,
-        instance_metadata={"input_dataset_identities": input_identities},
+        instance_metadata=instance_metadata,
         staged_validator=verify_input_sessions,
         resource_policy=policy,
     )

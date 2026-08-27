@@ -6,6 +6,9 @@ from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.ids import SourceId
 
 SOURCE_ID = SourceId("binance")
+RAW_RECORDER_RUN_DATA_ID = "binance_recorder_run"
+SPOT_MARKET_TYPE = "spot"
+FUTURES_MARKET_TYPE = "usd_s_m_futures"
 
 
 def market_bars_data_id(frequency: DataFrequency | str = DataFrequency.MINUTE) -> str:

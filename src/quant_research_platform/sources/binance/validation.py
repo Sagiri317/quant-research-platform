@@ -85,6 +85,18 @@ def strict_non_negative_integer(value: object, *, error: str) -> int:
     return number
 
 
+def validate_depth_update_levels(value: object, *, error: str) -> None:
+    """Validate raw Binance ``[price, quantity]`` pairs without normalizing."""
+
+    if not isinstance(value, list):
+        raise ValueError(error)
+    for level in value:
+        if not isinstance(level, list) or len(level) != 2:
+            raise ValueError(error)
+        strict_positive_float(level[0], error=error)
+        strict_non_negative_float(level[1], error=error)
+
+
 def strict_positive_integer(value: object, *, error: str) -> int:
     number = _strict_integer(value, error=error)
     if number <= 0:

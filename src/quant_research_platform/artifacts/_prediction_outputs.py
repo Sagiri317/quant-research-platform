@@ -35,6 +35,7 @@ from quant_research_platform.contracts.predictions import (
     PredictionSpec,
     _validate_prediction_output_values,
 )
+from quant_research_platform.contracts.time import is_intraday_time_value
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
@@ -152,9 +153,7 @@ def _write_prediction_output_chunks(
         expected_definition_id="prediction_outputs",
     )
     required = (*spec.primary_key, spec.prediction_column)
-    model_metadata_payload = validate_model_metadata_shape(
-        dict(model_metadata)
-    )
+    model_metadata_payload = validate_model_metadata_shape(dict(model_metadata))
     validate_model_metadata_consistency(model_metadata_payload, spec=spec)
 
     def _write(temp_root: Path) -> None:
@@ -164,6 +163,7 @@ def _write_prediction_output_chunks(
             required=required,
             key_columns=tuple(spec.primary_key),
             compression="zstd",
+            date_only=not is_intraday_time_value(spec.test_start),
         )
         prediction_metadata = validate_prediction_metadata_shape(
             dict(prediction_metadata_factory())

@@ -4,6 +4,10 @@ from __future__ import annotations
 
 from quant_research_platform.catalog.fields import FieldCatalog, platform_field_catalog
 from quant_research_platform.contracts.columns import ColumnRole, FieldSpec
+from quant_research_platform.markets.implementations.crypto.ids import (
+    HFT_FACTOR_COLUMNS,
+    HFT_LABEL_COLUMNS,
+)
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
 )
@@ -65,19 +69,76 @@ PANEL_FIELD_SPECS = (
     FieldSpec(name="eligible", role=ColumnRole.UNIVERSE, dtype="bool"),
 )
 
+HFT_PANEL_FIELD_SPECS = (
+    FieldSpec(name="segment_id", role=ColumnRole.CONTEXT, dtype="string"),
+    FieldSpec(name="capture_seq", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(name="book_state_time_ms", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(name="exchange_event_time_ms", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(name="transaction_time_ms", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(
+        name="local_receive_time",
+        role=ColumnRole.CONTEXT,
+        dtype="datetime64[ns]",
+    ),
+    FieldSpec(name="receive_monotonic_ns", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(name="update_id", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(name="best_bid_price", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(name="best_bid_qty", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(name="best_ask_price", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(name="best_ask_qty", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(name="mid", role=ColumnRole.CONTEXT, dtype="float64"),
+    *(
+        FieldSpec(
+            name=f"{side}_depth_{levels}",
+            role=ColumnRole.CONTEXT,
+            dtype="float64",
+        )
+        for levels in (1, 5, 10)
+        for side in ("bid", "ask")
+    ),
+    FieldSpec(name="book_ofi_100ms", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(name="trade_count_100ms", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(name="trade_volume_100ms", role=ColumnRole.CONTEXT, dtype="float64"),
+    FieldSpec(
+        name="observed_signed_trade_volume_100ms",
+        role=ColumnRole.CONTEXT,
+        dtype="float64",
+    ),
+    FieldSpec(
+        name="observed_taker_buy_volume_100ms",
+        role=ColumnRole.CONTEXT,
+        dtype="float64",
+    ),
+    FieldSpec(
+        name="observed_taker_sell_volume_100ms",
+        role=ColumnRole.CONTEXT,
+        dtype="float64",
+    ),
+)
+
 
 def field_catalog() -> FieldCatalog:
     return FieldCatalog(
         (
             *platform_field_catalog().list(),
             *PANEL_FIELD_SPECS,
+            *HFT_PANEL_FIELD_SPECS,
             *(
                 FieldSpec(name=column, role=ColumnRole.FACTOR, dtype="float64")
                 for column in MICROSTRUCTURE_FACTOR_COLUMNS
             ),
             *(
+                FieldSpec(name=column, role=ColumnRole.FACTOR, dtype="float64")
+                for column in HFT_FACTOR_COLUMNS
+                if column not in MICROSTRUCTURE_FACTOR_COLUMNS
+            ),
+            *(
                 FieldSpec(name=column, role=ColumnRole.LABEL, dtype="float64")
                 for column in CRYPTO_FORWARD_RETURN_COLUMNS
+            ),
+            *(
+                FieldSpec(name=column, role=ColumnRole.LABEL, dtype="float64")
+                for column in HFT_LABEL_COLUMNS
             ),
         )
     )
