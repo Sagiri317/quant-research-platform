@@ -157,7 +157,7 @@ def _quote(
     }
 
 
-def test_r1_only_local_observation_time_drives_panel_and_taker() -> None:
+def test_unobserved_state_is_hidden_from_panel_and_taker() -> None:
     state = _state(100, event_time_ms=0, transaction_time_ms=0)
 
     rows = list(
@@ -185,7 +185,7 @@ def test_r1_only_local_observation_time_drives_panel_and_taker() -> None:
     assert fills == []
 
 
-def test_r2_trade_gap_is_missing_not_zero_volume() -> None:
+def test_trade_gap_is_missing_not_zero_volume() -> None:
     books = [_state(0), _state(300)]
     missing = list(
         iter_panel_rows(
@@ -213,7 +213,7 @@ def test_r2_trade_gap_is_missing_not_zero_volume() -> None:
     assert [row["trade_volume_100ms"] for row in complete] == [0.0, 0.0]
 
 
-def test_r3_depth_reconnect_does_not_make_first_partial_interval_valid() -> None:
+def test_depth_reconnect_does_not_make_first_partial_interval_valid() -> None:
     rows = list(
         iter_panel_rows(
             [
@@ -231,7 +231,7 @@ def test_r3_depth_reconnect_does_not_make_first_partial_interval_valid() -> None
     assert [row["timestamp_ms"] for row in rows] == [100]
 
 
-def test_r4_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
+def test_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
     rows = list(
         iter_panel_rows(
             [_state(0)],
@@ -248,7 +248,7 @@ def test_r4_trade_reconnect_does_not_make_first_partial_interval_valid() -> None
     assert [row["timestamp_ms"] for row in rows] == [100, 300]
 
 
-def test_r4_maker_uses_local_observation_order_for_same_time_events() -> None:
+def test_maker_uses_local_observation_order_for_same_time_events() -> None:
     initial = _state(0, capture_seq=1, receive_monotonic_ns=1)
     changed = _state(
         100,
@@ -299,7 +299,7 @@ def test_r4_maker_uses_local_observation_order_for_same_time_events() -> None:
     assert book_first["same_timestamp_policy"] == "local_observation_order"
 
 
-def test_r4_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> None:
+def test_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> None:
     trade = _trade(50, quantity=2.0, visible_quantity=1.0)
     rows = list(
         iter_panel_rows(
@@ -324,7 +324,7 @@ def test_r4_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> N
     assert result["filled_orders"] == 0
 
 
-def test_r4_zero_visible_trade_through_cannot_fill_a_maker_order() -> None:
+def test_zero_visible_trade_through_cannot_fill_a_maker_order() -> None:
     result = simulate_maker(
         [_state(0)],
         [_trade(50, quantity=1.0, visible_quantity=0.0, price_tick=994)],
@@ -336,7 +336,7 @@ def test_r4_zero_visible_trade_through_cannot_fill_a_maker_order() -> None:
     assert result["filled_orders"] == 0
 
 
-def test_r4_zero_visible_trade_through_does_not_advance_queue() -> None:
+def test_zero_visible_trade_through_does_not_advance_queue() -> None:
     result = simulate_maker(
         [_state(0)],
         [
@@ -351,7 +351,7 @@ def test_r4_zero_visible_trade_through_does_not_advance_queue() -> None:
     assert result["filled_orders"] == 0
 
 
-def test_r7_maker_requires_matching_book_and_trade_schedule_identity() -> None:
+def test_maker_requires_matching_book_and_trade_schedule_identity() -> None:
     result = simulate_maker(
         [_state(0)],
         [],
@@ -363,7 +363,7 @@ def test_r7_maker_requires_matching_book_and_trade_schedule_identity() -> None:
     assert result["created_orders"] == 0
 
 
-def test_r5_book_state_lease_and_r6_taker_timing_and_terminal_mark() -> None:
+def test_book_state_lease_and_taker_timing_and_terminal_mark() -> None:
     fills: list[dict[str, object]] = []
     equities: list[dict[str, object]] = []
     simulate_taker(
@@ -395,7 +395,7 @@ def test_r5_book_state_lease_and_r6_taker_timing_and_terminal_mark() -> None:
     assert math.isclose(terminal["gross_pnl_usd"], 0.5)
 
 
-def test_r6_same_price_book_decrease_without_trade_does_not_deplete_queue() -> None:
+def test_same_price_book_decrease_without_trade_does_not_deplete_queue() -> None:
     result = simulate_maker(
         [
             _state(0, bid_qty=1.0),
@@ -410,7 +410,7 @@ def test_r6_same_price_book_decrease_without_trade_does_not_deplete_queue() -> N
     assert result["filled_orders"] == 0
 
 
-def test_r7_maker_quote_schedule_has_no_prediction_surface() -> None:
+def test_maker_quote_schedule_has_no_prediction_surface() -> None:
     assert "quote_schedule" in inspect.signature(simulate_maker).parameters
     with pytest.raises(ValueError, match="prediction"):
         simulate_maker(
@@ -423,7 +423,7 @@ def test_r7_maker_quote_schedule_has_no_prediction_surface() -> None:
         )
 
 
-def test_r8_hft_grid_is_the_only_model_and_label_step_owner() -> None:
+def test_hft_grid_is_the_only_model_and_label_step_owner() -> None:
     assert HFT_GRID_MS == 100
     models = build_hft_model_catalog(training_row_bound=1).list()
     assert all(
