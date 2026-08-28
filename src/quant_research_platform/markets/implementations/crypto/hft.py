@@ -18,6 +18,7 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import _OwnedValue
 
 HFT_GRID_MS = 100
+_NANOSECONDS_PER_MILLISECOND = 1_000_000
 
 
 def l1_ofi(
@@ -76,6 +77,8 @@ def iter_panel_rows(
         try:
             for grid_time in range(start_ms, end_ms + 1, interval_ms):
                 interval_start = max(0, grid_time - HFT_GRID_MS)
+                grid_time_ns = grid_time * _NANOSECONDS_PER_MILLISECOND
+                interval_start_ns = interval_start * _NANOSECONDS_PER_MILLISECOND
                 book_ofi = 0.0
                 trade_count = 0
                 trade_volume = 0.0
@@ -87,11 +90,11 @@ def iter_panel_rows(
                 trade_connections = tuple(
                     connection_id
                     for connection_id, bounds in trade_coverage.items()
-                    if bounds[0] <= interval_start and bounds[1] > grid_time
+                    if bounds[0] <= interval_start_ns and bounds[1] > grid_time_ns
                 )
                 while (
                     next_book is not None
-                    and _book_observed_time(next_book) <= grid_time
+                    and _book_observed_time(next_book) <= grid_time_ns
                 ):
                     event_time = _book_observed_time(next_book)
                     if (
@@ -136,9 +139,9 @@ def iter_panel_rows(
                 while next_trade is not None:
                     if not isinstance(next_trade, TradeEvent):
                         raise TypeError("hft_trade_event_invalid")
-                    if next_trade.observed_time_ms > grid_time:
+                    if next_trade.observed_time_ns > grid_time_ns:
                         break
-                    trade_time = next_trade.observed_time_ms
+                    trade_time = next_trade.observed_time_ns
                     if (
                         previous_trade_time is not None
                         and trade_time < previous_trade_time
@@ -166,8 +169,8 @@ def iter_panel_rows(
                         current_state is not None
                         and len(trade_connections) == 1
                         and trade.connection_id == trade_connections[0]
-                        and trade.observed_time_ms > interval_start
-                        and trade.observed_time_ms <= grid_time
+                        and trade.observed_time_ns > interval_start_ns
+                        and trade.observed_time_ns <= grid_time_ns
                     ):
                         trade_count += 1
                         trade_volume += quantity
@@ -192,8 +195,8 @@ def iter_panel_rows(
                 book_bounds = book_coverage.get(current_state.segment_id)
                 if (
                     book_bounds is None
-                    or book_bounds[0] > interval_start
-                    or book_bounds[1] <= grid_time
+                    or book_bounds[0] > interval_start_ns
+                    or book_bounds[1] <= grid_time_ns
                 ):
                     continue
                 if len(trade_connections) != 1:
@@ -228,9 +231,9 @@ def _book_observed_time(
     event: BookState | _OwnedValue[BookState] | BookBoundary,
 ) -> int:
     return (
-        event.value.observed_time_ms
+        event.value.observed_time_ns
         if isinstance(event, _OwnedValue)
-        else event.observed_time_ms
+        else event.observed_time_ns
     )
 
 

@@ -3,10 +3,13 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import sqlite3
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+import quant_research_platform.sources.binance.replay as replay
 from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
@@ -41,6 +44,9 @@ def _raw(
     return {
         "capture_seq": capture_seq,
         "receive_time": "2026-08-27T00:00:00.123456Z",
+        "observed_time_ns": pd.Timestamp(
+            "2026-08-27T00:00:00.123456Z"
+        ).value,
         "receive_monotonic_ns": capture_seq * 10,
         "connection_id": connection_id,
         "segment_id": segment_id,
@@ -139,6 +145,9 @@ def _agg_trade(
     return {
         "capture_seq": capture_seq,
         "receive_time": "2026-08-27T00:00:00.123456Z",
+        "observed_time_ns": pd.Timestamp(
+            "2026-08-27T00:00:00.123456Z"
+        ).value,
         "receive_monotonic_ns": capture_seq * 10,
         "connection_id": "trade-connection-1",
         "payload": {
@@ -729,6 +738,82 @@ def test_raw_decode_is_admitted_before_json_allocation(tmp_path: Path) -> None:
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
             next(run.iter_records())
+
+
+def test_snapshot_index_keeps_only_locator_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    _futures_run(
+        root,
+        [_futures_delta(1, 90, 100, previous=0, transaction_time=10, segment_id="s1")],
+    )
+    statements: list[str] = []
+    real_connect = sqlite3.connect
+
+    class Connection:
+        def __init__(self, inner: sqlite3.Connection) -> None:
+            self.inner = inner
+
+        def execute(self, statement: str, *args: object):  # noqa: ANN002, ANN201
+            statements.append(statement)
+            return self.inner.execute(statement, *args)
+
+        def commit(self) -> None:
+            self.inner.commit()
+
+        def close(self) -> None:
+            self.inner.close()
+
+    monkeypatch.setattr(
+        replay.sqlite3,
+        "connect",
+        lambda *args, **kwargs: Connection(real_connect(*args, **kwargs)),
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
+        events = list(
+            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+        )
+        _close_owned_events(events)
+
+    create_statements = [statement.lower() for statement in statements]
+    assert any("create table snapshots" in statement for statement in create_statements)
+    assert all("payload text" not in statement for statement in create_statements)
+    assert any("record_bytes" in statement for statement in create_statements)
+
+
+def test_snapshot_decode_and_bootstrap_share_an_active_transient_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    _futures_run(
+        root,
+        [_futures_delta(1, 90, 100, previous=0, transaction_time=10, segment_id="s1")],
+    )
+    observed_owners: list[set[str]] = []
+    real_bootstrap = replay.DepthReconstructor.bootstrap
+
+    def probe_bootstrap(self, record):  # noqa: ANN001
+        observed_owners.append(
+            {lease.owner for lease in self.policy._leases if lease.active}
+        )
+        return real_bootstrap(self, record)
+
+    monkeypatch.setattr(replay.DepthReconstructor, "bootstrap", probe_bootstrap)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
+        events = list(
+            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+        )
+        _close_owned_events(events)
+
+    assert any("binance.replay.snapshot" in owners for owners in observed_owners)
+    assert policy.used_memory_bytes == 0
 
 
 def test_same_run_replay_is_deterministic(tmp_path: Path) -> None:

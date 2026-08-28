@@ -19,6 +19,10 @@ from quant_research_platform.markets.implementations.crypto.hft import (
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 
 
+def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:
+    return start_ms * 1_000_000, end_ms * 1_000_000
+
+
 def _state(
     timestamp_ms: int,
     *,
@@ -32,7 +36,7 @@ def _state(
         capture_seq=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
-        observed_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
@@ -50,7 +54,7 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
         capture_seq=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
-        observed_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
@@ -65,7 +69,7 @@ def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEve
         capture_seq=timestamp_ms + 10,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
-        observed_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 10,
         connection_id="trade-connection-1",
@@ -89,8 +93,8 @@ def test_quiet_valid_book_persists_without_fabricated_gap() -> None:
             [],
             start_ms=0,
             end_ms=500,
-            book_coverage={"s1": (0, 501)},
-            trade_coverage={"trade-connection-1": (0, 501)},
+            book_coverage={"s1": _coverage(0, 501)},
+            trade_coverage={"trade-connection-1": _coverage(0, 501)},
         )
     )
 
@@ -105,8 +109,8 @@ def test_panel_excludes_pre_interval_trades_and_keeps_stream_clocks_separate() -
             [_trade(100, 9.0, maker_buyer=False), _trade(500, 2.0, maker_buyer=True)],
             start_ms=500,
             end_ms=500,
-            book_coverage={"s1": (0, 601)},
-            trade_coverage={"trade-connection-1": (0, 601)},
+            book_coverage={"s1": _coverage(0, 601)},
+            trade_coverage={"trade-connection-1": _coverage(0, 601)},
         )
     )
 
@@ -127,8 +131,8 @@ def test_explicit_book_boundary_stops_panel_until_new_segment() -> None:
             [],
             start_ms=0,
             end_ms=400,
-            book_coverage={"s1": (0, 250), "s2": (400, 500)},
-            trade_coverage={"trade-connection-1": (0, 500)},
+            book_coverage={"s1": _coverage(0, 250), "s2": _coverage(400, 500)},
+            trade_coverage={"trade-connection-1": _coverage(0, 500)},
         )
     )
 
@@ -150,8 +154,8 @@ def test_factor_rows_are_hand_calculated_from_panel_sufficient_statistics() -> N
             [_trade(100, 2.0, maker_buyer=False)],
             start_ms=0,
             end_ms=200,
-            book_coverage={"s1": (0, 201)},
-            trade_coverage={"trade-connection-1": (0, 201)},
+            book_coverage={"s1": _coverage(0, 201)},
+            trade_coverage={"trade-connection-1": _coverage(0, 201)},
         )
     )
     factors = list(iter_factor_rows(panel))
@@ -195,8 +199,8 @@ def test_factor_and_label_rows_reject_non_grid_gap_in_same_segment() -> None:
             [],
             start_ms=0,
             end_ms=200,
-            book_coverage={"s1": (0, 201)},
-            trade_coverage={"trade-connection-1": (0, 201)},
+            book_coverage={"s1": _coverage(0, 201)},
+            trade_coverage={"trade-connection-1": _coverage(0, 201)},
         )
     )
     rows = [complete[0], complete[2]]

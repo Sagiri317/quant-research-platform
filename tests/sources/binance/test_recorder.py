@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import json
+import threading
 from pathlib import Path
 
 import pytest
 
+import quant_research_platform.sources.binance.recorder as recorder
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     SPOT_MARKET_TYPE,
@@ -13,6 +17,7 @@ from quant_research_platform.sources.binance.recorder import (
     RecorderConfig,
     validate_stream_payload,
 )
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _depth_payload(market_type: str) -> dict[str, object]:
@@ -106,3 +111,122 @@ def test_recorder_config_rejects_existing_or_unbounded_target(tmp_path: Path) ->
     (occupied / "keep.txt").write_text("keep", encoding="utf-8")
     with pytest.raises(FileExistsError, match="output_not_empty"):
         RecorderConfig(output_root=occupied, duration_seconds=1).validate()
+
+
+def test_depth_reader_waits_for_same_generation_snapshot_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stream = RECORDER_STREAMS[1]
+    payload = _depth_payload(FUTURES_MARKET_TYPE)
+    payload.update({"U": 1, "u": 1, "pu": 0})
+    writes: list[dict[str, object]] = []
+
+    class Writer:
+        def write(self, **kwargs: object) -> int:
+            writes.append(kwargs)
+            return len(writes)
+
+    class Websocket:
+        def __init__(self) -> None:
+            self.sent = False
+            self.release = threading.Event()
+
+        def recv(self, timeout: float) -> str:
+            del timeout
+            if not self.sent:
+                self.sent = True
+                return json.dumps(payload)
+            self.release.wait(1)
+            raise TimeoutError
+
+        def close(self) -> None:
+            self.release.set()
+
+    websocket = Websocket()
+    monkeypatch.setattr(
+        recorder,
+        "_connect_websocket",
+        lambda *_args, **_kwargs: websocket,
+    )
+    reader = recorder._StreamReader(
+        stream=stream,
+        writer=Writer(),
+        stats=recorder._CaptureStats(),
+        stop=threading.Event(),
+        config=RecorderConfig(Path("unused"), 1),
+    )
+    reader.start()
+    assert reader.ready.wait(1)
+    try:
+        assert writes == []
+        generation, _connection_id, _segment_id = reader.current_identity()
+        assert reader.acknowledge_snapshot(generation)
+        assert reader.stop.wait(0.05) is False
+    finally:
+        reader.stop.set()
+        websocket.release.set()
+        reader.join(1)
+    assert len(writes) == 1
+
+
+def test_connection_interval_freezes_before_websocket_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    order: list[str] = []
+
+    class Websocket:
+        def recv(self, timeout: float) -> None:
+            del timeout
+            raise OSError("connection lost")
+
+        def close(self) -> None:
+            order.append("websocket")
+
+    stats = recorder._CaptureStats()
+    real_closed = stats.closed
+
+    def record_closed(*args: object, **kwargs: object) -> None:
+        order.append("interval")
+        real_closed(*args, **kwargs)
+
+    monkeypatch.setattr(stats, "closed", record_closed)
+    monkeypatch.setattr(
+        recorder,
+        "_connect_websocket",
+        lambda *_args, **_kwargs: Websocket(),
+    )
+    reader = recorder._StreamReader(
+        stream=RECORDER_STREAMS[2],
+        writer=recorder._RunWriter(tmp_path),
+        stats=stats,
+        stop=threading.Event(),
+        config=RecorderConfig(tmp_path / "run", 1),
+    )
+    with pytest.raises(recorder._ConnectionProblem):
+        reader._read_connection(reconnect=False)
+
+    assert order == ["interval", "websocket"]
+
+
+def test_connection_interval_retention_is_admitted_and_released() -> None:
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        stats = recorder._CaptureStats(policy)
+        stats.opened(
+            RECORDER_STREAMS[2],
+            reconnect=False,
+            connection_id="trade-1",
+            segment_id=None,
+            opened_at="1970-01-01T00:00:00.000000000Z",
+            opened_monotonic_ns=0,
+        )
+        assert policy.used_memory_bytes >= 1024
+        stats.closed(
+            "trade-1",
+            closed_at="1970-01-01T00:00:01.000000000Z",
+            closed_monotonic_ns=1_000_000_000,
+            close_reason="stop",
+        )
+        stats.close()
+        assert policy.used_memory_bytes == 0

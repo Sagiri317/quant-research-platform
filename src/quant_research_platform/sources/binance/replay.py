@@ -5,12 +5,11 @@ from __future__ import annotations
 import gzip
 import hashlib
 import heapq
-import json
 import os
 import sqlite3
 import sys
 import tempfile
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -149,6 +148,8 @@ class RecorderRun:
         *,
         market_type: str | None = None,
         data_kinds: Sequence[str] | None = None,
+        _record_observer: Callable[[dict[str, Any], str, int, int], None]
+        | None = None,
     ) -> Iterator[dict[str, Any]]:
         kinds = None if data_kinds is None else frozenset(data_kinds)
         selected = [
@@ -167,6 +168,7 @@ class RecorderRun:
                     item,
                     manifest=self.manifest,
                     resource_policy=self.resource_policy,
+                    record_observer=_record_observer,
                 )
                 for item in group
             ]
@@ -441,13 +443,11 @@ def _connection_coverage(
                 strict_iso_timestamp(
                     item["opened_at"],
                     error="binance_replay_connection_intervals_invalid",
-                ).value
-                // 1_000_000,
+                ).value,
                 strict_iso_timestamp(
                     item["closed_at"],
                     error="binance_replay_connection_intervals_invalid",
-                ).value
-                // 1_000_000,
+                ).value,
             )
     return result
 
@@ -478,10 +478,7 @@ def _validate_record_coverage(
         if item["connection_id"] == connection_id
     ):
         raise ValueError("binance_replay_connection_coverage_invalid")
-    observed_time = strict_iso_timestamp(
-        record.get("receive_time"),
-        error="binance_replay_receive_time_invalid",
-    ).value // 1_000_000
+    observed_time = record["observed_time_ns"]
     if not bounds[0] <= observed_time < bounds[1]:
         raise ValueError("binance_replay_connection_coverage_invalid")
 
@@ -606,6 +603,7 @@ def _iter_raw_file(
     *,
     manifest: dict[str, Any],
     resource_policy: RuntimeResourcePolicy,
+    record_observer: Callable[[dict[str, Any], str, int, int], None] | None = None,
 ) -> Iterator[dict[str, Any]]:
     metadata = item.metadata
     path = root / metadata["path"]
@@ -622,6 +620,7 @@ def _iter_raw_file(
             count = 0
             minimum: int | None = None
             maximum: int | None = None
+            record_index = 0
             previous: int | None = None
             while True:
                 with resource_policy.lease("binance.replay.record", bound):
@@ -639,6 +638,14 @@ def _iter_raw_file(
                     if previous is not None and capture_seq <= previous:
                         raise ValueError("binance_replay_capture_seq_non_monotonic")
                     previous = capture_seq
+                    if record_observer is not None:
+                        record_observer(
+                            record,
+                            metadata["path"],
+                            record_index,
+                            len(line),
+                        )
+                    record_index += 1
                     minimum = (
                         capture_seq if minimum is None else min(minimum, capture_seq)
                     )
@@ -686,8 +693,103 @@ def _iter_raw_file(
         raw_handle.close()
 
 
+def _read_snapshot_at_locator(
+    root: Path,
+    item: _RunFile,
+    *,
+    manifest: dict[str, Any],
+    resource_policy: RuntimeResourcePolicy,
+    record_index: int,
+    record_bytes: int,
+    capture_seq: int,
+    segment_id: str,
+    connection_id: str,
+    consume: Callable[[dict[str, Any]], None],
+) -> None:
+    if (
+        type(record_index) is not int
+        or record_index < 0
+        or type(record_bytes) is not int
+        or record_bytes <= 0
+        or type(capture_seq) is not int
+        or capture_seq < 0
+    ):
+        raise ValueError("binance_replay_snapshot_locator_invalid")
+    metadata = item.metadata
+    if record_bytes > metadata["max_record_bytes"]:
+        raise ValueError("binance_replay_snapshot_locator_invalid")
+    path = root / metadata["path"]
+    try:
+        raw_handle = path.open("rb")
+    except OSError as exc:
+        raise ValueError("binance_replay_raw_file_open_failed") from exc
+    try:
+        _verify_raw_file_handle(raw_handle, expected_identity=item.identity)
+        gzip_handle = gzip.GzipFile(fileobj=raw_handle, mode="rb")
+        try:
+            for index in range(record_index + 1):
+                if index == record_index:
+                    bound = _json_record_working_set_bytes(record_bytes) + 64 * 1024
+                    with resource_policy.lease(
+                        "binance.replay.snapshot",
+                        bound,
+                    ):
+                        line = gzip_handle.readline(record_bytes + 1)
+                        if not line or len(line) > record_bytes:
+                            raise ValueError(
+                                "binance_replay_snapshot_locator_invalid"
+                            )
+                        try:
+                            value = parse_qrp_json_object(line)
+                        except (UnicodeError, ValueError) as exc:
+                            raise ValueError("binance_replay_raw_json_invalid") from exc
+                        _validate_raw_record(value, metadata=metadata)
+                        if (
+                            value["capture_seq"] != capture_seq
+                            or value.get("segment_id") != segment_id
+                            or value.get("connection_id") != connection_id
+                        ):
+                            raise ValueError("binance_replay_snapshot_locator_invalid")
+                        record = {
+                            **value,
+                            "run_id": manifest["run_id"],
+                            "venue": metadata["venue"],
+                            "symbol": metadata["symbol"],
+                            "market_type": metadata["market"],
+                            "stream": metadata["stream"],
+                            "data_kind": metadata["data_kind"],
+                            "tick_size": manifest["market_metadata"][
+                                metadata["market"]
+                            ]["tick_size"],
+                            "snapshot_limit": manifest["market_metadata"][
+                                metadata["market"]
+                            ]["snapshot_limit"],
+                        }
+                        _validate_record_coverage(record, manifest=manifest)
+                        consume(record)
+                    return
+                with resource_policy.lease(
+                    "binance.replay.snapshot.scan",
+                    _json_record_working_set_bytes(metadata["max_record_bytes"])
+                    + 64 * 1024,
+                ):
+                    line = gzip_handle.readline(metadata["max_record_bytes"] + 1)
+                    if not line or len(line) > metadata["max_record_bytes"]:
+                        raise ValueError("binance_replay_snapshot_locator_invalid")
+        finally:
+            gzip_handle.close()
+    finally:
+        raw_handle.close()
+
+
 def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
-    required = {"capture_seq", "receive_time", "receive_monotonic_ns", "payload"}
+    required = {
+        "capture_seq",
+        "receive_time",
+        "observed_time_ns",
+        "receive_monotonic_ns",
+        "payload",
+    }
     optional = {"connection_id", "segment_id"}
     if (
         not isinstance(value, dict)
@@ -698,8 +800,13 @@ def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
     strict_non_negative_integer(
         value["capture_seq"], error="binance_replay_capture_seq_missing"
     )
-    strict_iso_timestamp(
+    observed_time_ns = strict_iso_timestamp(
         value["receive_time"], error="binance_replay_receive_time_invalid"
+    ).value
+    if value["observed_time_ns"] != observed_time_ns:
+        raise ValueError("binance_replay_observed_time_invalid")
+    strict_non_negative_integer(
+        value["observed_time_ns"], error="binance_replay_observed_time_invalid"
     )
     strict_non_negative_integer(
         value["receive_monotonic_ns"],
@@ -764,7 +871,7 @@ class DepthReconstructor:
         snapshot_limit: int,
         required_levels: int,
         max_book_levels: int,
-        connection_close_ms: int,
+        connection_close_ns: int,
         resource_policy: RuntimeResourcePolicy,
         stats: ReconstructionStats,
     ) -> None:
@@ -776,13 +883,13 @@ class DepthReconstructor:
             raise ValueError("binance_replay_snapshot_coverage_invalid")
         if type(max_book_levels) is not int or max_book_levels < snapshot_limit:
             raise ValueError("binance_replay_book_bound_invalid")
-        if type(connection_close_ms) is not int or connection_close_ms < 0:
+        if type(connection_close_ns) is not int or connection_close_ns < 0:
             raise ValueError("binance_replay_connection_coverage_invalid")
         self.market_type = market_type
         self.tick_size = validate_tick_size(tick_size)
         self.required_levels = required_levels
         self.max_book_levels = max_book_levels
-        self.connection_close_ms = connection_close_ms
+        self.connection_close_ns = connection_close_ns
         self.policy = resource_policy
         self.stats = stats
         self._book_lease = resource_policy.lease(
@@ -955,7 +1062,7 @@ class DepthReconstructor:
         if previous is None:
             self.stats.coverage_segments[segment_id] = (
                 observed_time,
-                self.connection_close_ms,
+                self.connection_close_ns,
             )
         state_bound = 64 * 1024 + (len(self._bids) + len(self._asks)) * _LEVEL_BYTES
         state_lease = self.policy.lease("binance.replay.state", state_bound)
@@ -965,7 +1072,7 @@ class DepthReconstructor:
                 capture_seq=record["capture_seq"],
                 event_time_ms=event_time,
                 transaction_time_ms=transaction_time,
-                observed_time_ms=observed_time,
+                observed_time_ns=observed_time,
                 receive_time=record["receive_time"],
                 receive_monotonic_ns=record["receive_monotonic_ns"],
                 update_id=last,
@@ -1032,7 +1139,7 @@ class DepthReconstructor:
             capture_seq=record["capture_seq"],
             event_time_ms=event_time,
             transaction_time_ms=transaction_time,
-            observed_time_ms=observed_time,
+            observed_time_ns=observed_time,
             receive_time=record["receive_time"],
             receive_monotonic_ns=record["receive_monotonic_ns"],
             segment_id=segment_id,
@@ -1071,7 +1178,7 @@ def _record_times(
     observed_time = strict_iso_timestamp(
         record.get("receive_time"),
         error="binance_replay_receive_time_invalid",
-    ).value // 1_000_000
+    ).value
     return (
         event_time,
         transaction_time,
@@ -1126,26 +1233,45 @@ def iter_reconstructed_depth(
         try:
             database.execute(
                 "CREATE TABLE snapshots "
-                "(segment_id TEXT PRIMARY KEY, payload TEXT NOT NULL)"
+                "(segment_id TEXT PRIMARY KEY, connection_id TEXT NOT NULL, "
+                "capture_seq INTEGER NOT NULL, path TEXT NOT NULL, "
+                "record_index INTEGER NOT NULL, record_bytes INTEGER NOT NULL)"
             )
-            for record in run.iter_records(
-                market_type=market_type,
-                data_kinds=("depth_snapshot",),
-            ):
-                segment_id, _ = _record_identity(record)
+
+            def index_snapshot(
+                record: dict[str, Any],
+                path: str,
+                record_index: int,
+                record_bytes: int,
+            ) -> None:
+                segment_id, connection_id = _record_identity(record)
                 try:
                     database.execute(
-                        "INSERT INTO snapshots VALUES (?, ?)",
+                        "INSERT INTO snapshots VALUES (?, ?, ?, ?, ?, ?)",
                         (
                             segment_id,
-                            json.dumps(record, separators=(",", ":"), allow_nan=False),
+                            connection_id,
+                            record["capture_seq"],
+                            path,
+                            record_index,
+                            record_bytes,
                         ),
                     )
                 except sqlite3.IntegrityError as exc:
                     raise ValueError(
                         "binance_replay_snapshot_identity_duplicate"
                     ) from exc
+
+            for _record in run.iter_records(
+                market_type=market_type,
+                data_kinds=("depth_snapshot",),
+                _record_observer=index_snapshot,
+            ):
+                pass
             database.commit()
+            snapshot_files = {
+                item.metadata["path"]: item for item in run._files
+            }
             for record in run.iter_records(
                 market_type=market_type,
                 data_kinds=("depth",),
@@ -1164,7 +1290,7 @@ def iter_reconstructed_depth(
                                 capture_seq=record["capture_seq"],
                                 event_time_ms=event_time,
                                 transaction_time_ms=transaction_time,
-                                observed_time_ms=observed_time,
+                                observed_time_ns=observed_time,
                                 receive_time=record["receive_time"],
                                 receive_monotonic_ns=record["receive_monotonic_ns"],
                                 segment_id=active_segment or segment_id,
@@ -1174,27 +1300,41 @@ def iter_reconstructed_depth(
                             )
                         reconstructor.close()
                     row = database.execute(
-                        "SELECT payload FROM snapshots WHERE segment_id = ?",
+                        "SELECT connection_id, capture_seq, path, record_index, "
+                        "record_bytes FROM snapshots WHERE segment_id = ?",
                         (segment_id,),
                     ).fetchone()
                     if row is None:
                         raise ValueError("binance_replay_snapshot_missing")
-                    snapshot = json.loads(row[0])
+                    snapshot_file = snapshot_files.get(row[2])
+                    if snapshot_file is None:
+                        raise ValueError("binance_replay_snapshot_locator_invalid")
                     reconstructor = DepthReconstructor(
                         market_type,
                         tick_size=metadata["tick_size"],
                         snapshot_limit=metadata["snapshot_limit"],
                         required_levels=required_levels,
                         max_book_levels=max_book_levels,
-                        connection_close_ms=depth_coverage[
-                            _record_identity(snapshot)[1]
+                        connection_close_ns=depth_coverage[
+                            row[0]
                         ][1],
                         resource_policy=run.resource_policy,
                         stats=active_stats,
                     )
                     active_segment = segment_id
                     try:
-                        reconstructor.bootstrap(snapshot)
+                        _read_snapshot_at_locator(
+                            run.root,
+                            snapshot_file,
+                            manifest=run.manifest,
+                            resource_policy=run.resource_policy,
+                            record_index=row[3],
+                            record_bytes=row[4],
+                            capture_seq=row[1],
+                            segment_id=segment_id,
+                            connection_id=row[0],
+                            consume=reconstructor.bootstrap,
+                        )
                     except ValueError as error:
                         reason = str(error)
                         prefix = "binance_replay_snapshot_"
@@ -1218,7 +1358,7 @@ def iter_reconstructed_depth(
                             capture_seq=record["capture_seq"],
                             event_time_ms=event_time,
                             transaction_time_ms=transaction_time,
-                            observed_time_ms=observed_time,
+                            observed_time_ns=observed_time,
                             receive_time=record["receive_time"],
                             receive_monotonic_ns=record["receive_monotonic_ns"],
                             segment_id=segment_id,
@@ -1285,8 +1425,8 @@ def iter_agg_trades(
             observed_time = strict_iso_timestamp(
                 record["receive_time"],
                 error="binance_replay_receive_time_invalid",
-            ).value // 1_000_000
-            if end_ms is not None and observed_time > end_ms:
+            ).value
+            if end_ms is not None and observed_time > end_ms * 1_000_000:
                 break
             key = (
                 observed_time,
@@ -1314,7 +1454,7 @@ def iter_agg_trades(
                 capture_seq=record["capture_seq"],
                 event_time_ms=event_time,
                 transaction_time_ms=transaction_time,
-                observed_time_ms=observed_time,
+                observed_time_ns=observed_time,
                 receive_time=record["receive_time"],
                 receive_monotonic_ns=record["receive_monotonic_ns"],
                 connection_id=record["connection_id"],

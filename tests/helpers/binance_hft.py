@@ -171,6 +171,7 @@ def _raw(
         "receive_time": received.isoformat(timespec="microseconds").replace(
             "+00:00", "Z"
         ),
+        "observed_time_ns": int(observed) * 1_000_000,
         "receive_monotonic_ns": capture_seq,
         "connection_id": connection_id
         or ("book-connection-1" if segment else "trade-connection-1"),

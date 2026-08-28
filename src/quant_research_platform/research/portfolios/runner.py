@@ -51,6 +51,9 @@ from quant_research_platform.research.portfolios.engine import (
     _construct_portfolio_positions,
     _PortfolioTemporalState,
 )
+from quant_research_platform.research.predictions.alignment import (
+    _iter_prediction_lookup_joined_chunks,
+)
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -529,7 +532,6 @@ def _iter_prediction_joined_chunks(
         yield from _iter_prediction_lookup_joined_chunks(
             chunks,
             prediction_lookup=prediction_frame,
-            primary_key=primary_key,
             input_columns=input_columns,
             sample_filter_mode=sample_filter_mode,
             test_start=test_start,
@@ -641,86 +643,6 @@ def _iter_prediction_joined_chunks(
             raise ValueError("missing_required_prediction_keys")
         if unexpected:
             raise ValueError("misaligned_persisted_prediction_keys")
-
-
-def _iter_prediction_lookup_joined_chunks(
-    chunks,
-    *,
-    prediction_lookup,
-    primary_key: tuple[str, ...],
-    input_columns: tuple[str, ...],
-    sample_filter_mode: str,
-    test_start: str,
-    test_end: str | None,
-):
-    missing_required = False
-    with closing_iterator(iter(chunks)) as active_chunks:
-        for chunk in active_chunks:
-            row_count = len(chunk)
-            frame_bytes = pandas_frame_payload_bytes(chunk)
-            index_bytes = int(chunk.index.memory_usage(deep=True))
-            timestamp_bytes = index_bytes + 8 * row_count
-            required_mask_bytes = index_bytes + row_count
-            required_output_bytes = frame_bytes
-            output_frame_bytes = frame_bytes + index_bytes + 8 * row_count
-            output_frame_bytes = max(
-                output_frame_bytes,
-                _filter_working_set_bound(
-                    chunk,
-                    mode=sample_filter_mode,
-                ),
-            )
-            policy = current_runtime_resource_policy()
-            with ExitStack() as chunk_state:
-                if policy is not None:
-                    chunk_state.enter_context(
-                        policy.lease(
-                            "research.portfolio.prediction.output",
-                            timestamp_bytes
-                            + required_mask_bytes
-                            + required_output_bytes
-                            + output_frame_bytes,
-                        )
-                    )
-                values, _found = chunk_state.enter_context(
-                    prediction_lookup.values_for_frame(
-                        chunk,
-                        mark_matched=False,
-                    )
-                )
-                eligible, _metadata = apply_filter_mode(
-                    chunk,
-                    mode=sample_filter_mode,
-                    metadata_key="sample_filter_mode",
-                )
-                eligible = eligible.dropna(subset=list(input_columns))
-                timestamps = strict_timestamp_series(
-                    eligible["timestamp"], error="invalid_portfolio_timestamp_values"
-                )
-                required_mask = timestamps >= pd.Timestamp(test_start)
-                if test_end is not None:
-                    required_mask &= timestamps <= pd.Timestamp(test_end)
-                required = eligible.loc[required_mask]
-                if not required.empty:
-                    _required_values, required_found = chunk_state.enter_context(
-                        prediction_lookup.values_for_frame(
-                            required,
-                            mark_matched=True,
-                        )
-                    )
-                    missing_required |= 0 in required_found
-                output = chunk.copy()
-                output[prediction_lookup.prediction_column] = values
-                yield output
-    unexpected, extra = prediction_lookup.coverage_counts()
-    if extra:
-        raise RuntimeError("persisted_prediction_match_state_invalid")
-    if missing_required and unexpected:
-        raise ValueError("misaligned_persisted_prediction_keys")
-    if missing_required:
-        raise ValueError("missing_required_prediction_keys")
-    if unexpected:
-        raise ValueError("misaligned_persisted_prediction_keys")
 
 
 def _portfolio_input_chunks(

@@ -14,7 +14,7 @@ import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -27,6 +27,7 @@ from websockets.sync.client import connect as _connect_websocket
 
 from quant_research_platform.contracts._json import parse_qrp_json_object
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
@@ -190,11 +191,10 @@ def _positive_number(value: object, *, error: str) -> float:
 
 
 def _utc_now() -> str:
-    return (
-        dt.datetime.now(dt.UTC)
-        .isoformat(timespec="microseconds")
-        .replace("+00:00", "Z")
-    )
+    epoch_ns = time.time_ns()
+    seconds, nanoseconds = divmod(epoch_ns, 1_000_000_000)
+    stamp = dt.datetime.fromtimestamp(seconds, dt.UTC)
+    return f"{stamp:%Y-%m-%dT%H:%M:%S}.{nanoseconds:09d}Z"
 
 
 @dataclass
@@ -228,10 +228,10 @@ class _RunWriter:
         connection_id: str | None = None,
         segment_id: str | None = None,
     ) -> int:
-        strict_iso_timestamp(
+        observed_time_ns = strict_iso_timestamp(
             receive_time,
             error="binance_recorder_receive_time_invalid",
-        )
+        ).value
         strict_non_negative_integer(
             receive_monotonic_ns,
             error="binance_recorder_receive_monotonic_invalid",
@@ -242,6 +242,7 @@ class _RunWriter:
             record: dict[str, Any] = {
                 "capture_seq": capture_seq,
                 "receive_time": receive_time,
+                "observed_time_ns": observed_time_ns,
                 "receive_monotonic_ns": receive_monotonic_ns,
                 "payload": payload,
             }
@@ -378,6 +379,7 @@ def _writer_lifecycle(
     policy: RuntimeResourcePolicy,
     files: list[dict[str, Any]],
     cleanup_errors: list[str],
+    capture_stats: _CaptureStats | None = None,
 ) -> Iterator[None]:
     try:
         yield
@@ -394,11 +396,25 @@ def _writer_lifecycle(
                 )
             else:
                 cleanup_errors.append(type(cleanup_error).__name__)
+        finally:
+            if capture_stats is not None:
+                try:
+                    capture_stats.close()
+                except BaseException as cleanup_error:
+                    if primary is not None:
+                        primary.add_note(
+                            "Binance capture stats cleanup also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                    else:
+                        cleanup_errors.append(type(cleanup_error).__name__)
 
 
 @dataclass
 class _CaptureStats:
+    resource_policy: RuntimeResourcePolicy | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _interval_lease: MemoryLease | None = field(default=None, init=False, repr=False)
     connection_opens: Counter[str] = field(default_factory=Counter)
     reconnects: Counter[str] = field(default_factory=Counter)
     connection_intervals: list[dict[str, Any]] = field(default_factory=list)
@@ -406,6 +422,22 @@ class _CaptureStats:
     sequence_gaps: int = 0
     stale_depth_events: int = 0
     invalid_messages: int = 0
+
+    def __post_init__(self) -> None:
+        if self.resource_policy is not None:
+            self._interval_lease = self.resource_policy.lease(
+                "binance.recorder.connection_intervals",
+                0,
+            )
+
+    def bind(self, resource_policy: RuntimeResourcePolicy) -> None:
+        if self.resource_policy is not None or self._interval_lease is not None:
+            raise RuntimeError("binance_recorder_capture_stats_already_bound")
+        self.resource_policy = resource_policy
+        self._interval_lease = resource_policy.lease(
+            "binance.recorder.connection_intervals",
+            0,
+        )
 
     def opened(
         self,
@@ -418,6 +450,8 @@ class _CaptureStats:
         opened_monotonic_ns: int,
     ) -> None:
         with self._lock:
+            if self._interval_lease is not None:
+                self._interval_lease.grow(1024)
             key = f"{stream.market_type}:{stream.stream}"
             self.connection_opens[key] += 1
             if reconnect:
@@ -477,14 +511,17 @@ class _CaptureStats:
         with self._lock:
             self.invalid_messages += 1
 
+    def close(self) -> None:
+        if self._interval_lease is not None:
+            self._interval_lease.close()
+            self._interval_lease = None
+
     def payload(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "connection_opens": dict(sorted(self.connection_opens.items())),
                 "reconnects": dict(sorted(self.reconnects.items())),
-                "connection_intervals": [
-                    dict(item) for item in self.connection_intervals
-                ],
+                "connection_intervals": self.connection_intervals,
                 "connection_errors": self.connection_errors,
                 "sequence_gaps": self.sequence_gaps,
                 "stale_depth_events": self.stale_depth_events,
@@ -513,6 +550,7 @@ class _StreamReader(threading.Thread):
         stats: _CaptureStats,
         stop: threading.Event,
         config: RecorderConfig,
+        on_generation_ready: Callable[[_StreamReader, int], None] | None = None,
     ) -> None:
         super().__init__(
             name=f"binance-{stream.market_type}-{stream.data_kind}",
@@ -523,16 +561,38 @@ class _StreamReader(threading.Thread):
         self.stats = stats
         self.stop = stop
         self.config = config
+        self.on_generation_ready = on_generation_ready
         self.ready = threading.Event()
         self.failure: str | None = None
         self._identity_lock = threading.Lock()
         self._connection_id: str | None = None
         self._segment_id: str | None = None
         self._generation = 0
+        self._snapshot_ack: threading.Event | None = None
 
     def current_identity(self) -> tuple[int, str | None, str | None]:
         with self._identity_lock:
             return self._generation, self._connection_id, self._segment_id
+
+    def acknowledge_snapshot(self, generation: int) -> bool:
+        with self._identity_lock:
+            if generation != self._generation or self._snapshot_ack is None:
+                return False
+            self._snapshot_ack.set()
+            return True
+
+    def wait_for_snapshot(self, generation: int, timeout: float) -> bool:
+        with self._identity_lock:
+            if generation != self._generation or self._snapshot_ack is None:
+                return False
+            acknowledgement = self._snapshot_ack
+        return acknowledgement.wait(timeout)
+
+    def _await_snapshot(self, generation: int) -> bool:
+        while not self.stop.is_set():
+            if self.wait_for_snapshot(generation, 0.1):
+                return True
+        return False
 
     def run(self) -> None:
         backoff = 1.0
@@ -575,6 +635,11 @@ class _StreamReader(threading.Thread):
                 self._generation += 1
                 self._connection_id = connection_id
                 self._segment_id = segment_id
+                self._snapshot_ack = (
+                    threading.Event()
+                    if self.stream.data_kind == "depth"
+                    else None
+                )
             self.stats.opened(
                 self.stream,
                 reconnect=reconnect,
@@ -585,6 +650,12 @@ class _StreamReader(threading.Thread):
             )
             opened = True
             self.ready.set()
+            if self.stream.data_kind == "depth":
+                generation = self.current_identity()[0]
+                if self.on_generation_ready is not None:
+                    self.on_generation_ready(self, generation)
+                if not self._await_snapshot(generation):
+                    raise _ConnectionProblem()
             previous_u: int | None = None
             last_message_at = time.monotonic()
             while not self.stop.is_set():
@@ -655,22 +726,14 @@ class _StreamReader(threading.Thread):
             raise
         finally:
             primary = sys.exception()
-            if websocket is not None:
-                try:
-                    websocket.close()
-                except BaseException as cleanup_error:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        "Binance websocket close also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
             if opened:
+                closed_at = _utc_now()
+                closed_monotonic_ns = time.monotonic_ns()
                 try:
                     self.stats.closed(
                         connection_id,
-                        closed_at=_utc_now(),
-                        closed_monotonic_ns=time.monotonic_ns(),
+                        closed_at=closed_at,
+                        closed_monotonic_ns=closed_monotonic_ns,
                         close_reason=close_reason,
                     )
                 except BaseException as cleanup_error:
@@ -681,6 +744,16 @@ class _StreamReader(threading.Thread):
                         )
                     else:
                         raise
+            if websocket is not None:
+                try:
+                    websocket.close()
+                except BaseException as cleanup_error:
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "Binance websocket close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
 
 
 def _http_get_json(
@@ -824,6 +897,8 @@ def _record_depth_snapshot(
     writer: _RunWriter,
     policy: RuntimeResourcePolicy,
     reader: _StreamReader,
+    *,
+    generation: int,
 ) -> None:
     market_type = reader.stream.market_type
     base_url, endpoint = (
@@ -831,33 +906,34 @@ def _record_depth_snapshot(
         if market_type == SPOT_MARKET_TYPE
         else (FUTURES_REST_BASE_URL, "/fapi/v1/depth")
     )
-    for _attempt in range(3):
-        before = reader.current_identity()
-        with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
-            payload, received, monotonic_ns = _http_get_json(
-                base_url,
-                endpoint,
-                params={
-                    "symbol": SYMBOL,
-                    "limit": str(SNAPSHOT_LIMITS[market_type]),
-                },
-            )
-            after = reader.current_identity()
-            if before != after:
-                continue
-            snapshot = _validate_snapshot(payload, market_type=market_type)
-            writer.write(
-                market_type=market_type,
-                data_kind="depth_snapshot",
-                stream=f"REST:{endpoint}",
-                payload=snapshot,
-                receive_time=received,
-                receive_monotonic_ns=monotonic_ns,
-                connection_id=after[1],
-                segment_id=after[2],
-            )
-            return
-    raise RuntimeError("binance_recorder_snapshot_identity_race")
+    before = reader.current_identity()
+    if before[0] != generation:
+        raise _ConnectionProblem()
+    with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
+        payload, received, monotonic_ns = _http_get_json(
+            base_url,
+            endpoint,
+            params={
+                "symbol": SYMBOL,
+                "limit": str(SNAPSHOT_LIMITS[market_type]),
+            },
+        )
+        after = reader.current_identity()
+        if before != after:
+            raise _ConnectionProblem()
+        snapshot = _validate_snapshot(payload, market_type=market_type)
+        writer.write(
+            market_type=market_type,
+            data_kind="depth_snapshot",
+            stream=f"REST:{endpoint}",
+            payload=snapshot,
+            receive_time=received,
+            receive_monotonic_ns=monotonic_ns,
+            connection_id=after[1],
+            segment_id=after[2],
+        )
+        if not reader.acknowledge_snapshot(generation):
+            raise _ConnectionProblem()
 
 
 def record(config: RecorderConfig) -> dict[str, Any]:
@@ -881,6 +957,7 @@ def record(config: RecorderConfig) -> dict[str, Any]:
     cleanup_errors: list[str] = []
     files: list[dict[str, Any]] = []
     manifest: dict[str, Any] | None = None
+    captured: dict[str, Any] = {}
 
     try:
         with (
@@ -890,8 +967,10 @@ def record(config: RecorderConfig) -> dict[str, Any]:
                 policy,
                 files,
                 cleanup_errors,
+                capture_stats=stats,
             ),
         ):
+            stats.bind(policy)
             market_metadata = _record_market_metadata(writer, policy)
             websocket_reserve = (
                 len(RECORDER_STREAMS) * MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
@@ -908,6 +987,14 @@ def record(config: RecorderConfig) -> dict[str, Any]:
                             stats=stats,
                             stop=stop,
                             config=config,
+                            on_generation_ready=(
+                                lambda reader, generation: _record_depth_snapshot(
+                                    writer,
+                                    policy,
+                                    reader,
+                                    generation=generation,
+                                )
+                            ),
                         )
                         for stream in RECORDER_STREAMS
                     ]
@@ -925,10 +1012,13 @@ def record(config: RecorderConfig) -> dict[str, Any]:
                         for reader in readers
                         if reader.stream.data_kind == "depth"
                     ]
-                    generations: dict[_StreamReader, int] = {}
                     for reader in depth_readers:
-                        _record_depth_snapshot(writer, policy, reader)
-                        generations[reader] = reader.current_identity()[0]
+                        remaining = max(0.0, deadline - time.monotonic())
+                        generation = reader.current_identity()[0]
+                        if not reader.wait_for_snapshot(generation, remaining):
+                            raise TimeoutError(
+                                "binance_recorder_snapshot_ack_timeout"
+                            )
                     started_at = _utc_now()
                     started_clock = time.monotonic()
                     cpu_start = time.process_time()
@@ -947,11 +1037,6 @@ def record(config: RecorderConfig) -> dict[str, Any]:
                                 raise RuntimeError(
                                     "binance_recorder_reader_thread_died"
                                 )
-                        for reader in depth_readers:
-                            generation = reader.current_identity()[0]
-                            if generation != generations[reader]:
-                                _record_depth_snapshot(writer, policy, reader)
-                                generations[reader] = reader.current_identity()[0]
                 finally:
                     active_primary = sys.exception()
                     stop.set()
@@ -968,6 +1053,7 @@ def record(config: RecorderConfig) -> dict[str, Any]:
                                 )
                             else:
                                 cleanup_errors.append(type(cleanup_error).__name__)
+            captured = stats.payload()
     except BaseException as error:
         failure = type(error).__name__
         raise
@@ -976,7 +1062,8 @@ def record(config: RecorderConfig) -> dict[str, Any]:
         stop.set()
         ended_at = _utc_now()
         duration_seconds = max(0.001, time.monotonic() - started_clock)
-        captured = stats.payload()
+        if not captured:
+            captured = stats.payload()
         missing_required_streams = [
             f"{stream.market_type}:{stream.stream}"
             for stream in RECORDER_STREAMS

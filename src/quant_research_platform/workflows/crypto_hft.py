@@ -19,6 +19,7 @@ from quant_research_platform.artifacts._output_bundle_validation import (
 )
 from quant_research_platform.artifacts.evidence import write_json_evidence
 from quant_research_platform.artifacts.outputs import write_prediction_outputs
+from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.order_book import BookBoundary, BookState
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -55,6 +56,9 @@ from quant_research_platform.research.datasets.assembler import (
 )
 from quant_research_platform.research.models.dependencies import (
     preflight_model_dependency,
+)
+from quant_research_platform.research.predictions.alignment import (
+    _iter_prediction_lookup_joined_chunks,
 )
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
@@ -424,11 +428,11 @@ def _book_events(
     with closing_iterator(events):
         for event in events:
             observed_time = (
-                event.value.observed_time_ms
+                event.value.observed_time_ns
                 if isinstance(event, _OwnedValue)
-                else event.observed_time_ms
+                else event.observed_time_ns
             )
-            if observed_time > end_ms:
+            if observed_time > end_ms * 1_000_000:
                 if isinstance(event, _OwnedValue):
                     event.lease.close()
                 break
@@ -451,10 +455,24 @@ def _prediction_decisions(
         prediction_root,
         expected_output_id=output_id,
         time_window=prediction_window,
-    ) as (_manifest, lookup):
+    ) as (manifest, lookup):
+        model_metadata = manifest["metadata"]["model_metadata"]
+        input_columns = tuple(model_metadata["input_columns"])
+        sample_filter_mode = model_metadata["sample_filter_mode"]
+        read_columns = tuple(
+            dict.fromkeys(
+                (
+                    *lookup.primary_key,
+                    "segment_id",
+                    "book_segment_id",
+                    *input_columns,
+                    *required_filter_columns(sample_filter_mode),
+                )
+            )
+        )
         with open_dataset_session(
             research_root,
-            columns=("timestamp", "asset_id", "segment_id", "book_segment_id"),
+            columns=read_columns,
             time_window=prediction_window,
             resource_policy=resource_policy,
         ) as session:
@@ -465,37 +483,31 @@ def _prediction_decisions(
                     resource_policy.available_memory_bytes,
                 ),
             )
-            with closing_iterator(chunks):
-                for frame in chunks:
-                    with lookup.values_for_frame(
-                        frame,
-                        mark_matched=True,
-                    ) as (values, found):
-                        rows = frame.itertuples(index=False)
-                        for row, value, present in zip(
-                            rows,
-                            values,
-                            found,
-                            strict=True,
-                        ):
-                            if not present:
-                                continue
-                            timestamp = pd.Timestamp(row.timestamp)
-                            if timestamp.tzinfo is not None:
-                                timestamp = timestamp.tz_convert("UTC").tz_localize(
-                                    None
-                                )
-                            yield {
-                                "timestamp_ms": timestamp.value // 1_000_000,
-                                "asset_id": str(row.asset_id),
-                                "segment_id": str(row.segment_id),
-                                "book_segment_id": str(row.book_segment_id),
-                                "prediction_score": float(value),
-                            }
+            joined = _iter_prediction_lookup_joined_chunks(
+                chunks,
+                prediction_lookup=lookup,
+                input_columns=input_columns,
+                sample_filter_mode=sample_filter_mode,
+                test_start=prediction_spec.test_start,
+                test_end=prediction_spec.test_end,
+            )
+            with closing_iterator(joined):
+                for frame in joined:
+                    for row in frame.itertuples(index=False):
+                        value = getattr(row, lookup.prediction_column)
+                        if pd.isna(value):
+                            continue
+                        timestamp = pd.Timestamp(row.timestamp)
+                        if timestamp.tzinfo is not None:
+                            timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+                        yield {
+                            "timestamp_ms": timestamp.value // 1_000_000,
+                            "asset_id": str(row.asset_id),
+                            "segment_id": str(row.segment_id),
+                            "book_segment_id": str(row.book_segment_id),
+                            "prediction_score": float(value),
+                        }
             session.verify()
-        unexpected, extra = lookup.coverage_counts()
-        if unexpected or extra:
-            raise ValueError("misaligned_persisted_prediction_keys")
 
 
 def _maker_quote_schedule(

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 import quant_research_platform.workflows.crypto_hft as crypto_hft
+from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
@@ -16,9 +19,11 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_PANEL_DATA_ID,
     HFT_RESEARCH_DATASET_ID,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows.crypto_hft import run_crypto_hft_experiment
 from tests.helpers.binance_hft import write_binance_hft_run
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _taker_config() -> TakerConfig:
@@ -178,3 +183,144 @@ def test_crypto_hft_maker_receives_research_quote_schedule(
         and "prediction_score" not in row
         for row in captured
     )
+
+
+class _PredictionLookup:
+    primary_key = ("timestamp", "asset_id")
+    prediction_column = "prediction_score"
+
+    def __init__(self, values: dict[tuple[pd.Timestamp, str], float]) -> None:
+        self.values = values
+        self.matched: set[tuple[pd.Timestamp, str]] = set()
+
+    @contextmanager
+    def values_for_frame(self, frame, *, mark_matched: bool):  # noqa: ANN001
+        values: list[float] = []
+        found = bytearray()
+        for row in frame.itertuples(index=False):
+            key = (row.timestamp, str(row.asset_id))
+            value = self.values.get(key)
+            if value is None:
+                values.append(float("nan"))
+                found.append(0)
+            else:
+                values.append(value)
+                found.append(1)
+                if mark_matched:
+                    self.matched.add(key)
+        yield values, found
+
+    def coverage_counts(self) -> tuple[int, int]:
+        return len(set(self.values).difference(self.matched)), 0
+
+
+class _DatasetSession:
+    def __init__(self, frame: pd.DataFrame) -> None:
+        self.frame = frame
+
+    def __enter__(self) -> _DatasetSession:
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        return None
+
+    def verify(self) -> None:
+        return None
+
+
+def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timestamps = pd.to_datetime(
+        [
+            "1970-01-01T00:00:00.100000000",
+            "1970-01-01T00:00:00.200000000",
+            "1970-01-01T00:00:00.300000000",
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamps,
+            "asset_id": ["btc_usdt"] * 3,
+            "segment_id": ["book-1:trade-1"] * 3,
+            "book_segment_id": ["book-1"] * 3,
+            "ofi_100ms": [1.0, float("nan"), 2.0],
+            "eligible": [True, True, False],
+        }
+    )
+    spec = PredictionSpec(
+        prediction_id="hft_prediction",
+        model_id="hft_model",
+        research_dataset_id="hft_dataset",
+        train_end="1970-01-01T00:00:00.000000000",
+        test_start="1970-01-01T00:00:00.100000000",
+        test_end="1970-01-01T00:00:00.300000000",
+    )
+    manifest = {
+        "metadata": {
+            "model_metadata": {
+                "input_columns": ["ofi_100ms"],
+                "sample_filter_mode": "eligible",
+            }
+        }
+    }
+    valid_key = (timestamps[0], "btc_usdt")
+
+    @contextmanager
+    def fake_bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        yield manifest, lookup
+
+    monkeypatch.setattr(crypto_hft, "_read_prediction_output_bundle", fake_bundle)
+    monkeypatch.setattr(
+        crypto_hft,
+        "open_dataset_session",
+        lambda *_args, **_kwargs: _DatasetSession(frame),
+    )
+    monkeypatch.setattr(
+        crypto_hft,
+        "iter_dataset_chunks",
+        lambda session, **_kwargs: iter((session.frame,)),
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy):
+        lookup = _PredictionLookup({})
+        with pytest.raises(ValueError, match="missing_required_prediction_keys"):
+            list(
+                crypto_hft._prediction_decisions(
+                    research_root=Path("research"),
+                    prediction_root=Path("prediction"),
+                    output_id="output",
+                    prediction_spec=spec,
+                    resource_policy=policy,
+                )
+            )
+
+        lookup = _PredictionLookup({valid_key: 0.5})
+        decisions = list(
+            crypto_hft._prediction_decisions(
+                research_root=Path("research"),
+                prediction_root=Path("prediction"),
+                output_id="output",
+                prediction_spec=spec,
+                resource_policy=policy,
+            )
+        )
+    assert len(decisions) == 1
+    assert decisions[0]["prediction_score"] == 0.5
+
+    extra_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    lookup = _PredictionLookup({valid_key: 0.5, (timestamps[2], "btc_usdt"): 0.7})
+    with runtime_resource_policy_scope(extra_policy):
+        with pytest.raises(
+            ValueError, match="misaligned_persisted_prediction_keys"
+        ):
+            list(
+                crypto_hft._prediction_decisions(
+                    research_root=Path("research"),
+                    prediction_root=Path("prediction"),
+                    output_id="output",
+                    prediction_spec=spec,
+                    resource_policy=extra_policy,
+                )
+            )

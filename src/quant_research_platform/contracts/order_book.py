@@ -11,7 +11,7 @@ class BookState:
     capture_seq: int
     event_time_ms: int
     transaction_time_ms: int | None
-    observed_time_ms: int
+    observed_time_ns: int
     receive_time: str
     receive_monotonic_ns: int
     update_id: int
@@ -21,6 +21,10 @@ class BookState:
     tick_size: str
     bids: tuple[tuple[int, float], ...]
     asks: tuple[tuple[int, float], ...]
+
+    @property
+    def observed_time_ms(self) -> int:
+        return self.observed_time_ns // 1_000_000
 
     @property
     def best_bid(self) -> tuple[int, float] | None:
@@ -36,13 +40,17 @@ class BookBoundary:
     capture_seq: int
     event_time_ms: int
     transaction_time_ms: int | None
-    observed_time_ms: int
+    observed_time_ns: int
     receive_time: str
     receive_monotonic_ns: int
     segment_id: str
     connection_id: str
     market_type: str
     reason: str
+
+    @property
+    def observed_time_ms(self) -> int:
+        return self.observed_time_ns // 1_000_000
 
 
 
@@ -51,7 +59,7 @@ class TradeEvent:
     capture_seq: int
     event_time_ms: int
     transaction_time_ms: int
-    observed_time_ms: int
+    observed_time_ns: int
     receive_time: str
     receive_monotonic_ns: int
     connection_id: str
@@ -61,6 +69,10 @@ class TradeEvent:
     quantity: float
     visible_quantity: float
     buyer_is_maker: bool
+
+    @property
+    def observed_time_ms(self) -> int:
+        return self.observed_time_ns // 1_000_000
 
 
 def validate_tick_size(value: object) -> str:

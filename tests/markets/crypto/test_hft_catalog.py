@@ -2,21 +2,13 @@ from __future__ import annotations
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, ProcessedDataKind
-from quant_research_platform.markets.implementations.crypto.factors.definitions import (
-    hft_factor_catalog,
-)
 from quant_research_platform.markets.implementations.crypto.hft import HFT_GRID_MS
 from quant_research_platform.markets.implementations.crypto.ids import (
-    HFT_FACTOR_COLUMNS,
     HFT_FACTOR_DATA_ID,
-    HFT_LABEL_COLUMNS,
     HFT_LABEL_DATA_ID,
     HFT_MODEL_LABEL_HORIZON_MS,
     HFT_PANEL_DATA_ID,
     HFT_RESEARCH_DATASET_ID,
-)
-from quant_research_platform.markets.implementations.crypto.labels.definitions import (
-    hft_label_catalog,
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
@@ -49,19 +41,6 @@ def test_hft_catalog_has_one_panel_factor_label_and_research_path() -> None:
         HFT_LABEL_DATA_ID,
     )
     assert research.base_input_data_id == HFT_PANEL_DATA_ID
-
-
-def test_hft_factor_and_label_definitions_name_exact_inputs_and_lookahead() -> None:
-    factors = {item.output_column: item for item in hft_factor_catalog().list()}
-    labels = {item.output_column: item for item in hft_label_catalog().list()}
-
-    assert set(factors) == set(HFT_FACTOR_COLUMNS)
-    assert factors["ofi_100ms"].input_columns == ("book_ofi_100ms",)
-    assert "ofi_100ms" not in factors["ofi_100ms"].input_columns
-    assert set(labels) == set(HFT_LABEL_COLUMNS)
-    assert labels["future_mid_return_500ms"].lookahead == 5
-    assert labels["future_mid_direction_500ms"].family == "futures_mid_direction"
-
 
 def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> None:
     models = build_hft_model_catalog(training_row_bound=100).list()

@@ -19,6 +19,8 @@ from quant_research_platform.contracts.order_book import (
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import _OwnedValue
 
+_NANOSECONDS_PER_MILLISECOND = 1_000_000
+
 
 @dataclass(frozen=True)
 class TakerConfig:
@@ -230,7 +232,7 @@ class _PendingMarkouts:
                 self._finalize(fill, future_mid=None)
                 self._pop()
                 continue
-            if state.observed_time_ms < fill["markout_target_time_ms"]:
+            if state.observed_time_ns < fill["markout_target_time_ns"]:
                 break
             self._finalize(fill, future_mid=future_mid)
             self._pop()
@@ -300,7 +302,7 @@ def _book_key(
 ) -> tuple[int, int, int]:
     value = event.value if isinstance(event, _OwnedValue) else event
     return (
-        value.observed_time_ms,
+        value.observed_time_ns,
         value.receive_monotonic_ns,
         value.capture_seq,
     )
@@ -320,7 +322,7 @@ def _checked_book_events(
             if not isinstance(value, BookState | BookBoundary):
                 raise TypeError("hft_execution_book_event_invalid")
             key = (
-                value.observed_time_ms,
+                value.observed_time_ns,
                 value.receive_monotonic_ns,
                 value.capture_seq,
             )
@@ -360,10 +362,10 @@ def _mid(state: BookState) -> float:
 def _covered(
     coverage: Mapping[str, tuple[int, int]],
     segment_id: str,
-    timestamp_ms: int,
+    timestamp_ns: int,
 ) -> bool:
     bounds = coverage.get(segment_id)
-    return bool(bounds is not None and bounds[0] <= timestamp_ms < bounds[1])
+    return bool(bounds is not None and bounds[0] <= timestamp_ns < bounds[1])
 
 
 def _resolve_observed_markouts(
@@ -372,9 +374,9 @@ def _resolve_observed_markouts(
     coverage: Mapping[str, tuple[int, int]],
 ) -> None:
     bounds = coverage.get(state.segment_id)
-    if bounds is None or state.observed_time_ms >= bounds[1]:
+    if bounds is None or state.observed_time_ns >= bounds[1]:
         pending.expire_all()
-    elif state.observed_time_ms >= bounds[0]:
+    elif state.observed_time_ns >= bounds[0]:
         pending.resolve(state)
 
 
@@ -434,7 +436,7 @@ def simulate_taker(
                 if _covered(
                     observed_coverage,
                     state.segment_id,
-                    state.observed_time_ms,
+                    state.observed_time_ns,
                 ):
                     terminal_mid = _mid(state)
                 _resolve_observed_markouts(
@@ -459,12 +461,13 @@ def simulate_taker(
                     "hft_prediction_invalid",
                 )
                 effective_time = decision_time + config.latency_ms
-                consume_until(effective_time)
+                effective_time_ns = effective_time * _NANOSECONDS_PER_MILLISECOND
+                consume_until(effective_time_ns)
                 current_mid: float | None = None
                 if latest_state is not None and _covered(
                     observed_coverage,
                     latest_state.segment_id,
-                    effective_time,
+                    effective_time_ns,
                 ):
                     decision_segment = row.get(
                         "book_segment_id",
@@ -554,6 +557,11 @@ def simulate_taker(
                                     ),
                                     "markout_target_time_ms": (
                                         effective_time + config.markout_horizon_ms
+                                    ),
+                                    "markout_target_time_ns": (
+                                        effective_time_ns
+                                        + config.markout_horizon_ms
+                                        * _NANOSECONDS_PER_MILLISECOND
                                     ),
                                 }
                                 metrics.observe_fill(fill)
@@ -662,7 +670,8 @@ class _MakerOrder:
     segment_id: str
     trade_connection_id: str
     tick_size: str
-    created_time_ms: int
+    created_time_ns: int
+    valid_until_ns: int
     had_fill: bool = False
 
 
@@ -676,7 +685,7 @@ def _checked_trades(
             if not isinstance(trade, TradeEvent):
                 raise TypeError("hft_execution_trade_event_invalid")
             key = (
-                trade.observed_time_ms,
+                trade.observed_time_ns,
                 trade.receive_monotonic_ns,
                 trade.capture_seq,
             )
@@ -708,7 +717,7 @@ def _market_events(
         while book_next is not None or trade_next is not None:
             if trade_next is None or (
                 book_next is not None and _book_key(book_next) <= (
-                    trade_next.observed_time_ms,
+                    trade_next.observed_time_ns,
                     trade_next.receive_monotonic_ns,
                     trade_next.capture_seq,
                 )
@@ -721,7 +730,7 @@ def _market_events(
                 pending_event = trade_next
                 assert trade_next is not None
                 key = (
-                    trade_next.observed_time_ms,
+                    trade_next.observed_time_ns,
                     trade_next.receive_monotonic_ns,
                     trade_next.capture_seq,
                 )
@@ -801,24 +810,24 @@ def simulate_maker(
     equity_rows = 0
     max_abs_position = 0.0
     market_event_count = 0
-    last_event_time = 0
+    last_event_time_ns = 0
     last_mid: float | None = None
     last_gross: float | None = None
     last_net: float | None = None
     all_lifetime_count = 0
-    all_lifetime_sum = 0
+    all_lifetime_sum_ns = 0
     filled_lifetime_count = 0
-    filled_lifetime_sum = 0
+    filled_lifetime_sum_ns = 0
 
-    def finish_order(order: _MakerOrder, timestamp_ms: int, *, cancelled: bool) -> None:
-        nonlocal all_lifetime_count, all_lifetime_sum, cancelled_orders
-        nonlocal filled_lifetime_count, filled_lifetime_sum
-        lifetime = max(0, timestamp_ms - order.created_time_ms)
+    def finish_order(order: _MakerOrder, timestamp_ns: int, *, cancelled: bool) -> None:
+        nonlocal all_lifetime_count, all_lifetime_sum_ns, cancelled_orders
+        nonlocal filled_lifetime_count, filled_lifetime_sum_ns
+        lifetime_ns = max(0, timestamp_ns - order.created_time_ns)
         all_lifetime_count += 1
-        all_lifetime_sum += lifetime
+        all_lifetime_sum_ns += lifetime_ns
         if order.had_fill:
             filled_lifetime_count += 1
-            filled_lifetime_sum += lifetime
+            filled_lifetime_sum_ns += lifetime_ns
         if cancelled:
             cancelled_orders += 1
 
@@ -837,17 +846,31 @@ def simulate_maker(
         cleanup.callback(cleanup_books)
         next_event = next(events, None)
 
-        def cancel_active(timestamp_ms: int) -> None:
+        def cancel_active(timestamp_ns: int) -> None:
             for order in active.values():
-                finish_order(order, timestamp_ms, cancelled=True)
+                finish_order(
+                    order,
+                    min(timestamp_ns, order.valid_until_ns),
+                    cancelled=True,
+                )
             active.clear()
+
+        def expire_active(timestamp_ns: int) -> None:
+            for side, order in tuple(active.items()):
+                if timestamp_ns >= order.valid_until_ns:
+                    active.pop(side)
+                    finish_order(
+                        order,
+                        order.valid_until_ns,
+                        cancelled=True,
+                    )
 
         def process_book(
             event: BookState | _OwnedValue[BookState] | BookBoundary,
         ) -> None:
             nonlocal last_mid, latest_state, latest_owned
             if isinstance(event, BookBoundary):
-                cancel_active(event.observed_time_ms)
+                cancel_active(event.observed_time_ns)
                 _close_book(latest_owned)
                 latest_owned = None
                 latest_state = None
@@ -859,7 +882,7 @@ def simulate_maker(
                 latest_state is not None
                 and state.segment_id != latest_state.segment_id
             ):
-                cancel_active(state.observed_time_ms)
+                cancel_active(state.observed_time_ns)
             elif latest_state is not None:
                 desired = {
                     "buy": state.bids[0][0],
@@ -871,7 +894,7 @@ def simulate_maker(
                         active.pop(side)
                         finish_order(
                             order,
-                            state.observed_time_ms,
+                            state.observed_time_ns,
                             cancelled=True,
                         )
             _close_book(latest_owned)
@@ -886,22 +909,22 @@ def simulate_maker(
 
         def process_trade(trade: TradeEvent) -> None:
             nonlocal cash_gross, fees, filled_orders, partial_fill_events
-            nonlocal position, trade_through_fill_events
+            nonlocal max_abs_position, position, trade_through_fill_events
             if latest_state is None:
                 return
             trade_tick = trade.price_tick
             quantity = trade.visible_quantity
             maker_buyer = trade.buyer_is_maker
-            timestamp_ms = trade.observed_time_ms
+            timestamp_ns = trade.observed_time_ns
             if quantity <= 0:
                 return
             if not _covered(
                 observed_coverage,
                 latest_state.segment_id,
-                timestamp_ms,
+                timestamp_ns,
             ):
                 return
-            if not _covered(trade_coverage, trade.connection_id, timestamp_ms):
+            if not _covered(trade_coverage, trade.connection_id, timestamp_ns):
                 return
             mid = _mid(latest_state)
             for side in ("buy", "sell"):
@@ -923,7 +946,7 @@ def simulate_maker(
                     or (side == "sell" and not maker_buyer)
                 )
                 if trade_through:
-                    fill_quantity = min(order.remaining, quantity)
+                    fill_quantity = order.remaining
                     order.queue_ahead = 0.0
                     reason = "trade_through"
                 elif same_price_depletion:
@@ -942,7 +965,7 @@ def simulate_maker(
                 signed = 1.0 if side == "buy" else -1.0
                 fill = {
                     "order_id": order.order_id,
-                    "timestamp_ms": timestamp_ms,
+                    "timestamp_ms": timestamp_ns // _NANOSECONDS_PER_MILLISECOND,
                     "segment_id": order.segment_id,
                     "side": side,
                     "fill_reason": reason,
@@ -954,14 +977,19 @@ def simulate_maker(
                     "estimated_queue_ahead_before_fill": order.queue_ahead,
                     "spread_capture_usd_per_unit": signed * (mid - fill_price),
                     "markout_target_time_ms": (
-                        timestamp_ms + config.markout_horizon_ms
+                        timestamp_ns // _NANOSECONDS_PER_MILLISECOND
+                        + config.markout_horizon_ms
+                    ),
+                    "markout_target_time_ns": (
+                        timestamp_ns
+                        + config.markout_horizon_ms
+                        * _NANOSECONDS_PER_MILLISECOND
                     ),
                 }
-                metrics.observe_fill(fill)
-                pending.add(fill)
                 position += signed * fill_quantity
                 cash_gross -= signed * notional
                 fees += fee
+                max_abs_position = max(max_abs_position, abs(position))
                 if not order.had_fill:
                     order.had_fill = True
                     filled_orders += 1
@@ -970,16 +998,19 @@ def simulate_maker(
                     partial_fill_events += 1
                 if trade_through:
                     trade_through_fill_events += 1
+                metrics.observe_fill(fill)
+                pending.add(fill)
                 if order.remaining <= 0:
                     active.pop(side, None)
-                    finish_order(order, timestamp_ms, cancelled=False)
+                    finish_order(order, timestamp_ns, cancelled=False)
                 break
 
         def process_until(target: int) -> None:
-            nonlocal last_event_time, market_event_count, next_event
+            nonlocal last_event_time_ns, market_event_count, next_event
             while next_event is not None and next_event[0][0] <= target:
                 market_event_count += 1
-                last_event_time = next_event[0][0]
+                last_event_time_ns = next_event[0][0]
+                expire_active(last_event_time_ns)
                 _, item = next_event
                 if isinstance(item, TradeEvent):
                     process_trade(item)
@@ -989,29 +1020,31 @@ def simulate_maker(
 
         for row in active_decisions:
             decision_time = row["timestamp_ms"]
-            process_until(decision_time)
+            decision_time_ns = decision_time * _NANOSECONDS_PER_MILLISECOND
+            process_until(decision_time_ns)
+            expire_active(decision_time_ns)
             current_mid: float | None = None
             if (
                 latest_state is None
                 or not _covered(
                     observed_coverage,
                     latest_state.segment_id,
-                    decision_time,
+                    decision_time_ns,
                 )
                 or row["book_segment_id"] != latest_state.segment_id
                 or not _covered(
                     trade_coverage,
                     row["trade_connection_id"],
-                    decision_time,
+                    decision_time_ns,
                 )
             ):
-                cancel_active(decision_time)
+                cancel_active(decision_time_ns)
             else:
                 if any(
                     order.trade_connection_id != row["trade_connection_id"]
                     for order in active.values()
                 ):
-                    cancel_active(decision_time)
+                    cancel_active(decision_time_ns)
                 current_mid = _mid(latest_state)
                 desired = {
                     "buy": latest_state.bids[0][0],
@@ -1021,7 +1054,7 @@ def simulate_maker(
                     order = active.get(side)
                     if order is not None and order.price_tick != price_tick:
                         active.pop(side)
-                        finish_order(order, decision_time, cancelled=True)
+                        finish_order(order, decision_time_ns, cancelled=True)
                 inventory_ratio = (
                     position - config.inventory_target
                 ) / config.max_position
@@ -1040,6 +1073,8 @@ def simulate_maker(
                 for side, size in sizes.items():
                     if side in active or size <= 0:
                         continue
+                    book_bounds = observed_coverage[latest_state.segment_id]
+                    trade_bounds = trade_coverage[row["trade_connection_id"]]
                     created_orders += 1
                     queue_ahead = (
                         latest_state.bids[0][1]
@@ -1056,7 +1091,8 @@ def simulate_maker(
                         segment_id=latest_state.segment_id,
                         trade_connection_id=row["trade_connection_id"],
                         tick_size=latest_state.tick_size,
-                        created_time_ms=decision_time,
+                        created_time_ns=decision_time_ns,
+                        valid_until_ns=min(book_bounds[1], trade_bounds[1]),
                     )
             gross = None if current_mid is None else cash_gross + position * current_mid
             net = None if gross is None else gross - fees
@@ -1075,7 +1111,7 @@ def simulate_maker(
             last_net = net
         while next_event is not None:
             process_until(next_event[0][0])
-        cancel_active(last_event_time)
+        cancel_active(last_event_time_ns)
         if latest_state is not None:
             last_mid = _mid(latest_state)
             last_gross = cash_gross + position * last_mid
@@ -1101,10 +1137,16 @@ def simulate_maker(
             None if last_gross is None else last_gross - metrics.spread_capture_pnl
         ),
         "average_order_lifetime_ms": (
-            all_lifetime_sum / all_lifetime_count if all_lifetime_count else None
+            all_lifetime_sum_ns
+            / _NANOSECONDS_PER_MILLISECOND
+            / all_lifetime_count
+            if all_lifetime_count
+            else None
         ),
         "average_filled_order_lifetime_ms": (
-            filled_lifetime_sum / filled_lifetime_count
+            filled_lifetime_sum_ns
+            / _NANOSECONDS_PER_MILLISECOND
+            / filled_lifetime_count
             if filled_lifetime_count
             else None
         ),

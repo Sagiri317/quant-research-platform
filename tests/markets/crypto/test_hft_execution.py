@@ -18,6 +18,10 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 
 
+def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:
+    return start_ms * 1_000_000, end_ms * 1_000_000
+
+
 def _state(
     timestamp_ms: int,
     *,
@@ -31,7 +35,7 @@ def _state(
         capture_seq=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
-        observed_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
@@ -49,7 +53,7 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
         capture_seq=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
-        observed_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
@@ -71,7 +75,7 @@ def _trade(
         capture_seq=timestamp_ms + 10,
         event_time_ms=timestamp_ms,
         transaction_time_ms=timestamp_ms,
-        observed_time_ms=timestamp_ms,
+        observed_time_ns=timestamp_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 10,
         connection_id="trade-connection-1",
@@ -128,7 +132,7 @@ def test_taker_uses_latest_actual_state_at_effective_time() -> None:
         [{"timestamp_ms": 0, "prediction": 0.02, "segment_id": "s1"}],
         prediction_column="prediction",
         config=_taker_config(latency_ms=10),
-        observed_coverage={"s1": (5, 15)},
+        observed_coverage={"s1": _coverage(5, 15)},
         on_fill=fills.append,
     )
 
@@ -153,7 +157,7 @@ def test_taker_walks_known_l2_and_reports_partial_coverage_honestly() -> None:
         [{"timestamp_ms": 0, "prediction": 0.02}],
         prediction_column="prediction",
         config=_taker_config(order_quantity=1.5),
-        observed_coverage={"s1": (0, 1)},
+        observed_coverage={"s1": _coverage(0, 1)},
         on_fill=fills.append,
     )
 
@@ -173,7 +177,7 @@ def test_taker_does_not_fill_after_coverage_or_explicit_boundary() -> None:
         [{"timestamp_ms": 100, "prediction": 0.02}],
         prediction_column="prediction",
         config=_taker_config(),
-        observed_coverage={"s1": (0, 49)},
+        observed_coverage={"s1": _coverage(0, 49)},
         on_fill=fills.append,
     )
 
@@ -188,7 +192,7 @@ def test_taker_markout_does_not_use_state_past_observed_coverage() -> None:
         [{"timestamp_ms": 0, "prediction": 0.02}],
         prediction_column="prediction",
         config=_taker_config(),
-        observed_coverage={"s1": (0, 100)},
+        observed_coverage={"s1": _coverage(0, 100)},
     )
 
     assert diagnostics["average_markout_bps"] is None
@@ -205,7 +209,7 @@ def test_taker_target_position_does_not_accumulate_repeated_signal() -> None:
         ],
         prediction_column="prediction",
         config=TakerConfig(2.0, 2.0, 0, 0.0, 0.0, 100),
-        observed_coverage={"s1": (0, 200)},
+        observed_coverage={"s1": _coverage(0, 200)},
     )
 
     assert diagnostics["created_orders"] == 1
@@ -219,8 +223,8 @@ def test_maker_processes_same_time_events_in_local_observation_order() -> None:
         [_trade(100, price="99.5", quantity="3", maker_buyer=True)],
         [_quote(0), _quote(100)],
         config=_maker_config(),
-        observed_coverage={"s1": (0, 100)},
-        trade_coverage={"trade-connection-1": (0, 101)},
+        observed_coverage={"s1": _coverage(0, 100)},
+        trade_coverage={"trade-connection-1": _coverage(0, 101)},
         on_fill=fills.append,
     )
 
@@ -239,8 +243,8 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
         ],
         [_quote(0)],
         config=_maker_config(),
-        observed_coverage={"s1": (0, 201)},
-        trade_coverage={"trade-connection-1": (0, 201)},
+        observed_coverage={"s1": _coverage(0, 201)},
+        trade_coverage={"trade-connection-1": _coverage(0, 201)},
         on_fill=fills.append,
     )
 
@@ -264,8 +268,8 @@ def test_maker_trade_through_fills_and_boundary_blocks_stale_trade() -> None:
         ],
         [_quote(0)],
         config=_maker_config(),
-        observed_coverage={"s1": (0, 74)},
-        trade_coverage={"trade-connection-1": (0, 101)},
+        observed_coverage={"s1": _coverage(0, 74)},
+        trade_coverage={"trade-connection-1": _coverage(0, 101)},
         on_fill=fills.append,
     )
 
@@ -282,7 +286,7 @@ def test_latency_sweep_has_exact_requested_scenarios() -> None:
         prediction_column="prediction",
         config=_taker_config(),
         latency_scenarios_ms=(0, 100, 200),
-        observed_coverage={"s1": (0, 200)},
+        observed_coverage={"s1": _coverage(0, 200)},
     )
 
     assert [item["latency_ms"] for item in result] == [0, 100, 200]
@@ -298,7 +302,7 @@ def test_taker_long_stream_retains_no_fill_or_equity_dataframe() -> None:
         decisions(),
         prediction_column="prediction",
         config=_taker_config(),
-        observed_coverage={"s1": (0, 19_999)},
+        observed_coverage={"s1": _coverage(0, 19_999)},
     )
 
     assert diagnostics["fill_events"] == 0
