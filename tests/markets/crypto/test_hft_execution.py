@@ -106,6 +106,21 @@ def _maker_config() -> MakerConfig:
     )
 
 
+def _quote(
+    timestamp_ms: int,
+    *,
+    book_segment_id: str = "s1",
+    trade_connection_id: str = "trade-connection-1",
+) -> dict[str, object]:
+    return {
+        "timestamp_ms": timestamp_ms,
+        "asset_id": "btc_usdt",
+        "segment_id": f"{book_segment_id}:{trade_connection_id}",
+        "book_segment_id": book_segment_id,
+        "trade_connection_id": trade_connection_id,
+    }
+
+
 def test_taker_uses_latest_actual_state_at_effective_time() -> None:
     fills = []
     diagnostics = simulate_taker(
@@ -202,9 +217,10 @@ def test_maker_processes_same_time_events_in_local_observation_order() -> None:
     diagnostics = simulate_maker(
         [_state(0), _state(100, bid_tick=994, ask_tick=1006)],
         [_trade(100, price="99.5", quantity="3", maker_buyer=True)],
-        [{"timestamp_ms": 0}, {"timestamp_ms": 100}],
+        [_quote(0), _quote(100)],
         config=_maker_config(),
         observed_coverage={"s1": (0, 100)},
+        trade_coverage={"trade-connection-1": (0, 101)},
         on_fill=fills.append,
     )
 
@@ -221,9 +237,10 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
             _trade(50, price="99.5", quantity="2.5", maker_buyer=True),
             _trade(100, price="99.5", quantity="0.5", maker_buyer=True),
         ],
-        [{"timestamp_ms": 0}],
+        [_quote(0)],
         config=_maker_config(),
         observed_coverage={"s1": (0, 201)},
+        trade_coverage={"trade-connection-1": (0, 201)},
         on_fill=fills.append,
     )
 
@@ -245,9 +262,10 @@ def test_maker_trade_through_fills_and_boundary_blocks_stale_trade() -> None:
             _trade(50, price="99.4", quantity="0.1", maker_buyer=True),
             _trade(100, price="99.0", quantity="1", maker_buyer=True),
         ],
-        [{"timestamp_ms": 0}],
+        [_quote(0)],
         config=_maker_config(),
         observed_coverage={"s1": (0, 74)},
+        trade_coverage={"trade-connection-1": (0, 101)},
         on_fill=fills.append,
     )
 

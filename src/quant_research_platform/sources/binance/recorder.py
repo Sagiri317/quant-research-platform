@@ -25,6 +25,7 @@ import psutil
 from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as _connect_websocket
 
+from quant_research_platform.contracts._json import parse_qrp_json_object
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
@@ -604,10 +605,15 @@ class _StreamReader(threading.Thread):
                 receive_time = _utc_now()
                 receive_monotonic_ns = time.monotonic_ns()
                 try:
-                    if isinstance(raw, bytes):
-                        raw = raw.decode("utf-8", errors="strict")
-                    payload = validate_stream_payload(self.stream, json.loads(raw))
-                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    if isinstance(raw, str):
+                        raw = raw.encode("utf-8")
+                    if not isinstance(raw, bytes):
+                        raise ValueError("binance_recorder_payload_bytes_invalid")
+                    payload = validate_stream_payload(
+                        self.stream,
+                        parse_qrp_json_object(raw),
+                    )
+                except (UnicodeError, ValueError):
                     self.stats.invalid()
                     raise _InvalidPayload() from None
                 needs_resync = False
@@ -712,8 +718,8 @@ def _http_get_json(
     except httpx.HTTPError as exc:
         raise OSError("binance_recorder_rest_request_failed") from exc
     try:
-        payload = json.loads(raw.decode("utf-8", errors="strict"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = parse_qrp_json_object(bytes(raw))
+    except (UnicodeError, ValueError) as exc:
         raise ValueError("binance_recorder_rest_json_invalid") from exc
     return payload, _utc_now(), time.monotonic_ns()
 

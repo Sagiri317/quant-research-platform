@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -62,6 +63,14 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
         "public_l2_inventory_maker_baseline"
     )
     assert report["execution"]["maker_prediction_used"] is False
+    execution_artifact = json.loads(
+        (output_root / report["execution"]["path"]).read_text(encoding="utf-8")
+    )
+    assert execution_artifact["taker_model_id"] == "crypto_hft_linear_regression"
+    assert execution_artifact["maker_policy_id"] == (
+        "public_l2_inventory_maker_baseline"
+    )
+    assert "model_id" not in execution_artifact
     assert report["execution"]["taker"]["latency_fidelity"] == (
         "full_l2_observed_event"
     )
@@ -156,6 +165,8 @@ def test_crypto_hft_maker_receives_research_quote_schedule(
 
     assert report["execution"]["maker_prediction_used"] is False
     assert captured
+    assert captured[0]["timestamp_ms"] == 4_000
+    assert captured[-1]["timestamp_ms"] == 6_000
     assert all(
         {
             "timestamp_ms",

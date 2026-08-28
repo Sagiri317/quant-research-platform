@@ -16,7 +16,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from quant_research_platform.contracts._json import canonical_json_hash
+from quant_research_platform.contracts._json import (
+    canonical_json_hash,
+    parse_qrp_json_object,
+)
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
@@ -39,6 +42,10 @@ from quant_research_platform.sources.binance.raw_exports import (
     _json_record_working_set_bytes,
     _raw_path_session,
     _verify_raw_file_handle,
+)
+from quant_research_platform.sources.binance.recorder import (
+    RecorderStream,
+    validate_stream_payload,
 )
 from quant_research_platform.sources.binance.validation import (
     strict_boolean,
@@ -268,8 +275,8 @@ def _read_run_manifest(
     with policy.lease("binance.replay.manifest", bound):
         try:
             raw = path.read_bytes()
-            manifest = json.loads(raw.decode("utf-8", errors="strict"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            manifest = parse_qrp_json_object(raw)
+        except (OSError, UnicodeError, ValueError) as exc:
             raise ValueError("binance_replay_run_manifest_invalid") from exc
         if _capture_raw_file_identity(path) != identity:
             raise ValueError("binance_replay_run_identity_changed")
@@ -624,8 +631,8 @@ def _iter_raw_file(
                     if len(line) > metadata["max_record_bytes"]:
                         raise ValueError("binance_replay_raw_record_too_large")
                     try:
-                        record = json.loads(line.decode("utf-8", errors="strict"))
-                    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                        record = parse_qrp_json_object(line)
+                    except (UnicodeError, ValueError) as exc:
                         raise ValueError("binance_replay_raw_json_invalid") from exc
                     _validate_raw_record(record, metadata=metadata)
                     capture_seq = record["capture_seq"]
@@ -710,6 +717,16 @@ def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
             raise ValueError("binance_replay_connection_identity_invalid")
         if "segment_id" in value:
             raise ValueError("binance_replay_segment_identity_invalid")
+    if metadata["data_kind"] in {"depth", "agg_trades"}:
+        validate_stream_payload(
+            RecorderStream(
+                metadata["market"],
+                metadata["data_kind"],
+                metadata["stream"],
+                "",
+            ),
+            value["payload"],
+        )
 
 
 def _levels(
@@ -830,7 +847,10 @@ class DepthReconstructor:
         self._bootstrapped = False
         self._invalid = False
 
-    def feed(self, record: dict[str, Any]) -> Iterator[BookState | BookBoundary]:
+    def feed(
+        self,
+        record: dict[str, Any],
+    ) -> Iterator[_OwnedValue[BookState] | BookBoundary]:
         if self._invalid:
             return
         if record.get("market_type") != self.market_type:

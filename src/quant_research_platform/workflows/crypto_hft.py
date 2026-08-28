@@ -179,6 +179,7 @@ def _run_in_staging(
         sample_resources()
         split_steps = (end_ms - start_ms) // HFT_GRID_MS * 2 // 3
         split_ms = start_ms + split_steps * HFT_GRID_MS
+        test_window = TimeWindow(_datetime(split_ms), _datetime(end_ms))
         model_catalog = build_hft_model_catalog(
             training_row_bound=inspections[HFT_PANEL_DATA_ID].row_count,
         )
@@ -259,11 +260,15 @@ def _run_in_staging(
             iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
             _maker_quote_schedule(
                 research_root=research_root,
-                time_window=time_window,
+                time_window=test_window,
                 resource_policy=resource_policy,
             ),
             config=maker_config,
             observed_coverage=coverage,
+            trade_coverage=run.connection_coverage(
+                market_type=FUTURES_MARKET_TYPE,
+                data_kind="agg_trades",
+            ),
         )
         latency = taker_latency_sweep(
             book_factory,
@@ -279,7 +284,9 @@ def _run_in_staging(
             _json_safe(
                 {
                     "schema_id": "qrp-crypto-hft-execution-diagnostics",
-                    "model_id": _EXECUTION_MODEL_ID,
+                    "taker_model_id": _EXECUTION_MODEL_ID,
+                    "maker_policy_id": "public_l2_inventory_maker_baseline",
+                    "maker_prediction_used": False,
                     "lineage": _lineage(run.source_identity),
                     "taker": taker,
                     "maker": maker,
@@ -301,18 +308,20 @@ def _run_in_staging(
                 for metadata in model_reports.values()
             ),
         )
+        research_status = (
+            "PASS"
+            if run.manifest["market_data_status"] == "PASS"
+            and reconstruction.invalid_segments == 0
+            else "PARTIAL"
+        )
         report = _json_safe(
             {
                 "schema_id": "qrp-crypto-hft-report",
-                "status": (
-                    "PASS"
-                    if run.manifest["market_data_status"] == "PASS"
-                    else "PARTIAL"
-                ),
+                "status": "PASS" if research_status == "PASS" else "PARTIAL",
                 "market_data_status": run.manifest["market_data_status"],
-                "research_status": "PASS",
-                "model_status": "PASS",
-                "execution_status": "PASS",
+                "research_status": research_status,
+                "model_status": research_status,
+                "execution_status": research_status,
                 "lineage": _lineage(run.source_identity),
                 "data_quality": {
                     **asdict(reconstruction),

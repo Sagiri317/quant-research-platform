@@ -142,6 +142,21 @@ def _taker_config(*, latency_ms: int = 0) -> TakerConfig:
     )
 
 
+def _quote(
+    timestamp_ms: int,
+    *,
+    book_segment_id: str = "book-1",
+    trade_connection_id: str = "trade-connection-1",
+) -> dict[str, object]:
+    return {
+        "timestamp_ms": timestamp_ms,
+        "asset_id": "btc_usdt",
+        "segment_id": f"{book_segment_id}:{trade_connection_id}",
+        "book_segment_id": book_segment_id,
+        "trade_connection_id": trade_connection_id,
+    }
+
+
 def test_r1_only_local_observation_time_drives_panel_and_taker() -> None:
     state = _state(100, event_time_ms=0, transaction_time_ms=0)
 
@@ -265,16 +280,18 @@ def test_r4_maker_uses_local_observation_order_for_same_time_events() -> None:
     book_first = simulate_maker(
         [initial, changed],
         [book_first_trade],
-        [{"timestamp_ms": 0, "segment_id": "book-1"}],
+        [_quote(0)],
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200)},
+        trade_coverage={"trade-connection-1": (0, 200)},
     )
     trade_first_result = simulate_maker(
         [initial, trade_first_book],
         [trade_first],
-        [{"timestamp_ms": 0, "segment_id": "book-1"}],
+        [_quote(0)],
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200)},
+        trade_coverage={"trade-connection-1": (0, 200)},
     )
 
     assert book_first["filled_orders"] == 0
@@ -299,11 +316,36 @@ def test_r4_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> N
     result = simulate_maker(
         [_state(0)],
         [trade],
-        [{"timestamp_ms": 0, "segment_id": "book-1"}],
+        [_quote(0)],
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200)},
+        trade_coverage={"trade-connection-1": (0, 200)},
     )
     assert result["filled_orders"] == 0
+
+
+def test_r4_zero_visible_trade_through_cannot_fill_a_maker_order() -> None:
+    result = simulate_maker(
+        [_state(0)],
+        [_trade(50, quantity=1.0, visible_quantity=0.0, price_tick=994)],
+        [_quote(0)],
+        config=_maker_config(),
+        observed_coverage={"book-1": (0, 200)},
+        trade_coverage={"trade-connection-1": (0, 200)},
+    )
+    assert result["filled_orders"] == 0
+
+
+def test_r7_maker_requires_matching_book_and_trade_schedule_identity() -> None:
+    result = simulate_maker(
+        [_state(0)],
+        [],
+        [_quote(0, book_segment_id="book-2", trade_connection_id="trade-connection-2")],
+        config=_maker_config(),
+        observed_coverage={"book-1": (0, 200)},
+        trade_coverage={"trade-connection-1": (0, 200)},
+    )
+    assert result["created_orders"] == 0
 
 
 def test_r5_book_state_lease_and_r6_taker_timing_and_terminal_mark() -> None:
@@ -345,9 +387,10 @@ def test_r6_same_price_book_decrease_without_trade_does_not_deplete_queue() -> N
             _state(50, bid_qty=0.5),
         ],
         [_trade(100, quantity=1.0, visible_quantity=1.0)],
-        [{"timestamp_ms": 0, "segment_id": "book-1"}],
+        [_quote(0)],
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200)},
+        trade_coverage={"trade-connection-1": (0, 200)},
     )
     assert result["filled_orders"] == 0
 
@@ -361,6 +404,7 @@ def test_r7_maker_quote_schedule_has_no_prediction_surface() -> None:
             [{"timestamp_ms": 0, "prediction_score": 1.0}],
             config=_maker_config(),
             observed_coverage={"book-1": (0, 100)},
+            trade_coverage={"trade-connection-1": (0, 100)},
         )
 
 

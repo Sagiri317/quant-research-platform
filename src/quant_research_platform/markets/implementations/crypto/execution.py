@@ -395,7 +395,7 @@ def simulate_taker(
     next_event = None
     latest_state: BookState | None = None
     latest_owned: _OwnedValue[BookState] | None = None
-    terminal_state: BookState | None = None
+    terminal_mid: float | None = None
     metrics = _Metrics()
     position = 0.0
     cash_gross = 0.0
@@ -420,7 +420,7 @@ def simulate_taker(
             def consume_event(
                 event: BookState | _OwnedValue[BookState] | BookBoundary,
             ) -> None:
-                nonlocal latest_state, latest_owned, terminal_state
+                nonlocal latest_state, latest_owned, terminal_mid
                 if isinstance(event, BookBoundary):
                     _close_book(latest_owned)
                     latest_owned = None
@@ -436,7 +436,7 @@ def simulate_taker(
                     state.segment_id,
                     state.observed_time_ms,
                 ):
-                    terminal_state = state
+                    terminal_mid = _mid(state)
                 _resolve_observed_markouts(
                     pending,
                     state,
@@ -590,11 +590,10 @@ def simulate_taker(
                 market_event_count += 1
                 consume_event(event)
                 next_event = next(events, None)
-            if terminal_state is None:
+            if terminal_mid is None:
                 last_gross = None
                 last_net = None
             else:
-                terminal_mid = _mid(terminal_state)
                 last_gross = cash_gross + position * terminal_mid
                 last_net = last_gross - fees
         finally:
@@ -661,6 +660,7 @@ class _MakerOrder:
     queue_ahead: float
     initial_queue_ahead: float
     segment_id: str
+    trade_connection_id: str
     tick_size: str
     created_time_ms: int
     had_fill: bool = False
@@ -749,6 +749,18 @@ def _checked_quote_schedule(
             row = dict(source)
             if "prediction_score" in row:
                 raise ValueError("hft_maker_prediction_forbidden")
+            for key in (
+                "asset_id",
+                "segment_id",
+                "book_segment_id",
+                "trade_connection_id",
+            ):
+                if not isinstance(row.get(key), str) or not row[key]:
+                    raise ValueError("hft_maker_quote_schedule_identity_invalid")
+            if row["segment_id"] != (
+                f"{row['book_segment_id']}:{row['trade_connection_id']}"
+            ):
+                raise ValueError("hft_maker_quote_schedule_identity_invalid")
             timestamp = row.get("timestamp_ms")
             if type(timestamp) is not int or timestamp < 0:
                 raise ValueError("hft_maker_quote_schedule_time_invalid")
@@ -765,6 +777,7 @@ def simulate_maker(
     *,
     config: MakerConfig,
     observed_coverage: Mapping[str, tuple[int, int]],
+    trade_coverage: Mapping[str, tuple[int, int]],
     on_fill: Callable[[dict[str, Any]], None] | None = None,
     on_equity: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
@@ -886,10 +899,16 @@ def simulate_maker(
                 timestamp_ms,
             ):
                 return
+            if not _covered(trade_coverage, trade.connection_id, timestamp_ms):
+                return
             mid = _mid(latest_state)
             for side in ("buy", "sell"):
                 order = active.get(side)
-                if order is None or order.segment_id != latest_state.segment_id:
+                if (
+                    order is None
+                    or order.segment_id != latest_state.segment_id
+                    or order.trade_connection_id != trade.connection_id
+                ):
                     continue
                 same_price = trade_tick == order.price_tick
                 trade_through = (
@@ -902,7 +921,7 @@ def simulate_maker(
                     or (side == "sell" and not maker_buyer)
                 )
                 if trade_through:
-                    fill_quantity = order.remaining
+                    fill_quantity = min(order.remaining, quantity)
                     order.queue_ahead = 0.0
                     reason = "trade_through"
                 elif same_price_depletion:
@@ -970,13 +989,27 @@ def simulate_maker(
             decision_time = row["timestamp_ms"]
             process_until(decision_time)
             current_mid: float | None = None
-            if latest_state is None or not _covered(
-                observed_coverage,
-                latest_state.segment_id,
-                decision_time,
+            if (
+                latest_state is None
+                or not _covered(
+                    observed_coverage,
+                    latest_state.segment_id,
+                    decision_time,
+                )
+                or row["book_segment_id"] != latest_state.segment_id
+                or not _covered(
+                    trade_coverage,
+                    row["trade_connection_id"],
+                    decision_time,
+                )
             ):
                 cancel_active(decision_time)
             else:
+                if any(
+                    order.trade_connection_id != row["trade_connection_id"]
+                    for order in active.values()
+                ):
+                    cancel_active(decision_time)
                 current_mid = _mid(latest_state)
                 desired = {
                     "buy": latest_state.bids[0][0],
@@ -1019,6 +1052,7 @@ def simulate_maker(
                         queue_ahead=queue_ahead,
                         initial_queue_ahead=queue_ahead,
                         segment_id=latest_state.segment_id,
+                        trade_connection_id=row["trade_connection_id"],
                         tick_size=latest_state.tick_size,
                         created_time_ms=decision_time,
                     )
