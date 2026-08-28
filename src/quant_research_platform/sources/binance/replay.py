@@ -1172,8 +1172,43 @@ def iter_reconstructed_depth(
                         resource_policy=run.resource_policy,
                         stats=active_stats,
                     )
-                    reconstructor.bootstrap(snapshot)
                     active_segment = segment_id
+                    try:
+                        reconstructor.bootstrap(snapshot)
+                    except ValueError as error:
+                        reason = str(error)
+                        prefix = "binance_replay_snapshot_"
+                        if not reason.startswith(prefix):
+                            raise
+                        reason = reason.removeprefix(prefix)
+                        if reason not in {
+                            "one_sided_book",
+                            "crossed_book",
+                            "unsupported_coverage",
+                        }:
+                            raise
+                        reconstructor.close()
+                        reconstructor = None
+                        event_time, transaction_time, observed_time = _record_times(
+                            record,
+                            market_type=market_type,
+                        )
+                        active_stats.invalid_segments += 1
+                        yield BookBoundary(
+                            capture_seq=record["capture_seq"],
+                            event_time_ms=event_time,
+                            transaction_time_ms=transaction_time,
+                            observed_time_ms=observed_time,
+                            receive_time=record["receive_time"],
+                            receive_monotonic_ns=record["receive_monotonic_ns"],
+                            segment_id=segment_id,
+                            connection_id=record["connection_id"],
+                            market_type=market_type,
+                            reason=reason,
+                        )
+                        continue
+                if reconstructor is None:
+                    continue
                 assert reconstructor is not None
                 yield from reconstructor.feed(record)
         finally:

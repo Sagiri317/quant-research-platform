@@ -341,7 +341,7 @@ def test_r5_book_state_lease_and_r6_taker_timing_and_terminal_mark() -> None:
 def test_r6_same_price_book_decrease_without_trade_does_not_deplete_queue() -> None:
     result = simulate_maker(
         [
-            _state(0, bid_qty=2.0),
+            _state(0, bid_qty=1.0),
             _state(50, bid_qty=0.5),
         ],
         [_trade(100, quantity=1.0, visible_quantity=1.0)],

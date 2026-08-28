@@ -471,6 +471,60 @@ def test_snapshot_frontier_is_not_promoted_to_executable_depth(tmp_path: Path) -
         owned.lease.close()
 
 
+def test_insufficient_snapshot_waits_for_next_segment(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "depth",
+                "btcusdt@depth@100ms",
+                [
+                    _futures_delta(
+                        1, 90, 100, previous=0, transaction_time=10, segment_id="s1"
+                    ),
+                    _futures_delta(
+                        2, 190, 200, previous=0, transaction_time=20, segment_id="s2"
+                    ),
+                ],
+            ),
+            (
+                FUTURES_MARKET_TYPE,
+                "depth_snapshot",
+                "REST:/fapi/v1/depth",
+                [
+                    _snapshot(
+                        3,
+                        market_type=FUTURES_MARKET_TYPE,
+                        segment_id="s1",
+                        last_update_id=100,
+                        bids=[["100.0", "2"]],
+                        asks=[["101.0", "2"]],
+                    ),
+                    _snapshot(
+                        4,
+                        market_type=FUTURES_MARKET_TYPE,
+                        segment_id="s2",
+                        last_update_id=200,
+                    ),
+                ],
+            ),
+        ],
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
+        events = list(
+            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=2)
+        )
+        assert isinstance(events[0], BookBoundary)
+        assert events[0].reason == "unsupported_coverage"
+        assert isinstance(events[1], _OwnedValue)
+        assert events[1].value.segment_id == "s2"
+        events[1].lease.close()
+
+
 def test_advancing_replay_keeps_previous_book_state_lease_active(
     tmp_path: Path,
 ) -> None:

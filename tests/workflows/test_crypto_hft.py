@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+import quant_research_platform.workflows.crypto_hft as crypto_hft
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
@@ -126,3 +127,43 @@ def test_crypto_hft_workflow_completes_under_explicit_memory_cap(
     assert report["resource"]["sampled_peak_reserved_bytes"] <= report["resource"][
         "memory_budget_bytes"
     ]
+
+
+def test_crypto_hft_maker_receives_research_quote_schedule(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "raw"
+    output_root = tmp_path / "output"
+    write_binance_hft_run(raw_root)
+    real_simulate_maker = crypto_hft.simulate_maker
+    captured: list[dict[str, object]] = []
+
+    def capture_schedule(book_events, trades, quote_schedule, **kwargs):  # noqa: ANN001
+        schedule = list(quote_schedule)
+        captured.extend(schedule)
+        return real_simulate_maker(book_events, trades, schedule, **kwargs)
+
+    monkeypatch.setattr(crypto_hft, "simulate_maker", capture_schedule)
+    report = crypto_hft.run_crypto_hft_experiment(
+        output_root=output_root,
+        raw_root=raw_root,
+        start_ms=0,
+        end_ms=6_000,
+        taker_config=_taker_config(),
+        maker_config=_maker_config(),
+    )
+
+    assert report["execution"]["maker_prediction_used"] is False
+    assert captured
+    assert all(
+        {
+            "timestamp_ms",
+            "asset_id",
+            "segment_id",
+            "book_segment_id",
+            "trade_connection_id",
+        }.issubset(row)
+        and "prediction_score" not in row
+        for row in captured
+    )

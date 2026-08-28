@@ -5,6 +5,7 @@ from quant_research_platform.contracts.data import DataFrequency, ProcessedDataK
 from quant_research_platform.markets.implementations.crypto.factors.definitions import (
     hft_factor_catalog,
 )
+from quant_research_platform.markets.implementations.crypto.hft import HFT_GRID_MS
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_COLUMNS,
     HFT_FACTOR_DATA_ID,
@@ -68,6 +69,7 @@ def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> N
     assert [model.model_algorithm for model in models] == sorted(HFT_MODEL_ALGORITHMS)
     assert all(model.max_train_rows == 100 for model in models)
     assert all(
-        model.purge_gap_steps == HFT_MODEL_LABEL_HORIZON_MS // 100 for model in models
+        model.purge_gap_steps == HFT_MODEL_LABEL_HORIZON_MS // HFT_GRID_MS
+        for model in models
     )
     assert all(not model.model_id.startswith("hft_model_framework") for model in models)
