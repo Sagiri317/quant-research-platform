@@ -893,6 +893,8 @@ def simulate_maker(
             quantity = trade.visible_quantity
             maker_buyer = trade.buyer_is_maker
             timestamp_ms = trade.observed_time_ms
+            if quantity <= 0:
+                return
             if not _covered(
                 observed_coverage,
                 latest_state.segment_id,

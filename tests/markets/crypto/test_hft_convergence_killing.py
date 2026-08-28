@@ -336,6 +336,21 @@ def test_r4_zero_visible_trade_through_cannot_fill_a_maker_order() -> None:
     assert result["filled_orders"] == 0
 
 
+def test_r4_zero_visible_trade_through_does_not_advance_queue() -> None:
+    result = simulate_maker(
+        [_state(0)],
+        [
+            _trade(50, quantity=1.0, visible_quantity=0.0, price_tick=994),
+            _trade(100, quantity=1.0, visible_quantity=1.0, price_tick=995),
+        ],
+        [_quote(0)],
+        config=_maker_config(),
+        observed_coverage={"book-1": (0, 200)},
+        trade_coverage={"trade-connection-1": (0, 200)},
+    )
+    assert result["filled_orders"] == 0
+
+
 def test_r7_maker_requires_matching_book_and_trade_schedule_identity() -> None:
     result = simulate_maker(
         [_state(0)],
