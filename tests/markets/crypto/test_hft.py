@@ -4,9 +4,13 @@ import math
 
 import pytest
 
-from quant_research_platform.contracts.order_book import BookBoundary, BookState
+from quant_research_platform.contracts.order_book import (
+    BookBoundary,
+    BookState,
+    TradeEvent,
+)
 from quant_research_platform.markets.implementations.crypto.hft import (
-    GRID_MS,
+    HFT_GRID_MS,
     iter_factor_rows,
     iter_label_rows,
     iter_panel_rows,
@@ -28,6 +32,7 @@ def _state(
         capture_seq=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
+        observed_time_ms=timestamp_ms,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
@@ -45,6 +50,7 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
         capture_seq=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
+        observed_time_ms=timestamp_ms,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
@@ -54,28 +60,22 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
     )
 
 
-def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> dict:
-    return {
-        "capture_seq": timestamp_ms + 10,
-        "receive_time": "2026-08-27T00:00:00.000000Z",
-        "receive_monotonic_ns": timestamp_ms + 10,
-        "market_type": FUTURES_MARKET_TYPE,
-        "tick_size": "0.1",
-        "payload": {
-            "e": "aggTrade",
-            "E": timestamp_ms + 1,
-            "T": timestamp_ms,
-            "s": "BTCUSDT",
-            "ps": "BTCUSDT",
-            "st": 1,
-            "a": timestamp_ms + 1,
-            "f": timestamp_ms + 1,
-            "l": timestamp_ms + 1,
-            "p": "100.5",
-            "q": str(quantity),
-            "m": maker_buyer,
-        },
-    }
+def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEvent:
+    return TradeEvent(
+        capture_seq=timestamp_ms + 10,
+        event_time_ms=timestamp_ms + 1,
+        transaction_time_ms=timestamp_ms,
+        observed_time_ms=timestamp_ms,
+        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_monotonic_ns=timestamp_ms + 10,
+        connection_id="trade-connection-1",
+        market_type=FUTURES_MARKET_TYPE,
+        tick_size="0.1",
+        price_tick=1005,
+        quantity=quantity,
+        visible_quantity=quantity,
+        buyer_is_maker=maker_buyer,
+    )
 
 
 def test_l1_ofi_uses_exact_integer_tick_identity() -> None:
@@ -89,11 +89,13 @@ def test_quiet_valid_book_persists_without_fabricated_gap() -> None:
             [],
             start_ms=0,
             end_ms=500,
+            book_coverage={"s1": (0, 501)},
+            trade_coverage={"trade-connection-1": (0, 501)},
         )
     )
 
     assert [row["timestamp_ms"] for row in rows] == [0, 100, 200, 300, 400, 500]
-    assert {row["segment_id"] for row in rows} == {"s1"}
+    assert {row["segment_id"] for row in rows} == {"s1:trade-connection-1"}
 
 
 def test_panel_excludes_pre_interval_trades_and_keeps_stream_clocks_separate() -> None:
@@ -103,6 +105,8 @@ def test_panel_excludes_pre_interval_trades_and_keeps_stream_clocks_separate() -
             [_trade(100, 9.0, maker_buyer=False), _trade(500, 2.0, maker_buyer=True)],
             start_ms=500,
             end_ms=500,
+            book_coverage={"s1": (0, 601)},
+            trade_coverage={"trade-connection-1": (0, 601)},
         )
     )
 
@@ -110,10 +114,10 @@ def test_panel_excludes_pre_interval_trades_and_keeps_stream_clocks_separate() -
     row = rows[0]
     assert row["trade_volume_100ms"] == 2.0
     assert row["observed_signed_trade_volume_100ms"] == -2.0
-    assert row["book_state_time_ms"] == 0
+    assert row["book_observed_time_ms"] == 0
     assert row["exchange_event_time_ms"] == 1
     assert row["transaction_time_ms"] == 0
-    assert row["capture_seq"] == 1
+    assert row["book_capture_seq"] == 1
 
 
 def test_explicit_book_boundary_stops_panel_until_new_segment() -> None:
@@ -123,14 +127,15 @@ def test_explicit_book_boundary_stops_panel_until_new_segment() -> None:
             [],
             start_ms=0,
             end_ms=400,
+            book_coverage={"s1": (0, 250), "s2": (400, 500)},
+            trade_coverage={"trade-connection-1": (0, 500)},
         )
     )
 
     assert [(row["timestamp_ms"], row["segment_id"]) for row in rows] == [
-        (0, "s1"),
-        (100, "s1"),
-        (200, "s1"),
-        (400, "s2"),
+        (0, "s1:trade-connection-1"),
+        (100, "s1:trade-connection-1"),
+        (200, "s1:trade-connection-1"),
     ]
 
 
@@ -145,6 +150,8 @@ def test_factor_rows_are_hand_calculated_from_panel_sufficient_statistics() -> N
             [_trade(100, 2.0, maker_buyer=False)],
             start_ms=0,
             end_ms=200,
+            book_coverage={"s1": (0, 201)},
+            trade_coverage={"trade-connection-1": (0, 201)},
         )
     )
     factors = list(iter_factor_rows(panel))
@@ -163,7 +170,7 @@ def test_labels_are_exact_horizon_same_segment_and_keep_zero_distinct_from_nan()
 ):
     rows = [
         {
-            "timestamp_ms": index * GRID_MS,
+            "timestamp_ms": index * HFT_GRID_MS,
             "timestamp": f"1970-01-01T00:00:00.{index}00",
             "segment_id": "s1" if index < 3 else "s2",
             "mid": 100.0 if index != 1 else 101.0,
@@ -173,7 +180,7 @@ def test_labels_are_exact_horizon_same_segment_and_keep_zero_distinct_from_nan()
         for index in range(5)
     ]
 
-    labels = list(iter_label_rows(rows, horizons_ms=(100, 200)))
+    labels = list(iter_label_rows(rows, horizons_ms=(HFT_GRID_MS, 200)))
 
     assert math.isclose(labels[0]["future_mid_return_100ms"], 0.01)
     assert labels[0]["future_mid_direction_100ms"] == 1.0
@@ -188,6 +195,8 @@ def test_factor_and_label_rows_reject_non_grid_gap_in_same_segment() -> None:
             [],
             start_ms=0,
             end_ms=200,
+            book_coverage={"s1": (0, 201)},
+            trade_coverage={"trade-connection-1": (0, 201)},
         )
     )
     rows = [complete[0], complete[2]]
@@ -195,4 +204,4 @@ def test_factor_and_label_rows_reject_non_grid_gap_in_same_segment() -> None:
     with pytest.raises(ValueError, match="hft_grid_non_contiguous"):
         list(iter_factor_rows(rows))
     with pytest.raises(ValueError, match="hft_grid_non_contiguous"):
-        list(iter_label_rows(rows, horizons_ms=(100,)))
+        list(iter_label_rows(rows, horizons_ms=(HFT_GRID_MS,)))

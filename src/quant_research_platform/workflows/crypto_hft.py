@@ -30,7 +30,7 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_taker,
     taker_latency_sweep,
 )
-from quant_research_platform.markets.implementations.crypto.hft import GRID_MS
+from quant_research_platform.markets.implementations.crypto.hft import HFT_GRID_MS
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_DATA_ID,
     HFT_LABEL_DATA_ID,
@@ -61,11 +61,13 @@ from quant_research_platform.research.predictions.runner import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.binance.replay import (
     RecorderRun,
+    iter_agg_trades,
     iter_reconstructed_depth,
     open_recorder_run,
 )
@@ -77,7 +79,7 @@ from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import crypto_hft_materialization
 
-_LATENCY_SCENARIOS_MS = (0, 100, 200)
+_LATENCY_SCENARIOS_MS = (0, HFT_GRID_MS, 2 * HFT_GRID_MS)
 _EXECUTION_MODEL_ID = "crypto_hft_linear_regression"
 _EPOCH = dt.datetime(1970, 1, 1)
 
@@ -99,11 +101,11 @@ def run_crypto_hft_experiment(
         or type(end_ms) is not int
         or start_ms < 0
         or end_ms <= start_ms
-        or start_ms % GRID_MS
-        or end_ms % GRID_MS
+        or start_ms % HFT_GRID_MS
+        or end_ms % HFT_GRID_MS
     ):
         raise ValueError("crypto_hft_time_window_invalid")
-    total_steps = (end_ms - start_ms) // GRID_MS
+    total_steps = (end_ms - start_ms) // HFT_GRID_MS
     if total_steps < 30:
         raise ValueError("crypto_hft_time_window_too_short")
     final_root = Path(output_root)
@@ -175,13 +177,13 @@ def _run_in_staging(
             resource_policy=resource_policy,
         )
         sample_resources()
-        split_steps = (end_ms - start_ms) // GRID_MS * 2 // 3
-        split_ms = start_ms + split_steps * GRID_MS
+        split_steps = (end_ms - start_ms) // HFT_GRID_MS * 2 // 3
+        split_ms = start_ms + split_steps * HFT_GRID_MS
         model_catalog = build_hft_model_catalog(
             training_row_bound=inspections[HFT_PANEL_DATA_ID].row_count,
         )
         prediction_catalog = build_hft_prediction_catalog(
-            train_end=_datetime(split_ms - GRID_MS).isoformat(),
+            train_end=_datetime(split_ms - HFT_GRID_MS).isoformat(),
             test_start=_datetime(split_ms).isoformat(),
             test_end=_datetime(end_ms).isoformat(),
         )
@@ -254,8 +256,12 @@ def _run_in_staging(
         )
         maker = simulate_maker(
             book_factory(),
-            _trade_events(run, end_ms=end_ms),
-            decision_factory(),
+            iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
+            _maker_quote_schedule(
+                research_root=research_root,
+                time_window=time_window,
+                resource_policy=resource_policy,
+            ),
             config=maker_config,
             observed_coverage=coverage,
         )
@@ -324,7 +330,9 @@ def _run_in_staging(
                     "metadata": model_reports,
                 },
                 "execution": {
-                    "model_id": _EXECUTION_MODEL_ID,
+                    "taker_model_id": _EXECUTION_MODEL_ID,
+                    "maker_policy_id": "public_l2_inventory_maker_baseline",
+                    "maker_prediction_used": False,
                     "path": execution_relative.as_posix(),
                     "taker": taker,
                     "maker": maker,
@@ -402,32 +410,20 @@ def _book_events(
     run: RecorderRun,
     *,
     end_ms: int,
-) -> Iterator[BookState | BookBoundary]:
+) -> Iterator[_OwnedValue[BookState] | BookBoundary]:
     events = iter_reconstructed_depth(run, FUTURES_MARKET_TYPE)
     with closing_iterator(events):
         for event in events:
-            if event.research_time_ms > end_ms:
+            observed_time = (
+                event.value.observed_time_ms
+                if isinstance(event, _OwnedValue)
+                else event.observed_time_ms
+            )
+            if observed_time > end_ms:
+                if isinstance(event, _OwnedValue):
+                    event.lease.close()
                 break
             yield event
-
-
-def _trade_events(
-    run: RecorderRun,
-    *,
-    end_ms: int,
-) -> Iterator[dict[str, Any]]:
-    records = run.iter_records(
-        market_type=FUTURES_MARKET_TYPE,
-        data_kinds=("agg_trades",),
-    )
-    with closing_iterator(records):
-        for record in records:
-            timestamp = record["payload"].get("T")
-            if type(timestamp) is not int:
-                raise ValueError("hft_execution_trade_time_invalid")
-            if timestamp > end_ms:
-                break
-            yield record
 
 
 def _prediction_decisions(
@@ -449,7 +445,7 @@ def _prediction_decisions(
     ) as (_manifest, lookup):
         with open_dataset_session(
             research_root,
-            columns=("timestamp", "asset_id", "segment_id"),
+            columns=("timestamp", "asset_id", "segment_id", "book_segment_id"),
             time_window=prediction_window,
             resource_policy=resource_policy,
         ) as session:
@@ -484,12 +480,51 @@ def _prediction_decisions(
                                 "timestamp_ms": timestamp.value // 1_000_000,
                                 "asset_id": str(row.asset_id),
                                 "segment_id": str(row.segment_id),
+                                "book_segment_id": str(row.book_segment_id),
                                 "prediction_score": float(value),
                             }
             session.verify()
         unexpected, extra = lookup.coverage_counts()
         if unexpected or extra:
             raise ValueError("misaligned_persisted_prediction_keys")
+
+
+def _maker_quote_schedule(
+    *,
+    research_root: Path,
+    time_window: TimeWindow,
+    resource_policy: RuntimeResourcePolicy,
+) -> Iterator[dict[str, Any]]:
+    with open_dataset_session(
+        research_root,
+        columns=(
+            "timestamp",
+            "asset_id",
+            "segment_id",
+            "book_segment_id",
+            "trade_connection_id",
+        ),
+        time_window=time_window,
+        resource_policy=resource_policy,
+    ) as session:
+        chunks = iter_dataset_chunks(
+            session,
+            target_chunk_bytes=max(1, resource_policy.available_memory_bytes),
+        )
+        with closing_iterator(chunks):
+            for frame in chunks:
+                for row in frame.itertuples(index=False):
+                    timestamp = pd.Timestamp(row.timestamp)
+                    if timestamp.tzinfo is not None:
+                        timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+                    yield {
+                        "timestamp_ms": timestamp.value // 1_000_000,
+                        "asset_id": str(row.asset_id),
+                        "segment_id": str(row.segment_id),
+                        "book_segment_id": str(row.book_segment_id),
+                        "trade_connection_id": str(row.trade_connection_id),
+                    }
+        session.verify()
 
 
 def _io_counters(process: psutil.Process) -> tuple[int, int]:

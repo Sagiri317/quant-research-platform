@@ -2,21 +2,22 @@
 
 from __future__ import annotations
 
-import heapq
 import json
 import math
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from typing import Any
 
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
-    price_to_tick,
+    TradeEvent,
     tick_to_price,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.runtime.resources import _OwnedValue
 
 
 @dataclass(frozen=True)
@@ -229,7 +230,7 @@ class _PendingMarkouts:
                 self._finalize(fill, future_mid=None)
                 self._pop()
                 continue
-            if state.research_time_ms < fill["markout_target_time_ms"]:
+            if state.observed_time_ms < fill["markout_target_time_ms"]:
                 break
             self._finalize(fill, future_mid=future_mid)
             self._pop()
@@ -282,33 +283,68 @@ class _PendingMarkouts:
             self._on_fill(fill)
 
 
+def _book_value(event: BookState | _OwnedValue[BookState]) -> BookState:
+    value = event.value if isinstance(event, _OwnedValue) else event
+    if not isinstance(value, BookState):
+        raise TypeError("hft_execution_book_event_invalid")
+    return value
+
+
+def _close_book(event: _OwnedValue[BookState] | None) -> None:
+    if event is not None:
+        event.lease.close()
+
+
+def _book_key(
+    event: BookState | _OwnedValue[BookState] | BookBoundary,
+) -> tuple[int, int, int]:
+    value = event.value if isinstance(event, _OwnedValue) else event
+    return (
+        value.observed_time_ms,
+        value.receive_monotonic_ns,
+        value.capture_seq,
+    )
+
+
 def _checked_book_events(
-    events: Iterable[BookState | BookBoundary],
-) -> Iterator[BookState | BookBoundary]:
-    previous: int | None = None
-    for event in events:
-        if not isinstance(event, BookState | BookBoundary):
-            raise TypeError("hft_execution_book_event_invalid")
-        timestamp = event.research_time_ms
-        if previous is not None and timestamp < previous:
-            raise ValueError("hft_execution_time_non_monotonic")
-        previous = timestamp
-        yield event
+    events: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
+) -> Iterator[BookState | _OwnedValue[BookState] | BookBoundary]:
+    previous: tuple[int, int, int] | None = None
+    active = iter(events)
+    with closing_iterator(active):
+        for event in active:
+            if isinstance(event, _OwnedValue):
+                value = event.value
+            else:
+                value = event
+            if not isinstance(value, BookState | BookBoundary):
+                raise TypeError("hft_execution_book_event_invalid")
+            key = (
+                value.observed_time_ms,
+                value.receive_monotonic_ns,
+                value.capture_seq,
+            )
+            if previous is not None and key < previous:
+                raise ValueError("hft_execution_time_non_monotonic")
+            previous = key
+            yield event
 
 
 def _checked_decisions(
     decisions: Iterable[Mapping[str, Any]],
 ) -> Iterator[dict[str, Any]]:
     previous: int | None = None
-    for source in decisions:
-        row = dict(source)
-        timestamp = row.get("timestamp_ms")
-        if type(timestamp) is not int or timestamp < 0:
-            raise ValueError("hft_execution_decision_time_invalid")
-        if previous is not None and timestamp <= previous:
-            raise ValueError("hft_execution_decision_time_non_monotonic")
-        previous = timestamp
-        yield row
+    active = iter(decisions)
+    with closing_iterator(active):
+        for source in active:
+            row = dict(source)
+            timestamp = row.get("timestamp_ms")
+            if type(timestamp) is not int or timestamp < 0:
+                raise ValueError("hft_execution_decision_time_invalid")
+            if previous is not None and timestamp <= previous:
+                raise ValueError("hft_execution_decision_time_non_monotonic")
+            previous = timestamp
+            yield row
 
 
 def _mid(state: BookState) -> float:
@@ -327,7 +363,7 @@ def _covered(
     timestamp_ms: int,
 ) -> bool:
     bounds = coverage.get(segment_id)
-    return bool(bounds is not None and bounds[0] <= timestamp_ms <= bounds[1])
+    return bool(bounds is not None and bounds[0] <= timestamp_ms < bounds[1])
 
 
 def _resolve_observed_markouts(
@@ -336,14 +372,14 @@ def _resolve_observed_markouts(
     coverage: Mapping[str, tuple[int, int]],
 ) -> None:
     bounds = coverage.get(state.segment_id)
-    if bounds is None or state.research_time_ms > bounds[1]:
+    if bounds is None or state.observed_time_ms >= bounds[1]:
         pending.expire_all()
-    elif state.research_time_ms >= bounds[0]:
+    elif state.observed_time_ms >= bounds[0]:
         pending.resolve(state)
 
 
 def simulate_taker(
-    book_events: Iterable[BookState | BookBoundary],
+    book_events: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
     decisions: Iterable[Mapping[str, Any]],
     *,
     prediction_column: str,
@@ -356,8 +392,10 @@ def simulate_taker(
 
     events = iter(_checked_book_events(book_events))
     active_decisions = iter(_checked_decisions(decisions))
-    next_event = next(events, None)
+    next_event = None
     latest_state: BookState | None = None
+    latest_owned: _OwnedValue[BookState] | None = None
+    terminal_state: BookState | None = None
     metrics = _Metrics()
     position = 0.0
     cash_gross = 0.0
@@ -376,145 +414,193 @@ def simulate_taker(
         closing_iterator(active_decisions),
         _PendingMarkouts(metrics, on_fill) as pending,
     ):
+        try:
+            next_event = next(events, None)
 
-        def consume_until(target: int) -> None:
-            nonlocal latest_state, market_event_count, next_event
-            while next_event is not None and next_event.research_time_ms <= target:
-                market_event_count += 1
-                if isinstance(next_event, BookBoundary):
+            def consume_event(
+                event: BookState | _OwnedValue[BookState] | BookBoundary,
+            ) -> None:
+                nonlocal latest_state, latest_owned, terminal_state
+                if isinstance(event, BookBoundary):
+                    _close_book(latest_owned)
+                    latest_owned = None
                     latest_state = None
                     pending.expire_all()
-                else:
-                    latest_state = next_event
-                    _resolve_observed_markouts(
-                        pending,
-                        next_event,
-                        observed_coverage,
-                    )
-                next_event = next(events, None)
-
-        for row in active_decisions:
-            decision_time = row["timestamp_ms"]
-            prediction = _finite(
-                row.get(prediction_column),
-                "hft_prediction_invalid",
-            )
-            effective_time = decision_time + config.latency_ms
-            consume_until(effective_time)
-            current_mid: float | None = None
-            if latest_state is not None and _covered(
-                observed_coverage,
-                latest_state.segment_id,
-                effective_time,
-            ):
-                decision_segment = row.get("segment_id")
-                if (
-                    decision_segment is None
-                    or decision_segment == latest_state.segment_id
+                    return
+                state = _book_value(event)
+                _close_book(latest_owned)
+                latest_owned = event if isinstance(event, _OwnedValue) else None
+                latest_state = state
+                if _covered(
+                    observed_coverage,
+                    state.segment_id,
+                    state.observed_time_ms,
                 ):
-                    current_mid = _mid(latest_state)
-                    bid = tick_to_price(
-                        latest_state.bids[0][0],
-                        latest_state.tick_size,
-                    )
-                    ask = tick_to_price(
-                        latest_state.asks[0][0],
-                        latest_state.tick_size,
-                    )
-                    edge_threshold = (
-                        (ask - bid) / current_mid / 2.0
-                        + config.taker_fee_bps / 10_000.0
-                        + config.threshold_bps / 10_000.0
-                    )
-                    target_position = (
-                        config.position_size
-                        if prediction > edge_threshold
-                        else -config.position_size
-                        if prediction < -edge_threshold
-                        else 0.0
-                    )
-                    delta = target_position - position
-                    if delta:
-                        created_orders += 1
-                        side = "buy" if delta > 0 else "sell"
-                        levels = latest_state.asks if delta > 0 else latest_state.bids
-                        requested = min(abs(delta), config.order_quantity)
-                        remaining = requested
-                        notional = 0.0
-                        levels_consumed = 0
-                        for price_tick, available in levels:
-                            quantity = min(remaining, available)
-                            if quantity <= 0:
-                                continue
-                            price = tick_to_price(price_tick, latest_state.tick_size)
-                            notional += quantity * price
-                            remaining -= quantity
-                            levels_consumed += 1
-                            if remaining <= 0:
-                                break
-                        filled = requested - remaining
-                        unfilled_quantity += remaining
-                        if filled > 0:
-                            filled_orders += 1
-                            fill_price = notional / filled
-                            fee = notional * config.taker_fee_bps / 10_000.0
-                            signed = 1.0 if delta > 0 else -1.0
-                            position += signed * filled
-                            cash_gross -= signed * notional
-                            fees += fee
-                            fill = {
-                                "order_id": created_orders,
-                                "timestamp_ms": effective_time,
-                                "effective_state_time_ms": (
-                                    latest_state.research_time_ms
-                                ),
-                                "segment_id": latest_state.segment_id,
-                                "side": side,
-                                "fill_price": fill_price,
-                                "fill_qty": filled,
-                                "levels_consumed": levels_consumed,
-                                "notional_usd": notional,
-                                "fee_usd": fee,
-                                "slippage_bps": (
-                                    signed
-                                    * (fill_price - current_mid)
-                                    / current_mid
-                                    * 10_000.0
-                                ),
-                                "markout_target_time_ms": (
-                                    effective_time + config.markout_horizon_ms
-                                ),
-                            }
-                            metrics.observe_fill(fill)
-                            pending.add(fill)
-            gross = None if current_mid is None else cash_gross + position * current_mid
-            net = None if gross is None else gross - fees
-            equity = {
-                "timestamp_ms": decision_time,
-                "position": position,
-                "gross_pnl_usd": gross,
-                "fees_usd": fees,
-                "net_pnl_usd": net,
-            }
-            if on_equity is not None:
-                on_equity(equity)
-            equity_rows += 1
-            max_abs_position = max(max_abs_position, abs(position))
-            last_gross = gross
-            last_net = net
-        while next_event is not None:
-            market_event_count += 1
-            if isinstance(next_event, BookBoundary):
-                latest_state = None
-                pending.expire_all()
-            else:
-                latest_state = next_event
+                    terminal_state = state
                 _resolve_observed_markouts(
                     pending,
-                    next_event,
+                    state,
                     observed_coverage,
                 )
-            next_event = next(events, None)
+
+            def consume_until(target: int) -> None:
+                nonlocal market_event_count, next_event
+                while next_event is not None and _book_key(next_event)[0] <= target:
+                    event = next_event
+                    next_event = None
+                    market_event_count += 1
+                    consume_event(event)
+                    next_event = next(events, None)
+
+            for row in active_decisions:
+                decision_time = row["timestamp_ms"]
+                prediction = _finite(
+                    row.get(prediction_column),
+                    "hft_prediction_invalid",
+                )
+                effective_time = decision_time + config.latency_ms
+                consume_until(effective_time)
+                current_mid: float | None = None
+                if latest_state is not None and _covered(
+                    observed_coverage,
+                    latest_state.segment_id,
+                    effective_time,
+                ):
+                    decision_segment = row.get(
+                        "book_segment_id",
+                        row.get("segment_id"),
+                    )
+                    if (
+                        decision_segment is None
+                        or decision_segment == latest_state.segment_id
+                    ):
+                        current_mid = _mid(latest_state)
+                        bid = tick_to_price(
+                            latest_state.bids[0][0],
+                            latest_state.tick_size,
+                        )
+                        ask = tick_to_price(
+                            latest_state.asks[0][0],
+                            latest_state.tick_size,
+                        )
+                        edge_threshold = (
+                            (ask - bid) / current_mid / 2.0
+                            + config.taker_fee_bps / 10_000.0
+                            + config.threshold_bps / 10_000.0
+                        )
+                        target_position = (
+                            config.position_size
+                            if prediction > edge_threshold
+                            else -config.position_size
+                            if prediction < -edge_threshold
+                            else 0.0
+                        )
+                        delta = target_position - position
+                        if delta:
+                            created_orders += 1
+                            side = "buy" if delta > 0 else "sell"
+                            levels = (
+                                latest_state.asks
+                                if delta > 0
+                                else latest_state.bids
+                            )
+                            requested = min(abs(delta), config.order_quantity)
+                            remaining = requested
+                            notional = 0.0
+                            levels_consumed = 0
+                            for price_tick, available in levels:
+                                quantity = min(remaining, available)
+                                if quantity <= 0:
+                                    continue
+                                price = tick_to_price(
+                                    price_tick,
+                                    latest_state.tick_size,
+                                )
+                                notional += quantity * price
+                                remaining -= quantity
+                                levels_consumed += 1
+                                if remaining <= 0:
+                                    break
+                            filled = requested - remaining
+                            unfilled_quantity += remaining
+                            if filled > 0:
+                                filled_orders += 1
+                                fill_price = notional / filled
+                                fee = notional * config.taker_fee_bps / 10_000.0
+                                signed = 1.0 if delta > 0 else -1.0
+                                position += signed * filled
+                                cash_gross -= signed * notional
+                                fees += fee
+                                fill = {
+                                    "order_id": created_orders,
+                                    "timestamp_ms": effective_time,
+                                    "decision_time_ms": decision_time,
+                                    "effective_time_ms": effective_time,
+                                    "state_observed_time_ms": (
+                                        latest_state.observed_time_ms
+                                    ),
+                                    "segment_id": latest_state.segment_id,
+                                    "side": side,
+                                    "fill_price": fill_price,
+                                    "fill_qty": filled,
+                                    "levels_consumed": levels_consumed,
+                                    "notional_usd": notional,
+                                    "fee_usd": fee,
+                                    "slippage_bps": (
+                                        signed
+                                        * (fill_price - current_mid)
+                                        / current_mid
+                                        * 10_000.0
+                                    ),
+                                    "markout_target_time_ms": (
+                                        effective_time + config.markout_horizon_ms
+                                    ),
+                                }
+                                metrics.observe_fill(fill)
+                                pending.add(fill)
+                gross = (
+                    None
+                    if current_mid is None
+                    else cash_gross + position * current_mid
+                )
+                net = None if gross is None else gross - fees
+                equity = {
+                    "timestamp_ms": effective_time,
+                    "decision_time_ms": decision_time,
+                    "effective_time_ms": effective_time,
+                    "state_observed_time_ms": (
+                        None
+                        if latest_state is None
+                        else latest_state.observed_time_ms
+                    ),
+                    "position": position,
+                    "gross_pnl_usd": gross,
+                    "fees_usd": fees,
+                    "net_pnl_usd": net,
+                }
+                if on_equity is not None:
+                    on_equity(equity)
+                equity_rows += 1
+                max_abs_position = max(max_abs_position, abs(position))
+                last_gross = gross
+                last_net = net
+            while next_event is not None:
+                event = next_event
+                next_event = None
+                market_event_count += 1
+                consume_event(event)
+                next_event = next(events, None)
+            if terminal_state is None:
+                last_gross = None
+                last_net = None
+            else:
+                terminal_mid = _mid(terminal_state)
+                last_gross = cash_gross + position * terminal_mid
+                last_net = last_gross - fees
+        finally:
+            _close_book(latest_owned)
+            if isinstance(next_event, _OwnedValue):
+                next_event.lease.close()
     return {
         "simulation": "event_time_target_position_taker",
         "created_orders": created_orders,
@@ -539,7 +625,9 @@ def simulate_taker(
 
 
 def taker_latency_sweep(
-    state_factory: Callable[[], Iterable[BookState | BookBoundary]],
+    state_factory: Callable[
+        [], Iterable[BookState | _OwnedValue[BookState] | BookBoundary]
+    ],
     decision_factory: Callable[[], Iterable[Mapping[str, Any]]],
     *,
     prediction_column: str,
@@ -579,75 +667,114 @@ class _MakerOrder:
 
 
 def _checked_trades(
-    trades: Iterable[Mapping[str, Any]],
-) -> Iterator[tuple[int, tuple[int, float, bool, int]]]:
-    previous: int | None = None
-    for record in trades:
-        payload = record.get("payload")
-        tick_size = record.get("tick_size")
-        if not isinstance(payload, Mapping) or not isinstance(tick_size, str):
-            raise ValueError("hft_execution_trade_payload_invalid")
-        timestamp = payload.get("T")
-        if type(timestamp) is not int or timestamp < 0:
-            raise ValueError("hft_execution_trade_time_invalid")
-        if previous is not None and timestamp < previous:
-            raise ValueError("hft_execution_time_non_monotonic")
-        previous = timestamp
-        quantity = _positive(
-            payload.get("q"),
-            "hft_execution_trade_quantity_invalid",
-        )
-        maker_buyer = payload.get("m")
-        if not isinstance(maker_buyer, bool):
-            raise ValueError("hft_execution_trade_side_invalid")
-        yield (
-            timestamp,
-            (
-                price_to_tick(
-                    payload.get("p"),
-                    tick_size,
-                    error="hft_execution_trade_price_invalid",
-                ),
-                quantity,
-                maker_buyer,
-                timestamp,
-            ),
-        )
+    trades: Iterable[TradeEvent],
+) -> Iterator[TradeEvent]:
+    previous: tuple[int, int, int] | None = None
+    active = iter(trades)
+    with closing_iterator(active):
+        for trade in active:
+            if not isinstance(trade, TradeEvent):
+                raise TypeError("hft_execution_trade_event_invalid")
+            key = (
+                trade.observed_time_ms,
+                trade.receive_monotonic_ns,
+                trade.capture_seq,
+            )
+            if previous is not None and key < previous:
+                raise ValueError("hft_execution_time_non_monotonic")
+            previous = key
+            _positive(trade.quantity, "hft_execution_trade_quantity_invalid")
+            visible = _finite(
+                trade.visible_quantity,
+                "hft_execution_trade_visible_quantity_invalid",
+            )
+            if visible < 0 or visible > trade.quantity:
+                raise ValueError("hft_execution_trade_visible_quantity_invalid")
+            if not isinstance(trade.buyer_is_maker, bool):
+                raise ValueError("hft_execution_trade_side_invalid")
+            yield trade
 
 
 def _market_events(
-    books: Iterable[BookState | BookBoundary],
-    trades: Iterable[Mapping[str, Any]],
-) -> Iterator[tuple[int, int, object]]:
-    book_events = (
-        (event.research_time_ms, 1, event) for event in _checked_book_events(books)
-    )
-    trade_events = (
-        (timestamp, 0, trade) for timestamp, trade in _checked_trades(trades)
-    )
-    yield from heapq.merge(
-        trade_events,
-        book_events,
-        key=lambda item: (item[0], item[1]),
-    )
+    books: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
+    trades: Iterable[TradeEvent],
+) -> Iterator[tuple[tuple[int, int, int], object]]:
+    book_events = iter(_checked_book_events(books))
+    trade_events = iter(_checked_trades(trades))
+    book_next = next(book_events, None)
+    trade_next = next(trade_events, None)
+    pending_event: object | None = None
+    try:
+        while book_next is not None or trade_next is not None:
+            if trade_next is None or (
+                book_next is not None and _book_key(book_next) <= (
+                    trade_next.observed_time_ms,
+                    trade_next.receive_monotonic_ns,
+                    trade_next.capture_seq,
+                )
+            ):
+                pending_event = book_next
+                assert book_next is not None
+                key = _book_key(book_next)
+                book_next = next(book_events, None)
+            else:
+                pending_event = trade_next
+                assert trade_next is not None
+                key = (
+                    trade_next.observed_time_ms,
+                    trade_next.receive_monotonic_ns,
+                    trade_next.capture_seq,
+                )
+                trade_next = next(trade_events, None)
+            yield key, pending_event
+            pending_event = None
+    finally:
+        if isinstance(pending_event, _OwnedValue):
+            pending_event.lease.close()
+        if isinstance(book_next, _OwnedValue):
+            book_next.lease.close()
+        for child in (book_events, trade_events):
+            close = getattr(child, "close", None)
+            if close is not None:
+                close()
+
+
+def _checked_quote_schedule(
+    rows: Iterable[Mapping[str, Any]],
+) -> Iterator[dict[str, Any]]:
+    previous: int | None = None
+    active = iter(rows)
+    with closing_iterator(active):
+        for source in active:
+            row = dict(source)
+            if "prediction_score" in row:
+                raise ValueError("hft_maker_prediction_forbidden")
+            timestamp = row.get("timestamp_ms")
+            if type(timestamp) is not int or timestamp < 0:
+                raise ValueError("hft_maker_quote_schedule_time_invalid")
+            if previous is not None and timestamp <= previous:
+                raise ValueError("hft_maker_quote_schedule_time_non_monotonic")
+            previous = timestamp
+            yield row
 
 
 def simulate_maker(
-    book_events: Iterable[BookState | BookBoundary],
-    trades: Iterable[Mapping[str, Any]],
-    decisions: Iterable[Mapping[str, Any]],
+    book_events: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
+    trades: Iterable[TradeEvent],
+    quote_schedule: Iterable[Mapping[str, Any]],
     *,
     config: MakerConfig,
     observed_coverage: Mapping[str, tuple[int, int]],
     on_fill: Callable[[dict[str, Any]], None] | None = None,
     on_equity: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Simulate an estimated-queue maker without claiming MBO/FIFO truth."""
+    """Simulate the model-free public-L2 maker baseline."""
 
     events = iter(_market_events(book_events, trades))
-    active_decisions = iter(_checked_decisions(decisions))
-    next_event = next(events, None)
+    active_decisions = iter(_checked_quote_schedule(quote_schedule))
+    next_event = None
     latest_state: BookState | None = None
+    latest_owned: _OwnedValue[BookState] | None = None
     active: dict[str, _MakerOrder] = {}
     metrics = _Metrics()
     position = 0.0
@@ -686,37 +813,73 @@ def simulate_maker(
         closing_iterator(events),
         closing_iterator(active_decisions),
         _PendingMarkouts(metrics, on_fill) as pending,
+        ExitStack() as cleanup,
     ):
+
+        def cleanup_books() -> None:
+            _close_book(latest_owned)
+            if next_event is not None and isinstance(next_event[1], _OwnedValue):
+                next_event[1].lease.close()
+
+        cleanup.callback(cleanup_books)
+        next_event = next(events, None)
 
         def cancel_active(timestamp_ms: int) -> None:
             for order in active.values():
                 finish_order(order, timestamp_ms, cancelled=True)
             active.clear()
 
-        def process_book(event: BookState | BookBoundary) -> None:
-            nonlocal last_mid, latest_state
+        def process_book(
+            event: BookState | _OwnedValue[BookState] | BookBoundary,
+        ) -> None:
+            nonlocal last_mid, latest_state, latest_owned
             if isinstance(event, BookBoundary):
-                cancel_active(event.research_time_ms)
+                cancel_active(event.observed_time_ms)
+                _close_book(latest_owned)
+                latest_owned = None
                 latest_state = None
                 last_mid = None
                 pending.expire_all()
                 return
-            if latest_state is not None and event.segment_id != latest_state.segment_id:
-                cancel_active(event.research_time_ms)
-            latest_state = event
-            last_mid = _mid(event)
+            state = _book_value(event)
+            if (
+                latest_state is not None
+                and state.segment_id != latest_state.segment_id
+            ):
+                cancel_active(state.observed_time_ms)
+            elif latest_state is not None:
+                desired = {
+                    "buy": state.bids[0][0],
+                    "sell": state.asks[0][0],
+                }
+                for side, price_tick in desired.items():
+                    order = active.get(side)
+                    if order is not None and order.price_tick != price_tick:
+                        active.pop(side)
+                        finish_order(
+                            order,
+                            state.observed_time_ms,
+                            cancelled=True,
+                        )
+            _close_book(latest_owned)
+            latest_owned = event if isinstance(event, _OwnedValue) else None
+            latest_state = state
+            last_mid = _mid(state)
             _resolve_observed_markouts(
                 pending,
-                event,
+                state,
                 observed_coverage,
             )
 
-        def process_trade(trade: tuple[int, float, bool, int]) -> None:
+        def process_trade(trade: TradeEvent) -> None:
             nonlocal cash_gross, fees, filled_orders, partial_fill_events
             nonlocal position, trade_through_fill_events
             if latest_state is None:
                 return
-            trade_tick, quantity, maker_buyer, timestamp_ms = trade
+            trade_tick = trade.price_tick
+            quantity = trade.visible_quantity
+            maker_buyer = trade.buyer_is_maker
+            timestamp_ms = trade.observed_time_ms
             if not _covered(
                 observed_coverage,
                 latest_state.segment_id,
@@ -793,11 +956,11 @@ def simulate_maker(
 
         def process_until(target: int) -> None:
             nonlocal last_event_time, market_event_count, next_event
-            while next_event is not None and next_event[0] <= target:
+            while next_event is not None and next_event[0][0] <= target:
                 market_event_count += 1
-                last_event_time = next_event[0]
-                _, kind, item = next_event
-                if kind == 0:
+                last_event_time = next_event[0][0]
+                _, item = next_event
+                if isinstance(item, TradeEvent):
                     process_trade(item)
                 else:
                     process_book(item)
@@ -875,7 +1038,7 @@ def simulate_maker(
             last_gross = gross
             last_net = net
         while next_event is not None:
-            process_until(next_event[0])
+            process_until(next_event[0][0])
         cancel_active(last_event_time)
         if latest_state is not None:
             last_mid = _mid(latest_state)
@@ -884,6 +1047,8 @@ def simulate_maker(
         else:
             last_gross = None
             last_net = None
+        _close_book(latest_owned)
+        latest_owned = None
     return {
         "simulation": "event_ordered_public_l2_maker",
         "created_orders": created_orders,
@@ -918,7 +1083,9 @@ def simulate_maker(
         "queue_assumption": (
             "public MBP aggregate depth; cancellations do not advance queue"
         ),
-        "same_timestamp_policy": "trade_before_book_and_requote",
+        "same_timestamp_policy": "local_observation_order",
+        "maker_policy_id": "public_l2_inventory_maker_baseline",
+        "maker_prediction_used": False,
         "assumption": "historical_book_zero_market_impact",
         **metrics.payload(),
     }

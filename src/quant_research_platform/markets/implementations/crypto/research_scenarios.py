@@ -9,6 +9,7 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.markets.implementations.crypto.hft import HFT_GRID_MS
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_COLUMNS,
     HFT_MODEL_LABEL_HORIZON_MS,
@@ -89,7 +90,7 @@ def build_hft_model_catalog(*, training_row_bound: int) -> ModelCatalog:
             ),
             label_column=HFT_MODEL_LABEL_COLUMN,
             random_seed=7,
-            purge_gap_steps=HFT_MODEL_LABEL_HORIZON_MS // 100,
+            purge_gap_steps=HFT_MODEL_LABEL_HORIZON_MS // HFT_GRID_MS,
             max_train_rows=training_row_bound,
         )
         for algorithm in HFT_MODEL_ALGORITHMS

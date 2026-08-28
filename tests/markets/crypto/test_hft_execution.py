@@ -2,7 +2,12 @@ from __future__ import annotations
 
 import math
 
-from quant_research_platform.contracts.order_book import BookBoundary, BookState
+from quant_research_platform.contracts.order_book import (
+    BookBoundary,
+    BookState,
+    TradeEvent,
+    price_to_tick,
+)
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
@@ -26,6 +31,7 @@ def _state(
         capture_seq=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
+        observed_time_ms=timestamp_ms,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
@@ -43,6 +49,7 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
         capture_seq=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
+        observed_time_ms=timestamp_ms,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
@@ -58,16 +65,23 @@ def _trade(
     price: str,
     quantity: str,
     maker_buyer: bool,
-) -> dict:
-    return {
-        "tick_size": "0.1",
-        "payload": {
-            "T": timestamp_ms,
-            "p": price,
-            "q": quantity,
-            "m": maker_buyer,
-        },
-    }
+) -> TradeEvent:
+    quantity_value = float(quantity)
+    return TradeEvent(
+        capture_seq=timestamp_ms + 10,
+        event_time_ms=timestamp_ms,
+        transaction_time_ms=timestamp_ms,
+        observed_time_ms=timestamp_ms,
+        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_monotonic_ns=timestamp_ms + 10,
+        connection_id="trade-connection-1",
+        market_type=FUTURES_MARKET_TYPE,
+        tick_size="0.1",
+        price_tick=price_to_tick(price, "0.1", error="bad"),
+        quantity=quantity_value,
+        visible_quantity=quantity_value,
+        buyer_is_maker=maker_buyer,
+    )
 
 
 def _taker_config(*, latency_ms: int = 0, order_quantity: float = 1.0) -> TakerConfig:
@@ -103,7 +117,9 @@ def test_taker_uses_latest_actual_state_at_effective_time() -> None:
         on_fill=fills.append,
     )
 
-    assert fills[0]["effective_state_time_ms"] == 5
+    assert fills[0]["decision_time_ms"] == 0
+    assert fills[0]["effective_time_ms"] == 10
+    assert fills[0]["state_observed_time_ms"] == 5
     assert fills[0]["timestamp_ms"] == 10
     assert fills[0]["fill_price"] == 100.5
     assert diagnostics["latency_fidelity"] == "full_l2_observed_event"
@@ -122,7 +138,7 @@ def test_taker_walks_known_l2_and_reports_partial_coverage_honestly() -> None:
         [{"timestamp_ms": 0, "prediction": 0.02}],
         prediction_column="prediction",
         config=_taker_config(order_quantity=1.5),
-        observed_coverage={"s1": (0, 0)},
+        observed_coverage={"s1": (0, 1)},
         on_fill=fills.append,
     )
 
@@ -148,7 +164,7 @@ def test_taker_does_not_fill_after_coverage_or_explicit_boundary() -> None:
 
     assert fills == []
     assert diagnostics["filled_orders"] == 0
-    assert diagnostics["gross_pnl_usd"] is None
+    assert diagnostics["gross_pnl_usd"] == 0.0
 
 
 def test_taker_markout_does_not_use_state_past_observed_coverage() -> None:
@@ -181,7 +197,7 @@ def test_taker_target_position_does_not_accumulate_repeated_signal() -> None:
     assert diagnostics["max_abs_position"] == 2.0
 
 
-def test_maker_processes_trade_before_same_time_requote() -> None:
+def test_maker_processes_same_time_events_in_local_observation_order() -> None:
     fills = []
     diagnostics = simulate_maker(
         [_state(0), _state(100, bid_tick=994, ask_tick=1006)],
@@ -192,9 +208,8 @@ def test_maker_processes_trade_before_same_time_requote() -> None:
         on_fill=fills.append,
     )
 
-    assert fills[0]["timestamp_ms"] == 100
-    assert fills[0]["fill_qty"] == 1.0
-    assert diagnostics["same_timestamp_policy"] == "trade_before_book_and_requote"
+    assert fills == []
+    assert diagnostics["same_timestamp_policy"] == "local_observation_order"
     assert diagnostics["queue_model"] == "estimated_queue_ahead"
 
 
@@ -208,7 +223,7 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
         ],
         [{"timestamp_ms": 0}],
         config=_maker_config(),
-        observed_coverage={"s1": (0, 200)},
+        observed_coverage={"s1": (0, 201)},
         on_fill=fills.append,
     )
 

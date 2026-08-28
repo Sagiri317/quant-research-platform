@@ -79,6 +79,7 @@ def test_recorder_validates_futures_aggregate_trade_semantics() -> None:
         "l": 22,
         "p": "100.1",
         "q": "2.5",
+        "nq": "2.0",
         "m": False,
     }
 
@@ -86,6 +87,14 @@ def test_recorder_validates_futures_aggregate_trade_semantics() -> None:
 
     with pytest.raises(ValueError, match="trade_quantity_invalid"):
         validate_stream_payload(aggregate_trade, {**payload, "q": "0"})
+
+    with pytest.raises(ValueError, match="visible_quantity_invalid"):
+        validate_stream_payload(aggregate_trade, {**payload, "nq": "3.0"})
+
+    missing_visible = dict(payload)
+    missing_visible.pop("nq")
+    with pytest.raises(ValueError, match="visible_quantity_invalid"):
+        validate_stream_payload(aggregate_trade, missing_visible)
 
 
 def test_recorder_config_rejects_existing_or_unbounded_target(tmp_path: Path) -> None:

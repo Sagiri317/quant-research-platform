@@ -40,6 +40,7 @@ from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.binance.replay import (
     ReconstructionStats,
     RecorderRun,
+    iter_agg_trades,
     iter_reconstructed_depth,
 )
 from quant_research_platform.storage._dataset_reading import (
@@ -87,12 +88,14 @@ def materialize_hft_processed_data(
                     FUTURES_MARKET_TYPE,
                     stats=stats,
                 ),
-                run.iter_records(
-                    market_type=FUTURES_MARKET_TYPE,
-                    data_kinds=("agg_trades",),
-                ),
+                iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
                 start_ms=start_ms,
                 end_ms=end_ms,
+                book_coverage=stats.coverage_segments,
+                trade_coverage=run.connection_coverage(
+                    market_type=FUTURES_MARKET_TYPE,
+                    data_kind="agg_trades",
+                ),
             ),
             asset_id=asset_id,
         )

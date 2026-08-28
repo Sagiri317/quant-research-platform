@@ -20,11 +20,14 @@ from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
+    TradeEvent,
     price_to_tick,
     validate_tick_size,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
@@ -38,9 +41,11 @@ from quant_research_platform.sources.binance.raw_exports import (
     _verify_raw_file_handle,
 )
 from quant_research_platform.sources.binance.validation import (
+    strict_boolean,
     strict_iso_timestamp,
     strict_non_negative_float,
     strict_non_negative_integer,
+    strict_positive_float,
 )
 from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
@@ -64,6 +69,23 @@ _FILE_MANIFEST_KEYS = frozenset(
 _LOWER_HEX = frozenset("0123456789abcdef")
 _HASH_BUFFER_BYTES = 64 * 1024
 _LEVEL_BYTES = 256
+_CONNECTION_INTERVAL_KEYS = frozenset(
+    {
+        "market",
+        "data_kind",
+        "stream",
+        "connection_id",
+        "segment_id",
+        "opened_at",
+        "opened_monotonic_ns",
+        "closed_at",
+        "closed_monotonic_ns",
+        "close_reason",
+    }
+)
+_CONNECTION_CLOSE_REASONS = frozenset(
+    {"stop", "connection_problem", "depth_resync", "failure"}
+)
 
 
 class _DigestingReader:
@@ -145,6 +167,7 @@ class RecorderRun:
                 *streams,
                 key=lambda value: value["capture_seq"],
             ):
+                _validate_record_coverage(record, manifest=self.manifest)
                 capture_seq = record["capture_seq"]
                 if (
                     previous_capture_seq is not None
@@ -155,6 +178,20 @@ class RecorderRun:
                     )
                 previous_capture_seq = capture_seq
                 yield record
+
+    def connection_coverage(
+        self,
+        *,
+        market_type: str,
+        data_kind: str,
+    ) -> dict[str, tuple[int, int]]:
+        if data_kind == "depth_snapshot":
+            data_kind = "depth"
+        return _connection_coverage(
+            self.manifest,
+            market_type=market_type,
+            data_kind=data_kind,
+        )
 
 
 @contextmanager
@@ -276,6 +313,13 @@ def _validate_run_manifest(value: object) -> None:
         limit = metadata["snapshot_limit"]
         if isinstance(limit, bool) or type(limit) is not int or limit <= 0:
             raise ValueError("binance_replay_market_metadata_invalid")
+    capture = value.get("capture")
+    if not isinstance(capture, dict):
+        raise ValueError("binance_replay_connection_intervals_invalid")
+    _validate_connection_intervals(
+        capture.get("connection_intervals"),
+        markets=set(market_types),
+    )
     files = value.get("files")
     if not isinstance(files, list) or not files:
         raise ValueError("binance_replay_run_files_missing")
@@ -326,6 +370,113 @@ def _validate_file_manifest(value: object, *, markets: set[str]) -> None:
         or any(character not in _LOWER_HEX for character in digest)
     ):
         raise ValueError("binance_replay_file_manifest_invalid")
+
+
+def _validate_connection_intervals(
+    value: object,
+    *,
+    markets: set[str],
+) -> None:
+    if not isinstance(value, list):
+        raise ValueError("binance_replay_connection_intervals_invalid")
+    seen: set[str] = set()
+    for item in value:
+        if not isinstance(item, dict) or set(item) != _CONNECTION_INTERVAL_KEYS:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        if (
+            item.get("market") not in markets
+            or item.get("data_kind") not in {"depth", "agg_trades"}
+            or not isinstance(item.get("stream"), str)
+            or not item["stream"]
+            or not isinstance(item.get("connection_id"), str)
+            or not item["connection_id"]
+            or item["connection_id"] in seen
+        ):
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        seen.add(item["connection_id"])
+        if item["data_kind"] == "depth":
+            if not isinstance(item.get("segment_id"), str) or not item["segment_id"]:
+                raise ValueError("binance_replay_connection_intervals_invalid")
+        elif item.get("segment_id") is not None:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        opened = strict_iso_timestamp(
+            item.get("opened_at"),
+            error="binance_replay_connection_intervals_invalid",
+        )
+        closed = strict_iso_timestamp(
+            item.get("closed_at"),
+            error="binance_replay_connection_intervals_invalid",
+        )
+        if closed < opened:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        for key in ("opened_monotonic_ns", "closed_monotonic_ns"):
+            strict_non_negative_integer(
+                item.get(key),
+                error="binance_replay_connection_intervals_invalid",
+            )
+        if item["closed_monotonic_ns"] < item["opened_monotonic_ns"]:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        if item["close_reason"] not in _CONNECTION_CLOSE_REASONS:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+
+
+def _connection_coverage(
+    manifest: dict[str, Any],
+    *,
+    market_type: str,
+    data_kind: str,
+) -> dict[str, tuple[int, int]]:
+    intervals = manifest["capture"]["connection_intervals"]
+    result = {}
+    for item in intervals:
+        if item["market"] == market_type and item["data_kind"] == data_kind:
+            result[item["connection_id"]] = (
+                strict_iso_timestamp(
+                    item["opened_at"],
+                    error="binance_replay_connection_intervals_invalid",
+                ).value
+                // 1_000_000,
+                strict_iso_timestamp(
+                    item["closed_at"],
+                    error="binance_replay_connection_intervals_invalid",
+                ).value
+                // 1_000_000,
+            )
+    return result
+
+
+def _validate_record_coverage(
+    record: dict[str, Any],
+    *,
+    manifest: dict[str, Any],
+) -> None:
+    data_kind = record["data_kind"]
+    if data_kind == "metadata":
+        return
+    interval_kind = "depth" if data_kind == "depth_snapshot" else data_kind
+    if interval_kind not in {"depth", "agg_trades"}:
+        raise ValueError("binance_replay_connection_coverage_invalid")
+    connection_id = record.get("connection_id")
+    coverage = _connection_coverage(
+        manifest,
+        market_type=record["market_type"],
+        data_kind=interval_kind,
+    )
+    bounds = coverage.get(connection_id)
+    if bounds is None:
+        raise ValueError("binance_replay_connection_coverage_invalid")
+    if interval_kind == "depth" and record.get("segment_id") != next(
+        item["segment_id"]
+        for item in manifest["capture"]["connection_intervals"]
+        if item["connection_id"] == connection_id
+    ):
+        raise ValueError("binance_replay_connection_coverage_invalid")
+    observed_time = strict_iso_timestamp(
+        record.get("receive_time"),
+        error="binance_replay_receive_time_invalid",
+    ).value // 1_000_000
+    if not bounds[0] <= observed_time < bounds[1]:
+        raise ValueError("binance_replay_connection_coverage_invalid")
 
 
 def _capture_run_files(
@@ -522,6 +673,8 @@ def _iter_raw_file(
                     )
                 else:
                     raise
+
+
     finally:
         raw_handle.close()
 
@@ -549,6 +702,14 @@ def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
         for key in ("connection_id", "segment_id"):
             if not isinstance(value.get(key), str) or not value[key]:
                 raise ValueError("binance_replay_segment_identity_invalid")
+    elif metadata["data_kind"] == "agg_trades":
+        if (
+            not isinstance(value.get("connection_id"), str)
+            or not value["connection_id"]
+        ):
+            raise ValueError("binance_replay_connection_identity_invalid")
+        if "segment_id" in value:
+            raise ValueError("binance_replay_segment_identity_invalid")
 
 
 def _levels(
@@ -586,6 +747,7 @@ class DepthReconstructor:
         snapshot_limit: int,
         required_levels: int,
         max_book_levels: int,
+        connection_close_ms: int,
         resource_policy: RuntimeResourcePolicy,
         stats: ReconstructionStats,
     ) -> None:
@@ -597,10 +759,13 @@ class DepthReconstructor:
             raise ValueError("binance_replay_snapshot_coverage_invalid")
         if type(max_book_levels) is not int or max_book_levels < snapshot_limit:
             raise ValueError("binance_replay_book_bound_invalid")
+        if type(connection_close_ms) is not int or connection_close_ms < 0:
+            raise ValueError("binance_replay_connection_coverage_invalid")
         self.market_type = market_type
         self.tick_size = validate_tick_size(tick_size)
         self.required_levels = required_levels
         self.max_book_levels = max_book_levels
+        self.connection_close_ms = connection_close_ms
         self.policy = resource_policy
         self.stats = stats
         self._book_lease = resource_policy.lease(
@@ -613,6 +778,8 @@ class DepthReconstructor:
         self._connection_id: str | None = None
         self._last_update_id: int | None = None
         self._last_time: int | None = None
+        self._known_bid_floor_tick: int | None = None
+        self._known_ask_ceiling_tick: int | None = None
         self._bootstrapped = False
         self._invalid = False
 
@@ -651,6 +818,8 @@ class DepthReconstructor:
             raise ValueError(f"binance_replay_snapshot_{reason}")
         self._bids = bids
         self._asks = asks
+        self._known_bid_floor_tick = min(bids)
+        self._known_ask_ceiling_tick = max(asks)
         self._segment_id = segment_id
         self._connection_id = connection_id
         self._last_update_id = strict_non_negative_integer(
@@ -722,26 +891,40 @@ class DepthReconstructor:
             allow_zero=True,
             max_levels=self.max_book_levels,
         )
+        assert self._known_bid_floor_tick is not None
+        assert self._known_ask_ceiling_tick is not None
+        known_bid_updates = {
+            price_tick: quantity
+            for price_tick, quantity in bid_updates.items()
+            if price_tick >= self._known_bid_floor_tick
+        }
+        known_ask_updates = {
+            price_tick: quantity
+            for price_tick, quantity in ask_updates.items()
+            if price_tick <= self._known_ask_ceiling_tick
+        }
         if (
-            _projected_level_count(self._bids, bid_updates) > self.max_book_levels
-            or _projected_level_count(self._asks, ask_updates) > self.max_book_levels
+            _projected_level_count(self._bids, known_bid_updates)
+            > self.max_book_levels
+            or _projected_level_count(self._asks, known_ask_updates)
+            > self.max_book_levels
         ):
             yield self._invalidate(record, "book_bound_exceeded")
             return
-        _apply_levels(self._bids, bid_updates)
-        _apply_levels(self._asks, ask_updates)
+        _apply_levels(self._bids, known_bid_updates)
+        _apply_levels(self._asks, known_ask_updates)
         reason = self._invalid_reason(self._bids, self._asks)
         if reason is not None:
             yield self._invalidate(record, reason)
             return
-        event_time, transaction_time, research_time = _record_times(
+        event_time, transaction_time, observed_time = _record_times(
             record,
             market_type=self.market_type,
         )
-        if self._last_time is not None and research_time < self._last_time:
+        if self._last_time is not None and observed_time < self._last_time:
             self.stats.non_monotonic_timestamps += 1
-            raise ValueError("binance_replay_research_time_non_monotonic")
-        self._last_time = research_time
+            raise ValueError("binance_replay_observed_time_non_monotonic")
+        self._last_time = observed_time
         self._last_update_id = last
         if not self._bootstrapped:
             self._bootstrapped = True
@@ -749,16 +932,20 @@ class DepthReconstructor:
             if self.stats.valid_segments > 1:
                 self.stats.recovered_segments += 1
         previous = self.stats.coverage_segments.get(segment_id)
-        self.stats.coverage_segments[segment_id] = (
-            research_time if previous is None else previous[0],
-            research_time,
-        )
+        if previous is None:
+            self.stats.coverage_segments[segment_id] = (
+                observed_time,
+                self.connection_close_ms,
+            )
         state_bound = 64 * 1024 + (len(self._bids) + len(self._asks)) * _LEVEL_BYTES
-        with self.policy.lease("binance.replay.state", state_bound):
+        state_lease = self.policy.lease("binance.replay.state", state_bound)
+        transferred = False
+        try:
             state = BookState(
                 capture_seq=record["capture_seq"],
                 event_time_ms=event_time,
                 transaction_time_ms=transaction_time,
+                observed_time_ms=observed_time,
                 receive_time=record["receive_time"],
                 receive_monotonic_ns=record["receive_monotonic_ns"],
                 update_id=last,
@@ -770,7 +957,13 @@ class DepthReconstructor:
                 asks=tuple(sorted(self._asks.items())),
             )
             self.stats.emitted_states += 1
-            yield state
+            state_lease.transfer("binance.replay.book_state_consumer")
+            transferred = True
+            yield _OwnedValue(state, state_lease)
+        except BaseException:
+            if not transferred:
+                state_lease.close()
+            raise
 
     def _invalid_reason(
         self,
@@ -788,12 +981,26 @@ class DepthReconstructor:
             return "crossed_book"
         return None
 
+    def _close_coverage(self, observed_time: int) -> None:
+        if self._segment_id in self.stats.coverage_segments:
+            start, end = self.stats.coverage_segments[self._segment_id]
+            self.stats.coverage_segments[self._segment_id] = (
+                start,
+                min(end, observed_time),
+            )
+
     def _invalidate(self, record: dict[str, Any], reason: str) -> BookBoundary:
-        event_time, transaction_time, _ = _record_times(
+        event_time, transaction_time, observed_time = _record_times(
             record,
             market_type=self.market_type,
         )
         segment_id, connection_id = _record_identity(record)
+        if segment_id in self.stats.coverage_segments:
+            start, end = self.stats.coverage_segments[segment_id]
+            self.stats.coverage_segments[segment_id] = (
+                start,
+                min(end, observed_time),
+            )
         self._invalid = True
         self._bootstrapped = False
         self._bids.clear()
@@ -805,6 +1012,7 @@ class DepthReconstructor:
             capture_seq=record["capture_seq"],
             event_time_ms=event_time,
             transaction_time_ms=transaction_time,
+            observed_time_ms=observed_time,
             receive_time=record["receive_time"],
             receive_monotonic_ns=record["receive_monotonic_ns"],
             segment_id=segment_id,
@@ -840,10 +1048,14 @@ def _record_times(
         if market_type == FUTURES_MARKET_TYPE
         else None
     )
+    observed_time = strict_iso_timestamp(
+        record.get("receive_time"),
+        error="binance_replay_receive_time_invalid",
+    ).value // 1_000_000
     return (
         event_time,
         transaction_time,
-        transaction_time if transaction_time is not None else event_time,
+        observed_time,
     )
 
 
@@ -875,13 +1087,18 @@ def iter_reconstructed_depth(
     required_levels: int = 10,
     max_book_levels: int = 10_000,
     stats: ReconstructionStats | None = None,
-) -> Iterator[BookState | BookBoundary]:
+) -> Iterator[_OwnedValue[BookState] | BookBoundary]:
     """Replay one venue book with snapshots indexed on bounded local scratch."""
 
     if market_type not in run.manifest["market_types"]:
         raise ValueError("binance_replay_market_type_missing")
     metadata = run.manifest["market_metadata"][market_type]
     active_stats = stats if stats is not None else ReconstructionStats()
+    depth_coverage = _connection_coverage(
+        run.manifest,
+        market_type=market_type,
+        data_kind="depth",
+    )
     with tempfile.TemporaryDirectory(prefix="qrp-binance-snapshots-") as scratch:
         database = sqlite3.connect(Path(scratch) / "snapshots.sqlite3")
         reconstructor: DepthReconstructor | None = None
@@ -917,15 +1134,17 @@ def iter_reconstructed_depth(
                 if segment_id != active_segment:
                     if reconstructor is not None:
                         if reconstructor.valid:
-                            event_time, transaction_time, _ = _record_times(
+                            event_time, transaction_time, observed_time = _record_times(
                                 record,
                                 market_type=market_type,
                             )
+                            reconstructor._close_coverage(observed_time)
                             active_stats.reconnect_boundaries += 1
                             yield BookBoundary(
                                 capture_seq=record["capture_seq"],
                                 event_time_ms=event_time,
                                 transaction_time_ms=transaction_time,
+                                observed_time_ms=observed_time,
                                 receive_time=record["receive_time"],
                                 receive_monotonic_ns=record["receive_monotonic_ns"],
                                 segment_id=active_segment or segment_id,
@@ -947,6 +1166,9 @@ def iter_reconstructed_depth(
                         snapshot_limit=metadata["snapshot_limit"],
                         required_levels=required_levels,
                         max_book_levels=max_book_levels,
+                        connection_close_ms=depth_coverage[
+                            _record_identity(snapshot)[1]
+                        ][1],
                         resource_policy=run.resource_policy,
                         stats=active_stats,
                     )
@@ -977,3 +1199,81 @@ def iter_reconstructed_depth(
                     )
                 else:
                     raise
+
+
+def iter_agg_trades(
+    run: RecorderRun,
+    market_type: str,
+    *,
+    end_ms: int | None = None,
+) -> Iterator[TradeEvent]:
+    """Normalize one recorder trade stream while preserving local identity."""
+
+    if market_type not in run.manifest["market_types"]:
+        raise ValueError("binance_replay_market_type_missing")
+    previous_key: tuple[int, int, int] | None = None
+    records = run.iter_records(
+        market_type=market_type,
+        data_kinds=("agg_trades",),
+    )
+    with closing_iterator(records):
+        for record in records:
+            payload = record["payload"]
+            event_time = strict_non_negative_integer(
+                payload.get("E"),
+                error="binance_replay_event_time_invalid",
+            )
+            transaction_time = strict_non_negative_integer(
+                payload.get("T"),
+                error="binance_replay_transaction_time_invalid",
+            )
+            observed_time = strict_iso_timestamp(
+                record["receive_time"],
+                error="binance_replay_receive_time_invalid",
+            ).value // 1_000_000
+            if end_ms is not None and observed_time > end_ms:
+                break
+            key = (
+                observed_time,
+                record["receive_monotonic_ns"],
+                record["capture_seq"],
+            )
+            if previous_key is not None and key < previous_key:
+                raise ValueError("binance_replay_trade_order_non_monotonic")
+            previous_key = key
+            quantity = strict_positive_float(
+                payload.get("q"),
+                error="binance_replay_trade_quantity_invalid",
+            )
+            visible_quantity = (
+                strict_non_negative_float(
+                    payload.get("nq"),
+                    error="binance_replay_trade_visible_quantity_invalid",
+                )
+                if market_type == FUTURES_MARKET_TYPE
+                else quantity
+            )
+            if visible_quantity > quantity:
+                raise ValueError("binance_replay_trade_visible_quantity_invalid")
+            yield TradeEvent(
+                capture_seq=record["capture_seq"],
+                event_time_ms=event_time,
+                transaction_time_ms=transaction_time,
+                observed_time_ms=observed_time,
+                receive_time=record["receive_time"],
+                receive_monotonic_ns=record["receive_monotonic_ns"],
+                connection_id=record["connection_id"],
+                market_type=market_type,
+                tick_size=record["tick_size"],
+                price_tick=price_to_tick(
+                    payload.get("p"),
+                    record["tick_size"],
+                    error="binance_replay_trade_price_invalid",
+                ),
+                quantity=quantity,
+                visible_quantity=visible_quantity,
+                buyer_is_maker=strict_boolean(
+                    payload.get("m"),
+                    error="binance_replay_trade_side_invalid",
+                ),
+            )

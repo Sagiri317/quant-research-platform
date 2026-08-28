@@ -11,11 +11,13 @@ from typing import Any
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
+    TradeEvent,
     tick_to_price,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.runtime.resources import _OwnedValue
 
-GRID_MS = 100
+HFT_GRID_MS = 100
 
 
 def l1_ofi(
@@ -46,18 +48,20 @@ def l1_ofi(
 
 
 def iter_panel_rows(
-    book_events: Iterable[BookState | BookBoundary],
-    trades: Iterable[Mapping[str, Any]],
+    book_events: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
+    trades: Iterable[TradeEvent],
     *,
     start_ms: int,
     end_ms: int,
-    interval_ms: int = GRID_MS,
+    book_coverage: Mapping[str, tuple[int, int]],
+    trade_coverage: Mapping[str, tuple[int, int]],
+    interval_ms: int = HFT_GRID_MS,
 ) -> Iterator[dict[str, Any]]:
-    """Sample the latest valid book and independent trade flow on one grid."""
+    """Sample one fully covered depth segment and trade connection per grid."""
 
     if type(start_ms) is not int or type(end_ms) is not int or end_ms < start_ms:
         raise ValueError("hft_panel_window_invalid")
-    if interval_ms != GRID_MS:
+    if interval_ms != HFT_GRID_MS:
         raise ValueError("hft_panel_interval_invalid")
     active_books = iter(book_events)
     active_trades = iter(trades)
@@ -65,35 +69,51 @@ def iter_panel_rows(
         next_book = next(active_books, None)
         next_trade = next(active_trades, None)
         current_state: BookState | None = None
-        current_segment: str | None = None
-        segment_start_ms: int | None = None
+        current_owned: _OwnedValue[BookState] | None = None
         previous_bbo: tuple[tuple[int, float], tuple[int, float]] | None = None
         previous_book_time: int | None = None
         previous_trade_time: int | None = None
-        for grid_time in range(start_ms, end_ms + 1, interval_ms):
-            interval_start = grid_time - interval_ms
-            book_ofi = 0.0
-            trade_count = 0
-            trade_volume = 0.0
-            signed_trade_volume = 0.0
-            taker_buy_volume = 0.0
-            taker_sell_volume = 0.0
-            while next_book is not None and next_book.research_time_ms <= grid_time:
-                event_time = next_book.research_time_ms
-                if previous_book_time is not None and event_time < previous_book_time:
-                    raise ValueError("hft_book_time_non_monotonic")
-                previous_book_time = event_time
-                if isinstance(next_book, BookBoundary):
-                    current_state = None
-                    current_segment = None
-                    segment_start_ms = None
-                    previous_bbo = None
-                    book_ofi = 0.0
-                else:
-                    state = next_book
-                    if state.segment_id != current_segment:
-                        current_segment = state.segment_id
-                        segment_start_ms = state.research_time_ms
+        try:
+            for grid_time in range(start_ms, end_ms + 1, interval_ms):
+                interval_start = max(0, grid_time - HFT_GRID_MS)
+                book_ofi = 0.0
+                trade_count = 0
+                trade_volume = 0.0
+                signed_trade_volume = 0.0
+                taker_buy_volume = 0.0
+                taker_sell_volume = 0.0
+                trade_capture_seq_min: int | None = None
+                trade_capture_seq_max: int | None = None
+                trade_connections = tuple(
+                    connection_id
+                    for connection_id, bounds in trade_coverage.items()
+                    if bounds[0] <= interval_start and bounds[1] > grid_time
+                )
+                while (
+                    next_book is not None
+                    and _book_observed_time(next_book) <= grid_time
+                ):
+                    event_time = _book_observed_time(next_book)
+                    if (
+                        previous_book_time is not None
+                        and event_time < previous_book_time
+                    ):
+                        raise ValueError("hft_book_time_non_monotonic")
+                    previous_book_time = event_time
+                    event = next_book
+                    next_book = next(active_books, None)
+                    if isinstance(event, BookBoundary):
+                        _close_owned(current_owned)
+                        current_owned = None
+                        current_state = None
+                        previous_bbo = None
+                        book_ofi = 0.0
+                        continue
+                    state = _book_value(event)
+                    if (
+                        current_state is None
+                        or state.segment_id != current_state.segment_id
+                    ):
                         previous_bbo = None
                         book_ofi = 0.0
                     if (
@@ -108,63 +128,115 @@ def iter_panel_rows(
                             previous_bbo[1],
                             state.best_ask,
                         )
+                    _close_owned(current_owned)
+                    current_owned = event if isinstance(event, _OwnedValue) else None
                     current_state = state
                     if state.best_bid is not None and state.best_ask is not None:
                         previous_bbo = (state.best_bid, state.best_ask)
-                next_book = next(active_books, None)
-            while next_trade is not None and _trade_time(next_trade) <= grid_time:
-                trade_time = _trade_time(next_trade)
-                if previous_trade_time is not None and trade_time < previous_trade_time:
-                    raise ValueError("hft_trade_time_non_monotonic")
-                previous_trade_time = trade_time
+                while next_trade is not None:
+                    if not isinstance(next_trade, TradeEvent):
+                        raise TypeError("hft_trade_event_invalid")
+                    if next_trade.observed_time_ms > grid_time:
+                        break
+                    trade_time = next_trade.observed_time_ms
+                    if (
+                        previous_trade_time is not None
+                        and trade_time < previous_trade_time
+                    ):
+                        raise ValueError("hft_trade_time_non_monotonic")
+                    previous_trade_time = trade_time
+                    trade = next_trade
+                    next_trade = next(active_trades, None)
+                    quantity = _number(
+                        trade.quantity,
+                        "hft_trade_quantity_invalid",
+                    )
+                    visible = _number(
+                        trade.visible_quantity,
+                        "hft_trade_visible_quantity_invalid",
+                    )
+                    if (
+                        quantity <= 0
+                        or visible < 0
+                        or visible > quantity
+                        or not isinstance(trade.buyer_is_maker, bool)
+                    ):
+                        raise ValueError("hft_trade_values_invalid")
+                    if (
+                        current_state is not None
+                        and len(trade_connections) == 1
+                        and trade.connection_id == trade_connections[0]
+                        and trade.observed_time_ms > interval_start
+                        and trade.observed_time_ms <= grid_time
+                    ):
+                        trade_count += 1
+                        trade_volume += quantity
+                        trade_capture_seq_min = (
+                            trade.capture_seq
+                            if trade_capture_seq_min is None
+                            else min(trade_capture_seq_min, trade.capture_seq)
+                        )
+                        trade_capture_seq_max = (
+                            trade.capture_seq
+                            if trade_capture_seq_max is None
+                            else max(trade_capture_seq_max, trade.capture_seq)
+                        )
+                        if trade.buyer_is_maker:
+                            signed_trade_volume -= quantity
+                            taker_sell_volume += quantity
+                        else:
+                            signed_trade_volume += quantity
+                            taker_buy_volume += quantity
+                if current_state is None:
+                    continue
+                book_bounds = book_coverage.get(current_state.segment_id)
                 if (
-                    current_state is not None
-                    and segment_start_ms is not None
-                    and max(interval_start, segment_start_ms) < trade_time <= grid_time
+                    book_bounds is None
+                    or book_bounds[0] > interval_start
+                    or book_bounds[1] <= grid_time
                 ):
-                    quantity, maker_buyer = _trade_values(next_trade)
-                    trade_count += 1
-                    trade_volume += quantity
-                    if maker_buyer:
-                        signed_trade_volume -= quantity
-                        taker_sell_volume += quantity
-                    else:
-                        signed_trade_volume += quantity
-                        taker_buy_volume += quantity
-                next_trade = next(active_trades, None)
-            if current_state is None or current_segment is None:
-                continue
-            if next_book is None and grid_time > current_state.research_time_ms:
-                continue
-            yield _panel_row(
-                current_state,
-                grid_time,
-                book_ofi=book_ofi,
-                trade_count=trade_count,
-                trade_volume=trade_volume,
-                signed_trade_volume=signed_trade_volume,
-                taker_buy_volume=taker_buy_volume,
-                taker_sell_volume=taker_sell_volume,
-            )
+                    continue
+                if len(trade_connections) != 1:
+                    continue
+                yield _panel_row(
+                    current_state,
+                    grid_time,
+                    trade_connection_id=trade_connections[0],
+                    trade_capture_seq_min=trade_capture_seq_min,
+                    trade_capture_seq_max=trade_capture_seq_max,
+                    book_ofi=book_ofi,
+                    trade_count=trade_count,
+                    trade_volume=trade_volume,
+                    signed_trade_volume=signed_trade_volume,
+                    taker_buy_volume=taker_buy_volume,
+                    taker_sell_volume=taker_sell_volume,
+                )
+        finally:
+            _close_owned(current_owned)
+            if isinstance(next_book, _OwnedValue):
+                next_book.lease.close()
 
 
-def _trade_time(record: Mapping[str, Any]) -> int:
-    payload = record.get("payload")
-    if not isinstance(payload, Mapping):
-        raise ValueError("hft_trade_payload_invalid")
-    value = payload.get("T")
-    if type(value) is not int or value < 0:
-        raise ValueError("hft_trade_time_invalid")
+def _book_value(event: BookState | _OwnedValue[BookState]) -> BookState:
+    value = event.value if isinstance(event, _OwnedValue) else event
+    if not isinstance(value, BookState):
+        raise TypeError("hft_book_event_invalid")
     return value
 
 
-def _trade_values(record: Mapping[str, Any]) -> tuple[float, bool]:
-    payload = record["payload"]
-    quantity = _number(payload.get("q"), "hft_trade_quantity_invalid")
-    maker_buyer = payload.get("m")
-    if quantity <= 0 or not isinstance(maker_buyer, bool):
-        raise ValueError("hft_trade_values_invalid")
-    return quantity, maker_buyer
+def _book_observed_time(
+    event: BookState | _OwnedValue[BookState] | BookBoundary,
+) -> int:
+    return (
+        event.value.observed_time_ms
+        if isinstance(event, _OwnedValue)
+        else event.observed_time_ms
+    )
+
+
+def _close_owned(value: _OwnedValue[BookState] | None) -> None:
+    if value is not None:
+        value.lease.close()
 
 
 def _number(value: object, error: str) -> float:
@@ -183,6 +255,9 @@ def _panel_row(
     state: BookState,
     grid_time: int,
     *,
+    trade_connection_id: str,
+    trade_capture_seq_min: int | None,
+    trade_capture_seq_max: int | None,
     book_ofi: float,
     trade_count: int,
     trade_volume: float,
@@ -213,13 +288,18 @@ def _panel_row(
     return {
         "timestamp_ms": grid_time,
         "timestamp": _timestamp(grid_time),
-        "segment_id": state.segment_id,
-        "capture_seq": state.capture_seq,
-        "book_state_time_ms": state.research_time_ms,
+        "segment_id": f"{state.segment_id}:{trade_connection_id}",
+        "book_segment_id": state.segment_id,
+        "book_connection_id": state.connection_id,
+        "trade_connection_id": trade_connection_id,
+        "book_capture_seq": state.capture_seq,
+        "trade_capture_seq_min": trade_capture_seq_min,
+        "trade_capture_seq_max": trade_capture_seq_max,
+        "book_observed_time_ms": state.observed_time_ms,
         "exchange_event_time_ms": state.event_time_ms,
         "transaction_time_ms": state.transaction_time_ms,
         "local_receive_time": _receive_timestamp(state.receive_time),
-        "receive_monotonic_ns": state.receive_monotonic_ns,
+        "book_receive_monotonic_ns": state.receive_monotonic_ns,
         "update_id": state.update_id,
         "best_bid_price": bid_price,
         "best_bid_qty": bid_quantity,
@@ -270,7 +350,7 @@ def iter_factor_rows(
             previous_time = None
             previous_mid = None
             returns.clear()
-        elif previous_time is not None and timestamp_ms - previous_time != GRID_MS:
+        elif previous_time is not None and timestamp_ms - previous_time != HFT_GRID_MS:
             raise ValueError("hft_grid_non_contiguous")
         mid = _number(row.get("mid"), "hft_factor_mid_invalid")
         bid_price = _number(row.get("best_bid_price"), "hft_factor_book_invalid")
@@ -360,7 +440,7 @@ def iter_label_rows(
         not horizons
         or len(set(horizons)) != len(horizons)
         or any(
-            type(value) is not int or value <= 0 or value % GRID_MS
+            type(value) is not int or value <= 0 or value % HFT_GRID_MS
             for value in horizons
         )
     ):
@@ -384,7 +464,7 @@ def iter_label_rows(
             mids.clear()
             active_segment = segment_id
             previous_time = None
-        elif previous_time is not None and timestamp_ms - previous_time != GRID_MS:
+        elif previous_time is not None and timestamp_ms - previous_time != HFT_GRID_MS:
             raise ValueError("hft_grid_non_contiguous")
         mids[timestamp_ms] = _number(row.get("mid"), "hft_label_mid_invalid")
         pending.append(row)

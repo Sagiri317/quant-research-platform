@@ -56,7 +56,11 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
         "crypto_hft_linear_regression",
         "crypto_hft_xgboost_regressor",
     }
-    assert report["execution"]["model_id"] == "crypto_hft_linear_regression"
+    assert report["execution"]["taker_model_id"] == "crypto_hft_linear_regression"
+    assert report["execution"]["maker_policy_id"] == (
+        "public_l2_inventory_maker_baseline"
+    )
+    assert report["execution"]["maker_prediction_used"] is False
     assert report["execution"]["taker"]["latency_fidelity"] == (
         "full_l2_observed_event"
     )
@@ -95,3 +99,30 @@ def test_crypto_hft_workflow_identity_failure_publishes_nothing(
         )
 
     assert not output_root.exists()
+
+
+def test_crypto_hft_workflow_completes_under_explicit_memory_cap(
+    tmp_path: Path,
+) -> None:
+    raw_root = tmp_path / "raw"
+    output_root = tmp_path / "output"
+    write_binance_hft_run(raw_root)
+
+    report = run_crypto_hft_experiment(
+        output_root=output_root,
+        raw_root=raw_root,
+        start_ms=0,
+        end_ms=6_000,
+        taker_config=_taker_config(),
+        maker_config=_maker_config(),
+        explicit_cap_bytes=256 * 1024**2,
+    )
+
+    assert report["status"] == "PASS"
+    assert report["data_quality"]["panel_rows"] == 61
+    assert report["data_quality"]["factor_rows"] == 61
+    assert report["data_quality"]["label_rows"] == 61
+    assert report["resource"]["memory_budget_bytes"] <= 256 * 1024**2
+    assert report["resource"]["sampled_peak_reserved_bytes"] <= report["resource"][
+        "memory_budget_bytes"
+    ]

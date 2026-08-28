@@ -11,15 +11,20 @@ from quant_research_platform.contracts._json import canonical_json_hash
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
+    TradeEvent,
     price_to_tick,
     tick_to_price,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    _OwnedValue,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     SPOT_MARKET_TYPE,
 )
 from quant_research_platform.sources.binance.replay import (
+    iter_agg_trades,
     iter_reconstructed_depth,
     open_recorder_run,
 )
@@ -51,6 +56,7 @@ def _snapshot(
     last_update_id: int,
     bids: list[list[str]] | None = None,
     asks: list[list[str]] | None = None,
+    connection_id: str | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "lastUpdateId": last_update_id,
@@ -59,7 +65,12 @@ def _snapshot(
     }
     if market_type == FUTURES_MARKET_TYPE:
         payload.update({"E": 90, "T": 89})
-    return _raw(capture_seq, payload, segment_id=segment_id)
+    return _raw(
+        capture_seq,
+        payload,
+        segment_id=segment_id,
+        connection_id=connection_id or f"connection-{segment_id}",
+    )
 
 
 def _futures_delta(
@@ -72,6 +83,7 @@ def _futures_delta(
     segment_id: str,
     bids: list[list[str]] | None = None,
     asks: list[list[str]] | None = None,
+    connection_id: str | None = None,
 ) -> dict[str, object]:
     return _raw(
         capture_seq,
@@ -89,6 +101,7 @@ def _futures_delta(
             "a": asks or [],
         },
         segment_id=segment_id,
+        connection_id=connection_id or f"connection-{segment_id}",
     )
 
 
@@ -99,6 +112,7 @@ def _spot_delta(
     *,
     event_time: int,
     segment_id: str,
+    connection_id: str | None = None,
 ) -> dict[str, object]:
     return _raw(
         capture_seq,
@@ -112,7 +126,37 @@ def _spot_delta(
             "a": [],
         },
         segment_id=segment_id,
+        connection_id=connection_id or f"connection-{segment_id}",
     )
+
+
+def _agg_trade(
+    capture_seq: int,
+    *,
+    quantity: str = "2.0",
+    visible_quantity: str = "1.0",
+) -> dict[str, object]:
+    return {
+        "capture_seq": capture_seq,
+        "receive_time": "2026-08-27T00:00:00.123456Z",
+        "receive_monotonic_ns": capture_seq * 10,
+        "connection_id": "trade-connection-1",
+        "payload": {
+            "e": "aggTrade",
+            "E": 101,
+            "T": 100,
+            "s": "BTCUSDT",
+            "ps": "BTCUSDT",
+            "st": 1,
+            "a": 1,
+            "f": 1,
+            "l": 1,
+            "p": "100.0",
+            "q": quantity,
+            "nq": visible_quantity,
+            "m": True,
+        },
+    }
 
 
 def _write_file(
@@ -171,6 +215,32 @@ def _write_run(
         )
         for market, kind, stream, rows in files
     ]
+    connection_intervals: list[dict[str, object]] = []
+    seen_connections: set[str] = set()
+    for market, kind, stream, rows in files:
+        if kind not in {"depth", "agg_trades"}:
+            continue
+        for row in rows:
+            connection_id = str(row["connection_id"])
+            if connection_id in seen_connections:
+                continue
+            seen_connections.add(connection_id)
+            connection_intervals.append(
+                {
+                    "market": market,
+                    "data_kind": kind,
+                    "stream": stream,
+                    "connection_id": connection_id,
+                    "segment_id": (
+                        str(row["segment_id"]) if kind == "depth" else None
+                    ),
+                    "opened_at": "2026-08-27T00:00:00.000000Z",
+                    "opened_monotonic_ns": 0,
+                    "closed_at": "2026-08-27T00:00:01.000000Z",
+                    "closed_monotonic_ns": 1_000_000_000,
+                    "close_reason": "stop",
+                }
+            )
     manifest: dict[str, object] = {
         "schema_id": "qrp-binance-recorder",
         "run_id": "run-1",
@@ -182,6 +252,9 @@ def _write_run(
         "market_metadata": {
             market: {"tick_size": "0.1", "snapshot_limit": 1000} for market, *_ in files
         },
+        "capture": {
+            "connection_intervals": connection_intervals,
+        },
         "files": file_manifests,
     }
     (root / "run.json").write_text(
@@ -189,6 +262,41 @@ def _write_run(
         encoding="utf-8",
     )
     return manifest
+
+
+def _close_owned_events(events: list[object]) -> None:
+    for event in events:
+        if isinstance(event, _OwnedValue):
+            event.lease.close()
+
+
+def test_agg_trades_normalize_all_clocks_and_visible_quantity(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
+        trades = list(iter_agg_trades(run, FUTURES_MARKET_TYPE))
+
+    assert len(trades) == 1
+    trade = trades[0]
+    assert isinstance(trade, TradeEvent)
+    assert trade.event_time_ms == 101
+    assert trade.transaction_time_ms == 100
+    assert trade.observed_time_ms == 1787788800123
+    assert trade.quantity == 2.0
+    assert trade.visible_quantity == 1.0
+    assert trade.price_tick == 1000
 
 
 def _futures_run(root: Path, depth_rows: list[dict[str, object]]) -> None:
@@ -320,19 +428,81 @@ def test_futures_bootstrap_keeps_all_clocks_and_exact_tick_identity(
         events = list(
             iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
         )
-
-    state = events[0]
-    assert isinstance(state, BookState)
-    assert state.transaction_time_ms == 10
-    assert state.event_time_ms == 12
-    assert state.receive_time == "2026-08-27T00:00:00.123456Z"
-    assert state.receive_monotonic_ns == 10
-    assert state.capture_seq == 1
-    assert state.best_bid == (1000, 2.0)
+        state = events[0].value
+        assert isinstance(state, BookState)
+        assert state.transaction_time_ms == 10
+        assert state.event_time_ms == 12
+        assert state.receive_time == "2026-08-27T00:00:00.123456Z"
+        assert state.receive_monotonic_ns == 10
+        assert state.capture_seq == 1
+        assert state.best_bid == (1000, 2.0)
+        _close_owned_events(events)
     assert price_to_tick("100.0", "0.1", error="bad") == 1000
     assert tick_to_price(1000, "0.1") == 100.0
     with pytest.raises(ValueError, match="bad"):
         price_to_tick("100.05", "0.1", error="bad")
+
+
+def test_snapshot_frontier_is_not_promoted_to_executable_depth(tmp_path: Path) -> None:
+    root = tmp_path / "run"
+    _futures_run(
+        root,
+        [
+            _futures_delta(
+                1,
+                90,
+                100,
+                previous=0,
+                transaction_time=10,
+                segment_id="s1",
+                bids=[["98.0", "4"]],
+            )
+        ],
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
+        owned = next(
+            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=2)
+        )
+        assert owned.value.bids == ((1000, 2.0), (990, 3.0))
+        assert owned.value.asks == ((1010, 2.0), (1020, 3.0))
+        assert owned.lease.active
+        owned.lease.close()
+
+
+def test_advancing_replay_keeps_previous_book_state_lease_active(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    _futures_run(
+        root,
+        [
+            _futures_delta(
+                1, 90, 100, previous=0, transaction_time=10, segment_id="s1"
+            ),
+            _futures_delta(
+                2,
+                101,
+                101,
+                previous=100,
+                transaction_time=20,
+                segment_id="s1",
+                bids=[["100.0", "1.5"]],
+            ),
+        ],
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
+        events = iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+        first = next(events)
+        second = next(events)
+        assert first.lease.active
+        assert second.lease.active
+        first.lease.close()
+        second.lease.close()
+        events.close()
 
 
 def test_futures_zero_transaction_time_is_not_replaced_by_event_time(
@@ -362,10 +532,10 @@ def test_futures_zero_transaction_time_is_not_replaced_by_event_time(
                 FUTURES_MARKET_TYPE,
                 required_levels=1,
             )
-            if isinstance(event, BookState)
+            if isinstance(event, _OwnedValue)
         )
-
-    assert state.research_time_ms == 0
+        assert state.value.observed_time_ms > state.value.transaction_time_ms
+        state.lease.close()
 
 
 def test_spot_uses_snapshot_plus_one_bootstrap(tmp_path: Path) -> None:
@@ -400,13 +570,16 @@ def test_spot_uses_snapshot_plus_one_bootstrap(tmp_path: Path) -> None:
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
-        states = [
+        owned_states = [
             event
             for event in iter_reconstructed_depth(
                 run, SPOT_MARKET_TYPE, required_levels=1
             )
-            if isinstance(event, BookState)
+            if isinstance(event, _OwnedValue)
         ]
+        states = [event.value for event in owned_states]
+        for event in owned_states:
+            event.lease.close()
 
     assert [state.update_id for state in states] == [11, 12]
     assert all(state.transaction_time_ms is None for state in states)
@@ -427,11 +600,14 @@ def test_gap_emits_boundary_and_recovery_never_reuses_old_book(tmp_path: Path) -
         events = list(
             iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
         )
-
-    assert [type(event) for event in events] == [BookState, BookBoundary, BookState]
-    assert events[1].reason == "sequence_gap"
-    assert events[1].transaction_time_ms == 20
-    assert events[2].segment_id == "s2"
+        assert [
+            type(event.value) if isinstance(event, _OwnedValue) else type(event)
+            for event in events
+        ] == [BookState, BookBoundary, BookState]
+        assert events[1].reason == "sequence_gap"
+        assert events[1].transaction_time_ms == 20
+        assert events[2].value.segment_id == "s2"
+        _close_owned_events(events)
 
 
 @pytest.mark.parametrize(
@@ -529,5 +705,12 @@ def test_same_run_replay_is_deterministic(tmp_path: Path) -> None:
         second = list(
             iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
         )
-
-    assert first == second
+        assert [
+            event.value if isinstance(event, _OwnedValue) else event
+            for event in first
+        ] == [
+            event.value if isinstance(event, _OwnedValue) else event
+            for event in second
+        ]
+        _close_owned_events(first)
+        _close_owned_events(second)

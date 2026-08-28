@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import gzip
 import hashlib
 import json
@@ -61,6 +62,7 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
                     "l": index,
                     "p": ask,
                     "q": "0.1",
+                    "nq": "0.1",
                     "m": False,
                 },
                 segment=False,
@@ -116,6 +118,34 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
         "market_metadata": {
             FUTURES_MARKET_TYPE: {"tick_size": "0.1", "snapshot_limit": 1000}
         },
+        "capture": {
+            "connection_intervals": [
+                {
+                    "market": FUTURES_MARKET_TYPE,
+                    "data_kind": "depth",
+                    "stream": "btcusdt@depth@100ms",
+                    "connection_id": "book-connection-1",
+                    "segment_id": "segment-1",
+                    "opened_at": "1970-01-01T00:00:00.000000Z",
+                    "opened_monotonic_ns": 0,
+                    "closed_at": "1970-01-01T00:00:10.000000Z",
+                    "closed_monotonic_ns": 10_000_000_000,
+                    "close_reason": "stop",
+                },
+                {
+                    "market": FUTURES_MARKET_TYPE,
+                    "data_kind": "agg_trades",
+                    "stream": "btcusdt@aggTrade",
+                    "connection_id": "trade-connection-1",
+                    "segment_id": None,
+                    "opened_at": "1970-01-01T00:00:00.000000Z",
+                    "opened_monotonic_ns": 0,
+                    "closed_at": "1970-01-01T00:00:10.000000Z",
+                    "closed_monotonic_ns": 10_000_000_000,
+                    "close_reason": "stop",
+                },
+            ]
+        },
         "files": files,
     }
     (root / "run.json").write_text(
@@ -130,12 +160,20 @@ def _raw(
     payload: dict,
     *,
     segment: bool = True,
+    connection_id: str | None = None,
 ) -> dict:
+    observed = payload.get("T", payload.get("E", 0))
+    received = dt.datetime(1970, 1, 1, tzinfo=dt.UTC) + dt.timedelta(
+        milliseconds=int(observed)
+    )
     row = {
         "capture_seq": capture_seq,
-        "receive_time": "2026-08-27T00:00:00.000000Z",
+        "receive_time": received.isoformat(timespec="microseconds").replace(
+            "+00:00", "Z"
+        ),
         "receive_monotonic_ns": capture_seq,
-        "connection_id": "connection-1",
+        "connection_id": connection_id
+        or ("book-connection-1" if segment else "trade-connection-1"),
         "payload": payload,
     }
     if segment:

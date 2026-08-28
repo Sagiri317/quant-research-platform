@@ -39,6 +39,7 @@ from quant_research_platform.sources.binance.raw_exports import (
 from quant_research_platform.sources.binance.validation import (
     strict_boolean,
     strict_iso_timestamp,
+    strict_non_negative_float,
     strict_non_negative_integer,
     strict_positive_float,
     validate_depth_update_levels,
@@ -135,9 +136,16 @@ def validate_stream_payload(
     strict_positive_float(
         payload.get("p"), error="binance_recorder_trade_price_invalid"
     )
-    strict_positive_float(
+    quantity = strict_positive_float(
         payload.get("q"), error="binance_recorder_trade_quantity_invalid"
     )
+    if stream.market_type == FUTURES_MARKET_TYPE:
+        visible_quantity = strict_non_negative_float(
+            payload.get("nq"),
+            error="binance_recorder_trade_visible_quantity_invalid",
+        )
+        if visible_quantity > quantity:
+            raise ValueError("binance_recorder_trade_visible_quantity_invalid")
     strict_boolean(payload.get("m"), error="binance_recorder_trade_side_invalid")
     return payload
 
@@ -392,17 +400,65 @@ class _CaptureStats:
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     connection_opens: Counter[str] = field(default_factory=Counter)
     reconnects: Counter[str] = field(default_factory=Counter)
+    connection_intervals: list[dict[str, Any]] = field(default_factory=list)
     connection_errors: int = 0
     sequence_gaps: int = 0
     stale_depth_events: int = 0
     invalid_messages: int = 0
 
-    def opened(self, stream: RecorderStream, *, reconnect: bool) -> None:
+    def opened(
+        self,
+        stream: RecorderStream,
+        *,
+        reconnect: bool,
+        connection_id: str,
+        segment_id: str | None,
+        opened_at: str,
+        opened_monotonic_ns: int,
+    ) -> None:
         with self._lock:
             key = f"{stream.market_type}:{stream.stream}"
             self.connection_opens[key] += 1
             if reconnect:
                 self.reconnects[key] += 1
+            self.connection_intervals.append(
+                {
+                    "market": stream.market_type,
+                    "data_kind": stream.data_kind,
+                    "stream": stream.stream,
+                    "connection_id": connection_id,
+                    "segment_id": segment_id,
+                    "opened_at": opened_at,
+                    "opened_monotonic_ns": opened_monotonic_ns,
+                    "closed_at": None,
+                    "closed_monotonic_ns": None,
+                    "close_reason": None,
+                }
+            )
+
+    def closed(
+        self,
+        connection_id: str,
+        *,
+        closed_at: str,
+        closed_monotonic_ns: int,
+        close_reason: str,
+    ) -> None:
+        with self._lock:
+            interval = next(
+                (
+                    item
+                    for item in reversed(self.connection_intervals)
+                    if item["connection_id"] == connection_id
+                    and item["closed_at"] is None
+                ),
+                None,
+            )
+            if interval is None:
+                raise RuntimeError("binance_recorder_connection_interval_missing")
+            interval["closed_at"] = closed_at
+            interval["closed_monotonic_ns"] = closed_monotonic_ns
+            interval["close_reason"] = close_reason
 
     def connection_error(self) -> None:
         with self._lock:
@@ -425,6 +481,9 @@ class _CaptureStats:
             return {
                 "connection_opens": dict(sorted(self.connection_opens.items())),
                 "reconnects": dict(sorted(self.reconnects.items())),
+                "connection_intervals": [
+                    dict(item) for item in self.connection_intervals
+                ],
                 "connection_errors": self.connection_errors,
                 "sequence_gaps": self.sequence_gaps,
                 "stale_depth_events": self.stale_depth_events,
@@ -437,6 +496,10 @@ class _ConnectionProblem(Exception):
 
 
 class _DepthResyncRequired(Exception):
+    pass
+
+
+class _InvalidPayload(Exception):
     pass
 
 
@@ -476,7 +539,7 @@ class _StreamReader(threading.Thread):
         while not self.stop.is_set():
             try:
                 self._read_connection(reconnect=reconnect)
-            except (_ConnectionProblem, _DepthResyncRequired):
+            except (_ConnectionProblem, _DepthResyncRequired, _InvalidPayload):
                 if self.stop.is_set():
                     break
                 self.stats.connection_error()
@@ -493,6 +556,8 @@ class _StreamReader(threading.Thread):
         connection_id = uuid.uuid4().hex
         segment_id = uuid.uuid4().hex if self.stream.data_kind == "depth" else None
         websocket: Any | None = None
+        opened = False
+        close_reason = "stop"
         try:
             try:
                 websocket = _connect_websocket(
@@ -509,7 +574,15 @@ class _StreamReader(threading.Thread):
                 self._generation += 1
                 self._connection_id = connection_id
                 self._segment_id = segment_id
-            self.stats.opened(self.stream, reconnect=reconnect)
+            self.stats.opened(
+                self.stream,
+                reconnect=reconnect,
+                connection_id=connection_id,
+                segment_id=segment_id,
+                opened_at=_utc_now(),
+                opened_monotonic_ns=time.monotonic_ns(),
+            )
+            opened = True
             self.ready.set()
             previous_u: int | None = None
             last_message_at = time.monotonic()
@@ -536,7 +609,7 @@ class _StreamReader(threading.Thread):
                     payload = validate_stream_payload(self.stream, json.loads(raw))
                 except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
                     self.stats.invalid()
-                    continue
+                    raise _InvalidPayload() from None
                 needs_resync = False
                 if self.stream.data_kind == "depth":
                     current_u = payload["u"]
@@ -562,6 +635,18 @@ class _StreamReader(threading.Thread):
                 if needs_resync:
                     self.stats.sequence_gap()
                     raise _DepthResyncRequired()
+        except _DepthResyncRequired:
+            close_reason = "depth_resync"
+            raise
+        except _InvalidPayload:
+            close_reason = "failure"
+            raise
+        except _ConnectionProblem:
+            close_reason = "connection_problem"
+            raise
+        except BaseException:
+            close_reason = "failure"
+            raise
         finally:
             primary = sys.exception()
             if websocket is not None:
@@ -574,6 +659,22 @@ class _StreamReader(threading.Thread):
                         "Binance websocket close also failed: "
                         f"{type(cleanup_error).__name__}"
                     )
+            if opened:
+                try:
+                    self.stats.closed(
+                        connection_id,
+                        closed_at=_utc_now(),
+                        closed_monotonic_ns=time.monotonic_ns(),
+                        close_reason=close_reason,
+                    )
+                except BaseException as cleanup_error:
+                    if primary is not None:
+                        primary.add_note(
+                            "Binance connection interval close also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                    else:
+                        raise
 
 
 def _http_get_json(

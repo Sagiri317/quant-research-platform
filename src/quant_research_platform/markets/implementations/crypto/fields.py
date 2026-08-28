@@ -71,8 +71,27 @@ PANEL_FIELD_SPECS = (
 
 HFT_PANEL_FIELD_SPECS = (
     FieldSpec(name="segment_id", role=ColumnRole.CONTEXT, dtype="string"),
-    FieldSpec(name="capture_seq", role=ColumnRole.CONTEXT, dtype="int64"),
-    FieldSpec(name="book_state_time_ms", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(name="book_segment_id", role=ColumnRole.CONTEXT, dtype="string"),
+    FieldSpec(name="book_connection_id", role=ColumnRole.CONTEXT, dtype="string"),
+    FieldSpec(
+        name="trade_connection_id",
+        role=ColumnRole.CONTEXT,
+        dtype="string",
+    ),
+    FieldSpec(name="book_capture_seq", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(
+        name="trade_capture_seq_min",
+        role=ColumnRole.CONTEXT,
+        dtype="int64",
+        nullable=True,
+    ),
+    FieldSpec(
+        name="trade_capture_seq_max",
+        role=ColumnRole.CONTEXT,
+        dtype="int64",
+        nullable=True,
+    ),
+    FieldSpec(name="book_observed_time_ms", role=ColumnRole.CONTEXT, dtype="int64"),
     FieldSpec(name="exchange_event_time_ms", role=ColumnRole.CONTEXT, dtype="int64"),
     FieldSpec(name="transaction_time_ms", role=ColumnRole.CONTEXT, dtype="int64"),
     FieldSpec(
@@ -80,7 +99,11 @@ HFT_PANEL_FIELD_SPECS = (
         role=ColumnRole.CONTEXT,
         dtype="datetime64[ns]",
     ),
-    FieldSpec(name="receive_monotonic_ns", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(
+        name="book_receive_monotonic_ns",
+        role=ColumnRole.CONTEXT,
+        dtype="int64",
+    ),
     FieldSpec(name="update_id", role=ColumnRole.CONTEXT, dtype="int64"),
     FieldSpec(name="best_bid_price", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="best_bid_qty", role=ColumnRole.CONTEXT, dtype="float64"),
