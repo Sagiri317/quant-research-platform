@@ -56,11 +56,14 @@ def _safe_output_bundle_contract(tmp_path: Path) -> dict[str, object]:
     output_id = output_spec.output_id
     root = tmp_path / "outputs" / output_id
     if not root.exists():
+        frame = make_price_volume_prediction_output_frame()
         write_prediction_outputs(
-            make_price_volume_prediction_output_frame(),
+            output_chunks=(frame,),
             spec=make_price_volume_prediction_spec(),
             output_spec=output_spec,
             layout=StorageLayout(project_root=tmp_path),
+            model_metadata=frame.attrs["model_metadata"],
+            prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
         )
     members = _evidence_members(
         root / "manifest.json",

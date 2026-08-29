@@ -22,20 +22,6 @@ _SIGNAL_METADATA_KEYS = frozenset(
 )
 
 
-def required_frame_metadata(
-    frame: pd.DataFrame,
-    *,
-    key: str,
-    error_name: str,
-) -> dict[str, object]:
-    if key not in frame.attrs:
-        raise ValueError(error_name)
-    value = frame.attrs[key]
-    if type(value) is not dict or not value:
-        raise ValueError(error_name)
-    return value
-
-
 def validate_metadata_row_count_chain(
     metadata: dict[str, object],
     keys: tuple[str, str, str],

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict
-
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs.membership import (
@@ -33,7 +31,6 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
-    strict_timestamp_series,
 )
 
 EVALUATION_METRICS_COLUMNS = (
@@ -240,65 +237,51 @@ def validate_evaluation_output_metadata_shape(
 
 def validate_evaluation_diagnostics_consistency(
     *,
-    metrics: pd.DataFrame,
-    grouped_label_values: pd.DataFrame,
-    ic_summary: pd.DataFrame,
-    group_spread_summary: pd.DataFrame,
     evaluation_diagnostics: EvaluationDiagnostics,
     spec: EvaluationSpec,
+    rows_input: int,
+    rows_after_filter_mode: int,
+    rows_after_signal_label_dropna: int,
+    metric_rows: int,
+    grouped_label_value_rows: int,
+    ic_summary_rows: int,
+    group_spread_summary_rows: int,
+    timestamp_count: int,
+    min_timestamp: str | None,
+    max_timestamp: str | None,
+    skipped_timestamp_count: int,
+    filter_columns_used: tuple[str, ...],
+    filter_definition_value: str,
+    n_groups: int,
 ) -> None:
-    diagnostics_payload = asdict(evaluation_diagnostics)
-    rows_input = int(diagnostics_payload["rows_input"])
-    rows_after_filter_mode = int(diagnostics_payload["rows_after_filter_mode"])
-    rows_after_signal_label_dropna = int(
-        diagnostics_payload["rows_after_signal_label_dropna"]
-    )
-    max_signal_label_rows = (
-        rows_after_filter_mode * len(spec.signals) * len(spec.label_columns)
-    )
     if not (
         0 <= rows_after_filter_mode <= rows_input
-        and 0 <= rows_after_signal_label_dropna <= max_signal_label_rows
+        and 0 <= rows_after_signal_label_dropna
+        <= rows_after_filter_mode * len(spec.signals) * len(spec.label_columns)
     ):
         raise ValueError("evaluation_diagnostics_inconsistent")
     validate_filter_metadata(
-        mode=evaluation_diagnostics.filter_mode,
-        columns=list(evaluation_diagnostics.filter_columns_used),
-        definition=evaluation_diagnostics.filter_definition,
+        mode=spec.filter_mode,
+        columns=list(filter_columns_used),
+        definition=filter_definition_value,
         error_name="evaluation_diagnostics_inconsistent",
     )
-    timestamps = strict_timestamp_series(
-        metrics["timestamp"], error="evaluation_diagnostics_inconsistent"
-    )
-    expected_timestamp_count = int(timestamps.nunique()) if not timestamps.empty else 0
-    expected_min_timestamp = (
-        pd.Timestamp(timestamps.min()).date().isoformat()
-        if not timestamps.empty
-        else None
-    )
-    expected_max_timestamp = (
-        pd.Timestamp(timestamps.max()).date().isoformat()
-        if not timestamps.empty
-        else None
-    )
-    n_obs = strict_non_negative_count_series(metrics["n_obs"])
-    expected_skipped_timestamp_count = int(
-        metrics.loc[n_obs.lt(2), "timestamp"].nunique()
-    )
-    expected_rows_after_signal_label_dropna = int(n_obs.sum())
     expected = {
         "filter_mode": spec.filter_mode,
         "filter_columns_used": tuple(required_filter_columns(spec.filter_mode)),
         "filter_definition": filter_definition(spec.filter_mode),
-        "rows_after_signal_label_dropna": expected_rows_after_signal_label_dropna,
-        "metric_rows": len(metrics),
-        "grouped_label_value_rows": len(grouped_label_values),
-        "ic_summary_rows": len(ic_summary),
-        "group_spread_summary_rows": len(group_spread_summary),
-        "timestamp_count": expected_timestamp_count,
-        "min_timestamp": expected_min_timestamp,
-        "max_timestamp": expected_max_timestamp,
-        "skipped_timestamp_count": expected_skipped_timestamp_count,
+        "rows_input": rows_input,
+        "rows_after_filter_mode": rows_after_filter_mode,
+        "rows_after_signal_label_dropna": rows_after_signal_label_dropna,
+        "metric_rows": metric_rows,
+        "grouped_label_value_rows": grouped_label_value_rows,
+        "ic_summary_rows": ic_summary_rows,
+        "group_spread_summary_rows": group_spread_summary_rows,
+        "timestamp_count": timestamp_count,
+        "min_timestamp": min_timestamp,
+        "max_timestamp": max_timestamp,
+        "skipped_timestamp_count": skipped_timestamp_count,
+        "n_groups": n_groups,
     }
     for key, value in expected.items():
         if getattr(evaluation_diagnostics, key) != value:

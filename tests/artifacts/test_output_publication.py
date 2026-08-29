@@ -8,7 +8,7 @@ import pytest
 import quant_research_platform.artifacts.outputs.evaluation as evaluation_outputs
 import quant_research_platform.artifacts.outputs.prediction as prediction_outputs
 from quant_research_platform.artifacts.outputs import (
-    write_evaluation_outputs,
+    write_evaluation_outputs_from_chunks,
     write_prediction_outputs,
 )
 from quant_research_platform.contracts.evaluations import (
@@ -33,17 +33,82 @@ from tests.helpers.output_frames import (
 )
 
 
-def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) -> None:
+def _write_prediction_output(frame: pd.DataFrame, *, layout) -> object:
+    return write_prediction_outputs(
+        output_chunks=(frame,),
+        spec=make_price_volume_prediction_spec(),
+        output_spec=make_prediction_report_spec(),
+        layout=layout,
+        model_metadata=frame.attrs["model_metadata"],
+        prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
+    )
+
+
+def _write_evaluation_output(
+    metrics: pd.DataFrame,
+    grouped_label_values: pd.DataFrame,
+    *,
+    ic_summary=None,
+    group_spread_summary=None,
+    evaluation_diagnostics,
+    spec: EvaluationSpec,
+    output_spec,
+    layout,
+) -> object:
+    return write_evaluation_outputs_from_chunks(
+        (
+            (
+                metrics,
+                grouped_label_values,
+                {
+                    "rows_input": evaluation_diagnostics.rows_input,
+                    "rows_after_filter_mode": (
+                        evaluation_diagnostics.rows_after_filter_mode
+                    ),
+                    "filter_columns_used": list(
+                        evaluation_diagnostics.filter_columns_used
+                    ),
+                    "filter_definition": evaluation_diagnostics.filter_definition,
+                },
+            ),
+        ),
+        summary_factory=lambda: (
+            evaluation_diagnostics,
+            make_price_volume_evaluation_ic_summary_frame()
+            if ic_summary is None
+            else ic_summary,
+            make_price_volume_evaluation_group_spread_summary_frame()
+            if group_spread_summary is None
+            else group_spread_summary,
+            pd.DataFrame(
+                columns=[
+                    "signal",
+                    "label",
+                    "mean_n_obs",
+                    "min_n_obs",
+                    "non_empty_period_count",
+                ]
+            ),
+        ),
+        spec=spec,
+        output_spec=output_spec,
+        layout=layout,
+        n_groups=evaluation_diagnostics.n_groups,
+    )
+
+
+def test_prediction_report_chunk_writer_matches_split_chunks(tmp_path) -> None:
     frame = make_price_volume_prediction_output_frame(row_count=2)
     materialized_root = write_prediction_outputs(
-        frame,
+        output_chunks=(frame,),
         spec=make_price_volume_prediction_spec(),
         output_spec=make_prediction_report_spec(),
         layout=StorageLayout(project_root=tmp_path / "materialized"),
+        model_metadata=frame.attrs["model_metadata"],
+        prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
     )
-    chunked_writer = prediction_outputs._write_prediction_output_chunks
-    chunked_root = chunked_writer(
-        (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
+    chunked_root = write_prediction_outputs(
+        output_chunks=(frame.iloc[:1].copy(), frame.iloc[1:].copy()),
         spec=make_price_volume_prediction_spec(),
         output_spec=make_prediction_report_spec(),
         layout=StorageLayout(project_root=tmp_path / "chunked"),
@@ -63,8 +128,8 @@ def test_prediction_report_chunk_writer_matches_materialized_report(tmp_path) ->
 def test_prediction_chunk_writer_rejects_cross_chunk_duplicates(tmp_path) -> None:
     frame = make_price_volume_prediction_output_frame()
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
-        prediction_outputs._write_prediction_output_chunks(
-            (frame.copy(), frame.copy()),
+        write_prediction_outputs(
+            output_chunks=(frame.copy(), frame.copy()),
             spec=make_price_volume_prediction_spec(),
             output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
@@ -84,10 +149,8 @@ def test_prediction_outputs_reject_existing_output_bundle_without_writes(
     sentinel.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(OutputAlreadyExistsError):
-        write_prediction_outputs(
+        _write_prediction_output(
             make_price_volume_prediction_output_frame(),
-            spec=make_price_volume_prediction_spec(),
-            output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
         )
 
@@ -105,7 +168,7 @@ def test_evaluation_outputs_reject_existing_output_bundle_without_writes(
     sentinel.write_text("existing\n", encoding="utf-8")
 
     with pytest.raises(OutputAlreadyExistsError):
-        write_evaluation_outputs(
+        _write_evaluation_output(
             make_price_volume_evaluation_metrics_frame(),
             make_price_volume_evaluation_grouped_label_values_frame(),
             ic_summary=make_price_volume_evaluation_ic_summary_frame(),
@@ -137,15 +200,13 @@ def test_prediction_outputs_clean_temp_root_after_mid_write_failure(
 
     monkeypatch.setattr(
         prediction_outputs,
-        "write_parquet",
+        "write_parquet_chunks",
         fail_parquet_write,
     )
 
     with pytest.raises(RuntimeError, match="simulated_prediction_failure"):
-        write_prediction_outputs(
+        _write_prediction_output(
             make_price_volume_prediction_output_frame(),
-            spec=make_price_volume_prediction_spec(),
-            output_spec=make_prediction_report_spec(),
             layout=StorageLayout(project_root=tmp_path),
         )
 
@@ -176,7 +237,7 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
     )
 
     with pytest.raises(RuntimeError, match="simulated_evaluation_failure"):
-        write_evaluation_outputs(
+        _write_evaluation_output(
             make_price_volume_evaluation_metrics_frame(),
             make_price_volume_evaluation_grouped_label_values_frame(),
             ic_summary=make_price_volume_evaluation_ic_summary_frame(),

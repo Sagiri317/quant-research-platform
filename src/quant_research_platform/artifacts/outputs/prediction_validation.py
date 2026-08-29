@@ -25,11 +25,6 @@ from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
     PredictionSpec,
 )
-from quant_research_platform.contracts.time import (
-    is_intraday_time_value,
-    time_value_isoformat,
-)
-from quant_research_platform.contracts.validation import strict_timestamp_series
 
 _MODEL_METADATA_BASE_KEYS = frozenset(
     {
@@ -653,27 +648,6 @@ def validate_model_selection_metadata_consistency(
         raise ValueError("model_metadata_inconsistent")
     if model_selection["selected_model_input_columns"] != metadata["input_columns"]:
         raise ValueError("model_metadata_inconsistent")
-
-
-def validate_prediction_metadata_consistency(
-    metadata: dict[str, object],
-    *,
-    spec: PredictionSpec,
-    frame: pd.DataFrame,
-) -> None:
-    timestamps = strict_timestamp_series(
-        frame["timestamp"], error="prediction_metadata_inconsistent"
-    )
-    effective_test_end = time_value_isoformat(
-        pd.Timestamp(timestamps.max()),
-        date_only=not is_intraday_time_value(spec.test_start),
-    )
-    validate_prediction_metadata_consistency_from_summary(
-        metadata,
-        spec=spec,
-        row_count=len(frame),
-        effective_test_end=effective_test_end,
-    )
 
 
 def validate_prediction_metadata_consistency_from_summary(

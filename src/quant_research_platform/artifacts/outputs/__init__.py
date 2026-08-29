@@ -8,7 +8,6 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs.evaluation import (
-    write_evaluation_outputs as evaluation_writer,
     write_evaluation_outputs_from_chunks as evaluation_chunks_writer,
 )
 from quant_research_platform.artifacts.outputs.bundle_validation import (
@@ -21,10 +20,7 @@ from quant_research_platform.artifacts.outputs.portfolio import (
 from quant_research_platform.artifacts.outputs.prediction import (
     write_prediction_outputs as prediction_writer,
 )
-from quant_research_platform.contracts.evaluations import (
-    EvaluationDiagnostics,
-    EvaluationSpec,
-)
+from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -54,52 +50,23 @@ def _write_in_resource_root(
 
 
 def write_prediction_outputs(
-    frame: pd.DataFrame | None = None,
     *,
     spec: PredictionSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
-    output_chunks: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]] | None = None,
-    model_metadata: Mapping[str, object] | None = None,
-    prediction_metadata_factory: Callable[[], Mapping[str, object]] | None = None,
+    output_chunks: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]],
+    model_metadata: Mapping[str, object],
+    prediction_metadata_factory: Callable[[], Mapping[str, object]],
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Path:
     return _write_in_resource_root(
         lambda: prediction_writer(
-            frame,
             spec=spec,
             output_spec=output_spec,
             layout=layout,
             output_chunks=output_chunks,
             model_metadata=model_metadata,
             prediction_metadata_factory=prediction_metadata_factory,
-        ),
-        resource_policy=resource_policy,
-    )
-
-
-def write_evaluation_outputs(
-    metrics: pd.DataFrame,
-    grouped_label_values: pd.DataFrame,
-    *,
-    ic_summary: pd.DataFrame,
-    group_spread_summary: pd.DataFrame,
-    evaluation_diagnostics: EvaluationDiagnostics,
-    spec: EvaluationSpec,
-    output_spec: OutputSpec,
-    layout: StorageLayout,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Path:
-    return _write_in_resource_root(
-        lambda: evaluation_writer(
-            metrics,
-            grouped_label_values,
-            ic_summary=ic_summary,
-            group_spread_summary=group_spread_summary,
-            evaluation_diagnostics=evaluation_diagnostics,
-            spec=spec,
-            output_spec=output_spec,
-            layout=layout,
         ),
         resource_policy=resource_policy,
     )

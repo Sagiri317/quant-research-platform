@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.artifacts import outputs
@@ -27,6 +28,66 @@ from tests.helpers.output_frames import (
 )
 
 WORKFLOW_MODULE = "quant_research_platform.workflows.local_verification"
+
+
+def _write_prediction_output(frame, *, spec, output_spec, layout):
+    return outputs.write_prediction_outputs(
+        output_chunks=(frame,),
+        spec=spec,
+        output_spec=output_spec,
+        layout=layout,
+        model_metadata=frame.attrs["model_metadata"],
+        prediction_metadata_factory=lambda: frame.attrs["prediction_metadata"],
+    )
+
+
+def _write_evaluation_output(
+    metrics,
+    grouped_label_values,
+    *,
+    ic_summary=None,
+    group_spread_summary=None,
+    evaluation_diagnostics,
+    spec,
+    output_spec,
+    layout,
+):
+    return outputs.write_evaluation_outputs_from_chunks(
+        (
+            (
+                metrics,
+                grouped_label_values,
+                {
+                    "rows_input": evaluation_diagnostics.rows_input,
+                    "rows_after_filter_mode": (
+                        evaluation_diagnostics.rows_after_filter_mode
+                    ),
+                    "filter_columns_used": list(
+                        evaluation_diagnostics.filter_columns_used
+                    ),
+                    "filter_definition": evaluation_diagnostics.filter_definition,
+                },
+            ),
+        ),
+        summary_factory=lambda: (
+            evaluation_diagnostics,
+            make_artifact_evaluation_ic_summary_frame()
+            if ic_summary is None
+            else ic_summary,
+            make_artifact_evaluation_group_spread_summary_frame()
+            if group_spread_summary is None
+            else group_spread_summary,
+            make_artifact_evaluation_metrics_frame().iloc[0:0].assign(
+                mean_n_obs=pd.Series(dtype="float64"),
+                min_n_obs=pd.Series(dtype="float64"),
+                non_empty_period_count=pd.Series(dtype="int64"),
+            ),
+        ),
+        spec=spec,
+        output_spec=output_spec,
+        layout=layout,
+        n_groups=evaluation_diagnostics.n_groups,
+    )
 
 
 @pytest.mark.parametrize("logical_layer", ("interim", "processed", "research"))
@@ -249,7 +310,7 @@ def test_local_verification_output_index_rejects_noncurrent_manifest_envelope(
         "run",
         "prediction",
     )
-    output_bundle = outputs.write_prediction_outputs(
+    output_bundle = _write_prediction_output(
         make_artifact_prediction_output_frame(),
         spec=spec,
         output_spec=output_spec,
@@ -298,7 +359,7 @@ def test_local_verification_output_index_requires_declared_files(
         "run",
         "prediction",
     )
-    output_bundle = outputs.write_prediction_outputs(
+    output_bundle = _write_prediction_output(
         make_artifact_prediction_output_frame(),
         spec=spec,
         output_spec=output_spec,
@@ -364,7 +425,7 @@ def test_output_index_rejects_prediction_output_substituted_for_evaluation(
         spec.prediction_id,
         "prediction",
     )
-    prediction_root = outputs.write_prediction_outputs(
+    prediction_root = _write_prediction_output(
         make_artifact_prediction_output_frame(),
         spec=spec,
         output_spec=output_spec,
@@ -397,7 +458,7 @@ def test_output_index_requires_mandatory_evaluation_summary_member(
         spec.run_id,
         "evaluation",
     )
-    evaluation_bundle = outputs.write_evaluation_outputs(
+    evaluation_bundle = _write_evaluation_output(
         make_artifact_evaluation_metrics_frame(),
         make_artifact_evaluation_grouped_label_values_frame(),
         ic_summary=make_artifact_evaluation_ic_summary_frame(),

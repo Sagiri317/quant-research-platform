@@ -1,12 +1,9 @@
 from __future__ import annotations
 
 import json
-import warnings
 from copy import deepcopy
 from dataclasses import replace
-from datetime import timedelta, timezone
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 import pyarrow.parquet as pq
@@ -68,6 +65,62 @@ def _static_managed_summary_factory():
                 "non_empty_period_count": [1],
             }
         ),
+    )
+
+
+def _write_evaluation_output(
+    metrics: pd.DataFrame,
+    grouped_label_values: pd.DataFrame,
+    *,
+    ic_summary: pd.DataFrame,
+    group_spread_summary: pd.DataFrame,
+    evaluation_diagnostics,
+    spec: EvaluationSpec,
+    output_spec,
+    layout: StorageLayout,
+    resource_policy=None,
+):
+    coverage = _static_managed_summary_factory()[3]
+    try:
+        source = metrics.loc[:, ["signal", "label", "n_obs"]].copy()
+        source["n_obs"] = source["n_obs"].astype("int64")
+        coverage = source.groupby(["signal", "label"], as_index=False, sort=True)[
+            "n_obs"
+        ].agg(
+            mean_n_obs="mean",
+            min_n_obs="min",
+            non_empty_period_count=lambda values: int(values.gt(0).sum()),
+        )
+    except (KeyError, TypeError, ValueError, OverflowError):
+        pass
+    return outputs.write_evaluation_outputs_from_chunks(
+        (
+            (
+                metrics,
+                grouped_label_values,
+                {
+                    "rows_input": evaluation_diagnostics.rows_input,
+                    "rows_after_filter_mode": (
+                        evaluation_diagnostics.rows_after_filter_mode
+                    ),
+                    "filter_columns_used": list(
+                        evaluation_diagnostics.filter_columns_used
+                    ),
+                    "filter_definition": evaluation_diagnostics.filter_definition,
+                },
+            ),
+        ),
+        summary_factory=lambda: (
+            evaluation_diagnostics,
+            ic_summary,
+            group_spread_summary,
+            coverage,
+        ),
+        spec=spec,
+        output_spec=output_spec,
+        layout=layout,
+        n_groups=evaluation_diagnostics.n_groups,
+        resource_policy=resource_policy,
     )
 
 
@@ -180,7 +233,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
     )
 
     with pytest.raises(ValueError, match="missing_evaluation_metrics_columns"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")]}),
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -192,7 +245,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
         )
 
     with pytest.raises(ValueError, match="missing_evaluation_ic_summary_columns"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=pd.DataFrame({"signal": ["signal"]}),
@@ -204,7 +257,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
         )
 
     with pytest.raises(ValueError, match="missing_evaluation_group_spread_summary"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -233,7 +286,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
 
     bad_metric_rows = replace(make_output_edge_evaluation_diagnostics(), metric_rows=2)
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -248,7 +301,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
         filter_mode="unfiltered",
     )
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -264,7 +317,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
         timestamp_count=2,
     )
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -287,7 +340,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
         skipped_timestamp_count=0,
     )
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             skipped_metrics,
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -308,7 +361,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
         max_timestamp=None,
     )
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             bad_timestamp_metrics,
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -317,52 +370,6 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
             spec=spec,
             output_spec=report_spec,
             layout=layout,
-        )
-
-
-def test_evaluation_diagnostics_accept_equivalent_timezone_representations() -> None:
-    metrics = pd.concat(
-        [
-            make_artifact_evaluation_metrics_frame().assign(
-                timestamp=pd.Timestamp(
-                    "2024-01-02T12:00:00",
-                    tz=timezone(timedelta(hours=1)),
-                ),
-                n_obs=1,
-            ),
-            make_artifact_evaluation_metrics_frame().assign(
-                timestamp=pd.Timestamp(
-                    "2024-01-02T12:01:00",
-                    tz=ZoneInfo("Europe/Paris"),
-                ),
-                n_obs=1,
-            ),
-        ],
-        ignore_index=True,
-    )
-    spec = EvaluationSpec(
-        run_id="eval_demo",
-        market_id=MarketId("a_share"),
-        research_dataset_id="research_demo",
-        signals=(make_artifact_signal_spec(),),
-        label_columns=("label",),
-    )
-    diagnostics = replace(
-        make_output_edge_evaluation_diagnostics(),
-        metric_rows=2,
-        timestamp_count=2,
-        skipped_timestamp_count=2,
-    )
-
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        evaluation_output_validation.validate_evaluation_diagnostics_consistency(
-            metrics=metrics,
-            grouped_label_values=make_artifact_evaluation_grouped_label_values_frame(),
-            ic_summary=make_artifact_evaluation_ic_summary_frame(),
-            group_spread_summary=make_artifact_evaluation_group_spread_summary_frame(),
-            evaluation_diagnostics=diagnostics,
-            spec=spec,
         )
 
 
@@ -396,7 +403,7 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
         rows_after_signal_label_dropna=4,
     )
     with pytest.raises(ValueError, match="duplicate_evaluation_metrics_keys"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             duplicate_metrics,
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -411,7 +418,7 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
         signal="other"
     )
     with pytest.raises(ValueError, match="evaluation_artifact_signal_label_mismatch"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             bad_feature_metrics,
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -424,7 +431,7 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
 
     bad_group = make_artifact_evaluation_grouped_label_values_frame().assign(group=3)
     with pytest.raises(ValueError, match="evaluation_group_out_of_range"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             bad_group,
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -440,7 +447,7 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
         rows_after_filter_mode=1,
     )
     with pytest.raises(ValueError, match="evaluation_diagnostics_inconsistent"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -557,7 +564,7 @@ def test_evaluation_outputs_rejects_invalid_signal_label_membership_values(
     metrics.iat[0, metrics.columns.get_loc(column)] = bad_value
 
     with pytest.raises(ValueError, match="evaluation_artifact_signal_label_mismatch"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             metrics,
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -593,7 +600,7 @@ def test_evaluation_outputs_rejects_padded_signal_label_membership_values(
     metrics = make_artifact_evaluation_metrics_frame().assign(**{column: padded_value})
 
     with pytest.raises(ValueError, match="evaluation_artifact_signal_label_mismatch"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             metrics,
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -629,7 +636,7 @@ def test_evaluation_outputs_rejects_invalid_metric_observation_counts(
     metrics = make_artifact_evaluation_metrics_frame().assign(n_obs=[n_obs])
 
     with pytest.raises(ValueError, match="invalid_evaluation_observation_counts"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             metrics,
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -659,7 +666,7 @@ def test_evaluation_outputs_rejects_fractional_grouped_label_group(
     grouped = make_artifact_evaluation_grouped_label_values_frame().assign(group=1.5)
 
     with pytest.raises(ValueError, match="evaluation_group_out_of_range"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             grouped,
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -689,7 +696,7 @@ def test_evaluation_outputs_rejects_non_finite_summary_numbers(
     metrics = make_artifact_evaluation_metrics_frame().assign(ic=[float("inf")])
 
     with pytest.raises(ValueError, match="invalid_evaluation_numeric_values"):
-        outputs.write_evaluation_outputs(
+        _write_evaluation_output(
             metrics,
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -715,7 +722,7 @@ def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> 
         "evaluation",
     )
 
-    output_bundle = outputs.write_evaluation_outputs(
+    output_bundle = _write_evaluation_output(
         make_artifact_evaluation_metrics_frame(),
         make_artifact_evaluation_grouped_label_values_frame(),
         ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -755,7 +762,7 @@ def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None
         "evaluation",
     )
 
-    output_bundle = outputs.write_evaluation_outputs(
+    output_bundle = _write_evaluation_output(
         make_artifact_evaluation_metrics_frame(),
         make_artifact_evaluation_grouped_label_values_frame(),
         ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -822,7 +829,7 @@ def test_evaluation_outputs_enforces_evidence_line_contract(
     )
 
     def write_outputs() -> Path:
-        return outputs.write_evaluation_outputs(
+        return _write_evaluation_output(
             make_artifact_evaluation_metrics_frame(),
             make_artifact_evaluation_grouped_label_values_frame(),
             ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -881,7 +888,7 @@ def test_evaluation_outputs_feeds_bounded_encoded_summary_chunks(
         label_columns=("label",),
     )
 
-    output = outputs.write_evaluation_outputs(
+    output = _write_evaluation_output(
         make_artifact_evaluation_metrics_frame(),
         make_artifact_evaluation_grouped_label_values_frame(),
         ic_summary=make_artifact_evaluation_ic_summary_frame(),
@@ -934,7 +941,7 @@ def test_summary_markdown_escapes_pipe_characters(tmp_path: Path) -> None:
         label="lab|el",
     )
 
-    output_bundle = outputs.write_evaluation_outputs(
+    output_bundle = _write_evaluation_output(
         metrics,
         grouped,
         ic_summary=ic_summary,

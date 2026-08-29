@@ -42,6 +42,42 @@ from tests.helpers.output_frames import (
 from tests.helpers.runtime_resources import capture_test_policy
 
 
+def _write_prediction_output(
+    frame: pd.DataFrame | None = None,
+    *,
+    spec,
+    output_spec,
+    layout,
+    output_chunks=None,
+    model_metadata=None,
+    prediction_metadata_factory=None,
+    resource_policy=None,
+):
+    if output_chunks is None:
+        output_chunks = () if frame is None else (frame,)
+    if model_metadata is None:
+        model_metadata = (
+            {} if frame is None else frame.attrs.get("model_metadata", {})
+        )
+    metadata_factory = prediction_metadata_factory
+    if metadata_factory is None:
+        if frame is None:
+            def metadata_factory():
+                return {}
+        else:
+            def metadata_factory():
+                return frame.attrs.get("prediction_metadata", {})
+    return outputs.write_prediction_outputs(
+        spec=spec,
+        output_spec=output_spec,
+        layout=layout,
+        output_chunks=output_chunks,
+        model_metadata=model_metadata,
+        prediction_metadata_factory=metadata_factory,
+        resource_policy=resource_policy,
+    )
+
+
 def test_public_artifact_writer_owns_a_composition_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -56,7 +92,7 @@ def test_public_artifact_writer_owns_a_composition_root(
     monkeypatch.setattr(outputs, "prediction_writer", write)
 
     assert (
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             spec=object(),  # type: ignore[arg-type]
             output_spec=object(),  # type: ignore[arg-type]
             layout=object(),  # type: ignore[arg-type]
@@ -84,7 +120,7 @@ def test_public_artifact_writer_rejects_an_unrelated_active_root(
             RuntimeError,
             match="^runtime_resource_policy_competing_root$",
         ):
-            outputs.write_prediction_outputs(
+            _write_prediction_output(
                 spec=object(),  # type: ignore[arg-type]
                 output_spec=object(),  # type: ignore[arg-type]
                 layout=object(),  # type: ignore[arg-type]
@@ -109,7 +145,7 @@ def test_public_artifact_writer_reuses_its_explicit_active_root(
 
     with runtime_resource_policy_scope(policy):
         assert (
-            outputs.write_prediction_outputs(
+            _write_prediction_output(
                 spec=object(),  # type: ignore[arg-type]
                 output_spec=object(),  # type: ignore[arg-type]
                 layout=object(),  # type: ignore[arg-type]
@@ -316,21 +352,21 @@ def test_prediction_output_validation_rejects_bad_frames(
     valid = make_artifact_prediction_output_frame()
 
     with pytest.raises(ValueError, match="missing_prediction_output_columns"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             valid.drop(columns=["prediction_score"]),
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
     with pytest.raises(ValueError, match="unregistered_prediction_output_columns"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             valid.assign(extra=1),
             spec=spec,
             output_spec=report_spec,
             layout=layout,
         )
     with pytest.raises(ValueError, match="duplicate_prediction_keys"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             pd.concat([valid, valid], ignore_index=True),
             spec=spec,
             output_spec=report_spec,
@@ -358,7 +394,7 @@ def test_prediction_artifact_rejects_non_finite_values_and_null_keys(
     frame.loc[frame.index[0], column] = value
 
     with pytest.raises(ValueError, match=f"^{error}$"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             frame,
             spec=make_output_edge_prediction_spec(),
             output_spec=make_output_edge_report_spec(
@@ -432,7 +468,7 @@ def test_prediction_output_identity_failure_never_publishes_bundle(
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match=error):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             make_artifact_prediction_output_frame(),
             spec=spec,
             output_spec=output_spec,
@@ -457,7 +493,7 @@ def test_prediction_output_nested_schema_identity_never_publishes_bundle(
     layout = StorageLayout(project_root=tmp_path)
 
     with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             frame,
             spec=spec,
             output_spec=output_spec,
@@ -757,46 +793,6 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
     assert row_groups == [(rows, rows) for rows, _row_group_size in row_groups]
 
 
-def test_prediction_outputs_require_standard_metadata_attrs(
-    tmp_path: Path,
-) -> None:
-    spec = make_output_edge_prediction_spec()
-    report_spec = make_output_edge_report_spec(
-        "prediction_outputs",
-        spec.prediction_id,
-        "prediction",
-    )
-    layout = StorageLayout(project_root=tmp_path)
-
-    with pytest.raises(ValueError, match="missing_model_metadata"):
-        outputs.write_prediction_outputs(
-            make_artifact_prediction_output_frame(with_metadata=False),
-            spec=spec,
-            output_spec=report_spec,
-            layout=layout,
-        )
-
-    incomplete_model = make_artifact_prediction_output_frame()
-    incomplete_model.attrs["model_metadata"] = {"unexpected": True}
-    with pytest.raises(ValueError, match="invalid_model_metadata"):
-        outputs.write_prediction_outputs(
-            incomplete_model,
-            spec=spec,
-            output_spec=report_spec,
-            layout=layout,
-        )
-
-    incomplete_prediction = make_artifact_prediction_output_frame()
-    incomplete_prediction.attrs["prediction_metadata"] = {"unexpected": True}
-    with pytest.raises(ValueError, match="invalid_prediction_metadata"):
-        outputs.write_prediction_outputs(
-            incomplete_prediction,
-            spec=spec,
-            output_spec=report_spec,
-            layout=layout,
-        )
-
-
 @pytest.mark.parametrize(
     ("requested_threads", "resolved_threads"),
     ((1, 999_999), (0, 1), (True, 1), (1.0, 1)),
@@ -826,30 +822,6 @@ def test_prediction_artifact_rejects_invalid_parallel_thread_contract(
         validation.validate_model_metadata_shape(forged)
 
 
-def test_prediction_outputs_require_prediction_metadata_attrs(
-    tmp_path: Path,
-) -> None:
-    spec = make_output_edge_prediction_spec()
-    report_spec = make_output_edge_report_spec(
-        "prediction_outputs",
-        spec.prediction_id,
-        "prediction",
-    )
-    layout = StorageLayout(project_root=tmp_path)
-    frame = make_artifact_prediction_output_frame(with_metadata=False)
-    frame.attrs["model_metadata"] = make_artifact_prediction_output_frame().attrs[
-        "model_metadata"
-    ]
-
-    with pytest.raises(ValueError, match="missing_prediction_metadata"):
-        outputs.write_prediction_outputs(
-            frame,
-            spec=spec,
-            output_spec=report_spec,
-            layout=layout,
-        )
-
-
 def test_prediction_outputs_reject_inconsistent_metadata(
     tmp_path: Path,
 ) -> None:
@@ -867,7 +839,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
         "prediction_rows": 2,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_rows,
             spec=spec,
             output_spec=report_spec,
@@ -880,7 +852,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
         "test_start": "2024-01-03",
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_window,
             spec=spec,
             output_spec=report_spec,
@@ -893,7 +865,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
         "train_end": "2024-01-02",
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_train_end,
             spec=spec,
             output_spec=report_spec,
@@ -906,7 +878,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
         "coefficient_count": 0,
     }
     with pytest.raises(ValueError, match="invalid_model_metadata"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_model,
             spec=spec,
             output_spec=report_spec,
@@ -919,7 +891,7 @@ def test_prediction_outputs_reject_inconsistent_metadata(
         "input_columns": ["factor", "other_input"],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_feature_columns,
             spec=spec,
             output_spec=report_spec,
@@ -993,7 +965,7 @@ def test_prediction_outputs_reject_tampered_selected_model_input_columns(
     }
 
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             tampered,
             spec=spec,
             output_spec=report_spec,
@@ -1031,7 +1003,7 @@ def test_prediction_outputs_bind_feature_importance_to_exact_model_inputs(
 
     with pytest.raises(ValueError, match="invalid_model_metadata"):
         if chunked:
-            outputs.write_prediction_outputs(
+            _write_prediction_output(
                 spec=spec,
                 output_spec=output_spec,
                 layout=layout,
@@ -1041,7 +1013,7 @@ def test_prediction_outputs_bind_feature_importance_to_exact_model_inputs(
             )
         else:
             frame.attrs["model_metadata"] = model_metadata
-            outputs.write_prediction_outputs(
+            _write_prediction_output(
                 frame,
                 spec=spec,
                 output_spec=output_spec,
@@ -1068,7 +1040,7 @@ def test_prediction_outputs_preserve_six_digit_aggregate_counts(
         "rows_after_input_label_dropna": 5_000,
     }
 
-    output_root = outputs.write_prediction_outputs(
+    output_root = _write_prediction_output(
         spec=spec,
         output_spec=output_spec,
         layout=StorageLayout(project_root=tmp_path),
@@ -1150,7 +1122,7 @@ def test_prediction_outputs_reject_tampered_model_selection_direction(
     }
 
     with pytest.raises(ValueError, match="invalid_model_metadata"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             tampered,
             spec=spec,
             output_spec=report_spec,
@@ -1311,7 +1283,7 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
         "rows_after_input_dropna": 0,
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_prediction_counts,
             spec=spec,
             output_spec=report_spec,
@@ -1324,7 +1296,7 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
         "rows_after_filter_mode": 1,
     }
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_model_counts,
             spec=spec,
             output_spec=report_spec,
@@ -1337,7 +1309,7 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
         "filter_columns_used": [],
     }
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_prediction_filter,
             spec=spec,
             output_spec=report_spec,
@@ -1350,7 +1322,7 @@ def test_prediction_outputs_reject_bad_row_count_chain_and_filter_contract(
         "filter_definition": "no eligible/can_enter/can_exit filter",
     }
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_model_filter,
             spec=spec,
             output_spec=report_spec,
@@ -1374,7 +1346,7 @@ def test_prediction_outputs_reject_bad_effective_test_end(
     }
 
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_effective_end,
             spec=spec,
             output_spec=report_spec,
@@ -1395,7 +1367,7 @@ def test_prediction_outputs_reject_unparseable_prediction_timestamp(
     bad_timestamp["timestamp"] = ["bad-date"]
 
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_timestamp,
             spec=spec,
             output_spec=report_spec,
@@ -1435,7 +1407,7 @@ def test_prediction_outputs_accept_equivalent_timezone_representations(
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             frame,
             spec=spec,
             output_spec=report_spec,
@@ -1474,7 +1446,7 @@ def test_chunked_prediction_outputs_accept_equivalent_timezone_representations(
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             spec=spec,
             output_spec=report_spec,
             layout=StorageLayout(project_root=tmp_path),
@@ -1516,7 +1488,7 @@ def test_prediction_outputs_reject_effective_test_end_after_requested_end(
     }
 
     with pytest.raises(ValueError, match="prediction_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             late_prediction,
             spec=spec,
             output_spec=report_spec,
@@ -1541,7 +1513,7 @@ def test_prediction_outputs_reject_model_train_window_after_spec_train_end(
     }
 
     with pytest.raises(ValueError, match="model_metadata_inconsistent"):
-        outputs.write_prediction_outputs(
+        _write_prediction_output(
             bad_model_window,
             spec=spec,
             output_spec=report_spec,
