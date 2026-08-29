@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts._prediction_outputs import (
+from quant_research_platform.artifacts.outputs.prediction import (
     write_prediction_outputs as write_prediction_outputs_in_workflow,
 )
 from quant_research_platform.contracts.filtering import (

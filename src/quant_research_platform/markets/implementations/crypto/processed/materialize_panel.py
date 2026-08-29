@@ -29,27 +29,25 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
     _OwnedValue,
+    _release_owned_value,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    _release_owned_value,
+from quant_research_platform.storage.datasets import (
+    DatasetInspection,
 )
-from quant_research_platform.storage._dataset_paths import require_artifact_root
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_chunks,
     open_dataset_session,
     parquet_filters_for_time_window,
     prune_paths_for_time_window,
 )
-from quant_research_platform.storage._dataset_writing import (
+from quant_research_platform.storage.datasets.writing import (
     DatasetWriteReceipt,
     _write_dataset_owned,
 )
-from quant_research_platform.storage.datasets import (
-    DatasetInspection,
-)
+from quant_research_platform.storage.identity import require_artifact_root
 from quant_research_platform.storage.layout import StorageLayout
 
 

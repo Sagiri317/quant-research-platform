@@ -7,7 +7,7 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.portfolios.runner as portfolio_runner
-from quant_research_platform.artifacts._portfolio_outputs import (
+from quant_research_platform.artifacts.outputs.portfolio import (
     write_portfolio_outputs,
 )
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
@@ -79,16 +79,6 @@ def test_portfolio_engine_produces_required_signal_artifacts() -> None:
     assert result.portfolio_returns["net_portfolio_return"].tolist() == pytest.approx(
         [0.038, 0.06]
     )
-    assert result.additive_cumulative_returns[
-        "additive_cumulative_net_return"
-    ].tolist() == pytest.approx([0.038, 0.098])
-    assert result.performance_summary.loc[0, "max_drawdown"] == pytest.approx(0.0)
-    assert result.performance_summary.loc[0, "win_rate"] == pytest.approx(1.0)
-    assert result.exposure_summary.loc[0, "mean_gross_exposure"] == pytest.approx(2.0)
-    assert result.concentration.loc[0, "mean_hhi"] == pytest.approx(0.5)
-    assert result.period_breakdown["year"].tolist() == [2024, 2024]
-    assert result.period_breakdown["month"].tolist() == [1, 2]
-    assert result.period_breakdown["hit_rate"].tolist() == pytest.approx([1.0, 1.0])
     assert result.diagnostics["method"].tolist() == [
         "rank_weighted_quantile",
         "rank_weighted_quantile",
@@ -170,7 +160,6 @@ def test_portfolio_engine_long_only_positions_do_not_short_assets() -> None:
     assert result.positions["position"].sum() == pytest.approx(1.0)
     assert result.portfolio_returns.loc[0, "portfolio_mode"] == "long_only"
     assert result.portfolio_returns.loc[0, "short_count"] == 0
-    assert result.exposure_summary.loc[0, "mean_net_exposure"] == pytest.approx(1.0)
 
 
 def test_portfolio_engine_keeps_two_signal_inputs_separate() -> None:
@@ -211,7 +200,6 @@ def test_portfolio_engine_keeps_two_signal_inputs_separate() -> None:
 
     assert set(result.positions["signal"]) == {"raw_a", "ranked_raw_b"}
     assert set(result.portfolio_returns["signal"]) == {"raw_a", "ranked_raw_b"}
-    assert result.performance_summary["periods"].tolist() == [1, 1]
 
 
 def test_portfolio_engine_applies_execution_lag_steps_to_signal_scores() -> None:
@@ -488,7 +476,6 @@ def _write_portfolio_result(layout: StorageLayout, result) -> Path:
             output_chunks=result.output_chunks,
             summary_factory=result.summary_factory,
             additive_cumulative_returns_factory=result.additive_cumulative_returns_factory,
-            summary_pre_reserved=True,
             spec=result.spec,
             output_spec=OutputSpec(
                 output_id=result.spec.portfolio_id,

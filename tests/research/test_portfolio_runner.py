@@ -8,10 +8,12 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.research.portfolios.runner as portfolio_runner
-from quant_research_platform.artifacts._output_bundle_validation import (
-    _read_prediction_output_bundle,
+import quant_research_platform.research.predictions.alignment as prediction_alignment
+from quant_research_platform.artifacts.outputs.bundle_validation import (
+    read_prediction_output_bundle,
 )
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
+from quant_research_platform.compute.dataframe.exposure import summarize_exposure
 from quant_research_platform.compute.dataframe.performance import (
     calculate_additive_cumulative_returns,
     summarize_performance,
@@ -27,9 +29,6 @@ from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.portfolios.engine import (
     _construct_portfolio_positions,
-    compute_exposure_summary,
-    summarize_concentration,
-    summarize_period_breakdown,
 )
 from quant_research_platform.research.portfolios.runner import (
     build_portfolio_result_from_research_dataset,
@@ -142,9 +141,7 @@ def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> 
     expected = {
         "additive_cumulative_returns": expected_additive_cumulative,
         "performance_summary": summarize_performance(returns),
-        "exposure_summary": compute_exposure_summary(positions, returns),
-        "concentration": summarize_concentration(positions),
-        "period_breakdown": summarize_period_breakdown(returns),
+        "exposure_summary": summarize_exposure(positions, returns),
     }
 
     summary_state = portfolio_runner._PortfolioSummaryState()
@@ -709,7 +706,7 @@ def test_portfolio_state_admission_precedes_source_pull_and_reopens(
         assert portfolio_runner.current_runtime_resource_policy() is reopened
 
 
-def test_portfolio_output_chunks_keep_one_lease_across_state_and_output(
+def test_portfolio_output_chunks_transfer_output_and_reopen_state_lease(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = PortfolioSpec(
@@ -770,14 +767,19 @@ def test_portfolio_output_chunks_keep_one_lease_across_state_and_output(
             source_columns_by_kind={"factor": ("signal",)},
             resource_policy=policy,
         )
-        assert next(output_chunks)
+        first = next(output_chunks)
+        assert isinstance(first, portfolio_runner._OwnedValue)
+        assert first.lease.owner == "research.portfolio.output"
         assert policy.used_memory_bytes > 0
-        assert next(output_chunks)
+        second = next(output_chunks)
+        assert isinstance(second, portfolio_runner._OwnedValue)
+        assert second.lease.owner == "research.portfolio.output"
         assert policy.used_memory_bytes > 0
         with pytest.raises(StopIteration):
             next(output_chunks)
 
-    assert lease_starts == [0]
+    assert lease_starts[0] == 0
+    assert len(lease_starts) == 3
     assert policy.used_memory_bytes == 0
 
 
@@ -1010,7 +1012,9 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
         prediction_frame=prediction,
         prediction_metadata=manifest["metadata"],
     )
-    expected_chunks = list(expected_result.output_chunks)
+    expected_chunks = [
+        item.value for item in expected_result.output_chunks
+    ]
     expected_summary = expected_result.summary_factory()
     expected_result.close()
 
@@ -1032,7 +1036,7 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
         prediction_frame=prediction,
         prediction_metadata=manifest["metadata"],
     )
-    chunks = list(result.output_chunks)
+    chunks = [item.value for item in result.output_chunks]
     summary = result.summary_factory()
     returns = pd.concat(
         [chunk["portfolio_returns"] for chunk in chunks],
@@ -1076,7 +1080,7 @@ def test_portfolio_prediction_join_preflights_index_allocation(
         )
 
         monkeypatch.setattr(
-            portfolio_runner,
+            prediction_alignment,
             "pandas_frame_payload_bytes",
             lambda _frame: policy.memory_budget_bytes,
         )
@@ -1234,7 +1238,7 @@ def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(
 
     monkeypatch.setattr(pd, "read_parquet", reject_full_read)
     with runtime_resource_policy_scope(policy):
-        with _read_prediction_output_bundle(
+        with read_prediction_output_bundle(
             root,
             expected_output_id="demo_prediction",
         ) as (manifest, prediction_lookup):
@@ -1248,7 +1252,7 @@ def test_persisted_prediction_portfolio_uses_bounded_disk_lookup(
                 prediction_metadata=manifest["metadata"],
                 resource_policy=policy,
             )
-            chunks = list(result.output_chunks)
+            chunks = [item.value for item in result.output_chunks]
             summary = result.summary_factory()
             result.close()
 
@@ -1300,7 +1304,7 @@ def test_prediction_bundle_rejects_duplicate_outside_selected_window(
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(ValueError, match="duplicate_persisted_prediction_keys"):
-            with _read_prediction_output_bundle(
+            with read_prediction_output_bundle(
                 root,
                 expected_output_id=spec.prediction_id,
                 time_window=TimeWindow("2024-01-03", "2024-01-03"),

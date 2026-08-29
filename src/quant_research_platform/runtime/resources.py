@@ -7,11 +7,12 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if os.name == "nt":
     import msvcrt
@@ -103,8 +104,7 @@ class MemoryLease:
         return False
 
     def transfer(self, new_owner: str) -> None:
-        self._root._require_lease_owner(self)
-        self.owner = _required_owner(new_owner)
+        self._root._transfer_lease(self, new_owner)
 
     def grow(self, additional_bytes: int) -> None:
         self._root._require_lease_owner(self)
@@ -115,14 +115,7 @@ class MemoryLease:
         self._root._grow_lease(self, additional)
 
     def shrink_to(self, actual_bytes: int) -> None:
-        self._root._require_lease_owner(self)
-        actual = _exact_nonnegative_int(
-            actual_bytes,
-            error="invalid_runtime_memory_lease_bytes",
-        )
-        if actual > self.reserved_bytes:
-            raise ValueError("invalid_runtime_memory_lease_bytes")
-        self.reserved_bytes = actual
+        self._root._shrink_lease(self, actual_bytes)
 
     def close(self) -> None:
         if not self.active:
@@ -139,6 +132,27 @@ class _OwnedValue[T]:
 type _OwnedFrame = _OwnedValue[pd.DataFrame]
 
 
+def _close_lease_preserving_primary(lease: MemoryLease, *, owner: str) -> None:
+    primary = sys.exception()
+    try:
+        lease.close()
+    except BaseException as cleanup_error:
+        if primary is None:
+            raise
+        primary.add_note(
+            f"{owner} lease close also failed: {type(cleanup_error).__name__}"
+        )
+
+
+def _release_owned_value(
+    owned: _OwnedValue[Any],
+    *,
+    owner: str,
+) -> None:
+    owned.value = None
+    _close_lease_preserving_primary(owned.lease, owner=owner)
+
+
 @dataclass(frozen=True, init=False, eq=False, slots=True)
 class RuntimeResourcePolicy:
     """One immutable data-scale root budget and mutable lease ledger."""
@@ -147,6 +161,7 @@ class RuntimeResourcePolicy:
     memory_budget_bytes: int
     state: str
     _lock: _MachineLock
+    _ledger_lock: threading.RLock
     _leases: set[MemoryLease] = field(default_factory=set, repr=False)
 
     def __new__(cls) -> RuntimeResourcePolicy:
@@ -154,54 +169,87 @@ class RuntimeResourcePolicy:
 
     @property
     def used_memory_bytes(self) -> int:
-        return sum(lease.reserved_bytes for lease in self._leases)
+        with self._ledger_lock:
+            return self._used_memory_bytes()
 
     @property
     def available_memory_bytes(self) -> int:
-        return self.memory_budget_bytes - self.used_memory_bytes
+        with self._ledger_lock:
+            return self.memory_budget_bytes - self._used_memory_bytes()
 
     def lease(self, owner: str, reserved_bytes: int) -> MemoryLease:
-        self._require_active_root()
-        valid_owner = _required_owner(owner)
-        reserved = _exact_nonnegative_int(
-            reserved_bytes,
-            error="invalid_runtime_memory_lease_bytes",
-        )
-        if self.used_memory_bytes + reserved > self.memory_budget_bytes:
-            raise MemoryError("runtime_memory_budget_exceeded")
-        leased = MemoryLease(valid_owner, reserved, True, self)
-        self._leases.add(leased)
-        return leased
+        with self._ledger_lock:
+            self._require_active_root()
+            valid_owner = _required_owner(owner)
+            reserved = _exact_nonnegative_int(
+                reserved_bytes,
+                error="invalid_runtime_memory_lease_bytes",
+            )
+            if self._used_memory_bytes() + reserved > self.memory_budget_bytes:
+                raise MemoryError("runtime_memory_budget_exceeded")
+            leased = MemoryLease(valid_owner, reserved, True, self)
+            self._leases.add(leased)
+            return leased
 
     def to_payload(self) -> dict[str, int]:
-        return {
-            "captured_available_memory_bytes": self.captured_available_memory_bytes,
-            "memory_budget_bytes": self.memory_budget_bytes,
-            "used_memory_bytes": self.used_memory_bytes,
-            "available_memory_bytes": self.available_memory_bytes,
-        }
+        with self._ledger_lock:
+            used = self._used_memory_bytes()
+            return {
+                "captured_available_memory_bytes": self.captured_available_memory_bytes,
+                "memory_budget_bytes": self.memory_budget_bytes,
+                "used_memory_bytes": used,
+                "available_memory_bytes": self.memory_budget_bytes - used,
+            }
 
     def _require_active_root(self) -> None:
         if self.state != "ACTIVE" or _ACTIVE_RUNTIME_RESOURCE_POLICY is not self:
             raise RuntimeError("runtime_resource_policy_not_active")
 
     def _require_lease_owner(self, lease: MemoryLease) -> None:
-        if lease._root is not self or not lease.active:
-            raise RuntimeError("runtime_memory_lease_not_active")
+        with self._ledger_lock:
+            if lease._root is not self or not lease.active:
+                raise RuntimeError("runtime_memory_lease_not_active")
 
     def _grow_lease(self, lease: MemoryLease, additional_bytes: int) -> None:
-        self._require_active_root()
-        if self.used_memory_bytes + additional_bytes > self.memory_budget_bytes:
-            raise MemoryError("runtime_memory_budget_exceeded")
-        lease.reserved_bytes += additional_bytes
+        with self._ledger_lock:
+            self._require_active_root()
+            self._require_lease_owner(lease)
+            if (
+                self._used_memory_bytes() + additional_bytes
+                > self.memory_budget_bytes
+            ):
+                raise MemoryError("runtime_memory_budget_exceeded")
+            lease.reserved_bytes += additional_bytes
+
+    def _shrink_lease(self, lease: MemoryLease, actual_bytes: int) -> None:
+        with self._ledger_lock:
+            self._require_lease_owner(lease)
+            actual = _exact_nonnegative_int(
+                actual_bytes,
+                error="invalid_runtime_memory_lease_bytes",
+            )
+            if actual > lease.reserved_bytes:
+                raise ValueError("invalid_runtime_memory_lease_bytes")
+            lease.reserved_bytes = actual
+
+    def _transfer_lease(self, lease: MemoryLease, new_owner: str) -> None:
+        with self._ledger_lock:
+            self._require_lease_owner(lease)
+            lease.owner = _required_owner(new_owner)
 
     def _close_lease(self, lease: MemoryLease) -> None:
-        if self.state == "CLOSED":
-            raise RuntimeError("runtime_memory_lease_not_active")
-        if self.state == "ACTIVE":
-            self._require_active_root()
-        self._leases.discard(lease)
-        lease.active = False
+        with self._ledger_lock:
+            if not lease.active:
+                return
+            if self.state == "CLOSED":
+                raise RuntimeError("runtime_memory_lease_not_active")
+            if self.state == "ACTIVE":
+                self._require_active_root()
+            self._leases.discard(lease)
+            lease.active = False
+
+    def _used_memory_bytes(self) -> int:
+        return sum(lease.reserved_bytes for lease in self._leases)
 
 
 _ACTIVE_RUNTIME_RESOURCE_POLICY: RuntimeResourcePolicy | None = None
@@ -353,6 +401,7 @@ def _capture_runtime_resource_policy(
         object.__setattr__(policy, "memory_budget_bytes", budget)
         object.__setattr__(policy, "state", "ACTIVE")
         object.__setattr__(policy, "_lock", lock)
+        object.__setattr__(policy, "_ledger_lock", threading.RLock())
         object.__setattr__(policy, "_leases", set())
         return policy
     except BaseException as primary:

@@ -13,66 +13,52 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from quant_research_platform.contracts._json import (
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import DataSpec
+from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
     canonical_json_hash,
     parse_qrp_json_object,
 )
-from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
     _OwnedValue,
+    _release_owned_value,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    _close_lease_preserving_primary,
+from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.datasets.inspection import (
     _inspection_result_bound,
-    _release_owned_value,
     dataset_inspection_retained_memory_bytes,
     inspection_from_persisted_session,
 )
-from quant_research_platform.storage._dataset_inventory import (
+from quant_research_platform.storage.datasets.inventory import (
     DATASET_INVENTORY_RESERVE_BYTES,
     DatasetSessionInventory,
 )
-from quant_research_platform.storage._dataset_key_tracking import (
-    EXACT_KEY_SQLITE_CACHE_BYTES,
-    ExactPrimaryKeyIndex,
-)
-from quant_research_platform.storage._dataset_observation import (
+from quant_research_platform.storage.datasets.observation import (
     DatasetSummaryObserver,
 )
-from quant_research_platform.storage._dataset_paths import (
+from quant_research_platform.storage.datasets.paths import (
     partition_frames,
     partition_part_path,
     relative_partition_label,
-    require_artifact_root,
     timestamp_primary_key_column_from_spec,
     validate_dataset_artifact_root,
 )
-from quant_research_platform.storage._dataset_physical import (
-    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
-    _PHYSICAL_PAGE_ROWS_KEY,
-    DatasetPartMetadata,
-    _parquet_row_group_footer_upper_bound,
-    _parquet_row_group_size,
-    _table_parquet_page_working_set_bytes,
-    dataset_file_identity,
-    table_with_decoded_row_bounds,
-)
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     dataset_session_from_inventory,
     iter_bounded_frame_chunks,
     iter_declared_parquet_member_batches,
 )
-from quant_research_platform.storage._dataset_schema import (
+from quant_research_platform.storage.datasets.schema import (
     data_spec_payload,
     encode_logical_category_value,
     logical_dtype_metadata_bytes,
@@ -87,10 +73,26 @@ from quant_research_platform.storage._dataset_schema import (
     require_logical_dtype_metadata_within_target,
     validate_dataset_spec,
 )
-from quant_research_platform.storage._dataset_types import DatasetInspection
-from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.datasets.types import DatasetInspection
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
+from quant_research_platform.storage.exact_keys import (
+    EXACT_KEY_SQLITE_CACHE_BYTES,
+    ExactPrimaryKeyIndex,
+)
+from quant_research_platform.storage.identity import (
+    dataset_file_identity,
+    require_artifact_root,
+)
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
+from quant_research_platform.storage.parquet import (
+    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+    _PHYSICAL_PAGE_ROWS_KEY,
+    DatasetPartMetadata,
+    _parquet_row_group_footer_upper_bound,
+    _parquet_row_group_size,
+    _table_parquet_page_working_set_bytes,
+    table_with_decoded_row_bounds,
+)
 
 _TIMESTAMP_PREPARATION_BYTES_PER_ROW = 256
 _ARROW_CELL_OVERHEAD_BYTES = 9

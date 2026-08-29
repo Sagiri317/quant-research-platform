@@ -28,13 +28,13 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     open_dataset_session,
 )
-from quant_research_platform.storage._dataset_types import DatasetInspection
-from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets.types import DatasetInspection
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
 

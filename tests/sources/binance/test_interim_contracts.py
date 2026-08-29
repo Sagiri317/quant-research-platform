@@ -3,12 +3,13 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import quant_research_platform.sources.binance.raw_exports as raw_exports
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.sources.binance.interim import (
+    _normalize_depth,
     interim_catalog,
     materialize_interim_data,
-    normalize_raw_envelopes,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -50,71 +51,45 @@ def test_binance_interim_fields_are_source_local_only() -> None:
         assert "asset_id" not in spec.required_columns
 
 
-def test_binance_interim_rejects_data_id_raw_kind_mismatch() -> None:
-    with pytest.raises(ValueError, match="binance_raw_data_id_kind_mismatch"):
-        normalize_raw_envelopes(
-            (
-                {
-                    "source": "binance",
-                    "market_type": "spot",
-                    "data_kind": "depth",
-                    "symbol": "BTCUSDT",
-                    "captured_at": "2026-07-06T00:00:02Z",
-                    "payload": {
-                        "lastUpdateId": 1,
-                        "bids": [["100.0", "1.0"]],
-                        "asks": [],
-                    },
-                },
-            ),
-            data_id="market_bars_1m",
-        )
-
-
 @pytest.mark.parametrize(
     "captured_at",
     ["2026-01-01T00:00:00Z", "2026-01-01T00:00:00+00:00"],
 )
 def test_binance_interim_accepts_strict_depth_captured_at(captured_at: str) -> None:
-    frame = normalize_raw_envelopes(
-        (
-            {
-                "source": "binance",
-                "market_type": "spot",
-                "data_kind": "depth",
-                "symbol": "BTCUSDT",
-                "captured_at": captured_at,
-                "payload": {
-                    "lastUpdateId": 1,
-                    "bids": [["100.0", "1.0"]],
-                    "asks": [["101.0", "1.5"]],
-                },
+    envelope = raw_exports._validate_envelope(
+        {
+            "source": "binance",
+            "market_type": "spot",
+            "data_kind": "depth",
+            "symbol": "BTCUSDT",
+            "captured_at": captured_at,
+            "payload": {
+                "lastUpdateId": 1,
+                "bids": [["100.0", "1.0"]],
+                "asks": [["101.0", "1.5"]],
             },
-        ),
-        data_id="depth_levels_tick",
+        }
     )
+    frame = _normalize_depth((envelope,))
 
     assert frame["timestamp"].iloc[0] == pd.Timestamp("2026-01-01T00:00:00")
 
 
 def test_binance_interim_rejects_naive_depth_captured_at() -> None:
     with pytest.raises(ValueError, match="invalid_binance_raw_envelope_captured_at"):
-        normalize_raw_envelopes(
-            (
-                {
-                    "source": "binance",
-                    "market_type": "spot",
-                    "data_kind": "depth",
-                    "symbol": "BTCUSDT",
-                    "captured_at": "2026-01-01T00:00:00",
-                    "payload": {
-                        "lastUpdateId": 1,
-                        "bids": [["100.0", "1.0"]],
-                        "asks": [["101.0", "1.5"]],
-                    },
+        raw_exports._validate_envelope(
+            {
+                "source": "binance",
+                "market_type": "spot",
+                "data_kind": "depth",
+                "symbol": "BTCUSDT",
+                "captured_at": "2026-01-01T00:00:00",
+                "payload": {
+                    "lastUpdateId": 1,
+                    "bids": [["100.0", "1.0"]],
+                    "asks": [["101.0", "1.5"]],
                 },
-            ),
-            data_id="depth_levels_tick",
+            }
         )
 
 
@@ -137,11 +112,8 @@ def test_binance_interim_maps_millisecond_range_failure_to_owner_error() -> None
         },
     }
 
-    with pytest.raises(ValueError, match="invalid_binance_millisecond_timestamp"):
-        normalize_raw_envelopes(
-            (envelope,),
-            data_id="aggregate_trades_tick",
-        )
+    with pytest.raises(ValueError, match="invalid_binance_agg_trade_timestamp"):
+        raw_exports._validate_envelope(envelope)
 
 
 def test_binance_interim_materialization_rejects_bare_str_data_ids(tmp_path) -> None:
@@ -162,23 +134,20 @@ def test_binance_interim_rejects_unknown_data_id_with_stable_error(tmp_path) -> 
 
 def test_binance_interim_rejects_missing_payload_field_with_value_error() -> None:
     with pytest.raises(ValueError, match="missing_binance_raw_payload_field"):
-        normalize_raw_envelopes(
-            (
-                {
-                    "source": "binance",
-                    "market_type": "spot",
-                    "data_kind": "agg_trades",
-                    "symbol": "BTCUSDT",
-                    "captured_at": "2026-07-06T00:00:02Z",
-                    "payload": {
-                        "a": 1,
-                        "p": "100.1",
-                        "q": "2.0",
-                        "f": 10,
-                        "T": 1783296001000,
-                        "m": False,
-                    },
+        raw_exports._validate_envelope(
+            {
+                "source": "binance",
+                "market_type": "spot",
+                "data_kind": "agg_trades",
+                "symbol": "BTCUSDT",
+                "captured_at": "2026-07-06T00:00:02Z",
+                "payload": {
+                    "a": 1,
+                    "p": "100.1",
+                    "q": "2.0",
+                    "f": 10,
+                    "T": 1783296001000,
+                    "m": False,
                 },
-            ),
-            data_id="aggregate_trades_tick",
+            }
         )

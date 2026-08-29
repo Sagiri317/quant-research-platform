@@ -3,59 +3,38 @@
 from __future__ import annotations
 
 import struct
-import sys
 from pathlib import Path
 from typing import Any
 
-from quant_research_platform.contracts._json import render_qrp_json_object
+from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
-    MemoryLease,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
     _OwnedValue,
+    _release_owned_value,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_key_tracking import (
-    EXACT_KEY_SQLITE_CACHE_BYTES,
-    ExactPrimaryKeyIndex,
-)
-from quant_research_platform.storage._dataset_observation import (
+from quant_research_platform.storage.datasets.observation import (
     DatasetSummaryObserver,
 )
-from quant_research_platform.storage._dataset_paths import relative_partition_label
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.paths import relative_partition_label
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     dataset_partition_state_reserve_bytes,
     dataset_primary_key_schema,
     iter_dataset_file_batches,
     open_dataset_session,
 )
-from quant_research_platform.storage._dataset_schema import (
+from quant_research_platform.storage.datasets.schema import (
     date_string,
     physical_schema_columns,
 )
-from quant_research_platform.storage._dataset_types import DatasetInspection
-
-
-def _close_lease_preserving_primary(lease: MemoryLease, *, owner: str) -> None:
-    primary = sys.exception()
-    try:
-        lease.close()
-    except BaseException as cleanup_error:
-        if primary is None:
-            raise
-        primary.add_note(
-            f"{owner} lease close also failed: {type(cleanup_error).__name__}"
-        )
-
-
-def _release_owned_value(
-    owned: _OwnedValue[Any],
-    *,
-    owner: str,
-) -> None:
-    owned.value = None
-    _close_lease_preserving_primary(owned.lease, owner=owner)
+from quant_research_platform.storage.datasets.types import DatasetInspection
+from quant_research_platform.storage.exact_keys import (
+    EXACT_KEY_SQLITE_CACHE_BYTES,
+    ExactPrimaryKeyIndex,
+)
 
 
 def inspect_dataset(

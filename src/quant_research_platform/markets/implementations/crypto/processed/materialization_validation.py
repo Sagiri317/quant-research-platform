@@ -28,15 +28,15 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     filter_frame_by_time_window,
     iter_dataset_chunks,
     iter_dataset_file_batches,
     parquet_filters_for_time_window,
 )
-from quant_research_platform.storage._dataset_schema import dataset_identity_payload
-from quant_research_platform.storage._dataset_writing import DatasetWriteReceipt
+from quant_research_platform.storage.datasets.schema import dataset_identity_payload
+from quant_research_platform.storage.datasets.writing import DatasetWriteReceipt
 
 _EXPECTED_KEY_NAMESPACE = "crypto_expected"
 

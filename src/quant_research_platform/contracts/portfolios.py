@@ -139,7 +139,6 @@ class CostConfig:
     sell_cost_bps: float = 0.0
     slippage_bps: float = 0.0
     spread_bps: float | None = None
-    impact_model: str | None = None
 
     def __post_init__(self) -> None:
         _validate_nonnegative(self.buy_cost_bps, "buy_cost_bps")
@@ -147,10 +146,6 @@ class CostConfig:
         _validate_nonnegative(self.slippage_bps, "slippage_bps")
         if self.spread_bps is not None:
             _validate_nonnegative(self.spread_bps, "spread_bps")
-        if self.impact_model is not None and type(self.impact_model) is not str:
-            raise ValueError("unsupported_portfolio_impact_model")
-        if self.impact_model is not None:
-            raise ValueError("unsupported_portfolio_impact_model")
 
 
 @dataclass(frozen=True)

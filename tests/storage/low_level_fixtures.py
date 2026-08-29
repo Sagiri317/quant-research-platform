@@ -8,10 +8,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.catalog.fields import platform_entity_time_key
-from quant_research_platform.contracts._json import (
-    canonical_json_hash,
-    render_qrp_json_object,
-)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -21,8 +17,12 @@ from quant_research_platform.contracts.data import (
     data_frequency_slug,
 )
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.storage._dataset_paths import relative_partition_label
-from quant_research_platform.storage._dataset_schema import (
+from quant_research_platform.contracts.json_codec import (
+    canonical_json_hash,
+    render_qrp_json_object,
+)
+from quant_research_platform.storage.datasets.paths import relative_partition_label
+from quant_research_platform.storage.datasets.schema import (
     logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
     physical_schema_columns,

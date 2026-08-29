@@ -83,7 +83,6 @@ def test_blocked_entry_policy_names_have_distinct_contracts() -> None:
         ({"buy_cost_bps": float("nan")}, "buy_cost_bps must be nonnegative"),
         ({"sell_cost_bps": float("inf")}, "sell_cost_bps must be nonnegative"),
         ({"slippage_bps": float("-inf")}, "slippage_bps must be nonnegative"),
-        ({"impact_model": ""}, "unsupported_portfolio_impact_model"),
     ],
 )
 def test_cost_config_validation_errors(kwargs: dict[str, object], error: str) -> None:

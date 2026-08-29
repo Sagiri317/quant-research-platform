@@ -7,13 +7,13 @@ from types import SimpleNamespace
 import pytest
 
 import quant_research_platform.runtime.resources as resources
-import quant_research_platform.storage._dataset_reading as dataset_reading
+import quant_research_platform.storage.datasets.reading as dataset_reading
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_types import DatasetReadMode
+from quant_research_platform.storage.datasets.types import DatasetReadMode
 from tests.helpers.runtime_resources import capture_test_policy
 
 

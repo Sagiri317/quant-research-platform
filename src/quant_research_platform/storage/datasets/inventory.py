@@ -17,19 +17,17 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     require_free_disk_headroom,
 )
-from quant_research_platform.storage._dataset_paths import (
-    parse_year_partition_label,
-    require_unaliased_path,
-)
-from quant_research_platform.storage._dataset_physical import (
-    DatasetFileIdentity,
-    DatasetPartMetadata,
-    dataset_file_identity,
-)
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     remove_owned_scratch,
 )
+from quant_research_platform.storage.datasets.paths import parse_year_partition_label
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+    require_unaliased_path,
+)
+from quant_research_platform.storage.parquet import DatasetPartMetadata
 
 _PREFIX = ".i-"
 _PART_FILE_PATTERN = re.compile(r"^part-(\d+)\.parquet$")

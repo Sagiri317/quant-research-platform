@@ -21,10 +21,12 @@ from quant_research_platform.markets.implementations.crypto.hft import (
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_DATA_ID,
     HFT_LABEL_DATA_ID,
-    HFT_LABEL_HORIZONS_MS,
     HFT_PANEL_DATA_ID,
     MARKET_ID,
     canonical_crypto_asset_id,
+)
+from quant_research_platform.markets.implementations.crypto.labels.definitions import (
+    HFT_LABEL_HORIZONS_MS,
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
@@ -43,14 +45,14 @@ from quant_research_platform.sources.binance.replay import (
     iter_agg_trades,
     iter_reconstructed_depth,
 )
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets import DatasetInspection
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_chunks,
     open_dataset_session,
 )
-from quant_research_platform.storage._dataset_schema import dataset_identity_payload
-from quant_research_platform.storage._dataset_writing import write_dataset
-from quant_research_platform.storage.datasets import DatasetInspection
+from quant_research_platform.storage.datasets.schema import dataset_identity_payload
+from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 _ROW_WORKING_BYTES = 16 * 1024

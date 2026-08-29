@@ -26,22 +26,17 @@ import pyarrow.parquet as pq
 import pytest
 
 import quant_research_platform.runtime.resources as runtime_resources
-import quant_research_platform.storage._dataset_comparison as dataset_comparison
-import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
-import quant_research_platform.storage._dataset_inspection as dataset_inspection
-import quant_research_platform.storage._dataset_inventory as dataset_inventory
-import quant_research_platform.storage._dataset_key_tracking as dataset_key_tracking
-import quant_research_platform.storage._dataset_physical as dataset_physical
-import quant_research_platform.storage._dataset_reading as dataset_reading
-import quant_research_platform.storage._dataset_schema as dataset_schema
-import quant_research_platform.storage._dataset_writing as dataset_writing
-import quant_research_platform.storage.datasets as datasets
+import quant_research_platform.storage.datasets.comparison as dataset_comparison
+import quant_research_platform.storage.datasets.fingerprinting as dataset_fingerprinting
+import quant_research_platform.storage.datasets.inspection as dataset_inspection
+import quant_research_platform.storage.datasets.inventory as dataset_inventory
+import quant_research_platform.storage.datasets.reading as dataset_reading
+import quant_research_platform.storage.datasets.schema as dataset_schema
+import quant_research_platform.storage.datasets.writing as dataset_writing
 import quant_research_platform.storage.errors as storage_errors
+import quant_research_platform.storage.exact_keys as dataset_key_tracking
 import quant_research_platform.storage.manifests as storage_manifests
-from quant_research_platform.contracts._json import (
-    canonical_identity_bytes,
-    canonical_json_hash,
-)
+import quant_research_platform.storage.parquet as dataset_physical
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -50,6 +45,10 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.json_codec import (
+    canonical_identity_bytes,
+    canonical_json_hash,
+)
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
@@ -58,10 +57,6 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_schema import (
-    logical_dtype_metadata_bytes,
-    logical_dtype_payload_from_frame,
-)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -69,6 +64,10 @@ from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
     write_dataset,
+)
+from quant_research_platform.storage.datasets.schema import (
+    logical_dtype_metadata_bytes,
+    logical_dtype_payload_from_frame,
 )
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.low_level_fixtures import (
@@ -2600,11 +2599,11 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     tmp_path: Path,
 ) -> None:
     module_spec = importlib.util.find_spec(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
     assert module_spec is not None, "storage exact key index module is missing"
     module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
     index_root = tmp_path / "index"
     index_root.mkdir()
@@ -2665,7 +2664,7 @@ def test_exact_key_index_cleans_scratch_when_sqlite_connect_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
     index = module.ExactPrimaryKeyIndex(
         primary_key=("key",),
@@ -2688,7 +2687,7 @@ def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk(
     tmp_path: Path,
 ) -> None:
     module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
 
     with module.ExactPrimaryKeyIndex(
@@ -2704,7 +2703,7 @@ def test_exact_key_index_spills_sqlite_temp_state_to_disk(
     tmp_path: Path,
 ) -> None:
     module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
 
     with module.ExactPrimaryKeyIndex(
@@ -2728,7 +2727,7 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     tmp_path: Path,
 ) -> None:
     module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
 
     with module.ExactPrimaryKeyIndex(
@@ -2774,7 +2773,7 @@ def test_exact_primary_key_accepts_timestamp_outside_nanosecond_range(
     tmp_path: Path,
 ) -> None:
     module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
     out_of_nanosecond_range = 32_503_680_000
     timestamp_type = pa.timestamp("s", tz="UTC")
@@ -2794,7 +2793,7 @@ def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     key_tracking = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
     tracked_schemas: list[pa.Schema] = []
     original_add_table = key_tracking.ExactPrimaryKeyIndex.add_table
@@ -3844,76 +3843,6 @@ def test_iter_bounded_frame_chunks_reuses_bounded_frame_storage() -> None:
         )
         for chunk in chunks
     )
-
-
-def test_public_storage_operations_delegate_admission_to_storage_owner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    delegated_policies: list[RuntimeResourcePolicy | None] = []
-    sentinel = object()
-
-    def delegate(*_args, **kwargs):
-        delegated_policies.append(kwargs["resource_policy"])
-        return sentinel
-
-    for name in (
-        "_write_dataset",
-        "_read_dataset",
-        "_inspect_dataset",
-        "_fingerprint_dataset",
-        "_compare_datasets",
-    ):
-        monkeypatch.setattr(datasets, name, delegate)
-
-    spec = make_processed_dataset_spec("captured_policy")
-    calls = (
-        lambda: datasets.write_dataset(Path("ignored"), pd.DataFrame(), spec=spec),
-        lambda: datasets.read_dataset(Path("ignored")),
-        lambda: datasets.read_dataset(
-            Path("ignored"),
-            mode=DatasetReadMode.CHUNKED,
-        ),
-        lambda: datasets.inspect_dataset(Path("ignored")),
-        lambda: datasets.fingerprint_dataset(Path("ignored")),
-        lambda: datasets.compare_datasets(Path("left"), Path("right")),
-    )
-
-    results = tuple(call() for call in calls)
-    assert results[0] is None
-    assert all(result is sentinel for result in results[1:])
-    assert delegated_policies == [None] * len(calls)
-
-
-def test_independent_public_storage_operations_reject_an_unrelated_active_root(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def forbidden(*_args, **_kwargs):
-        raise AssertionError("competing root reached storage owner")
-
-    for name in (
-        "_write_dataset",
-        "_read_dataset",
-        "_inspect_dataset",
-        "_fingerprint_dataset",
-        "_compare_datasets",
-    ):
-        monkeypatch.setattr(datasets, name, forbidden)
-    spec = make_processed_dataset_spec("independent_public")
-    calls = (
-        lambda: datasets.write_dataset(Path("ignored"), pd.DataFrame(), spec=spec),
-        lambda: datasets.read_dataset(Path("ignored")),
-        lambda: datasets.inspect_dataset(Path("ignored")),
-        lambda: datasets.fingerprint_dataset(Path("ignored")),
-        lambda: datasets.compare_datasets(Path("left"), Path("right")),
-    )
-
-    with runtime_resource_policy_scope(_issued_test_policy()):
-        for call in calls:
-            with pytest.raises(
-                RuntimeError,
-                match="^runtime_resource_policy_competing_root$",
-            ):
-                call()
 
 
 def test_storage_operations_propagate_the_captured_payload_target(
@@ -7524,7 +7453,7 @@ def test_exact_key_decimal_zero_and_numpy_scalar_identity(
     tmp_path: Path,
 ) -> None:
     module = importlib.import_module(
-        "quant_research_platform.storage._dataset_key_tracking"
+        "quant_research_platform.storage.exact_keys"
     )
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),

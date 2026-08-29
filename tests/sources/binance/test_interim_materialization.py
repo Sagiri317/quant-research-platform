@@ -377,7 +377,7 @@ def test_binance_interim_materializer_writes_multiple_batches(
     ):
         chunks = _collect_bound_first(data, resource_policy)
         chunk_lengths.extend(len(chunk) for chunk in chunks)
-        from quant_research_platform.storage._dataset_writing import write_dataset
+        from quant_research_platform.storage.datasets.writing import write_dataset
 
         return write_dataset(
             dataset_root,

@@ -55,6 +55,7 @@ def make_filter_mode_prediction_output_scores(
             build_state=build_state,
         )
     )
+    output = [item.value for item in output]
     return (
         pd.concat(output, ignore_index=True)
         .sort_values(["timestamp", "asset_id"], kind="mergesort")

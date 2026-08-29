@@ -29,13 +29,13 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
     strict_symbol,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
-from quant_research_platform.storage._dataset_physical import (
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
-    _dataset_file_identity_bytes,
+    _file_identity_bytes,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    require_unaliased_path,
 )
 
 DATA_ID_BY_RAW_KIND = {
@@ -382,7 +382,7 @@ def _index_raw_kind_files(
             )
             relative = path.relative_to(root).as_posix().encode("utf-8")
             discovered += 1
-            yield relative, relative + b"\0" + _dataset_file_identity_bytes(identity)
+            yield relative, relative + b"\0" + _file_identity_bytes(identity)
 
     inserted = index.add_identity_payloads(
         namespace=namespace,
@@ -431,7 +431,7 @@ def _verify_indexed_raw_kind_files(
             namespace=namespace,
             payload=relative,
         )
-        actual = relative + b"\0" + _dataset_file_identity_bytes(identity)
+        actual = relative + b"\0" + _file_identity_bytes(identity)
         if expected != actual:
             raise ValueError(_RAW_IDENTITY_ERROR)
         current_count += 1

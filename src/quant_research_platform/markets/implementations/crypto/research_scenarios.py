@@ -9,10 +9,11 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.markets.implementations.crypto.factors.definitions import (
+    HFT_FACTOR_COLUMNS,
+)
 from quant_research_platform.markets.implementations.crypto.hft import HFT_GRID_MS
 from quant_research_platform.markets.implementations.crypto.ids import (
-    HFT_FACTOR_COLUMNS,
-    HFT_MODEL_LABEL_HORIZON_MS,
     HFT_RESEARCH_DATASET_ID,
     MARKET_ID,
     MICROSTRUCTURE_FORWARD_RETURNS_DATASET_ID,
@@ -31,6 +32,7 @@ HFT_MODEL_ALGORITHMS = (
     "linear_regression",
     "xgboost_regressor",
 )
+HFT_MODEL_LABEL_HORIZON_MS = 500
 HFT_MODEL_LABEL_COLUMN = f"future_mid_return_{HFT_MODEL_LABEL_HORIZON_MS}ms"
 
 

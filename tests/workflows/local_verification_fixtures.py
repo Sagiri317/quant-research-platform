@@ -9,12 +9,12 @@ from types import SimpleNamespace
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts._output_manifest import (
+from quant_research_platform.artifacts.outputs.manifest import (
     _OUTPUT_DEFINITION_FILES,
     portfolio_output_metadata_from_row_counts,
     prediction_output_metadata,
 )
-from quant_research_platform.artifacts._portfolio_output_validation import (
+from quant_research_platform.artifacts.outputs.portfolio_validation import (
     PORTFOLIO_ARTIFACTS,
 )
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
@@ -40,10 +40,10 @@ from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.portfolios.runner import PortfolioResult
 from quant_research_platform.research.predictions.outputs import PredictionResult
 from quant_research_platform.runtime.resources import current_runtime_resource_policy
-from quant_research_platform.storage._dataset_inspection import (
+from quant_research_platform.storage.datasets.inspection import (
     inspect_dataset as inspect_dataset_with_policy,
 )
-from quant_research_platform.storage._dataset_writing import (
+from quant_research_platform.storage.datasets.writing import (
     write_dataset as write_dataset_with_policy,
 )
 from quant_research_platform.workflows import local_verification as module
@@ -290,7 +290,7 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(
         module,
-        "_read_prediction_output_bundle",
+        "read_prediction_output_bundle",
         lambda *_args, **_kwargs: nullcontext(({"metadata": {}}, pd.DataFrame())),
     )
     return write_evaluation_stub

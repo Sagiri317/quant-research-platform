@@ -38,9 +38,9 @@ from quant_research_platform.sources.csmar import (
     ids as csmar_ids,
 )
 from quant_research_platform.storage import errors as storage_errors
-from quant_research_platform.storage._dataset_key_tracking import CompactPositionState
-from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
 from quant_research_platform.storage.datasets import inspect_dataset, read_dataset
+from quant_research_platform.storage.exact_keys import CompactPositionState
+from quant_research_platform.storage.identity import DatasetFileIdentity
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers import frequency_ids
 from tests.helpers.runtime_resources import capture_test_policy

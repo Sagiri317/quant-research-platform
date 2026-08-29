@@ -7,14 +7,15 @@ from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.markets.implementations.crypto.factors.definitions import (
+    HFT_FACTOR_COLUMNS,
+)
 from quant_research_platform.markets.implementations.crypto.fields import (
     field_catalog,
 )
 from quant_research_platform.markets.implementations.crypto.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
-    HFT_FACTOR_COLUMNS,
     HFT_FACTOR_DATA_ID,
-    HFT_LABEL_COLUMNS,
     HFT_LABEL_DATA_ID,
     HFT_PANEL_DATA_ID,
     HFT_RESEARCH_DATASET_ID,
@@ -25,6 +26,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 )
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
+    HFT_LABEL_COLUMNS,
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     HFT_PANEL_CONTEXT_COLUMNS,

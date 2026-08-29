@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.sources.csmar.catalog import source_definition
+from quant_research_platform.sources.csmar.interim import interim_catalog
 from tests.helpers import frequency_ids
 
 EXPECTED_CSMAR_INTERIM_DATA_IDS = (
@@ -16,9 +17,8 @@ EXPECTED_CSMAR_INTERIM_DATA_IDS = (
 
 
 def test_csmar_source_interim_catalog_graph_closes_without_provider_binding() -> None:
-    catalogs = research_profile()
-    source = catalogs.sources.get("csmar")
-    catalog = catalogs.source_interim_catalogs["csmar"]
+    source = source_definition()
+    catalog = interim_catalog()
 
     assert str(source.source_id) == "csmar"
     assert source.provider_id == "csmar"
@@ -32,7 +32,7 @@ def test_csmar_source_interim_catalog_graph_closes_without_provider_binding() ->
 
 
 def test_csmar_catalog_rejects_unknown_data_id() -> None:
-    catalog = research_profile().source_interim_catalogs["csmar"]
+    catalog = interim_catalog()
 
     with pytest.raises(KeyError, match="unknown_interim_data_spec"):
         catalog.get("unknown")

@@ -225,16 +225,34 @@ class _PendingMarkouts:
         )
         self._file.flush()
 
-    def resolve(self, state: BookState) -> None:
-        future_mid = _mid(state)
+    def resolve(
+        self,
+        state: BookState,
+        *,
+        previous_state: BookState | None,
+        coverage: Mapping[str, tuple[int, int]],
+    ) -> None:
+        current_mid = _mid(state)
+        previous_mid = None if previous_state is None else _mid(previous_state)
         while (fill := self._peek()) is not None:
             if fill["segment_id"] != state.segment_id:
                 self._finalize(fill, future_mid=None)
                 self._pop()
                 continue
-            if state.observed_time_ns < fill["markout_target_time_ns"]:
+            target = fill["markout_target_time_ns"]
+            if state.observed_time_ns < target:
                 break
-            self._finalize(fill, future_mid=future_mid)
+            if target == state.observed_time_ns:
+                markout_mid = current_mid
+            elif (
+                previous_state is not None
+                and previous_state.segment_id == fill["segment_id"]
+                and _covered(coverage, fill["segment_id"], target)
+            ):
+                markout_mid = previous_mid
+            else:
+                markout_mid = None
+            self._finalize(fill, future_mid=markout_mid)
             self._pop()
 
     def expire_all(self) -> None:
@@ -372,12 +390,18 @@ def _resolve_observed_markouts(
     pending: _PendingMarkouts,
     state: BookState,
     coverage: Mapping[str, tuple[int, int]],
+    *,
+    previous_state: BookState | None,
 ) -> None:
     bounds = coverage.get(state.segment_id)
     if bounds is None or state.observed_time_ns >= bounds[1]:
         pending.expire_all()
     elif state.observed_time_ns >= bounds[0]:
-        pending.resolve(state)
+        pending.resolve(
+            state,
+            previous_state=previous_state,
+            coverage=coverage,
+        )
 
 
 def simulate_taker(
@@ -429,6 +453,7 @@ def simulate_taker(
                     latest_state = None
                     pending.expire_all()
                     return
+                previous_state = latest_state
                 state = _book_value(event)
                 _close_book(latest_owned)
                 latest_owned = event if isinstance(event, _OwnedValue) else None
@@ -443,6 +468,7 @@ def simulate_taker(
                     pending,
                     state,
                     observed_coverage,
+                    previous_state=previous_state,
                 )
 
             def consume_until(target: int) -> None:
@@ -612,7 +638,7 @@ def simulate_taker(
         "simulation": "event_time_target_position_taker",
         "created_orders": created_orders,
         "filled_orders": filled_orders,
-        "unfilled_orders": created_orders - filled_orders,
+        "zero_fill_orders": created_orders - filled_orders,
         "unfilled_quantity": unfilled_quantity,
         "equity_rows": equity_rows,
         "gross_pnl_usd": last_gross,
@@ -877,6 +903,7 @@ def simulate_maker(
                 last_mid = None
                 pending.expire_all()
                 return
+            previous_state = latest_state
             state = _book_value(event)
             if (
                 latest_state is not None
@@ -905,6 +932,7 @@ def simulate_maker(
                 pending,
                 state,
                 observed_coverage,
+                previous_state=previous_state,
             )
 
         def process_trade(trade: TradeEvent) -> None:
@@ -1111,7 +1139,9 @@ def simulate_maker(
             last_net = net
         while next_event is not None:
             process_until(next_event[0][0])
-        cancel_active(last_event_time_ns)
+        for order in active.values():
+            finish_order(order, order.valid_until_ns, cancelled=True)
+        active.clear()
         if latest_state is not None:
             last_mid = _mid(latest_state)
             last_gross = cash_gross + position * last_mid
@@ -1126,7 +1156,7 @@ def simulate_maker(
         "created_orders": created_orders,
         "filled_orders": filled_orders,
         "cancelled_orders": cancelled_orders,
-        "unfilled_orders": created_orders - filled_orders,
+        "zero_fill_orders": created_orders - filled_orders,
         "partial_fill_events": partial_fill_events,
         "trade_through_fill_events": trade_through_fill_events,
         "equity_rows": equity_rows,

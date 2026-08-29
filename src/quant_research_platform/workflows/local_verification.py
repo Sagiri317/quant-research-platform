@@ -10,22 +10,16 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from quant_research_platform.artifacts._evaluation_outputs import (
-    _write_evaluation_outputs_from_chunks,
-)
-from quant_research_platform.artifacts._output_bundle_validation import (
-    _read_prediction_output_bundle,
-    validate_output_bundle,
-)
-from quant_research_platform.artifacts._portfolio_outputs import (
-    write_portfolio_outputs,
-)
-from quant_research_platform.artifacts._prediction_outputs import (
-    write_prediction_outputs,
-)
 from quant_research_platform.artifacts.evidence import (
     write_json_evidence,
     write_markdown_evidence,
+)
+from quant_research_platform.artifacts.outputs import (
+    read_prediction_output_bundle,
+    validate_output_bundle,
+    write_evaluation_outputs_from_chunks,
+    write_portfolio_outputs,
+    write_prediction_outputs,
 )
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
@@ -78,12 +72,14 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
-from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
 from quant_research_platform.storage._scratch_ownership import (
     move_path_no_replace,
     owned_scratch_name,
     remove_owned_scratch,
+)
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
+    require_unaliased_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
@@ -214,13 +210,14 @@ def _write_evaluation_outputs_from_research_dataset(
                     state.coverage_summary(),
                 )
 
-            return _write_evaluation_outputs_from_chunks(
+            return write_evaluation_outputs_from_chunks(
                 evaluation_chunks,
                 summary_factory=summary_factory,
                 spec=spec,
                 output_spec=output_spec,
                 layout=layout,
                 n_groups=effective_groups,
+                resource_policy=policy,
             )
         except BaseException as exc:
             primary = exc
@@ -417,6 +414,7 @@ def _run_local_verification_with_policy(
                         market_id=catalogs.research_datasets.get(
                             prediction_spec.research_dataset_id
                         ).market_id,
+                        resource_policy=resource_policy,
                     )
                 )
         prediction_roots = tuple(prediction_roots_by_id.values())
@@ -442,7 +440,7 @@ def _run_local_verification_with_policy(
                         raise ValueError("persisted_prediction_output_missing") from exc
                     prediction_manifest, prediction_frame = (
                         prediction_input.enter_context(
-                            _read_prediction_output_bundle(
+                            read_prediction_output_bundle(
                                 prediction_root,
                                 expected_output_id=prediction_id,
                                 time_window=evaluation_time_window,
@@ -467,7 +465,6 @@ def _run_local_verification_with_policy(
                             additive_cumulative_returns_factory=(
                                 portfolio_result.additive_cumulative_returns_factory
                             ),
-                            summary_pre_reserved=True,
                             spec=portfolio_result.spec,
                             output_spec=_output_spec(
                                 output_id=portfolio_result.spec.portfolio_id,
@@ -477,6 +474,7 @@ def _run_local_verification_with_policy(
                                 run_type=portfolio_result.spec.run_type,
                             ),
                             layout=storage_layout,
+                            resource_policy=resource_policy,
                         )
                     )
                 del prediction_frame, prediction_metadata
@@ -543,7 +541,7 @@ def _run_local_verification_with_policy(
             schema_inventory_summary = summarize_schema_inventory(
                 run_root,
                 important_null_count_columns=(
-                    config.profile.schema_inventory_important_columns()
+                    config.profile.schema_inventory_important_columns
                 ),
                 resource_policy=resource_policy,
             )
@@ -633,6 +631,7 @@ def _write_prediction_result(
     layout: StorageLayout,
     run_id: str,
     market_id: str,
+    resource_policy: RuntimeResourcePolicy,
 ) -> Path:
     return write_prediction_outputs(
         spec=result.spec,
@@ -647,6 +646,7 @@ def _write_prediction_result(
         output_chunks=result.output_chunks,
         model_metadata=result.model_metadata,
         prediction_metadata_factory=result.prediction_metadata_factory,
+        resource_policy=resource_policy,
     )
 
 

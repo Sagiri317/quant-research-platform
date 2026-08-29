@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import math
 
+import pytest
+
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
@@ -16,10 +18,7 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     taker_latency_sweep,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
-
-
-def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:
-    return start_ms * 1_000_000, end_ms * 1_000_000
+from tests.helpers.binance_hft import _coverage, _quote
 
 
 def _state(
@@ -110,21 +109,6 @@ def _maker_config() -> MakerConfig:
     )
 
 
-def _quote(
-    timestamp_ms: int,
-    *,
-    book_segment_id: str = "s1",
-    trade_connection_id: str = "trade-connection-1",
-) -> dict[str, object]:
-    return {
-        "timestamp_ms": timestamp_ms,
-        "asset_id": "btc_usdt",
-        "segment_id": f"{book_segment_id}:{trade_connection_id}",
-        "book_segment_id": book_segment_id,
-        "trade_connection_id": trade_connection_id,
-    }
-
-
 def test_taker_uses_latest_actual_state_at_effective_time() -> None:
     fills = []
     diagnostics = simulate_taker(
@@ -166,6 +150,8 @@ def test_taker_walks_known_l2_and_reports_partial_coverage_honestly() -> None:
     assert fills[0]["levels_consumed"] == 2
     assert math.isclose(fills[0]["fill_price"], 100.8)
     assert math.isclose(diagnostics["unfilled_quantity"], 0.5)
+    assert diagnostics["zero_fill_orders"] == 0
+    assert "unfilled_orders" not in diagnostics
     assert diagnostics["markout_undefined_fill_events"] == 1
     assert diagnostics["average_markout_bps"] is None
 
@@ -199,6 +185,25 @@ def test_taker_markout_does_not_use_state_past_observed_coverage() -> None:
     assert diagnostics["markout_undefined_fill_events"] == 1
 
 
+def test_taker_markout_uses_latest_state_as_of_target() -> None:
+    fills: list[dict[str, object]] = []
+    diagnostics = simulate_taker(
+        [
+            _state(0, bid_tick=1000, ask_tick=1005),
+            _state(50, bid_tick=1005, ask_tick=1015),
+            _state(200, bid_tick=1095, ask_tick=1105),
+        ],
+        [{"timestamp_ms": 0, "prediction": 0.1}],
+        prediction_column="prediction",
+        config=_taker_config(),
+        observed_coverage={"s1": _coverage(0, 300)},
+        on_fill=fills.append,
+    )
+
+    assert diagnostics["markout_undefined_fill_events"] == 0
+    assert fills[0]["markout_usd_per_unit"] == pytest.approx(0.5)
+
+
 def test_taker_target_position_does_not_accumulate_repeated_signal() -> None:
     diagnostics = simulate_taker(
         [_state(0), _state(100), _state(200)],
@@ -221,7 +226,7 @@ def test_maker_processes_same_time_events_in_local_observation_order() -> None:
     diagnostics = simulate_maker(
         [_state(0), _state(100, bid_tick=994, ask_tick=1006)],
         [_trade(100, price="99.5", quantity="3", maker_buyer=True)],
-        [_quote(0), _quote(100)],
+        [_quote(0, book_segment_id="s1"), _quote(100, book_segment_id="s1")],
         config=_maker_config(),
         observed_coverage={"s1": _coverage(0, 100)},
         trade_coverage={"trade-connection-1": _coverage(0, 101)},
@@ -241,7 +246,7 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
             _trade(50, price="99.5", quantity="2.5", maker_buyer=True),
             _trade(100, price="99.5", quantity="0.5", maker_buyer=True),
         ],
-        [_quote(0)],
+        [_quote(0, book_segment_id="s1")],
         config=_maker_config(),
         observed_coverage={"s1": _coverage(0, 201)},
         trade_coverage={"trade-connection-1": _coverage(0, 201)},
@@ -266,7 +271,7 @@ def test_maker_trade_through_fills_and_boundary_blocks_stale_trade() -> None:
             _trade(50, price="99.4", quantity="0.1", maker_buyer=True),
             _trade(100, price="99.0", quantity="1", maker_buyer=True),
         ],
-        [_quote(0)],
+        [_quote(0, book_segment_id="s1")],
         config=_maker_config(),
         observed_coverage={"s1": _coverage(0, 74)},
         trade_coverage={"trade-connection-1": _coverage(0, 101)},

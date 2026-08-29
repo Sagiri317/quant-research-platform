@@ -15,28 +15,26 @@ import pyarrow as pa
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
+    _release_owned_value,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_fingerprinting import (
+from quant_research_platform.storage.datasets.fingerprinting import (
     _fingerprint_dataset_session_owned,
     dataset_fingerprint_retained_memory_bytes,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    _close_lease_preserving_primary,
-    _release_owned_value,
-)
-from quant_research_platform.storage._dataset_key_tracking import (
-    EXACT_KEY_SQLITE_CACHE_BYTES,
-    ExactPrimaryKeyIndex,
-)
-from quant_research_platform.storage._dataset_paths import require_artifact_root
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_file_batches,
     open_dataset_session,
 )
-from quant_research_platform.storage._dataset_types import DatasetComparison
+from quant_research_platform.storage.datasets.types import DatasetComparison
+from quant_research_platform.storage.exact_keys import (
+    EXACT_KEY_SQLITE_CACHE_BYTES,
+    ExactPrimaryKeyIndex,
+)
+from quant_research_platform.storage.identity import require_artifact_root
 
 
 def compare_datasets(

@@ -7,12 +7,12 @@ import os
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from quant_research_platform.interfaces import services
+from quant_research_platform.interfaces import queries
 from quant_research_platform.interfaces.api.errors import (
     ApiError,
     register_api_error_handlers,
 )
-from quant_research_platform.interfaces.api.models import (
+from quant_research_platform.interfaces.models import (
     FactorCatalogResponse,
     LabelCatalogResponse,
     ResearchDatasetRequirementsResponse,
@@ -63,14 +63,14 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
         operation_id="list_catalog_factors",
     )
     def catalog_factors() -> FactorCatalogResponse:
-        return services.list_factors(research_profile())
+        return queries.list_factors(research_profile())
 
     @app.get(
         "/api/0.1/catalog/labels",
         operation_id="list_catalog_labels",
     )
     def catalog_labels() -> LabelCatalogResponse:
-        return services.list_labels(research_profile())
+        return queries.list_labels(research_profile())
 
     @app.get(
         "/api/0.1/research-datasets/{dataset_id}/requirements",
@@ -80,7 +80,7 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
         dataset_id: str,
     ) -> ResearchDatasetRequirementsResponse:
         try:
-            return services.describe_research_dataset_requirements(
+            return queries.describe_research_dataset_requirements(
                 dataset_id,
                 research_profile(),
             )

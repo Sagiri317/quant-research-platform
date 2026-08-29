@@ -5,8 +5,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts import (
-    _output_common_validation as output_common_validation,
+from quant_research_platform.artifacts.outputs import (
+    common_validation as output_common_validation,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec

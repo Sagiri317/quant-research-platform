@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.markets.implementations.a_share.definition import (
     market_definition,
@@ -8,7 +9,6 @@ from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
 from quant_research_platform.markets.implementations.a_share.ids import (
-    MARKET_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
 )
 from quant_research_platform.markets.implementations.a_share.labels import (
@@ -17,10 +17,11 @@ from quant_research_platform.markets.implementations.a_share.labels import (
 from quant_research_platform.markets.implementations.a_share.processed import (
     catalog as processed_catalog,
 )
-from quant_research_platform.markets.implementations.a_share.research_profiles import (
+from quant_research_platform.markets.implementations.a_share.research_datasets import (
     build_research_dataset_catalog,
 )
 from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.sources.csmar.catalog import source_definition
 from tests.helpers import frequency_ids
 
 
@@ -66,18 +67,17 @@ def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
     assert kinds_by_id["forward_returns"] is ProcessedDataKind.LABEL
 
 
-def test_local_profile_internal_registries_are_platform_composed() -> None:
-    catalogs = research_profile()
-    market = catalogs.markets.get(MARKET_ID)
+def test_market_source_output_owners_are_composed() -> None:
+    market = market_definition()
     owner_market = market_definition()
-    source = catalogs.sources.get("csmar")
+    source = source_definition()
 
     assert market.market_id == owner_market.market_id
     assert market.display_name == owner_market.display_name
     assert market.processed_spec_ids == owner_market.processed_spec_ids
     assert source.provider_id == "csmar"
     assert source.implementation_package == "quant_research_platform.sources.csmar"
-    assert catalogs.outputs.get("evaluation_outputs").run_type == "evaluation"
+    assert output_catalog().get("evaluation_outputs").run_type == "evaluation"
 
 
 def test_processed_catalog_owner_matches_profile() -> None:

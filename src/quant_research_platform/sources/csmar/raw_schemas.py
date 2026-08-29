@@ -19,36 +19,25 @@ from quant_research_platform.runtime.resources import (
     MIB,
     MemoryLease,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
     current_runtime_resource_policy,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar import field_mappings as _field_mappings
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
-from quant_research_platform.storage._dataset_physical import (
+from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
+from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    require_unaliased_path,
 )
-from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 
 MAX_LOGICAL_RECORD_BYTES = MIB
 _MAX_PROVIDER_HEADER_FIELDS = 64
 LOGICAL_RECORD_LIMIT_ERROR = "csmar_logical_record_exceeds_source_limit"
 _CSV_RECORD_LEASE_BOUND_BYTES = 5 * MAX_LOGICAL_RECORD_BYTES
 _CSV_PARSER_WORKSPACE_BOUND_BYTES = 128 * 1024
-
-
-def _close_lease_preserving_primary(lease: MemoryLease, *, owner: str) -> None:
-    primary = sys.exception()
-    try:
-        lease.close()
-    except BaseException as close_error:
-        if primary is None:
-            raise
-        primary.add_note(
-            f"{owner} lease close also failed: {type(close_error).__name__}"
-        )
 
 
 @dataclass(frozen=True)

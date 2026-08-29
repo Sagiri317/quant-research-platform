@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts._json import (
+from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
     parse_qrp_json_object,
 )
@@ -37,32 +37,20 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inventory import (
+from quant_research_platform.storage.datasets.inventory import (
     DatasetInventoryPaths,
     DatasetSessionInventory,
 )
-from quant_research_platform.storage._dataset_manifest_validation import (
+from quant_research_platform.storage.datasets.manifest_validation import (
     manifest_has_runtime_metadata,
 )
-from quant_research_platform.storage._dataset_paths import (
+from quant_research_platform.storage.datasets.paths import (
     format_year_partition_label,
     parse_year_partition_label,
     relative_partition_label,
-    require_artifact_root,
-    require_unaliased_path,
     timestamp_column_from_spec_payload,
 )
-from quant_research_platform.storage._dataset_physical import (
-    DatasetFileIdentity,
-    DatasetPartMetadata,
-    PreparedMembershipValues,
-    _dataset_file_identity_bytes,
-    dataset_file_identity,
-    inspect_dataset_part,
-    iter_dataset_part_batches,
-    record_batch_decoded_working_set_bounds,
-)
-from quant_research_platform.storage._dataset_schema import (
+from quant_research_platform.storage.datasets.schema import (
     logical_dtype_metadata_bytes,
     merge_logical_dtype_payloads,
     pandas_dtype_overrides_from_logical_payload,
@@ -73,11 +61,25 @@ from quant_research_platform.storage._dataset_schema import (
     validate_dataset_manifest_payload,
     validate_dataset_spec_payload,
 )
-from quant_research_platform.storage._dataset_types import (
+from quant_research_platform.storage.datasets.types import (
     DatasetReadMode,
 )
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
+    _file_identity_bytes,
+    dataset_file_identity,
+    require_artifact_root,
+    require_unaliased_path,
+)
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.parquet import (
+    DatasetPartMetadata,
+    PreparedMembershipValues,
+    inspect_dataset_part,
+    iter_dataset_part_batches,
+    record_batch_decoded_working_set_bounds,
+)
 
 _PANDAS_FRAME_FIXED_BYTES = 4 * 1024
 _PANDAS_OBJECT_CELL_BYTES = 64
@@ -193,7 +195,7 @@ class DatasetSession:
 
     def verify(self) -> None:
         spec_identity = dataset_file_identity(self.root / "spec.json")
-        if _dataset_file_identity_bytes(spec_identity) != self.spec_identity_bytes:
+        if _file_identity_bytes(spec_identity) != self.spec_identity_bytes:
             raise ValueError("dataset_spec_identity_changed")
         spec_bytes, _ = read_bounded_qrp_json(
             self.root / "spec.json", expected_identity=spec_identity
@@ -204,7 +206,7 @@ class DatasetSession:
             self.root / "_manifest" / "manifest.json"
         )
         if (
-            _dataset_file_identity_bytes(manifest_identity)
+            _file_identity_bytes(manifest_identity)
             != self.manifest_identity_bytes
         ):
             raise ValueError("dataset_manifest_identity_changed")
@@ -794,8 +796,8 @@ def open_dataset_session(
     with runtime_resource_policy_scope(resource_policy) as issued_policy:
         spec_stat_span_bytes = spec_identity.size
         manifest_stat_span_bytes = manifest_identity.size
-        spec_identity_bytes = _dataset_file_identity_bytes(spec_identity)
-        manifest_identity_bytes = _dataset_file_identity_bytes(manifest_identity)
+        spec_identity_bytes = _file_identity_bytes(spec_identity)
+        manifest_identity_bytes = _file_identity_bytes(manifest_identity)
         metadata_identity_span_bytes = len(spec_identity_bytes) + len(
             manifest_identity_bytes
         )
@@ -927,8 +929,8 @@ def dataset_session_from_inventory(
         manifest_stat_span_bytes = manifest_identity.size
     except (OSError, ValueError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
-    spec_identity_bytes = _dataset_file_identity_bytes(spec_identity)
-    manifest_identity_bytes = _dataset_file_identity_bytes(manifest_identity)
+    spec_identity_bytes = _file_identity_bytes(spec_identity)
+    manifest_identity_bytes = _file_identity_bytes(manifest_identity)
     metadata_identity_span_bytes = len(spec_identity_bytes) + len(
         manifest_identity_bytes
     )

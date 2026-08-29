@@ -1,8 +1,8 @@
-"""Thin service layer shared by API and CLI adapters."""
+"""Read-only catalog and research-dataset query projections."""
 
 from __future__ import annotations
 
-from quant_research_platform.interfaces.api.models import (
+from quant_research_platform.interfaces.models import (
     FactorCatalogResponse,
     LabelCatalogResponse,
     ResearchDatasetRequirementsResponse,

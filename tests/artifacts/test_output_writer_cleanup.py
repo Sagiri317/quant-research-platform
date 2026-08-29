@@ -5,8 +5,8 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import quant_research_platform.artifacts._parquet_writers as parquet_writers
-import quant_research_platform.artifacts._portfolio_outputs as portfolio_outputs
+import quant_research_platform.artifacts.outputs.parquet as parquet_writers
+import quant_research_platform.artifacts.outputs.portfolio as portfolio_outputs
 import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.storage.layout import StorageLayout
 from tests.artifacts.output_edge_fixtures import (

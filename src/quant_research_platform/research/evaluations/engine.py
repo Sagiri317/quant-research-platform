@@ -35,12 +35,21 @@ from quant_research_platform.research.signals.materialization import (
     normalize_signal_frame,
 )
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
+    _OwnedValue,
     pandas_frame_payload_bytes,
 )
 
 _EVALUATION_RECORD_WORKING_BYTES = 512
 _EVALUATION_TIMESTAMP_FACT_BYTES = 128
+
+type _EvaluationOutputChunk = tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    dict[str, object],
+]
 
 
 class _EvaluationStreamingState:
@@ -406,7 +415,7 @@ def _iter_evaluation_output_chunks(
     resource_policy: RuntimeResourcePolicy,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
     summary_state: _EvaluationStreamingState | None = None,
-) -> Iterator[tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]]:
+) -> Iterator[_OwnedValue[_EvaluationOutputChunk]]:
     """Yield bounded pairs and optionally consume them into research summaries."""
 
     from quant_research_platform.research.filtering import _filter_mode_scope
@@ -437,7 +446,7 @@ def _iter_evaluation_output_chunks(
                     resource_policy=resource_policy,
                 ):
                     if summary_state is not None:
-                        summary_state.consume(*output)
+                        summary_state.consume(*output.value)
                     yield output
             finally:
                 filtered = None
@@ -453,7 +462,7 @@ def _iter_evaluation_filtered_chunks(
     n_groups: int,
     asset_column: str,
     resource_policy: RuntimeResourcePolicy,
-) -> Iterator[tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]]:
+) -> Iterator[_OwnedValue[_EvaluationOutputChunk]]:
     rows_input = strict_non_negative_count_value(
         filter_metadata["rows_input"]
     )
@@ -567,11 +576,13 @@ def _iter_evaluation_batch_outputs(
     batch_min_timestamp: str | None,
     batch_max_timestamp: str | None,
     skipped_timestamps: set[pd.Timestamp],
-) -> Iterator[tuple[pd.DataFrame, pd.DataFrame, dict[str, object]]]:
+) -> Iterator[_OwnedValue[_EvaluationOutputChunk]]:
     label_metrics: list[pd.DataFrame] = []
     label_grouped: list[pd.DataFrame] = []
-    label_leases = []
-    concat_lease = None
+    label_leases: list[MemoryLease] = []
+    concat_lease: MemoryLease | None = None
+    output_lease: MemoryLease | None = None
+    owned_output: _OwnedValue[_EvaluationOutputChunk] | None = None
     try:
         for compute_spec, compute_columns in zip(
             compute_specs, compute_columns_by_label, strict=True
@@ -632,6 +643,8 @@ def _iter_evaluation_batch_outputs(
         if len(label_metrics) == 1:
             metrics = label_metrics[0]
             grouped_label_values = label_grouped[0]
+            output_lease = label_leases.pop()
+            label_leases.clear()
         else:
             retained_output_bytes = sum(
                 pandas_frame_payload_bytes(frame)
@@ -664,6 +677,8 @@ def _iter_evaluation_batch_outputs(
                 )
             concat_lease.shrink_to(combined_output_bytes)
             concat_lease.transfer("research.evaluation.output")
+            output_lease = concat_lease
+            concat_lease = None
             for lease in label_leases:
                 lease.close()
             label_leases.clear()
@@ -681,10 +696,33 @@ def _iter_evaluation_batch_outputs(
             "max_timestamp": batch_max_timestamp,
             "skipped_timestamp_count": len(skipped_timestamps),
         }
-        yield metrics, grouped_label_values, metadata
+        owned_output = _OwnedValue(
+            (metrics, grouped_label_values, metadata),
+            output_lease,
+        )
+        output_lease = None
+        try:
+            yield owned_output
+        finally:
+            if owned_output.lease.active:
+                _close_lease_preserving_primary(
+                    owned_output.lease,
+                    owner="research.evaluation.output",
+                )
     finally:
         primary = sys.exception()
         first_failure: BaseException | None = None
+        if output_lease is not None:
+            try:
+                output_lease.close()
+            except BaseException as close_error:
+                if primary is not None:
+                    primary.add_note(
+                        "evaluation output lease release also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+                else:
+                    first_failure = close_error
         if concat_lease is not None:
             try:
                 concat_lease.close()

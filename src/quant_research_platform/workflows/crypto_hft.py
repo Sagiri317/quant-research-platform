@@ -14,11 +14,11 @@ from typing import Any
 import pandas as pd
 import psutil
 
-from quant_research_platform.artifacts._output_bundle_validation import (
-    _read_prediction_output_bundle,
-)
 from quant_research_platform.artifacts.evidence import write_json_evidence
-from quant_research_platform.artifacts.outputs import write_prediction_outputs
+from quant_research_platform.artifacts.outputs import (
+    read_prediction_output_bundle,
+    write_prediction_outputs,
+)
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.order_book import BookBoundary, BookState
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
@@ -42,7 +42,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto.research_profiles import (
+from quant_research_platform.markets.implementations.crypto.research_datasets import (
     build_hft_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
@@ -75,11 +75,11 @@ from quant_research_platform.sources.binance.replay import (
     iter_reconstructed_depth,
     open_recorder_run,
 )
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     open_dataset_session,
 )
-from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import crypto_hft_materialization
 
@@ -451,7 +451,7 @@ def _prediction_decisions(
         prediction_spec.test_start,
         prediction_spec.test_end,
     )
-    with _read_prediction_output_bundle(
+    with read_prediction_output_bundle(
         prediction_root,
         expected_output_id=output_id,
         time_window=prediction_window,

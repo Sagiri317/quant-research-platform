@@ -6,7 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
+import quant_research_platform.storage.datasets.fingerprinting as dataset_fingerprinting
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -16,9 +16,6 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.storage._dataset_reading import (
-    open_dataset_session,
-)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -26,6 +23,9 @@ from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
     write_dataset,
+)
+from quant_research_platform.storage.datasets.reading import (
+    open_dataset_session,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,

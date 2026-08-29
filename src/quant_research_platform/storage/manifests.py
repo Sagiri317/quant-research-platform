@@ -9,7 +9,7 @@ from typing import Any
 from uuid import uuid4
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
-from quant_research_platform.contracts._json import (
+from quant_research_platform.contracts.json_codec import (
     bounded_qrp_json_object_snapshot,
     parse_qrp_json_object,
     render_qrp_json_object,
@@ -20,24 +20,22 @@ from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )
 from quant_research_platform.runtime.logical_paths import logical_path
-from quant_research_platform.storage._dataset_paths import (
-    require_artifact_root,
-    require_unaliased_path,
-)
-from quant_research_platform.storage._dataset_physical import (
-    DatasetFileIdentity,
-    dataset_file_identity,
-    dataset_file_identity_from_stat,
-)
-from quant_research_platform.storage._dataset_schema import (
-    validate_dataset_manifest_consumable,
-    validate_dataset_manifest_payload,
-    validate_dataset_spec_payload,
-)
 from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
 )
 from quant_research_platform.storage.atomic import atomic_write_text
+from quant_research_platform.storage.datasets.schema import (
+    validate_dataset_manifest_consumable,
+    validate_dataset_manifest_payload,
+    validate_dataset_spec_payload,
+)
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+    dataset_file_identity_from_stat,
+    require_artifact_root,
+    require_unaliased_path,
+)
 
 _DATASET_LOGICAL_PATH_MARKERS = ("data",)
 _MAX_QRP_JSON_BYTES = 1024 * 1024

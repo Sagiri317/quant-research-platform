@@ -10,11 +10,8 @@ from quant_research_platform.contracts.outputs import (
 )
 
 
-def test_output_scope_is_local_or_review_safe_only() -> None:
-    assert tuple(scope.value for scope in OutputScope) == (
-        "LOCAL_ONLY",
-        "REVIEW_SAFE",
-    )
+def test_output_scope_is_local_only() -> None:
+    assert tuple(scope.value for scope in OutputScope) == ("LOCAL_ONLY",)
 
 
 def test_output_spec_separates_instance_and_definition_identity() -> None:

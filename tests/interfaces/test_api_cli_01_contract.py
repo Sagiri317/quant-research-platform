@@ -13,9 +13,9 @@ from typer.testing import CliRunner
 
 import quant_research_platform.interfaces.api.app as api_app_module
 import quant_research_platform.interfaces.cli.commands as cli_commands_module
-import quant_research_platform.interfaces.services as services_module
+import quant_research_platform.interfaces.queries as queries_module
 from quant_research_platform.interfaces.api.errors import register_api_error_handlers
-from quant_research_platform.interfaces.api.models import (
+from quant_research_platform.interfaces.models import (
     FactorCatalogResponse,
     LabelCatalogResponse,
     ResearchDatasetRequirementsResponse,
@@ -239,7 +239,7 @@ def test_openapi_schema_does_not_expose_provider_markers() -> None:
     assert hits == []
 
 
-def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> None:
+def test_api_and_cli_delegate_to_same_shared_query_functions(monkeypatch) -> None:
     calls: dict[str, list[tuple[object, ...]]] = {
         "list_factors": [],
         "list_labels": [],
@@ -247,7 +247,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
     }
 
     def list_factors(profile) -> FactorCatalogResponse:
-        assert profile.fields.list()
+        assert profile.factors.list()
         calls["list_factors"].append(())
         return FactorCatalogResponse(
             api_version="0.1",
@@ -255,7 +255,7 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
         )
 
     def list_labels(profile) -> LabelCatalogResponse:
-        assert profile.fields.list()
+        assert profile.labels.list()
         calls["list_labels"].append(())
         return LabelCatalogResponse(
             api_version="0.1",
@@ -280,10 +280,10 @@ def test_api_and_cli_delegate_to_same_shared_service_functions(monkeypatch) -> N
             label_count=1,
         )
 
-    monkeypatch.setattr(services_module, "list_factors", list_factors)
-    monkeypatch.setattr(services_module, "list_labels", list_labels)
+    monkeypatch.setattr(queries_module, "list_factors", list_factors)
+    monkeypatch.setattr(queries_module, "list_labels", list_labels)
     monkeypatch.setattr(
-        services_module,
+        queries_module,
         "describe_research_dataset_requirements",
         describe_research_dataset_requirements,
     )

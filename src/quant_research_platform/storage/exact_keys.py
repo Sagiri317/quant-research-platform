@@ -21,11 +21,11 @@ import pyarrow as pa
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import require_free_disk_headroom
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     remove_owned_scratch,
 )
+from quant_research_platform.storage.identity import require_unaliased_path
 
 _DISK_RESERVE_BATCH_BYTES = 1024**2
 EXACT_KEY_SQLITE_PAGE_BYTES = 1024

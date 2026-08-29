@@ -173,6 +173,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() ->
                     summary_state=eligible_state,
                 )
             )
+            eligible_output = [item.value for item in eligible_output]
             eligible_metrics, eligible_grouped, _ = eligible_output[0]
             eligible_diagnostics = eligible_state.diagnostics()
             eligible_ic_summary = eligible_state.ic_summary()
@@ -200,6 +201,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() ->
                     summary_state=tradable_state,
                 )
             )
+            tradable_output = [item.value for item in tradable_output]
             tradable_metrics, tradable_grouped, _ = tradable_output[0]
             tradable_diagnostics = tradable_state.diagnostics()
         finally:
@@ -225,6 +227,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() ->
                     summary_state=unfiltered_state,
                 )
             )
+            unfiltered_output = [item.value for item in unfiltered_output]
             unfiltered_metrics, unfiltered_grouped, _ = unfiltered_output[0]
             unfiltered_diagnostics = unfiltered_state.diagnostics()
         finally:
@@ -332,6 +335,7 @@ def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
                     summary_state=state,
                 )
             )
+            output = [item.value for item in output]
             metrics, grouped, _ = output[0]
             spread = state.group_spread_summary()
             diagnostics = state.diagnostics()
@@ -396,6 +400,7 @@ def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
                     summary_state=baseline_state,
                 )
             )
+            baseline_output = [item.value for item in baseline_output]
             baseline_metrics, baseline_grouped, _ = baseline_output[0]
             baseline_spread = baseline_state.group_spread_summary()
             baseline_diagnostics = baseline_state.diagnostics()
@@ -422,6 +427,7 @@ def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
                     summary_state=shuffled_state,
                 )
             )
+            shuffled_output = [item.value for item in shuffled_output]
             shuffled_metrics, shuffled_grouped, _ = shuffled_output[0]
             shuffled_spread = shuffled_state.group_spread_summary()
             shuffled_diagnostics = shuffled_state.diagnostics()
@@ -507,6 +513,7 @@ def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None
                     summary_state=state,
                 )
             )
+            output = [item.value for item in output]
             metrics, grouped, _ = output[0]
             spread = state.group_spread_summary()
         finally:
@@ -569,6 +576,7 @@ def test_evaluation_computes_multiple_signals_in_one_run() -> None:
                     summary_state=state,
                 )
             )
+            output = [item.value for item in output]
             metrics, _, _ = output[0]
             ic_summary = state.ic_summary()
             group_spread_summary = state.group_spread_summary()
@@ -631,6 +639,7 @@ def test_evaluation_computes_signal_by_label_cross_product() -> None:
                     summary_state=state,
                 )
             )
+            output = [item.value for item in output]
             metrics, _, _ = output[0]
             diagnostics = state.diagnostics()
         finally:

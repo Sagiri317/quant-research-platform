@@ -15,6 +15,15 @@ CRYPTO_FORWARD_RETURN_COLUMNS = tuple(
     forward_return_label_column(horizon, DataFrequency.MINUTE)
     for horizon in CRYPTO_FORWARD_RETURN_HORIZONS
 )
+HFT_LABEL_HORIZONS_MS = (100, 500, 1_000, 5_000)
+HFT_LABEL_COLUMNS = tuple(
+    column
+    for horizon in HFT_LABEL_HORIZONS_MS
+    for column in (
+        f"future_mid_return_{horizon}ms",
+        f"future_mid_direction_{horizon}ms",
+    )
+)
 
 
 def label_catalog() -> LabelCatalog:

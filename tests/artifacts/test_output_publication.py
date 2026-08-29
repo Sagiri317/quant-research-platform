@@ -5,8 +5,8 @@ import json
 import pandas as pd
 import pytest
 
-import quant_research_platform.artifacts._evaluation_outputs as evaluation_outputs
-import quant_research_platform.artifacts._prediction_outputs as prediction_outputs
+import quant_research_platform.artifacts.outputs.evaluation as evaluation_outputs
+import quant_research_platform.artifacts.outputs.prediction as prediction_outputs
 from quant_research_platform.artifacts.outputs import (
     write_evaluation_outputs,
     write_prediction_outputs,

@@ -47,14 +47,14 @@ from quant_research_platform.sources.csmar.raw_exports import (
     dataset_files_with_identity_by_id,
     iter_private_export_chunks_with_policy,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_paths import (
+from quant_research_platform.storage.datasets.writing import write_dataset
+from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
     require_artifact_root,
     require_unaliased_path,
 )
-from quant_research_platform.storage._dataset_physical import DatasetFileIdentity
-from quant_research_platform.storage._dataset_writing import write_dataset
-from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
 

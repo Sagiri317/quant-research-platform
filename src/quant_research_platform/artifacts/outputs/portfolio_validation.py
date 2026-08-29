@@ -6,10 +6,10 @@ from collections.abc import Mapping
 
 import pandas as pd
 
-from quant_research_platform.artifacts._membership_validation import (
+from quant_research_platform.artifacts.outputs.membership import (
     validate_string_membership_column,
 )
-from quant_research_platform.artifacts._output_common_validation import (
+from quant_research_platform.artifacts.outputs.common_validation import (
     require_finite_metadata_number,
     require_metadata_string,
     require_metadata_string_list,
@@ -75,7 +75,7 @@ _TRADABILITY_CONFIG_KEYS = frozenset(
     }
 )
 _COST_CONFIG_KEYS = frozenset(
-    {"buy_cost_bps", "sell_cost_bps", "slippage_bps", "spread_bps", "impact_model"}
+    {"buy_cost_bps", "sell_cost_bps", "slippage_bps", "spread_bps"}
 )
 _DIAGNOSTICS_CONFIG_KEYS = frozenset(
     {
@@ -379,16 +379,12 @@ def validate_portfolio_output_metadata_shape(
             cost, "spread_bps", "output_manifest_metadata_invalid"
         )
     )
-    impact_model = require_optional_metadata_string(
-        cost, "impact_model", "output_manifest_metadata_invalid"
-    )
     try:
         cost_config = CostConfig(
             buy_cost_bps=buy_cost_bps,
             sell_cost_bps=sell_cost_bps,
             slippage_bps=slippage_bps,
             spread_bps=spread_bps,
-            impact_model=impact_model,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("output_manifest_metadata_invalid") from exc

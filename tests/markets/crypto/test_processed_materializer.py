@@ -38,7 +38,7 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto.research_profiles import (
+from quant_research_platform.markets.implementations.crypto.research_datasets import (
     build_research_dataset_catalog,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -57,13 +57,13 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.interim import materialize_interim_data
-from quant_research_platform.storage._dataset_reading import (
-    open_dataset_session,
-)
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
     write_dataset,
+)
+from quant_research_platform.storage.datasets.reading import (
+    open_dataset_session,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import (

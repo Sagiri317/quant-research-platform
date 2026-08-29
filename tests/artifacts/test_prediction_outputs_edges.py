@@ -12,14 +12,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from quant_research_platform.artifacts import (
-    _parquet_writers as parquet_writers,
-)
-from quant_research_platform.artifacts import (
-    _prediction_output_validation as validation,
-)
-from quant_research_platform.artifacts import outputs
-from quant_research_platform.artifacts._output_manifest import (
+import quant_research_platform.artifacts.outputs as outputs
+import quant_research_platform.artifacts.outputs.parquet as parquet_writers
+import quant_research_platform.artifacts.outputs.prediction_validation as validation
+from quant_research_platform.artifacts.outputs.manifest import (
     prediction_output_metadata,
 )
 from quant_research_platform.contracts.models import (
@@ -30,12 +26,12 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_physical import (
-    parquet_decoded_working_set_bounds,
-)
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
+from quant_research_platform.storage.parquet import (
+    parquet_decoded_working_set_bounds,
+)
 from tests.artifacts.output_edge_fixtures import (
     make_output_edge_prediction_spec,
     make_output_edge_report_spec,
@@ -57,7 +53,7 @@ def test_public_artifact_writer_owns_a_composition_root(
         target.mkdir()
         return target
 
-    monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
+    monkeypatch.setattr(outputs, "prediction_writer", write)
 
     assert (
         outputs.write_prediction_outputs(
@@ -81,7 +77,7 @@ def test_public_artifact_writer_rejects_an_unrelated_active_root(
         writes += 1
         return Path("unreachable")
 
-    monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
+    monkeypatch.setattr(outputs, "prediction_writer", write)
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(
@@ -109,7 +105,7 @@ def test_public_artifact_writer_reuses_its_explicit_active_root(
         target.mkdir()
         return target
 
-    monkeypatch.setattr(outputs, "_write_prediction_outputs", write)
+    monkeypatch.setattr(outputs, "prediction_writer", write)
 
     with runtime_resource_policy_scope(policy):
         assert (

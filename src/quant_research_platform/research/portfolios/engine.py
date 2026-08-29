@@ -8,17 +8,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.dataframe.exposure import summarize_exposure
-from quant_research_platform.compute.dataframe.performance import (
-    _validate_returns_frame,
-    calculate_additive_cumulative_returns,
-    summarize_performance,
-)
 from quant_research_platform.compute.dataframe.portfolio_returns import (
     _stream_weighted_portfolio_from_validated_panel,
 )
-from quant_research_platform.compute.dataframe.position_math import validate_positions
-from quant_research_platform.compute.grouping import normalize_group_key
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import (
     SUPPORTED_REBALANCE_FREQUENCIES,
@@ -47,11 +39,6 @@ class PortfolioComputationResult:
     turnover: pd.DataFrame
     cost_breakdown: pd.DataFrame
     portfolio_returns: pd.DataFrame
-    additive_cumulative_returns: pd.DataFrame
-    performance_summary: pd.DataFrame
-    exposure_summary: pd.DataFrame
-    concentration: pd.DataFrame
-    period_breakdown: pd.DataFrame
     diagnostics: pd.DataFrame
     capacity_diagnostics: pd.DataFrame
     numeric_exposure_diagnostics: pd.DataFrame
@@ -108,13 +95,6 @@ def _construct_portfolio_positions(
             previous_positions=temporal_state.previous_positions,
         )
     )
-    additive_cumulative_returns = calculate_additive_cumulative_returns(
-        portfolio_returns
-    )
-    performance_summary = summarize_performance(portfolio_returns)
-    exposure_summary = compute_exposure_summary(positions, portfolio_returns)
-    concentration = summarize_concentration(positions)
-    period_breakdown = summarize_period_breakdown(portfolio_returns)
     capacity_diagnostics = build_capacity_diagnostics(
         positions,
         panel,
@@ -136,121 +116,11 @@ def _construct_portfolio_positions(
         turnover=turnover,
         cost_breakdown=cost_breakdown,
         portfolio_returns=portfolio_returns,
-        additive_cumulative_returns=additive_cumulative_returns,
-        performance_summary=performance_summary,
-        exposure_summary=exposure_summary,
-        concentration=concentration,
-        period_breakdown=period_breakdown,
         diagnostics=diagnostics,
         capacity_diagnostics=capacity_diagnostics,
         numeric_exposure_diagnostics=numeric_exposure_diagnostics,
         categorical_exposure_diagnostics=categorical_exposure_diagnostics,
     )
-
-
-def compute_exposure_summary(
-    positions: pd.DataFrame,
-    portfolio_returns: pd.DataFrame,
-) -> pd.DataFrame:
-    return summarize_exposure(positions, portfolio_returns)
-
-
-def summarize_concentration(
-    positions: pd.DataFrame,
-    *,
-    segment_columns: tuple[str, ...] = (),
-) -> pd.DataFrame:
-    output_columns = [
-        *segment_columns,
-        "signal",
-        "periods",
-        "mean_hhi",
-        "max_hhi",
-        "mean_top_weight",
-        "max_top_weight",
-        "mean_position_count",
-    ]
-    if positions.empty:
-        return pd.DataFrame(columns=output_columns)
-
-    frame = validate_positions(positions, segment_columns=segment_columns)
-    frame["abs_position"] = frame["position"].abs()
-    period_columns = [*segment_columns, "signal", "timestamp"]
-    totals = frame.groupby(period_columns, sort=True)["abs_position"].transform("sum")
-    frame["abs_weight_share"] = frame["abs_position"].div(totals.replace(0, np.nan))
-    period = (
-        frame.groupby(period_columns, sort=True)
-        .agg(
-            hhi=("abs_weight_share", lambda values: float(np.square(values).sum())),
-            top_weight=("abs_weight_share", "max"),
-            position_count=("abs_position", lambda values: int((values > 0).sum())),
-        )
-        .reset_index()
-    )
-    records: list[dict[str, object]] = []
-    group_columns = [*segment_columns, "signal"]
-    for group_key, group in period.groupby(group_columns, sort=True, dropna=False):
-        group_values = normalize_group_key(group_key, group_columns)
-        records.append(
-            {
-                **{column: group_values[column] for column in segment_columns},
-                "signal": group_values["signal"],
-                "periods": int(len(group)),
-                "mean_hhi": float(group["hhi"].mean()),
-                "max_hhi": float(group["hhi"].max()),
-                "mean_top_weight": float(group["top_weight"].mean()),
-                "max_top_weight": float(group["top_weight"].max()),
-                "mean_position_count": float(group["position_count"].mean()),
-            }
-        )
-    return pd.DataFrame.from_records(records, columns=output_columns)
-
-
-def summarize_period_breakdown(
-    portfolio_returns: pd.DataFrame,
-    *,
-    segment_columns: tuple[str, ...] = (),
-) -> pd.DataFrame:
-    output_columns = [
-        *segment_columns,
-        "signal",
-        "year",
-        "month",
-        "periods",
-        "gross_portfolio_return",
-        "net_portfolio_return",
-        "cost",
-        "turnover",
-        "hit_rate",
-    ]
-    if portfolio_returns.empty:
-        return pd.DataFrame(columns=output_columns)
-
-    frame = _validate_returns_frame(
-        portfolio_returns,
-        segment_columns=segment_columns,
-        include_performance_columns=True,
-    )
-    timestamps = frame["timestamp"]
-    frame["year"] = timestamps.dt.year.astype("int64")
-    frame["month"] = timestamps.dt.month.astype("int64")
-    group_columns = [*segment_columns, "signal", "year", "month"]
-    result = (
-        frame.groupby(group_columns, sort=True, dropna=False)
-        .agg(
-            periods=("net_portfolio_return", "size"),
-            gross_portfolio_return=("gross_portfolio_return", "sum"),
-            net_portfolio_return=("net_portfolio_return", "sum"),
-            cost=("cost", "sum"),
-            turnover=("turnover", "mean"),
-            hit_rate=(
-                "net_portfolio_return",
-                lambda values: float((values > 0).mean()),
-            ),
-        )
-        .reset_index()
-    )
-    return result.loc[:, output_columns]
 
 
 def _portfolio_panel(

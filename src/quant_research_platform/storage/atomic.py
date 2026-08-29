@@ -8,8 +8,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
-from quant_research_platform.contracts._json import render_qrp_json_object
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
+from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.storage._scratch_ownership import (
     move_path_no_replace,
     open_owned_scratch_file,
@@ -17,6 +16,7 @@ from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
+from quant_research_platform.storage.identity import require_unaliased_path
 
 
 def reject_if_exists(path: Path) -> None:

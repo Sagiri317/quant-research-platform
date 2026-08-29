@@ -14,7 +14,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto.research_profiles import (
+from quant_research_platform.markets.implementations.crypto.research_datasets import (
     build_hft_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
@@ -33,7 +33,7 @@ from quant_research_platform.research.predictions.runner import (
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.replay import open_recorder_run
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
     read_dataset,
 )

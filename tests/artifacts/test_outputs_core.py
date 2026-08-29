@@ -6,13 +6,13 @@ from types import MappingProxyType
 
 import pytest
 
-from quant_research_platform.artifacts._output_manifest import (
+from quant_research_platform.artifacts.definitions import output_catalog
+from quant_research_platform.artifacts.layout import output_bundle_root
+from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
     prediction_output_metadata,
     validate_output_manifest_business_envelope,
 )
-from quant_research_platform.artifacts.definitions import output_catalog
-from quant_research_platform.artifacts.layout import output_bundle_root
 from quant_research_platform.contracts.outputs import OutputScope
 from tests.helpers.output_frames import (
     make_prediction_report_spec,

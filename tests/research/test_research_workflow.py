@@ -13,12 +13,12 @@ import quant_research_platform.research.datasets.assembler as assembler_module
 import quant_research_platform.research.datasets.io as research_dataset_io
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.predictions.runner as prediction_runner_module
-import quant_research_platform.storage._dataset_reading as dataset_reading
+import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.workflows.local_verification as local_verification_module
-from quant_research_platform.artifacts._evaluation_outputs import (
-    _write_evaluation_outputs_from_chunks,
+from quant_research_platform.artifacts.outputs.evaluation import (
+    write_evaluation_outputs_from_chunks,
 )
-from quant_research_platform.artifacts._prediction_outputs import (
+from quant_research_platform.artifacts.outputs.prediction import (
     write_prediction_outputs,
 )
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
@@ -2038,7 +2038,7 @@ def test_managed_workflow_admits_summary_before_research_pull(
     )
     monkeypatch.setattr(
         local_verification_module,
-        "_write_evaluation_outputs_from_chunks",
+        "write_evaluation_outputs_from_chunks",
         artifact_writer,
     )
     policy = capture_test_policy(
@@ -2183,7 +2183,7 @@ def test_managed_evaluation_parity_covers_filters_ties_and_all_nan(
                 resource_policy=policy,
                 summary_state=state,
             )
-            output_bundle = _write_evaluation_outputs_from_chunks(
+            output_bundle = write_evaluation_outputs_from_chunks(
                 chunks,
                 summary_factory=lambda: (
                     state.diagnostics(),
@@ -2269,7 +2269,7 @@ def test_managed_evaluation_two_label_order_and_shared_skip_parity(
                 resource_policy=policy,
             )
             try:
-                output_bundle = _write_evaluation_outputs_from_chunks(
+                output_bundle = write_evaluation_outputs_from_chunks(
                     _iter_evaluation_output_chunks(
                         frames,
                         spec=spec,

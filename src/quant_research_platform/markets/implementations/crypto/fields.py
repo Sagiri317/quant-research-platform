@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from quant_research_platform.catalog.fields import FieldCatalog, platform_field_catalog
 from quant_research_platform.contracts.columns import ColumnRole, FieldSpec
-from quant_research_platform.markets.implementations.crypto.ids import (
+from quant_research_platform.markets.implementations.crypto.factors.definitions import (
     HFT_FACTOR_COLUMNS,
-    HFT_LABEL_COLUMNS,
 )
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
+    HFT_LABEL_COLUMNS,
 )
 from quant_research_platform.research.factors.microstructure.columns import (
     MICROSTRUCTURE_FACTOR_COLUMNS,

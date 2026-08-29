@@ -12,19 +12,17 @@ import pandas as pd
 import pyarrow.parquet as pq
 import pytest
 
-from quant_research_platform.artifacts import (
-    _evaluation_output_validation as evaluation_output_validation,
+import quant_research_platform.artifacts.outputs as outputs
+from quant_research_platform.artifacts.outputs import (
+    evaluation as evaluation_outputs_owner,
 )
-from quant_research_platform.artifacts import (
-    _evaluation_outputs as evaluation_outputs_owner,
+from quant_research_platform.artifacts.outputs import (
+    evaluation_validation as evaluation_output_validation,
 )
-from quant_research_platform.artifacts import (
-    outputs,
-)
-from quant_research_platform.artifacts._evaluation_output_validation import (
+from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
 )
-from quant_research_platform.artifacts._output_manifest import (
+from quant_research_platform.artifacts.outputs.manifest import (
     evaluation_output_metadata,
     output_manifest_payload,
 )
@@ -996,7 +994,7 @@ def test_managed_evaluation_admits_fixed_writers_before_first_pull(
     )
     with runtime_resource_policy_scope(policy):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+            evaluation_outputs_owner.write_evaluation_outputs_from_chunks(
                 chunks(),
                 summary_factory=_static_managed_summary_factory,
                 spec=spec,
@@ -1048,7 +1046,7 @@ def test_managed_evaluation_disk_preflight_happens_before_first_pull(
     )
 
     with pytest.raises(OSError, match="evaluation_disk_preflight"):
-        evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+        evaluation_outputs_owner.write_evaluation_outputs_from_chunks(
             chunks(),
             summary_factory=_static_managed_summary_factory,
             spec=spec,
@@ -1106,7 +1104,7 @@ def test_managed_evaluation_failure_closes_partial_writer_and_preserves_primary(
     policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
     with runtime_resource_policy_scope(policy):
         with pytest.raises(RuntimeError) as raised:
-            evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+            evaluation_outputs_owner.write_evaluation_outputs_from_chunks(
                 chunks(),
                 summary_factory=_static_managed_summary_factory,
                 spec=spec,
@@ -1146,7 +1144,7 @@ def test_managed_evaluation_empty_output_failure_closes_summary_state(
     policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
     with runtime_resource_policy_scope(policy):
         with pytest.raises(OSError) as raised:
-            evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+            evaluation_outputs_owner.write_evaluation_outputs_from_chunks(
                 iter(()),
                 summary_factory=_static_managed_summary_factory,
                 spec=spec,
@@ -1185,7 +1183,7 @@ def test_managed_evaluation_pre_writer_failure_releases_table_state(
     policy = capture_test_policy(available_memory_bytes=32 * 1024**2)
     with runtime_resource_policy_scope(policy):
         with pytest.raises(OSError) as raised:
-            evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+            evaluation_outputs_owner.write_evaluation_outputs_from_chunks(
                 iter(
                     (
                         (
@@ -1289,7 +1287,7 @@ def test_managed_evaluation_persists_aggregate_beyond_ram_budget(
                 summary_state=state,
             )
             output_bundle = (
-                evaluation_outputs_owner._write_evaluation_outputs_from_chunks(
+                evaluation_outputs_owner.write_evaluation_outputs_from_chunks(
                     chunks,
                     summary_factory=lambda: (
                         state.diagnostics(),

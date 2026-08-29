@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import os
-import stat
 import sys
 from collections.abc import Callable, Iterator
 from contextlib import ExitStack, contextmanager
@@ -16,15 +15,19 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
-from quant_research_platform.contracts._json import (
+from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
     render_qrp_json_object,
 )
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
 )
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+    dataset_file_identity_from_stat,
+)
 
 _DECODED_ROW_BOUNDS_KEY = b"qrp.decoded-row-bounds"
 _DECODED_ROW_BOUNDS_SCHEMA_ID = "qrp-dataset-part-decoded-row-bounds"
@@ -33,35 +36,6 @@ _PARQUET_MAX_ROW_GROUP_ROWS = 64 * 1024 * 1024
 _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES = 5 * 1024 * 1024
 _PARQUET_NATIVE_METADATA_PAGE_BYTES = 4096
 _PARQUET_METADATA_FIXED_WORKSPACE_BYTES = 2 * 1024 * 1024
-
-
-@dataclass(frozen=True, slots=True)
-class DatasetFileIdentity:
-    device: int
-    inode: int
-    size: int
-    modified_ns: int
-
-
-def dataset_file_identity_from_stat(value: os.stat_result) -> DatasetFileIdentity:
-    return DatasetFileIdentity(
-        device=int(value.st_dev),
-        inode=int(value.st_ino),
-        size=int(value.st_size),
-        modified_ns=int(value.st_mtime_ns),
-    )
-
-
-def _dataset_file_identity_bytes(identity: DatasetFileIdentity) -> bytes:
-    return b"\0".join(
-        str(value).encode("ascii")
-        for value in (
-            identity.device,
-            identity.inode,
-            identity.size,
-            identity.modified_ns,
-        )
-    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,20 +52,6 @@ class PreparedMembershipValues:
     values: pa.Array
     max_scalar_bytes: int
     retained_memory_bytes: int
-
-
-def dataset_file_identity(path: Path) -> DatasetFileIdentity:
-    candidate = require_unaliased_path(
-        Path(path),
-        error="invalid_dataset_part_files",
-    )
-    try:
-        before = candidate.lstat()
-    except OSError as exc:
-        raise ValueError("invalid_dataset_part_files") from exc
-    if not stat.S_ISREG(before.st_mode) or int(before.st_ino) <= 0:
-        raise ValueError("invalid_dataset_part_files")
-    return dataset_file_identity_from_stat(before)
 
 
 def inspect_dataset_part(

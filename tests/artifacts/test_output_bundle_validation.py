@@ -6,17 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from quant_research_platform.artifacts import (
-    _output_bundle_validation as bundle_validation,
-)
-from quant_research_platform.artifacts._output_bundle_validation import (
+import quant_research_platform.artifacts.outputs.bundle_validation as bundle_validation
+from quant_research_platform.artifacts.outputs.bundle_validation import (
     validate_output_bundle,
 )
-from quant_research_platform.artifacts._output_manifest import (
+from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
     prediction_output_metadata,
 )
-from quant_research_platform.storage._dataset_physical import dataset_file_identity
+from quant_research_platform.storage.identity import dataset_file_identity
 from tests.helpers.output_frames import (
     make_prediction_report_spec,
     make_price_volume_prediction_output_frame,

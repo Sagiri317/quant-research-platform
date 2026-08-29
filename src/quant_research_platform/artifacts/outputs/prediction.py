@@ -7,21 +7,21 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.artifacts._output_common_validation import (
+from quant_research_platform.artifacts.outputs.common_validation import (
     derive_output_bundle_root,
     required_frame_metadata,
     validate_output_frame,
 )
-from quant_research_platform.artifacts._output_manifest import (
+from quant_research_platform.artifacts.outputs.manifest import (
     PREDICTION_ARTIFACTS,
     output_manifest_payload,
     prediction_output_metadata,
 )
-from quant_research_platform.artifacts._parquet_writers import (
+from quant_research_platform.artifacts.outputs.parquet import (
     write_parquet,
     write_parquet_chunks,
 )
-from quant_research_platform.artifacts._prediction_output_validation import (
+from quant_research_platform.artifacts.outputs.prediction_validation import (
     model_metadata_with_effective_prediction_end,
     validate_model_metadata_consistency,
     validate_model_metadata_shape,

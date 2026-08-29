@@ -33,23 +33,21 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     _OwnedValue,
+    _release_owned_value,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    _inspect_dataset_owned,
-    _release_owned_value,
-)
-from quant_research_platform.storage._dataset_key_tracking import (
-    ExactPrimaryKeyIndex,
-)
-from quant_research_platform.storage._dataset_paths import require_artifact_root
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.inspection import _inspect_dataset_owned
+from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     open_dataset_session,
 )
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
+from quant_research_platform.storage.exact_keys import (
+    ExactPrimaryKeyIndex,
+)
+from quant_research_platform.storage.identity import require_artifact_root
 from quant_research_platform.storage.layout import StorageLayout
 
 

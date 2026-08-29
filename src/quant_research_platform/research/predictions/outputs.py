@@ -40,6 +40,8 @@ from quant_research_platform.research.models.rank_ensemble import (
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
+    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -49,7 +51,7 @@ from quant_research_platform.runtime.resources import (
 @dataclass(frozen=True)
 class PredictionResult:
     spec: PredictionSpec
-    output_chunks: Iterable[pd.DataFrame]
+    output_chunks: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
     model_metadata: dict[str, object]
     prediction_metadata_factory: Callable[[], dict[str, object]]
     _close: Callable[[], None] = field(
@@ -274,7 +276,7 @@ def _iter_prediction_output_frames(
     input_columns: tuple[str, ...],
     predictor: Callable[[pd.DataFrame], np.ndarray],
     build_state: _PredictionBuildState,
-) -> Iterable[pd.DataFrame]:
+) -> Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]:
     usable_columns = tuple(dict.fromkeys((*spec.primary_key, *input_columns)))
     with closing_iterator(iter(frames)) as active_frames:
         for chunk in active_frames:
@@ -316,6 +318,7 @@ def _iter_prediction_output_frames(
                 usable_mask = None
                 test_frame = None
                 output = None
+                owned_output: _OwnedValue[pd.DataFrame] | None = None
                 try:
                     usable_mask = (
                         filtered.loc[:, list(input_columns)].notna().all(axis=1)
@@ -348,32 +351,33 @@ def _iter_prediction_output_frames(
                     if working_lease is not None:
                         working_lease.shrink_to(retained_bytes)
                         working_lease.transfer("research.prediction.result")
+                        owned_output = _OwnedValue(output, working_lease)
+                        working_lease = None
                     test_frame = None
                     usable_mask = None
                     try:
-                        yield output
-                    except BaseException as primary:
+                        yield owned_output if owned_output is not None else output
+                    finally:
                         output = None
                         filtered = None
-                        if working_lease is not None:
-                            try:
-                                working_lease.close()
-                            except BaseException as cleanup_error:
-                                primary.add_note(
-                                    "prediction output lease release also failed: "
-                                    f"{type(cleanup_error).__name__}"
-                                )
-                        raise
-                    else:
-                        output = None
-                        filtered = None
-                        if working_lease is not None:
-                            working_lease.close()
+                        if owned_output is not None and owned_output.lease.active:
+                            _close_lease_preserving_primary(
+                                owned_output.lease,
+                                owner="research.prediction.result",
+                            )
                 except BaseException as primary:
                     output = None
                     test_frame = None
                     usable_mask = None
                     filtered = None
+                    if owned_output is not None and owned_output.lease.active:
+                        try:
+                            owned_output.lease.close()
+                        except BaseException as cleanup_error:
+                            primary.add_note(
+                                "prediction output lease release also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
                     if working_lease is not None and working_lease.active:
                         try:
                             working_lease.close()

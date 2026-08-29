@@ -32,7 +32,6 @@ def validate_output_identifier(value: str) -> str:
 
 class OutputScope(StrEnum):
     LOCAL_ONLY = "LOCAL_ONLY"
-    REVIEW_SAFE = "REVIEW_SAFE"
 
 
 @dataclass(frozen=True)

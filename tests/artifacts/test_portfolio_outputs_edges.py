@@ -7,17 +7,17 @@ import numpy as np
 import pandas as pd
 import pytest
 
-import quant_research_platform.artifacts._parquet_writers as parquet_writers
-import quant_research_platform.artifacts._portfolio_output_validation as validation
-import quant_research_platform.artifacts._portfolio_outputs as portfolio_outputs
-from quant_research_platform.artifacts._output_manifest import (
-    portfolio_output_metadata_from_row_counts,
-)
-from quant_research_platform.artifacts._portfolio_output_validation import (
-    validate_portfolio_artifact_membership_columns,
-)
+import quant_research_platform.artifacts.outputs.parquet as parquet_writers
+import quant_research_platform.artifacts.outputs.portfolio as portfolio_outputs
+import quant_research_platform.artifacts.outputs.portfolio_validation as validation
 from quant_research_platform.artifacts.outputs import (
     write_portfolio_outputs as public_write_portfolio_outputs,
+)
+from quant_research_platform.artifacts.outputs.manifest import (
+    portfolio_output_metadata_from_row_counts,
+)
+from quant_research_platform.artifacts.outputs.portfolio_validation import (
+    validate_portfolio_artifact_membership_columns,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout

@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -189,6 +190,112 @@ def test_lease_overflow_release_and_leak_poison() -> None:
             leaked.lease("producer", 1)
     assert leaked.state == "POISONED"
     assert not leaked._lock.closed  # noqa: SLF001
+
+
+def test_concurrent_lease_admission_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=MIB,
+        explicit_cap_bytes=100,
+    )
+    checks = threading.Barrier(2)
+    original_used = resources.RuntimeResourcePolicy.used_memory_bytes.fget
+
+    def observed_used(root: resources.RuntimeResourcePolicy) -> int:
+        ledger_lock = getattr(root, "_ledger_lock", None)
+        assert original_used is not None
+        value = original_used(root)
+        if (
+            threading.current_thread() is not threading.main_thread()
+            and (ledger_lock is None or not ledger_lock._is_owned())  # noqa: SLF001
+        ):
+            checks.wait(timeout=2)
+        return value
+
+    monkeypatch.setattr(
+        resources.RuntimeResourcePolicy,
+        "used_memory_bytes",
+        property(observed_used),
+    )
+    outcomes: list[str] = []
+    leases: list[resources.MemoryLease] = []
+
+    def admit() -> None:
+        try:
+            leases.append(policy.lease("concurrent", 80))
+        except MemoryError:
+            outcomes.append("rejected")
+        else:
+            outcomes.append("accepted")
+
+    with runtime_resource_policy_scope(policy):
+        threads = [threading.Thread(target=admit) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+        assert all(not thread.is_alive() for thread in threads)
+        for lease in leases:
+            lease.close()
+
+    assert sorted(outcomes) == ["accepted", "rejected"]
+    assert policy.used_memory_bytes == 0
+
+
+def test_concurrent_lease_growth_is_atomic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=MIB,
+        explicit_cap_bytes=100,
+    )
+    checks = threading.Barrier(2)
+    original_used = resources.RuntimeResourcePolicy.used_memory_bytes.fget
+
+    def observed_used(root: resources.RuntimeResourcePolicy) -> int:
+        ledger_lock = getattr(root, "_ledger_lock", None)
+        assert original_used is not None
+        value = original_used(root)
+        if (
+            threading.current_thread() is not threading.main_thread()
+            and (ledger_lock is None or not ledger_lock._is_owned())  # noqa: SLF001
+        ):
+            checks.wait(timeout=2)
+        return value
+
+    monkeypatch.setattr(
+        resources.RuntimeResourcePolicy,
+        "used_memory_bytes",
+        property(observed_used),
+    )
+    outcomes: list[str] = []
+
+    def grow(lease: resources.MemoryLease) -> None:
+        try:
+            lease.grow(50)
+        except MemoryError:
+            outcomes.append("rejected")
+        else:
+            outcomes.append("accepted")
+
+    with runtime_resource_policy_scope(policy):
+        first = policy.lease("first", 20)
+        second = policy.lease("second", 20)
+        threads = [
+            threading.Thread(target=grow, args=(first,)),
+            threading.Thread(target=grow, args=(second,)),
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=2)
+        assert all(not thread.is_alive() for thread in threads)
+        first.close()
+        second.close()
+
+    assert sorted(outcomes) == ["accepted", "rejected"]
+    assert policy.used_memory_bytes == 0
 
 
 def test_lease_context_manager_closes_and_preserves_body_primary(

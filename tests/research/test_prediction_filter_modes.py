@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts._output_common_validation import (
+from quant_research_platform.artifacts.outputs.common_validation import (
     validate_output_frame,
 )
 from quant_research_platform.catalog.models import ModelCatalog
@@ -724,7 +724,10 @@ def test_prediction_builder_outputs_canonical_columns_for_validation() -> None:
         input_columns=("factor",),
         model_metadata=_prediction_model_metadata(),
     )
-    output = pd.concat(tuple(result.output_chunks), ignore_index=True)
+    output = pd.concat(
+        [item.value for item in result.output_chunks],
+        ignore_index=True,
+    )
 
     assert tuple(output.columns) == (*spec.primary_key, spec.prediction_column)
     validate_output_frame(

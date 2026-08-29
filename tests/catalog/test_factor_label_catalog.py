@@ -14,10 +14,10 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.fields import (
     field_catalog,
 )
-from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.factors.price_volume.presets import (
     price_volume_factor_columns,
 )
+from quant_research_platform.sources.csmar.catalog import source_definition
 from tests.helpers import frequency_ids
 
 
@@ -112,7 +112,7 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
 
 
 def test_source_registry_entries_are_internal_only() -> None:
-    sources = research_profile().sources.list()
+    sources = (source_definition(),)
 
     assert sources
     assert all(not item.public_identifier for item in sources)

@@ -17,11 +17,11 @@ from quant_research_platform.runtime.resources import (
     _OwnedValue,
 )
 from quant_research_platform.storage import manifests
-from quant_research_platform.storage._dataset_physical import (
+from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
+from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
 )
-from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows.diagnostics import validation_summary
 from quant_research_platform.workflows.diagnostics.validation_summary import (

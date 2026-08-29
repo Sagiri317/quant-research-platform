@@ -28,13 +28,13 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
-from quant_research_platform.storage._dataset_physical import (
-    DatasetFileIdentity,
-    _dataset_file_identity_bytes,
-)
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
+    _file_identity_bytes,
+    require_unaliased_path,
+)
 
 from .field_mappings import RAW_TABLE_CONTRACTS
 from .raw_schemas import (
@@ -1138,7 +1138,7 @@ def _iter_indexed_raw_export_files(
     for path in paths:
         identity = raw_export_file_identity(path)
         relative = path.relative_to(root).as_posix().encode("utf-8")
-        payload = relative + b"\0" + _dataset_file_identity_bytes(identity)
+        payload = relative + b"\0" + _file_identity_bytes(identity)
         inserted = index.add_identity_payloads(
             namespace=namespace,
             payloads=((_raw_export_physical_key(identity), payload),),
@@ -1180,7 +1180,7 @@ def _verify_csmar_member_set(
                 namespace=namespace,
                 payload=relative,
             )
-            actual = relative + b"\0" + _dataset_file_identity_bytes(
+            actual = relative + b"\0" + _file_identity_bytes(
                 raw_export_file_identity(path)
             )
             if expected != actual:

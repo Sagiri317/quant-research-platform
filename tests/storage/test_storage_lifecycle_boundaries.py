@@ -11,28 +11,26 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.runtime.resources as runtime_resources
-import quant_research_platform.storage._dataset_comparison as comparison
-import quant_research_platform.storage._dataset_fingerprinting as fingerprinting
-import quant_research_platform.storage._dataset_inspection as inspection
-import quant_research_platform.storage._dataset_key_tracking as key_owner
-import quant_research_platform.storage._dataset_paths as dataset_paths
-import quant_research_platform.storage._dataset_physical as physical
-import quant_research_platform.storage._dataset_reading as dataset_reading
-import quant_research_platform.storage._dataset_writing as dataset_writing
+import quant_research_platform.storage.datasets.comparison as comparison
+import quant_research_platform.storage.datasets.fingerprinting as fingerprinting
+import quant_research_platform.storage.datasets.inspection as inspection
+import quant_research_platform.storage.datasets.inventory as inventory_owner
+import quant_research_platform.storage.datasets.reading as dataset_reading
+import quant_research_platform.storage.datasets.writing as dataset_writing
+import quant_research_platform.storage.exact_keys as key_owner
+import quant_research_platform.storage.identity as identity
+import quant_research_platform.storage.parquet as physical
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
-)
-from quant_research_platform.storage import (
-    _dataset_inventory as inventory_owner,
 )
 from quant_research_platform.storage import _scratch_ownership as scratch_owner
 from quant_research_platform.storage import (
     atomic,
     manifests,
 )
-from quant_research_platform.storage._dataset_types import DatasetReadMode
+from quant_research_platform.storage.datasets.types import DatasetReadMode
 from tests.helpers.runtime_resources import (
     capture_storage_test_policy,
     capture_test_policy,
@@ -225,10 +223,10 @@ def test_unaliased_path_checks_lexical_component_before_parent_traversal(
         visited.append(path)
         return path == alias
 
-    monkeypatch.setattr(dataset_paths, "path_is_filesystem_alias", is_alias)
+    monkeypatch.setattr(identity, "path_is_filesystem_alias", is_alias)
 
     with pytest.raises(ValueError, match="invalid_path"):
-        dataset_paths.require_unaliased_path(
+        identity.require_unaliased_path(
             alias / ".." / "artifact",
             error="invalid_path",
         )
@@ -600,7 +598,7 @@ def _patch_open_session_metadata_preflight(
     monkeypatch.setattr(
         dataset_reading,
         "dataset_file_identity",
-        lambda _path: physical.DatasetFileIdentity(1, 2, 2, 3),
+        lambda _path: identity.DatasetFileIdentity(1, 2, 2, 3),
     )
     monkeypatch.setattr(
         dataset_reading,
@@ -952,7 +950,7 @@ def test_opened_parquet_close_preserves_generator_exit(
     monkeypatch.setattr(
         physical,
         "dataset_file_identity",
-        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+        lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
 
@@ -1016,7 +1014,7 @@ def test_opened_parquet_reserves_metadata_for_lifetime_and_scales_with_footer(
         monkeypatch.setattr(
             physical,
             "dataset_file_identity",
-            lambda _path: physical.dataset_file_identity_from_stat(metadata),
+            lambda _path: identity.dataset_file_identity_from_stat(metadata),
         )
 
         class Parquet:
@@ -1095,7 +1093,7 @@ def test_opened_parquet_rejects_metadata_before_constructor_and_releases_lease(
     monkeypatch.setattr(
         physical,
         "dataset_file_identity",
-        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+        lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
 
     def construct(_handle: object) -> object:
@@ -1223,7 +1221,7 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
     monkeypatch.setattr(
         physical,
         "dataset_file_identity",
-        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+        lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
 
@@ -1275,7 +1273,7 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
     monkeypatch.setattr(
         physical,
         "dataset_file_identity",
-        lambda _path: physical.dataset_file_identity_from_stat(metadata),
+        lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
     monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
 
@@ -1395,13 +1393,13 @@ def test_artifact_root_alias_is_rejected_by_unique_root_owner(
     root = Path("dataset")
     absolute_root = Path.cwd() / root
     monkeypatch.setattr(
-        dataset_paths,
+        identity,
         "path_is_filesystem_alias",
         lambda candidate: candidate == absolute_root,
     )
 
     with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        dataset_paths.require_artifact_root(root)
+        identity.require_artifact_root(root)
 
 
 @pytest.mark.parametrize("position", ("root", "immediate", "deep"))
@@ -1439,7 +1437,7 @@ def test_artifact_root_rejects_exact_or_ancestor_alias(
     )
 
     with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        dataset_paths.require_artifact_root(root)
+        identity.require_artifact_root(root)
 
 
 def test_artifact_root_ordinary_chain_preserves_candidate_spelling(
@@ -1447,12 +1445,12 @@ def test_artifact_root_ordinary_chain_preserves_candidate_spelling(
 ) -> None:
     root = Path("relative") / "dataset"
     monkeypatch.setattr(
-        dataset_paths,
+        identity,
         "path_is_filesystem_alias",
         lambda _candidate: False,
     )
 
-    assert dataset_paths.require_artifact_root(root) == root
+    assert identity.require_artifact_root(root) == root
 
 
 def test_dataset_file_identity_accepts_single_external_hardlink(tmp_path: Path) -> None:
@@ -1464,7 +1462,7 @@ def test_dataset_file_identity_accepts_single_external_hardlink(tmp_path: Path) 
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
 
-    assert physical.dataset_file_identity(alias) == physical.dataset_file_identity(
+    assert identity.dataset_file_identity(alias) == identity.dataset_file_identity(
         source
     )
 
@@ -1480,7 +1478,7 @@ def test_dataset_file_identity_rejects_ancestor_alias(tmp_path: Path) -> None:
         pytest.skip(f"directory_symlink_not_available: {exc}")
 
     with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        physical.dataset_file_identity(alias / "part.bin")
+        identity.dataset_file_identity(alias / "part.bin")
 
 
 def test_bounded_metadata_reader_rejects_ancestor_alias(tmp_path: Path) -> None:
@@ -1616,7 +1614,7 @@ def test_compare_maps_ancestor_alias_before_public_exists_probe(
     aliased_parent = Path.cwd() / (left if alias_side == "left" else right).parent
 
     monkeypatch.setattr(
-        dataset_paths,
+        identity,
         "path_is_filesystem_alias",
         lambda candidate: candidate == aliased_parent,
     )
@@ -1671,7 +1669,7 @@ def test_compare_internal_recheck_blocks_new_ancestor_alias_before_exists(
         return True
 
     monkeypatch.setattr(comparison, "require_artifact_root", require_root)
-    monkeypatch.setattr(dataset_paths, "path_is_filesystem_alias", is_alias)
+    monkeypatch.setattr(identity, "path_is_filesystem_alias", is_alias)
     monkeypatch.setattr(Path, "exists", exists)
 
     result = comparison.compare_datasets(

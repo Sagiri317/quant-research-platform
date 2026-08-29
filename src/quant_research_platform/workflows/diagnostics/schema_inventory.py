@@ -11,7 +11,7 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.contracts._json import (
+from quant_research_platform.contracts.json_codec import (
     bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
@@ -22,19 +22,19 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _release_owned_value,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
+from quant_research_platform.storage.atomic import atomic_write_chunks
+from quant_research_platform.storage.datasets.inspection import (
     _inspect_dataset_session_owned,
-    _release_owned_value,
 )
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_chunks,
     open_dataset_session,
 )
-from quant_research_platform.storage.atomic import atomic_write_chunks
+from quant_research_platform.storage.identity import require_unaliased_path
 
 _INVENTORY_ITEM_KEYS = frozenset(
     {

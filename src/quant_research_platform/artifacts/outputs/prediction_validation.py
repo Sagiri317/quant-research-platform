@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.artifacts._output_common_validation import (
+from quant_research_platform.artifacts.outputs.common_validation import (
     require_finite_metadata_number,
     require_metadata_string,
     require_metadata_string_list,
@@ -13,7 +13,7 @@ from quant_research_platform.artifacts._output_common_validation import (
     validate_filter_metadata,
     validate_metadata_row_count_chain,
 )
-from quant_research_platform.contracts._json import render_qrp_json_object
+from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_SUMMARY_REASON_CODES,
 )

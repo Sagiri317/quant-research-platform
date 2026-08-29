@@ -175,8 +175,6 @@ def test_portfolio_helper_costs_signals_and_group_keys() -> None:
 
     assert simple["cost_model"] == "zero_cost"
     assert simple["total_cost"] == pytest.approx(0.0)
-    with pytest.raises(ValueError, match="unsupported_portfolio_impact_model"):
-        CostConfig(impact_model="custom")
     assert _uses_detailed_cost_config(CostConfig(spread_bps=2)) is True
     assert detailed["cost_model"] == "detailed_bps"
     assert detailed["total_cost"] == pytest.approx(0.001 + 0.004 + 0.0003 + 0.0006)

@@ -10,8 +10,8 @@ import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_schema import date_string
+from quant_research_platform.storage.datasets.schema import date_string
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 
 
 @dataclass

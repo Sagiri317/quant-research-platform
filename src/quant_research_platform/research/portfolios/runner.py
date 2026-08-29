@@ -43,20 +43,18 @@ from quant_research_platform.research._memory import (
     iter_complete_session_frames,
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
-from quant_research_platform.research.filtering import (
-    _filter_working_set_bound,
-    apply_filter_mode,
-)
 from quant_research_platform.research.portfolios.engine import (
     _construct_portfolio_positions,
     _PortfolioTemporalState,
 )
 from quant_research_platform.research.predictions.alignment import (
-    _iter_prediction_lookup_joined_chunks,
+    _iter_prediction_joined_chunks as _align_prediction_joined_chunks,
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
+    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
@@ -77,10 +75,13 @@ _PORTFOLIO_SQLITE_STARTUP_BYTES = 64 * _PORTFOLIO_SQLITE_PAGE_BYTES
 @dataclass(frozen=True)
 class PortfolioResult:
     spec: PortfolioSpec
-    output_chunks: Iterable[Mapping[str, pd.DataFrame]]
+    output_chunks: Iterable[
+        Mapping[str, pd.DataFrame]
+        | _OwnedValue[Mapping[str, pd.DataFrame]]
+    ]
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]]
     additive_cumulative_returns_factory: Callable[
-        [], Iterable[pd.DataFrame]
+        [], Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
     ] | None = field(
         default=None,
         repr=False,
@@ -314,9 +315,9 @@ def _build_portfolio_result_from_research_dataset(
             columns=read_columns,
         )
         if prediction_input is not None:
-            input_chunks = _iter_prediction_joined_chunks(
+            input_chunks = _align_prediction_joined_chunks(
                 input_chunks,
-                prediction_frame=prediction_input[0],
+                    prediction_source=prediction_input[0],
                 primary_key=prediction_input[1],
                 input_columns=prediction_input[2],
                 sample_filter_mode=prediction_input[3],
@@ -517,134 +518,6 @@ def _validated_prediction_input(
     )
 
 
-def _iter_prediction_joined_chunks(
-    chunks,
-    *,
-    prediction_frame: pd.DataFrame,
-    primary_key: tuple[str, ...],
-    input_columns: tuple[str, ...],
-    sample_filter_mode: str,
-    test_start: str,
-    test_end: str | None,
-    resource_policy: RuntimeResourcePolicy,
-):
-    if not isinstance(prediction_frame, pd.DataFrame):
-        yield from _iter_prediction_lookup_joined_chunks(
-            chunks,
-            prediction_lookup=prediction_frame,
-            input_columns=input_columns,
-            sample_filter_mode=sample_filter_mode,
-            test_start=test_start,
-            test_end=test_end,
-        )
-        return
-    prediction_bytes = pandas_frame_payload_bytes(prediction_frame)
-    prediction_rows = len(prediction_frame)
-    prediction_key_bytes = _selected_frame_payload_bytes(
-        prediction_frame,
-        list(primary_key),
-    )
-    prediction_index_bytes = prediction_key_bytes + prediction_rows * (
-        8 * len(primary_key)
-    )
-    matched_bytes = prediction_rows
-    with ExitStack() as prediction_state:
-        if resource_policy is not None:
-            try:
-                prediction_state.enter_context(
-                    resource_policy.lease(
-                        "research.portfolio.prediction.input",
-                        prediction_bytes + prediction_index_bytes + matched_bytes,
-                    )
-                )
-            except MemoryError:
-                raise ValueError(
-                    "portfolio_prediction_join_working_set_exceeds_task_memory_budget"
-                ) from None
-        prediction_index = pd.MultiIndex.from_frame(
-            prediction_frame.loc[:, list(primary_key)]
-        )
-        matched = np.zeros(prediction_rows, dtype=bool)
-        missing_required = False
-        with closing_iterator(iter(chunks)) as active_chunks:
-            for chunk in active_chunks:
-                chunk_rows = len(chunk)
-                chunk_bytes = pandas_frame_payload_bytes(chunk)
-                chunk_index_bytes = int(chunk.index.memory_usage(deep=True))
-                timestamp_bytes = chunk_index_bytes + 8 * chunk_rows
-                required_mask_bytes = chunk_index_bytes + chunk_rows
-                required_key_bytes = _selected_frame_payload_bytes(
-                    chunk,
-                    list(primary_key),
-                )
-                required_index_bytes = required_key_bytes + chunk_rows * (
-                    8 * len(primary_key)
-                )
-                positions_bytes = chunk_rows * np.dtype(np.intp).itemsize
-                join_hash_bytes = chunk_rows * (32 + 16 * len(primary_key))
-                joined_output_bytes = chunk_bytes + chunk_index_bytes + 8 * chunk_rows
-                joined_output_bytes = max(
-                    joined_output_bytes,
-                    _filter_working_set_bound(
-                        chunk,
-                        mode=sample_filter_mode,
-                    ),
-                )
-                chunk_working_bytes = (
-                    timestamp_bytes
-                    + required_mask_bytes
-                    + required_index_bytes
-                    + positions_bytes
-                    + join_hash_bytes
-                    + joined_output_bytes
-                )
-                with ExitStack() as chunk_state:
-                    if resource_policy is not None:
-                        chunk_state.enter_context(
-                            resource_policy.lease(
-                                "research.portfolio.prediction.join",
-                                chunk_working_bytes,
-                            )
-                        )
-                    eligible, _metadata = apply_filter_mode(
-                        chunk,
-                        mode=sample_filter_mode,
-                        metadata_key="sample_filter_mode",
-                    )
-                    eligible = eligible.dropna(subset=list(input_columns))
-                    timestamps = strict_timestamp_series(
-                        eligible["timestamp"],
-                        error="invalid_portfolio_timestamp_values",
-                    )
-                    required_mask = timestamps >= pd.Timestamp(test_start)
-                    if test_end is not None:
-                        required_mask &= timestamps <= pd.Timestamp(test_end)
-                    required_index = pd.MultiIndex.from_frame(
-                        eligible.loc[required_mask, list(primary_key)]
-                    )
-                    positions = prediction_index.get_indexer(required_index)
-                    missing_required |= bool((positions < 0).any())
-                    matched[positions[positions >= 0]] = True
-                    try:
-                        yield chunk.merge(
-                            prediction_frame,
-                            on=list(primary_key),
-                            how="left",
-                            validate="one_to_one",
-                        )
-                    except pd.errors.MergeError as exc:
-                        raise ValueError(
-                            "persisted_prediction_join_key_invalid"
-                        ) from exc
-        unexpected = bool((~matched).any())
-        if missing_required and unexpected:
-            raise ValueError("misaligned_persisted_prediction_keys")
-        if missing_required:
-            raise ValueError("missing_required_prediction_keys")
-        if unexpected:
-            raise ValueError("misaligned_persisted_prediction_keys")
-
-
 def _portfolio_input_chunks(
     *,
     layout: StorageLayout,
@@ -672,7 +545,9 @@ def _iter_portfolio_output_chunks(
     *,
     source_columns_by_kind,
     resource_policy: RuntimeResourcePolicy | None,
-) -> Iterable[dict[str, pd.DataFrame]]:
+) -> Iterable[
+    dict[str, pd.DataFrame] | _OwnedValue[dict[str, pd.DataFrame]]
+]:
     temporal_state = _PortfolioTemporalState()
     saw_rows = False
     rolling_lease: MemoryLease | None = None
@@ -747,18 +622,35 @@ def _iter_portfolio_output_chunks(
             )
             retained_state_bytes = _portfolio_temporal_state_bytes(temporal_state)
             del result, chunk
+            owned_output: _OwnedValue[dict[str, pd.DataFrame]] | None = None
             if rolling_lease is not None:
                 retained_bytes = output_bytes + retained_state_bytes
                 if retained_bytes > rolling_lease.reserved_bytes:
                     rolling_lease.grow(retained_bytes - rolling_lease.reserved_bytes)
                 else:
                     rolling_lease.shrink_to(retained_bytes)
-                rolling_lease.transfer("research.portfolio.output_state")
-            yield output
-            del output
-            if rolling_lease is not None:
-                rolling_lease.shrink_to(retained_state_bytes)
-                rolling_lease.transfer("research.portfolio.temporal_state")
+                rolling_lease.shrink_to(output_bytes)
+                rolling_lease.transfer("research.portfolio.output")
+                output_lease = rolling_lease
+                rolling_lease = None
+                try:
+                    rolling_lease = policy.lease(
+                        "research.portfolio.temporal_state",
+                        retained_state_bytes,
+                    )
+                except BaseException:
+                    output_lease.close()
+                    raise
+                owned_output = _OwnedValue(output, output_lease)
+            try:
+                yield owned_output if owned_output is not None else output
+            finally:
+                if owned_output is not None and owned_output.lease.active:
+                    _close_lease_preserving_primary(
+                        owned_output.lease,
+                        owner="research.portfolio.output",
+                    )
+                del output
     finally:
         primary = sys.exception()
         first_failure: BaseException | None = None
@@ -796,19 +688,24 @@ def _iter_portfolio_output_chunks(
 
 
 def _observe_portfolio_summary_chunks(
-    output_chunks: Iterable[dict[str, pd.DataFrame]],
+    output_chunks: Iterable[
+        dict[str, pd.DataFrame] | _OwnedValue[dict[str, pd.DataFrame]]
+    ],
     summary_state: _PortfolioSummaryState,
-) -> Iterable[dict[str, pd.DataFrame]]:
+) -> Iterable[
+    dict[str, pd.DataFrame] | _OwnedValue[dict[str, pd.DataFrame]]
+]:
     completed = False
     try:
         with closing_iterator(iter(output_chunks)) as active_chunks:
-            for output_chunk in active_chunks:
+            for item in active_chunks:
+                output_chunk = item.value if isinstance(item, _OwnedValue) else item
                 _update_portfolio_summary_state(
                     summary_state,
                     positions=output_chunk["positions"],
                     portfolio_returns=output_chunk["portfolio_returns"],
                 )
-                yield output_chunk
+                yield item
         completed = True
         summary_state.returns_complete = True
     finally:
@@ -1072,7 +969,7 @@ def _portfolio_return_summary_frame(
 
 def _iter_portfolio_additive_cumulative_chunks(
     summary_state: _PortfolioSummaryState,
-) -> Iterable[pd.DataFrame]:
+) -> Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]:
     database = summary_state.return_database
     if database is None:
         raise RuntimeError("portfolio_additive_cumulative_returns_unavailable")
@@ -1100,6 +997,7 @@ def _iter_portfolio_additive_cumulative_chunks(
     try:
         while True:
             lease = None
+            owned_frame: _OwnedValue[pd.DataFrame] | None = None
             try:
                 if policy is not None:
                     lease = policy.lease(
@@ -1190,7 +1088,17 @@ def _iter_portfolio_additive_cumulative_chunks(
                 )
                 if lease is not None:
                     lease.shrink_to(max(1, pandas_frame_payload_bytes(frame)))
-                yield frame
+                    lease.transfer("research.portfolio.additive_cumulative.output")
+                    owned_frame = _OwnedValue(frame, lease)
+                    lease = None
+                try:
+                    yield owned_frame if owned_frame is not None else frame
+                finally:
+                    if owned_frame is not None and owned_frame.lease.active:
+                        _close_lease_preserving_primary(
+                            owned_frame.lease,
+                            owner="research.portfolio.additive_cumulative.output",
+                        )
             finally:
                 if lease is not None:
                     primary = sys.exception()

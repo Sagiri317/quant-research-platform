@@ -6,7 +6,7 @@ import json
 
 import typer
 
-from quant_research_platform.interfaces import services
+from quant_research_platform.interfaces import queries
 from quant_research_platform.profiles.research import research_profile
 
 app = typer.Typer(add_completion=False)
@@ -25,7 +25,7 @@ def catalog_factors() -> None:
     """List registered factor definitions."""
 
     typer.echo("factor_id,market_id,factor_set,definition_version")
-    for item in services.list_factors(research_profile()).items:
+    for item in queries.list_factors(research_profile()).items:
         typer.echo(
             f"{item.factor_id},{item.market_id},{item.factor_set},"
             f"{item.definition_version}"
@@ -37,7 +37,7 @@ def catalog_labels() -> None:
     """List registered label definitions."""
 
     typer.echo("label_id,market_id,horizon,definition_version")
-    for item in services.list_labels(research_profile()).items:
+    for item in queries.list_labels(research_profile()).items:
         typer.echo(
             f"{item.label_id},{item.market_id},{item.horizon},"
             f"{item.definition_version}"
@@ -51,7 +51,7 @@ def research_dataset_requirements(
     """Describe public research dataset requirements."""
 
     try:
-        result = services.describe_research_dataset_requirements(
+        result = queries.describe_research_dataset_requirements(
             dataset_id,
             research_profile(),
         )

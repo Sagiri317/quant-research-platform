@@ -11,6 +11,23 @@ from quant_research_platform.research.factors.microstructure.definitions import 
     microstructure_factor_definitions,
 )
 
+HFT_FACTOR_COLUMNS = (
+    "spread",
+    "relative_spread",
+    "imbalance_1",
+    "imbalance_5",
+    "imbalance_10",
+    "microprice",
+    "microprice_deviation",
+    "ofi_100ms",
+    "signed_trade_flow_100ms",
+    "taker_buy_volume_100ms",
+    "taker_sell_volume_100ms",
+    "return_100ms",
+    "realized_volatility_1s",
+    "top10_depth_per_spread",
+)
+
 
 def factor_catalog() -> FactorCatalog:
     return FactorCatalog(

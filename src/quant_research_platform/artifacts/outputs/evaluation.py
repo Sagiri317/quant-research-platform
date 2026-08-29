@@ -11,7 +11,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from quant_research_platform.artifacts._evaluation_output_validation import (
+from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
     EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
@@ -20,16 +20,16 @@ from quant_research_platform.artifacts._evaluation_output_validation import (
     validate_evaluation_artifact_structure,
     validate_evaluation_diagnostics_consistency,
 )
-from quant_research_platform.artifacts._output_common_validation import (
+from quant_research_platform.artifacts.outputs.common_validation import (
     derive_output_bundle_root,
     validate_output_frame,
 )
-from quant_research_platform.artifacts._output_manifest import (
+from quant_research_platform.artifacts.outputs.manifest import (
     evaluation_output_metadata,
     output_manifest_payload,
 )
-from quant_research_platform.artifacts._parquet_writers import (
-    _artifact_frame_reservation,
+from quant_research_platform.artifacts.outputs.parquet import (
+    _artifact_frames_reservation,
     _artifact_table_write_state,
     _artifact_writer_fixed_reservation,
     _parquet_row_group_size,
@@ -46,10 +46,11 @@ from quant_research_platform.policy.share_safety import (
     evidence_text_stream_unsafe_reason,
 )
 from quant_research_platform.runtime.resources import (
+    _OwnedValue,
     current_runtime_resource_policy,
     require_free_disk_headroom,
 )
-from quant_research_platform.storage._dataset_physical import (
+from quant_research_platform.storage.parquet import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
@@ -175,7 +176,7 @@ def write_evaluation_outputs(
     return output_bundle
 
 
-def _write_evaluation_outputs_from_chunks(
+def write_evaluation_outputs_from_chunks(
     chunks: Iterable[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]],
     *,
     summary_factory: Callable[
@@ -234,7 +235,6 @@ def _write_evaluation_outputs_from_chunks(
         write_parquet(
             ic_summary,
             temp_root / "ic_summary.parquet",
-            pre_reserved=True,
             engine="pyarrow",
             compression="zstd",
             index=False,
@@ -242,7 +242,6 @@ def _write_evaluation_outputs_from_chunks(
         write_parquet(
             group_spread_summary,
             temp_root / "group_spread_summary.parquet",
-            pre_reserved=True,
             engine="pyarrow",
             compression="zstd",
             index=False,
@@ -282,7 +281,10 @@ def _write_evaluation_outputs_from_chunks(
 
 
 def _write_evaluation_artifact_chunks(
-    chunks: Iterable[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]],
+    chunks: Iterable[
+        tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]
+        | _OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
+    ],
     *,
     temp_root: Path,
 ) -> None:
@@ -388,22 +390,18 @@ def _write_evaluation_artifact_chunks(
     def write_frame(name: str, frame: pd.DataFrame) -> None:
         if frame.empty:
             return
-        with _artifact_frame_reservation(
-            frame,
-            payload_already_reserved=True,
-        ):
-            table = pa.Table.from_pandas(frame, preserve_index=False)
-            policy = current_runtime_resource_policy()
-            if policy is not None:
-                pending_states[name].enter_context(
-                    policy.lease(
-                        "artifacts.parquet.pending",
-                        max(1, table.nbytes)
-                        + _EVALUATION_PENDING_TABLE_OVERHEAD_BYTES,
-                    )
+        table = pa.Table.from_pandas(frame, preserve_index=False)
+        policy = current_runtime_resource_policy()
+        if policy is not None:
+            pending_states[name].enter_context(
+                policy.lease(
+                    "artifacts.parquet.pending",
+                    max(1, table.nbytes)
+                    + _EVALUATION_PENDING_TABLE_OVERHEAD_BYTES,
                 )
-            pending_tables[name].append(table)
-            pending_rows[name] += len(frame)
+            )
+        pending_tables[name].append(table)
+        pending_rows[name] += len(frame)
         if pending_rows[name] >= batch_row_limit:
             flush(name)
         elif len(pending_tables[name]) >= _EVALUATION_PENDING_TABLE_LIMIT:
@@ -420,9 +418,20 @@ def _write_evaluation_artifact_chunks(
             index_bytes=0,
         )
         with closing_iterator(iter(chunks)) as active_chunks:
-            for metrics, grouped, _ in active_chunks:
-                write_frame("metrics", metrics)
-                write_frame("grouped_label_values", grouped)
+            for item in active_chunks:
+                if isinstance(item, _OwnedValue):
+                    value = item.value
+                    owned_lease = item.lease
+                else:
+                    value = item
+                    owned_lease = None
+                metrics, grouped, _ = value
+                with _artifact_frames_reservation(
+                    ((metrics, ()), (grouped, ())),
+                    owned_lease=owned_lease,
+                ):
+                    write_frame("metrics", metrics)
+                    write_frame("grouped_label_values", grouped)
         flush("metrics")
         flush("grouped_label_values")
         for name in tuple(writers):

@@ -129,35 +129,6 @@ def validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
     raise ValueError("unsupported_data_spec_type")
 
 
-def require_artifact_root(root: Path) -> Path:
-    candidate = Path(root)
-    if candidate.name == "data":
-        raise ValueError("dataset_root_must_be_artifact_root")
-    return require_unaliased_path(candidate, error="invalid_dataset_part_files")
-
-
-def require_unaliased_path(path: Path, *, error: str) -> Path:
-    candidate = Path(path)
-    current = Path(candidate.anchor) if candidate.is_absolute() else Path.cwd()
-    parts = candidate.parts[1:] if candidate.anchor else candidate.parts
-    try:
-        for component in (*reversed(current.parents), current):
-            if path_is_filesystem_alias(component):
-                raise ValueError(error)
-        for part in parts:
-            if part == ".":
-                continue
-            if part == "..":
-                current = current.parent
-                continue
-            current /= part
-            if path_is_filesystem_alias(current):
-                raise ValueError(error)
-    except OSError as exc:
-        raise ValueError(error) from exc
-    return candidate
-
-
 def _unique_matching_suffix(
     parts: tuple[str, ...],
     predicate: Any,
@@ -228,13 +199,6 @@ def _is_research_dataset_output_suffix(
 
 def _matches_artifact_segment(segment: str, expected: str) -> bool:
     return segment == expected
-
-
-def path_is_filesystem_alias(path: Path) -> bool:
-    candidate = Path(path)
-    return candidate.is_symlink() or (
-        hasattr(candidate, "is_junction") and candidate.is_junction()
-    )
 
 
 def timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:

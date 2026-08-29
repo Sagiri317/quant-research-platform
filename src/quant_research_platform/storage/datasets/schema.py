@@ -13,13 +13,6 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts._json import (
-    bounded_rendered_qrp_json_object_size,
-    canonical_identity_bytes,
-    canonical_json_hash,
-    parse_qrp_json_object,
-    render_qrp_json_object,
-)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -37,8 +30,15 @@ from quant_research_platform.contracts.features import (
     validated_winsorize_quantiles,
 )
 from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.contracts.json_codec import (
+    bounded_rendered_qrp_json_object_size,
+    canonical_identity_bytes,
+    canonical_json_hash,
+    parse_qrp_json_object,
+    render_qrp_json_object,
+)
 from quant_research_platform.policy.check_status import VALID_STATUS_TOKENS
-from quant_research_platform.storage._dataset_paths import (
+from quant_research_platform.storage.datasets.paths import (
     parse_year_partition_label,
     timestamp_column_from_spec_payload,
 )

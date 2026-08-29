@@ -3,14 +3,13 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
-import sqlite3
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
 import quant_research_platform.sources.binance.replay as replay
-from quant_research_platform.contracts._json import canonical_json_hash
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
@@ -212,6 +211,8 @@ def _write_file(
 def _write_run(
     root: Path,
     files: list[tuple[str, str, str, list[dict[str, object]]]],
+    *,
+    run_id: str = "run-1",
 ) -> dict[str, object]:
     root.mkdir(parents=True, exist_ok=True)
     file_manifests = [
@@ -250,9 +251,15 @@ def _write_run(
                     "close_reason": "stop",
                 }
             )
+    sidecar = root / "connection_intervals.jsonl.gz"
+    with gzip.open(sidecar, "wt", encoding="utf-8") as handle:
+        for interval in connection_intervals:
+            handle.write(json.dumps(interval, separators=(",", ":")))
+            handle.write("\n")
+    sidecar_bytes = sidecar.read_bytes()
     manifest: dict[str, object] = {
         "schema_id": "qrp-binance-recorder",
-        "run_id": "run-1",
+        "run_id": run_id,
         "status": "PASS",
         "market_data_status": "PASS",
         "venue": "binance",
@@ -262,7 +269,12 @@ def _write_run(
             market: {"tick_size": "0.1", "snapshot_limit": 1000} for market, *_ in files
         },
         "capture": {
-            "connection_intervals": connection_intervals,
+            "connection_intervals": {
+                "path": "connection_intervals.jsonl.gz",
+                "record_count": len(connection_intervals),
+                "compressed_bytes": len(sidecar_bytes),
+                "sha256": hashlib.sha256(sidecar_bytes).hexdigest(),
+            },
         },
         "files": file_manifests,
     }
@@ -310,15 +322,26 @@ def test_agg_trades_normalize_all_clocks_and_visible_quantity(tmp_path: Path) ->
 
 def _futures_run(root: Path, depth_rows: list[dict[str, object]]) -> None:
     segments = dict.fromkeys(str(row["segment_id"]) for row in depth_rows)
-    snapshots = [
-        _snapshot(
-            100 + index,
-            market_type=FUTURES_MARKET_TYPE,
-            segment_id=segment,
-            last_update_id=100 if index == 0 else 200,
+    snapshots: list[dict[str, object]] = []
+    ordered_depth_rows: list[dict[str, object]] = []
+    next_capture_seq = 1
+    for index, segment in enumerate(segments):
+        snapshots.append(
+            _snapshot(
+                next_capture_seq,
+                market_type=FUTURES_MARKET_TYPE,
+                segment_id=segment,
+                last_update_id=100 if index == 0 else 200,
+            )
         )
-        for index, segment in enumerate(segments)
-    ]
+        next_capture_seq += 1
+        for source in depth_rows:
+            if str(source["segment_id"]) != segment:
+                continue
+            row = dict(source)
+            row["capture_seq"] = next_capture_seq
+            ordered_depth_rows.append(row)
+            next_capture_seq += 1
     _write_run(
         root,
         [
@@ -326,7 +349,7 @@ def _futures_run(root: Path, depth_rows: list[dict[str, object]]) -> None:
                 FUTURES_MARKET_TYPE,
                 "depth",
                 "btcusdt@depth@100ms",
-                depth_rows,
+                ordered_depth_rows,
             ),
             (
                 FUTURES_MARKET_TYPE,
@@ -386,6 +409,46 @@ def test_run_identity_binds_exact_manifest_files_and_capture_order(
     assert [record["capture_seq"] for record in records] == [1, 2, 3]
 
 
+@pytest.mark.parametrize(
+    ("run_id", "valid"),
+    (
+        ("../x", False),
+        (" x", False),
+        ("UPPER", False),
+        ("0123456789abcdef0123456789abcdef", True),
+        ("legal-lowercase.run_1", True),
+    ),
+)
+def test_replay_run_id_uses_shared_contract(
+    tmp_path: Path,
+    run_id: str,
+    valid: bool,
+) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+        run_id=run_id,
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy):
+        if valid:
+            with open_recorder_run(root, policy):
+                pass
+        else:
+            with pytest.raises(ValueError, match="run_manifest_invalid"):
+                with open_recorder_run(root, policy):
+                    pass
+
+
 def test_run_rejects_unlisted_or_hash_mismatched_file(tmp_path: Path) -> None:
     root = tmp_path / "run"
     _write_run(
@@ -414,7 +477,11 @@ def test_run_rejects_unlisted_or_hash_mismatched_file(tmp_path: Path) -> None:
                 pass
 
     extra.unlink()
-    declared = next(root.rglob("*.jsonl.gz"))
+    declared = next(
+        path
+        for path in root.rglob("*.jsonl.gz")
+        if path.name == "usd_s_m_futures_depth.jsonl.gz"
+    )
     declared.write_bytes(declared.read_bytes() + b"tampered")
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with runtime_resource_policy_scope(policy):
@@ -443,7 +510,7 @@ def test_futures_bootstrap_keeps_all_clocks_and_exact_tick_identity(
         assert state.event_time_ms == 12
         assert state.receive_time == "2026-08-27T00:00:00.123456Z"
         assert state.receive_monotonic_ns == 10
-        assert state.capture_seq == 1
+        assert state.capture_seq == 2
         assert state.best_bid == (1000, 2.0)
         _close_owned_events(events)
     assert price_to_tick("100.0", "0.1", error="bad") == 1000
@@ -488,23 +555,23 @@ def test_insufficient_snapshot_waits_for_next_segment(tmp_path: Path) -> None:
             (
                 FUTURES_MARKET_TYPE,
                 "depth",
-                "btcusdt@depth@100ms",
+                    "btcusdt@depth@100ms",
                 [
                     _futures_delta(
-                        1, 90, 100, previous=0, transaction_time=10, segment_id="s1"
+                        2, 90, 100, previous=0, transaction_time=10, segment_id="s1"
                     ),
                     _futures_delta(
-                        2, 190, 200, previous=0, transaction_time=20, segment_id="s2"
+                        4, 190, 200, previous=0, transaction_time=20, segment_id="s2"
                     ),
                 ],
             ),
             (
                 FUTURES_MARKET_TYPE,
                 "depth_snapshot",
-                "REST:/fapi/v1/depth",
+                    "REST:/fapi/v1/depth",
                 [
                     _snapshot(
-                        3,
+                        1,
                         market_type=FUTURES_MARKET_TYPE,
                         segment_id="s1",
                         last_update_id=100,
@@ -512,7 +579,7 @@ def test_insufficient_snapshot_waits_for_next_segment(tmp_path: Path) -> None:
                         asks=[["101.0", "2"]],
                     ),
                     _snapshot(
-                        4,
+                        3,
                         market_type=FUTURES_MARKET_TYPE,
                         segment_id="s2",
                         last_update_id=200,
@@ -609,19 +676,19 @@ def test_spot_uses_snapshot_plus_one_bootstrap(tmp_path: Path) -> None:
             (
                 SPOT_MARKET_TYPE,
                 "depth",
-                "btcusdt@depth@100ms",
+                    "btcusdt@depth@100ms",
                 [
-                    _spot_delta(1, 10, 11, event_time=10, segment_id="s1"),
-                    _spot_delta(2, 12, 12, event_time=20, segment_id="s1"),
+                    _spot_delta(2, 10, 11, event_time=10, segment_id="s1"),
+                    _spot_delta(3, 12, 12, event_time=20, segment_id="s1"),
                 ],
             ),
             (
                 SPOT_MARKET_TYPE,
                 "depth_snapshot",
-                "REST:/api/v3/depth",
+                    "REST:/api/v3/depth",
                 [
                     _snapshot(
-                        3,
+                        1,
                         market_type=SPOT_MARKET_TYPE,
                         segment_id="s1",
                         last_update_id=10,
@@ -740,37 +807,16 @@ def test_raw_decode_is_admitted_before_json_allocation(tmp_path: Path) -> None:
             next(run.iter_records())
 
 
-def test_snapshot_index_keeps_only_locator_metadata(
+def test_replay_bootstraps_snapshot_without_locator_rescan(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = tmp_path / "run"
     _futures_run(
         root,
         [_futures_delta(1, 90, 100, previous=0, transaction_time=10, segment_id="s1")],
     )
-    statements: list[str] = []
-    real_connect = sqlite3.connect
 
-    class Connection:
-        def __init__(self, inner: sqlite3.Connection) -> None:
-            self.inner = inner
-
-        def execute(self, statement: str, *args: object):  # noqa: ANN002, ANN201
-            statements.append(statement)
-            return self.inner.execute(statement, *args)
-
-        def commit(self) -> None:
-            self.inner.commit()
-
-        def close(self) -> None:
-            self.inner.close()
-
-    monkeypatch.setattr(
-        replay.sqlite3,
-        "connect",
-        lambda *args, **kwargs: Connection(real_connect(*args, **kwargs)),
-    )
+    assert not hasattr(replay, "_read_snapshot_at_locator")
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
@@ -778,11 +824,6 @@ def test_snapshot_index_keeps_only_locator_metadata(
             iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
         )
         _close_owned_events(events)
-
-    create_statements = [statement.lower() for statement in statements]
-    assert any("create table snapshots" in statement for statement in create_statements)
-    assert all("payload text" not in statement for statement in create_statements)
-    assert any("record_bytes" in statement for statement in create_statements)
 
 
 def test_snapshot_decode_and_bootstrap_share_an_active_transient_lease(

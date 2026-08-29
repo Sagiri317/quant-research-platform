@@ -606,6 +606,17 @@ def test_price_volume_compute_fails_closed_for_unsupported_factor_names(
         calculate_price_volume_factors(panel, factor_columns=factor_columns)
 
 
+def test_price_volume_mom_1d_is_not_a_supported_factor() -> None:
+    panel = _factor_panel_for_dates(pd.bdate_range("2014-01-02", periods=5))
+
+    assert unsupported_price_volume_factors(("mom_1d",)) == ("mom_1d",)
+    with pytest.raises(
+        ValueError,
+        match="unsupported_price_volume_factors: mom_1d",
+    ):
+        calculate_price_volume_factors(panel, factor_columns=("mom_1d",))
+
+
 def test_price_volume_window_column_uses_frequency_suffix_contract() -> None:
     assert price_volume_window_column("mom", 7, DataFrequency.DAILY) == "mom_7d"
     assert price_volume_window_column("mom", 7, DataFrequency.MINUTE) == "mom_7m"

@@ -13,7 +13,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from quant_research_platform.artifacts._output_manifest import (
+from quant_research_platform.artifacts.outputs.manifest import (
     validate_output_manifest_business_envelope,
 )
 from quant_research_platform.runtime.resources import (
@@ -21,9 +21,9 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
-from quant_research_platform.storage._dataset_physical import (
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.parquet import (
     DatasetFileIdentity,
     _opened_parquet,
     dataset_file_identity,
@@ -197,7 +197,7 @@ class _PredictionLookup:
 
 
 @contextmanager
-def _read_prediction_output_bundle(
+def read_prediction_output_bundle(
     root: Path,
     *,
     expected_output_id: str,

@@ -40,7 +40,8 @@ def test_evaluation_chunk_producer_does_not_terminal_concat(
             asset_column="asset_id",
             resource_policy=policy,
         )
-        metrics, grouped, _ = next(chunks)
+        owned = next(chunks)
+        metrics, grouped, _ = owned.value
         chunks.close()
 
     assert list(metrics.columns) == [

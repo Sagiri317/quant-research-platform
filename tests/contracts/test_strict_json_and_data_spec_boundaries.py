@@ -7,7 +7,7 @@ from types import MappingProxyType
 
 import pytest
 
-import quant_research_platform.contracts._json as json_owner
+import quant_research_platform.contracts.json_codec as json_owner
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, DataGrain, DataSpec
 from quant_research_platform.contracts.time import TimeWindow

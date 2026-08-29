@@ -7,9 +7,9 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts._json import render_qrp_json_object
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks

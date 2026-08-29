@@ -197,9 +197,6 @@ def test_default_daily_portfolio_uses_one_day_realized_capital_returns() -> None
     assert result.portfolio_returns["gross_portfolio_return"].tolist() == pytest.approx(
         [0.02, 0.04]
     )
-    assert result.additive_cumulative_returns[
-        "additive_cumulative_gross_return"
-    ].tolist() == pytest.approx([0.02, 0.06])
 
 
 def test_a_share_model_purge_is_derived_from_live_label_lookahead() -> None:

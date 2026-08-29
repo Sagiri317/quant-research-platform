@@ -25,7 +25,7 @@ import psutil
 from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as _connect_websocket
 
-from quant_research_platform.contracts._json import parse_qrp_json_object
+from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -46,7 +46,11 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
     validate_depth_update_levels,
 )
-from quant_research_platform.storage.atomic import atomic_write_json
+from quant_research_platform.storage.atomic import (
+    atomic_write_directory,
+    atomic_write_json,
+)
+from quant_research_platform.storage.identity import require_unaliased_path
 
 SYMBOL = "BTCUSDT"
 SPOT_REST_BASE_URL = "https://data-api.binance.vision"
@@ -172,6 +176,7 @@ class RecorderConfig:
         ):
             _positive_number(value, error="binance_recorder_timeout_invalid")
         root = Path(self.output_root)
+        require_unaliased_path(root, error="invalid_storage_write_path")
         if (root / "run.json").exists():
             raise FileExistsError("binance_recorder_output_exists")
         if root.exists() and any(root.iterdir()):
@@ -208,6 +213,8 @@ class _OpenFile:
 class _RunWriter:
     root: Path
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+    _closed: bool = field(default=False, init=False)
+    _aborted: bool = field(default=False, init=False)
     _capture_seq: int = field(default=0, init=False)
     _handles: dict[tuple[str, str, str, str], _OpenFile] = field(
         default_factory=dict,
@@ -215,6 +222,11 @@ class _RunWriter:
     )
     _files: dict[Path, dict[str, Any]] = field(default_factory=dict, init=False)
     _event_counts: Counter[str] = field(default_factory=Counter, init=False)
+    _interval_path: Path | None = field(default=None, init=False, repr=False)
+    _interval_raw_handle: Any | None = field(default=None, init=False, repr=False)
+    _interval_gzip_handle: Any | None = field(default=None, init=False, repr=False)
+    _interval_record_count: int = field(default=0, init=False, repr=False)
+    _interval_max_record_bytes: int = field(default=0, init=False, repr=False)
 
     def write(
         self,
@@ -237,6 +249,7 @@ class _RunWriter:
             error="binance_recorder_receive_monotonic_invalid",
         )
         with self._lock:
+            self._require_open()
             self._capture_seq += 1
             capture_seq = self._capture_seq
             record: dict[str, Any] = {
@@ -327,6 +340,40 @@ class _RunWriter:
         )
         return opened
 
+    def write_connection_interval(self, interval: dict[str, Any]) -> None:
+        with self._lock:
+            self._require_open()
+            self._open_interval_file()
+            line = (
+                json.dumps(
+                    interval,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+                + b"\n"
+            )
+            assert self._interval_gzip_handle is not None
+            self._interval_gzip_handle.write(line)
+            self._interval_record_count += 1
+            self._interval_max_record_bytes = max(
+                self._interval_max_record_bytes,
+                len(line),
+            )
+
+    def _open_interval_file(self) -> None:
+        if self._interval_gzip_handle is not None:
+            return
+        path = self.root / "connection_intervals.jsonl.gz"
+        raw_handle = path.open("wb")
+        self._interval_raw_handle = raw_handle
+        self._interval_gzip_handle = gzip.GzipFile(
+            fileobj=raw_handle,
+            mode="wb",
+            compresslevel=6,
+        )
+        self._interval_path = path
+
     def _close_key(self, key: tuple[str, str, str, str]) -> None:
         opened = self._handles.pop(key, None)
         if opened is None:
@@ -338,40 +385,84 @@ class _RunWriter:
 
     def close(self) -> None:
         with self._lock:
+            if self._closed:
+                return
             for key in tuple(self._handles):
                 self._close_key(key)
+            self._open_interval_file()
+            assert self._interval_gzip_handle is not None
+            assert self._interval_raw_handle is not None
+            try:
+                self._interval_gzip_handle.close()
+            finally:
+                self._interval_raw_handle.close()
+            self._closed = True
+
+    def abort(self) -> None:
+        with self._lock:
+            if self._closed:
+                self._aborted = True
+                return
+            for key in tuple(self._handles):
+                self._close_key(key)
+            if self._interval_gzip_handle is not None:
+                try:
+                    self._interval_gzip_handle.close()
+                finally:
+                    assert self._interval_raw_handle is not None
+                    self._interval_raw_handle.close()
+            self._closed = True
+            self._aborted = True
+
+    def connection_interval_manifest(
+        self,
+        resource_policy: RuntimeResourcePolicy,
+    ) -> dict[str, Any]:
+        with self._lock:
+            if not self._closed:
+                raise RuntimeError("binance_recorder_writer_not_closed")
+            assert self._interval_path is not None
+            path = self._interval_path
+            digest = _sha256_path(path, resource_policy)
+            return {
+                "path": path.relative_to(self.root).as_posix(),
+                "record_count": self._interval_record_count,
+                "compressed_bytes": path.stat().st_size,
+                "sha256": digest,
+            }
 
     def file_manifests(
         self,
         resource_policy: RuntimeResourcePolicy,
     ) -> list[dict[str, Any]]:
         with self._lock:
-            if self._handles:
+            if not self._closed or self._handles:
                 raise RuntimeError("binance_recorder_writer_not_closed")
-            result = []
-            for path in sorted(self._files):
-                with resource_policy.lease(
-                    "binance.recorder.file_hash",
-                    128 * 1024,
-                ):
-                    digest = hashlib.sha256()
-                    buffer = bytearray(64 * 1024)
-                    with path.open("rb") as handle:
-                        while count := handle.readinto(buffer):
-                            digest.update(memoryview(buffer)[:count])
-                    result.append(
-                        {
-                            **self._files[path],
-                            "compressed_bytes": path.stat().st_size,
-                            "sha256": digest.hexdigest(),
-                        }
-                    )
-            return result
+            return [
+                {
+                    **self._files[path],
+                    "compressed_bytes": path.stat().st_size,
+                    "sha256": _sha256_path(path, resource_policy),
+                }
+                for path in sorted(self._files)
+            ]
+
+    def _require_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("binance_recorder_writer_closed")
 
     def event_counts(self) -> dict[str, int]:
         with self._lock:
             return dict(sorted(self._event_counts.items()))
 
+def _sha256_path(path: Path, resource_policy: RuntimeResourcePolicy) -> str:
+    with resource_policy.lease("binance.recorder.file_hash", 128 * 1024):
+        digest = hashlib.sha256()
+        buffer = bytearray(64 * 1024)
+        with path.open("rb") as handle:
+            while count := handle.readinto(buffer):
+                digest.update(memoryview(buffer)[:count])
+        return digest.hexdigest()
 
 @contextmanager
 def _writer_lifecycle(
@@ -386,8 +477,13 @@ def _writer_lifecycle(
     finally:
         primary = sys.exception()
         try:
-            writer.close()
-            files.extend(writer.file_manifests(policy))
+            if not writer._aborted:  # noqa: SLF001
+                writer.close()
+                files.extend(writer.file_manifests(policy))
+                if capture_stats is not None:
+                    capture_stats.set_connection_interval_manifest(
+                        writer.connection_interval_manifest(policy)
+                    )
         except BaseException as cleanup_error:
             if primary is not None:
                 primary.add_note(
@@ -413,11 +509,17 @@ def _writer_lifecycle(
 @dataclass
 class _CaptureStats:
     resource_policy: RuntimeResourcePolicy | None = None
+    writer: _RunWriter | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _interval_lease: MemoryLease | None = field(default=None, init=False, repr=False)
     connection_opens: Counter[str] = field(default_factory=Counter)
     reconnects: Counter[str] = field(default_factory=Counter)
-    connection_intervals: list[dict[str, Any]] = field(default_factory=list)
+    connection_intervals: dict[str, dict[str, Any]] = field(default_factory=dict)
+    _connection_interval_manifest: dict[str, Any] | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
     connection_errors: int = 0
     sequence_gaps: int = 0
     stale_depth_events: int = 0
@@ -456,20 +558,20 @@ class _CaptureStats:
             self.connection_opens[key] += 1
             if reconnect:
                 self.reconnects[key] += 1
-            self.connection_intervals.append(
-                {
-                    "market": stream.market_type,
-                    "data_kind": stream.data_kind,
-                    "stream": stream.stream,
-                    "connection_id": connection_id,
-                    "segment_id": segment_id,
-                    "opened_at": opened_at,
-                    "opened_monotonic_ns": opened_monotonic_ns,
-                    "closed_at": None,
-                    "closed_monotonic_ns": None,
-                    "close_reason": None,
-                }
-            )
+            if connection_id in self.connection_intervals:
+                raise RuntimeError("binance_recorder_connection_interval_duplicate")
+            self.connection_intervals[connection_id] = {
+                "market": stream.market_type,
+                "data_kind": stream.data_kind,
+                "stream": stream.stream,
+                "connection_id": connection_id,
+                "segment_id": segment_id,
+                "opened_at": opened_at,
+                "opened_monotonic_ns": opened_monotonic_ns,
+                "closed_at": None,
+                "closed_monotonic_ns": None,
+                "close_reason": None,
+            }
 
     def closed(
         self,
@@ -480,20 +582,17 @@ class _CaptureStats:
         close_reason: str,
     ) -> None:
         with self._lock:
-            interval = next(
-                (
-                    item
-                    for item in reversed(self.connection_intervals)
-                    if item["connection_id"] == connection_id
-                    and item["closed_at"] is None
-                ),
-                None,
-            )
+            interval = self.connection_intervals.get(connection_id)
             if interval is None:
                 raise RuntimeError("binance_recorder_connection_interval_missing")
             interval["closed_at"] = closed_at
             interval["closed_monotonic_ns"] = closed_monotonic_ns
             interval["close_reason"] = close_reason
+            if self.writer is not None:
+                self.writer.write_connection_interval(interval)
+            del self.connection_intervals[connection_id]
+            if self._interval_lease is not None:
+                self._interval_lease.shrink_to(len(self.connection_intervals) * 1024)
 
     def connection_error(self) -> None:
         with self._lock:
@@ -512,16 +611,27 @@ class _CaptureStats:
             self.invalid_messages += 1
 
     def close(self) -> None:
-        if self._interval_lease is not None:
-            self._interval_lease.close()
-            self._interval_lease = None
+        with self._lock:
+            if self._interval_lease is not None:
+                self._interval_lease.close()
+                self._interval_lease = None
+
+    def set_connection_interval_manifest(self, value: dict[str, Any]) -> None:
+        with self._lock:
+            if self._connection_interval_manifest is not None:
+                raise RuntimeError("binance_recorder_interval_manifest_duplicate")
+            self._connection_interval_manifest = dict(value)
 
     def payload(self) -> dict[str, Any]:
         with self._lock:
+            if self.connection_intervals:
+                raise RuntimeError("binance_recorder_connection_interval_active")
+            if self._connection_interval_manifest is None:
+                raise RuntimeError("binance_recorder_interval_manifest_missing")
             return {
                 "connection_opens": dict(sorted(self.connection_opens.items())),
                 "reconnects": dict(sorted(self.reconnects.items())),
-                "connection_intervals": self.connection_intervals,
+                "connection_intervals": dict(self._connection_interval_manifest),
                 "connection_errors": self.connection_errors,
                 "sequence_gaps": self.sequence_gaps,
                 "stale_depth_events": self.stale_depth_events,
@@ -538,6 +648,10 @@ class _DepthResyncRequired(Exception):
 
 
 class _InvalidPayload(Exception):
+    pass
+
+
+class _ReaderQuiescenceFailure(RuntimeError):
     pass
 
 
@@ -619,6 +733,15 @@ class _StreamReader(threading.Thread):
         websocket: Any | None = None
         opened = False
         close_reason = "stop"
+        closed_at: str | None = None
+        closed_monotonic_ns: int | None = None
+
+        def freeze_close() -> None:
+            nonlocal closed_at, closed_monotonic_ns
+            if closed_at is None:
+                closed_at = _utc_now()
+                closed_monotonic_ns = time.monotonic_ns()
+
         try:
             try:
                 websocket = _connect_websocket(
@@ -658,7 +781,10 @@ class _StreamReader(threading.Thread):
                     raise _ConnectionProblem()
             previous_u: int | None = None
             last_message_at = time.monotonic()
-            while not self.stop.is_set():
+            while True:
+                if self.stop.is_set():
+                    freeze_close()
+                    break
                 try:
                     raw = websocket.recv(timeout=1)
                 except TimeoutError:
@@ -666,11 +792,14 @@ class _StreamReader(threading.Thread):
                         time.monotonic() - last_message_at
                         >= self.config.connection_idle_timeout_seconds
                     ):
+                        freeze_close()
                         raise _ConnectionProblem() from None
                     continue
                 except (OSError, WebSocketException) as exc:
+                    freeze_close()
                     raise _ConnectionProblem() from exc
                 if raw is None:
+                    freeze_close()
                     raise _ConnectionProblem()
                 last_message_at = time.monotonic()
                 receive_time = _utc_now()
@@ -686,6 +815,7 @@ class _StreamReader(threading.Thread):
                     )
                 except (UnicodeError, ValueError):
                     self.stats.invalid()
+                    freeze_close()
                     raise _InvalidPayload() from None
                 needs_resync = False
                 if self.stream.data_kind == "depth":
@@ -711,24 +841,29 @@ class _StreamReader(threading.Thread):
                 )
                 if needs_resync:
                     self.stats.sequence_gap()
+                    freeze_close()
                     raise _DepthResyncRequired()
         except _DepthResyncRequired:
             close_reason = "depth_resync"
+            freeze_close()
             raise
         except _InvalidPayload:
             close_reason = "failure"
+            freeze_close()
             raise
         except _ConnectionProblem:
             close_reason = "connection_problem"
+            freeze_close()
             raise
         except BaseException:
             close_reason = "failure"
+            freeze_close()
             raise
         finally:
             primary = sys.exception()
             if opened:
-                closed_at = _utc_now()
-                closed_monotonic_ns = time.monotonic_ns()
+                assert closed_at is not None
+                assert closed_monotonic_ns is not None
                 try:
                     self.stats.closed(
                         connection_id,
@@ -940,10 +1075,15 @@ def record(config: RecorderConfig) -> dict[str, Any]:
     """Record one bounded public-data run and publish its exact manifest."""
 
     config.validate()
-    root = Path(config.output_root)
-    root.mkdir(parents=True, exist_ok=True)
+    return atomic_write_directory(
+        Path(config.output_root),
+        lambda root: _record_staged(config, root),
+    )
+
+
+def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     writer = _RunWriter(root)
-    stats = _CaptureStats()
+    stats = _CaptureStats(writer=writer)
     stop = threading.Event()
     readers: list[_StreamReader] = []
     started_at = _utc_now()
@@ -956,173 +1096,161 @@ def record(config: RecorderConfig) -> dict[str, Any]:
     failure: str | None = None
     cleanup_errors: list[str] = []
     files: list[dict[str, Any]] = []
-    manifest: dict[str, Any] | None = None
-    captured: dict[str, Any] = {}
-
-    try:
-        with (
-            runtime_resource_policy_scope() as policy,
-            _writer_lifecycle(
-                writer,
-                policy,
-                files,
-                cleanup_errors,
-                capture_stats=stats,
-            ),
-        ):
-            stats.bind(policy)
-            market_metadata = _record_market_metadata(writer, policy)
-            websocket_reserve = (
-                len(RECORDER_STREAMS) * MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
-            )
-            with policy.lease(
-                "binance.recorder.websocket_buffers",
-                websocket_reserve,
-            ):
-                try:
-                    readers = [
-                        _StreamReader(
-                            stream=stream,
-                            writer=writer,
-                            stats=stats,
-                            stop=stop,
-                            config=config,
-                            on_generation_ready=(
-                                lambda reader, generation: _record_depth_snapshot(
-                                    writer,
-                                    policy,
-                                    reader,
-                                    generation=generation,
-                                )
-                            ),
-                        )
-                        for stream in RECORDER_STREAMS
-                    ]
-                    for reader in readers:
-                        reader.start()
-                    deadline = time.monotonic() + config.connect_timeout_seconds
-                    for reader in readers:
-                        remaining = max(0.0, deadline - time.monotonic())
-                        if not reader.ready.wait(remaining):
-                            raise TimeoutError(
-                                "binance_recorder_stream_connect_timeout"
-                            )
-                    depth_readers = [
-                        reader
-                        for reader in readers
-                        if reader.stream.data_kind == "depth"
-                    ]
-                    for reader in depth_readers:
-                        remaining = max(0.0, deadline - time.monotonic())
-                        generation = reader.current_identity()[0]
-                        if not reader.wait_for_snapshot(generation, remaining):
-                            raise TimeoutError(
-                                "binance_recorder_snapshot_ack_timeout"
-                            )
-                    started_at = _utc_now()
-                    started_clock = time.monotonic()
-                    cpu_start = time.process_time()
-                    while True:
-                        elapsed = time.monotonic() - started_clock
-                        remaining = config.duration_seconds - elapsed
-                        if remaining <= 0:
-                            duration_reached = True
-                            break
-                        stop.wait(min(0.25, remaining))
-                        peak_rss = max(peak_rss, process.memory_info().rss)
-                        for reader in readers:
-                            if reader.failure is not None:
-                                raise RuntimeError("binance_recorder_reader_failure")
-                            if not reader.is_alive():
-                                raise RuntimeError(
-                                    "binance_recorder_reader_thread_died"
-                                )
-                finally:
-                    active_primary = sys.exception()
-                    stop.set()
-                    for reader in readers:
-                        try:
-                            reader.join(timeout=20)
-                            if reader.is_alive():
-                                cleanup_errors.append(f"{reader.name}:join_timeout")
-                        except BaseException as cleanup_error:
-                            if active_primary is not None:
-                                active_primary.add_note(
-                                    "Binance reader join also failed: "
-                                    f"{type(cleanup_error).__name__}"
-                                )
-                            else:
-                                cleanup_errors.append(type(cleanup_error).__name__)
-            captured = stats.payload()
-    except BaseException as error:
-        failure = type(error).__name__
-        raise
-    finally:
-        primary = sys.exception()
-        stop.set()
-        ended_at = _utc_now()
-        duration_seconds = max(0.001, time.monotonic() - started_clock)
-        if not captured:
-            captured = stats.payload()
-        missing_required_streams = [
-            f"{stream.market_type}:{stream.stream}"
-            for stream in RECORDER_STREAMS
-            if not any(
-                item["market"] == stream.market_type
-                and item["stream"] == stream.stream
-                and item["record_count"] > 0
-                for item in files
-            )
-        ]
-        status = (
-            "FAIL"
-            if failure is not None or cleanup_errors
-            else "PARTIAL"
-            if captured["connection_errors"]
-            or captured["sequence_gaps"]
-            or captured["invalid_messages"]
-            or missing_required_streams
-            else "PASS"
-            if duration_reached
-            else "PARTIAL"
+    with (
+        runtime_resource_policy_scope() as policy,
+        _writer_lifecycle(
+            writer,
+            policy,
+            files,
+            cleanup_errors,
+            capture_stats=stats,
+        ),
+    ):
+        stats.bind(policy)
+        market_metadata = _record_market_metadata(writer, policy)
+        websocket_reserve = (
+            len(RECORDER_STREAMS) * MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
         )
-        manifest = {
-            "schema_id": "qrp-binance-recorder",
-            "run_id": uuid.uuid4().hex,
-            "status": status,
-            "market_data_status": status,
-            "venue": "binance",
-            "symbol": SYMBOL,
-            "market_types": [SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE],
-            "market_metadata": market_metadata,
-            "files": files,
-            "capture": {
-                "started_at": started_at,
-                "ended_at": ended_at,
-                "duration_seconds": duration_seconds,
-                "duration_target_seconds": config.duration_seconds,
-                "event_counts": writer.event_counts(),
-                "missing_required_streams": missing_required_streams,
-                **captured,
-                "peak_rss_bytes": peak_rss,
-                "process_cpu_seconds": max(0.0, time.process_time() - cpu_start),
-                "threads": len(readers),
-                "descendants": len(process.children(recursive=True)),
-                "failure": failure,
-                "cleanup_errors": cleanup_errors,
-            },
-        }
-        try:
-            atomic_write_json(root / "run.json", manifest)
-        except BaseException as publication_error:
-            if primary is not None:
-                primary.add_note(
-                    "Binance manifest publication also failed: "
-                    f"{type(publication_error).__name__}"
-                )
-            else:
-                raise
-    assert manifest is not None
+        with policy.lease(
+            "binance.recorder.websocket_buffers",
+            websocket_reserve,
+        ):
+            try:
+                readers = [
+                    _StreamReader(
+                        stream=stream,
+                        writer=writer,
+                        stats=stats,
+                        stop=stop,
+                        config=config,
+                        on_generation_ready=(
+                            lambda reader, generation: _record_depth_snapshot(
+                                writer,
+                                policy,
+                                reader,
+                                generation=generation,
+                            )
+                        ),
+                    )
+                    for stream in RECORDER_STREAMS
+                ]
+                for reader in readers:
+                    reader.start()
+                deadline = time.monotonic() + config.connect_timeout_seconds
+                for reader in readers:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    if not reader.ready.wait(remaining):
+                        raise TimeoutError(
+                            "binance_recorder_stream_connect_timeout"
+                        )
+                depth_readers = [
+                    reader
+                    for reader in readers
+                    if reader.stream.data_kind == "depth"
+                ]
+                for reader in depth_readers:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    generation = reader.current_identity()[0]
+                    if not reader.wait_for_snapshot(generation, remaining):
+                        raise TimeoutError(
+                            "binance_recorder_snapshot_ack_timeout"
+                        )
+                started_at = _utc_now()
+                started_clock = time.monotonic()
+                cpu_start = time.process_time()
+                while True:
+                    elapsed = time.monotonic() - started_clock
+                    remaining = config.duration_seconds - elapsed
+                    if remaining <= 0:
+                        duration_reached = True
+                        break
+                    stop.wait(min(0.25, remaining))
+                    peak_rss = max(peak_rss, process.memory_info().rss)
+                    for reader in readers:
+                        if reader.failure is not None:
+                            raise RuntimeError("binance_recorder_reader_failure")
+                        if not reader.is_alive():
+                            raise RuntimeError(
+                                "binance_recorder_reader_thread_died"
+                            )
+            finally:
+                active_primary = sys.exception()
+                stop.set()
+                join_failed = False
+                for reader in readers:
+                    try:
+                        reader.join(timeout=20)
+                        if reader.is_alive():
+                            join_failed = True
+                            cleanup_errors.append(f"{reader.name}:join_timeout")
+                    except BaseException as cleanup_error:
+                        join_failed = True
+                        if active_primary is not None:
+                            active_primary.add_note(
+                                "Binance reader join also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        else:
+                            cleanup_errors.append(type(cleanup_error).__name__)
+                if join_failed:
+                    writer.abort()
+                    if active_primary is None:
+                        raise _ReaderQuiescenceFailure(
+                            "binance_recorder_reader_quiescence_timeout"
+                        )
+        captured = stats.payload()
+
+    ended_at = _utc_now()
+    duration_seconds = max(0.001, time.monotonic() - started_clock)
+    missing_required_streams = [
+        f"{stream.market_type}:{stream.stream}"
+        for stream in RECORDER_STREAMS
+        if not any(
+            item["market"] == stream.market_type
+            and item["stream"] == stream.stream
+            and item["record_count"] > 0
+            for item in files
+        )
+    ]
+    status = (
+        "FAIL"
+        if failure is not None or cleanup_errors
+        else "PARTIAL"
+        if captured["connection_errors"]
+        or captured["sequence_gaps"]
+        or captured["invalid_messages"]
+        or missing_required_streams
+        else "PASS"
+        if duration_reached
+        else "PARTIAL"
+    )
+    manifest = {
+        "schema_id": "qrp-binance-recorder",
+        "run_id": uuid.uuid4().hex,
+        "status": status,
+        "market_data_status": status,
+        "venue": "binance",
+        "symbol": SYMBOL,
+        "market_types": [SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE],
+        "market_metadata": market_metadata,
+        "files": files,
+        "capture": {
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_seconds": duration_seconds,
+            "duration_target_seconds": config.duration_seconds,
+            "event_counts": writer.event_counts(),
+            "missing_required_streams": missing_required_streams,
+            **captured,
+            "peak_rss_bytes": peak_rss,
+            "process_cpu_seconds": max(0.0, time.process_time() - cpu_start),
+            "threads": len(readers),
+            "descendants": len(process.children(recursive=True)),
+            "failure": failure,
+            "cleanup_errors": cleanup_errors,
+        },
+    }
+    atomic_write_json(root / "run.json", manifest)
     return manifest
 
 

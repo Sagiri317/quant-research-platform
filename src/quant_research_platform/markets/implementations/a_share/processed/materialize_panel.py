@@ -24,15 +24,13 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    pandas_frame_payload_bytes,
-)
-from quant_research_platform.storage._dataset_inspection import (
-    _inspect_dataset_owned,
     _release_owned_value,
+    pandas_frame_payload_bytes,
 )
 from quant_research_platform.storage.datasets import (
     DatasetInspection,
 )
+from quant_research_platform.storage.datasets.inspection import _inspect_dataset_owned
 from quant_research_platform.storage.layout import StorageLayout
 
 

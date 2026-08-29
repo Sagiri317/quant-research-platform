@@ -16,11 +16,10 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-import quant_research_platform.storage._dataset_comparison as dataset_comparison
-import quant_research_platform.storage._dataset_fingerprinting as dataset_fingerprinting
-import quant_research_platform.storage._dataset_inventory as inventory_owner
-import quant_research_platform.storage._dataset_key_tracking as key_tracking
-from quant_research_platform.contracts._json import canonical_json_hash
+import quant_research_platform.storage.datasets.comparison as dataset_comparison
+import quant_research_platform.storage.datasets.fingerprinting as dataset_fingerprinting
+import quant_research_platform.storage.datasets.inventory as inventory_owner
+import quant_research_platform.storage.exact_keys as key_tracking
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -29,24 +28,22 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage import datasets
-from quant_research_platform.storage._dataset_inventory import DatasetSessionInventory
-from quant_research_platform.storage._dataset_key_tracking import (
-    ExactPrimaryKeyIndex,
-)
-from quant_research_platform.storage._dataset_paths import (
+from quant_research_platform.storage.datasets.inventory import DatasetSessionInventory
+from quant_research_platform.storage.datasets.paths import (
     partition_frames,
     timestamp_column_from_spec_payload,
 )
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.reading import (
     filter_frame_by_time_window,
     read_columns_for_time_window,
 )
-from quant_research_platform.storage._dataset_schema import (
+from quant_research_platform.storage.datasets.schema import (
     data_spec_payload,
     logical_dtype_payload_from_frame,
     physical_schema_from_schema,
@@ -55,7 +52,10 @@ from quant_research_platform.storage._dataset_schema import (
     validate_dataset_spec_payload,
     validate_physical_schema_payload,
 )
-from quant_research_platform.storage._dataset_writing import _WriteStats
+from quant_research_platform.storage.datasets.writing import _WriteStats
+from quant_research_platform.storage.exact_keys import (
+    ExactPrimaryKeyIndex,
+)
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.low_level_fixtures import (
@@ -153,7 +153,7 @@ def test_dataset_inventory_failure_and_primary_cleanup_release_lease(
     with runtime_resource_policy_scope(policy):
         with monkeypatch.context() as sqlite_failure:
             sqlite_failure.setattr(
-                "quant_research_platform.storage._dataset_inventory.sqlite3.connect",
+                "quant_research_platform.storage.datasets.inventory.sqlite3.connect",
                 fail_connect,
             )
             with pytest.raises(RuntimeError, match="sqlite_start_failed"):

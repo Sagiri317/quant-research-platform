@@ -14,10 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, BinaryIO, cast
 
-from quant_research_platform.artifacts._output_bundle_validation import (
-    validate_output_bundle,
-)
-from quant_research_platform.contracts._json import (
+from quant_research_platform.artifacts.outputs import validate_output_bundle
+from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
     canonical_json_hash,
 )
@@ -35,23 +33,23 @@ from quant_research_platform.runtime.logical_paths import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _release_owned_value,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
+from quant_research_platform.storage.datasets.inspection import (
     _inspect_dataset_session_owned,
-    _release_owned_value,
 )
-from quant_research_platform.storage._dataset_physical import (
+from quant_research_platform.storage.datasets.reading import open_dataset_session
+from quant_research_platform.storage.datasets.schema import (
+    validate_dataset_manifest_consumable,
+    validate_dataset_primary_key_null_summary,
+)
+from quant_research_platform.storage.datasets.types import DatasetInspection
+from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
 )
-from quant_research_platform.storage._dataset_reading import open_dataset_session
-from quant_research_platform.storage._dataset_schema import (
-    validate_dataset_manifest_consumable,
-    validate_dataset_primary_key_null_summary,
-)
-from quant_research_platform.storage._dataset_types import DatasetInspection
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 
 _LAYER_SUMMARY_KEYS = frozenset(

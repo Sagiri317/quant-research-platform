@@ -9,10 +9,10 @@ import pandas as pd
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import current_runtime_resource_policy
-from quant_research_platform.storage._dataset_reading import read_dataset
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
 )
+from quant_research_platform.storage.datasets.reading import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 

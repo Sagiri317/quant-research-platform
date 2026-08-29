@@ -100,7 +100,11 @@ def test_crypto_hft_workflow_identity_failure_publishes_nothing(
     raw_root = tmp_path / "raw"
     output_root = tmp_path / "output"
     write_binance_hft_run(raw_root)
-    raw_file = next(raw_root.rglob("*.jsonl.gz"))
+    raw_file = next(
+        path
+        for path in raw_root.rglob("*.jsonl.gz")
+        if path.name == "usd_s_m_futures_depth.jsonl.gz"
+    )
     raw_file.write_bytes(raw_file.read_bytes() + b"tampered")
 
     with pytest.raises(ValueError, match="file_identity_mismatch"):
@@ -270,7 +274,7 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
     def fake_bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
         yield manifest, lookup
 
-    monkeypatch.setattr(crypto_hft, "_read_prediction_output_bundle", fake_bundle)
+    monkeypatch.setattr(crypto_hft, "read_prediction_output_bundle", fake_bundle)
     monkeypatch.setattr(
         crypto_hft,
         "open_dataset_session",

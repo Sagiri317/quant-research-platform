@@ -7,14 +7,19 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.artifacts._evaluation_outputs import (
-    write_evaluation_outputs as _write_evaluation_outputs,
+from quant_research_platform.artifacts.outputs.evaluation import (
+    write_evaluation_outputs as evaluation_writer,
+    write_evaluation_outputs_from_chunks as evaluation_chunks_writer,
 )
-from quant_research_platform.artifacts._portfolio_outputs import (
-    write_portfolio_outputs as _write_portfolio_outputs,
+from quant_research_platform.artifacts.outputs.bundle_validation import (
+    read_prediction_output_bundle,
+    validate_output_bundle,
 )
-from quant_research_platform.artifacts._prediction_outputs import (
-    write_prediction_outputs as _write_prediction_outputs,
+from quant_research_platform.artifacts.outputs.portfolio import (
+    write_portfolio_outputs as portfolio_writer,
+)
+from quant_research_platform.artifacts.outputs.prediction import (
+    write_prediction_outputs as prediction_writer,
 )
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
@@ -25,6 +30,7 @@ from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -53,13 +59,13 @@ def write_prediction_outputs(
     spec: PredictionSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
-    output_chunks: Iterable[pd.DataFrame] | None = None,
+    output_chunks: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]] | None = None,
     model_metadata: Mapping[str, object] | None = None,
     prediction_metadata_factory: Callable[[], Mapping[str, object]] | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Path:
     return _write_in_resource_root(
-        lambda: _write_prediction_outputs(
+        lambda: prediction_writer(
             frame,
             spec=spec,
             output_spec=output_spec,
@@ -82,9 +88,10 @@ def write_evaluation_outputs(
     spec: EvaluationSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Path:
     return _write_in_resource_root(
-        lambda: _write_evaluation_outputs(
+        lambda: evaluation_writer(
             metrics,
             grouped_label_values,
             ic_summary=ic_summary,
@@ -93,26 +100,68 @@ def write_evaluation_outputs(
             spec=spec,
             output_spec=output_spec,
             layout=layout,
-        )
+        ),
+        resource_policy=resource_policy,
+    )
+
+
+def write_evaluation_outputs_from_chunks(
+    chunks: Iterable[
+        tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]
+        | _OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
+    ],
+    *,
+    summary_factory: Callable[
+        [],
+        tuple[
+            EvaluationDiagnostics,
+            pd.DataFrame,
+            pd.DataFrame,
+            pd.DataFrame,
+        ],
+    ],
+    spec: EvaluationSpec,
+    output_spec: OutputSpec,
+    layout: StorageLayout,
+    n_groups: int,
+    resource_policy: RuntimeResourcePolicy | None = None,
+) -> Path:
+    return _write_in_resource_root(
+        lambda: evaluation_chunks_writer(
+            chunks,
+            summary_factory=summary_factory,
+            spec=spec,
+            output_spec=output_spec,
+            layout=layout,
+            n_groups=n_groups,
+        ),
+        resource_policy=resource_policy,
     )
 
 
 def write_portfolio_outputs(
     *,
-    output_chunks: Iterable[Mapping[str, pd.DataFrame]],
+    output_chunks: Iterable[
+        Mapping[str, pd.DataFrame]
+        | _OwnedValue[Mapping[str, pd.DataFrame]]
+    ],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
-    additive_cumulative_returns_factory: Callable[[], Iterable[pd.DataFrame]],
+    additive_cumulative_returns_factory: Callable[
+        [], Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
+    ],
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
+    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Path:
     return _write_in_resource_root(
-        lambda: _write_portfolio_outputs(
+        lambda: portfolio_writer(
             output_chunks=output_chunks,
             summary_factory=summary_factory,
             additive_cumulative_returns_factory=additive_cumulative_returns_factory,
             spec=spec,
             output_spec=output_spec,
             layout=layout,
-        )
+        ),
+        resource_policy=resource_policy,
     )

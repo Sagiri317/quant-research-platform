@@ -375,7 +375,7 @@ def test_qrp_local_verification_run_accepts_required_options(monkeypatch) -> Non
     assert calls[0].prediction_test_start == "2014-07-01"
     assert calls[0].portfolio_frequency == frequency_ids.DAILY_FREQUENCY_SLUG
     assert calls[0].portfolio_execution_lag_steps == 1
-    assert calls[0].profile.fields.list()
+    assert calls[0].profile.research_datasets.list()
     assert calls[0].run_id is None
     assert "PASS" in result.output
     assert "run_id=s1" in result.output

@@ -103,9 +103,11 @@ def _required_fields_for_factor(factor: str) -> tuple[str, ...]:
     parsed = parse_price_volume_windowed_factor_name(factor)
     if parsed is None:
         return ()
-    prefix, _window, frequency = parsed
+    prefix, window, frequency = parsed
     if prefix not in _WINDOWED_PRICE_VOLUME_FACTOR_PREFIXES:
         return ()
     if frequency.value != "1d":
+        return ()
+    if prefix == "mom" and window == 1:
         return ()
     return BASE_PRICE_VOLUME_FACTOR_REQUIREMENTS.get(prefix, ())

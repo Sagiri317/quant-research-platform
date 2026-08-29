@@ -41,13 +41,11 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    _release_owned_value,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    _inspect_dataset_owned,
-    _release_owned_value,
-)
 from quant_research_platform.storage.datasets import DatasetInspection
+from quant_research_platform.storage.datasets.inspection import _inspect_dataset_owned
 from quant_research_platform.storage.layout import StorageLayout
 
 processed_catalog = processed_catalog_module.processed_catalog

@@ -12,7 +12,7 @@ from quant_research_platform.markets.implementations.crypto.labels.definitions i
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto.research_profiles import (
+from quant_research_platform.markets.implementations.crypto.research_datasets import (
     build_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (

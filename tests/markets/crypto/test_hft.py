@@ -17,10 +17,7 @@ from quant_research_platform.markets.implementations.crypto.hft import (
     l1_ofi,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
-
-
-def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:
-    return start_ms * 1_000_000, end_ms * 1_000_000
+from tests.helpers.binance_hft import _coverage
 
 
 def _state(
@@ -122,6 +119,22 @@ def test_panel_excludes_pre_interval_trades_and_keeps_stream_clocks_separate() -
     assert row["exchange_event_time_ms"] == 1
     assert row["transaction_time_ms"] == 0
     assert row["book_capture_seq"] == 1
+
+
+def test_panel_ofi_excludes_book_events_before_interval_lower_bound() -> None:
+    rows = list(
+        iter_panel_rows(
+            [_state(0), _state(50, bid_qty=3.0)],
+            [],
+            start_ms=200,
+            end_ms=200,
+            book_coverage={"s1": _coverage(0, 301)},
+            trade_coverage={"trade-connection-1": _coverage(0, 301)},
+        )
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["book_ofi_100ms"] == 0.0
 
 
 def test_explicit_book_boundary_stops_panel_until_new_segment() -> None:

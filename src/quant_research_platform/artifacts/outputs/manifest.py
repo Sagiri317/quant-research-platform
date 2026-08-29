@@ -6,16 +6,16 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict
 from pathlib import PurePosixPath
 
-from quant_research_platform.artifacts._evaluation_output_validation import (
+from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     validate_evaluation_output_metadata_shape,
 )
-from quant_research_platform.artifacts._portfolio_output_validation import (
+from quant_research_platform.artifacts.outputs.portfolio_validation import (
     PORTFOLIO_ARTIFACTS,
     validate_portfolio_output_metadata_shape,
     validate_portfolio_row_counts,
 )
-from quant_research_platform.artifacts._prediction_output_validation import (
+from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_output_metadata_shape,
 )
 from quant_research_platform.artifacts.definitions import output_catalog

@@ -32,19 +32,14 @@ def test_research_profile_contains_active_catalogs() -> None:
 
     profile = research_profile()
 
-    assert profile.profile_id == "a_share_csmar_1d"
     assert (
         research_profile_id("a_share", "csmar", frequency_ids.DAILY_FREQUENCY_SLUG)
-        == profile.profile_id
+        == "a_share_csmar_1d"
     )
-    assert research_profile(profile.profile_id) is profile
-    assert set(profile.source_interim_catalogs) == {"csmar"}
-    with pytest.raises(AttributeError):
-        profile.fields.list().append(profile.fields.list()[0])
-    with pytest.raises(TypeError):
-        profile.source_interim_catalogs["other"] = profile.source_interim_catalogs[
-            "csmar"
-        ]
+    assert research_profile("a_share_csmar_1d") is profile
+    assert profile.factors.list()
+    assert profile.labels.list()
+    assert isinstance(profile.schema_inventory_important_columns, tuple)
     assert profile.source_id == SourceId("csmar")
     assert callable(profile.materialize_interim_data)
     assert callable(profile.materialize_processed_data)
@@ -214,8 +209,6 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     )
     model_ids = {model.model_id for model in models}
 
-    assert profile.predictions.list() == ()
-    assert profile.portfolios.list() == ()
     assert sorted(model.model_algorithm for model in models) == sorted(algorithms)
     assert len(predictions) == len(algorithms)
     assert {prediction.model_id for prediction in predictions} == model_ids

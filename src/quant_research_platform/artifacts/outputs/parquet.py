@@ -15,7 +15,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
-from quant_research_platform.artifacts._output_common_validation import (
+from quant_research_platform.artifacts.outputs.common_validation import (
     validate_output_frame,
 )
 from quant_research_platform.contracts.predictions import (
@@ -25,16 +25,19 @@ from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
+    _OwnedValue,
+    _close_lease_preserving_primary,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
 )
-from quant_research_platform.storage._dataset_key_tracking import (
+from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
-from quant_research_platform.storage._dataset_paths import require_unaliased_path
-from quant_research_platform.storage._dataset_physical import (
+from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.parquet import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _parquet_row_group_footer_upper_bound,
     _parquet_row_group_size,
@@ -50,8 +53,81 @@ class _PredictionOutputWriteSummary:
     effective_test_end: str
 
 
+def _unwrap_frame_input(
+    item: pd.DataFrame | _OwnedValue[pd.DataFrame],
+) -> tuple[pd.DataFrame, MemoryLease | None]:
+    if isinstance(item, _OwnedValue):
+        if not isinstance(item.value, pd.DataFrame):
+            raise TypeError("invalid_artifact_output_frame")
+        return item.value, item.lease
+    if not isinstance(item, pd.DataFrame):
+        raise TypeError("invalid_artifact_output_frame")
+    return item, None
+
+
+def _artifact_frame_bound(
+    frame: pd.DataFrame,
+    *,
+    key_columns: tuple[str, ...],
+) -> int:
+    payload_bytes = pandas_frame_payload_bytes(frame)
+    row_count = len(frame)
+    column_count = len(frame.columns)
+    index_bytes = int(frame.index.memory_usage(deep=True))
+    arrow_bytes = payload_bytes + row_count * 9 * column_count
+    timestamp_bytes = (
+        index_bytes + 9 * row_count if "timestamp" in key_columns else 0
+    )
+    key_mask_bytes = index_bytes + row_count if key_columns else 0
+    return payload_bytes + arrow_bytes + timestamp_bytes + key_mask_bytes
+
+
+def _artifact_frames_reservation(
+    frames: Iterable[tuple[pd.DataFrame, tuple[str, ...]]],
+    *,
+    owned_lease: MemoryLease | None = None,
+) -> ExitStack:
+    bound = sum(
+        _artifact_frame_bound(frame, key_columns=key_columns)
+        for frame, key_columns in frames
+    )
+    stack = ExitStack()
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        if owned_lease is not None:
+            raise RuntimeError("runtime_resource_policy_not_active")
+        return stack
+    try:
+        if owned_lease is None:
+            stack.enter_context(policy.lease("artifacts.outputs.payload", bound))
+        else:
+            if owned_lease._root is not policy or not owned_lease.active:
+                raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+            owned_lease.transfer("artifacts.outputs.payload")
+            if bound > owned_lease.reserved_bytes:
+                owned_lease.grow(bound - owned_lease.reserved_bytes)
+            elif bound < owned_lease.reserved_bytes:
+                owned_lease.shrink_to(bound)
+            stack.callback(
+                _close_lease_preserving_primary,
+                owned_lease,
+                owner="artifacts.outputs.payload",
+            )
+    except BaseException as primary:
+        if owned_lease is not None and owned_lease.active:
+            try:
+                owned_lease.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "artifact output lease release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        raise
+    return stack
+
+
 def write_parquet_chunks(
-    frames: Iterable[pd.DataFrame],
+    frames: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]],
     path: Path,
     *,
     required: tuple[str, ...],
@@ -90,14 +166,16 @@ def write_parquet_chunks(
         ):
             with closing_iterator(iter(frames)) as active_frames:
                 try:
-                    first_frame = next(active_frames)
+                    first_item = next(active_frames)
                 except StopIteration:
                     raise ValueError("empty_prediction_window") from None
+                first_frame, first_lease = _unwrap_frame_input(first_item)
                 with ExitStack() as first_frame_state:
                     first_frame_state.enter_context(
                         _artifact_frame_reservation(
                             first_frame,
                             key_columns=key_columns,
+                            owned_lease=first_lease,
                         )
                     )
                     handle = scratch_owner.open_owned_scratch_file(temp_path)
@@ -118,7 +196,8 @@ def write_parquet_chunks(
                                 scratch_parent=temp_path.parent,
                             ) as key_index:
                                 first_pending = True
-                                for frame in chain((first_frame,), active_frames):
+                                for item in chain((first_item,), active_frames):
+                                    frame, frame_lease = _unwrap_frame_input(item)
                                     is_first = first_pending
                                     first_pending = False
                                     try:
@@ -128,6 +207,7 @@ def write_parquet_chunks(
                                                     _artifact_frame_reservation(
                                                         frame,
                                                         key_columns=key_columns,
+                                                        owned_lease=frame_lease,
                                                     )
                                                 )
                                             selected = _prediction_output_chunk_frame(
@@ -295,8 +375,6 @@ def _prediction_output_chunk_frame(
 def write_parquet(
     frame: pd.DataFrame,
     path: Path,
-    *,
-    pre_reserved: bool = False,
     **kwargs: object,
 ) -> Path:
     final_path = Path(path)
@@ -320,7 +398,6 @@ def write_parquet(
     try:
         with _artifact_frame_reservation(
             frame,
-            payload_already_reserved=pre_reserved,
         ):
             handle = scratch_owner.open_owned_scratch_file(temp_path)
             claimed_temp = True
@@ -399,28 +476,16 @@ def _artifact_frame_reservation(
     frame: pd.DataFrame | None,
     *,
     key_columns: tuple[str, ...] = (),
-    payload_already_reserved: bool = False,
+    owned_lease: MemoryLease | None = None,
 ) -> ExitStack:
-    stack = ExitStack()
-    policy = current_runtime_resource_policy()
-    if policy is not None:
-        payload_bytes = 0 if frame is None else pandas_frame_payload_bytes(frame)
-        input_charge = 0 if payload_already_reserved else payload_bytes
-        row_count = 0 if frame is None else len(frame)
-        column_count = 0 if frame is None else len(frame.columns)
-        index_bytes = 0 if frame is None else int(frame.index.memory_usage(deep=True))
-        arrow_bytes = payload_bytes + row_count * 9 * column_count
-        timestamp_bytes = (
-            index_bytes + 9 * row_count if "timestamp" in key_columns else 0
-        )
-        key_mask_bytes = index_bytes + row_count if key_columns else 0
-        stack.enter_context(
-            policy.lease(
-                "artifacts.parquet.frame",
-                input_charge + arrow_bytes + timestamp_bytes + key_mask_bytes,
-            )
-        )
-    return stack
+    if frame is None:
+        if owned_lease is not None:
+            raise TypeError("invalid_artifact_output_frame")
+        return ExitStack()
+    return _artifact_frames_reservation(
+        ((frame, key_columns),),
+        owned_lease=owned_lease,
+    )
 
 
 def _artifact_table_write_state(

@@ -110,6 +110,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
                         summary_state=state,
                     )
                 )
+                outputs = [item.value for item in outputs]
                 return (
                     outputs,
                     state.ic_summary(),
@@ -211,6 +212,7 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
                 resource_policy=expected_policy,
             )
         )
+    expected_outputs = [item.value for item in expected_outputs]
     with runtime_resource_policy_scope() as result_policy:
         result_outputs = list(
             eval_engine._iter_evaluation_output_chunks(
@@ -223,6 +225,7 @@ def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
                 resource_policy=result_policy,
             )
         )
+    result_outputs = [item.value for item in result_outputs]
 
     assert len(result_outputs) == len(expected_outputs)
     result_metrics, result_grouped, result_metadata = result_outputs[0]

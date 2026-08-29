@@ -123,7 +123,7 @@ def iter_panel_rows(
                         previous_bbo is not None
                         and state.best_bid is not None
                         and state.best_ask is not None
-                        and event_time > interval_start
+                        and event_time > interval_start_ns
                     ):
                         book_ofi += l1_ofi(
                             previous_bbo[0],

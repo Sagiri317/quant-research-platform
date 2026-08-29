@@ -24,9 +24,6 @@ def test_compute_costs_are_owned_by_cost_config() -> None:
             spread_bps=2,
         ),
     )
-    with pytest.raises(ValueError, match="unsupported_portfolio_impact_model"):
-        CostConfig(impact_model="custom")
-
     assert zero["cost_model"] == "zero_cost"
     assert zero["total_cost"] == 0.0
     assert detailed["cost_model"] == "detailed_bps"

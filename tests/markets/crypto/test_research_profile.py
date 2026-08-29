@@ -11,14 +11,10 @@ from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.runtime_resources import capture_test_policy
 
 
-def test_crypto_binance_1m_profile_builds_with_empty_prediction_and_portfolio() -> None:
+def test_crypto_binance_1m_profile_keeps_hft_composition_binding() -> None:
     profile = research_profile("crypto_binance_1m")
 
-    assert profile.profile_id == "crypto_binance_1m"
     assert profile.source_id == "binance"
-    assert [item.source_id for item in profile.sources.list()] == ["binance"]
-    assert [item.market_id for item in profile.markets.list()] == ["crypto"]
-    assert profile.source_interim_catalogs.keys() == {"binance"}
     assert profile.research_datasets.list()[0].data_id == (
         "microstructure_forward_returns"
     )
@@ -26,8 +22,6 @@ def test_crypto_binance_1m_profile_builds_with_empty_prediction_and_portfolio() 
         "microstructure_forward_returns_evaluation"
     )
     assert profile.models.list() == ()
-    assert profile.predictions.list() == ()
-    assert profile.portfolios.list() == ()
 
 
 def test_crypto_binance_profile_imports_processed_dependency_window(

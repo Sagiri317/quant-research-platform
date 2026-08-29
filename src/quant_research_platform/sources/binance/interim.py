@@ -45,7 +45,6 @@ from quant_research_platform.sources.binance.validation import (
     depth_side_levels,
     first_present,
     strict_boolean,
-    strict_data_kind,
     strict_iso_timestamp,
     strict_market_type,
     strict_millisecond_timestamp,
@@ -55,8 +54,8 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_integer,
     strict_symbol,
 )
-from quant_research_platform.storage._dataset_key_tracking import ExactPrimaryKeyIndex
-from quant_research_platform.storage._dataset_writing import write_dataset
+from quant_research_platform.storage.datasets.writing import write_dataset
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.layout import StorageLayout
 
 RAW_ROW_BATCH_SIZE = 100_000
@@ -193,9 +192,20 @@ def _iter_owned_interim_frames(
                                     "runtime_memory_lease_transfer_mismatch"
                                 )
                             batch = owned.value
-                            normalized = normalize_raw_envelopes(
-                                batch,
+                            if data_id == ids.market_bars_data_id():
+                                normalized = _normalize_klines(batch)
+                            elif data_id == ids.aggregate_trades_data_id():
+                                normalized = _normalize_aggregate_trades(batch)
+                            elif data_id == ids.depth_levels_data_id():
+                                normalized = _normalize_depth(batch)
+                            else:
+                                raise ValueError(
+                                    f"unsupported_binance_data_id: {data_id}"
+                                )
+                            _validate_normalized_order(
+                                normalized,
                                 data_id=data_id,
+                                previous_key=None,
                             )
                             last_key = _validate_normalized_boundary(
                                 normalized,
@@ -269,24 +279,6 @@ def _iter_owned_interim_frames(
                 verify_root()
 
     return activate()
-
-
-def normalize_raw_envelopes(
-    envelopes: tuple[dict[str, Any], ...],
-    *,
-    data_id: str,
-) -> pd.DataFrame:
-    _validate_raw_kind_matches_data_id(envelopes, data_id=data_id)
-    if data_id == ids.market_bars_data_id():
-        frame = _normalize_klines(envelopes)
-    elif data_id == ids.aggregate_trades_data_id():
-        frame = _normalize_aggregate_trades(envelopes)
-    elif data_id == ids.depth_levels_data_id():
-        frame = _normalize_depth(envelopes)
-    else:
-        raise ValueError(f"unsupported_binance_data_id: {data_id}")
-    _validate_normalized_order(frame, data_id=data_id, previous_key=None)
-    return frame
 
 
 def materialize_interim_data(
@@ -433,23 +425,6 @@ def _normalize_klines(rows: tuple[dict[str, Any], ...]) -> pd.DataFrame:
         normalized,
         MARKET_BARS_COLUMNS,
     )
-
-
-def _validate_raw_kind_matches_data_id(
-    envelopes: tuple[dict[str, Any], ...],
-    *,
-    data_id: str,
-) -> None:
-    expected = {
-        ids.market_bars_data_id(): "klines",
-        ids.aggregate_trades_data_id(): "agg_trades",
-        ids.depth_levels_data_id(): "depth",
-    }.get(data_id)
-    if expected is None:
-        raise ValueError(f"unsupported_binance_data_id: {data_id}")
-    for envelope in envelopes:
-        if strict_data_kind(envelope.get("data_kind")) != expected:
-            raise ValueError("binance_raw_data_id_kind_mismatch")
 
 
 def _filter_time_window(

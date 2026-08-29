@@ -9,6 +9,25 @@ from pathlib import Path
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 
 
+def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:
+    return start_ms * 1_000_000, end_ms * 1_000_000
+
+
+def _quote(
+    timestamp_ms: int,
+    *,
+    book_segment_id: str = "book-1",
+    trade_connection_id: str = "trade-connection-1",
+) -> dict[str, object]:
+    return {
+        "timestamp_ms": timestamp_ms,
+        "asset_id": "btc_usdt",
+        "segment_id": f"{book_segment_id}:{trade_connection_id}",
+        "book_segment_id": book_segment_id,
+        "trade_connection_id": trade_connection_id,
+    }
+
+
 def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
     root.mkdir(parents=True)
     snapshot_rows = [
@@ -107,6 +126,38 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
             rows=trade_rows,
         ),
     ]
+    connection_intervals = [
+        {
+            "market": FUTURES_MARKET_TYPE,
+            "data_kind": "depth",
+            "stream": "btcusdt@depth@100ms",
+            "connection_id": "book-connection-1",
+            "segment_id": "segment-1",
+            "opened_at": "1970-01-01T00:00:00.000000Z",
+            "opened_monotonic_ns": 0,
+            "closed_at": "1970-01-01T00:00:10.000000Z",
+            "closed_monotonic_ns": 10_000_000_000,
+            "close_reason": "stop",
+        },
+        {
+            "market": FUTURES_MARKET_TYPE,
+            "data_kind": "agg_trades",
+            "stream": "btcusdt@aggTrade",
+            "connection_id": "trade-connection-1",
+            "segment_id": None,
+            "opened_at": "1970-01-01T00:00:00.000000Z",
+            "opened_monotonic_ns": 0,
+            "closed_at": "1970-01-01T00:00:10.000000Z",
+            "closed_monotonic_ns": 10_000_000_000,
+            "close_reason": "stop",
+        },
+    ]
+    sidecar = root / "connection_intervals.jsonl.gz"
+    with gzip.open(sidecar, "wt", encoding="utf-8") as handle:
+        for interval in connection_intervals:
+            handle.write(json.dumps(interval, separators=(",", ":")))
+            handle.write("\n")
+    sidecar_bytes = sidecar.read_bytes()
     manifest = {
         "schema_id": "qrp-binance-recorder",
         "run_id": "workflow-run",
@@ -119,32 +170,12 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
             FUTURES_MARKET_TYPE: {"tick_size": "0.1", "snapshot_limit": 1000}
         },
         "capture": {
-            "connection_intervals": [
-                {
-                    "market": FUTURES_MARKET_TYPE,
-                    "data_kind": "depth",
-                    "stream": "btcusdt@depth@100ms",
-                    "connection_id": "book-connection-1",
-                    "segment_id": "segment-1",
-                    "opened_at": "1970-01-01T00:00:00.000000Z",
-                    "opened_monotonic_ns": 0,
-                    "closed_at": "1970-01-01T00:00:10.000000Z",
-                    "closed_monotonic_ns": 10_000_000_000,
-                    "close_reason": "stop",
-                },
-                {
-                    "market": FUTURES_MARKET_TYPE,
-                    "data_kind": "agg_trades",
-                    "stream": "btcusdt@aggTrade",
-                    "connection_id": "trade-connection-1",
-                    "segment_id": None,
-                    "opened_at": "1970-01-01T00:00:00.000000Z",
-                    "opened_monotonic_ns": 0,
-                    "closed_at": "1970-01-01T00:00:10.000000Z",
-                    "closed_monotonic_ns": 10_000_000_000,
-                    "close_reason": "stop",
-                },
-            ]
+            "connection_intervals": {
+                "path": "connection_intervals.jsonl.gz",
+                "record_count": len(connection_intervals),
+                "compressed_bytes": len(sidecar_bytes),
+                "sha256": hashlib.sha256(sidecar_bytes).hexdigest(),
+            }
         },
         "files": files,
     }

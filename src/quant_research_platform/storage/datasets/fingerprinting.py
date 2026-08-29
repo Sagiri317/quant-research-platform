@@ -11,28 +11,26 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts._json import canonical_json_hash
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
     _OwnedValue,
+    _release_owned_value,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage._dataset_inspection import (
-    _close_lease_preserving_primary,
-    _release_owned_value,
-)
-from quant_research_platform.storage._dataset_paths import relative_partition_label
-from quant_research_platform.storage._dataset_reading import (
+from quant_research_platform.storage.datasets.paths import relative_partition_label
+from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_file_batches,
     open_dataset_session,
     read_columns_for_time_window,
 )
-from quant_research_platform.storage._dataset_schema import physical_schema_from_schema
-from quant_research_platform.storage._dataset_types import DatasetFingerprint
+from quant_research_platform.storage.datasets.schema import physical_schema_from_schema
+from quant_research_platform.storage.datasets.types import DatasetFingerprint
 
 
 def fingerprint_dataset(

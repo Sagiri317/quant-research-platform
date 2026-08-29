@@ -21,17 +21,12 @@ from quant_research_platform.markets.implementations.crypto.hft import (
     iter_label_rows,
     iter_panel_rows,
 )
-from quant_research_platform.markets.implementations.crypto.ids import (
-    HFT_MODEL_LABEL_HORIZON_MS,
-)
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
+    HFT_MODEL_LABEL_HORIZON_MS,
     build_hft_model_catalog,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
-
-
-def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:
-    return start_ms * 1_000_000, end_ms * 1_000_000
+from tests.helpers.binance_hft import _coverage, _quote
 
 
 def _state(
@@ -144,21 +139,6 @@ def _taker_config(*, latency_ms: int = 0) -> TakerConfig:
         threshold_bps=0.0,
         markout_horizon_ms=100,
     )
-
-
-def _quote(
-    timestamp_ms: int,
-    *,
-    book_segment_id: str = "book-1",
-    trade_connection_id: str = "trade-connection-1",
-) -> dict[str, object]:
-    return {
-        "timestamp_ms": timestamp_ms,
-        "asset_id": "btc_usdt",
-        "segment_id": f"{book_segment_id}:{trade_connection_id}",
-        "book_segment_id": book_segment_id,
-        "trade_connection_id": trade_connection_id,
-    }
 
 
 def _state_at_ns(
@@ -492,6 +472,21 @@ def test_maker_order_expires_at_first_missing_trade_coverage_boundary() -> None:
         on_fill=fills.append,
     )
     assert fills == []
+    assert result["average_order_lifetime_ms"] == 75.0
+    assert result["created_orders"] == 2
+    assert result["zero_fill_orders"] == 2
+
+
+def test_maker_terminal_order_uses_coverage_validity_end() -> None:
+    result = simulate_maker(
+        [_state(0)],
+        [],
+        [_quote(0)],
+        config=_maker_config(),
+        observed_coverage={"book-1": _coverage(0, 200)},
+        trade_coverage={"trade-connection-1": _coverage(0, 75)},
+    )
+
     assert result["average_order_lifetime_ms"] == 75.0
 
 

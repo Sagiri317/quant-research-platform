@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gzip
+import hashlib
 import json
 import threading
 from pathlib import Path
@@ -113,6 +115,19 @@ def test_recorder_config_rejects_existing_or_unbounded_target(tmp_path: Path) ->
         RecorderConfig(output_root=occupied, duration_seconds=1).validate()
 
 
+def test_recorder_rejects_aliased_output_root_before_access(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory_symlink_not_available: {exc}")
+
+    with pytest.raises(ValueError, match="invalid_storage_write_path"):
+        RecorderConfig(alias, duration_seconds=1).validate()
+
+
 def test_depth_reader_waits_for_same_generation_snapshot_ack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -207,6 +222,170 @@ def test_connection_interval_freezes_before_websocket_cleanup(
         reader._read_connection(reconnect=False)
 
     assert order == ["interval", "websocket"]
+
+
+def test_connection_close_time_is_frozen_at_error_detection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    phase = {"value": "open"}
+    closed: list[str] = []
+
+    def utc_now() -> str:
+        return phase["value"]
+
+    class LateConnectionProblem(Exception):
+        def __init__(self) -> None:
+            phase["value"] = "after"
+
+    class Websocket:
+        def recv(self, timeout: float) -> None:
+            del timeout
+            phase["value"] = "detected"
+            raise OSError("connection lost")
+
+        def close(self) -> None:
+            return None
+
+    stats = recorder._CaptureStats()
+
+    def record_closed(*args: object, **kwargs: object) -> None:
+        del args
+        closed.append(str(kwargs["closed_at"]))
+
+    monkeypatch.setattr(recorder, "_utc_now", utc_now)
+    monkeypatch.setattr(recorder, "_ConnectionProblem", LateConnectionProblem)
+    monkeypatch.setattr(stats, "closed", record_closed)
+    monkeypatch.setattr(
+        recorder,
+        "_connect_websocket",
+        lambda *_args, **_kwargs: Websocket(),
+    )
+    reader = recorder._StreamReader(
+        stream=RECORDER_STREAMS[2],
+        writer=recorder._RunWriter(tmp_path),
+        stats=stats,
+        stop=threading.Event(),
+        config=RecorderConfig(tmp_path / "run", 1),
+    )
+
+    with pytest.raises(LateConnectionProblem):
+        reader._read_connection(reconnect=False)
+
+    assert closed == ["detected"]
+
+
+def test_run_writer_rejects_late_writes_after_close(tmp_path: Path) -> None:
+    writer = recorder._RunWriter(tmp_path)
+    writer.write(
+        market_type=FUTURES_MARKET_TYPE,
+        data_kind="agg_trades",
+        stream="btcusdt@aggTrade",
+        payload={},
+        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_monotonic_ns=1,
+    )
+    writer.close()
+    path = next(tmp_path.rglob("*.jsonl.gz"))
+    before = path.read_bytes()
+
+    with pytest.raises(RuntimeError, match="writer_closed"):
+        writer.write(
+            market_type=FUTURES_MARKET_TYPE,
+            data_kind="agg_trades",
+            stream="btcusdt@aggTrade",
+            payload={},
+            receive_time="2026-08-27T00:00:00.000000Z",
+            receive_monotonic_ns=2,
+        )
+
+    assert path.read_bytes() == before
+
+
+def test_capture_stats_streams_finalized_intervals_to_sidecar(
+    tmp_path: Path,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    writer = recorder._RunWriter(tmp_path)
+
+    with runtime_resource_policy_scope(policy):
+        stats = recorder._CaptureStats(policy, writer)
+        for index in range(10_000):
+            connection_id = f"trade-{index}"
+            stats.opened(
+                RECORDER_STREAMS[2],
+                reconnect=index > 0,
+                connection_id=connection_id,
+                segment_id=None,
+                opened_at="1970-01-01T00:00:00.000000000Z",
+                opened_monotonic_ns=index,
+            )
+            stats.closed(
+                connection_id,
+                closed_at="1970-01-01T00:00:01.000000000Z",
+                closed_monotonic_ns=index + 1,
+                close_reason="stop",
+            )
+
+        assert stats.connection_intervals == {}
+        writer.close()
+        descriptor = writer.connection_interval_manifest(policy)
+        stats.set_connection_interval_manifest(descriptor)
+        stats.close()
+        payload = stats.payload()
+
+    sidecar = tmp_path / descriptor["path"]
+    assert payload["connection_intervals"] == {
+        "path": "connection_intervals.jsonl.gz",
+        "record_count": 10_000,
+        "compressed_bytes": sidecar.stat().st_size,
+        "sha256": hashlib.sha256(sidecar.read_bytes()).hexdigest(),
+    }
+    with gzip.open(sidecar, "rt", encoding="utf-8") as handle:
+        assert sum(1 for _ in handle) == 10_000
+
+
+def test_recorder_does_not_publish_when_reader_join_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
+    output_root = tmp_path / "run"
+    stream = RECORDER_STREAMS[2]
+
+    class Reader:
+        def __init__(self, **kwargs: object) -> None:
+            self.name = "fake-reader"
+            self.stream = kwargs["stream"]
+            self.ready = threading.Event()
+            self.failure = None
+
+        def start(self) -> None:
+            self.ready.set()
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float) -> None:
+            del timeout
+
+    monkeypatch.setattr(recorder, "RECORDER_STREAMS", (stream,))
+    monkeypatch.setattr(
+        recorder,
+        "runtime_resource_policy_scope",
+        lambda *_args, **_kwargs: runtime_resource_policy_scope(policy),
+    )
+    monkeypatch.setattr(
+        recorder,
+        "_record_market_metadata",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(recorder, "_StreamReader", Reader)
+
+    with pytest.raises(RuntimeError, match="quiescence_timeout"):
+        recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
+
+    assert not output_root.exists()
 
 
 def test_connection_interval_retention_is_admitted_and_released() -> None:

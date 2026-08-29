@@ -6,18 +6,18 @@ from quant_research_platform.markets.implementations.crypto.hft import HFT_GRID_
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_DATA_ID,
     HFT_LABEL_DATA_ID,
-    HFT_MODEL_LABEL_HORIZON_MS,
     HFT_PANEL_DATA_ID,
     HFT_RESEARCH_DATASET_ID,
 )
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto.research_profiles import (
+from quant_research_platform.markets.implementations.crypto.research_datasets import (
     build_hft_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
     HFT_MODEL_ALGORITHMS,
+    HFT_MODEL_LABEL_HORIZON_MS,
     build_hft_model_catalog,
 )
 

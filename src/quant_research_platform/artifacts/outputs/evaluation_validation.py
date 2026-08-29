@@ -6,10 +6,10 @@ from dataclasses import asdict
 
 import pandas as pd
 
-from quant_research_platform.artifacts._membership_validation import (
+from quant_research_platform.artifacts.outputs.membership import (
     validate_string_membership_column,
 )
-from quant_research_platform.artifacts._output_common_validation import (
+from quant_research_platform.artifacts.outputs.common_validation import (
     require_metadata_string,
     require_metadata_string_list,
     require_non_negative_metadata_int,
