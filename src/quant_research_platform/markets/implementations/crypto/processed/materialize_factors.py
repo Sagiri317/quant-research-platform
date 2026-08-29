@@ -21,9 +21,8 @@ from quant_research_platform.research.factors.microstructure.calculations import
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
-    _release_owned_value,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -94,13 +93,10 @@ def write_factors(
         def release_result() -> None:
             nonlocal result
             result = None
-            _release_owned_value(
-                owned,
-                owner="crypto.factors.write.result",
-            )
+            owned.release(owner="crypto.factors.write.result")
 
         if cleanup_stack is None:
-            _release_owned_value(owned, owner="crypto.factors.write.result")
+            owned.release(owner="crypto.factors.write.result")
         else:
             cleanup_stack.callback(release_result)
         return result
@@ -116,7 +112,7 @@ def _iter_factor_chunks(
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        available_bytes = max(1, resource_policy.available_memory_bytes)
+        available_bytes = max(1, resource_policy.planning_headroom_bytes)
         chunk_target_bytes = max(1, available_bytes // 8)
         producer_bound = max(1, available_bytes // 2)
         active_key: tuple[str, str] | None = None
@@ -196,7 +192,7 @@ def _iter_factor_chunks(
                         output = factors.loc[factors[_CORE_ROW]].copy()
                         carry_bound = min(
                             max(1, lease.reserved_bytes),
-                            max(1, resource_policy.available_memory_bytes),
+                            max(1, resource_policy.planning_headroom_bytes),
                         )
                         next_carry_lease = resource_policy.lease(
                             "crypto.factor.carry",
@@ -244,7 +240,7 @@ def _iter_factor_chunks(
                                 raise ValueError("crypto_factor_bound_invalid")
                             del factors, output, combined
                             lease.shrink_to(actual_bound)
-                            yield _OwnedValue(result, lease)
+                            yield OwnedValue(result, lease)
                             del result
                             lease = None
                         else:

@@ -188,7 +188,6 @@ def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
 
 def build_layer_summary(
     *,
-    layer_root: Path,
     logical_layer: str,
     dataset_roots: tuple[Path, ...],
 ) -> dict[str, Any]:

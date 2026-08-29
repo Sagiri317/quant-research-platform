@@ -20,23 +20,36 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 )
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
+    HFT_LABEL_COLUMNS,
+    HFT_MAKER_BID_FILL_RATIO_PROXY_COLUMN,
+    HFT_MAKER_FILL_PROXY_HORIZON_MS,
 )
 from quant_research_platform.research.factors.microstructure.columns import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
 )
 
-EVALUATION_RUN_ID = "microstructure_forward_returns_evaluation"
+EVALUATION_ID = "microstructure_forward_returns_evaluation"
+HFT_EVALUATION_ID = "crypto_hft_microstructure_evaluation"
 DEFAULT_SIGNAL_COLUMNS = MICROSTRUCTURE_FACTOR_COLUMNS
-HFT_MODEL_ALGORITHMS = (
+HFT_PRICE_MODEL_ALGORITHMS = (
     "lightgbm_regressor",
     "linear_regression",
     "xgboost_regressor",
+)
+HFT_MAKER_FILL_MODEL_ID = "crypto_hft_maker_bid_fill_ratio_proxy"
+HFT_MAKER_FILL_MODEL_ALGORITHM = "gradient_boosting_regressor"
+HFT_MODEL_ALGORITHMS = (
+    *HFT_PRICE_MODEL_ALGORITHMS,
+    HFT_MAKER_FILL_MODEL_ALGORITHM,
 )
 HFT_MODEL_LABEL_HORIZON_MS = 500
 HFT_MODEL_LABEL_COLUMN = f"future_mid_return_{HFT_MODEL_LABEL_HORIZON_MS}ms"
 
 
-def build_signal_specs() -> tuple[SignalSpec, ...]:
+def build_signal_specs(
+    *,
+    columns: tuple[str, ...] = DEFAULT_SIGNAL_COLUMNS,
+) -> tuple[SignalSpec, ...]:
     return tuple(
         SignalSpec(
             signal_id=column,
@@ -48,7 +61,7 @@ def build_signal_specs() -> tuple[SignalSpec, ...]:
                 else "higher_is_better"
             ),
         )
-        for column in DEFAULT_SIGNAL_COLUMNS
+        for column in columns
     )
 
 
@@ -58,7 +71,7 @@ def build_evaluation_specs(
 ) -> tuple[EvaluationSpec, ...]:
     return (
         EvaluationSpec(
-            run_id=EVALUATION_RUN_ID,
+            evaluation_id=EVALUATION_ID,
             market_id=MARKET_ID,
             research_dataset_id=MICROSTRUCTURE_FORWARD_RETURNS_DATASET_ID,
             signals=signals or build_signal_specs(),
@@ -74,6 +87,21 @@ def build_evaluation_catalog(
     return EvaluationCatalog(build_evaluation_specs(signals=signals))
 
 
+def build_hft_evaluation_catalog() -> EvaluationCatalog:
+    return EvaluationCatalog(
+        (
+            EvaluationSpec(
+                evaluation_id=HFT_EVALUATION_ID,
+                market_id=MARKET_ID,
+                research_dataset_id=HFT_RESEARCH_DATASET_ID,
+                signals=build_signal_specs(columns=HFT_FACTOR_COLUMNS),
+                label_columns=HFT_LABEL_COLUMNS,
+                evaluation_axis="single_asset_time_series",
+            ),
+        )
+    )
+
+
 def build_hft_model_catalog(*, training_row_bound: int) -> ModelCatalog:
     if (
         isinstance(training_row_bound, bool)
@@ -81,7 +109,7 @@ def build_hft_model_catalog(*, training_row_bound: int) -> ModelCatalog:
         or training_row_bound <= 0
     ):
         raise ValueError("hft_training_row_bound_invalid")
-    return ModelCatalog(
+    price_models = tuple(
         ModelSpec(
             model_id=f"crypto_hft_{algorithm}",
             model_algorithm=algorithm,
@@ -95,7 +123,21 @@ def build_hft_model_catalog(*, training_row_bound: int) -> ModelCatalog:
             purge_gap_steps=HFT_MODEL_LABEL_HORIZON_MS // HFT_GRID_MS,
             max_train_rows=training_row_bound,
         )
-        for algorithm in HFT_MODEL_ALGORITHMS
+        for algorithm in HFT_PRICE_MODEL_ALGORITHMS
+    )
+    return ModelCatalog(
+        (
+            *price_models,
+            ModelSpec(
+                model_id=HFT_MAKER_FILL_MODEL_ID,
+                model_algorithm=HFT_MAKER_FILL_MODEL_ALGORITHM,
+                input_factor_columns=HFT_FACTOR_COLUMNS,
+                label_column=HFT_MAKER_BID_FILL_RATIO_PROXY_COLUMN,
+                random_seed=7,
+                purge_gap_steps=HFT_MAKER_FILL_PROXY_HORIZON_MS // HFT_GRID_MS,
+                max_train_rows=training_row_bound,
+            ),
+        )
     )
 
 
@@ -105,7 +147,7 @@ def build_hft_prediction_catalog(
     test_start: str,
     test_end: str,
 ) -> PredictionCatalog:
-    return PredictionCatalog(
+    price_predictions = tuple(
         PredictionSpec(
             prediction_id=f"crypto_hft_{algorithm}_prediction",
             model_id=f"crypto_hft_{algorithm}",
@@ -114,5 +156,18 @@ def build_hft_prediction_catalog(
             test_start=test_start,
             test_end=test_end,
         )
-        for algorithm in HFT_MODEL_ALGORITHMS
+        for algorithm in HFT_PRICE_MODEL_ALGORITHMS
+    )
+    return PredictionCatalog(
+        (
+            *price_predictions,
+            PredictionSpec(
+                prediction_id=f"{HFT_MAKER_FILL_MODEL_ID}_prediction",
+                model_id=HFT_MAKER_FILL_MODEL_ID,
+                research_dataset_id=HFT_RESEARCH_DATASET_ID,
+                train_end=train_end,
+                test_start=test_start,
+                test_end=test_end,
+            ),
+        )
     )

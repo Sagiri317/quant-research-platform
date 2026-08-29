@@ -7,12 +7,14 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.evaluation import (
-    write_evaluation_outputs_from_chunks as evaluation_chunks_writer,
+from quant_research_platform.artifacts.outputs.bundle_validation import (
+    read_prediction_output_bundle as read_prediction_output_bundle,
 )
 from quant_research_platform.artifacts.outputs.bundle_validation import (
-    read_prediction_output_bundle,
-    validate_output_bundle,
+    validate_output_bundle as validate_output_bundle,
+)
+from quant_research_platform.artifacts.outputs.evaluation import (
+    write_evaluation_outputs_from_chunks as evaluation_chunks_writer,
 )
 from quant_research_platform.artifacts.outputs.portfolio import (
     write_portfolio_outputs as portfolio_writer,
@@ -20,13 +22,16 @@ from quant_research_platform.artifacts.outputs.portfolio import (
 from quant_research_platform.artifacts.outputs.prediction import (
     write_prediction_outputs as prediction_writer,
 )
-from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.evaluations import (
+    EvaluationDiagnostics,
+    EvaluationSpec,
+)
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -54,7 +59,7 @@ def write_prediction_outputs(
     spec: PredictionSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
-    output_chunks: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]],
+    output_chunks: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]],
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
     resource_policy: RuntimeResourcePolicy | None = None,
@@ -75,7 +80,7 @@ def write_prediction_outputs(
 def write_evaluation_outputs_from_chunks(
     chunks: Iterable[
         tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]
-        | _OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
+        | OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
     ],
     *,
     summary_factory: Callable[
@@ -110,11 +115,11 @@ def write_portfolio_outputs(
     *,
     output_chunks: Iterable[
         Mapping[str, pd.DataFrame]
-        | _OwnedValue[Mapping[str, pd.DataFrame]]
+        | OwnedValue[Mapping[str, pd.DataFrame]]
     ],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     additive_cumulative_returns_factory: Callable[
-        [], Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
+        [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
     ],
     spec: PortfolioSpec,
     output_spec: OutputSpec,

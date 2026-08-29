@@ -1829,7 +1829,7 @@ def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
         )
 
 
-def test_dataset_partition_and_manifest_shape_helpers(tmp_path: Path) -> None:
+def test_dataset_partition_and_manifest_shape_helpers() -> None:
     frame = make_helper_edges_dataset_frame(market_id="dummy")
 
     assert (

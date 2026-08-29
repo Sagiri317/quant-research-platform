@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import pytest
 
-from quant_research_platform.sources.csmar.catalog import source_definition
 from quant_research_platform.sources.csmar.interim import interim_catalog
 from tests.helpers import frequency_ids
 
@@ -16,15 +15,9 @@ EXPECTED_CSMAR_INTERIM_DATA_IDS = (
 )
 
 
-def test_csmar_source_interim_catalog_graph_closes_without_provider_binding() -> None:
-    source = source_definition()
+def test_csmar_interim_catalog_uses_single_source_id() -> None:
     catalog = interim_catalog()
 
-    assert str(source.source_id) == "csmar"
-    assert source.provider_id == "csmar"
-    assert source.implementation_package == "quant_research_platform.sources.csmar"
-    assert source.visibility.value == "internal_private"
-    assert not source.public_identifier
     assert tuple(spec.data_id for spec in catalog.list()) == (
         EXPECTED_CSMAR_INTERIM_DATA_IDS
     )

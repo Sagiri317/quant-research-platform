@@ -29,22 +29,25 @@ from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
+    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
+    FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
+    RECORDING_SCOPE_MARKET_TYPES,
+    SPOT_L2_RECORDING_SCOPE,
     SPOT_MARKET_TYPE,
 )
 from quant_research_platform.sources.binance.raw_exports import (
     _json_record_working_set_bytes,
 )
 from quant_research_platform.sources.binance.validation import (
-    strict_boolean,
     strict_iso_timestamp,
-    strict_non_negative_float,
     strict_non_negative_integer,
     strict_positive_float,
     validate_depth_update_levels,
+    validate_market_payload,
 )
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
@@ -60,6 +63,7 @@ MAX_WS_QUEUE = 4
 MAX_REST_RESPONSE_BYTES = 4 * 1024 * 1024
 REST_REQUEST_TIMEOUT_SECONDS = 15.0
 SNAPSHOT_LIMITS = {SPOT_MARKET_TYPE: 5000, FUTURES_MARKET_TYPE: 1000}
+_RECORDER_DISK_CHECK_BYTES = 1024 * 1024
 _REST_WORKING_SET_BYTES = (
     _json_record_working_set_bytes(MAX_REST_RESPONSE_BYTES) + 64 * 1024
 )
@@ -73,87 +77,30 @@ class RecorderStream:
     url: str
 
 
-RECORDER_STREAMS = (
-    RecorderStream(
-        SPOT_MARKET_TYPE,
-        "depth",
-        "btcusdt@depth@100ms",
-        "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms",
+RECORDER_STREAMS_BY_SCOPE = {
+    FUTURES_HFT_RECORDING_SCOPE: (
+        RecorderStream(
+            FUTURES_MARKET_TYPE,
+            "depth",
+            "btcusdt@depth@100ms",
+            "wss://fstream.binance.com/public/ws/btcusdt@depth@100ms",
+        ),
+        RecorderStream(
+            FUTURES_MARKET_TYPE,
+            "agg_trades",
+            "btcusdt@aggTrade",
+            "wss://fstream.binance.com/market/ws/btcusdt@aggTrade",
+        ),
     ),
-    RecorderStream(
-        FUTURES_MARKET_TYPE,
-        "depth",
-        "btcusdt@depth@100ms",
-        "wss://fstream.binance.com/public/ws/btcusdt@depth@100ms",
+    SPOT_L2_RECORDING_SCOPE: (
+        RecorderStream(
+            SPOT_MARKET_TYPE,
+            "depth",
+            "btcusdt@depth@100ms",
+            "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms",
+        ),
     ),
-    RecorderStream(
-        FUTURES_MARKET_TYPE,
-        "agg_trades",
-        "btcusdt@aggTrade",
-        "wss://fstream.binance.com/market/ws/btcusdt@aggTrade",
-    ),
-)
-
-
-def validate_stream_payload(
-    stream: RecorderStream,
-    payload: object,
-) -> dict[str, Any]:
-    """Validate one raw public payload while preserving its exchange shape."""
-
-    if not isinstance(payload, dict):
-        raise ValueError("binance_recorder_payload_object_required")
-    expected_event = "depthUpdate" if stream.data_kind == "depth" else "aggTrade"
-    if payload.get("e") != expected_event or payload.get("s") != SYMBOL:
-        raise ValueError("binance_recorder_market_payload_identity_invalid")
-    strict_non_negative_integer(
-        payload.get("E"), error="binance_recorder_event_time_invalid"
-    )
-    if stream.market_type == FUTURES_MARKET_TYPE:
-        if payload.get("st") != 1 or (
-            stream.data_kind == "depth" and payload.get("ps") != SYMBOL
-        ):
-            raise ValueError("binance_recorder_market_payload_identity_invalid")
-    if stream.data_kind == "depth":
-        for key in ("U", "u"):
-            strict_non_negative_integer(
-                payload.get(key), error="binance_recorder_depth_id_invalid"
-            )
-        if payload["U"] > payload["u"]:
-            raise ValueError("binance_recorder_depth_id_range_invalid")
-        if stream.market_type == FUTURES_MARKET_TYPE:
-            for key in ("T", "pu"):
-                strict_non_negative_integer(
-                    payload.get(key), error="binance_recorder_depth_id_invalid"
-                )
-        validate_depth_update_levels(
-            payload.get("b"), error="binance_recorder_depth_bids_invalid"
-        )
-        validate_depth_update_levels(
-            payload.get("a"), error="binance_recorder_depth_asks_invalid"
-        )
-        return payload
-    for key in ("a", "f", "l", "T"):
-        strict_non_negative_integer(
-            payload.get(key), error="binance_recorder_trade_id_invalid"
-        )
-    if payload["l"] < payload["f"]:
-        raise ValueError("binance_recorder_trade_id_range_invalid")
-    strict_positive_float(
-        payload.get("p"), error="binance_recorder_trade_price_invalid"
-    )
-    quantity = strict_positive_float(
-        payload.get("q"), error="binance_recorder_trade_quantity_invalid"
-    )
-    if stream.market_type == FUTURES_MARKET_TYPE:
-        visible_quantity = strict_non_negative_float(
-            payload.get("nq"),
-            error="binance_recorder_trade_visible_quantity_invalid",
-        )
-        if visible_quantity > quantity:
-            raise ValueError("binance_recorder_trade_visible_quantity_invalid")
-    strict_boolean(payload.get("m"), error="binance_recorder_trade_side_invalid")
-    return payload
+}
 
 
 @dataclass(frozen=True)
@@ -163,8 +110,11 @@ class RecorderConfig:
     connect_timeout_seconds: float = 20.0
     reconnect_max_seconds: float = 30.0
     connection_idle_timeout_seconds: float = 30.0
+    scope: str = FUTURES_HFT_RECORDING_SCOPE
 
     def validate(self) -> None:
+        if type(self.scope) is not str or self.scope not in RECORDER_STREAMS_BY_SCOPE:
+            raise ValueError("binance_recorder_scope_invalid")
         _positive_number(
             self.duration_seconds,
             error="binance_recorder_duration_invalid",
@@ -177,10 +127,8 @@ class RecorderConfig:
             _positive_number(value, error="binance_recorder_timeout_invalid")
         root = Path(self.output_root)
         require_unaliased_path(root, error="invalid_storage_write_path")
-        if (root / "run.json").exists():
+        if root.exists():
             raise FileExistsError("binance_recorder_output_exists")
-        if root.exists() and any(root.iterdir()):
-            raise FileExistsError("binance_recorder_output_not_empty")
 
 
 def _positive_number(value: object, *, error: str) -> float:
@@ -209,6 +157,29 @@ class _OpenFile:
     path: Path
 
 
+def _close_compressed_handles(gzip_handle: Any, raw_handle: Any) -> None:
+    primary = sys.exception()
+    failure: BaseException | None = None
+    for handle, label in (
+        (gzip_handle, "Binance gzip handle close also failed"),
+        (raw_handle, "Binance raw handle close also failed"),
+    ):
+        if handle is None:
+            continue
+        try:
+            handle.close()
+        except BaseException as close_error:
+            note = f"{label}: {type(close_error).__name__}"
+            if primary is not None:
+                primary.add_note(note)
+            elif failure is None:
+                failure = close_error
+            else:
+                failure.add_note(note)
+    if failure is not None:
+        raise failure
+
+
 @dataclass
 class _RunWriter:
     root: Path
@@ -227,6 +198,7 @@ class _RunWriter:
     _interval_gzip_handle: Any | None = field(default=None, init=False, repr=False)
     _interval_record_count: int = field(default=0, init=False, repr=False)
     _interval_max_record_bytes: int = field(default=0, init=False, repr=False)
+    _disk_bytes_remaining: int = field(default=0, init=False, repr=False)
 
     def write(
         self,
@@ -250,8 +222,7 @@ class _RunWriter:
         )
         with self._lock:
             self._require_open()
-            self._capture_seq += 1
-            capture_seq = self._capture_seq
+            capture_seq = self._capture_seq + 1
             record: dict[str, Any] = {
                 "capture_seq": capture_seq,
                 "receive_time": receive_time,
@@ -272,6 +243,8 @@ class _RunWriter:
                 ).encode("utf-8")
                 + b"\n"
             )
+            self._admit_disk_growth(len(line))
+            self._capture_seq = capture_seq
             hour = receive_time[:13]
             for key in tuple(self._handles):
                 if key[0] != hour:
@@ -320,7 +293,15 @@ class _RunWriter:
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{market_type}_{data_kind}.jsonl.gz"
         raw_handle = path.open("ab")
-        gzip_handle = gzip.GzipFile(fileobj=raw_handle, mode="wb", compresslevel=6)
+        try:
+            gzip_handle = gzip.GzipFile(
+                fileobj=raw_handle,
+                mode="wb",
+                compresslevel=6,
+            )
+        except BaseException:
+            _close_compressed_handles(None, raw_handle)
+            raise
         opened = _OpenFile(raw_handle, gzip_handle, path)
         self._handles[key] = opened
         self._files.setdefault(
@@ -343,7 +324,6 @@ class _RunWriter:
     def write_connection_interval(self, interval: dict[str, Any]) -> None:
         with self._lock:
             self._require_open()
-            self._open_interval_file()
             line = (
                 json.dumps(
                     interval,
@@ -353,6 +333,8 @@ class _RunWriter:
                 ).encode("utf-8")
                 + b"\n"
             )
+            self._admit_disk_growth(len(line))
+            self._open_interval_file()
             assert self._interval_gzip_handle is not None
             self._interval_gzip_handle.write(line)
             self._interval_record_count += 1
@@ -366,53 +348,100 @@ class _RunWriter:
             return
         path = self.root / "connection_intervals.jsonl.gz"
         raw_handle = path.open("wb")
+        try:
+            gzip_handle = gzip.GzipFile(
+                fileobj=raw_handle,
+                mode="wb",
+                compresslevel=6,
+            )
+        except BaseException:
+            _close_compressed_handles(None, raw_handle)
+            raise
         self._interval_raw_handle = raw_handle
-        self._interval_gzip_handle = gzip.GzipFile(
-            fileobj=raw_handle,
-            mode="wb",
-            compresslevel=6,
-        )
+        self._interval_gzip_handle = gzip_handle
         self._interval_path = path
+
+    def _admit_disk_growth(self, logical_bytes: int) -> None:
+        if logical_bytes <= self._disk_bytes_remaining:
+            self._disk_bytes_remaining -= logical_bytes
+            return
+        admitted = max(_RECORDER_DISK_CHECK_BYTES, logical_bytes)
+        require_free_disk_headroom(self.root, reserve_bytes=2 * admitted)
+        self._disk_bytes_remaining = admitted - logical_bytes
 
     def _close_key(self, key: tuple[str, str, str, str]) -> None:
         opened = self._handles.pop(key, None)
         if opened is None:
             return
-        try:
-            opened.gzip_handle.close()
-        finally:
-            opened.raw_handle.close()
+        _close_compressed_handles(opened.gzip_handle, opened.raw_handle)
+
+    def _close_stream_handles(self) -> BaseException | None:
+        failure: BaseException | None = None
+        for key in tuple(self._handles):
+            try:
+                self._close_key(key)
+            except BaseException as close_error:
+                if failure is None:
+                    failure = close_error
+                else:
+                    failure.add_note(
+                        "additional Binance stream close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+        return failure
 
     def close(self) -> None:
         with self._lock:
             if self._closed:
                 return
-            for key in tuple(self._handles):
-                self._close_key(key)
-            self._open_interval_file()
-            assert self._interval_gzip_handle is not None
-            assert self._interval_raw_handle is not None
+            failure = self._close_stream_handles()
             try:
-                self._interval_gzip_handle.close()
-            finally:
-                self._interval_raw_handle.close()
+                if self._interval_gzip_handle is None:
+                    self._admit_disk_growth(1)
+                self._open_interval_file()
+                assert self._interval_gzip_handle is not None
+                assert self._interval_raw_handle is not None
+                _close_compressed_handles(
+                    self._interval_gzip_handle,
+                    self._interval_raw_handle,
+                )
+            except BaseException as close_error:
+                if failure is None:
+                    failure = close_error
+                else:
+                    failure.add_note(
+                        "Binance interval handle close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
             self._closed = True
+            if failure is not None:
+                raise failure
 
     def abort(self) -> None:
         with self._lock:
             if self._closed:
                 self._aborted = True
                 return
-            for key in tuple(self._handles):
-                self._close_key(key)
-            if self._interval_gzip_handle is not None:
-                try:
-                    self._interval_gzip_handle.close()
-                finally:
+            failure = self._close_stream_handles()
+            try:
+                if self._interval_gzip_handle is not None:
                     assert self._interval_raw_handle is not None
-                    self._interval_raw_handle.close()
+                    _close_compressed_handles(
+                        self._interval_gzip_handle,
+                        self._interval_raw_handle,
+                    )
+            except BaseException as close_error:
+                if failure is None:
+                    failure = close_error
+                else:
+                    failure.add_note(
+                        "Binance interval handle close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
             self._closed = True
             self._aborted = True
+            if failure is not None:
+                raise failure
 
     def connection_interval_manifest(
         self,
@@ -809,8 +838,10 @@ class _StreamReader(threading.Thread):
                         raw = raw.encode("utf-8")
                     if not isinstance(raw, bytes):
                         raise ValueError("binance_recorder_payload_bytes_invalid")
-                    payload = validate_stream_payload(
-                        self.stream,
+                    payload = validate_market_payload(
+                        self.stream.market_type,
+                        self.stream.data_kind,
+                        SYMBOL,
                         parse_qrp_json_object(raw),
                     )
                 except (UnicodeError, ValueError):
@@ -951,23 +982,26 @@ def _selected_symbol(payload: object) -> dict[str, Any]:
 def _record_market_metadata(
     writer: _RunWriter,
     policy: RuntimeResourcePolicy,
+    *,
+    market_types: tuple[str, ...],
 ) -> dict[str, dict[str, Any]]:
-    requests = (
-        (
+    requests = {
+        SPOT_MARKET_TYPE: (
             SPOT_MARKET_TYPE,
             SPOT_REST_BASE_URL,
             "/api/v3/exchangeInfo",
             {"symbol": SYMBOL},
         ),
-        (
+        FUTURES_MARKET_TYPE: (
             FUTURES_MARKET_TYPE,
             FUTURES_REST_BASE_URL,
             "/fapi/v1/exchangeInfo",
             None,
         ),
-    )
+    }
     result: dict[str, dict[str, Any]] = {}
-    for market_type, base_url, endpoint, params in requests:
+    for requested_market in market_types:
+        market_type, base_url, endpoint, params = requests[requested_market]
         with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
             payload, received, monotonic_ns = _http_get_json(
                 base_url,
@@ -1082,6 +1116,8 @@ def record(config: RecorderConfig) -> dict[str, Any]:
 
 
 def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
+    streams = RECORDER_STREAMS_BY_SCOPE[config.scope]
+    market_types = RECORDING_SCOPE_MARKET_TYPES[config.scope]
     writer = _RunWriter(root)
     stats = _CaptureStats(writer=writer)
     stop = threading.Event()
@@ -1093,7 +1129,6 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     peak_rss = process.memory_info().rss
     market_metadata: dict[str, dict[str, Any]] = {}
     duration_reached = False
-    failure: str | None = None
     cleanup_errors: list[str] = []
     files: list[dict[str, Any]] = []
     with (
@@ -1107,9 +1142,13 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
         ),
     ):
         stats.bind(policy)
-        market_metadata = _record_market_metadata(writer, policy)
+        market_metadata = _record_market_metadata(
+            writer,
+            policy,
+            market_types=market_types,
+        )
         websocket_reserve = (
-            len(RECORDER_STREAMS) * MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
+            len(streams) * MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
         )
         with policy.lease(
             "binance.recorder.websocket_buffers",
@@ -1132,7 +1171,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                             )
                         ),
                     )
-                    for stream in RECORDER_STREAMS
+                    for stream in streams
                 ]
                 for reader in readers:
                     reader.start()
@@ -1204,7 +1243,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     duration_seconds = max(0.001, time.monotonic() - started_clock)
     missing_required_streams = [
         f"{stream.market_type}:{stream.stream}"
-        for stream in RECORDER_STREAMS
+        for stream in streams
         if not any(
             item["market"] == stream.market_type
             and item["stream"] == stream.stream
@@ -1214,7 +1253,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     ]
     status = (
         "FAIL"
-        if failure is not None or cleanup_errors
+        if cleanup_errors
         else "PARTIAL"
         if captured["connection_errors"]
         or captured["sequence_gaps"]
@@ -1227,11 +1266,12 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     manifest = {
         "schema_id": "qrp-binance-recorder",
         "run_id": uuid.uuid4().hex,
+        "recording_scope": config.scope,
         "status": status,
         "market_data_status": status,
         "venue": "binance",
         "symbol": SYMBOL,
-        "market_types": [SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE],
+        "market_types": list(market_types),
         "market_metadata": market_metadata,
         "files": files,
         "capture": {
@@ -1246,7 +1286,6 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             "process_cpu_seconds": max(0.0, time.process_time() - cpu_start),
             "threads": len(readers),
             "descendants": len(process.children(recursive=True)),
-            "failure": failure,
             "cleanup_errors": cleanup_errors,
         },
     }
@@ -1255,10 +1294,17 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(
+        description="Unauthenticated Binance public-market-data recorder."
+    )
     parser.add_argument("--output-root", type=Path, required=True)
     parser.add_argument("--duration-seconds", type=float, required=True)
     parser.add_argument("--connect-timeout-seconds", type=float, default=20.0)
+    parser.add_argument(
+        "--scope",
+        choices=tuple(RECORDER_STREAMS_BY_SCOPE),
+        default=FUTURES_HFT_RECORDING_SCOPE,
+    )
     return parser
 
 
@@ -1270,6 +1316,7 @@ def main(argv: list[str] | None = None) -> int:
                 output_root=args.output_root,
                 duration_seconds=args.duration_seconds,
                 connect_timeout_seconds=args.connect_timeout_seconds,
+                scope=args.scope,
             )
         )
     except BaseException as error:

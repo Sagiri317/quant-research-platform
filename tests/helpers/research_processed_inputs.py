@@ -19,12 +19,7 @@ from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_specs import DEMO_FACTOR_COLUMN, DEMO_LABEL_COLUMN
 
 
-def make_demo_processed_catalog(
-    *,
-    include_extensions: bool = False,
-    duplicate_factor_context: bool = False,
-    missing_factor_key: bool = False,
-) -> ProcessedDataCatalog:
+def make_demo_processed_catalog() -> ProcessedDataCatalog:
     return _demo_processed_catalog()
 
 

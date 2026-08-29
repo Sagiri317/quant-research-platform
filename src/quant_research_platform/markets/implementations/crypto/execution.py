@@ -8,6 +8,7 @@ import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Any
 
 from quant_research_platform.contracts.order_book import (
@@ -17,9 +18,13 @@ from quant_research_platform.contracts.order_book import (
     tick_to_price,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import _OwnedValue
+from quant_research_platform.runtime.resources import (
+    OwnedValue,
+    require_free_disk_headroom,
+)
 
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
+_PENDING_MARKOUT_DISK_CHECK_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -190,6 +195,12 @@ class _PendingMarkouts:
         metrics: _Metrics,
         on_fill: Callable[[dict[str, Any]], None] | None,
     ) -> None:
+        self._temp_root = Path(tempfile.gettempdir())
+        require_free_disk_headroom(
+            self._temp_root,
+            reserve_bytes=2 * _PENDING_MARKOUT_DISK_CHECK_BYTES,
+        )
+        self._disk_bytes_remaining = _PENDING_MARKOUT_DISK_CHECK_BYTES
         self._file = tempfile.TemporaryFile(mode="w+b")
         self._read_offset = 0
         self._next: tuple[dict[str, Any], int] | None = None
@@ -205,24 +216,50 @@ class _PendingMarkouts:
         primary: BaseException | None,
         _traceback: object,
     ) -> None:
+        cleanup_failure: BaseException | None = None
         try:
             self.expire_all()
         except BaseException as cleanup_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "execution pending markout flush also failed: "
-                f"{type(cleanup_error).__name__}"
-            )
-        finally:
+            if primary is not None:
+                primary.add_note(
+                    "execution pending markout flush also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+            else:
+                cleanup_failure = cleanup_error
+        try:
             self._file.close()
+        except BaseException as close_error:
+            if primary is not None:
+                primary.add_note(
+                    "execution pending markout handle close also failed: "
+                    f"{type(close_error).__name__}"
+                )
+            elif cleanup_failure is None:
+                cleanup_failure = close_error
+            else:
+                cleanup_failure.add_note(
+                    "execution pending markout handle close also failed: "
+                    f"{type(close_error).__name__}"
+                )
+        if cleanup_failure is not None:
+            raise cleanup_failure
 
     def add(self, fill: dict[str, Any]) -> None:
-        self._file.seek(0, 2)
-        self._file.write(
+        payload = (
             json.dumps(fill, separators=(",", ":"), allow_nan=False).encode("utf-8")
             + b"\n"
         )
+        if len(payload) > self._disk_bytes_remaining:
+            admitted = max(_PENDING_MARKOUT_DISK_CHECK_BYTES, len(payload))
+            require_free_disk_headroom(
+                self._temp_root,
+                reserve_bytes=2 * admitted,
+            )
+            self._disk_bytes_remaining = admitted
+        self._disk_bytes_remaining -= len(payload)
+        self._file.seek(0, 2)
+        self._file.write(payload)
         self._file.flush()
 
     def resolve(
@@ -303,22 +340,17 @@ class _PendingMarkouts:
             self._on_fill(fill)
 
 
-def _book_value(event: BookState | _OwnedValue[BookState]) -> BookState:
-    value = event.value if isinstance(event, _OwnedValue) else event
+def _book_value(event: BookState | OwnedValue[BookState]) -> BookState:
+    value = event.value if isinstance(event, OwnedValue) else event
     if not isinstance(value, BookState):
         raise TypeError("hft_execution_book_event_invalid")
     return value
 
 
-def _close_book(event: _OwnedValue[BookState] | None) -> None:
-    if event is not None:
-        event.lease.close()
-
-
 def _book_key(
-    event: BookState | _OwnedValue[BookState] | BookBoundary,
+    event: BookState | OwnedValue[BookState] | BookBoundary,
 ) -> tuple[int, int, int]:
-    value = event.value if isinstance(event, _OwnedValue) else event
+    value = event.value if isinstance(event, OwnedValue) else event
     return (
         value.observed_time_ns,
         value.receive_monotonic_ns,
@@ -327,13 +359,13 @@ def _book_key(
 
 
 def _checked_book_events(
-    events: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
-) -> Iterator[BookState | _OwnedValue[BookState] | BookBoundary]:
+    events: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
+) -> Iterator[BookState | OwnedValue[BookState] | BookBoundary]:
     previous: tuple[int, int, int] | None = None
     active = iter(events)
     with closing_iterator(active):
         for event in active:
-            if isinstance(event, _OwnedValue):
+            if isinstance(event, OwnedValue):
                 value = event.value
             else:
                 value = event
@@ -405,7 +437,7 @@ def _resolve_observed_markouts(
 
 
 def simulate_taker(
-    book_events: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
+    book_events: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
     decisions: Iterable[Mapping[str, Any]],
     *,
     prediction_column: str,
@@ -420,7 +452,7 @@ def simulate_taker(
     active_decisions = iter(_checked_decisions(decisions))
     next_event = None
     latest_state: BookState | None = None
-    latest_owned: _OwnedValue[BookState] | None = None
+    latest_owned: OwnedValue[BookState] | None = None
     terminal_mid: float | None = None
     metrics = _Metrics()
     position = 0.0
@@ -444,19 +476,21 @@ def simulate_taker(
             next_event = next(events, None)
 
             def consume_event(
-                event: BookState | _OwnedValue[BookState] | BookBoundary,
+                event: BookState | OwnedValue[BookState] | BookBoundary,
             ) -> None:
                 nonlocal latest_state, latest_owned, terminal_mid
                 if isinstance(event, BookBoundary):
-                    _close_book(latest_owned)
+                    if latest_owned is not None:
+                        latest_owned.release(owner="crypto.execution.book")
                     latest_owned = None
                     latest_state = None
                     pending.expire_all()
                     return
                 previous_state = latest_state
                 state = _book_value(event)
-                _close_book(latest_owned)
-                latest_owned = event if isinstance(event, _OwnedValue) else None
+                if latest_owned is not None:
+                    latest_owned.release(owner="crypto.execution.book")
+                latest_owned = event if isinstance(event, OwnedValue) else None
                 latest_state = state
                 if _covered(
                     observed_coverage,
@@ -631,9 +665,10 @@ def simulate_taker(
                 last_gross = cash_gross + position * terminal_mid
                 last_net = last_gross - fees
         finally:
-            _close_book(latest_owned)
-            if isinstance(next_event, _OwnedValue):
-                next_event.lease.close()
+            if latest_owned is not None:
+                latest_owned.release(owner="crypto.execution.book")
+            if isinstance(next_event, OwnedValue):
+                next_event.release(owner="crypto.execution.book")
     return {
         "simulation": "event_time_target_position_taker",
         "created_orders": created_orders,
@@ -659,7 +694,7 @@ def simulate_taker(
 
 def taker_latency_sweep(
     state_factory: Callable[
-        [], Iterable[BookState | _OwnedValue[BookState] | BookBoundary]
+        [], Iterable[BookState | OwnedValue[BookState] | BookBoundary]
     ],
     decision_factory: Callable[[], Iterable[Mapping[str, Any]]],
     *,
@@ -731,47 +766,46 @@ def _checked_trades(
 
 
 def _market_events(
-    books: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
+    books: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
     trades: Iterable[TradeEvent],
 ) -> Iterator[tuple[tuple[int, int, int], object]]:
     book_events = iter(_checked_book_events(books))
     trade_events = iter(_checked_trades(trades))
-    book_next = next(book_events, None)
-    trade_next = next(trade_events, None)
+    book_next: BookState | OwnedValue[BookState] | BookBoundary | None = None
+    trade_next: TradeEvent | None = None
     pending_event: object | None = None
-    try:
-        while book_next is not None or trade_next is not None:
-            if trade_next is None or (
-                book_next is not None and _book_key(book_next) <= (
-                    trade_next.observed_time_ns,
-                    trade_next.receive_monotonic_ns,
-                    trade_next.capture_seq,
-                )
-            ):
-                pending_event = book_next
-                assert book_next is not None
-                key = _book_key(book_next)
-                book_next = next(book_events, None)
-            else:
-                pending_event = trade_next
-                assert trade_next is not None
-                key = (
-                    trade_next.observed_time_ns,
-                    trade_next.receive_monotonic_ns,
-                    trade_next.capture_seq,
-                )
-                trade_next = next(trade_events, None)
-            yield key, pending_event
-            pending_event = None
-    finally:
-        if isinstance(pending_event, _OwnedValue):
-            pending_event.lease.close()
-        if isinstance(book_next, _OwnedValue):
-            book_next.lease.close()
-        for child in (book_events, trade_events):
-            close = getattr(child, "close", None)
-            if close is not None:
-                close()
+    with closing_iterator(book_events), closing_iterator(trade_events):
+        try:
+            book_next = next(book_events, None)
+            trade_next = next(trade_events, None)
+            while book_next is not None or trade_next is not None:
+                if trade_next is None or (
+                    book_next is not None and _book_key(book_next) <= (
+                        trade_next.observed_time_ns,
+                        trade_next.receive_monotonic_ns,
+                        trade_next.capture_seq,
+                    )
+                ):
+                    pending_event = book_next
+                    assert book_next is not None
+                    key = _book_key(book_next)
+                    book_next = next(book_events, None)
+                else:
+                    pending_event = trade_next
+                    assert trade_next is not None
+                    key = (
+                        trade_next.observed_time_ns,
+                        trade_next.receive_monotonic_ns,
+                        trade_next.capture_seq,
+                    )
+                    trade_next = next(trade_events, None)
+                yield key, pending_event
+                pending_event = None
+        finally:
+            if isinstance(pending_event, OwnedValue):
+                pending_event.release(owner="crypto.execution.market_event")
+            if isinstance(book_next, OwnedValue):
+                book_next.release(owner="crypto.execution.market_event")
 
 
 def _checked_quote_schedule(
@@ -806,7 +840,7 @@ def _checked_quote_schedule(
 
 
 def simulate_maker(
-    book_events: Iterable[BookState | _OwnedValue[BookState] | BookBoundary],
+    book_events: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
     trades: Iterable[TradeEvent],
     quote_schedule: Iterable[Mapping[str, Any]],
     *,
@@ -822,7 +856,7 @@ def simulate_maker(
     active_decisions = iter(_checked_quote_schedule(quote_schedule))
     next_event = None
     latest_state: BookState | None = None
-    latest_owned: _OwnedValue[BookState] | None = None
+    latest_owned: OwnedValue[BookState] | None = None
     active: dict[str, _MakerOrder] = {}
     metrics = _Metrics()
     position = 0.0
@@ -865,9 +899,10 @@ def simulate_maker(
     ):
 
         def cleanup_books() -> None:
-            _close_book(latest_owned)
-            if next_event is not None and isinstance(next_event[1], _OwnedValue):
-                next_event[1].lease.close()
+            if latest_owned is not None:
+                latest_owned.release(owner="crypto.execution.book")
+            if next_event is not None and isinstance(next_event[1], OwnedValue):
+                next_event[1].release(owner="crypto.execution.book")
 
         cleanup.callback(cleanup_books)
         next_event = next(events, None)
@@ -892,12 +927,13 @@ def simulate_maker(
                     )
 
         def process_book(
-            event: BookState | _OwnedValue[BookState] | BookBoundary,
+            event: BookState | OwnedValue[BookState] | BookBoundary,
         ) -> None:
             nonlocal last_mid, latest_state, latest_owned
             if isinstance(event, BookBoundary):
                 cancel_active(event.observed_time_ns)
-                _close_book(latest_owned)
+                if latest_owned is not None:
+                    latest_owned.release(owner="crypto.execution.book")
                 latest_owned = None
                 latest_state = None
                 last_mid = None
@@ -924,8 +960,9 @@ def simulate_maker(
                             state.observed_time_ns,
                             cancelled=True,
                         )
-            _close_book(latest_owned)
-            latest_owned = event if isinstance(event, _OwnedValue) else None
+            if latest_owned is not None:
+                latest_owned.release(owner="crypto.execution.book")
+            latest_owned = event if isinstance(event, OwnedValue) else None
             latest_state = state
             last_mid = _mid(state)
             _resolve_observed_markouts(
@@ -1149,7 +1186,8 @@ def simulate_maker(
         else:
             last_gross = None
             last_net = None
-        _close_book(latest_owned)
+        if latest_owned is not None:
+            latest_owned.release(owner="crypto.execution.book")
         latest_owned = None
     return {
         "simulation": "event_ordered_public_l2_maker",

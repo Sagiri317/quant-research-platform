@@ -106,7 +106,7 @@ def test_output_spec_preserves_typed_content_identifiers(run_id: str) -> None:
 def test_evaluation_and_prediction_specs_validate_run_ids() -> None:
     with pytest.raises(ValueError, match="invalid_run_id"):
         EvaluationSpec(
-            run_id="run 01",
+            evaluation_id="run 01",
             market_id=MarketId("a_share"),
             research_dataset_id="dataset",
             signals=(

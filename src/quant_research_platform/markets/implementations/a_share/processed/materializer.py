@@ -41,7 +41,6 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    _release_owned_value,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import DatasetInspection
@@ -113,18 +112,13 @@ def _materialize_processed_data_with_policy(
         sessions = owned_sessions.value
 
         def release_sessions() -> None:
-            _release_owned_value(
-                owned_sessions,
-                owner="a_share.materializer.sessions",
-            )
+            owned_sessions.release(owner="a_share.materializer.sessions")
 
         cleanup_stack.callback(release_sessions)
         materialization_planning.require_target_sessions(sessions, time_window)
         dependency_windows = (
             materialization_dependencies.planned_processed_dependency_windows(
                 targets,
-                layout=layout,
-                source_id=source_id,
                 time_window=time_window,
                 sessions=sessions,
             )
@@ -185,16 +179,10 @@ def _materialize_one(
         def release_inspection() -> None:
             nonlocal inspection
             inspection = None
-            _release_owned_value(
-                owned,
-                owner="a_share.materializer.inspection.result",
-            )
+            owned.release(owner="a_share.materializer.inspection.result")
 
         if cleanup_stack is None:
-            _release_owned_value(
-                owned,
-                owner="a_share.materializer.inspection.result",
-            )
+            owned.release(owner="a_share.materializer.inspection.result")
         else:
             cleanup_stack.callback(release_inspection)
         return inspection

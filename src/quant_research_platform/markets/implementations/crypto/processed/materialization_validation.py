@@ -9,6 +9,7 @@ from dataclasses import dataclass, replace
 from itertools import zip_longest
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.data import ProcessedDataSpec
@@ -61,7 +62,7 @@ def crypto_asset_session_views(
         raise ValueError(error)
     with runtime_resource_policy_scope(session.resource_policy):
         selections: dict[tuple[str, ...], int] = {}
-        if session.resource_policy.available_memory_bytes <= 0:
+        if session.resource_policy.planning_headroom_bytes <= 0:
             raise ValueError("crypto_asset_session_views_exceed_task_memory_budget")
         current_path: Path | None = None
         current_key: tuple[str, ...] | None = None
@@ -430,7 +431,7 @@ def _iter_core_window_chunks(
 def _validation_chunk_target_bytes(
     resource_policy: RuntimeResourcePolicy,
 ) -> int:
-    return max(1, resource_policy.available_memory_bytes // 8)
+    return max(1, resource_policy.planning_headroom_bytes // 8)
 
 
 def _key_projection_view(
@@ -525,13 +526,30 @@ def validated_ordered_dependency_chunk(
         ordered["timestamp"],
         error=error,
     )
-    previous_key = state.last_key
-    for row in ordered.loc[:, list(required)].itertuples(index=False, name=None):
-        key = (str(row[0]), str(row[1]), pd.Timestamp(row[2]))
-        if previous_key is not None and key <= previous_key:
+    if not ordered.empty:
+        markets = ordered["market_id"].to_numpy(dtype=object, copy=False)
+        assets = ordered["asset_id"].to_numpy(dtype=object, copy=False)
+        timestamps = ordered["timestamp"].to_numpy(
+            dtype="datetime64[ns]",
+            copy=False,
+        )
+        first_key = (str(markets[0]), str(assets[0]), pd.Timestamp(timestamps[0]))
+        if state.last_key is not None and first_key <= state.last_key:
             raise ValueError(error)
-        previous_key = key
-    state.last_key = previous_key
+        same_market = np.equal(markets[1:], markets[:-1])
+        same_asset = same_market & np.equal(assets[1:], assets[:-1])
+        invalid = (
+            np.less(markets[1:], markets[:-1])
+            | (same_market & np.less(assets[1:], assets[:-1]))
+            | (same_asset & np.less_equal(timestamps[1:], timestamps[:-1]))
+        )
+        if bool(np.any(invalid)):
+            raise ValueError(error)
+        state.last_key = (
+            str(markets[-1]),
+            str(assets[-1]),
+            pd.Timestamp(timestamps[-1]),
+        )
     return ordered.reset_index(drop=True)
 
 

@@ -53,13 +53,13 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
         fake_capture,
     )
     monkeypatch.setattr(module, "assemble_research_dataset", assemble_dataset)
-    real_publish = module._publish_staged_run_root
+    real_publish = module.publish_no_replace
 
     def publish(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
         capture_policy()
         return real_publish(*args, **kwargs)
 
-    monkeypatch.setattr(module, "_publish_staged_run_root", publish)
+    monkeypatch.setattr(module, "publish_no_replace", publish)
     evaluation_writer = stub_output_writers(monkeypatch)
     monkeypatch.setattr(
         module,
@@ -120,13 +120,15 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
     assert set(policy_payload) == {
         "captured_available_memory_bytes",
         "memory_budget_bytes",
+        "explicit_memory_cap_bytes",
         "used_memory_bytes",
-        "available_memory_bytes",
+        "planning_headroom_bytes",
     }
     assert policy_payload["memory_budget_bytes"] == explicit_cap
+    assert policy_payload["explicit_memory_cap_bytes"] == explicit_cap
     assert (
         policy_payload["used_memory_bytes"]
-        + policy_payload["available_memory_bytes"]
+        + policy_payload["planning_headroom_bytes"]
         == policy_payload["memory_budget_bytes"]
     )
 

@@ -200,6 +200,8 @@ def _pearson_correlation_from_moments(
     value = float(covariance / denominator)
     if not np.isfinite(value):
         return None, "nonfinite_result"
+    if abs(value) == np.nextafter(1.0, np.inf):
+        value = float(np.copysign(1.0, value))
     return value, None
 
 

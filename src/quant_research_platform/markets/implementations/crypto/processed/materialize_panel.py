@@ -27,9 +27,8 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
-    _release_owned_value,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -85,7 +84,6 @@ def write_panel(
         chunks = _iter_panel_chunks(
             spec,
             input_sessions=input_sessions,
-            time_window=time_window,
             resource_policy=resource_policy,
         )
 
@@ -112,13 +110,10 @@ def write_panel(
         def release_result() -> None:
             nonlocal result
             result = None
-            _release_owned_value(
-                owned,
-                owner="crypto.panel.write.result",
-            )
+            owned.release(owner="crypto.panel.write.result")
 
         if cleanup_stack is None:
-            _release_owned_value(owned, owner="crypto.panel.write.result")
+            owned.release(owner="crypto.panel.write.result")
         else:
             cleanup_stack.callback(release_result)
         return result
@@ -128,7 +123,6 @@ def _iter_panel_chunks(
     spec: ProcessedDataSpec,
     *,
     input_sessions: Mapping[str, DatasetSession],
-    time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[object]:
     if any(
@@ -137,7 +131,7 @@ def _iter_panel_chunks(
     ):
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        available_bytes = max(1, resource_policy.available_memory_bytes)
+        available_bytes = max(1, resource_policy.planning_headroom_bytes)
         chunk_target_bytes = max(1, available_bytes // 8)
         producer_bound = max(1, available_bytes // 2)
         bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
@@ -213,7 +207,7 @@ def _iter_panel_chunks(
                                 prepared_bars,
                                 trade_chunks=trade_chunks,
                                 depth_chunks=depth_chunks,
-                                payload_target_bytes=resource_policy.available_memory_bytes,
+                                payload_target_bytes=resource_policy.planning_headroom_bytes,
                                 trade_continuity_state=trade_continuity_state,
                                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
                                 _output_stack=output_stack,
@@ -226,7 +220,7 @@ def _iter_panel_chunks(
                                 raise ValueError("crypto_panel_bound_invalid")
                             lease.shrink_to(actual_bound)
                             del prepared_bars
-                            yield _OwnedValue(output, lease)
+                            yield OwnedValue(output, lease)
                             del output
                             lease = None
         for session in input_sessions.values():

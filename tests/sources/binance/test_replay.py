@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+import io
 import json
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -18,11 +20,13 @@ from quant_research_platform.contracts.order_book import (
     tick_to_price,
 )
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
+    FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
+    SPOT_L2_RECORDING_SCOPE,
     SPOT_MARKET_TYPE,
 )
 from quant_research_platform.sources.binance.replay import (
@@ -51,6 +55,90 @@ def _raw(
         "segment_id": segment_id,
         "payload": payload,
     }
+
+
+def test_connection_coverage_cleanup_preserves_active_primary() -> None:
+    class FailingDatabase:
+        def close(self) -> None:
+            raise OSError("database_close")
+
+    class FailingScratch:
+        def cleanup(self) -> None:
+            raise OSError("scratch_cleanup")
+
+    index = object.__new__(replay._ConnectionCoverageIndex)
+    index._database = FailingDatabase()
+    index._scratch = FailingScratch()
+
+    with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
+        try:
+            raise KeyboardInterrupt("body_primary")
+        finally:
+            index.close()
+
+    assert raised.value.__notes__ == [
+        "Binance connection coverage database close also failed: OSError",
+        "Binance connection coverage scratch cleanup also failed: OSError",
+    ]
+
+
+def test_connection_coverage_gzip_constructor_failure_closes_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = KeyboardInterrupt("gzip_constructor_primary")
+    raw_handle = io.BytesIO(b"not-consumed")
+
+    class FakePath:
+        def open(self, _mode: str):  # noqa: ANN202
+            return raw_handle
+
+    def fail_gzip(*_args, **_kwargs):  # noqa: ANN202
+        raise primary
+
+    monkeypatch.setattr(replay.gzip, "GzipFile", fail_gzip)
+    index = object.__new__(replay._ConnectionCoverageIndex)
+    index._path = FakePath()
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    try:
+        with runtime_resource_policy_scope(policy):
+            with pytest.raises(KeyboardInterrupt) as raised:
+                index._load(markets={FUTURES_MARKET_TYPE}, resource_policy=policy)
+        assert raised.value is primary
+        assert raw_handle.closed
+    finally:
+        raw_handle.close()
+
+
+def test_replay_file_handle_cleanup_preserves_hash_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingHandle:
+        def close(self) -> None:
+            raise OSError("handle_close")
+
+    class FakePath:
+        def open(self, _mode: str) -> FailingHandle:
+            return FailingHandle()
+
+    monkeypatch.setattr(
+        replay,
+        "_verify_raw_file_handle",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            KeyboardInterrupt("hash_primary")
+        ),
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=32 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(KeyboardInterrupt, match="hash_primary") as raised:
+            replay._sha256_file(FakePath(), object(), policy)
+
+    assert raised.value.__notes__ == [
+        "Binance replay file handle close also failed: OSError"
+    ]
 
 
 def _snapshot(
@@ -257,14 +345,21 @@ def _write_run(
             handle.write(json.dumps(interval, separators=(",", ":")))
             handle.write("\n")
     sidecar_bytes = sidecar.read_bytes()
+    market_types = sorted({market for market, *_ in files})
+    recording_scope = (
+        SPOT_L2_RECORDING_SCOPE
+        if market_types == [SPOT_MARKET_TYPE]
+        else FUTURES_HFT_RECORDING_SCOPE
+    )
     manifest: dict[str, object] = {
         "schema_id": "qrp-binance-recorder",
         "run_id": run_id,
+        "recording_scope": recording_scope,
         "status": "PASS",
         "market_data_status": "PASS",
         "venue": "binance",
         "symbol": "BTCUSDT",
-        "market_types": sorted({market for market, *_ in files}),
+        "market_types": market_types,
         "market_metadata": {
             market: {"tick_size": "0.1", "snapshot_limit": 1000} for market, *_ in files
         },
@@ -285,9 +380,177 @@ def _write_run(
     return manifest
 
 
+def test_connection_coverage_rejects_disk_before_scratch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        replay,
+        "require_free_disk_headroom",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("coverage_disk_headroom")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        replay.tempfile,
+        "TemporaryDirectory",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("coverage_scratch_created_before_disk_preflight")
+        ),
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(OSError, match="coverage_disk_headroom"):
+            replay._ConnectionCoverageIndex(
+                root,
+                manifest["capture"]["connection_intervals"],
+                markets={FUTURES_MARKET_TYPE},
+                resource_policy=policy,
+            )
+
+
+def test_connection_coverage_rechecks_disk_and_removes_scratch_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    calls: list[int] = []
+
+    def gate(_path: Path, *, reserve_bytes: int) -> int:
+        calls.append(reserve_bytes)
+        if len(calls) == 2:
+            raise OSError("coverage_disk_headroom")
+        return reserve_bytes
+
+    scratch = tempfile.TemporaryDirectory(prefix="qrp-coverage-test-")
+    scratch_path = Path(scratch.name)
+    monkeypatch.setattr(
+        replay,
+        "require_free_disk_headroom",
+        gate,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        replay.tempfile,
+        "TemporaryDirectory",
+        lambda **_kwargs: scratch,
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    index = None
+    try:
+        with runtime_resource_policy_scope(policy):
+            with pytest.raises(OSError, match="coverage_disk_headroom"):
+                index = replay._ConnectionCoverageIndex(
+                    root,
+                    manifest["capture"]["connection_intervals"],
+                    markets={FUTURES_MARKET_TYPE},
+                    resource_policy=policy,
+                )
+    finally:
+        if index is not None:
+            index.close()
+
+    assert len(calls) == 2
+    assert not scratch_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("status", "market_data_status"),
+    (("UNKNOWN", "PASS"), ("PASS", "UNKNOWN"), ("PASS", "FAIL")),
+)
+def test_run_manifest_requires_equal_known_statuses(
+    tmp_path: Path,
+    status: str,
+    market_data_status: str,
+) -> None:
+    manifest = _write_run(
+        tmp_path / "run",
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    manifest["status"] = status
+    manifest["market_data_status"] = market_data_status
+
+    with pytest.raises(ValueError, match="binance_replay_run_manifest_invalid"):
+        replay._validate_run_manifest(manifest)
+
+
+@pytest.mark.parametrize("status", ("PASS", "PARTIAL", "FAIL"))
+def test_run_manifest_accepts_equal_known_statuses(
+    tmp_path: Path,
+    status: str,
+) -> None:
+    manifest = _write_run(
+        tmp_path / "run",
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    manifest["status"] = status
+    manifest["market_data_status"] = status
+
+    replay._validate_run_manifest(manifest)
+
+
+def test_run_manifest_binds_recording_scope_to_exact_market_set(
+    tmp_path: Path,
+) -> None:
+    manifest = _write_run(
+        tmp_path / "run",
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    manifest["recording_scope"] = SPOT_L2_RECORDING_SCOPE
+
+    with pytest.raises(ValueError, match="binance_replay_run_manifest_invalid"):
+        replay._validate_run_manifest(manifest)
+
+
 def _close_owned_events(events: list[object]) -> None:
     for event in events:
-        if isinstance(event, _OwnedValue):
+        if isinstance(event, OwnedValue):
             event.lease.close()
 
 
@@ -596,7 +859,7 @@ def test_insufficient_snapshot_waits_for_next_segment(tmp_path: Path) -> None:
         )
         assert isinstance(events[0], BookBoundary)
         assert events[0].reason == "unsupported_coverage"
-        assert isinstance(events[1], _OwnedValue)
+        assert isinstance(events[1], OwnedValue)
         assert events[1].value.segment_id == "s2"
         events[1].lease.close()
 
@@ -662,7 +925,7 @@ def test_futures_zero_transaction_time_is_not_replaced_by_event_time(
                 FUTURES_MARKET_TYPE,
                 required_levels=1,
             )
-            if isinstance(event, _OwnedValue)
+            if isinstance(event, OwnedValue)
         )
         assert state.value.observed_time_ms > state.value.transaction_time_ms
         state.lease.close()
@@ -705,7 +968,7 @@ def test_spot_uses_snapshot_plus_one_bootstrap(tmp_path: Path) -> None:
             for event in iter_reconstructed_depth(
                 run, SPOT_MARKET_TYPE, required_levels=1
             )
-            if isinstance(event, _OwnedValue)
+            if isinstance(event, OwnedValue)
         ]
         states = [event.value for event in owned_states]
         for event in owned_states:
@@ -731,7 +994,7 @@ def test_gap_emits_boundary_and_recovery_never_reuses_old_book(tmp_path: Path) -
             iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
         )
         assert [
-            type(event.value) if isinstance(event, _OwnedValue) else type(event)
+            type(event.value) if isinstance(event, OwnedValue) else type(event)
             for event in events
         ] == [BookState, BookBoundary, BookState]
         assert events[1].reason == "sequence_gap"
@@ -886,10 +1149,10 @@ def test_same_run_replay_is_deterministic(tmp_path: Path) -> None:
             iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
         )
         assert [
-            event.value if isinstance(event, _OwnedValue) else event
+            event.value if isinstance(event, OwnedValue) else event
             for event in first
         ] == [
-            event.value if isinstance(event, _OwnedValue) else event
+            event.value if isinstance(event, OwnedValue) else event
             for event in second
         ]
         _close_owned_events(first)

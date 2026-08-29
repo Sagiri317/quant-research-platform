@@ -26,7 +26,6 @@ from quant_research_platform.compute.dataframe.position_math import (
     build_signal_positions,
 )
 from quant_research_platform.compute.dataframe.turnover import (
-    active_position_map,
     position_change_turnover,
 )
 from quant_research_platform.compute.grouping import normalize_group_key
@@ -90,11 +89,16 @@ def _stream_weighted_portfolio_from_validated_panel(
     signals = select_signals(spec, portfolio_signals)
     group_columns = [*segment_columns, spec.timestamp_column]
 
-    position_records: list[dict[str, object]] = []
-    diagnostic_records: list[dict[str, object]] = []
-    turnover_records: list[dict[str, object]] = []
-    cost_records: list[dict[str, object]] = []
-    return_records: list[dict[str, object]] = []
+    position_columns = [*segment_columns, *POSITION_COLUMNS]
+    turnover_columns = [*segment_columns, *TURNOVER_COLUMNS]
+    returns_columns = [*segment_columns, *RETURNS_COLUMNS]
+    diagnostic_columns = [*segment_columns, *WEIGHT_DIAGNOSTIC_COLUMNS]
+    cost_columns = [*segment_columns, *COST_BREAKDOWN_COLUMNS]
+    position_data = {column: [] for column in position_columns}
+    turnover_data = {column: [] for column in turnover_columns}
+    return_data = {column: [] for column in returns_columns}
+    diagnostic_data = {column: [] for column in diagnostic_columns}
+    cost_data = {column: [] for column in cost_columns}
     if previous_positions is None:
         previous_positions = {}
     for group_key, timestamp_frame in panel.groupby(group_columns, sort=True):
@@ -119,17 +123,20 @@ def _stream_weighted_portfolio_from_validated_panel(
                 for asset, position in previous.items()
             ):
                 raise ValueError("held_asset_missing_from_portfolio_frame")
-            records, diagnostic = build_signal_positions(
+            positions, diagnostic = build_signal_positions(
                 timestamp_frame=timestamp_frame,
                 spec=spec,
                 signal=signal,
                 weight_config=weight_config,
                 tradability_config=tradability_config,
                 tradability_context=tradability_context,
-                group_values=group_values,
                 previous_positions=previous,
             )
-            current = active_position_map(records)
+            current = {
+                asset: float(position)
+                for asset, position in positions.items()
+                if float(position) != 0.0
+            }
             buy_turnover, sell_turnover = position_change_turnover(
                 previous=previous,
                 current=current,
@@ -141,55 +148,78 @@ def _stream_weighted_portfolio_from_validated_panel(
                 turnover=turnover,
                 cost_config=cost_config,
             )
-            base_values = {
-                **{column: group_values[column] for column in segment_columns},
-                "timestamp": timestamp,
-                "signal": signal,
-            }
-            position_records.extend(records)
-            diagnostic_records.append(
-                {
-                    **{column: group_values[column] for column in segment_columns},
-                    "timestamp": timestamp,
-                    **diagnostic,
-                }
+            position_items = sorted(current.items())
+            if not position_items:
+                marker_asset = next(iter(positions))
+                position_items = [(marker_asset, 0.0)]
+            position_count = len(position_items)
+            for column in segment_columns:
+                position_data[column].extend(
+                    [group_values[column]] * position_count
+                )
+            position_data["timestamp"].extend([timestamp] * position_count)
+            position_data["asset"].extend(asset for asset, _ in position_items)
+            position_data["signal"].extend([signal] * position_count)
+            position_data["position"].extend(
+                float(position) for _, position in position_items
             )
-            turnover_records.append({**base_values, "turnover": turnover})
-            cost_records.append(
-                {
-                    **base_values,
-                    "buy_turnover": buy_turnover,
-                    "sell_turnover": sell_turnover,
-                    "turnover": turnover,
-                    **costs,
-                }
-            )
-            return_records.append(
-                _build_portfolio_return_record_from_positions(
-                    group_values=base_values,
+            for column in segment_columns:
+                value = group_values[column]
+                turnover_data[column].append(value)
+                return_data[column].append(value)
+                diagnostic_data[column].append(value)
+                cost_data[column].append(value)
+            turnover_data["timestamp"].append(timestamp)
+            turnover_data["signal"].append(signal)
+            turnover_data["turnover"].append(turnover)
+            diagnostic_data["timestamp"].append(timestamp)
+            for column in WEIGHT_DIAGNOSTIC_COLUMNS[1:]:
+                diagnostic_data[column].append(diagnostic[column])
+            cost_data["timestamp"].append(timestamp)
+            cost_data["signal"].append(signal)
+            cost_data["buy_turnover"].append(buy_turnover)
+            cost_data["sell_turnover"].append(sell_turnover)
+            cost_data["turnover"].append(turnover)
+            for column in COST_BREAKDOWN_COLUMNS[5:]:
+                cost_data[column].append(costs[column])
+            long_return, short_return, gross_return, long_count, short_count = (
+                _portfolio_return_components(
                     portfolio_mode=weight_config.portfolio_mode,
                     positions=current,
                     label_lookup=label_lookup,
-                    return_source_column=return_source_column,
-                    turnover=turnover,
-                    cost=float(costs["total_cost"]),
-                    segment_columns=segment_columns,
                 )
             )
+            cost = float(costs["total_cost"])
+            return_data["timestamp"].append(timestamp)
+            return_data["signal"].append(signal)
+            return_data["return_source_column"].append(return_source_column)
+            return_data["portfolio_mode"].append(weight_config.portfolio_mode)
+            return_data["long_return"].append(long_return)
+            return_data["short_return"].append(short_return)
+            return_data["gross_portfolio_return"].append(gross_return)
+            return_data["turnover"].append(float(turnover))
+            return_data["cost"].append(cost)
+            return_data["net_portfolio_return"].append(gross_return - cost)
+            return_data["long_count"].append(long_count)
+            return_data["short_count"].append(short_count)
             signal_previous[signal] = current
 
-    position_columns = [*segment_columns, *POSITION_COLUMNS]
-    turnover_columns = [*segment_columns, *TURNOVER_COLUMNS]
-    returns_columns = [*segment_columns, *RETURNS_COLUMNS]
-    diagnostic_columns = [*segment_columns, *WEIGHT_DIAGNOSTIC_COLUMNS]
-    cost_columns = [*segment_columns, *COST_BREAKDOWN_COLUMNS]
     return (
-        pd.DataFrame.from_records(position_records, columns=position_columns),
-        pd.DataFrame.from_records(turnover_records, columns=turnover_columns),
-        pd.DataFrame.from_records(return_records, columns=returns_columns),
-        pd.DataFrame.from_records(diagnostic_records, columns=diagnostic_columns),
-        pd.DataFrame.from_records(cost_records, columns=cost_columns),
+        _frame_from_column_buffers(position_data, position_columns),
+        _frame_from_column_buffers(turnover_data, turnover_columns),
+        _frame_from_column_buffers(return_data, returns_columns),
+        _frame_from_column_buffers(diagnostic_data, diagnostic_columns),
+        _frame_from_column_buffers(cost_data, cost_columns),
     )
+
+
+def _frame_from_column_buffers(
+    data: dict[str, list[object]],
+    columns: list[str],
+) -> pd.DataFrame:
+    if not columns or not data[columns[0]]:
+        return pd.DataFrame(columns=columns)
+    return pd.DataFrame(data, columns=columns)
 
 
 def _timestamp_label_lookup(
@@ -205,17 +235,12 @@ def _timestamp_label_lookup(
     return dict(zip(assets, labels, strict=True))
 
 
-def _build_portfolio_return_record_from_positions(
+def _portfolio_return_components(
     *,
-    group_values: dict[str, object],
     portfolio_mode: str,
     positions: dict[str, float],
     label_lookup: dict[str, float],
-    return_source_column: str,
-    turnover: float,
-    cost: float,
-    segment_columns: tuple[str, ...],
-) -> dict[str, object]:
+) -> tuple[float, float, float, int, int]:
     long_return = 0.0
     short_return = 0.0
     long_count = 0
@@ -233,18 +258,10 @@ def _build_portfolio_return_record_from_positions(
     gross_return = (
         long_return - short_return if portfolio_mode == "long_short" else long_return
     )
-    return {
-        **{column: group_values[column] for column in segment_columns},
-        "timestamp": group_values["timestamp"],
-        "signal": group_values["signal"],
-        "return_source_column": return_source_column,
-        "portfolio_mode": portfolio_mode,
-        "long_return": float(long_return),
-        "short_return": float(short_return),
-        "gross_portfolio_return": float(gross_return),
-        "turnover": float(turnover),
-        "cost": float(cost),
-        "net_portfolio_return": float(gross_return - cost),
-        "long_count": int(long_count),
-        "short_count": int(short_count),
-    }
+    return (
+        float(long_return),
+        float(short_return),
+        float(gross_return),
+        int(long_count),
+        int(short_count),
+    )

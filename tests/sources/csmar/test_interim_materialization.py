@@ -23,8 +23,8 @@ import quant_research_platform.runtime.resources as runtime_resources
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -49,7 +49,7 @@ from tests.helpers.runtime_resources import capture_test_policy
 def _bound_first_test_frames(frames, *, bound: int = 256 * 1024):  # noqa: ANN001, ANN202
     for frame in frames:
         lease = yield bound
-        yield _OwnedValue(frame, lease)
+        yield OwnedValue(frame, lease)
 
 
 def _collect_bound_first_frames(data, policy):  # noqa: ANN001, ANN202
@@ -74,7 +74,7 @@ def _collect_bound_first_frames(data, policy):  # noqa: ANN001, ANN202
                             owned = data.send(lease)
                         except StopIteration:
                             return frames
-                        if isinstance(owned, _OwnedValue):
+                        if isinstance(owned, OwnedValue):
                             break
                         raise AssertionError("invalid_bound_first_output")
                     lease.transfer("test.csmar.output")
@@ -471,10 +471,10 @@ def test_csv_owner_fast_path_admits_before_content_materialization(
                 pytest.fail("content_slice_before_capacity_admission")
             return value
 
-        def decode(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN204
+        def decode(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN204
             pytest.fail("decode_before_capacity_admission")
 
-        def split(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN204
+        def split(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN204
             pytest.fail("split_before_capacity_admission")
 
     class Handle:
@@ -980,7 +980,7 @@ def test_private_export_flushes_publishable_batch_before_next_record(
         lease = policy.lease("test.csmar.raw", bound)
         try:
             owned = chunks.send(lease)
-            assert isinstance(owned, _OwnedValue)
+            assert isinstance(owned, OwnedValue)
             assert owned.value["value"].tolist() == [0]
             assert pulls == [0]
         finally:
@@ -1096,7 +1096,7 @@ def test_private_export_parent_reservation_blocks_downstream_overlap(
         bound = next(chunks)
         lease = policy.lease("test.csmar.raw", bound)
         previous = chunks.send(lease)
-        assert isinstance(previous, _OwnedValue)
+        assert isinstance(previous, OwnedValue)
         assert policy.used_memory_bytes == lease.reserved_bytes
 
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
@@ -1154,7 +1154,7 @@ def test_private_export_overflow_waits_for_next_writer_lease(
         for label in ("first", "second"):
             consumer_lease = policy.lease(f"test.csmar.raw.{label}", bound)
             owned = stream.send(consumer_lease)
-            assert isinstance(owned, _OwnedValue)
+            assert isinstance(owned, OwnedValue)
             consumer_lease.transfer(f"test.csmar.output.{label}")
             frame = owned.value
             identities.append((frame["Clddt"].iloc[0], frame["State"].iloc[0]))
@@ -1207,7 +1207,7 @@ def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
     monkeypatch.setattr(
         interim,
         "pandas_frame_payload_bytes",
-        lambda _frame: policy.available_memory_bytes,
+        lambda _frame: policy.planning_headroom_bytes,
     )
 
     def reject_mapping(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
@@ -3017,7 +3017,7 @@ def test_csmar_reference_dedup_summary_is_atomic_on_upstream_failure(
     def failing_frames():
         try:
             lease = yield 256 * 1024
-            yield _OwnedValue(
+            yield OwnedValue(
                 pd.DataFrame(
                     {
                         "source_asset_id": ["000001", "000001"],
@@ -4134,7 +4134,7 @@ def test_csmar_reference_dedup_closes_upstream_on_early_close() -> None:
     def frames():
         try:
             lease = yield 256 * 1024
-            yield _OwnedValue(
+            yield OwnedValue(
                 pd.DataFrame(
                     {
                         "source_asset_id": ["000001"],
@@ -4145,7 +4145,7 @@ def test_csmar_reference_dedup_closes_upstream_on_early_close() -> None:
                 lease,
             )
             lease = yield 256 * 1024
-            yield _OwnedValue(pd.DataFrame(), lease)
+            yield OwnedValue(pd.DataFrame(), lease)
         finally:
             closed.append(True)
 
@@ -4173,12 +4173,12 @@ def test_csmar_materializer_closes_prefetched_frames_when_writer_fails(
     def frames(**_kwargs: object):
         try:
             lease = yield 256 * 1024
-            yield _OwnedValue(
+            yield OwnedValue(
                 pd.DataFrame({"source_asset_id": ["000001"]}),
                 lease,
             )
             lease = yield 256 * 1024
-            yield _OwnedValue(
+            yield OwnedValue(
                 pd.DataFrame({"source_asset_id": ["000002"]}),
                 lease,
             )
@@ -4266,7 +4266,7 @@ def test_csmar_materializer_consumes_spill_order_without_prefetch(
         for path, _identity in input_files:
             lease = yield 256 * 1024
             events.append(f"frame:{path.stem}")
-            yield _OwnedValue(
+            yield OwnedValue(
                 pd.DataFrame({"source_asset_id": [path.stem]}),
                 lease,
             )
@@ -4430,11 +4430,11 @@ def test_materializer_releases_prefetched_frame_before_next_writer_chunk(
         first = pd.DataFrame({"source_asset_id": ["000001"]})
         first_refs.append(weakref.ref(first))
         lease = yield 256 * 1024
-        yield _OwnedValue(first, lease)
+        yield OwnedValue(first, lease)
         del first
         second = pd.DataFrame({"source_asset_id": ["000002"]})
         lease = yield 256 * 1024
-        yield _OwnedValue(second, lease)
+        yield OwnedValue(second, lease)
 
     def write_dataset(_root: Path, data, **kwargs: object) -> None:  # noqa: ANN001
         policy = kwargs["resource_policy"]
@@ -5071,7 +5071,7 @@ def test_pruned_pending_frame_transfers_its_existing_lease(
                 bound = next(data)
                 consumer_lease = policy.lease("test.csmar.consumer", bound)
                 first = data.send(consumer_lease)
-                assert isinstance(first, _OwnedValue)
+                assert isinstance(first, OwnedValue)
                 assert first.lease is consumer_lease
                 consumer_lease.transfer("test.csmar.output")
 
@@ -5087,7 +5087,7 @@ def test_pruned_pending_frame_transfers_its_existing_lease(
                 consumer_lease = None
 
                 second = data.send(pending_lease)
-                assert isinstance(second, _OwnedValue)
+                assert isinstance(second, OwnedValue)
                 assert second.lease is pending_lease
                 pending_lease.transfer("test.csmar.output")
                 pending_lease.close()
@@ -5332,7 +5332,6 @@ def test_csmar_raw_inventory_gates_supported_file_before_file_probe(
 
 def test_csmar_raw_inventory_rejects_duplicate_hardlink_identity_before_inspection(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     first = tmp_path / "TRDNEW_Cale.csv"
     second = tmp_path / "TRDNEW_Cale-copy.csv"

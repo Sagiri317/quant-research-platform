@@ -63,8 +63,6 @@ def ensure_processed_dependencies(
 ) -> None:
     dependency_window = _processed_dependency_time_window(
         spec,
-        layout=layout,
-        source_id=source_id,
         time_window=time_window,
         sessions=sessions,
     )
@@ -103,8 +101,6 @@ def ensure_processed_dependencies(
 def planned_processed_dependency_windows(
     targets: tuple[ProcessedDataSpec, ...],
     *,
-    layout: StorageLayout,
-    source_id: SourceId,
     time_window: TimeWindow,
     sessions: pd.DatetimeIndex,
 ) -> dict[str, TimeWindow]:
@@ -114,8 +110,6 @@ def planned_processed_dependency_windows(
             continue
         dependency_window = _processed_dependency_time_window(
             spec,
-            layout=layout,
-            source_id=source_id,
             time_window=time_window,
             sessions=sessions,
         )
@@ -146,8 +140,6 @@ def merge_time_windows(left: TimeWindow, right: TimeWindow) -> TimeWindow:
 def _processed_dependency_time_window(
     spec: ProcessedDataSpec,
     *,
-    layout: StorageLayout,
-    source_id: SourceId,
     time_window: TimeWindow,
     sessions: pd.DatetimeIndex,
 ) -> TimeWindow:

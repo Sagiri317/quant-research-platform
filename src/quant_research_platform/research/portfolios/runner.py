@@ -52,9 +52,9 @@ from quant_research_platform.research.predictions.alignment import (
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
     _close_lease_preserving_primary,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
@@ -77,11 +77,11 @@ class PortfolioResult:
     spec: PortfolioSpec
     output_chunks: Iterable[
         Mapping[str, pd.DataFrame]
-        | _OwnedValue[Mapping[str, pd.DataFrame]]
+        | OwnedValue[Mapping[str, pd.DataFrame]]
     ]
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]]
     additive_cumulative_returns_factory: Callable[
-        [], Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
+        [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
     ] | None = field(
         default=None,
         repr=False,
@@ -546,7 +546,7 @@ def _iter_portfolio_output_chunks(
     source_columns_by_kind,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> Iterable[
-    dict[str, pd.DataFrame] | _OwnedValue[dict[str, pd.DataFrame]]
+    dict[str, pd.DataFrame] | OwnedValue[dict[str, pd.DataFrame]]
 ]:
     temporal_state = _PortfolioTemporalState()
     saw_rows = False
@@ -622,7 +622,7 @@ def _iter_portfolio_output_chunks(
             )
             retained_state_bytes = _portfolio_temporal_state_bytes(temporal_state)
             del result, chunk
-            owned_output: _OwnedValue[dict[str, pd.DataFrame]] | None = None
+            owned_output: OwnedValue[dict[str, pd.DataFrame]] | None = None
             if rolling_lease is not None:
                 retained_bytes = output_bytes + retained_state_bytes
                 if retained_bytes > rolling_lease.reserved_bytes:
@@ -641,7 +641,7 @@ def _iter_portfolio_output_chunks(
                 except BaseException:
                     output_lease.close()
                     raise
-                owned_output = _OwnedValue(output, output_lease)
+                owned_output = OwnedValue(output, output_lease)
             try:
                 yield owned_output if owned_output is not None else output
             finally:
@@ -689,17 +689,17 @@ def _iter_portfolio_output_chunks(
 
 def _observe_portfolio_summary_chunks(
     output_chunks: Iterable[
-        dict[str, pd.DataFrame] | _OwnedValue[dict[str, pd.DataFrame]]
+        dict[str, pd.DataFrame] | OwnedValue[dict[str, pd.DataFrame]]
     ],
     summary_state: _PortfolioSummaryState,
 ) -> Iterable[
-    dict[str, pd.DataFrame] | _OwnedValue[dict[str, pd.DataFrame]]
+    dict[str, pd.DataFrame] | OwnedValue[dict[str, pd.DataFrame]]
 ]:
     completed = False
     try:
         with closing_iterator(iter(output_chunks)) as active_chunks:
             for item in active_chunks:
-                output_chunk = item.value if isinstance(item, _OwnedValue) else item
+                output_chunk = item.value if isinstance(item, OwnedValue) else item
                 _update_portfolio_summary_state(
                     summary_state,
                     positions=output_chunk["positions"],
@@ -969,7 +969,7 @@ def _portfolio_return_summary_frame(
 
 def _iter_portfolio_additive_cumulative_chunks(
     summary_state: _PortfolioSummaryState,
-) -> Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]:
+) -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
     database = summary_state.return_database
     if database is None:
         raise RuntimeError("portfolio_additive_cumulative_returns_unavailable")
@@ -980,7 +980,7 @@ def _iter_portfolio_additive_cumulative_chunks(
     else:
         fixed_bound = _PORTFOLIO_PERIOD_WORKING_BYTES
         per_row_bound = _PORTFOLIO_ROW_WORKING_BYTES
-        available = policy.available_memory_bytes
+        available = policy.planning_headroom_bytes
         batch_rows = max(
             1,
             min(1024, max(1, (available - fixed_bound) // per_row_bound)),
@@ -997,7 +997,7 @@ def _iter_portfolio_additive_cumulative_chunks(
     try:
         while True:
             lease = None
-            owned_frame: _OwnedValue[pd.DataFrame] | None = None
+            owned_frame: OwnedValue[pd.DataFrame] | None = None
             try:
                 if policy is not None:
                     lease = policy.lease(
@@ -1089,7 +1089,7 @@ def _iter_portfolio_additive_cumulative_chunks(
                 if lease is not None:
                     lease.shrink_to(max(1, pandas_frame_payload_bytes(frame)))
                     lease.transfer("research.portfolio.additive_cumulative.output")
-                    owned_frame = _OwnedValue(frame, lease)
+                    owned_frame = OwnedValue(frame, lease)
                     lease = None
                 try:
                     yield owned_frame if owned_frame is not None else frame

@@ -184,7 +184,6 @@ def test_layer_and_run_manifests_summarize_dataset_manifests(tmp_path: Path) -> 
     manifests.replace_qrp_json(failed_manifest_path, failed_manifest)
 
     layer = manifests.build_layer_summary(
-        layer_root=tmp_path / "local-verification-output" / "layers",
         logical_layer="processed",
         dataset_roots=(dataset_root, missing_root, failed_root),
     )
@@ -216,7 +215,6 @@ def test_layer_summary_distinguishes_present_invalid_dataset_evidence(
     (dataset_root / relative_path).write_text("{", encoding="utf-8")
 
     layer = manifests.build_layer_summary(
-        layer_root=tmp_path / "layers",
         logical_layer="processed",
         dataset_roots=(dataset_root,),
     )
@@ -249,7 +247,6 @@ def test_layer_and_run_summaries_fail_when_primary_key_null_facts_are_missing(
     manifests.replace_qrp_json(manifest_path, manifest)
 
     layer = manifests.build_layer_summary(
-        layer_root=tmp_path / "local-verification-output" / "layers",
         logical_layer="processed",
         dataset_roots=(dataset_root,),
     )
@@ -290,7 +287,6 @@ def test_layer_summary_uses_effective_manifest_consumability(
     manifests.replace_qrp_json(manifest_path, manifest)
 
     layer = manifests.build_layer_summary(
-        layer_root=tmp_path / "local-verification-output" / "layers",
         logical_layer="processed",
         dataset_roots=(dataset_root,),
     )

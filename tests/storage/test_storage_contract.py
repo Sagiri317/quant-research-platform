@@ -210,7 +210,6 @@ def test_build_layer_summary_detects_missing_dataset_manifests(tmp_path: Path) -
     )
 
     payload = build_layer_summary(
-        layer_root=layer_root,
         logical_layer="processed",
         dataset_roots=(present, missing),
     )
@@ -223,14 +222,12 @@ def test_build_layer_summary_detects_missing_dataset_manifests(tmp_path: Path) -
     assert payload["layer_validation_status"] == "FAIL"
 
 
-def test_build_run_data_summary_aggregates_dynamic_layers(tmp_path: Path) -> None:
+def test_build_run_data_summary_aggregates_dynamic_layers() -> None:
     processed = build_layer_summary(
-        layer_root=tmp_path / "data" / "processed",
         logical_layer="processed",
         dataset_roots=(),
     )
     research = build_layer_summary(
-        layer_root=tmp_path / "data" / "research",
         logical_layer="research",
         dataset_roots=(),
     )

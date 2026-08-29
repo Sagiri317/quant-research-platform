@@ -447,7 +447,7 @@ def test_output_index_requires_mandatory_evaluation_summary_member(
     module = _workflow_module()
     run_root = tmp_path / "run"
     spec = EvaluationSpec(
-        run_id="evaluation_required",
+        evaluation_id="evaluation_required",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -455,7 +455,7 @@ def test_output_index_requires_mandatory_evaluation_summary_member(
     )
     output_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     evaluation_bundle = _write_evaluation_output(
@@ -474,7 +474,7 @@ def test_output_index_requires_mandatory_evaluation_summary_member(
         module._output_index(
             evaluation_bundle,
             run_root,
-            expected_run_id=spec.run_id,
+            expected_run_id=spec.evaluation_id,
             expected_output_definition_id="evaluation_outputs",
         )
 

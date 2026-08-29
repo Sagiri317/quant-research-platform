@@ -11,7 +11,7 @@ import pytest
 
 from quant_research_platform.runtime.resources import (
     MemoryLease,
-    _OwnedValue,
+    OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -25,7 +25,7 @@ from tests.helpers.runtime_resources import capture_test_policy
 def _bound_first_frames(frames):  # noqa: ANN001, ANN202
     for frame in frames:
         lease = yield 256 * 1024
-        yield _OwnedValue(frame, lease)
+        yield OwnedValue(frame, lease)
 
 
 def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
@@ -39,7 +39,7 @@ def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
             except StopIteration:
                 lease.close()
                 return frames
-            if not isinstance(owned, _OwnedValue):
+            if not isinstance(owned, OwnedValue):
                 raise AssertionError("invalid_bound_first_output")
             break
         frames.append(owned.value)
@@ -617,7 +617,7 @@ def test_binance_raw_iterator_closes_without_closing_consumer_lease(
     def raw_batches(*_args, **_kwargs):  # noqa: ANN002, ANN003
         try:
             lease = yield 256 * 1024
-            yield _OwnedValue((_kline_envelope(0),), lease)
+            yield OwnedValue((_kline_envelope(0),), lease)
         finally:
             closed.append(True)
 
@@ -634,7 +634,7 @@ def test_binance_raw_iterator_closes_without_closing_consumer_lease(
         bound = next(iterator)
         lease = policy.lease("test.binance.consumer", bound)
         owned = iterator.send(lease)
-        assert isinstance(owned, _OwnedValue)
+        assert isinstance(owned, OwnedValue)
         assert lease.active
         with pytest.raises(KeyboardInterrupt, match="primary"):
             iterator.throw(KeyboardInterrupt("primary"))
@@ -663,7 +663,6 @@ def test_binance_raw_bound_pull_admits_scan_before_record_read(
     stream = raw_exports._iter_raw_envelope_batches(
         path,
         batch_size=1,
-        resource_policy=policy,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
@@ -672,7 +671,7 @@ def test_binance_raw_bound_pull_admits_scan_before_record_read(
         lease = policy.lease("test.binance.raw", bound)
         try:
             owned = stream.send(lease)
-            assert isinstance(owned, _OwnedValue)
+            assert isinstance(owned, OwnedValue)
             assert pulls
         finally:
             stream.close()
@@ -690,14 +689,13 @@ def test_binance_raw_output_suspension_has_no_scan_record_duplicate(
     stream = raw_exports._iter_raw_envelope_batches(
         path,
         batch_size=1,
-        resource_policy=policy,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
         lease = policy.lease("test.binance.raw", bound)
         try:
             owned = stream.send(lease)
-            assert isinstance(owned, _OwnedValue)
+            assert isinstance(owned, OwnedValue)
             assert policy.used_memory_bytes == lease.reserved_bytes
         finally:
             stream.close()
@@ -728,7 +726,6 @@ def test_binance_raw_oversize_first_record_fails_before_read_or_decode(
     stream = raw_exports._iter_raw_envelope_batches(
         path,
         batch_size=1,
-        resource_policy=policy,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
@@ -756,7 +753,6 @@ def test_binance_whitespace_only_fails_after_admission(
     stream = interim._iter_raw_envelope_batches(
         path,
         batch_size=1,
-        resource_policy=policy,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
@@ -780,14 +776,13 @@ def test_binance_blank_line_and_valid_row_share_one_admission(
     stream = interim._iter_raw_envelope_batches(
         path,
         batch_size=1,
-        resource_policy=policy,
     )
     with runtime_resource_policy_scope(policy):
         bound = next(stream)
         lease = policy.lease("test.binance.blank", bound)
         try:
             owned = stream.send(lease)
-            assert isinstance(owned, _OwnedValue)
+            assert isinstance(owned, OwnedValue)
             assert owned.lease is lease
         finally:
             stream.close()
@@ -816,7 +811,7 @@ def test_binance_interim_clears_previous_output_before_next_bound(
         lease = policy.lease("test.binance.interim", bound)
         try:
             owned = iterator.send(lease)
-            assert isinstance(owned, _OwnedValue)
+            assert isinstance(owned, OwnedValue)
             output_ref = weakref.ref(owned.value)
             del owned
             next_bound = iterator.send(None)

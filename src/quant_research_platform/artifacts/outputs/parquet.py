@@ -26,12 +26,13 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
-    _OwnedValue,
+    OwnedValue,
     _close_lease_preserving_primary,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
 )
+from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
 from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
@@ -44,7 +45,6 @@ from quant_research_platform.storage.parquet import (
     _table_parquet_page_working_set_bytes,
     table_with_decoded_row_bounds,
 )
-from quant_research_platform.storage.atomic import publish_no_replace, reject_if_exists
 
 
 @dataclass(frozen=True)
@@ -54,9 +54,9 @@ class _PredictionOutputWriteSummary:
 
 
 def _unwrap_frame_input(
-    item: pd.DataFrame | _OwnedValue[pd.DataFrame],
+    item: pd.DataFrame | OwnedValue[pd.DataFrame],
 ) -> tuple[pd.DataFrame, MemoryLease | None]:
-    if isinstance(item, _OwnedValue):
+    if isinstance(item, OwnedValue):
         if not isinstance(item.value, pd.DataFrame):
             raise TypeError("invalid_artifact_output_frame")
         return item.value, item.lease
@@ -127,7 +127,7 @@ def _artifact_frames_reservation(
 
 
 def write_parquet_chunks(
-    frames: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]],
+    frames: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]],
     path: Path,
     *,
     required: tuple[str, ...],
@@ -466,7 +466,7 @@ def _artifact_writer_fixed_reservation(
                 index_bytes + writer_count * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
             )
         )
-        if policy.available_memory_bytes <= 0:
+        if policy.planning_headroom_bytes <= 0:
             stack.close()
             raise MemoryError("runtime_memory_budget_exceeded")
     return stack
@@ -509,7 +509,7 @@ def _artifact_table_write_state(
         rows=persisted.num_rows,
     )
     page_headroom = (
-        policy.available_memory_bytes + retained_page_bytes - footer_increment
+        policy.planning_headroom_bytes + retained_page_bytes - footer_increment
     )
     minimum_rows = 0 if persisted.num_rows == 0 else 1
     minimum_bytes = _table_parquet_page_working_set_bytes(

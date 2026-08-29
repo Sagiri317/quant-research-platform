@@ -62,7 +62,7 @@ source / market data
 
 ## Managed operation and performance
 
-每个 managed data-scale operation 只有一个简单资源边界：先取得 host-local data-scale lock，只捕获一次 `available0`，默认预算为 `min(available0 * 70%, explicit cap)`。进入数据规模 read/decode/allocation 前做保守准入，无法满足时稳定失败；生产流程必须 bounded，并且 aggregate persisted output 可以超过 RAM 预算而 exact 完成。已有 operation 内的 public DataFrame/ndarray 是 borrowed baseline；新 payload/workspace/output 只有一个 logical owner，跨 producer/consumer 转移而不重复计费，离开 owner context 时关闭。
+每个 managed data-scale operation 只有一个简单资源边界：先取得 host-local data-scale lock，只捕获一次 `available0`，默认 planning target 为 `min(available0 * 70%, explicit cap)`。70% 和派生出的 `memory_budget_bytes` 都是相对安全的 soft planning reference，不是进程 RSS、真实 allocation 或逻辑内存的硬上限。lease 以 bytes 表达只是为了让 owner 的保守粗估可相加比较，不要求或声称字节级精确。进入数据规模 read/decode/allocation 前按大致 working-set estimate 选择 bounded 批次；只有保守估算表明无法维持相对安全或 explicit cap 明确限制时才稳定失败，不因轻微估算或观测越过 70% 的精确点自动判死，也不建立第二套 hard threshold。aggregate persisted output 可以超过 RAM planning target 而 exact 完成。已有 operation 内的 public DataFrame/ndarray 是 borrowed baseline；新 payload/workspace/output 只有一个 logical owner，跨 producer/consumer 转移而不重复计费，离开 owner context 时关闭。borrowed baseline、native workspace 与仓库外 RSS 观测不得重复计费。
 
 默认 single-process + native threads，只允许一层主要并行；线程数不超过物理核并可因预算下调。不得叠加 Python worker pool、native fan-out、scheduler 或 executor。native thread environment 必须在 measured fresh child 导入相关库前设置。
 

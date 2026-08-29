@@ -768,11 +768,11 @@ def test_portfolio_output_chunks_transfer_output_and_reopen_state_lease(
             resource_policy=policy,
         )
         first = next(output_chunks)
-        assert isinstance(first, portfolio_runner._OwnedValue)
+        assert isinstance(first, portfolio_runner.OwnedValue)
         assert first.lease.owner == "research.portfolio.output"
         assert policy.used_memory_bytes > 0
         second = next(output_chunks)
-        assert isinstance(second, portfolio_runner._OwnedValue)
+        assert isinstance(second, portfolio_runner.OwnedValue)
         assert second.lease.owner == "research.portfolio.output"
         assert policy.used_memory_bytes > 0
         with pytest.raises(StopIteration):

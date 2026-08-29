@@ -9,10 +9,9 @@ from typing import Any
 from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
     _close_lease_preserving_primary,
-    _OwnedValue,
-    _release_owned_value,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets.observation import (
@@ -71,7 +70,7 @@ def inspect_dataset_session(
             resource_policy=resource_policy,
         )
         result = owned.value
-        _release_owned_value(owned, owner="storage.dataset.inspection.result")
+        owned.release(owner="storage.dataset.inspection.result")
         return result
 
 
@@ -80,7 +79,7 @@ def _inspect_dataset_owned(
     *,
     time_window: TimeWindow | None = None,
     resource_policy: RuntimeResourcePolicy,
-) -> _OwnedValue[DatasetInspection]:
+) -> OwnedValue[DatasetInspection]:
     with open_dataset_session(
         dataset_root,
         columns=None,
@@ -98,7 +97,7 @@ def _inspect_dataset_session_owned(
     context: DatasetSession,
     *,
     resource_policy: RuntimeResourcePolicy,
-) -> _OwnedValue[DatasetInspection]:
+) -> OwnedValue[DatasetInspection]:
     try:
         result_lease = resource_policy.lease(
             "storage.dataset.inspection.result",
@@ -111,7 +110,7 @@ def _inspect_dataset_session_owned(
     try:
         runtime = _inspection_runtime_metadata(
             context,
-            target_chunk_bytes=resource_policy.available_memory_bytes,
+            target_chunk_bytes=resource_policy.planning_headroom_bytes,
         )
         columns = physical_schema_columns(context.schema)
     except BaseException:
@@ -141,7 +140,7 @@ def _inspect_dataset_session_owned(
         if result_bytes > result_lease.reserved_bytes:
             raise ValueError("dataset_inspection_result_bound_invalid")
         result_lease.shrink_to(result_bytes)
-        return _OwnedValue(result, result_lease)
+        return OwnedValue(result, result_lease)
     except BaseException:
         result = None
         runtime = None

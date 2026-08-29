@@ -298,7 +298,6 @@ def _window_kurt_values(windows: np.ndarray) -> np.ndarray:
 
 def rolling_drawdown(
     values: pd.Series,
-    group_keys: pd.Series,
     group_positions: tuple[np.ndarray, ...],
     window: int,
 ) -> pd.Series:

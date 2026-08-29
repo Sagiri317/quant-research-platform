@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Iterable, Iterator, Mapping
-from itertools import islice
-from typing import Any
+from collections.abc import Callable, Iterable, Iterator
 
 import pandas as pd
 
@@ -14,9 +12,9 @@ from quant_research_platform.contracts.time import (
     is_intraday_time_window,
 )
 from quant_research_platform.markets.implementations.crypto.hft import (
-    iter_factor_rows,
-    iter_label_rows,
-    iter_panel_rows,
+    iter_factor_frames,
+    iter_label_frames,
+    iter_panel_frames,
 )
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_DATA_ID,
@@ -33,12 +31,15 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+from quant_research_platform.sources.binance.ids import (
+    FUTURES_HFT_RECORDING_SCOPE,
+    FUTURES_MARKET_TYPE,
+)
 from quant_research_platform.sources.binance.replay import (
     ReconstructionStats,
     RecorderRun,
@@ -55,7 +56,7 @@ from quant_research_platform.storage.datasets.schema import dataset_identity_pay
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
-_ROW_WORKING_BYTES = 16 * 1024
+_PANEL_ROW_BUFFER_BYTES = 4 * 1024
 _FRAME_FIXED_BYTES = 1024 * 1024
 _EPOCH = dt.datetime(1970, 1, 1)
 
@@ -73,6 +74,8 @@ def materialize_hft_processed_data(
         raise ValueError("hft_materialization_requires_intraday_window")
     if run.manifest["market_data_status"] == "FAIL":
         raise ValueError("hft_recorder_run_failed")
+    if run.manifest["recording_scope"] != FUTURES_HFT_RECORDING_SCOPE:
+        raise ValueError("hft_futures_run_missing")
     if FUTURES_MARKET_TYPE not in run.manifest["market_types"]:
         raise ValueError("hft_futures_run_missing")
     start_ms = _milliseconds(time_window.start)
@@ -83,8 +86,16 @@ def materialize_hft_processed_data(
     inspections: dict[str, DatasetInspection] = {}
     with runtime_resource_policy_scope(resource_policy) as policy:
         panel_spec = catalog.get(HFT_PANEL_DATA_ID)
-        panel_rows = _with_identity(
-            iter_panel_rows(
+        panel_target = policy.planning_headroom_bytes // 2
+        if panel_target <= _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES:
+            raise MemoryError("runtime_memory_budget_exceeded")
+        panel_batch_rows = (
+            panel_target - _FRAME_FIXED_BYTES
+        ) // _PANEL_ROW_BUFFER_BYTES
+        panel_producer_bound = (
+            _FRAME_FIXED_BYTES + panel_batch_rows * _PANEL_ROW_BUFFER_BYTES
+        )
+        panel_frames = iter_panel_frames(
                 iter_reconstructed_depth(
                     run,
                     FUTURES_MARKET_TYPE,
@@ -98,9 +109,10 @@ def materialize_hft_processed_data(
                     market_type=FUTURES_MARKET_TYPE,
                     data_kind="agg_trades",
                 ),
-            ),
-            asset_id=asset_id,
-        )
+                market_id=str(MARKET_ID),
+                asset_id=asset_id,
+                batch_rows=panel_batch_rows,
+            )
         panel_root = layout.processed_data_root(
             panel_spec.market_id,
             panel_spec.kind,
@@ -108,10 +120,10 @@ def materialize_hft_processed_data(
         )
         inspections[HFT_PANEL_DATA_ID] = write_dataset(
             panel_root,
-            _frame_producer(
-                panel_rows,
+            _event_frame_producer(
+                panel_frames,
                 columns=panel_spec.required_columns,
-                resource_policy=policy,
+                producer_bound=panel_producer_bound,
             ),
             spec=panel_spec,
             instance_metadata={
@@ -145,8 +157,9 @@ def materialize_hft_processed_data(
                     factor_spec.kind,
                     factor_spec.data_id,
                 ),
-                _frame_producer(
-                    iter_factor_rows(_panel_records(panel_session)),
+                _panel_frame_producer(
+                    panel_session,
+                    transform=iter_factor_frames,
                     columns=factor_spec.required_columns,
                     resource_policy=policy,
                 ),
@@ -162,9 +175,10 @@ def materialize_hft_processed_data(
                     label_spec.kind,
                     label_spec.data_id,
                 ),
-                _frame_producer(
-                    iter_label_rows(
-                        _panel_records(panel_session),
+                _panel_frame_producer(
+                    panel_session,
+                    transform=lambda frames: iter_label_frames(
+                        frames,
                         horizons_ms=HFT_LABEL_HORIZONS_MS,
                     ),
                     columns=label_spec.required_columns,
@@ -187,56 +201,54 @@ def _milliseconds(value: dt.datetime) -> int:
     return milliseconds
 
 
-def _with_identity(
-    rows: Iterable[Mapping[str, Any]],
-    *,
-    asset_id: str,
-) -> Iterator[dict[str, Any]]:
-    for source in rows:
-        row = dict(source)
-        row["market_id"] = str(MARKET_ID)
-        row["asset_id"] = asset_id
-        yield row
-
-
-def _frame_producer(
-    rows: Iterable[Mapping[str, Any]],
+def _event_frame_producer(
+    frames: Iterable[pd.DataFrame],
     *,
     columns: tuple[str, ...],
-    resource_policy: RuntimeResourcePolicy,
+    producer_bound: int,
 ) -> Iterator[object]:
-    active_rows = iter(rows)
-    with closing_iterator(active_rows):
+    active_frames = iter(frames)
+    with closing_iterator(active_frames):
         while True:
-            target = resource_policy.available_memory_bytes // 2
-            if target <= _FRAME_FIXED_BYTES + _ROW_WORKING_BYTES:
-                raise MemoryError("runtime_memory_budget_exceeded")
-            batch_rows = (target - _FRAME_FIXED_BYTES) // _ROW_WORKING_BYTES
-            producer_bound = _FRAME_FIXED_BYTES + batch_rows * _ROW_WORKING_BYTES
             lease = yield producer_bound
-            batch = list(islice(active_rows, batch_rows))
-            if not batch:
+            try:
+                frame = next(active_frames)
+            except StopIteration:
                 return
-            frame = pd.DataFrame.from_records(batch, columns=list(columns))
-            del batch
+            if tuple(frame.columns) != columns:
+                raise ValueError("hft_panel_frame_columns_invalid")
             actual_bound = pandas_frame_payload_bytes(frame) + 64 * 1024
             if actual_bound > lease.reserved_bytes:
                 raise ValueError("hft_dataframe_producer_bound_invalid")
             lease.shrink_to(actual_bound)
-            yield _OwnedValue(frame, lease)
+            yield OwnedValue(frame, lease)
             del frame
 
 
-def _panel_records(session: DatasetSession) -> Iterator[dict[str, Any]]:
-    target = max(1, session.resource_policy.available_memory_bytes)
-    chunks = iter_dataset_chunks(session, target_chunk_bytes=target)
-    with closing_iterator(chunks):
-        for frame in chunks:
-            columns = tuple(frame.columns)
-            for values in frame.itertuples(index=False, name=None):
-                row = dict(zip(columns, values, strict=True))
-                timestamp = pd.Timestamp(row["timestamp"])
-                if timestamp.tzinfo is not None:
-                    timestamp = timestamp.tz_convert("UTC").tz_localize(None)
-                row["timestamp_ms"] = timestamp.value // 1_000_000
-                yield row
+def _panel_frame_producer(
+    session: DatasetSession,
+    *,
+    transform: Callable[[Iterable[pd.DataFrame]], Iterable[pd.DataFrame]],
+    columns: tuple[str, ...],
+    resource_policy: RuntimeResourcePolicy,
+) -> Iterator[object]:
+    target_chunk_bytes = max(1, resource_policy.planning_headroom_bytes // 8)
+    chunks = iter_dataset_chunks(session, target_chunk_bytes=target_chunk_bytes)
+    frames = iter(transform(chunks))
+    with closing_iterator(chunks), closing_iterator(frames):
+        while True:
+            producer_bound = resource_policy.planning_headroom_bytes // 2
+            if producer_bound <= _FRAME_FIXED_BYTES:
+                raise MemoryError("runtime_memory_budget_exceeded")
+            lease = yield producer_bound
+            try:
+                frame = next(frames)
+            except StopIteration:
+                return
+            output = frame.loc[:, list(columns)]
+            actual_bound = pandas_frame_payload_bytes(output) + 64 * 1024
+            if actual_bound > lease.reserved_bytes:
+                raise ValueError("hft_dataframe_producer_bound_invalid")
+            lease.shrink_to(actual_bound)
+            yield OwnedValue(output, lease)
+            del frame, output

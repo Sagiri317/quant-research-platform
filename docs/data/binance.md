@@ -2,9 +2,9 @@
 
 本文描述 Binance public market data 在 QRP 中的当前数据合同。本文只记录结构和层边界，不记录真实 payload、row-level sample、运行结果或本地路径。
 
-## Raw Envelope
+## Legacy Local Envelope
 
-Binance raw input 只接受 JSONL。每行必须是 canonical envelope，所有
+Legacy local-envelope importer 只接受 JSONL。每行必须是 canonical envelope，所有
 `data_kind` 共同必需的顶层字段为：
 
 ```text
@@ -66,17 +66,37 @@ secrets.
 
 ## Recorder Run Contract
 
-Formal HFT replay accepts exactly one recorder root containing one `run.json` and
-only the gzip JSONL members declared by that manifest. It never discovers input by
-glob-joining multiple runs.
-
-The current recorder keeps only streams with live consumers:
+Each recorder root contains one `run.json` and only the gzip JSONL members declared
+by that manifest. It never glob-joins multiple runs. `recording_scope` selects one
+independent current contract per output root:
 
 ```text
-Spot diff depth @ 100ms
-USDⓈ-M Futures diff depth @ 100ms
-USDⓈ-M Futures aggregate trades
+futures-hft:
+  USDⓈ-M Futures diff depth @ 100ms
+  USDⓈ-M Futures aggregate trades
+  -> consumed by the current HFT workflow
+
+spot-l2:
+  Spot diff depth @ 100ms
+  -> independent long-lived L2 capture for future spot/perpetual research
 ```
+
+The two scopes use separate roots, manifests and aggregate statuses. A Spot outage
+cannot downgrade or reject a complete Futures HFT run. Existing Spot replay,
+legacy local-envelope input and minute Crypto research remain separate capabilities.
+Each command is one managed data-scale operation and holds the host-local QRP lock
+for its lifetime, so `futures-hft` and `spot-l2` are not recorded concurrently on
+the same host. Run them sequentially or use separate hosts. The supplied output
+root must not already exist; the recorder publishes it atomically on success.
+
+```text
+python -m quant_research_platform.sources.binance.recorder --scope futures-hft --output-root <run-root> --duration-seconds <seconds>
+
+python -m quant_research_platform.sources.binance.recorder --scope spot-l2 --output-root <run-root> --duration-seconds <seconds>
+```
+
+Recording starts when the command starts; it cannot backfill complete L2 from a
+period that was not captured.
 
 RPI depth, book ticker, force order, mark price and auxiliary statistics are not
 part of the current recorder contract because the implemented research chain does
@@ -126,9 +146,20 @@ one recorder run
 -> persisted 100ms PANEL sufficient statistics
 -> FACTOR and LABEL derived only from persisted PANEL
 -> standard ResearchDataset
--> standard ModelSpec / fitting / prediction / artifact
--> event-time taker and estimated-queue public-L2 maker diagnostics
+-> standard evaluation / evaluation artifact
+-> temporal train/test ModelSpec fitting and persisted predictions
+-> out-of-sample prediction/target evaluation for every model
+-> price-model taker economics and baseline-versus-score-gated maker economics
+-> execution artifact and report
 ```
+
+The price branch compares linear regression, LightGBM and XGBoost on the same
+500 ms return target. The execution-quality branch predicts the explicitly named
+`maker_bid_fill_ratio_proxy_500ms`: future observed sell taker volume at the
+current best bid divided by current displayed bid quantity, clipped to `[0, 1]`.
+It gates the maker quote schedule at a prediction score of `0.5` and reports that
+run beside the ungated maker baseline. This public-L2 proxy is not an exchange
+fill probability, MBO queue position or promise of executable fills.
 
 The recorder uses the bounded `websockets` runtime for public streams and `httpx`
 for public REST metadata/snapshots. It has no authenticated endpoint or order API.

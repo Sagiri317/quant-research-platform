@@ -82,7 +82,6 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    _release_owned_value,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance import ids as binance_ids
@@ -299,8 +298,7 @@ def _materialize_a_share_csmar_interim_data(
                 )
             )
             cleanup_stack.callback(
-                _release_owned_value,
-                owned_sessions,
+                owned_sessions.release,
                 owner="a_share.profile.sessions",
             )
             sessions = owned_sessions.value

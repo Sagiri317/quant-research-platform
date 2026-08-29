@@ -83,7 +83,7 @@ def test_crypto_factors_and_labels_are_strictly_limited() -> None:
 def test_crypto_evaluation_uses_microstructure_research_dataset() -> None:
     evaluation = build_evaluation_catalog().list()[0]
 
-    assert evaluation.run_id == "microstructure_forward_returns_evaluation"
+    assert evaluation.evaluation_id == "microstructure_forward_returns_evaluation"
     assert evaluation.market_id == MarketId("crypto")
     assert evaluation.research_dataset_id == "microstructure_forward_returns"
     assert tuple(signal.source_column for signal in evaluation.signals) == (

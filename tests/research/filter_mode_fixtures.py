@@ -41,11 +41,11 @@ def make_filter_mode_prediction_output_scores(
     result,
 ) -> pd.DataFrame:
     build_state = prediction_outputs._PredictionBuildState()
-    output = list(
-        prediction_outputs._iter_prediction_output_frames(
+    output = [
+        item.value
+        for item in prediction_outputs._iter_prediction_output_frames(
             iter(frames),
             spec=prediction_spec,
-            coefficients=result.coefficients,
             input_columns=model_spec.input_columns,
             predictor=prediction_outputs.prediction_callable(
                 result.coefficients,
@@ -54,8 +54,7 @@ def make_filter_mode_prediction_output_scores(
             ),
             build_state=build_state,
         )
-    )
-    output = [item.value for item in output]
+    ]
     return (
         pd.concat(output, ignore_index=True)
         .sort_values(["timestamp", "asset_id"], kind="mergesort")

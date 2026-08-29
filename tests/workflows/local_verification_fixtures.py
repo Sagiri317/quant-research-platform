@@ -269,7 +269,7 @@ def stub_output_writers(monkeypatch: pytest.MonkeyPatch):
         del args
         stub_kwargs = dict(kwargs)
         stub_kwargs["spec"] = stub_kwargs["evaluation_catalog"].get(
-            stub_kwargs["run_id"]
+            stub_kwargs["evaluation_id"]
         )
         return write_stub(**stub_kwargs)
 
@@ -303,10 +303,11 @@ def _stub_output_metadata(
     spec = kwargs["spec"]
     if output_definition_id == "evaluation_outputs":
         return {
-            "run_id": spec.run_id,
+            "evaluation_id": spec.evaluation_id,
             "run_type": spec.run_type,
             "market_id": str(spec.market_id),
             "research_dataset_id": spec.research_dataset_id,
+            "evaluation_axis": spec.evaluation_axis,
             "signals": [
                 {
                     "signal_id": signal.signal_id,

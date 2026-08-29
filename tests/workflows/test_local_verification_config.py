@@ -359,7 +359,7 @@ def test_local_verification_resolves_only_profile_dataset_and_evaluation() -> No
     profile = research_profile()
 
     assert module._only_research_dataset_id(profile) == "price_volume_forward_returns"
-    assert module._only_evaluation_run_id(profile) == "signal_forward_return_20d"
+    assert module._only_evaluation_id(profile) == "signal_forward_return_20d"
 
 
 def test_local_verification_rejects_ambiguous_profile_dataset() -> None:
@@ -377,11 +377,11 @@ def test_local_verification_rejects_ambiguous_profile_evaluation() -> None:
     profile = research_profile()
     evaluation = profile.evaluations.list()[0]
     catalog = EvaluationCatalog(
-        (evaluation, replace(evaluation, run_id="other_evaluation_run"))
+        (evaluation, replace(evaluation, evaluation_id="other_evaluation"))
     )
 
-    with pytest.raises(ValueError, match="ambiguous_evaluation_run"):
-        module._only_evaluation_run_id(replace(profile, evaluations=catalog))
+    with pytest.raises(ValueError, match="ambiguous_evaluation"):
+        module._only_evaluation_id(replace(profile, evaluations=catalog))
 
 
 def test_local_verification_workflow_resolves_independent_windows(

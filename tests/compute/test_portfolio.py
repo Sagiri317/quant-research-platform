@@ -12,6 +12,9 @@ from quant_research_platform.compute.dataframe.performance import (
 from quant_research_platform.compute.dataframe.portfolio_returns import (
     _stream_weighted_portfolio_from_validated_panel,
 )
+from quant_research_platform.compute.dataframe.position_math import (
+    build_signal_positions,
+)
 from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
@@ -63,6 +66,28 @@ def test_validated_stream_applies_turnover_costs_and_keeps_market_neutrality() -
     assert returns["gross_portfolio_return"].round(6).tolist() == [0.02, 0.02]
     assert returns["cost"].round(6).tolist() == [0.002, 0.004]
     assert returns["net_portfolio_return"].round(6).tolist() == [0.018, 0.016]
+
+
+def test_validated_stream_builds_outputs_from_column_buffers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel, spec = _validated_ranking_panel()
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "from_records",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("row_record_graph_used")
+        ),
+    )
+
+    outputs = _stream_weighted_portfolio_from_validated_panel(
+        panel,
+        spec,
+        WeightConfig(top_quantile=1 / 3, bottom_quantile=1 / 3),
+        return_source_column="forward_return",
+    )
+
+    assert [len(frame) for frame in outputs] == [4, 2, 2, 2, 2]
 
 
 def test_validated_stream_keeps_long_only_rows_without_short_leg() -> None:
@@ -122,6 +147,30 @@ def test_ordinal_portfolio_has_no_tied_signal_and_keeps_cutoff_ties() -> None:
     assert tied[2]["gross_portfolio_return"].tolist() == [0.0]
     assert sorted(cutoff[0]["position"].tolist()) == [-0.5, -0.5, 0.5, 0.5]
     assert sorted(renamed[0]["position"].tolist()) == [-0.5, -0.5, 0.5, 0.5]
+
+
+def test_all_zero_positions_use_one_input_order_marker() -> None:
+    spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
+    frame = pd.DataFrame(
+        {
+            "timestamp": ["2026-01-02"] * 2,
+            "asset": ["A", "D"],
+            "factor": [1.0, 1.0],
+            "forward_return": [0.0, 0.0],
+            "can_enter": [False, True],
+        }
+    )
+
+    positions, _diagnostic = build_signal_positions(
+        timestamp_frame=frame,
+        spec=spec,
+        signal="factor",
+        weight_config=WeightConfig(top_quantile=0.5, bottom_quantile=0.5),
+        tradability_config=TradabilityConfig(can_enter_column="can_enter"),
+        previous_positions={"D": -0.5, "A": 0.5},
+    )
+
+    assert positions == {"A": 0.0}
 
 
 def test_validated_stream_rejects_disappeared_held_asset() -> None:

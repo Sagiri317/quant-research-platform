@@ -6,9 +6,6 @@ from collections.abc import Mapping
 
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.membership import (
-    validate_string_membership_column,
-)
 from quant_research_platform.artifacts.outputs.common_validation import (
     require_finite_metadata_number,
     require_metadata_string,
@@ -16,6 +13,9 @@ from quant_research_platform.artifacts.outputs.common_validation import (
     require_non_negative_metadata_int,
     require_optional_metadata_string,
     require_signal_metadata_list,
+)
+from quant_research_platform.artifacts.outputs.membership import (
+    validate_string_membership_column,
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.portfolios import (

@@ -14,7 +14,7 @@ from quant_research_platform.policy.share_safety import (
 )
 from quant_research_platform.runtime.resources import (
     MIB,
-    _OwnedValue,
+    OwnedValue,
 )
 from quant_research_platform.storage import manifests
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
@@ -89,7 +89,6 @@ def _valid_dataset(tmp_path: Path, data_id: str) -> Path:
 
 def _layer_summary(dataset_root: Path) -> dict[str, object]:
     return manifests.build_layer_summary(
-        layer_root=dataset_root.parents[3],
         logical_layer="processed",
         dataset_roots=(dataset_root,),
     )
@@ -173,7 +172,6 @@ def test_validation_summary_releases_each_reinspection_payload(
         dataset_roots=dataset_roots,
         layer_summaries=(
             manifests.build_layer_summary(
-                layer_root=dataset_roots[0].parents[3],
                 logical_layer="processed",
                 dataset_roots=dataset_roots,
             ),
@@ -340,7 +338,7 @@ def test_validated_text_scan_accepts_payload_at_exact_runtime_target(
     policy = capture_test_policy(
         available_memory_bytes=2 * MIB,
     )
-    line_pairs, remainder = divmod(policy.available_memory_bytes, 2)
+    line_pairs, remainder = divmod(policy.planning_headroom_bytes, 2)
     path.write_bytes((b"x\n" * line_pairs) + (b"x" * remainder))
 
     assert (
@@ -356,7 +354,7 @@ def test_validated_text_scan_accepts_many_short_lines_over_runtime_soft_target(
     policy = capture_test_policy(
         available_memory_bytes=2 * MIB,
     )
-    path.write_bytes(b"x\n" * (policy.available_memory_bytes + 1))
+    path.write_bytes(b"x\n" * (policy.planning_headroom_bytes + 1))
 
     assert (
         validation_summary._scan_validated_text_evidence(*_evidence_members(path)[0])
@@ -951,7 +949,6 @@ def test_validation_summary_rejects_forged_storage_summary(
     manifest[field] = value
     manifests.replace_qrp_json(manifest_path, manifest)
     layer_summary = manifests.build_layer_summary(
-        layer_root=tmp_path / "layers",
         logical_layer="processed",
         dataset_roots=(dataset_root,),
     )
@@ -1063,7 +1060,7 @@ def test_validation_summary_reports_all_observed_dataset_failure_classes(
     observed = replace(inspection, manifest=manifest)
 
     def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
-        return _OwnedValue(
+        return OwnedValue(
             observed,
             resource_policy.lease("test.validation.inspection", 0),
         )

@@ -23,10 +23,9 @@ from quant_research_platform.contracts.json_codec import (
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
     _close_lease_preserving_primary,
-    _OwnedValue,
-    _release_owned_value,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
@@ -398,7 +397,7 @@ def write_dataset(
             borrowed_input=borrowed_input,
         )
         result = owned.value
-        _release_owned_value(owned, owner="storage.dataset.write.result")
+        owned.release(owner="storage.dataset.write.result")
         return result
 
 
@@ -410,7 +409,7 @@ def _write_dataset_owned(
     instance_metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
     borrowed_input: bool = False,
-) -> _OwnedValue[DatasetInspection]:
+) -> OwnedValue[DatasetInspection]:
     resource_policy = current_runtime_resource_policy()
     if resource_policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
@@ -440,7 +439,7 @@ def _write_dataset_body(
     instance_metadata: Mapping[str, Any] | None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None,
     borrowed_input: bool,
-) -> _OwnedValue[DatasetInspection]:
+) -> OwnedValue[DatasetInspection]:
     resource_policy = current_runtime_resource_policy()
     if resource_policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
@@ -450,8 +449,8 @@ def _write_dataset_body(
     input_cleanup_failed = False
     lease_cleanup_failed = False
     active_producer_leases: list[MemoryLease] = []
-    active_producer_values: list[_OwnedValue[pd.DataFrame]] = []
-    pending_result: _OwnedValue[DatasetInspection] | None = None
+    active_producer_values: list[OwnedValue[pd.DataFrame]] = []
+    pending_result: OwnedValue[DatasetInspection] | None = None
 
     def close_input_once() -> None:
         nonlocal input_cleanup_failed, input_closed
@@ -503,7 +502,7 @@ def _write_dataset_body(
         if first_failure is not None:
             raise first_failure
 
-    def _writer(temp_root: Path) -> _OwnedValue[DatasetInspection]:
+    def _writer(temp_root: Path) -> OwnedValue[DatasetInspection]:
         nonlocal pending_result
         try:
             if (
@@ -533,7 +532,7 @@ def _write_dataset_body(
                     input_chunks,
                     temp_root / "data",
                     spec=spec,
-                    target_chunk_bytes=resource_policy.available_memory_bytes,
+                    target_chunk_bytes=resource_policy.planning_headroom_bytes,
                     key_tracker=key_tracker,
                     inventory=inventory,
                     borrowed_input=borrowed_input,
@@ -608,7 +607,7 @@ def _write_dataset_body(
                         raise ValueError("dataset_write_result_bound_invalid")
                     result_lease.shrink_to(result_bytes)
                     session.close()
-                    pending_result = _OwnedValue(result, result_lease)
+                    pending_result = OwnedValue(result, result_lease)
                     return pending_result
                 except BaseException as primary:
                     result = None
@@ -639,10 +638,7 @@ def _write_dataset_body(
         pending_result = None
         try:
             if result_to_release is not None:
-                _release_owned_value(
-                    result_to_release,
-                    owner="storage.dataset.write.result",
-                )
+                result_to_release.release(owner="storage.dataset.write.result")
         finally:
             close_input_and_active_leases()
 
@@ -657,7 +653,7 @@ def _write_contents(
     inventory: DatasetSessionInventory,
     borrowed_input: bool,
     active_producer_leases: list[MemoryLease],
-    active_producer_values: list[_OwnedValue[pd.DataFrame]],
+    active_producer_values: list[OwnedValue[pd.DataFrame]],
 ) -> _WriteStats:
     resource_policy = current_runtime_resource_policy()
     if resource_policy is None:
@@ -757,7 +753,7 @@ def _write_contents(
                 producer_lease = None
             if producer_lease is None:
                 break
-            if not isinstance(owned, _OwnedValue):
+            if not isinstance(owned, OwnedValue):
                 raise TypeError("invalid_dataset_owned_frame")
             if owned.lease is not producer_lease:
                 raise RuntimeError("runtime_memory_lease_transfer_mismatch")

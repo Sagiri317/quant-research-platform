@@ -520,7 +520,7 @@ def test_trade_reducer_admits_target_and_output_before_constructor_allocation(
         ):
             module.AggregateTradeReducer(
                 bars=bars,
-                payload_target_bytes=policy.available_memory_bytes,
+                payload_target_bytes=policy.planning_headroom_bytes,
                 normalize_chunk=panels.normalize_trade_chunk,
             )
 
@@ -614,7 +614,7 @@ def test_market_panel_admits_merge_before_calling_pandas_owner(
                 prepared,
                 trade_chunks=(),
                 depth_chunks=(),
-                payload_target_bytes=policy.available_memory_bytes,
+                payload_target_bytes=policy.planning_headroom_bytes,
             )
 
     assert policy.used_memory_bytes == 0
@@ -631,7 +631,7 @@ def test_depth_reducer_admits_chunk_before_normalization() -> None:
     with runtime_resource_policy_scope(policy):
         reducer = module.DepthSnapshotReducer(
             bars=panels.prepare_panel_bars(_bars_frame()),
-            payload_target_bytes=policy.available_memory_bytes,
+            payload_target_bytes=policy.planning_headroom_bytes,
             normalize_chunk=lambda _frame: (_ for _ in ()).throw(
                 AssertionError("normalization_started_before_admission")
             ),

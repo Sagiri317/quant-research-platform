@@ -3,14 +3,6 @@
 from __future__ import annotations
 
 
-def active_position_map(records: list[dict[str, object]]) -> dict[str, float]:
-    return {
-        record["asset"]: float(record["position"])
-        for record in records
-        if float(record["position"]) != 0.0
-    }
-
-
 def position_change_turnover(
     *,
     previous: dict[str, float],

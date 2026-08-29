@@ -319,7 +319,7 @@ def test_evaluation_and_portfolio_specs_are_signal_owned() -> None:
         direction="higher_is_better",
     )
     evaluation = EvaluationSpec(
-        run_id="signal_eval",
+        evaluation_id="signal_eval",
         market_id=MarketId("a_share"),
         research_dataset_id="a_share_research",
         signals=(signal,),
@@ -349,7 +349,7 @@ def test_signal_contracts_reject_filter_and_label_collisions() -> None:
 
     with pytest.raises(ValueError, match="evaluation_signal_label_overlap"):
         EvaluationSpec(
-            run_id="bad_eval_signal_column",
+            evaluation_id="bad_eval_signal_column",
             market_id=MarketId("a_share"),
             research_dataset_id="a_share_research",
             signals=(
@@ -364,7 +364,7 @@ def test_signal_contracts_reject_filter_and_label_collisions() -> None:
 
     with pytest.raises(ValueError, match="evaluation_signal_label_overlap"):
         EvaluationSpec(
-            run_id="bad_eval_signal_id",
+            evaluation_id="bad_eval_signal_id",
             market_id=MarketId("a_share"),
             research_dataset_id="a_share_research",
             signals=(
@@ -385,7 +385,7 @@ def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
         source_kind="prediction",
     )
     EvaluationSpec(
-        run_id="self_named_eval",
+        evaluation_id="self_named_eval",
         market_id=MarketId("a_share"),
         research_dataset_id="a_share_research",
         signals=(own_name_signal,),
@@ -415,7 +415,7 @@ def test_signal_contracts_reject_cross_signal_id_column_collisions() -> None:
     )
     with pytest.raises(ValueError, match="evaluation_signal_id_column_overlap"):
         EvaluationSpec(
-            run_id="bad_eval_cross_signal",
+            evaluation_id="bad_eval_cross_signal",
             market_id=MarketId("a_share"),
             research_dataset_id="a_share_research",
             signals=cross_collision,

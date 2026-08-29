@@ -52,7 +52,7 @@ from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -103,7 +103,7 @@ def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
                         owned = data.send(lease)
                     except StopIteration:
                         return frames
-                    if isinstance(owned, _OwnedValue):
+                    if isinstance(owned, OwnedValue):
                         break
                     raise AssertionError("invalid_bound_first_output")
                 lease.transfer("test.crypto.output")
@@ -119,7 +119,7 @@ def _collect_bound_first(data, policy):  # noqa: ANN001, ANN202
 def _bound_first_frames(frames):  # noqa: ANN001, ANN202
     for frame in frames:
         lease = yield 256 * 1024
-        yield _OwnedValue(frame, lease)
+        yield OwnedValue(frame, lease)
 
 
 @pytest.mark.parametrize(
@@ -183,7 +183,7 @@ def test_existing_panel_validation_keeps_policy_active_across_both_iterators(
         target_chunk_bytes: int,
         **_kwargs,
     ):
-        assert 0 < target_chunk_bytes <= policy.available_memory_bytes
+        assert 0 < target_chunk_bytes <= policy.planning_headroom_bytes
         assert current_runtime_resource_policy() is policy
         count = 1 if session.name == "bar" else 2
         with runtime_resource_policy_scope(session.resource_policy):
@@ -1058,7 +1058,6 @@ def test_crypto_panel_source_parts_require_one_asset_per_physical_part(
                 materialize_panel._iter_panel_chunks(
                     processed_catalog().get("market_panel_1m"),
                     input_sessions=input_sessions,
-                    time_window=TimeWindow("2026-07-06", "2026-07-06"),
                     resource_policy=policy,
                 )
             )
@@ -1092,7 +1091,7 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=session.resource_policy.available_memory_bytes,
+            target_chunk_bytes=session.resource_policy.planning_headroom_bytes,
             error="invalid_crypto_test_asset_grouping",
         ) as views:
             normal_selections = tuple(view.path_selection for _key, view in views)
@@ -1115,7 +1114,7 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
             with materialization_validation.crypto_asset_session_views(
                 session,
                 columns=("asset_id",),
-                target_chunk_bytes=session.resource_policy.available_memory_bytes,
+                target_chunk_bytes=session.resource_policy.planning_headroom_bytes,
                 error="invalid_crypto_test_asset_grouping",
             ) as views:
                 consumer_selections = tuple(view.path_selection for _key, view in views)
@@ -1155,7 +1154,7 @@ def test_crypto_session_views_prune_asset_and_window_paths_in_shared_inventory(
             with materialization_validation.crypto_asset_session_views(
                 session,
                 columns=("asset_id",),
-                target_chunk_bytes=session.resource_policy.available_memory_bytes,
+                target_chunk_bytes=session.resource_policy.planning_headroom_bytes,
                 error="invalid_crypto_test_asset_grouping",
             ):
                 raise AssertionError("unreachable")
@@ -1270,7 +1269,7 @@ def test_matching_chunk_caller_releases_selection_on_all_exit_paths(
             "time_window": TimeWindow("2026-01-01", "2026-12-31"),
             "source_asset_error": "invalid_test_source_asset_id",
             "timestamp_error": "invalid_test_timestamp",
-            "target_chunk_bytes": session.resource_policy.available_memory_bytes,
+            "target_chunk_bytes": session.resource_policy.planning_headroom_bytes,
         }
 
         def empty_chunks(*_args, **_kwargs):
@@ -1385,7 +1384,7 @@ def test_asset_views_preserve_primary_and_attempt_all_selection_release(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.available_memory_bytes,
+            target_chunk_bytes=policy.planning_headroom_bytes,
             error="invalid_test_asset_grouping",
         ):
             if failure_site == "body":
@@ -1450,7 +1449,7 @@ def test_asset_views_propagate_first_release_failure_after_attempting_all(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.available_memory_bytes,
+            target_chunk_bytes=policy.planning_headroom_bytes,
             error="invalid_test_asset_grouping",
         ):
             pass
@@ -2623,7 +2622,6 @@ def test_panel_chunk_keeps_output_admitted_through_consumer_yield(
         chunks = materialize_panel._iter_panel_chunks(
             spec,
             input_sessions=input_sessions,
-            time_window=TimeWindow("2026-07-06", "2026-07-06"),
             resource_policy=policy,
         )
         bound = next(chunks)
@@ -2723,7 +2721,7 @@ def test_panel_dependent_publication_carries_live_panel_session_bytes(
             "test.crypto.writer.result",
             0,
         )
-        return _OwnedValue(SimpleNamespace(), lease)
+        return OwnedValue(SimpleNamespace(), lease)
 
     monkeypatch.setattr(module, "_write_dataset_owned", record_write)
     with open_dataset_session(
@@ -2869,7 +2867,7 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
     monkeypatch.setattr(
         materialization_validation,
         "crypto_asset_session_views",
-        lambda session, **_kwargs: _asset_views_context(
+        lambda _session, **_kwargs: _asset_views_context(
             (
                 (
                     ("ETHFIUSDT",),
@@ -2940,7 +2938,6 @@ def test_panel_chunks_are_globally_ordered_after_canonical_asset_mapping(
             materialize_panel._iter_panel_chunks(
                 spec,
                 input_sessions=input_sessions,
-                time_window=TimeWindow("2026-07-06", "2026-07-06"),
                 resource_policy=policy,
             ),
             policy,
@@ -3037,7 +3034,6 @@ def test_panel_chunks_reject_same_asset_cross_chunk_time_reversal(
                 materialize_panel._iter_panel_chunks(
                     spec,
                     input_sessions=input_sessions,
-                    time_window=TimeWindow("2026-07-06", "2026-07-06"),
                     resource_policy=policy,
                 ),
                 policy,

@@ -5,6 +5,7 @@ import json
 import pytest
 
 import quant_research_platform.runtime.resources as runtime_resources
+import quant_research_platform.storage.atomic as storage_atomic
 from quant_research_platform.workflows import local_verification as module
 from quant_research_platform.workflows.local_verification import run_local_verification
 from quant_research_platform.workflows.local_verification_layout import (
@@ -35,7 +36,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     calls: list[str] = []
     publish_order: list[str] = []
     run_years: list[tuple[int, ...]] = []
-    evaluation_run_ids: list[str] = []
+    evaluation_ids: list[str] = []
     prediction_ids: list[str] = []
     portfolio_ids: list[str] = []
     final_reserved_bytes: list[int] = []
@@ -80,7 +81,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
         lambda **kwargs: (
             calls.append("evaluation")
             or run_years.append((kwargs["time_window"].start.year,))
-            or evaluation_run_ids.append(kwargs["run_id"])
+            or evaluation_ids.append(kwargs["evaluation_id"])
             or evaluation_writer(**kwargs)
         ),
     )
@@ -144,7 +145,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
         "portfolio",
     ]
     assert run_years == [(2014,)] * (expected_prediction_count + 3)
-    assert evaluation_run_ids == ["signal_forward_return_20d"]
+    assert evaluation_ids == ["signal_forward_return_20d"]
     assert prediction_ids == expected_prediction_ids
     assert portfolio_ids == [
         f"{representative_prediction_id}_portfolio",
@@ -270,7 +271,7 @@ def test_local_verification_replace_failure_preserves_old_good(
         "_run_local_verification_with_policy",
         complete_replacement,
     )
-    original_move = module.move_path_no_replace
+    original_move = storage_atomic.move_path_no_replace
 
     def fail_candidate_publish(source, target):
         if (
@@ -281,7 +282,7 @@ def test_local_verification_replace_failure_preserves_old_good(
             raise OSError("replacement_publish_failed")
         return original_move(source, target)
 
-    monkeypatch.setattr(module, "move_path_no_replace", fail_candidate_publish)
+    monkeypatch.setattr(storage_atomic, "move_path_no_replace", fail_candidate_publish)
     with pytest.raises(OSError, match="replacement_publish_failed"):
         run_local_verification(config)
 
@@ -289,7 +290,7 @@ def test_local_verification_replace_failure_preserves_old_good(
     assert marker.read_text(encoding="utf-8") == "old-good\n"
     assert tuple(path.name for path in run_root.parent.iterdir()) == ("old_good",)
 
-    monkeypatch.setattr(module, "move_path_no_replace", original_move)
+    monkeypatch.setattr(storage_atomic, "move_path_no_replace", original_move)
     policies = iter(
         (
             capture_test_policy(available_memory_bytes=16 * 1024 * 1024),

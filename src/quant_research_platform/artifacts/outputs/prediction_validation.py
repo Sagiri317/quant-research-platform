@@ -13,10 +13,10 @@ from quant_research_platform.artifacts.outputs.common_validation import (
     validate_filter_metadata,
     validate_metadata_row_count_chain,
 )
-from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_SUMMARY_REASON_CODES,
 )
+from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.models import (
     ModelSpec,
     _resolved_model_hyperparameters_match,

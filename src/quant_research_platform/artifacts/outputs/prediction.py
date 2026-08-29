@@ -29,10 +29,10 @@ from quant_research_platform.artifacts.outputs.prediction_validation import (
 from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import is_intraday_time_value
+from quant_research_platform.runtime.resources import OwnedValue
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
-from quant_research_platform.runtime.resources import _OwnedValue
 
 
 def write_prediction_outputs(
@@ -40,7 +40,7 @@ def write_prediction_outputs(
     spec: PredictionSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
-    output_chunks: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]],
+    output_chunks: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]],
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
 ) -> Path:
@@ -57,7 +57,7 @@ def write_prediction_outputs(
 
 
 def _write_prediction_output_chunks(
-    frames: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]],
+    frames: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]],
     *,
     spec: PredictionSpec,
     output_spec: OutputSpec,

@@ -13,13 +13,17 @@ class EvaluationCatalog(ImmutableCatalog[EvaluationSpec]):
         values = tuple(items)
         seen: set[str] = set()
         for spec in values:
-            if spec.run_id in seen:
-                raise ValueError(f"duplicate_evaluation_spec: {spec.run_id}")
-            seen.add(spec.run_id)
-        super().__init__(sorted(values, key=lambda spec: spec.run_id))
+            if spec.evaluation_id in seen:
+                raise ValueError(
+                    f"duplicate_evaluation_spec: {spec.evaluation_id}"
+                )
+            seen.add(spec.evaluation_id)
+        super().__init__(sorted(values, key=lambda spec: spec.evaluation_id))
 
-    def get(self, run_id: str) -> EvaluationSpec:
+    def get(self, evaluation_id: str) -> EvaluationSpec:
         try:
-            return next(spec for spec in self._items if spec.run_id == run_id)
+            return next(
+                spec for spec in self._items if spec.evaluation_id == evaluation_id
+            )
         except StopIteration as exc:
-            raise KeyError(f"unknown_evaluation_spec: {run_id}") from exc
+            raise KeyError(f"unknown_evaluation_spec: {evaluation_id}") from exc

@@ -219,7 +219,6 @@ def test_dataframe_tradability_helper_edges() -> None:
     counts = constraints.tradability_diagnostic_counts(
         timestamp_frame=frame,
         signal="signal",
-        spec=spec,
         tradability_config=tradability,
     )
     assert counts["entry_blocked_count"] == 0
@@ -351,7 +350,6 @@ def test_leg_weight_methods_normalize_one_signed_leg(
         asset_values=np.array(["A", "B"]),
         signal_values=np.array([1.0, 3.0]),
         risk_values=risk,
-        signal="signal",
         weight_config=WeightConfig(
             method=method,
             risk_column="risk" if risk is not None else None,
@@ -369,7 +367,6 @@ def test_zero_zscore_leg_uses_equal_weight_fallback() -> None:
         asset_values=np.array(["A", "B"]),
         signal_values=np.array([1.0, 1.0]),
         risk_values=None,
-        signal="signal",
         weight_config=WeightConfig(method="zscore_weighted_quantile"),
         sign=1.0,
     )
@@ -383,7 +380,6 @@ def test_tiny_nonconstant_zscore_leg_does_not_falsely_fallback() -> None:
         asset_values=np.array(["A", "B", "C"]),
         signal_values=np.array([1e-320, 2e-320, 3e-320]),
         risk_values=None,
-        signal="signal",
         weight_config=WeightConfig(method="zscore_weighted_quantile"),
         sign=1.0,
     )

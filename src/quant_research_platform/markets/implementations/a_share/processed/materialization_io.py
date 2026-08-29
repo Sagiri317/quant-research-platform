@@ -17,9 +17,8 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
-    _release_owned_value,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -78,16 +77,10 @@ def write_and_inspect(
             nonlocal inspection
             if sys.exception() is not None:
                 inspection = None
-            _release_owned_value(
-                owned,
-                owner="a_share.materialization.inspection.result",
-            )
+            owned.release(owner="a_share.materialization.inspection.result")
 
         if cleanup_stack is None:
-            _release_owned_value(
-                owned,
-                owner="a_share.materialization.inspection.result",
-            )
+            owned.release(owner="a_share.materialization.inspection.result")
         else:
             cleanup_stack.callback(release_inspection)
     written[spec.data_id] = inspection
@@ -156,7 +149,7 @@ def iter_sorted_output_chunks(
                         owned = frames.send(lease)
                     except StopIteration:
                         break
-                    if not isinstance(owned, _OwnedValue):
+                    if not isinstance(owned, OwnedValue):
                         raise TypeError("invalid_a_share_owned_frame")
                     if owned.lease is not lease:
                         raise RuntimeError("runtime_memory_lease_transfer_mismatch")
@@ -235,7 +228,7 @@ def iter_sorted_output_chunks(
                     if actual_bound > lease.reserved_bytes:
                         raise ValueError("a_share_output_bound_invalid")
                     lease.shrink_to(actual_bound)
-                    yield _OwnedValue(output, lease)
+                    yield OwnedValue(output, lease)
                     del output
                     try:
                         bound = frames.send(None)
@@ -308,12 +301,11 @@ def read_materialized_dataset(
     ) as session:
         owned = materialize_dataset_session_owned(
             session,
-            target_chunk_bytes=resource_policy.available_memory_bytes,
+            target_chunk_bytes=resource_policy.planning_headroom_bytes,
             materialized_budget_bytes=resource_policy.memory_budget_bytes,
         )
         cleanup_stack.callback(
-            _release_owned_value,
-            owned,
+            owned.release,
             owner="a_share.materialized.input",
         )
         return owned.value

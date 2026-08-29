@@ -62,6 +62,21 @@ def render_qrp_json_object(value: Mapping[str, Any]) -> str:
     )
 
 
+def replace_nonfinite_json_numbers(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Replace unavailable non-finite report numbers with JSON nulls."""
+
+    def replace(item: Any) -> Any:
+        if isinstance(item, float) and not math.isfinite(item):
+            return None
+        if isinstance(item, Mapping):
+            return {str(key): replace(child) for key, child in item.items()}
+        if isinstance(item, (list, tuple)):
+            return [replace(child) for child in item]
+        return item
+
+    return replace(value)
+
+
 def bounded_rendered_qrp_json_object_size(
     value: Mapping[str, Any],
     *,

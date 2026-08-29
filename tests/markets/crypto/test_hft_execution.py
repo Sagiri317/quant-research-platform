@@ -4,6 +4,7 @@ import math
 
 import pytest
 
+import quant_research_platform.markets.implementations.crypto.execution as execution
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
@@ -13,12 +14,19 @@ from quant_research_platform.contracts.order_book import (
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
+    _Metrics,
+    _PendingMarkouts,
     simulate_maker,
     simulate_taker,
     taker_latency_sweep,
 )
+from quant_research_platform.runtime.resources import (
+    OwnedValue,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from tests.helpers.binance_hft import _coverage, _quote
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _state(
@@ -109,6 +117,58 @@ def _maker_config() -> MakerConfig:
     )
 
 
+def test_market_event_first_trade_failure_releases_first_book_and_children() -> None:
+    primary = KeyboardInterrupt("trade_primary")
+
+    class OneBook:
+        def __init__(self, value: OwnedValue[BookState]) -> None:
+            self.value = value
+            self.closed = False
+
+        def __iter__(self):  # noqa: ANN204
+            return self
+
+        def __next__(self):  # noqa: ANN204
+            if self.value is None:
+                raise StopIteration
+            value, self.value = self.value, None
+            return value
+
+        def close(self) -> None:
+            self.closed = True
+            raise OSError("book_close_secondary")
+
+    class FailingTrades:
+        closed = False
+
+        def __iter__(self):  # noqa: ANN204
+            return self
+
+        def __next__(self):  # noqa: ANN204
+            raise primary
+
+        def close(self) -> None:
+            self.closed = True
+            raise OSError("trade_close_secondary")
+
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        lease = policy.lease("test.crypto.execution.first_book", 1234)
+        owned = OwnedValue(_state(0), lease)
+        books = OneBook(owned)
+        trades = FailingTrades()
+        try:
+            with pytest.raises(KeyboardInterrupt) as raised:
+                next(execution._market_events(books, trades))
+            assert raised.value is primary
+            assert not lease.active
+            assert books.closed and trades.closed
+            assert policy.used_memory_bytes == 0
+        finally:
+            if lease.active:
+                owned.release(owner="test.crypto.execution.first_book")
+
+
 def test_taker_uses_latest_actual_state_at_effective_time() -> None:
     fills = []
     diagnostics = simulate_taker(
@@ -127,6 +187,92 @@ def test_taker_uses_latest_actual_state_at_effective_time() -> None:
     assert fills[0]["fill_price"] == 100.5
     assert diagnostics["latency_fidelity"] == "full_l2_observed_event"
     assert diagnostics["assumption"] == "historical_book_zero_market_impact"
+
+
+def test_pending_markout_close_failure_preserves_body_primary() -> None:
+    class FailingClose:
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise OSError("close_failure")
+
+    handle = FailingClose()
+    pending = object.__new__(_PendingMarkouts)
+    pending._file = handle
+    pending.expire_all = lambda: None
+
+    with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
+        with pending:
+            raise KeyboardInterrupt("body_primary")
+
+    assert handle.close_calls == 1
+    assert raised.value.__notes__ == [
+        "execution pending markout handle close also failed: OSError"
+    ]
+
+
+def test_pending_markout_rejects_disk_before_tempfile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        execution,
+        "require_free_disk_headroom",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            OSError("pending_markout_disk_headroom")
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        execution.tempfile,
+        "TemporaryFile",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("temporary_file_created_before_disk_preflight")
+        ),
+    )
+
+    with pytest.raises(OSError, match="pending_markout_disk_headroom"):
+        _PendingMarkouts(_Metrics(), None)
+
+
+def test_pending_markout_rechecks_disk_and_closes_after_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def gate(_path, *, reserve_bytes: int) -> int:
+        calls.append(reserve_bytes)
+        if len(calls) == 2:
+            raise OSError("pending_markout_disk_headroom")
+        return reserve_bytes
+
+    monkeypatch.setattr(
+        execution,
+        "require_free_disk_headroom",
+        gate,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        execution,
+        "_PENDING_MARKOUT_DISK_CHECK_BYTES",
+        1,
+        raising=False,
+    )
+    pending = _PendingMarkouts(_Metrics(), None)
+    fill = {
+        "fill_qty": 1.0,
+        "fill_price": 100.0,
+        "side": "buy",
+        "segment_id": "s1",
+        "markout_target_time_ns": 1,
+    }
+
+    with pytest.raises(OSError, match="pending_markout_disk_headroom"):
+        with pending:
+            pending.add(fill)
+
+    assert len(calls) == 2
+    assert pending._file.closed is True
 
 
 def test_taker_walks_known_l2_and_reports_partial_coverage_honestly() -> None:

@@ -18,7 +18,7 @@ def test_crypto_binance_1m_profile_keeps_hft_composition_binding() -> None:
     assert profile.research_datasets.list()[0].data_id == (
         "microstructure_forward_returns"
     )
-    assert profile.evaluations.list()[0].run_id == (
+    assert profile.evaluations.list()[0].evaluation_id == (
         "microstructure_forward_returns_evaluation"
     )
     assert profile.models.list() == ()

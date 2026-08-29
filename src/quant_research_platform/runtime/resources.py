@@ -12,7 +12,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if os.name == "nt":
     import msvcrt
@@ -124,12 +124,13 @@ class MemoryLease:
 
 
 @dataclass(slots=True)
-class _OwnedValue[T]:
+class OwnedValue[T]:
     value: T
     lease: MemoryLease
 
-
-type _OwnedFrame = _OwnedValue[pd.DataFrame]
+    def release(self, *, owner: str) -> None:
+        self.value = None
+        _close_lease_preserving_primary(self.lease, owner=owner)
 
 
 def _close_lease_preserving_primary(lease: MemoryLease, *, owner: str) -> None:
@@ -144,21 +145,13 @@ def _close_lease_preserving_primary(lease: MemoryLease, *, owner: str) -> None:
         )
 
 
-def _release_owned_value(
-    owned: _OwnedValue[Any],
-    *,
-    owner: str,
-) -> None:
-    owned.value = None
-    _close_lease_preserving_primary(owned.lease, owner=owner)
-
-
 @dataclass(frozen=True, init=False, eq=False, slots=True)
 class RuntimeResourcePolicy:
-    """One immutable data-scale root budget and mutable lease ledger."""
+    """One soft host planning target and approximate owned-memory ledger."""
 
     captured_available_memory_bytes: int
     memory_budget_bytes: int
+    explicit_memory_cap_bytes: int | None
     state: str
     _lock: _MachineLock
     _ledger_lock: threading.RLock
@@ -173,9 +166,9 @@ class RuntimeResourcePolicy:
             return self._used_memory_bytes()
 
     @property
-    def available_memory_bytes(self) -> int:
+    def planning_headroom_bytes(self) -> int:
         with self._ledger_lock:
-            return self.memory_budget_bytes - self._used_memory_bytes()
+            return max(0, self.memory_budget_bytes - self._used_memory_bytes())
 
     def lease(self, owner: str, reserved_bytes: int) -> MemoryLease:
         with self._ledger_lock:
@@ -185,20 +178,28 @@ class RuntimeResourcePolicy:
                 reserved_bytes,
                 error="invalid_runtime_memory_lease_bytes",
             )
-            if self._used_memory_bytes() + reserved > self.memory_budget_bytes:
+            if (
+                self.explicit_memory_cap_bytes is not None
+                and self._used_memory_bytes() + reserved
+                > self.explicit_memory_cap_bytes
+            ):
                 raise MemoryError("runtime_memory_budget_exceeded")
             leased = MemoryLease(valid_owner, reserved, True, self)
             self._leases.add(leased)
             return leased
 
-    def to_payload(self) -> dict[str, int]:
+    def to_payload(self) -> dict[str, int | None]:
         with self._ledger_lock:
             used = self._used_memory_bytes()
             return {
                 "captured_available_memory_bytes": self.captured_available_memory_bytes,
                 "memory_budget_bytes": self.memory_budget_bytes,
+                "explicit_memory_cap_bytes": self.explicit_memory_cap_bytes,
                 "used_memory_bytes": used,
-                "available_memory_bytes": self.memory_budget_bytes - used,
+                "planning_headroom_bytes": max(
+                    0,
+                    self.memory_budget_bytes - used,
+                ),
             }
 
     def _require_active_root(self) -> None:
@@ -214,9 +215,9 @@ class RuntimeResourcePolicy:
         with self._ledger_lock:
             self._require_active_root()
             self._require_lease_owner(lease)
-            if (
+            if self.explicit_memory_cap_bytes is not None and (
                 self._used_memory_bytes() + additional_bytes
-                > self.memory_budget_bytes
+                > self.explicit_memory_cap_bytes
             ):
                 raise MemoryError("runtime_memory_budget_exceeded")
             lease.reserved_bytes += additional_bytes
@@ -399,6 +400,7 @@ def _capture_runtime_resource_policy(
         policy = object.__new__(RuntimeResourcePolicy)
         object.__setattr__(policy, "captured_available_memory_bytes", available)
         object.__setattr__(policy, "memory_budget_bytes", budget)
+        object.__setattr__(policy, "explicit_memory_cap_bytes", explicit_cap)
         object.__setattr__(policy, "state", "ACTIVE")
         object.__setattr__(policy, "_lock", lock)
         object.__setattr__(policy, "_ledger_lock", threading.RLock())

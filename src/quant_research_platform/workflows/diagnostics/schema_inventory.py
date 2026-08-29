@@ -22,7 +22,6 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    _release_owned_value,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.atomic import atomic_write_chunks
@@ -494,10 +493,7 @@ def _inventory_item_from_session(
         ) from None
     finally:
         inspection = None
-        _release_owned_value(
-            owned,
-            owner="workflow.schema_inventory.inspection.result",
-        )
+        owned.release(owner="workflow.schema_inventory.inspection.result")
 
 
 def _inventory_item_upper_bound_bytes(
@@ -547,7 +543,7 @@ def _aggregate_dataset_stats(
     duplicate_primary_key_count = exact_duplicate_count
     chunks = iter_dataset_chunks(
         session,
-        target_chunk_bytes=resource_policy.available_memory_bytes,
+        target_chunk_bytes=resource_policy.planning_headroom_bytes,
     )
     with closing_iterator(chunks):
         for frame in chunks:

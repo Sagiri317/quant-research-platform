@@ -24,7 +24,6 @@ from quant_research_platform.artifacts.outputs import (
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.contracts.data import ProcessedDataKind
-from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
@@ -47,13 +46,8 @@ from quant_research_platform.reports.verification_summary import (
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
-from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
-from quant_research_platform.research.datasets.validation import (
-    validate_evaluation_input,
-)
-from quant_research_platform.research.evaluations.engine import (
-    _EvaluationStreamingState,
-    _iter_evaluation_output_chunks,
+from quant_research_platform.research.evaluations.runner import (
+    build_evaluation_result_from_research_dataset,
 )
 from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.portfolios.runner import (
@@ -73,9 +67,12 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._scratch_ownership import (
-    move_path_no_replace,
     owned_scratch_name,
     remove_owned_scratch,
+)
+from quant_research_platform.storage.atomic import (
+    publish_no_replace,
+    publish_replace_preserving_old_good,
 )
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -142,7 +139,7 @@ def _write_evaluation_outputs_from_research_dataset(
     layout: StorageLayout,
     dataset_catalog: ResearchDatasetCatalog,
     evaluation_catalog: EvaluationCatalog,
-    run_id: str,
+    evaluation_id: str,
     output_spec: OutputSpec,
     time_window: TimeWindow | None = None,
     n_groups: int | None = None,
@@ -151,87 +148,26 @@ def _write_evaluation_outputs_from_research_dataset(
     """Compose the research producer and artifact persistence in the workflow."""
 
     with runtime_resource_policy_scope(resource_policy) as policy:
-        spec = evaluation_catalog.get(run_id)
-        dataset_spec = dataset_catalog.get(spec.research_dataset_id)
-        signal_columns = tuple(signal.source_column for signal in spec.signals)
-        read_columns = (
-            *dataset_spec.primary_key,
-            *signal_columns,
-            *spec.label_columns,
-            *required_filter_columns(spec.filter_mode),
-        )
+        spec = evaluation_catalog.get(evaluation_id)
         effective_groups = spec.n_groups if n_groups is None else n_groups
-        chunks = iter_research_dataset_chunks(
-            layout,
-            market_id=dataset_spec.market_id,
-            dataset_id=dataset_spec.data_id,
+        with build_evaluation_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            evaluation_catalog=evaluation_catalog,
+            evaluation_id=evaluation_id,
             time_window=time_window,
-            columns=read_columns,
-        )
-
-        def validated_chunks():
-            for chunk in chunks:
-                validate_evaluation_input(
-                    chunk,
-                    dataset_spec,
-                    signals=spec.signals,
-                    label_columns=spec.label_columns,
-                )
-                yield chunk
-
-        state = _EvaluationStreamingState(
-            spec=spec,
             n_groups=effective_groups,
             resource_policy=policy,
-        )
-        primary: BaseException | None = None
-        try:
-            evaluation_chunks = _iter_evaluation_output_chunks(
-                validated_chunks(),
-                spec=spec,
-                signal_columns=tuple(signal.signal_id for signal in spec.signals),
-                label_columns=spec.label_columns,
-                n_groups=effective_groups,
-                asset_column="asset_id",
-                source_columns_by_kind={
-                    "factor": tuple(dataset_spec.factor_columns),
-                    "feature": tuple(dataset_spec.feature_columns),
-                    "prediction": tuple(dataset_spec.context_columns),
-                },
-                resource_policy=policy,
-                summary_state=state,
-            )
-
-            def summary_factory():
-                return (
-                    state.diagnostics(),
-                    state.ic_summary(),
-                    state.group_spread_summary(),
-                    state.coverage_summary(),
-                )
-
+        ) as result:
             return write_evaluation_outputs_from_chunks(
-                evaluation_chunks,
-                summary_factory=summary_factory,
+                result.output_chunks,
+                summary_factory=result.summaries,
                 spec=spec,
                 output_spec=output_spec,
                 layout=layout,
                 n_groups=effective_groups,
                 resource_policy=policy,
             )
-        except BaseException as exc:
-            primary = exc
-            raise
-        finally:
-            try:
-                state.close()
-            except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "evaluation summary reservation release also failed: "
-                    f"{type(close_error).__name__}"
-                )
 
 
 def run_local_verification(
@@ -279,11 +215,14 @@ def run_local_verification(
                 retained_state=retained_state,
             )
             retained_state.close()
-            _publish_staged_run_root(
-                staged_root,
-                run_root=run_root,
-                replacing=replacing,
-            )
+            if replacing:
+                publish_replace_preserving_old_good(
+                    staged_root,
+                    run_root,
+                    _previous_generation_root(run_root),
+                )
+            else:
+                publish_no_replace(staged_root, run_root)
         except BaseException as primary:
             if staged_claimed:
                 try:
@@ -321,7 +260,7 @@ def _run_local_verification_with_policy(
     )
     catalogs = config.profile
     research_dataset_id = _only_research_dataset_id(config.profile)
-    evaluation_run_id = _only_evaluation_run_id(config.profile)
+    evaluation_id = _only_evaluation_id(config.profile)
     prediction_catalog = config.profile.build_prediction_catalog(
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
@@ -380,13 +319,13 @@ def _run_local_verification_with_policy(
             layout=storage_layout,
             dataset_catalog=catalogs.research_datasets,
             evaluation_catalog=catalogs.evaluations,
-            run_id=evaluation_run_id,
+            evaluation_id=evaluation_id,
             output_spec=_output_spec(
-                output_id=evaluation_run_id,
+                output_id=evaluation_id,
                 output_definition_id="evaluation_outputs",
                 run_id=run_id,
-                market_id=catalogs.evaluations.get(evaluation_run_id).market_id,
-                run_type=catalogs.evaluations.get(evaluation_run_id).run_type,
+                market_id=catalogs.evaluations.get(evaluation_id).market_id,
+                run_type=catalogs.evaluations.get(evaluation_id).run_type,
             ),
             time_window=evaluation_time_window,
             resource_policy=resource_policy,
@@ -675,11 +614,11 @@ def _only_research_dataset_id(profile: ResearchProfile) -> str:
     return specs[0].data_id
 
 
-def _only_evaluation_run_id(profile: ResearchProfile) -> str:
+def _only_evaluation_id(profile: ResearchProfile) -> str:
     specs = profile.evaluations.list()
     if len(specs) != 1:
-        raise ValueError("ambiguous_evaluation_run")
-    return specs[0].run_id
+        raise ValueError("ambiguous_evaluation")
+    return specs[0].evaluation_id
 
 
 def _optional_portfolio_ids(portfolio_catalog) -> tuple[str, ...]:
@@ -699,7 +638,6 @@ def _logical_run_root(run_root: Path) -> str:
 
 
 def _resolve_local_output_repo_root(
-    run_root: Path,
     explicit_repo_root: Path | None,
 ) -> Path:
     if explicit_repo_root is not None:
@@ -737,31 +675,6 @@ def _replacement_target_exists(
     return True
 
 
-def _publish_staged_run_root(
-    staged_root: Path,
-    *,
-    run_root: Path,
-    replacing: bool,
-) -> Path | None:
-    if not replacing:
-        move_path_no_replace(staged_root, run_root)
-        return None
-    backup_root = _previous_generation_root(run_root)
-    move_path_no_replace(run_root, backup_root)
-    try:
-        move_path_no_replace(staged_root, run_root)
-    except BaseException as primary:
-        try:
-            move_path_no_replace(backup_root, run_root)
-        except BaseException as rollback_error:
-            primary.add_note(
-                "local verification old-good rollback also failed: "
-                f"{type(rollback_error).__name__}"
-            )
-        raise
-    return backup_root
-
-
 def _previous_generation_root(run_root: Path) -> Path:
     root = Path(run_root)
     return root.with_name(f".{root.name}.previous-good")
@@ -792,7 +705,7 @@ def _prepare_run_root(
     )
     reason = local_run_root_reason(
         run_root,
-        _resolve_local_output_repo_root(run_root, repo_root),
+        _resolve_local_output_repo_root(repo_root),
     )
     if reason is not None:
         raise ValueError(reason)
@@ -1007,7 +920,6 @@ def _build_layer_summaries(
         grouped.setdefault(logical_layer, []).append(root)
     return tuple(
         build_layer_summary(
-            layer_root=layout.data_root / logical_layer,
             logical_layer=logical_layer,
             dataset_roots=tuple(sorted(roots, key=lambda item: item.as_posix())),
         )

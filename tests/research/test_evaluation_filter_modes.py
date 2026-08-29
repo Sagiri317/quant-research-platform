@@ -44,7 +44,7 @@ def test_managed_evaluation_accepts_true_peak_and_rejects_before_kernel(
         }
     )
     spec = EvaluationSpec(
-        run_id="lease_peak",
+        evaluation_id="lease_peak",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
         signals=(
@@ -130,14 +130,14 @@ def test_managed_evaluation_accepts_true_peak_and_rejects_before_kernel(
 def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() -> None:
     frame = make_filter_mode_frame()
     eligible_spec = EvaluationSpec(
-        run_id="eval_eligible",
+        evaluation_id="eval_eligible",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
         label_columns=("label",),
     )
     tradable_spec = EvaluationSpec(
-        run_id="eval_tradable",
+        evaluation_id="eval_tradable",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -145,7 +145,7 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() ->
         filter_mode="tradable",
     )
     unfiltered_spec = EvaluationSpec(
-        run_id="eval_unfiltered",
+        evaluation_id="eval_unfiltered",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -307,7 +307,7 @@ def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
     frame["factor"] = np.nan
     frame["label"] = np.nan
     spec = EvaluationSpec(
-        run_id="eval_all_nan",
+        evaluation_id="eval_all_nan",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -373,7 +373,7 @@ def test_evaluation_group_spread_is_deterministic_for_shuffled_assets() -> None:
         }
     )
     spec = EvaluationSpec(
-        run_id="eval_shuffle_stable",
+        evaluation_id="eval_shuffle_stable",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -478,7 +478,7 @@ def test_evaluation_normalizes_lower_rank_signal_before_compute_output() -> None
         }
     )
     spec = EvaluationSpec(
-        run_id="eval_lower_rank_signal",
+        evaluation_id="eval_lower_rank_signal",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(
@@ -537,7 +537,7 @@ def test_evaluation_computes_multiple_signals_in_one_run() -> None:
         reverse_factor=[6.0, 5.0, 4.0, 3.0, 2.0, 1.0],
     )
     spec = EvaluationSpec(
-        run_id="eval_multi_signal",
+        evaluation_id="eval_multi_signal",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(
@@ -600,7 +600,7 @@ def test_evaluation_computes_signal_by_label_cross_product() -> None:
         label_alt=[0.06, 0.05, 0.04, 0.03, 0.02, 0.01],
     )
     spec = EvaluationSpec(
-        run_id="eval_multi_signal_label",
+        evaluation_id="eval_multi_signal_label",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(
@@ -729,12 +729,24 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
         )
 
 
+def test_evaluation_spec_rejects_unknown_axis() -> None:
+    with pytest.raises(ValueError, match="evaluation_axis_invalid"):
+        EvaluationSpec(
+            evaluation_id="bad_axis",
+            market_id=MarketId("crypto"),
+            research_dataset_id="demo_filter",
+            signals=(make_signal_spec("factor"),),
+            label_columns=("label",),
+            evaluation_axis="rows",  # type: ignore[arg-type]
+        )
+
+
 @pytest.mark.parametrize(
     ("spec", "frame", "match"),
     [
         (
             EvaluationSpec(
-                run_id="missing_filter",
+                evaluation_id="missing_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
                 signals=(make_signal_spec("factor"),),
@@ -746,7 +758,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
         ),
         (
             EvaluationSpec(
-                run_id="null_filter",
+                evaluation_id="null_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
                 signals=(make_signal_spec("factor"),),
@@ -759,7 +771,7 @@ def test_evaluation_diagnostics_contract_validates_shape() -> None:
         ),
         (
             EvaluationSpec(
-                run_id="bad_filter",
+                evaluation_id="bad_filter",
                 market_id=MarketId("a_share"),
                 research_dataset_id="demo_filter",
                 signals=(make_signal_spec("factor"),),

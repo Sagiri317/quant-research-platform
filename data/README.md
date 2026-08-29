@@ -9,4 +9,4 @@
 
 数据合同见 `docs/data/README.md`。
 
-目录职责：sources 负责摄取，A 股实现层负责 processed data 与市场语义，storage 负责通用 dataset IO、manifest、fingerprint、compare 和 data layout。本目录不定义运行时业务逻辑或 `run_root`。
+目录职责：sources 负责摄取，A 股与 Crypto 的对应实现层分别负责本市场 processed data 与市场语义，storage 负责通用 dataset IO、manifest、fingerprint、compare 和 data layout。本目录不定义运行时业务逻辑或 `run_root`。

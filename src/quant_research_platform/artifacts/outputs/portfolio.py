@@ -35,18 +35,18 @@ from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     _close_lease_preserving_primary,
     current_runtime_resource_policy,
     require_free_disk_headroom,
 )
+from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _parquet_row_group_size,
 )
-from quant_research_platform.storage.atomic import atomic_write_directory
-from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import write_manifest
 
 _PORTFOLIO_SUMMARY_FIXED_WORKING_BYTES = 64 * 1024
 
@@ -55,11 +55,11 @@ def write_portfolio_outputs(
     *,
     output_chunks: Iterable[
         Mapping[str, pd.DataFrame]
-        | _OwnedValue[Mapping[str, pd.DataFrame]]
+        | OwnedValue[Mapping[str, pd.DataFrame]]
     ],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     additive_cumulative_returns_factory: Callable[
-        [], Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
+        [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
     ] | None = None,
     spec: PortfolioSpec,
     output_spec: OutputSpec,
@@ -80,12 +80,12 @@ def write_portfolio_outputs(
 def _write_portfolio_output_chunks(
     output_chunks: Iterable[
         Mapping[str, pd.DataFrame]
-        | _OwnedValue[Mapping[str, pd.DataFrame]]
+        | OwnedValue[Mapping[str, pd.DataFrame]]
     ],
     *,
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     additive_cumulative_returns_factory: Callable[
-        [], Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
+        [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
     ] | None = None,
     spec: PortfolioSpec,
     output_spec: OutputSpec,
@@ -191,7 +191,7 @@ def _write_portfolio_output_chunks(
 def _write_portfolio_row_artifact_chunks(
     artifact_chunks: Iterable[
         Mapping[str, pd.DataFrame]
-        | _OwnedValue[Mapping[str, pd.DataFrame]]
+        | OwnedValue[Mapping[str, pd.DataFrame]]
     ],
     *,
     temp_root: Path,
@@ -199,7 +199,7 @@ def _write_portfolio_row_artifact_chunks(
     required_columns: Mapping[str, tuple[str, ...]],
     spec: PortfolioSpec,
     additive_cumulative_returns_factory: Callable[
-        [], Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
+        [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
     ] | None = None,
 ) -> dict[str, int]:
     all_row_artifacts = (
@@ -299,7 +299,7 @@ def _write_portfolio_row_artifact_chunks(
     try:
         with closing_iterator(iter(artifact_chunks)) as active_chunks:
             for item in active_chunks:
-                if isinstance(item, _OwnedValue):
+                if isinstance(item, OwnedValue):
                     artifact_chunk = item.value
                     owned_lease = item.lease
                 else:
@@ -325,7 +325,7 @@ def _write_portfolio_row_artifact_chunks(
                                 artifact_name,
                                 artifact_chunk[artifact_name],
                             )
-                except BaseException as primary:
+                except BaseException:
                     if owned_lease is not None and owned_lease.active:
                         _close_lease_preserving_primary(
                             owned_lease,
@@ -340,7 +340,7 @@ def _write_portfolio_row_artifact_chunks(
                 iter(additive_cumulative_returns_factory())
             ) as additive_cumulative_chunks:
                 for item in additive_cumulative_chunks:
-                    if isinstance(item, _OwnedValue):
+                    if isinstance(item, OwnedValue):
                         frame = item.value
                         owned_lease = item.lease
                     else:
@@ -354,7 +354,7 @@ def _write_portfolio_row_artifact_chunks(
                             owned_lease=owned_lease,
                         ):
                             write_frame("additive_cumulative_returns", frame)
-                    except BaseException as primary:
+                    except BaseException:
                         if owned_lease is not None and owned_lease.active:
                             _close_lease_preserving_primary(
                                 owned_lease,

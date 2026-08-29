@@ -31,9 +31,8 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
-    _release_owned_value,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -112,10 +111,7 @@ def require_dataset_coverage(
             if "timestamp" not in owned_inspection.value.columns:
                 raise ValueError("time_window_not_supported")
         finally:
-            _release_owned_value(
-                owned_inspection,
-                owner="a_share.planning.calendar.inspection",
-            )
+            owned_inspection.release(owner="a_share.planning.calendar.inspection")
         with open_dataset_session(
             root,
             columns=("timestamp",),
@@ -124,7 +120,7 @@ def require_dataset_coverage(
         ) as session:
             chunks = iter_dataset_chunks(
                 session,
-                target_chunk_bytes=resource_policy.available_memory_bytes,
+                target_chunk_bytes=resource_policy.planning_headroom_bytes,
             )
             with closing_iterator(chunks):
                 for chunk in chunks:
@@ -473,7 +469,7 @@ def _iter_adaptive_materialization_batches(
                     else sessions[session_start:session_stop]
                 )
                 current_keys: pd.DataFrame | None = None
-                owned_keys: _OwnedValue[pd.DataFrame] | None = None
+                owned_keys: OwnedValue[pd.DataFrame] | None = None
                 try:
                     if valid_bar_index is None:
                         frame = materialize(
@@ -508,16 +504,13 @@ def _iter_adaptive_materialization_batches(
                     ) from None
                 finally:
                     if owned_keys is not None:
-                        _release_owned_value(
-                            owned_keys,
-                            owner="a_share.materialization.keys",
-                        )
+                        owned_keys.release(owner="a_share.materialization.keys")
                     del current_assets, current_sessions, current_keys
             actual_output_bound = pandas_frame_payload_bytes(frame) + 64 * 1024
             if actual_output_bound > lease.reserved_bytes:
                 raise ValueError("a_share_producer_bound_invalid")
             lease.shrink_to(actual_output_bound)
-            yield _OwnedValue(frame, lease)
+            yield OwnedValue(frame, lease)
             del frame
             session_start = session_stop
         asset_start = asset_stop
@@ -586,7 +579,7 @@ def _build_valid_bar_key_index(
     ) as session:
         frames = iter_dataset_chunks(
             session,
-            target_chunk_bytes=resource_policy.available_memory_bytes,
+            target_chunk_bytes=resource_policy.planning_headroom_bytes,
         )
         with closing_iterator(frames):
             for frame in frames:
@@ -628,7 +621,7 @@ def bounded_valid_bar_key_coverage(
     lookback_bars: int,
     lookahead_bars: int,
     resource_policy: RuntimeResourcePolicy,
-) -> _OwnedValue[pd.DataFrame]:
+) -> OwnedValue[pd.DataFrame]:
     """Query current assets' exact sparse boundary from one built disk index."""
 
     require_non_negative_int(lookback_bars, error="invalid_valid_bar_offset")
@@ -772,7 +765,7 @@ def bounded_valid_bar_key_coverage(
                     f"{type(cleanup_error).__name__}"
                 )
             raise
-        return _OwnedValue(output, output_lease)
+        return OwnedValue(output, output_lease)
 
 
 def available_trading_sessions(
@@ -783,7 +776,7 @@ def available_trading_sessions(
     lookback_sessions: int,
     lookahead_sessions: int,
     resource_policy: RuntimeResourcePolicy,
-) -> _OwnedValue[pd.DatetimeIndex]:
+) -> OwnedValue[pd.DatetimeIndex]:
     require_date_window(time_window, context="a_share_trading_sessions")
     require_non_negative_int(
         lookback_sessions, error="invalid_a_share_session_offset"
@@ -802,10 +795,7 @@ def available_trading_sessions(
             owned_inspection.value.manifest.get("file_size_bytes", 0) or 0
         )
     finally:
-        _release_owned_value(
-            owned_inspection,
-            owner="a_share.planning.coverage.inspection",
-        )
+        owned_inspection.release(owner="a_share.planning.coverage.inspection")
     maximum_session_state_bytes = calendar_row_count * np.dtype(np.int64).itemsize
     boolean_state_bytes = calendar_row_count * np.dtype(np.bool_).itemsize
     position_state_bytes = calendar_row_count * np.dtype(np.intp).itemsize
@@ -816,7 +806,7 @@ def available_trading_sessions(
         + position_state_bytes
         + maximum_selected_output_bytes
     )
-    if compact_peak_bytes > resource_policy.available_memory_bytes:
+    if compact_peak_bytes > resource_policy.planning_headroom_bytes:
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
         )
@@ -833,7 +823,7 @@ def available_trading_sessions(
         transform_row_bytes = (
             2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
         )
-        reader_headroom_bytes = resource_policy.available_memory_bytes
+        reader_headroom_bytes = resource_policy.planning_headroom_bytes
         if reader_headroom_bytes <= 0:
             raise materialization_io.MaterializationCapacityExceeded(
                 "a_share_known_payloads_exceed_task_memory_budget"
@@ -962,7 +952,7 @@ def available_trading_sessions(
                 f"{type(cleanup_error).__name__}"
             )
         raise
-    return _OwnedValue(result, session_lease)
+    return OwnedValue(result, session_lease)
 
 
 def _rotate_left_int64_prefix(

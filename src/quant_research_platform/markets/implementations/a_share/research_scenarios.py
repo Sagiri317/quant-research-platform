@@ -206,7 +206,7 @@ def build_evaluation_specs(
 ) -> tuple[EvaluationSpec, ...]:
     return (
         EvaluationSpec(
-            run_id=f"signal_{return_source_column}",
+            evaluation_id=f"signal_{return_source_column}",
             market_id=MARKET_ID,
             research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
             signals=signals or build_signal_specs(),

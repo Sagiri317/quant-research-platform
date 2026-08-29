@@ -17,7 +17,6 @@ from quant_research_platform.markets.implementations.a_share.fields import (
 from quant_research_platform.research.factors.price_volume.presets import (
     price_volume_factor_columns,
 )
-from quant_research_platform.sources.csmar.catalog import source_definition
 from tests.helpers import frequency_ids
 
 
@@ -109,10 +108,3 @@ def test_label_catalog_rejects_duplicate_label_by_default() -> None:
     catalog = LabelCatalog((definition,))
     assert catalog.get("forward_return_20d") == definition
     assert catalog.list() == (definition,)
-
-
-def test_source_registry_entries_are_internal_only() -> None:
-    sources = (source_definition(),)
-
-    assert sources
-    assert all(not item.public_identifier for item in sources)

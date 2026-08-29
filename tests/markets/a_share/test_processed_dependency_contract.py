@@ -82,8 +82,8 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -151,7 +151,7 @@ def _consume_bound_first(data, policy):  # noqa: ANN001, ANN202
                         owned = data.send(lease)
                     except StopIteration:
                         return frames
-                    if isinstance(owned, _OwnedValue):
+                    if isinstance(owned, OwnedValue):
                         break
                     raise AssertionError("invalid_bound_first_output")
                 lease.transfer("test.a_share.output")
@@ -276,7 +276,7 @@ def test_source_input_physical_reads_use_owner_resource_policy(
     )
 
     def fake_materialize_dataset_session_owned(  # noqa: ANN001
-        context,
+        _context,
         *,
         target_chunk_bytes,
         materialized_budget_bytes,
@@ -284,7 +284,7 @@ def test_source_input_physical_reads_use_owner_resource_policy(
         assert materialized_budget_bytes == policy.memory_budget_bytes
         observed_targets.append(target_chunk_bytes)
         frame = _key_frame()
-        return _OwnedValue(
+        return OwnedValue(
             frame,
             policy.lease(
                 "test.source_input",
@@ -311,7 +311,7 @@ def test_source_input_physical_reads_use_owner_resource_policy(
             )
 
     assert set(inputs) == {"trading_calendar"}
-    assert observed_targets == [policy.available_memory_bytes]
+    assert observed_targets == [policy.planning_headroom_bytes]
 
 
 def test_materialized_read_transfers_output_lease_to_caller_stack(
@@ -322,7 +322,7 @@ def test_materialized_read_transfers_output_lease_to_caller_stack(
     )
     observed: list[tuple[int, int]] = []
 
-    def open_session(root, **kwargs):  # noqa: ANN001, ANN202
+    def open_session(root, **_kwargs):  # noqa: ANN001, ANN202
         return nullcontext(root)
 
     monkeypatch.setattr(
@@ -339,7 +339,7 @@ def test_materialized_read_transfers_output_lease_to_caller_stack(
     ):
         observed.append((target_chunk_bytes, materialized_budget_bytes))
         frame = _key_frame()
-        return _OwnedValue(
+        return OwnedValue(
             frame,
             policy.lease(
                 "test.materialized.output",
@@ -365,7 +365,7 @@ def test_materialized_read_transfers_output_lease_to_caller_stack(
 
     assert policy.used_memory_bytes == 0
     assert observed == [
-        (policy.available_memory_bytes, policy.memory_budget_bytes),
+        (policy.planning_headroom_bytes, policy.memory_budget_bytes),
     ]
 
 
@@ -405,7 +405,7 @@ def test_dataset_read_scope_remains_active_through_session_exit(
     monkeypatch.setattr(
         materialization_io,
         "materialize_dataset_session_owned",
-        lambda *_args, **_kwargs: _OwnedValue(
+        lambda *_args, **_kwargs: OwnedValue(
             pd.DataFrame(),
             SimpleNamespace(close=lambda: None),
         ),
@@ -455,10 +455,7 @@ def test_dataset_read_does_not_construct_session_when_policy_entry_fails(
     assert raised.value is primary
 
 
-@pytest.mark.parametrize("operation", ("assets",))
-def test_a_share_factories_defer_policy_use_until_consumption(
-    operation: str,
-) -> None:
+def test_a_share_factories_defer_policy_use_until_consumption() -> None:
     active = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1 * 1024 * 1024,
@@ -527,8 +524,6 @@ def test_dependency_window_uses_sorted_indexed_sessions_without_selection_state(
 
     result = materialization_dependencies.planned_processed_dependency_windows(
         (target,),
-        layout=SimpleNamespace(),  # type: ignore[arg-type]
-        source_id="source",  # type: ignore[arg-type]
         time_window=TimeWindow(sessions[5_000].date(), sessions[5_002].date()),
         sessions=sessions,
     )
@@ -735,7 +730,7 @@ def test_write_paths_read_processed_inputs_via_helper(
     key_asset_filters: list[tuple[object, ...] | None] = []
     key_time_windows: list[TimeWindow | None] = []
 
-    def fake_inspect_dataset(*args: object, **kwargs: object):
+    def fake_inspect_dataset(*_args: object, **_kwargs: object):
         return SimpleNamespace(
             manifest={"file_size_bytes": 1},
             row_count=1,
@@ -747,7 +742,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         resource_policy,
         **_kwargs: object,
     ):
-        return _OwnedValue(
+        return OwnedValue(
             fake_inspect_dataset(),
             resource_policy.lease("test.a_share.inspection", 0),
         )
@@ -760,7 +755,7 @@ def test_write_paths_read_processed_inputs_via_helper(
             lease = policy.lease("test.a_share.writer", bound)
             try:
                 owned = frame.send(lease)
-                if not isinstance(owned, _OwnedValue):
+                if not isinstance(owned, OwnedValue):
                     raise AssertionError("invalid_bound_first_output")
                 lease.transfer("test.a_share.output")
                 del owned
@@ -786,10 +781,10 @@ def test_write_paths_read_processed_inputs_via_helper(
         return {MARKET_PANEL_DATA_ID: _panel_frame_for_write_path()}
 
     def fake_derive_annotations(
-        panel: pd.DataFrame,
+        _panel: pd.DataFrame,
         *,
         data_ids: tuple[str, ...],
-        **kwargs: object,
+        **_kwargs: object,
     ) -> dict[str, pd.DataFrame]:
         output = _key_frame().assign(
             next_bar_is_trading=[True],
@@ -800,7 +795,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         return {data_ids[0]: output}
 
     def fake_calculate_factors_for_panel(
-        panel: pd.DataFrame,
+        _panel: pd.DataFrame,
         *,
         definitions: tuple[FactorDefinition, ...],
     ) -> pd.DataFrame:
@@ -821,7 +816,7 @@ def test_write_paths_read_processed_inputs_via_helper(
         return read_window
 
     def fake_calculate_labels_for_panel(
-        panel: pd.DataFrame,
+        _panel: pd.DataFrame,
         *,
         definitions: tuple[LabelDefinition, ...],
     ) -> pd.DataFrame:
@@ -1073,7 +1068,7 @@ def test_write_paths_reserve_registered_output_before_transform(
     monkeypatch.setattr(
         materialize_panel,
         "_inspect_dataset_owned",
-        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+        lambda *_args, resource_policy, **_kwargs: OwnedValue(
             inspection,
             resource_policy.lease("test.a_share.inspection", 0),
         ),
@@ -1179,7 +1174,7 @@ def test_materialized_dataset_asset_filter_is_forwarded_outside_projection(
     monkeypatch.setattr(
         materialization_io,
         "materialize_dataset_session_owned",
-        lambda *_args, **_kwargs: _OwnedValue(
+        lambda *_args, **_kwargs: OwnedValue(
             pd.DataFrame({"timestamp": pd.Series(dtype="datetime64[ns]")}),
             SimpleNamespace(close=lambda: None),
         ),
@@ -1230,7 +1225,7 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
     observed: list[dict[str, object]] = []
 
     def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
-        return _OwnedValue(
+        return OwnedValue(
             SimpleNamespace(
                 row_count=6,
                 manifest={"file_size_bytes": 10**9},
@@ -1245,7 +1240,7 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
     )
     _patch_planning_reader(
         monkeypatch,
-        lambda *args, **kwargs: observed.append(kwargs) or chunks,
+        lambda *_args, **kwargs: observed.append(kwargs) or chunks,
     )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
@@ -1276,7 +1271,7 @@ def test_available_trading_sessions_is_order_independent_across_chunks(
     )
     transform_row_bytes = 2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
     target_bytes = min(
-        policy.available_memory_bytes,
+        policy.planning_headroom_bytes,
         session_state_bytes + (10**9 + 5) // 6,
         (policy.memory_budget_bytes - session_state_bytes)
         * fixed_row_bytes
@@ -1320,7 +1315,7 @@ def test_available_trading_sessions_small_fit_reaches_exact_working_set_check(
     monkeypatch.setattr(
         materialization_planning,
         "_inspect_dataset_owned",
-        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+        lambda *_args, resource_policy, **_kwargs: OwnedValue(
             SimpleNamespace(row_count=1, manifest={"file_size_bytes": 1}),
             resource_policy.lease("test.a_share.inspection", 0),
         ),
@@ -1365,7 +1360,7 @@ def test_available_trading_sessions_retains_only_selected_boundary_state(
     monkeypatch.setattr(
         materialization_planning,
         "_inspect_dataset_owned",
-        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+        lambda *_args, resource_policy, **_kwargs: OwnedValue(
             SimpleNamespace(row_count=len(dates), manifest={"file_size_bytes": 10**9}),
             resource_policy.lease("test.a_share.inspection", 0),
         ),
@@ -1407,7 +1402,7 @@ def test_dataset_coverage_reader_bounds_session_state(
     monkeypatch.setattr(
         materialization_planning,
         "_inspect_dataset_owned",
-        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+        lambda *_args, resource_policy, **_kwargs: OwnedValue(
             SimpleNamespace(columns=("timestamp",)),
             resource_policy.lease("test.a_share.inspection", 0),
         ),
@@ -1451,7 +1446,7 @@ def test_dataset_coverage_checks_timestamps_without_series_transform(
     monkeypatch.setattr(
         materialization_planning,
         "_inspect_dataset_owned",
-        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+        lambda *_args, resource_policy, **_kwargs: OwnedValue(
             SimpleNamespace(columns=("timestamp",)),
             resource_policy.lease("test.a_share.inspection", 0),
         ),
@@ -1788,7 +1783,7 @@ def test_active_materialization_rejects_hostile_datetime_index_subclass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class AliasingArray(np.ndarray):
-        def copy(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        def copy(self, *_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
             return self
 
     class DataProxy:
@@ -2452,14 +2447,14 @@ def test_a_share_direct_consumers_close_iterators_on_all_exit_kinds(
     monkeypatch.setattr(
         materialization_planning,
         "_inspect_dataset_owned",
-        lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+        lambda *_args, resource_policy, **_kwargs: OwnedValue(
             SimpleNamespace(columns=("asset_id", "timestamp")),
             resource_policy.lease("test.a_share.inspection", 0),
         ),
     )
     _patch_planning_reader(
         monkeypatch,
-        lambda *args, **kwargs: iterator(
+        lambda *_args, **_kwargs: iterator(
             "normal", (pd.DataFrame({"timestamp": ["2024-01-02"]}),)
         ),
     )
@@ -2476,14 +2471,14 @@ def test_a_share_direct_consumers_close_iterators_on_all_exit_kinds(
         monkeypatch.setattr(
             materialization_planning,
             "_inspect_dataset_owned",
-            lambda *_args, resource_policy, **_kwargs: _OwnedValue(
+            lambda *_args, resource_policy, **_kwargs: OwnedValue(
                 SimpleNamespace(row_count=2, manifest={"file_size_bytes": 10**9}),
                 resource_policy.lease("test.a_share.inspection", 0),
             ),
         )
         _patch_planning_reader(
             monkeypatch,
-            lambda *args, **kwargs: iterator(
+            lambda *_args, **_kwargs: iterator(
                 "early",
                 (
                     pd.DataFrame(
@@ -2714,7 +2709,6 @@ def test_dependency_root_keeps_one_policy_active_for_all_children(
 )
 def test_dependency_root_retires_policy_after_every_primary(
     primary_type: type[BaseException],
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     policy = capture_test_policy(
@@ -2850,11 +2844,11 @@ def test_sorted_output_releases_previous_publication_before_upstream_next() -> N
         lease = yield 256 * 1024
         current = first
         first = None
-        yield _OwnedValue(current, lease)
+        yield OwnedValue(current, lease)
         del current
         assert first_reference() is None
         lease = yield 256 * 1024
-        yield _OwnedValue(second, lease)
+        yield OwnedValue(second, lease)
 
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,

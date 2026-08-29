@@ -11,6 +11,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+import quant_research_platform.reports.evaluation as evaluation_report
+from quant_research_platform.artifacts.outputs.common_validation import (
+    derive_output_bundle_root,
+    validate_output_frame,
+)
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
@@ -19,10 +24,6 @@ from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_METRICS_COLUMNS,
     validate_evaluation_artifact_structure,
     validate_evaluation_diagnostics_consistency,
-)
-from quant_research_platform.artifacts.outputs.common_validation import (
-    derive_output_bundle_root,
-    validate_output_frame,
 )
 from quant_research_platform.artifacts.outputs.manifest import (
     evaluation_output_metadata,
@@ -47,16 +48,16 @@ from quant_research_platform.policy.share_safety import (
     evidence_text_stream_unsafe_reason,
 )
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     current_runtime_resource_policy,
     require_free_disk_headroom,
-)
-from quant_research_platform.storage.parquet import (
-    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
+from quant_research_platform.storage.parquet import (
+    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+)
 
 _EVALUATION_PENDING_TABLE_LIMIT = 64
 _EVALUATION_PENDING_TABLE_OVERHEAD_BYTES = 4 * 1024
@@ -65,7 +66,7 @@ _EVALUATION_PENDING_TABLE_OVERHEAD_BYTES = 4 * 1024
 def write_evaluation_outputs_from_chunks(
     chunks: Iterable[
         tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]
-        | _OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
+        | OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
     ],
     *,
     summary_factory: Callable[
@@ -145,7 +146,7 @@ def write_evaluation_outputs_from_chunks(
             compression="zstd",
             index=False,
         )
-        rendered_summary = _render_evaluation_summary(
+        rendered_summary = evaluation_report.render_evaluation_summary(
             spec=spec,
             evaluation_diagnostics=evaluation_diagnostics,
             metrics=pd.DataFrame(columns=EVALUATION_METRICS_COLUMNS),
@@ -182,7 +183,7 @@ def write_evaluation_outputs_from_chunks(
 def _write_evaluation_artifact_chunks(
     chunks: Iterable[
         tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]
-        | _OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
+        | OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
     ],
     *,
     temp_root: Path,
@@ -331,7 +332,7 @@ def _write_evaluation_artifact_chunks(
         )
         with closing_iterator(iter(chunks)) as active_chunks:
             for item in active_chunks:
-                if isinstance(item, _OwnedValue):
+                if isinstance(item, OwnedValue):
                     value = item.value
                     owned_lease = item.lease
                 else:
@@ -368,13 +369,36 @@ def _write_evaluation_artifact_chunks(
                 rows_after_signal_label_dropna += int(n_obs.sum())
                 metric_rows += len(metrics)
                 grouped_label_value_rows += len(grouped)
-                timestamp_count += int(timestamps.nunique())
-                skipped_timestamp_count += int(
-                    timestamps.loc[n_obs.lt(2)].nunique()
-                )
-                if not timestamps.empty:
-                    chunk_min = pd.Timestamp(timestamps.min()).date().isoformat()
-                    chunk_max = pd.Timestamp(timestamps.max()).date().isoformat()
+                if spec.evaluation_axis == "single_asset_time_series":
+                    chunk_timestamp_count = int(metadata["timestamp_count"])
+                    timestamp_count += chunk_timestamp_count
+                    skipped_timestamp_count += int(
+                        metadata["skipped_timestamp_count"]
+                    )
+                    chunk_min = metadata["min_timestamp"]
+                    chunk_max = metadata["max_timestamp"]
+                    if (
+                        chunk_timestamp_count <= 0
+                        or not isinstance(chunk_min, str)
+                        or not isinstance(chunk_max, str)
+                    ):
+                        raise ValueError("evaluation_diagnostics_inconsistent")
+                else:
+                    timestamp_count += int(timestamps.nunique())
+                    skipped_timestamp_count += int(
+                        timestamps.loc[n_obs.lt(2)].nunique()
+                    )
+                    chunk_min = (
+                        pd.Timestamp(timestamps.min()).date().isoformat()
+                        if not timestamps.empty
+                        else None
+                    )
+                    chunk_max = (
+                        pd.Timestamp(timestamps.max()).date().isoformat()
+                        if not timestamps.empty
+                        else None
+                    )
+                if chunk_min is not None and chunk_max is not None:
                     min_timestamp = (
                         chunk_min
                         if min_timestamp is None
@@ -502,102 +526,3 @@ def _write_evaluation_artifact_chunks(
         "filter_columns_used": filter_columns_used,
         "filter_definition_value": filter_definition_value,
     }
-
-
-def _render_evaluation_summary(
-    *,
-    spec: EvaluationSpec,
-    evaluation_diagnostics: EvaluationDiagnostics,
-    metrics: pd.DataFrame,
-    ic_summary: pd.DataFrame,
-    group_spread_summary: pd.DataFrame,
-    coverage_summary: pd.DataFrame | None = None,
-) -> str:
-    signals = ", ".join(signal.signal_id for signal in spec.signals)
-    labels = ", ".join(spec.label_columns)
-    lines = [
-        "# Evaluation Summary",
-        "",
-        f"- run_id: `{spec.run_id}`",
-        f"- market_id: `{spec.market_id}`",
-        f"- research_dataset_id: `{spec.research_dataset_id}`",
-        f"- signals: `{signals}`",
-        f"- labels: `{labels}`",
-        f"- rows_input: `{evaluation_diagnostics.rows_input}`",
-        f"- rows_after_filter: `{evaluation_diagnostics.rows_after_filter_mode}`",
-        f"- timestamp_count: `{evaluation_diagnostics.timestamp_count}`",
-        f"- min_timestamp: `{evaluation_diagnostics.min_timestamp}`",
-        f"- max_timestamp: `{evaluation_diagnostics.max_timestamp}`",
-        "",
-        "## IC Summary",
-        "",
-        _markdown_table(
-            ic_summary,
-            ("signal", "label", "mean_ic", "mean_rankic"),
-        ),
-        "",
-        "## Signal/Label Coverage Summary",
-        "",
-        _markdown_table(
-            (
-                _signal_label_coverage_summary(metrics)
-                if coverage_summary is None
-                else coverage_summary
-            ),
-            ("signal", "label", "mean_n_obs", "min_n_obs", "non_empty_period_count"),
-        ),
-        "",
-        "## Group Spread Summary",
-        "",
-        _markdown_table(
-            group_spread_summary,
-            ("signal", "label", "top_bottom_label_value_spread_mean"),
-        ),
-        "",
-    ]
-    return "\n".join(lines)
-
-
-def _markdown_table(frame: pd.DataFrame, columns: tuple[str, ...]) -> str:
-    rows = [
-        "| " + " | ".join(columns) + " |",
-        "| " + " | ".join("---" for _ in columns) + " |",
-    ]
-    for _, row in frame.loc[:, list(columns)].iterrows():
-        rows.append(
-            "| " + " | ".join(_markdown_cell(row[column]) for column in columns) + " |"
-        )
-    return "\n".join(rows)
-
-
-def _markdown_cell(value: object) -> str:
-    if pd.isna(value):
-        return ""
-    if isinstance(value, float):
-        return f"{value:.6g}"
-    return str(value).replace("|", r"\|")
-
-
-def _signal_label_coverage_summary(metrics: pd.DataFrame) -> pd.DataFrame:
-    columns = ["signal", "label", "mean_n_obs", "min_n_obs", "non_empty_period_count"]
-    if metrics.empty:
-        return pd.DataFrame(columns=columns)
-    source = metrics.copy()
-    if "n_obs" not in source:
-        return (
-            source.loc[:, ["signal", "label"]]
-            .drop_duplicates()
-            .assign(
-                mean_n_obs=pd.NA,
-                min_n_obs=pd.NA,
-                non_empty_period_count=pd.NA,
-            )
-        )
-    source["n_obs"] = strict_non_negative_count_series(source["n_obs"])
-    grouped = source.groupby(["signal", "label"], as_index=False, sort=True)["n_obs"]
-    summary = grouped.agg(
-        mean_n_obs="mean",
-        min_n_obs="min",
-        non_empty_period_count=lambda values: int(values.gt(0).sum()),
-    )
-    return summary.loc[:, columns]

@@ -25,8 +25,8 @@ from quant_research_platform.contracts.workflows import (
 )
 from quant_research_platform.interfaces import private_cli
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -343,7 +343,7 @@ def test_schema_inventory_item_state_is_admitted_before_aggregation(
         date_max="2026-01-01",
     )
     def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
-        return _OwnedValue(
+        return OwnedValue(
             inspection,
             resource_policy.lease("test.schema.inspection", 0),
         )

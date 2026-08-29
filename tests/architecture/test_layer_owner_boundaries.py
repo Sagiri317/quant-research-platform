@@ -69,7 +69,6 @@ LAYER_BOUNDARIES = {
     ),
     "artifacts": (
         "quant_research_platform.research",
-        "quant_research_platform.reports",
         "quant_research_platform.markets.implementations",
     ),
     "compute": (
@@ -208,6 +207,21 @@ def test_live_source_physical_writes_stay_in_writer_owners() -> None:
     }
 
     assert _physical_writer_violations(sources) == []
+
+
+def test_crypto_hft_workflow_delegates_persisted_content_to_owners() -> None:
+    path = SOURCE_ROOT / "workflows" / "crypto_hft.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
+    literals = {
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    }
+
+    assert {
+        "qrp-crypto-hft-execution-diagnostics",
+        "qrp-crypto-hft-report",
+    }.isdisjoint(literals)
 
 
 def _physical_writer_violations(

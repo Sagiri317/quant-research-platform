@@ -44,8 +44,8 @@ from quant_research_platform.research.predictions.outputs import (
     prediction_callable,
 )
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -261,11 +261,11 @@ def _build_prediction_result_from_research_dataset(
         )
         model_result = (
             owned_model.value
-            if isinstance(owned_model, _OwnedValue)
+            if isinstance(owned_model, OwnedValue)
             else owned_model
         )
         model_lease = (
-            owned_model.lease if isinstance(owned_model, _OwnedValue) else None
+            owned_model.lease if isinstance(owned_model, OwnedValue) else None
         )
     except ValueError as exc:
         if str(exc) == "model_training_sample_empty":
@@ -306,13 +306,14 @@ def _validated_prediction_chunks(
     dataset_spec,
     input_columns: tuple[str, ...],
 ) -> Iterable[pd.DataFrame]:
-    for chunk in chunks:
-        validate_prediction_input(
-            chunk,
-            dataset_spec,
-            input_columns=input_columns,
-        )
-        yield chunk
+    with closing_iterator(iter(chunks)) as active_chunks:
+        for chunk in active_chunks:
+            validate_prediction_input(
+                chunk,
+                dataset_spec,
+                input_columns=input_columns,
+            )
+            yield chunk
 
 
 def _select_prediction_model_spec(
@@ -356,11 +357,11 @@ def _select_prediction_model_spec(
         )
         model_result = (
             owned_model.value
-            if isinstance(owned_model, _OwnedValue)
+            if isinstance(owned_model, OwnedValue)
             else owned_model
         )
         model_lease = (
-            owned_model.lease if isinstance(owned_model, _OwnedValue) else None
+            owned_model.lease if isinstance(owned_model, OwnedValue) else None
         )
         validation_read_columns = tuple(
             dict.fromkeys(
@@ -538,7 +539,7 @@ def _iter_validation_prediction_chunks(
                             chunk_lease.transfer(
                                 "research.model.selection.metric.chunk"
                             )
-                            item = _OwnedValue(output, chunk_lease)
+                            item = OwnedValue(output, chunk_lease)
                         else:
                             item = output
                         del chunk, timestamps, validation, filtered, usable, output

@@ -16,7 +16,6 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     _close_lease_preserving_primary,
-    _release_owned_value,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -105,10 +104,7 @@ def _compare_datasets_under_policy(
                 def release_left() -> None:
                     nonlocal left
                     left = None
-                    _release_owned_value(
-                        left_owned,
-                        owner="storage.dataset.comparison.left.fingerprint",
-                    )
+                    left_owned.release(owner="storage.dataset.comparison.left.fingerprint")
 
                 retained.callback(release_left)
                 left_identity_lease = issued_policy.lease(
@@ -149,10 +145,7 @@ def _compare_datasets_under_policy(
                 def release_right() -> None:
                     nonlocal right
                     right = None
-                    _release_owned_value(
-                        right_owned,
-                        owner="storage.dataset.comparison.right.fingerprint",
-                    )
+                    right_owned.release(owner="storage.dataset.comparison.right.fingerprint")
 
                 retained.callback(release_right)
                 right_identity_lease = issued_policy.lease(
@@ -396,7 +389,7 @@ def _index_dataset_rows(
             context,
             columns=comparison_columns,
             target_chunk_bytes=min(
-                resource_policy.available_memory_bytes,
+                resource_policy.planning_headroom_bytes,
                 reader_headroom,
             ),
             operation_headroom_bytes=reader_headroom,

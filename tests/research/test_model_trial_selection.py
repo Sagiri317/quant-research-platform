@@ -19,7 +19,7 @@ from quant_research_platform.research.models.trial_selection import (
     validate_trial_metric_columns,
 )
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     runtime_resource_policy_scope,
 )
 from tests.helpers.runtime_resources import capture_test_policy
@@ -701,7 +701,7 @@ def test_chunked_trial_metrics_releases_owned_chunk_on_primary_failure() -> None
 
     def failing_chunks():
         lease = policy.lease("tests.metric.chunk", 1024)
-        yield _OwnedValue(frame, lease)
+        yield OwnedValue(frame, lease)
         raise RuntimeError("metric_primary")
 
     with runtime_resource_policy_scope(policy):

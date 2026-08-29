@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import datetime as dt
-import math
 import os
 import time
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterator
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
@@ -14,16 +13,22 @@ from typing import Any
 import pandas as pd
 import psutil
 
+from quant_research_platform.artifacts.crypto_hft import (
+    write_crypto_hft_execution_artifact,
+)
 from quant_research_platform.artifacts.evidence import write_json_evidence
 from quant_research_platform.artifacts.outputs import (
     read_prediction_output_bundle,
+    write_evaluation_outputs_from_chunks,
     write_prediction_outputs,
 )
+from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.order_book import BookBoundary, BookState
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
@@ -46,26 +51,39 @@ from quant_research_platform.markets.implementations.crypto.research_datasets im
     build_hft_research_dataset_catalog,
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
+    HFT_EVALUATION_ID,
+    HFT_MAKER_FILL_MODEL_ID,
     HFT_MODEL_ALGORITHMS,
+    HFT_PRICE_MODEL_ALGORITHMS,
+    build_hft_evaluation_catalog,
     build_hft_model_catalog,
     build_hft_prediction_catalog,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.reports.crypto_hft import (
+    build_crypto_hft_report,
+)
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
+)
+from quant_research_platform.research.evaluations.engine import (
+    build_evaluation_result_from_frames,
+)
+from quant_research_platform.research.evaluations.runner import (
+    build_evaluation_result_from_research_dataset,
 )
 from quant_research_platform.research.models.dependencies import (
     preflight_model_dependency,
 )
 from quant_research_platform.research.predictions.alignment import (
-    _iter_prediction_lookup_joined_chunks,
+    _iter_prediction_joined_chunks,
 )
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
@@ -84,7 +102,7 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import crypto_hft_materialization
 
 _LATENCY_SCENARIOS_MS = (0, HFT_GRID_MS, 2 * HFT_GRID_MS)
-_EXECUTION_MODEL_ID = "crypto_hft_linear_regression"
+_TAKER_MODEL_ID = "crypto_hft_linear_regression"
 _EPOCH = dt.datetime(1970, 1, 1)
 
 
@@ -163,6 +181,7 @@ def _run_in_staging(
         peak_reserved = max(peak_reserved, resource_policy.used_memory_bytes)
 
     with open_recorder_run(raw_root, resource_policy) as run:
+        source_run_id = str(run.manifest["run_id"])
         inspections, reconstruction = (
             crypto_hft_materialization.materialize_hft_processed_data(
                 layout=layout,
@@ -172,14 +191,50 @@ def _run_in_staging(
             )
         )
         sample_resources()
+        dataset_catalog = build_hft_research_dataset_catalog()
         research_root = assemble_research_dataset(
             layout=layout,
-            dataset_catalog=build_hft_research_dataset_catalog(),
+            dataset_catalog=dataset_catalog,
             processed_catalog=hft_processed_catalog(),
             dataset_id=HFT_RESEARCH_DATASET_ID,
             time_window=time_window,
             resource_policy=resource_policy,
         )
+        sample_resources()
+        evaluation_catalog = build_hft_evaluation_catalog()
+        evaluation_spec = evaluation_catalog.get(HFT_EVALUATION_ID)
+        with build_evaluation_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            evaluation_catalog=evaluation_catalog,
+            evaluation_id=HFT_EVALUATION_ID,
+            time_window=time_window,
+            resource_policy=resource_policy,
+        ) as evaluation_result:
+            evaluation_bundle = write_evaluation_outputs_from_chunks(
+                evaluation_result.output_chunks,
+                summary_factory=evaluation_result.summaries,
+                spec=evaluation_spec,
+                output_spec=OutputSpec(
+                    output_id=HFT_EVALUATION_ID,
+                    output_definition_id="evaluation_outputs",
+                    run_id=source_run_id,
+                    market_id=MARKET_ID,
+                    run_type=evaluation_spec.run_type,
+                    scope=OutputScope.LOCAL_ONLY,
+                ),
+                layout=layout,
+                n_groups=evaluation_spec.n_groups,
+                resource_policy=resource_policy,
+            )
+            evaluation_summaries = evaluation_result.summaries()
+            evaluation_diagnostics = evaluation_summaries[0]
+            evaluation_ic_summary = evaluation_summaries[1]
+            evaluation_valid_ic_count = int(
+                evaluation_ic_summary["valid_ic_count"].sum()
+            )
+        evaluation_status = "PASS" if evaluation_valid_ic_count > 0 else "FAIL"
+        evaluation_relative = evaluation_bundle.relative_to(staging)
         sample_resources()
         split_steps = (end_ms - start_ms) // HFT_GRID_MS * 2 // 3
         split_ms = start_ms + split_steps * HFT_GRID_MS
@@ -195,11 +250,12 @@ def _run_in_staging(
         for algorithm in HFT_MODEL_ALGORITHMS:
             preflight_model_dependency(algorithm)
         bundles: dict[str, tuple[Path, str, Any]] = {}
-        model_reports: dict[str, dict[str, Any]] = {}
+        model_metadata_by_id: dict[str, dict[str, Any]] = {}
+        prediction_evaluations: dict[str, dict[str, Any]] = {}
         for prediction_spec in prediction_catalog.list():
             result = build_prediction_result_from_research_dataset(
                 layout=layout,
-                dataset_catalog=build_hft_research_dataset_catalog(),
+                dataset_catalog=dataset_catalog,
                 model_catalog=model_catalog,
                 prediction_catalog=prediction_catalog,
                 prediction_id=prediction_spec.prediction_id,
@@ -207,14 +263,14 @@ def _run_in_staging(
                 resource_policy=resource_policy,
             )
             output_id = f"{prediction_spec.prediction_id}_output"
-            try:
+            with result:
                 bundle = write_prediction_outputs(
                     output_chunks=result.output_chunks,
                     spec=result.spec,
                     output_spec=OutputSpec(
                         output_id=output_id,
                         output_definition_id="prediction_outputs",
-                        run_id=prediction_spec.prediction_id,
+                        run_id=source_run_id,
                         market_id=MARKET_ID,
                         run_type="prediction",
                         scope=OutputScope.LOCAL_ONLY,
@@ -229,37 +285,54 @@ def _run_in_staging(
                     output_id,
                     prediction_spec,
                 )
-                model_reports[prediction_spec.model_id] = _model_report(
+                model_metadata_by_id[prediction_spec.model_id] = dict(
                     result.model_metadata
                 )
-            finally:
-                result.close()
+            prediction_evaluations[prediction_spec.model_id] = (
+                _prediction_oos_evaluation(
+                    research_root=research_root,
+                    prediction_root=bundle,
+                    output_id=output_id,
+                    prediction_spec=prediction_spec,
+                    expected_run_id=source_run_id,
+                    label_column=model_catalog.get(
+                        prediction_spec.model_id
+                    ).label_column,
+                    resource_policy=resource_policy,
+                )
+            )
             sample_resources()
         coverage = dict(reconstruction.coverage_segments)
-        execution_bundle, execution_output_id, execution_prediction_spec = bundles[
-            _EXECUTION_MODEL_ID
-        ]
 
         def book_factory() -> Iterator[BookState | BookBoundary]:
             return _book_events(run, end_ms=end_ms)
 
-        def decision_factory() -> Iterator[dict[str, Any]]:
+        def decisions_for(model_id: str) -> Iterator[dict[str, Any]]:
+            prediction_root, output_id, prediction_spec = bundles[model_id]
             return _prediction_decisions(
                 research_root=research_root,
-                prediction_root=execution_bundle,
-                output_id=execution_output_id,
-                prediction_spec=execution_prediction_spec,
+                prediction_root=prediction_root,
+                output_id=output_id,
+                prediction_spec=prediction_spec,
+                expected_run_id=source_run_id,
                 resource_policy=resource_policy,
             )
 
-        taker = simulate_taker(
-            book_factory(),
-            decision_factory(),
-            prediction_column="prediction_score",
-            config=taker_config,
-            observed_coverage=coverage,
+        price_model_ids = tuple(
+            f"crypto_hft_{algorithm}" for algorithm in HFT_PRICE_MODEL_ALGORITHMS
         )
-        maker = simulate_maker(
+        taker_models = {
+            model_id: simulate_taker(
+                book_factory(),
+                decisions_for(model_id),
+                prediction_column="prediction_score",
+                config=taker_config,
+                observed_coverage=coverage,
+            )
+            for model_id in price_model_ids
+        }
+        taker = taker_models[_TAKER_MODEL_ID]
+        maker_baseline = simulate_maker(
             book_factory(),
             iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
             _maker_quote_schedule(
@@ -274,29 +347,49 @@ def _run_in_staging(
                 data_kind="agg_trades",
             ),
         )
+
+        def maker_prediction_schedule() -> Iterator[dict[str, Any]]:
+            for row in decisions_for(HFT_MAKER_FILL_MODEL_ID):
+                if row.pop("prediction_score") >= 0.5:
+                    yield row
+
+        maker = simulate_maker(
+            book_factory(),
+            iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
+            maker_prediction_schedule(),
+            config=maker_config,
+            observed_coverage=coverage,
+            trade_coverage=run.connection_coverage(
+                market_type=FUTURES_MARKET_TYPE,
+                data_kind="agg_trades",
+            ),
+        )
         latency = taker_latency_sweep(
             book_factory,
-            decision_factory,
+            lambda: decisions_for(_TAKER_MODEL_ID),
             prediction_column="prediction_score",
             config=taker_config,
             latency_scenarios_ms=_LATENCY_SCENARIOS_MS,
             observed_coverage=coverage,
         )
-        execution_relative = Path("execution") / "linear_regression.json"
-        write_json_evidence(
+        execution_relative = Path("execution") / "model_comparison.json"
+        execution_payload = write_crypto_hft_execution_artifact(
             staging / execution_relative,
-            _json_safe(
-                {
-                    "schema_id": "qrp-crypto-hft-execution-diagnostics",
-                    "taker_model_id": _EXECUTION_MODEL_ID,
-                    "maker_policy_id": "public_l2_inventory_maker_baseline",
-                    "maker_prediction_used": False,
-                    "lineage": _lineage(run.source_identity),
-                    "taker": taker,
-                    "maker": maker,
-                    "latency_sweep": latency,
-                }
-            ),
+            taker_model_id=_TAKER_MODEL_ID,
+            maker_policy_id="public_l2_fill_ratio_proxy_gated_maker",
+            maker_prediction_used=True,
+            maker_model_id=HFT_MAKER_FILL_MODEL_ID,
+            source_identity=run.source_identity,
+            panel_id=HFT_PANEL_DATA_ID,
+            factor_id=HFT_FACTOR_DATA_ID,
+            label_id=HFT_LABEL_DATA_ID,
+            research_dataset_id=HFT_RESEARCH_DATASET_ID,
+            evaluation_id=HFT_EVALUATION_ID,
+            taker=taker,
+            taker_models=taker_models,
+            maker=maker,
+            maker_baseline=maker_baseline,
+            latency_sweep=latency,
         )
         sample_resources()
         wall_seconds = max(0.001, time.perf_counter() - wall_start)
@@ -309,7 +402,7 @@ def _run_in_staging(
             1,
             *(
                 int(metadata["resolved_hyperparameters"].get("n_jobs", 1))
-                for metadata in model_reports.values()
+                for metadata in model_metadata_by_id.values()
             ),
         )
         research_status = (
@@ -318,69 +411,75 @@ def _run_in_staging(
             and reconstruction.invalid_segments == 0
             else "PARTIAL"
         )
-        report = _json_safe(
-            {
-                "schema_id": "qrp-crypto-hft-report",
-                "status": "PASS" if research_status == "PASS" else "PARTIAL",
-                "market_data_status": run.manifest["market_data_status"],
-                "research_status": research_status,
-                "model_status": research_status,
-                "execution_status": research_status,
-                "lineage": _lineage(run.source_identity),
-                "data_quality": {
-                    **asdict(reconstruction),
-                    "raw_record_count": raw_record_count,
-                    "panel_rows": inspections[HFT_PANEL_DATA_ID].row_count,
-                    "factor_rows": inspections[HFT_FACTOR_DATA_ID].row_count,
-                    "label_rows": inspections[HFT_LABEL_DATA_ID].row_count,
+        report = build_crypto_hft_report(
+            run_id=source_run_id,
+            market_data_status=run.manifest["market_data_status"],
+            research_status=research_status,
+            evaluation_status=evaluation_status,
+            evaluation_valid_ic_count=evaluation_valid_ic_count,
+            reconstruction=asdict(reconstruction),
+            raw_record_count=raw_record_count,
+            row_counts={
+                "panel": inspections[HFT_PANEL_DATA_ID].row_count,
+                "factor": inspections[HFT_FACTOR_DATA_ID].row_count,
+                "label": inspections[HFT_LABEL_DATA_ID].row_count,
+            },
+            algorithms=HFT_MODEL_ALGORITHMS,
+            prediction_outputs={
+                model_id: output_id
+                for model_id, (_path, output_id, _spec) in bundles.items()
+            },
+            prediction_evaluations=prediction_evaluations,
+            model_metadata=model_metadata_by_id,
+            evaluation_id=HFT_EVALUATION_ID,
+            evaluation_dataset_id=HFT_RESEARCH_DATASET_ID,
+            evaluation_axis=evaluation_spec.evaluation_axis,
+            evaluation_primary_key=dataset_catalog.get(
+                HFT_RESEARCH_DATASET_ID
+            ).primary_key,
+            evaluation_requested_window={
+                "start": time_value_isoformat(
+                    time_window.start,
+                    preserve_datetime=True,
+                ),
+                "end": time_value_isoformat(
+                    time_window.end,
+                    preserve_datetime=True,
+                ),
+            },
+            evaluation_observed_window={
+                "start": evaluation_diagnostics.min_timestamp,
+                "end": evaluation_diagnostics.max_timestamp,
+            },
+            evaluation_path=evaluation_relative.as_posix(),
+            execution_path=execution_relative.as_posix(),
+            execution_payload=execution_payload,
+            resource={
+                **resource_policy.to_payload(),
+                "rss0_bytes": rss0,
+                "sampled_peak_rss_bytes": peak_rss,
+                "sampled_peak_reserved_bytes": peak_reserved,
+                "wall_seconds": wall_seconds,
+                "cpu_seconds": cpu_seconds,
+                "read_bytes": max(0, io_end[0] - io_start[0]),
+                "write_bytes": max(0, io_end[1] - io_start[1]),
+                "raw_records": raw_record_count,
+                "dataset_files": sum(
+                    inspection.file_count for inspection in inspections.values()
+                ),
+                "threads": model_thread_limit,
+                "process_threads_peak": peak_threads,
+                "native_thread_env": {
+                    key: os.environ.get(key)
+                    for key in (
+                        "OPENBLAS_NUM_THREADS",
+                        "OMP_NUM_THREADS",
+                        "MKL_NUM_THREADS",
+                        "NUMEXPR_NUM_THREADS",
+                    )
                 },
-                "models": {
-                    "algorithms": list(HFT_MODEL_ALGORITHMS),
-                    "prediction_outputs": {
-                        model_id: output_id
-                        for model_id, (_path, output_id, _spec) in bundles.items()
-                    },
-                    "metadata": model_reports,
-                },
-                "execution": {
-                    "taker_model_id": _EXECUTION_MODEL_ID,
-                    "maker_policy_id": "public_l2_inventory_maker_baseline",
-                    "maker_prediction_used": False,
-                    "path": execution_relative.as_posix(),
-                    "taker": taker,
-                    "maker": maker,
-                    "latency_sweep": latency,
-                },
-                "resource": {
-                    "available0_bytes": (
-                        resource_policy.captured_available_memory_bytes
-                    ),
-                    "memory_budget_bytes": resource_policy.memory_budget_bytes,
-                    "rss0_bytes": rss0,
-                    "sampled_peak_rss_bytes": peak_rss,
-                    "sampled_peak_reserved_bytes": peak_reserved,
-                    "wall_seconds": wall_seconds,
-                    "cpu_seconds": cpu_seconds,
-                    "read_bytes": max(0, io_end[0] - io_start[0]),
-                    "write_bytes": max(0, io_end[1] - io_start[1]),
-                    "raw_records": raw_record_count,
-                    "dataset_files": sum(
-                        inspection.file_count for inspection in inspections.values()
-                    ),
-                    "threads": model_thread_limit,
-                    "process_threads_peak": peak_threads,
-                    "native_thread_env": {
-                        key: os.environ.get(key)
-                        for key in (
-                            "OPENBLAS_NUM_THREADS",
-                            "OMP_NUM_THREADS",
-                            "MKL_NUM_THREADS",
-                            "NUMEXPR_NUM_THREADS",
-                        )
-                    },
-                    "descendants": peak_descendants,
-                },
-            }
+                "descendants": peak_descendants,
+            },
         )
         write_json_evidence(staging / "report.json", report)
         return report
@@ -390,51 +489,22 @@ def _datetime(value: int) -> dt.datetime:
     return _EPOCH + dt.timedelta(milliseconds=value)
 
 
-def _lineage(source_identity: Mapping[str, str]) -> dict[str, Any]:
-    return {
-        "source_artifact_identity": dict(source_identity),
-        "panel": HFT_PANEL_DATA_ID,
-        "factor": HFT_FACTOR_DATA_ID,
-        "label": HFT_LABEL_DATA_ID,
-        "research_dataset": HFT_RESEARCH_DATASET_ID,
-    }
-
-
-def _model_report(metadata: Mapping[str, Any]) -> dict[str, Any]:
-    keys = (
-        "model_algorithm",
-        "input_columns",
-        "label_column",
-        "random_seed",
-        "max_train_rows",
-        "purge_gap_steps",
-        "rows_input",
-        "rows_after_filter_mode",
-        "rows_after_input_label_dropna",
-        "train_start",
-        "train_end",
-        "resolved_hyperparameters",
-        "dependency_status",
-    )
-    return {key: metadata[key] for key in keys}
-
-
 def _book_events(
     run: RecorderRun,
     *,
     end_ms: int,
-) -> Iterator[_OwnedValue[BookState] | BookBoundary]:
+) -> Iterator[OwnedValue[BookState] | BookBoundary]:
     events = iter_reconstructed_depth(run, FUTURES_MARKET_TYPE)
     with closing_iterator(events):
         for event in events:
             observed_time = (
                 event.value.observed_time_ns
-                if isinstance(event, _OwnedValue)
+                if isinstance(event, OwnedValue)
                 else event.observed_time_ns
             )
             if observed_time > end_ms * 1_000_000:
-                if isinstance(event, _OwnedValue):
-                    event.lease.close()
+                if isinstance(event, OwnedValue):
+                    event.release(owner="workflow.crypto_hft.book_event")
                 break
             yield event
 
@@ -445,8 +515,51 @@ def _prediction_decisions(
     prediction_root: Path,
     output_id: str,
     prediction_spec: PredictionSpec,
+    expected_run_id: str,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[dict[str, Any]]:
+    frames = _prediction_joined_frames(
+        research_root=research_root,
+        prediction_root=prediction_root,
+        output_id=output_id,
+        prediction_spec=prediction_spec,
+        expected_run_id=expected_run_id,
+        additional_columns=(
+            "segment_id",
+            "book_segment_id",
+            "trade_connection_id",
+        ),
+        resource_policy=resource_policy,
+    )
+    with closing_iterator(frames):
+        for frame in frames:
+            for row in frame.itertuples(index=False):
+                value = getattr(row, prediction_spec.prediction_column)
+                if pd.isna(value):
+                    continue
+                timestamp = pd.Timestamp(row.timestamp)
+                if timestamp.tzinfo is not None:
+                    timestamp = timestamp.tz_convert("UTC").tz_localize(None)
+                yield {
+                    "timestamp_ms": timestamp.value // 1_000_000,
+                    "asset_id": str(row.asset_id),
+                    "segment_id": str(row.segment_id),
+                    "book_segment_id": str(row.book_segment_id),
+                    "trade_connection_id": str(row.trade_connection_id),
+                    "prediction_score": float(value),
+                }
+
+
+def _prediction_joined_frames(
+    *,
+    research_root: Path,
+    prediction_root: Path,
+    output_id: str,
+    prediction_spec: PredictionSpec,
+    expected_run_id: str,
+    additional_columns: tuple[str, ...],
+    resource_policy: RuntimeResourcePolicy,
+) -> Iterator[pd.DataFrame]:
     prediction_window = TimeWindow(
         prediction_spec.test_start,
         prediction_spec.test_end,
@@ -454,6 +567,7 @@ def _prediction_decisions(
     with read_prediction_output_bundle(
         prediction_root,
         expected_output_id=output_id,
+        expected_run_id=expected_run_id,
         time_window=prediction_window,
     ) as (manifest, lookup):
         model_metadata = manifest["metadata"]["model_metadata"]
@@ -463,8 +577,7 @@ def _prediction_decisions(
             dict.fromkeys(
                 (
                     *lookup.primary_key,
-                    "segment_id",
-                    "book_segment_id",
+                    *additional_columns,
                     *input_columns,
                     *required_filter_columns(sample_filter_mode),
                 )
@@ -480,34 +593,82 @@ def _prediction_decisions(
                 session,
                 target_chunk_bytes=max(
                     1,
-                    resource_policy.available_memory_bytes,
+                    resource_policy.planning_headroom_bytes,
                 ),
             )
-            joined = _iter_prediction_lookup_joined_chunks(
+            joined = _iter_prediction_joined_chunks(
                 chunks,
-                prediction_lookup=lookup,
+                prediction_source=lookup,
+                primary_key=lookup.primary_key,
                 input_columns=input_columns,
                 sample_filter_mode=sample_filter_mode,
                 test_start=prediction_spec.test_start,
                 test_end=prediction_spec.test_end,
+                resource_policy=resource_policy,
             )
             with closing_iterator(joined):
-                for frame in joined:
-                    for row in frame.itertuples(index=False):
-                        value = getattr(row, lookup.prediction_column)
-                        if pd.isna(value):
-                            continue
-                        timestamp = pd.Timestamp(row.timestamp)
-                        if timestamp.tzinfo is not None:
-                            timestamp = timestamp.tz_convert("UTC").tz_localize(None)
-                        yield {
-                            "timestamp_ms": timestamp.value // 1_000_000,
-                            "asset_id": str(row.asset_id),
-                            "segment_id": str(row.segment_id),
-                            "book_segment_id": str(row.book_segment_id),
-                            "prediction_score": float(value),
-                        }
+                yield from joined
             session.verify()
+
+
+def _prediction_oos_evaluation(
+    *,
+    research_root: Path,
+    prediction_root: Path,
+    output_id: str,
+    prediction_spec: PredictionSpec,
+    expected_run_id: str,
+    label_column: str,
+    resource_policy: RuntimeResourcePolicy,
+) -> dict[str, Any]:
+    signal = SignalSpec(
+        signal_id=f"{prediction_spec.model_id}_score",
+        source_kind="prediction",
+        source_column=prediction_spec.prediction_column,
+    )
+    spec = EvaluationSpec(
+        evaluation_id=f"{prediction_spec.prediction_id}_oos_evaluation",
+        market_id=MARKET_ID,
+        research_dataset_id=prediction_spec.research_dataset_id,
+        signals=(signal,),
+        label_columns=(label_column,),
+        evaluation_axis="single_asset_time_series",
+    )
+    frames = _prediction_joined_frames(
+        research_root=research_root,
+        prediction_root=prediction_root,
+        output_id=output_id,
+        prediction_spec=prediction_spec,
+        expected_run_id=expected_run_id,
+        additional_columns=(label_column,),
+        resource_policy=resource_policy,
+    )
+    with build_evaluation_result_from_frames(
+        frames,
+        spec=spec,
+        signal_columns=(signal.signal_id,),
+        label_columns=(label_column,),
+        n_groups=spec.n_groups,
+        asset_column="asset_id",
+        source_columns_by_kind={"prediction": (prediction_spec.prediction_column,)},
+        resource_policy=resource_policy,
+    ) as result:
+        for _output in result.output_chunks:
+            pass
+        diagnostics, ic_summary, _spread, _coverage = result.summaries()
+    row = ic_summary.iloc[0]
+    return {
+        "evaluation_id": spec.evaluation_id,
+        "evaluation_axis": spec.evaluation_axis,
+        "label_column": label_column,
+        "rows_input": diagnostics.rows_input,
+        "rows_after_filter": diagnostics.rows_after_filter_mode,
+        "observed_start": diagnostics.min_timestamp,
+        "observed_end": diagnostics.max_timestamp,
+        "ic": None if pd.isna(row["mean_ic"]) else float(row["mean_ic"]),
+        "valid_ic_count": int(row["valid_ic_count"]),
+        "ic_reason": None if pd.isna(row["ic_reason"]) else str(row["ic_reason"]),
+    }
 
 
 def _maker_quote_schedule(
@@ -530,7 +691,7 @@ def _maker_quote_schedule(
     ) as session:
         chunks = iter_dataset_chunks(
             session,
-            target_chunk_bytes=max(1, resource_policy.available_memory_bytes),
+            target_chunk_bytes=max(1, resource_policy.planning_headroom_bytes),
         )
         with closing_iterator(chunks):
             for frame in chunks:
@@ -554,13 +715,3 @@ def _io_counters(process: psutil.Process) -> tuple[int, int]:
     except (AttributeError, psutil.Error):
         return 0, 0
     return int(counters.read_bytes), int(counters.write_bytes)
-
-
-def _json_safe(value: Any) -> Any:
-    if isinstance(value, float) and not math.isfinite(value):
-        return None
-    if isinstance(value, Mapping):
-        return {str(key): _json_safe(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_safe(item) for item in value]
-    return value

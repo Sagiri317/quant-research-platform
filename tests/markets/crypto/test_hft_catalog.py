@@ -45,7 +45,7 @@ def test_hft_catalog_has_one_panel_factor_label_and_research_path() -> None:
 def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> None:
     models = build_hft_model_catalog(training_row_bound=100).list()
 
-    assert [model.model_algorithm for model in models] == sorted(HFT_MODEL_ALGORITHMS)
+    assert {model.model_algorithm for model in models} == set(HFT_MODEL_ALGORITHMS)
     assert all(model.max_train_rows == 100 for model in models)
     assert all(
         model.purge_gap_steps == HFT_MODEL_LABEL_HORIZON_MS // HFT_GRID_MS

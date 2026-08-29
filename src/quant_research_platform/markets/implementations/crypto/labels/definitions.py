@@ -16,13 +16,21 @@ CRYPTO_FORWARD_RETURN_COLUMNS = tuple(
     for horizon in CRYPTO_FORWARD_RETURN_HORIZONS
 )
 HFT_LABEL_HORIZONS_MS = (100, 500, 1_000, 5_000)
-HFT_LABEL_COLUMNS = tuple(
+HFT_PRICE_LABEL_COLUMNS = tuple(
     column
     for horizon in HFT_LABEL_HORIZONS_MS
     for column in (
         f"future_mid_return_{horizon}ms",
         f"future_mid_direction_{horizon}ms",
     )
+)
+HFT_MAKER_FILL_PROXY_HORIZON_MS = 500
+HFT_MAKER_BID_FILL_RATIO_PROXY_COLUMN = (
+    f"maker_bid_fill_ratio_proxy_{HFT_MAKER_FILL_PROXY_HORIZON_MS}ms"
+)
+HFT_LABEL_COLUMNS = (
+    *HFT_PRICE_LABEL_COLUMNS,
+    HFT_MAKER_BID_FILL_RATIO_PROXY_COLUMN,
 )
 
 

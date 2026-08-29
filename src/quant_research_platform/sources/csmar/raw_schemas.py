@@ -417,7 +417,7 @@ class _BoundedCsvRecords:
             self._record_lease = payload_lease
             parser_bound = min(
                 _CSV_PARSER_WORKSPACE_BOUND_BYTES,
-                self._resource_policy.available_memory_bytes,
+                self._resource_policy.planning_headroom_bytes,
             )
             try:
                 self._parser_lease = self._resource_policy.lease(
@@ -435,7 +435,7 @@ class _BoundedCsvRecords:
                 owner="source.csmar.csv.record",
             )
             self._record_lease = None
-        available = self._resource_policy.available_memory_bytes
+        available = self._resource_policy.planning_headroom_bytes
         parser_bound = min(_CSV_PARSER_WORKSPACE_BOUND_BYTES, available)
         record_bound = min(
             _CSV_RECORD_LEASE_BOUND_BYTES,

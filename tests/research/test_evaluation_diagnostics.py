@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -15,7 +16,7 @@ def test_evaluation_chunk_producer_does_not_terminal_concat(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_stream",
+        evaluation_id="eval_stream",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -64,6 +65,129 @@ def test_evaluation_chunk_producer_does_not_terminal_concat(
     ]
 
 
+def test_single_asset_time_series_evaluation_is_exact_across_chunks() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=4, freq="100ms"),
+            "asset_id": ["btc_usdt"] * 4,
+            "feature": [1.0, 2.0, 3.0, 4.0],
+            "label": [2.0, 4.0, 6.0, 8.0],
+            "eligible": [True] * 4,
+        }
+    )
+    spec = EvaluationSpec(
+        evaluation_id="single_asset_time_series",
+        market_id=MarketId("crypto"),
+        research_dataset_id="hft_research",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+        evaluation_axis="single_asset_time_series",
+        n_groups=2,
+    )
+    outputs: list[pd.DataFrame] = []
+    for frames in ((frame,), (frame.iloc[:2], frame.iloc[2:])):
+        policy = capture_test_policy(available_memory_bytes=256 * 1024)
+        with runtime_resource_policy_scope(policy):
+            with evaluation_engine.build_evaluation_result_from_frames(
+                frames,
+                spec=spec,
+                signal_columns=("signal",),
+                label_columns=("label",),
+                n_groups=2,
+                asset_column="asset_id",
+                source_columns_by_kind={"feature": ("feature",)},
+                resource_policy=policy,
+            ) as result:
+                chunks = iter(result.output_chunks)
+                owned = next(chunks)
+                metrics, grouped, metadata = owned.value
+                with pytest.raises(StopIteration):
+                    next(chunks)
+                summary = result.summaries()[1]
+        assert grouped.empty
+        assert metadata["timestamp_count"] == 4
+        assert metrics.loc[0, "n_obs"] == 4
+        assert metrics.loc[0, "ic"] == pytest.approx(1.0)
+        assert pd.isna(metrics.loc[0, "rankic"])
+        assert metrics.loc[0, "rankic_reason"] == "not_applicable"
+        assert summary.loc[0, "valid_ic_count"] == 1
+        assert summary.loc[0, "valid_rankic_count"] == 0
+        outputs.append(metrics)
+
+    pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
+
+
+@pytest.mark.parametrize("case", ("ordinary", "missing", "extreme"))
+def test_single_asset_time_series_values_are_chunk_exact(case: str) -> None:
+    row_count = 10_007
+    random = np.random.default_rng(0)
+    if case == "extreme":
+        feature = random.normal(1e9, 1e-3, size=row_count)
+        label = feature * 0.17 + random.normal(-1e8, 2e-3, size=row_count)
+    else:
+        feature = random.normal(size=row_count)
+        label = random.normal(size=row_count)
+        if case == "missing":
+            feature[::997] = np.nan
+            label[::613] = np.nan
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range(
+                "2026-01-01",
+                periods=row_count,
+                freq="100ms",
+            ),
+            "asset_id": ["btc_usdt"] * row_count,
+            "feature": feature,
+            "label": label,
+            "eligible": [True] * row_count,
+        }
+    )
+    spec = EvaluationSpec(
+        evaluation_id="single_asset_chunk_exact",
+        market_id=MarketId("crypto"),
+        research_dataset_id="hft_research",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+        evaluation_axis="single_asset_time_series",
+        n_groups=2,
+    )
+
+    def evaluate(frames) -> pd.DataFrame:  # noqa: ANN001
+        policy = capture_test_policy(available_memory_bytes=512 * 1024)
+        with runtime_resource_policy_scope(policy):
+            with evaluation_engine.build_evaluation_result_from_frames(
+                frames,
+                spec=spec,
+                signal_columns=("signal",),
+                label_columns=("label",),
+                n_groups=2,
+                asset_column="asset_id",
+                source_columns_by_kind={"feature": ("feature",)},
+                resource_policy=policy,
+            ) as result:
+                chunks = iter(result.output_chunks)
+                metrics = next(chunks).value[0].copy()
+                with pytest.raises(StopIteration):
+                    next(chunks)
+        return metrics
+
+    chunks_127 = evaluate(
+        tuple(
+            frame.iloc[start : start + 127]
+            for start in range(0, row_count, 127)
+        )
+    )
+    chunks_251 = evaluate(
+        tuple(
+            frame.iloc[start : start + 251]
+            for start in range(0, row_count, 251)
+        )
+    )
+
+    pd.testing.assert_frame_equal(chunks_127, chunks_251, check_exact=True)
+
+
 @pytest.mark.parametrize("epsilon", (1e-7, 1e-8))
 def test_streaming_ic_summary_matches_stable_canonical_values(
     epsilon: float,
@@ -82,7 +206,7 @@ def test_streaming_ic_summary_matches_stable_canonical_values(
         }
     )
     spec = EvaluationSpec(
-        run_id="stable_ic_summary",
+        evaluation_id="stable_ic_summary",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -150,7 +274,7 @@ def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
         }
     )
     spec = EvaluationSpec(
-        run_id="streaming_group_spread",
+        evaluation_id="streaming_group_spread",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),

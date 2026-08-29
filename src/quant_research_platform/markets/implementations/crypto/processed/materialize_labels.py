@@ -27,9 +27,8 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
-    _release_owned_value,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -99,13 +98,10 @@ def write_labels(
         def release_result() -> None:
             nonlocal result
             result = None
-            _release_owned_value(
-                owned,
-                owner="crypto.labels.write.result",
-            )
+            owned.release(owner="crypto.labels.write.result")
 
         if cleanup_stack is None:
-            _release_owned_value(owned, owner="crypto.labels.write.result")
+            owned.release(owner="crypto.labels.write.result")
         else:
             cleanup_stack.callback(release_result)
         return result
@@ -121,7 +117,7 @@ def _iter_label_chunks(
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        available_bytes = max(1, resource_policy.available_memory_bytes)
+        available_bytes = max(1, resource_policy.planning_headroom_bytes)
         chunk_target_bytes = max(1, available_bytes // 8)
         producer_bound = max(1, available_bytes // 2)
         buffer = pd.DataFrame()
@@ -166,7 +162,7 @@ def _iter_label_chunks(
                         if actual_bound > lease.reserved_bytes:
                             raise ValueError("crypto_label_bound_invalid")
                         lease.shrink_to(actual_bound)
-                        yield _OwnedValue(finalized, lease)
+                        yield OwnedValue(finalized, lease)
                         del finalized
                         lease = None
                     else:
@@ -257,7 +253,7 @@ def _iter_label_chunks(
                             buffer = tail
                             del tail
                             lease.shrink_to(actual_bound)
-                            yield _OwnedValue(output, lease)
+                            yield OwnedValue(output, lease)
                             del output
                             lease = None
                         else:
@@ -277,7 +273,7 @@ def _iter_label_chunks(
                         raise ValueError("crypto_label_bound_invalid")
                     lease.shrink_to(actual_bound)
                     close_buffer()
-                    yield _OwnedValue(finalized, lease)
+                    yield OwnedValue(finalized, lease)
                     del finalized
                     lease = None
                 else:

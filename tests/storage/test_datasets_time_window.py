@@ -25,6 +25,7 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.datasets.reading import (
+    DatasetSession,
     open_dataset_session,
 )
 from tests.storage.low_level_fixtures import (
@@ -125,6 +126,84 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
         time_window=window,
     ) as context:
         assert {path.parent.name for path in context.read_paths} == {"year=2015"}
+
+
+def test_dataset_session_filtered_view_owns_path_selection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "filtered_view")
+    write_dataset(
+        root,
+        make_time_window_dataset_frame(),
+        spec=make_processed_dataset_spec("filtered_view"),
+    )
+
+    verified: list[int | None] = []
+    real_verify = DatasetSession.verify
+
+    def verify(session: DatasetSession) -> None:
+        verified.append(session.path_selection)
+        real_verify(session)
+
+    monkeypatch.setattr(DatasetSession, "verify", verify)
+    with open_dataset_session(root, columns=None, time_window=None) as session:
+        policy = session.resource_policy
+        retained_before = policy.used_memory_bytes
+        parent_lease = session._lease
+        with session.filtered_view(
+            TimeWindow("2015-01-01", "2015-12-31")
+        ) as view:
+            assert view.path_selection is not None
+            assert {path.parent.name for path in view.read_paths} == {"year=2015"}
+            view.close()
+            assert parent_lease.active is True
+            assert policy.used_memory_bytes == retained_before
+        assert tuple(view.read_paths) == ()
+        assert parent_lease.active is True
+        assert policy.used_memory_bytes == retained_before
+        session.verify()
+    assert policy.used_memory_bytes == 0
+    assert view.path_selection in verified
+
+
+def test_dataset_session_filtered_view_preserves_body_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "filtered_view_primary")
+    write_dataset(
+        root,
+        make_time_window_dataset_frame(),
+        spec=make_processed_dataset_spec("filtered_view_primary"),
+    )
+    primary = KeyboardInterrupt("body_primary")
+
+    with open_dataset_session(root, columns=None, time_window=None) as session:
+        inventory_type = type(session.inventory)
+        real_release = inventory_type.release_path_selection
+
+        def fail_release(_inventory, _selection: int) -> None:
+            raise OSError("release_secondary")
+
+        monkeypatch.setattr(inventory_type, "release_path_selection", fail_release)
+        try:
+            with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
+                with session.filtered_view(
+                    TimeWindow("2015-01-01", "2015-12-31")
+                ):
+                    raise primary
+        finally:
+            monkeypatch.setattr(
+                inventory_type,
+                "release_path_selection",
+                real_release,
+            )
+
+    assert raised.value is primary
+    assert primary.__notes__ == [
+        "dataset filtered-view path cleanup also failed: OSError"
+    ]
 
 
 def test_read_dataset_datetime_time_window_filters_intraday_precisely(

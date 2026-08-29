@@ -37,9 +37,8 @@ def build_signal_positions(
     weight_config: WeightConfig,
     tradability_config: TradabilityConfig,
     tradability_context: dict[str, object] | None = None,
-    group_values: dict[str, object],
     previous_positions: dict[str, float],
-) -> tuple[list[dict[str, object]], dict[str, object]]:
+) -> tuple[dict[str, float], dict[str, object]]:
     asset_values = timestamp_frame[spec.asset_column].to_numpy()
     signal_values = timestamp_frame[signal].to_numpy(dtype="float64", copy=False)
     valid_mask = ~pd.isna(signal_values)
@@ -108,7 +107,6 @@ def build_signal_positions(
                 asset_values=asset_values[long_leg],
                 signal_values=signal_values[long_leg],
                 risk_values=None if risk_array is None else risk_array[long_leg],
-                signal=signal,
                 weight_config=weight_config,
                 sign=1.0,
             )
@@ -121,9 +119,8 @@ def build_signal_positions(
                     risk_values=(
                         None
                         if risk_array is None
-                        else risk_array[short_leg]
+                    else risk_array[short_leg]
                     ),
-                    signal=signal,
                     weight_config=weight_config,
                     sign=-1.0,
                 )
@@ -142,43 +139,23 @@ def build_signal_positions(
         tradability_context=tradability_context,
     )
 
-    sorted_positions = sorted(positions.items())
-    nonzero_positions = [
-        (asset, position)
-        for asset, position in sorted_positions
-        if float(position) != 0.0
-    ]
-    if not nonzero_positions and len(asset_values):
-        marker_asset = asset_values[0]
-        nonzero_positions = [(marker_asset, float(positions.get(marker_asset, 0.0)))]
-    records = [
-        {
-            **{
-                column: value
-                for column, value in group_values.items()
-                if column != spec.timestamp_column
-            },
-            "timestamp": group_values[spec.timestamp_column],
-            "asset": asset,
-            "signal": signal,
-            "position": float(position),
-        }
-        for asset, position in nonzero_positions
-    ]
+    if not any(float(position) != 0.0 for position in positions.values()) and len(
+        asset_values
+    ):
+        positions = {asset_values[0]: 0.0}
     diagnostic = {
         "signal": signal,
         "method": weight_config.method,
         **tradability_diagnostic_counts(
             timestamp_frame=timestamp_frame,
             signal=signal,
-            spec=spec,
             tradability_config=tradability_config,
         ),
         "long_count": int(long_count),
         "short_count": int(short_count),
         "fallback_reason": fallback_reason,
     }
-    return records, diagnostic
+    return positions, diagnostic
 
 
 def _leg_weights(
@@ -186,7 +163,6 @@ def _leg_weights(
     asset_values: np.ndarray,
     signal_values: np.ndarray,
     risk_values: np.ndarray | None,
-    signal: str,
     weight_config: WeightConfig,
     sign: float,
 ) -> tuple[dict[str, float], str]:

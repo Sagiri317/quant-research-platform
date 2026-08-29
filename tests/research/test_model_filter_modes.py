@@ -103,7 +103,7 @@ def test_training_controls_parse_supported_date_strings_without_epoch_guessing(
 def test_filter_columns_cannot_be_features() -> None:
     with pytest.raises(ValueError, match="filter_column_in_input_columns: eligible"):
         EvaluationSpec(
-            run_id="bad_eval_features",
+            evaluation_id="bad_eval_features",
             market_id=MarketId("a_share"),
             research_dataset_id="demo_filter",
             signals=(make_signal_spec("eligible"),),

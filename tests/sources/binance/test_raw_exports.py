@@ -10,7 +10,7 @@ import pytest
 import quant_research_platform.sources.binance.raw_exports as raw_exports
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -38,7 +38,6 @@ def _iter_test_raw_envelopes(
                 raw_exports._iter_raw_envelope_batches(
                     raw_path,
                     batch_size=1,
-                    resource_policy=policy,
                     expected_identity=expected_identity,
                 )
             ) as batches:
@@ -52,7 +51,7 @@ def _iter_test_raw_envelopes(
                             owned = batches.send(lease)
                         except StopIteration:
                             return
-                        if not isinstance(owned, _OwnedValue):
+                        if not isinstance(owned, OwnedValue):
                             raise TypeError("invalid_binance_owned_frame")
                         if owned.lease is not lease:
                             raise RuntimeError(
@@ -107,6 +106,7 @@ def test_binance_materializer_rejects_directory_alias_before_publication(
         _envelope(data_kind="klines"),
     )
     alias_symbol = raw_root / "spot" / "klines" / "ALIASUSDT"
+    alias_symbol.parent.mkdir(parents=True, exist_ok=True)
     try:
         alias_symbol.symlink_to(outside_symbol, target_is_directory=True)
     except OSError as error:
@@ -324,6 +324,25 @@ def test_binance_raw_rows_reject_missing_empty_and_malformed_files(
         tuple(_iter_test_raw_envelopes(empty))
     with pytest.raises(ValueError, match="malformed_binance_raw_row"):
         tuple(_iter_test_raw_envelopes(malformed))
+
+
+@pytest.mark.parametrize(
+    "raw",
+    (
+        b'{"source":"binance","source":"binance"}',
+        b'{"payload":{"value":1,"value":2}}',
+        b'{"payload":NaN}',
+        b'{"payload":"\xff"}',
+        b'{"payload":' + b"1" * 4097 + b"}",
+        b'{"payload":' + b"[" * 65 + b"0" + b"]" * 65 + b"}",
+    ),
+)
+def test_legacy_binance_json_uses_strict_qrp_boundary(raw: bytes) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"malformed_binance_raw_row: legacy\.jsonl:7",
+    ):
+        raw_exports._loads_json(raw, Path("legacy.jsonl"), line_number=7)
 
 
 @pytest.mark.parametrize(

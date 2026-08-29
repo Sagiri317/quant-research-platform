@@ -5,7 +5,6 @@ from __future__ import annotations
 import sys
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack
-from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -27,9 +26,8 @@ from quant_research_platform.research.features.transforms import (
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
-    _release_owned_value,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -39,8 +37,6 @@ from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     materialize_dataset_session_owned,
     open_dataset_session,
-    parquet_filters_for_time_window,
-    prune_paths_for_time_window,
 )
 from quant_research_platform.storage.datasets.schema import dataset_identity_payload
 from quant_research_platform.storage.datasets.writing import (
@@ -160,7 +156,7 @@ def _iter_joined_processed_chunks(
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
     base_data_id = _base_input_data_id(dataset_spec)
-    producer_bound = max(1, policy.available_memory_bytes // 2)
+    producer_bound = max(1, policy.planning_headroom_bytes // 2)
     lease = yield producer_bound
     chunk_windows = _iter_research_chunk_windows_from_base_input(
         sessions[base_data_id],
@@ -196,7 +192,7 @@ def _iter_joined_processed_chunks(
                 raise ValueError("research_joined_bound_invalid")
             lease.shrink_to(actual_bound)
             del chunk
-            yield _OwnedValue(output, lease)
+            yield OwnedValue(output, lease)
             del output
             lease = None
 
@@ -237,8 +233,7 @@ def _join_processed_inputs(
             input_bytes = pandas_frame_payload_bytes(input_frame)
             input_state = ExitStack()
             input_state.callback(
-                _release_owned_value,
-                owned_input,
+                owned_input.release,
                 owner="research.assembly.input",
             )
             try:
@@ -437,18 +432,14 @@ def _iter_research_chunk_windows_from_base_input(
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    session = _research_session_view(
-        base_session,
-        time_window=time_window,
-    )
     intraday = is_intraday_time_window(time_window)
     last_timestamp: pd.Timestamp | None = None
     saw_timestamp = False
-    try:
+    with base_session.filtered_view(time_window) as session:
         with closing_iterator(
             iter_dataset_chunks(
                 session,
-                target_chunk_bytes=policy.available_memory_bytes,
+                target_chunk_bytes=policy.planning_headroom_bytes,
             )
         ) as chunks:
             for chunk in chunks:
@@ -488,8 +479,6 @@ def _iter_research_chunk_windows_from_base_input(
                     else:
                         window = TimeWindow(start.date(), end.date())
                 yield window
-    finally:
-        _close_research_view_preserving_primary(session, base_session)
     if not saw_timestamp:
         raise ValueError("no_research_dataset_sessions")
 
@@ -559,7 +548,7 @@ def _read_processed_input(
     session: DatasetSession,
     existing_columns: tuple[str, ...],
     time_window: TimeWindow,
-) -> _OwnedValue[pd.DataFrame]:
+) -> OwnedValue[pd.DataFrame]:
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
@@ -570,17 +559,11 @@ def _read_processed_input(
     )
     if tuple(columns) != session.logical_columns:
         raise ValueError("research_input_session_columns_mismatch")
-    view = _research_session_view(
-        session,
-        time_window=time_window,
-    )
-    try:
+    with session.filtered_view(time_window) as view:
         return materialize_dataset_session_owned(
             view,
-            target_chunk_bytes=policy.available_memory_bytes,
+            target_chunk_bytes=policy.planning_headroom_bytes,
         )
-    finally:
-        _close_research_view_preserving_primary(view, session)
 
 
 def _processed_input_columns(
@@ -603,47 +586,6 @@ def _processed_input_columns(
             continue
         columns.append(column)
     return tuple(columns)
-
-
-def _close_research_view_preserving_primary(
-    view: DatasetSession,
-    base_session: DatasetSession,
-) -> None:
-    primary = sys.exception()
-    first_failure: BaseException | None = None
-    if (
-        view.path_selection is not None
-        and view.path_selection != base_session.path_selection
-    ):
-        try:
-            base_session.inventory.release_path_selection(view.path_selection)
-        except BaseException as exc:
-            if primary is None and first_failure is None:
-                first_failure = exc
-            elif primary is not None:
-                primary.add_note(
-                    "research session path-selection cleanup also failed: "
-                    f"{type(exc).__name__}"
-                )
-            else:
-                first_failure.add_note(
-                    "research session close also failed: " f"{type(exc).__name__}"
-                )
-    try:
-        view.close()
-    except BaseException as exc:
-        if primary is None and first_failure is None:
-            first_failure = exc
-        elif primary is not None:
-            primary.add_note(
-                "research session close also failed: " f"{type(exc).__name__}"
-            )
-        else:
-            first_failure.add_note(
-                "research session close also failed: " f"{type(exc).__name__}"
-            )
-    if first_failure is not None:
-        raise first_failure
 
 
 def _validate_research_input_specs(
@@ -889,53 +831,3 @@ def _open_input_dataset_sessions(
         sessions[data_id] = session
         existing_columns = tuple(dict.fromkeys((*existing_columns, *columns)))
     return sessions
-
-
-def _research_session_view(
-    session: DatasetSession,
-    *,
-    time_window: TimeWindow,
-) -> DatasetSession:
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
-    if policy is not session.resource_policy:
-        raise ValueError("research_session_resource_policy_mismatch")
-    parquet_filters = parquet_filters_for_time_window(
-        timestamp_column=session.timestamp_column,
-        time_window=time_window,
-    )
-    spec = session.spec
-    if tuple(spec.get("partition_columns", ())) != ("year",):
-        return replace(
-            session,
-            time_window=time_window,
-            parquet_filters=parquet_filters,
-            owns_inventory=False,
-        )
-    path_selection = session.inventory.new_path_selection()
-    try:
-        for path in session.read_paths:
-            if prune_paths_for_time_window(
-                session.data_root,
-                (path,),
-                spec=spec,
-                time_window=time_window,
-            ):
-                session.inventory.select_path(path_selection, path)
-        return replace(
-            session,
-            path_selection=path_selection,
-            time_window=time_window,
-            parquet_filters=parquet_filters,
-            owns_inventory=False,
-        )
-    except BaseException as primary:
-        try:
-            session.inventory.release_path_selection(path_selection)
-        except BaseException as cleanup_error:
-            primary.add_note(
-                "research session path-selection cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
-            )
-        raise

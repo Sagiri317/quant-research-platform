@@ -6,6 +6,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import asdict
 from pathlib import PurePosixPath
 
+from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     validate_evaluation_output_metadata_shape,
@@ -18,7 +19,6 @@ from quant_research_platform.artifacts.outputs.portfolio_validation import (
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_output_metadata_shape,
 )
-from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
@@ -233,10 +233,11 @@ def evaluation_output_metadata(
     evaluation_diagnostics: EvaluationDiagnostics,
 ) -> dict[str, object]:
     return {
-        "run_id": spec.run_id,
+        "evaluation_id": spec.evaluation_id,
         "run_type": spec.run_type,
         "market_id": str(spec.market_id),
         "research_dataset_id": spec.research_dataset_id,
+        "evaluation_axis": spec.evaluation_axis,
         "signals": [_signal_payload(signal) for signal in spec.signals],
         "label_columns": list(spec.label_columns),
         "filter_mode": spec.filter_mode,

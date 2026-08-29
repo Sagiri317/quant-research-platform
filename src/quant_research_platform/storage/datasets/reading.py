@@ -7,7 +7,7 @@ import struct
 import sys
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -31,8 +31,8 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -107,6 +107,7 @@ class DatasetSession:
     owns_inventory: bool
     _lease: MemoryLease
     plan_base_retained_bytes: int
+    owns_lease: bool = True
     prepared_filter_bytes: int = 0
     path_selection: int | None = None
 
@@ -155,21 +156,22 @@ class DatasetSession:
                     )
                 else:
                     first_error = inventory_error
-        try:
-            self._lease.close()
-        except BaseException as lease_error:
-            if primary is not None:
-                primary.add_note(
-                    "dataset session lease release also failed: "
-                    f"{type(lease_error).__name__}"
-                )
-            elif first_error is None:
-                first_error = lease_error
-            else:
-                first_error.add_note(
-                    "dataset session lease release also failed: "
-                    f"{type(lease_error).__name__}"
-                )
+        if self.owns_lease:
+            try:
+                self._lease.close()
+            except BaseException as lease_error:
+                if primary is not None:
+                    primary.add_note(
+                        "dataset session lease release also failed: "
+                        f"{type(lease_error).__name__}"
+                    )
+                elif first_error is None:
+                    first_error = lease_error
+                else:
+                    first_error.add_note(
+                        "dataset session lease release also failed: "
+                        f"{type(lease_error).__name__}"
+                    )
         if first_error is not None:
             raise first_error
 
@@ -218,6 +220,62 @@ class DatasetSession:
             raise ValueError("dataset_manifest_identity_changed")
         self.inventory.verify_filesystem(self.spec)
 
+    @contextmanager
+    def filtered_view(self, time_window: TimeWindow) -> Iterator[DatasetSession]:
+        if current_runtime_resource_policy() is not self.resource_policy:
+            raise ValueError("dataset_session_resource_policy_mismatch")
+        parquet_filters = parquet_filters_for_time_window(
+            timestamp_column=self.timestamp_column,
+            time_window=time_window,
+        )
+        selection: int | None = None
+        spec = self.spec
+        if tuple(spec.get("partition_columns", ())) == ("year",):
+            selection = self.inventory.new_path_selection()
+            try:
+                for path in self.read_paths:
+                    if prune_paths_for_time_window(
+                        self.data_root,
+                        (path,),
+                        spec=spec,
+                        time_window=time_window,
+                    ):
+                        self.inventory.select_path(selection, path)
+            except BaseException as primary:
+                try:
+                    self.inventory.release_path_selection(selection)
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "dataset filtered-view path cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                raise
+        view = replace(
+            self,
+            path_selection=selection if selection is not None else self.path_selection,
+            time_window=time_window,
+            parquet_filters=parquet_filters,
+            owns_inventory=False,
+            owns_lease=False,
+        )
+        try:
+            try:
+                yield view
+            finally:
+                _verify_preserving_primary(view)
+        finally:
+            primary = sys.exception()
+            try:
+                if selection is not None:
+                    self.inventory.release_path_selection(selection)
+            except BaseException as cleanup_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "dataset filtered-view path cleanup also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+
 
 def read_dataset(
     dataset_root: Path,
@@ -256,7 +314,7 @@ def read_dataset(
                         yield from iter_dataset_chunks(
                             context,
                             target_chunk_bytes=(
-                                context.resource_policy.available_memory_bytes
+                                context.resource_policy.planning_headroom_bytes
                             ),
                         )
                 return
@@ -268,7 +326,7 @@ def read_dataset(
             ) as context:
                 yield from iter_dataset_chunks(
                     context,
-                    target_chunk_bytes=context.resource_policy.available_memory_bytes,
+                    target_chunk_bytes=context.resource_policy.planning_headroom_bytes,
                 )
 
         return activate()
@@ -284,7 +342,7 @@ def read_dataset(
     ) as context:
         return materialize_dataset_session(
             context,
-            target_chunk_bytes=context.resource_policy.available_memory_bytes,
+            target_chunk_bytes=context.resource_policy.planning_headroom_bytes,
             materialized_budget_bytes=context.resource_policy.memory_budget_bytes,
         )
 
@@ -306,7 +364,7 @@ def materialize_dataset_session(
         try:
             return owned.value
         finally:
-            owned.lease.close()
+            owned.release(owner="storage.dataset.materialized")
 
 
 def materialize_dataset_session_owned(
@@ -314,7 +372,7 @@ def materialize_dataset_session_owned(
     *,
     target_chunk_bytes: int,
     materialized_budget_bytes: int | None = None,
-) -> _OwnedValue[pd.DataFrame]:
+) -> OwnedValue[pd.DataFrame]:
     """Materialize one context while transferring its output lease to the caller."""
 
     if current_runtime_resource_policy() is not context.resource_policy:
@@ -331,7 +389,7 @@ def _materialize_dataset_session(
     *,
     target_chunk_bytes: int,
     materialized_budget_bytes: int | None = None,
-) -> _OwnedValue[pd.DataFrame]:
+) -> OwnedValue[pd.DataFrame]:
     """Materialize one validated context through the unique physical iterator."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
@@ -342,7 +400,7 @@ def _materialize_dataset_session(
     )
     materialized_budget = min(
         configured_budget,
-        context.resource_policy.available_memory_bytes,
+        context.resource_policy.planning_headroom_bytes,
     )
     if materialized_budget <= 0:
         raise DatasetReadCapacityExceeded(
@@ -411,7 +469,7 @@ def _materialize_dataset_session(
                 f"{type(cleanup_error).__name__}"
             )
         raise
-    return _OwnedValue(output, output_lease)
+    return OwnedValue(output, output_lease)
 
 
 @dataclass(slots=True)
@@ -1434,7 +1492,7 @@ def _iter_dataset_file_batches(
     """Yield deterministic file batches after Arrow-level bounded conversion."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    policy_available = context.resource_policy.available_memory_bytes
+    policy_available = context.resource_policy.planning_headroom_bytes
     if operation_headroom_bytes is None:
         operation_headroom = policy_available
     else:
@@ -1457,7 +1515,7 @@ def _iter_dataset_file_batches(
     def current_operation_headroom() -> int:
         current = min(
             operation_headroom,
-            context.resource_policy.available_memory_bytes,
+            context.resource_policy.planning_headroom_bytes,
         ) - previous_output_bytes[0]
         if current <= 0:
             raise DatasetReadCapacityExceeded(

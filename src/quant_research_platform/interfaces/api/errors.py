@@ -60,7 +60,7 @@ def register_api_error_handlers(app: FastAPI) -> None:
     @app.exception_handler(Exception)
     async def _handle_unexpected_error(
         _request: Request,
-        exc: Exception,
+        _exc: Exception,
     ) -> JSONResponse:
         return api_error_response(
             ApiError(

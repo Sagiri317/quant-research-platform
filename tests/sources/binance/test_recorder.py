@@ -3,6 +3,9 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import os
+import subprocess
+import sys
 import threading
 from pathlib import Path
 
@@ -15,11 +18,14 @@ from quant_research_platform.sources.binance.ids import (
     SPOT_MARKET_TYPE,
 )
 from quant_research_platform.sources.binance.recorder import (
-    RECORDER_STREAMS,
+    RECORDER_STREAMS_BY_SCOPE,
     RecorderConfig,
-    validate_stream_payload,
 )
+from quant_research_platform.sources.binance.validation import validate_market_payload
 from tests.helpers.runtime_resources import capture_test_policy
+
+FUTURES_STREAMS = RECORDER_STREAMS_BY_SCOPE["futures-hft"]
+SPOT_STREAMS = RECORDER_STREAMS_BY_SCOPE["spot-l2"]
 
 
 def _depth_payload(market_type: str) -> dict[str, object]:
@@ -44,37 +50,267 @@ def _depth_payload(market_type: str) -> dict[str, object]:
     return payload
 
 
-def test_recorder_inventory_contains_only_consumed_public_streams() -> None:
-    streams = RECORDER_STREAMS
+def _validate_stream(stream, payload):  # noqa: ANN001, ANN202
+    return validate_market_payload(
+        stream.market_type,
+        stream.data_kind,
+        "BTCUSDT",
+        payload,
+    )
 
-    assert [(item.market_type, item.data_kind) for item in streams] == [
-        (SPOT_MARKET_TYPE, "depth"),
+
+def test_recorder_scopes_bind_exact_public_streams() -> None:
+    scopes = recorder.RECORDER_STREAMS_BY_SCOPE
+
+    assert set(scopes) == {"futures-hft", "spot-l2"}
+    assert [(item.market_type, item.data_kind) for item in scopes["futures-hft"]] == [
         (FUTURES_MARKET_TYPE, "depth"),
         (FUTURES_MARKET_TYPE, "agg_trades"),
     ]
-    assert streams[0].url == ("wss://stream.binance.com:9443/ws/btcusdt@depth@100ms")
-    assert streams[1].url == ("wss://fstream.binance.com/public/ws/btcusdt@depth@100ms")
-    assert streams[2].url == ("wss://fstream.binance.com/market/ws/btcusdt@aggTrade")
+    assert [(item.market_type, item.data_kind) for item in scopes["spot-l2"]] == [
+        (SPOT_MARKET_TYPE, "depth")
+    ]
+    assert scopes["futures-hft"][0].url == (
+        "wss://fstream.binance.com/public/ws/btcusdt@depth@100ms"
+    )
+    assert scopes["futures-hft"][1].url == (
+        "wss://fstream.binance.com/market/ws/btcusdt@aggTrade"
+    )
+    assert scopes["spot-l2"][0].url == (
+        "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms"
+    )
+
+
+def test_run_writer_handle_cleanup_preserves_active_primary(tmp_path: Path) -> None:
+    class FailingClose:
+        def __init__(self, message: str) -> None:
+            self.message = message
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise OSError(self.message)
+
+    raw_handle = FailingClose("raw_close")
+    gzip_handle = FailingClose("gzip_close")
+    writer = recorder._RunWriter(tmp_path)
+    key = (FUTURES_MARKET_TYPE, "depth", "stream", "connection")
+    writer._handles[key] = recorder._OpenFile(
+        raw_handle=raw_handle,
+        gzip_handle=gzip_handle,
+        path=tmp_path / "raw.jsonl.gz",
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
+        try:
+            raise KeyboardInterrupt("body_primary")
+        finally:
+            writer._close_key(key)
+
+    assert gzip_handle.close_calls == 1
+    assert raw_handle.close_calls == 1
+    assert raised.value.__notes__ == [
+        "Binance gzip handle close also failed: OSError",
+        "Binance raw handle close also failed: OSError",
+    ]
+
+
+def test_stream_gzip_constructor_failure_closes_raw_and_preserves_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = KeyboardInterrupt("gzip_constructor_primary")
+
+    class RawHandle:
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            raise OSError("raw_close_secondary")
+
+    raw_handle = RawHandle()
+    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: raw_handle)
+
+    def fail_gzip(*_args, **_kwargs):  # noqa: ANN202
+        raise primary
+
+    monkeypatch.setattr(recorder.gzip, "GzipFile", fail_gzip)
+    writer = recorder._RunWriter(tmp_path)
+
+    with pytest.raises(KeyboardInterrupt) as raised:
+        writer._open_file(
+            ("hour", FUTURES_MARKET_TYPE, "depth", "stream"),
+            market_type=FUTURES_MARKET_TYPE,
+            data_kind="depth",
+            stream="stream",
+            receive_time="2026-08-29T00:00:00Z",
+        )
+
+    assert raised.value is primary
+    assert raw_handle.close_calls == 1
+    assert raised.value.__notes__ == [
+        "Binance raw handle close also failed: OSError"
+    ]
+    assert writer._handles == {}
+
+
+def test_interval_gzip_constructor_failure_closes_raw(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = KeyboardInterrupt("gzip_constructor_primary")
+    raw_handle = (tmp_path / "tracked.bin").open("wb")
+    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: raw_handle)
+
+    def fail_gzip(*_args, **_kwargs):  # noqa: ANN202
+        raise primary
+
+    monkeypatch.setattr(recorder.gzip, "GzipFile", fail_gzip)
+    writer = recorder._RunWriter(tmp_path)
+    try:
+        with pytest.raises(KeyboardInterrupt) as raised:
+            writer._open_interval_file()
+        assert raised.value is primary
+        assert raw_handle.closed
+        assert writer._interval_raw_handle is None
+        assert writer._interval_gzip_handle is None
+    finally:
+        raw_handle.close()
+
+
+def test_run_writer_attempts_all_stream_closes_after_first_failure(
+    tmp_path: Path,
+) -> None:
+    class Handle:
+        def __init__(self, *, fail: bool = False) -> None:
+            self.fail = fail
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.fail:
+                raise OSError("first_gzip_close")
+
+    first_gzip = Handle(fail=True)
+    first_raw = Handle()
+    second_gzip = Handle()
+    second_raw = Handle()
+    writer = recorder._RunWriter(tmp_path)
+    writer._handles = {
+        ("00", "market", "depth", "first"): recorder._OpenFile(
+            first_raw,
+            first_gzip,
+            tmp_path / "first.gz",
+        ),
+        ("00", "market", "depth", "second"): recorder._OpenFile(
+            second_raw,
+            second_gzip,
+            tmp_path / "second.gz",
+        ),
+    }
+
+    with pytest.raises(OSError, match="first_gzip_close"):
+        writer.close()
+
+    assert (first_gzip.close_calls, first_raw.close_calls) == (1, 1)
+    assert (second_gzip.close_calls, second_raw.close_calls) == (1, 1)
+    assert writer._handles == {}
+    assert writer._closed is True
+
+
+def test_run_writer_rejects_disk_before_first_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    writer = recorder._RunWriter(root)
+
+    def reject(path: Path, *, reserve_bytes: int) -> int:
+        assert path == root
+        assert reserve_bytes > 0
+        assert not root.exists()
+        raise OSError("recorder_disk_headroom")
+
+    monkeypatch.setattr(
+        recorder,
+        "require_free_disk_headroom",
+        reject,
+        raising=False,
+    )
+    try:
+        with pytest.raises(OSError, match="recorder_disk_headroom"):
+            writer.write(
+                market_type=FUTURES_MARKET_TYPE,
+                data_kind="depth",
+                stream="btcusdt@depth@100ms",
+                payload={},
+                receive_time="2026-08-27T00:00:00.000000Z",
+                receive_monotonic_ns=1,
+            )
+        assert writer._capture_seq == 0
+        assert not root.exists()
+    finally:
+        writer.abort()
+
+
+def test_run_writer_rechecks_cumulative_disk_and_closes_after_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[int] = []
+
+    def gate(_path: Path, *, reserve_bytes: int) -> int:
+        calls.append(reserve_bytes)
+        if len(calls) == 2:
+            raise OSError("recorder_disk_headroom")
+        return reserve_bytes
+
+    monkeypatch.setattr(
+        recorder,
+        "require_free_disk_headroom",
+        gate,
+        raising=False,
+    )
+    monkeypatch.setattr(recorder, "_RECORDER_DISK_CHECK_BYTES", 1, raising=False)
+    writer = recorder._RunWriter(tmp_path / "run")
+    write_args = {
+        "market_type": FUTURES_MARKET_TYPE,
+        "data_kind": "depth",
+        "stream": "btcusdt@depth@100ms",
+        "payload": {},
+        "receive_time": "2026-08-27T00:00:00.000000Z",
+    }
+    try:
+        writer.write(**write_args, receive_monotonic_ns=1)
+        with pytest.raises(OSError, match="recorder_disk_headroom"):
+            writer.write(**write_args, receive_monotonic_ns=2)
+        assert writer._capture_seq == 1
+        assert next(iter(writer._files.values()))["record_count"] == 1
+    finally:
+        writer.abort()
+
+    assert len(calls) == 2
+    assert writer._closed is True
+    assert writer._handles == {}
 
 
 def test_recorder_validates_spot_and_futures_depth_semantics() -> None:
-    streams = RECORDER_STREAMS
-    spot, futures = streams[:2]
+    spot, futures = SPOT_STREAMS[0], FUTURES_STREAMS[0]
 
-    assert validate_stream_payload(spot, _depth_payload(SPOT_MARKET_TYPE))["u"] == 12
+    assert _validate_stream(spot, _depth_payload(SPOT_MARKET_TYPE))["u"] == 12
     assert (
-        validate_stream_payload(futures, _depth_payload(FUTURES_MARKET_TYPE))["pu"] == 9
+        _validate_stream(futures, _depth_payload(FUTURES_MARKET_TYPE))["pu"] == 9
     )
 
     with pytest.raises(ValueError, match="market_payload_identity_invalid"):
-        validate_stream_payload(
+        _validate_stream(
             futures,
             {**_depth_payload(FUTURES_MARKET_TYPE), "st": 2},
         )
 
 
 def test_recorder_validates_futures_aggregate_trade_semantics() -> None:
-    aggregate_trade = RECORDER_STREAMS[2]
+    aggregate_trade = FUTURES_STREAMS[1]
     payload = {
         "e": "aggTrade",
         "E": 1_700_000_000_001,
@@ -90,29 +326,63 @@ def test_recorder_validates_futures_aggregate_trade_semantics() -> None:
         "m": False,
     }
 
-    assert validate_stream_payload(aggregate_trade, payload) is payload
+    assert _validate_stream(aggregate_trade, payload) is payload
 
     with pytest.raises(ValueError, match="trade_quantity_invalid"):
-        validate_stream_payload(aggregate_trade, {**payload, "q": "0"})
+        _validate_stream(aggregate_trade, {**payload, "q": "0"})
 
     with pytest.raises(ValueError, match="visible_quantity_invalid"):
-        validate_stream_payload(aggregate_trade, {**payload, "nq": "3.0"})
+        _validate_stream(aggregate_trade, {**payload, "nq": "3.0"})
 
     missing_visible = dict(payload)
     missing_visible.pop("nq")
     with pytest.raises(ValueError, match="visible_quantity_invalid"):
-        validate_stream_payload(aggregate_trade, missing_visible)
+        _validate_stream(aggregate_trade, missing_visible)
 
 
 def test_recorder_config_rejects_existing_or_unbounded_target(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="duration_invalid"):
         RecorderConfig(output_root=tmp_path / "run", duration_seconds=0).validate()
+    with pytest.raises(ValueError, match="scope_invalid"):
+        RecorderConfig(
+            output_root=tmp_path / "run",
+            duration_seconds=1,
+            scope="mixed",
+        ).validate()
+
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    with pytest.raises(FileExistsError, match="output_exists"):
+        RecorderConfig(output_root=empty, duration_seconds=1).validate()
 
     occupied = tmp_path / "occupied"
     occupied.mkdir()
     (occupied / "keep.txt").write_text("keep", encoding="utf-8")
-    with pytest.raises(FileExistsError, match="output_not_empty"):
+    with pytest.raises(FileExistsError, match="output_exists"):
         RecorderConfig(output_root=occupied, duration_seconds=1).validate()
+
+
+def test_recorder_help_is_gbk_safe() -> None:
+    environment = {
+        **os.environ,
+        "PYTHONIOENCODING": "gbk",
+        "PYTHONPATH": str(Path("src").resolve()),
+    }
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "quant_research_platform.sources.binance.recorder",
+            "--help",
+        ],
+        cwd=Path(__file__).resolve().parents[3],
+        env=environment,
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr.decode("gbk", errors="replace")
 
 
 def test_recorder_rejects_aliased_output_root_before_access(tmp_path: Path) -> None:
@@ -131,7 +401,7 @@ def test_recorder_rejects_aliased_output_root_before_access(tmp_path: Path) -> N
 def test_depth_reader_waits_for_same_generation_snapshot_ack(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stream = RECORDER_STREAMS[1]
+    stream = FUTURES_STREAMS[0]
     payload = _depth_payload(FUTURES_MARKET_TYPE)
     payload.update({"U": 1, "u": 1, "pu": 0})
     writes: list[dict[str, object]] = []
@@ -212,7 +482,7 @@ def test_connection_interval_freezes_before_websocket_cleanup(
         lambda *_args, **_kwargs: Websocket(),
     )
     reader = recorder._StreamReader(
-        stream=RECORDER_STREAMS[2],
+        stream=FUTURES_STREAMS[1],
         writer=recorder._RunWriter(tmp_path),
         stats=stats,
         stop=threading.Event(),
@@ -262,7 +532,7 @@ def test_connection_close_time_is_frozen_at_error_detection(
         lambda *_args, **_kwargs: Websocket(),
     )
     reader = recorder._StreamReader(
-        stream=RECORDER_STREAMS[2],
+        stream=FUTURES_STREAMS[1],
         writer=recorder._RunWriter(tmp_path),
         stats=stats,
         stop=threading.Event(),
@@ -313,7 +583,7 @@ def test_capture_stats_streams_finalized_intervals_to_sidecar(
         for index in range(10_000):
             connection_id = f"trade-{index}"
             stats.opened(
-                RECORDER_STREAMS[2],
+                FUTURES_STREAMS[1],
                 reconnect=index > 0,
                 connection_id=connection_id,
                 segment_id=None,
@@ -351,7 +621,7 @@ def test_recorder_does_not_publish_when_reader_join_times_out(
 ) -> None:
     policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
     output_root = tmp_path / "run"
-    stream = RECORDER_STREAMS[2]
+    stream = FUTURES_STREAMS[1]
 
     class Reader:
         def __init__(self, **kwargs: object) -> None:
@@ -369,7 +639,11 @@ def test_recorder_does_not_publish_when_reader_join_times_out(
         def join(self, timeout: float) -> None:
             del timeout
 
-    monkeypatch.setattr(recorder, "RECORDER_STREAMS", (stream,))
+    monkeypatch.setitem(
+        recorder.RECORDER_STREAMS_BY_SCOPE,
+        "futures-hft",
+        (stream,),
+    )
     monkeypatch.setattr(
         recorder,
         "runtime_resource_policy_scope",
@@ -393,7 +667,7 @@ def test_connection_interval_retention_is_admitted_and_released() -> None:
     with runtime_resource_policy_scope(policy):
         stats = recorder._CaptureStats(policy)
         stats.opened(
-            RECORDER_STREAMS[2],
+            FUTURES_STREAMS[1],
             reconnect=False,
             connection_id="trade-1",
             segment_id=None,

@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.contracts.data import ProcessedDataKind
-from quant_research_platform.markets.implementations.a_share.definition import (
-    market_definition,
-)
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
@@ -21,7 +17,6 @@ from quant_research_platform.markets.implementations.a_share.research_datasets i
     build_research_dataset_catalog,
 )
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.sources.csmar.catalog import source_definition
 from tests.helpers import frequency_ids
 
 
@@ -65,19 +60,6 @@ def test_local_profile_processed_catalog_uses_kind_not_category() -> None:
     )
     assert kinds_by_id["price_volume"] is ProcessedDataKind.FACTOR
     assert kinds_by_id["forward_returns"] is ProcessedDataKind.LABEL
-
-
-def test_market_source_output_owners_are_composed() -> None:
-    market = market_definition()
-    owner_market = market_definition()
-    source = source_definition()
-
-    assert market.market_id == owner_market.market_id
-    assert market.display_name == owner_market.display_name
-    assert market.processed_spec_ids == owner_market.processed_spec_ids
-    assert source.provider_id == "csmar"
-    assert source.implementation_package == "quant_research_platform.sources.csmar"
-    assert output_catalog().get("evaluation_outputs").run_type == "evaluation"
 
 
 def test_processed_catalog_owner_matches_profile() -> None:

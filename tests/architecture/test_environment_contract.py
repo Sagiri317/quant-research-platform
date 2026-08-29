@@ -9,6 +9,7 @@ from tests.helpers.root_config_contract import python_minor_from_requires
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
+GITIGNORE = PROJECT_ROOT / ".gitignore"
 
 RUNTIME_DEPENDENCIES = {
     "fastapi",
@@ -46,6 +47,13 @@ def test_python_and_ruff_contracts_follow_root_config() -> None:
     assert pyproject["tool"]["ruff"]["target-version"] == (
         "py" + python_minor.replace(".", "")
     )
+
+
+def test_repo_output_ignore_does_not_hide_source_packages() -> None:
+    rules = GITIGNORE.read_text(encoding="utf-8").splitlines()
+
+    assert "outputs/" not in rules
+    assert "/outputs/" in rules
 
 
 def test_core_dependencies_have_version_boundaries() -> None:

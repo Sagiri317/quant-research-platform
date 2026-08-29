@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar import interim, raw_exports, raw_schemas
@@ -49,7 +49,7 @@ def _collect_raw_chunks(
                         owned = producer.send(lease)
                     except StopIteration:
                         return chunks
-                    if not isinstance(owned, _OwnedValue):
+                    if not isinstance(owned, OwnedValue):
                         raise AssertionError("invalid_bound_first_output")
                     chunks.append(owned.value)
                     try:

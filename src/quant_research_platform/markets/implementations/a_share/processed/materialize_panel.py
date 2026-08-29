@@ -24,7 +24,6 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    _release_owned_value,
     pandas_frame_payload_bytes,
 )
 from quant_research_platform.storage.datasets import (
@@ -58,10 +57,7 @@ def write_panel(
             columns=("open", "high", "low", "close", "volume", "amount"),
         )
     finally:
-        _release_owned_value(
-            owned_inspection,
-            owner="a_share.panel.source.inspection",
-        )
+        owned_inspection.release(owner="a_share.panel.source.inspection")
     market_bars_row_buffer = (
         materialization_planning.registered_output_buffer_bytes(
             spec,

@@ -22,8 +22,8 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -58,7 +58,7 @@ def _collect_bound_first(data, policy, *, requested_bounds=None):  # noqa: ANN00
                     except StopIteration:
                         lease.close()
                         return frames
-                    if not isinstance(owned, _OwnedValue):
+                    if not isinstance(owned, OwnedValue):
                         raise AssertionError("invalid_bound_first_output")
                     break
                 frames.append(owned.value)
@@ -242,7 +242,7 @@ def test_asset_discovery_closes_file_batches_on_validation_failure(
         with materialization_validation.crypto_asset_session_views(
             session,
             columns=("asset_id",),
-            target_chunk_bytes=policy.available_memory_bytes,
+            target_chunk_bytes=policy.planning_headroom_bytes,
             error="invalid_asset",
         ):
             raise AssertionError("unreachable")
@@ -255,7 +255,7 @@ def test_write_chunk_owner_closes_source_chunks_on_early_close() -> None:
     def source_chunks():
         try:
             lease = yield 128 * 1024
-            yield _OwnedValue(pd.DataFrame({"value": [1]}), lease)
+            yield OwnedValue(pd.DataFrame({"value": [1]}), lease)
         finally:
             closed.append(True)
 
@@ -338,7 +338,6 @@ def test_panel_iterator_closes_bar_traversal_on_early_close(
     iterator = materialize_panel._iter_panel_chunks(
         spec,
         input_sessions=sessions,
-        time_window=TimeWindow("2026-07-06", "2026-07-06"),
         resource_policy=policy,
     )
     with runtime_resource_policy_scope(policy):
@@ -426,7 +425,6 @@ def test_panel_empty_asset_transition_reuses_admitted_lease(
     iterator = materialize_panel._iter_panel_chunks(
         spec,
         input_sessions=sessions,
-        time_window=TimeWindow("2026-07-06", "2026-07-06"),
         resource_policy=policy,
     )
     with runtime_resource_policy_scope(policy):
@@ -434,7 +432,7 @@ def test_panel_empty_asset_transition_reuses_admitted_lease(
         lease = policy.lease("test.crypto.panel.transition", bound)
         try:
             owned = iterator.send(lease)
-            assert isinstance(owned, _OwnedValue)
+            assert isinstance(owned, OwnedValue)
             iterator.close()
         finally:
             lease.close()
@@ -448,7 +446,10 @@ def test_crypto_producer_admits_before_panel_pull(
     monkeypatch: pytest.MonkeyPatch,
     owner: str,
 ) -> None:
-    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024 * 1024,
+        explicit_cap_bytes=8 * 1024 * 1024,
+    )
     pulled: list[bool] = []
     frame = pd.DataFrame({"placeholder": [1]})
 
@@ -485,7 +486,6 @@ def test_crypto_producer_admits_before_panel_pull(
         iterator = materialize_panel._iter_panel_chunks(
             spec,
             input_sessions=sessions,
-            time_window=TimeWindow("2026-07-06", "2026-07-06"),
             resource_policy=policy,
         )
     else:
@@ -615,7 +615,7 @@ def test_crypto_factor_admits_each_segment_before_carry_append(
             except StopIteration:
                 lease.close()
                 break
-            if not isinstance(owned, _OwnedValue):
+            if not isinstance(owned, OwnedValue):
                 raise AssertionError("invalid_bound_first_output")
             carry_seen = carry_seen or policy.used_memory_bytes > lease.reserved_bytes
             try:
@@ -768,7 +768,7 @@ def test_crypto_label_buffer_lease_survives_output_and_closes_on_close(
             lease = policy.lease("test.crypto.label", bound)
             try:
                 owned = iterator.send(lease)
-                assert isinstance(owned, _OwnedValue)
+                assert isinstance(owned, OwnedValue)
                 if not saw_buffer_owner:
                     assert policy.used_memory_bytes > lease.reserved_bytes
                     saw_buffer_owner = True
@@ -845,7 +845,7 @@ def test_crypto_label_finalizes_asset_before_pulling_next_view(
             lease = policy.lease("test.crypto.label.boundary", bound)
             try:
                 owned = iterator.send(lease)
-                assert isinstance(owned, _OwnedValue)
+                assert isinstance(owned, OwnedValue)
                 outputs.append(owned.value)
                 try:
                     bound = iterator.send(None)
@@ -1133,7 +1133,6 @@ def test_panel_iterator_rejects_any_session_policy_mismatch_before_selection(
     iterator = materialize_panel._iter_panel_chunks(
         spec,
         input_sessions=sessions,
-        time_window=TimeWindow("2026-07-06", "2026-07-06"),
         resource_policy=explicit_policy,
     )
     with pytest.raises(RuntimeError, match="^runtime_resource_policy_conflict$"):
@@ -1819,6 +1818,30 @@ def test_dependency_chunk_order_rejects_unsorted_and_overlap() -> None:
         )
 
 
+def test_dependency_chunk_order_validation_is_columnar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ordered = _key_frame().sort_values(
+        ["market_id", "asset_id", "timestamp"],
+        kind="mergesort",
+    )
+    monkeypatch.setattr(
+        pd.DataFrame,
+        "itertuples",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("row_tuple_graph_used")
+        ),
+    )
+
+    result = materialization_validation.validated_ordered_dependency_chunk(
+        ordered,
+        state=materialization_validation.OrderedDependencyState(),
+        error="out_of_order_crypto_factor_dependency",
+    )
+
+    assert len(result) == len(ordered)
+
+
 def test_existing_dependency_reuse_passes_same_resource_policy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1835,7 +1858,7 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
         lambda *_args, **_kwargs: nullcontext(_dataset_session_stub(policy)),
     )
     def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
-        return _OwnedValue(
+        return OwnedValue(
             inspection,
             resource_policy.lease("test.crypto.inspection", 0),
         )
@@ -1928,7 +1951,7 @@ def test_crypto_direct_dataset_writers_keep_one_policy_through_inspection(
         assert len(chunks) == 1
         assert "retained_payload_bytes" not in _kwargs
         staged_validator(SimpleNamespace())
-        return _OwnedValue(
+        return OwnedValue(
             inspection,
             resource_policy.lease("test.crypto.writer.result", 0),
         )

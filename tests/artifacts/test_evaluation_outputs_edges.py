@@ -10,6 +10,7 @@ import pyarrow.parquet as pq
 import pytest
 
 import quant_research_platform.artifacts.outputs as outputs
+import quant_research_platform.reports.evaluation as evaluation_report_owner
 from quant_research_platform.artifacts.outputs import (
     evaluation as evaluation_outputs_owner,
 )
@@ -142,7 +143,7 @@ def test_evaluation_metadata_reuses_complete_business_owner_graph(
     mutation: str,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -184,7 +185,7 @@ def test_evaluation_metadata_reuses_complete_business_owner_graph(
 
 def test_output_manifest_preserves_nested_typed_identifier_values() -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(
@@ -198,7 +199,7 @@ def test_output_manifest_preserves_nested_typed_identifier_values() -> None:
     )
     payload = output_manifest_payload(
         output_spec=make_output_edge_report_spec(
-            "evaluation_outputs", spec.run_id, "evaluation"
+            "evaluation_outputs", spec.evaluation_id, "evaluation"
         ),
         metadata=evaluation_output_metadata(
             spec=spec,
@@ -220,7 +221,7 @@ def test_output_manifest_preserves_nested_typed_identifier_values() -> None:
 
 def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -228,7 +229,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
 
@@ -271,7 +272,7 @@ def test_evaluation_outputs_validation_rejects_bad_inputs(tmp_path: Path) -> Non
 
 def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -279,7 +280,7 @@ def test_evaluation_outputs_rejects_inconsistent_diagnostics(tmp_path: Path) -> 
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     layout = StorageLayout(project_root=tmp_path)
@@ -377,7 +378,7 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
     tmp_path: Path,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -385,7 +386,7 @@ def test_evaluation_outputs_rejects_bad_keys_features_groups_and_counts(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     layout = StorageLayout(project_root=tmp_path)
@@ -523,7 +524,7 @@ def test_evaluation_artifact_numeric_and_reason_tampering(
     else:
         raise AssertionError(f"unknown mutation: {mutation}")
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -548,7 +549,7 @@ def test_evaluation_outputs_rejects_invalid_signal_label_membership_values(
     bad_value: object,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -556,7 +557,7 @@ def test_evaluation_outputs_rejects_invalid_signal_label_membership_values(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     metrics = make_artifact_evaluation_metrics_frame()
@@ -591,7 +592,7 @@ def test_evaluation_outputs_rejects_padded_signal_label_membership_values(
     padded_value: str,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -609,7 +610,7 @@ def test_evaluation_outputs_rejects_padded_signal_label_membership_values(
             spec=spec,
             output_spec=make_output_edge_report_spec(
                 "evaluation_outputs",
-                spec.run_id,
+                spec.evaluation_id,
                 "evaluation",
             ),
             layout=StorageLayout(project_root=tmp_path),
@@ -622,7 +623,7 @@ def test_evaluation_outputs_rejects_invalid_metric_observation_counts(
     n_obs: object,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -630,7 +631,7 @@ def test_evaluation_outputs_rejects_invalid_metric_observation_counts(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     metrics = make_artifact_evaluation_metrics_frame().assign(n_obs=[n_obs])
@@ -652,7 +653,7 @@ def test_evaluation_outputs_rejects_fractional_grouped_label_group(
     tmp_path: Path,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -660,7 +661,7 @@ def test_evaluation_outputs_rejects_fractional_grouped_label_group(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     grouped = make_artifact_evaluation_grouped_label_values_frame().assign(group=1.5)
@@ -682,7 +683,7 @@ def test_evaluation_outputs_rejects_non_finite_summary_numbers(
     tmp_path: Path,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -690,7 +691,7 @@ def test_evaluation_outputs_rejects_non_finite_summary_numbers(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     metrics = make_artifact_evaluation_metrics_frame().assign(ic=[float("inf")])
@@ -710,7 +711,7 @@ def test_evaluation_outputs_rejects_non_finite_summary_numbers(
 
 def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -718,7 +719,7 @@ def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> 
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
 
@@ -750,7 +751,7 @@ def test_evaluation_outputs_writes_label_value_artifact_name(tmp_path: Path) -> 
 
 def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -758,7 +759,7 @@ def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
 
@@ -783,7 +784,7 @@ def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None
         "summary.md",
     ]
     assert "# Evaluation Summary" in summary
-    assert "- run_id: `eval_demo`" in summary
+    assert "- evaluation_id: `eval_demo`" in summary
     assert "- market_id: `a_share`" in summary
     assert "- research_dataset_id: `research_demo`" in summary
     assert "- rows_input: `2`" in summary
@@ -814,14 +815,14 @@ def test_evaluation_outputs_enforces_evidence_line_contract(
     should_pass: bool,
 ) -> None:
     monkeypatch.setattr(
-        evaluation_outputs_owner,
-        "_render_evaluation_summary",
+        evaluation_report_owner,
+        "render_evaluation_summary",
         lambda **_kwargs: (
             "x" * (MAX_REVIEW_SAFE_EVIDENCE_LINE_CHARACTERS + extra_characters)
         ),
     )
     spec = EvaluationSpec(
-        run_id="eval_line_bound",
+        evaluation_id="eval_line_bound",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -838,7 +839,7 @@ def test_evaluation_outputs_enforces_evidence_line_contract(
             spec=spec,
             output_spec=make_output_edge_report_spec(
                 "evaluation_outputs",
-                spec.run_id,
+                spec.evaluation_id,
                 "evaluation",
             ),
             layout=StorageLayout(project_root=tmp_path),
@@ -871,8 +872,8 @@ def test_evaluation_outputs_feeds_bounded_encoded_summary_chunks(
         return real_scan(captured)
 
     monkeypatch.setattr(
-        evaluation_outputs_owner,
-        "_render_evaluation_summary",
+        evaluation_report_owner,
+        "render_evaluation_summary",
         lambda **_kwargs: rendered,
     )
     monkeypatch.setattr(
@@ -881,7 +882,7 @@ def test_evaluation_outputs_feeds_bounded_encoded_summary_chunks(
         scan,
     )
     spec = EvaluationSpec(
-        run_id="eval_bounded_feed",
+        evaluation_id="eval_bounded_feed",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -896,7 +897,7 @@ def test_evaluation_outputs_feeds_bounded_encoded_summary_chunks(
         evaluation_diagnostics=make_output_edge_evaluation_diagnostics(),
         spec=spec,
         output_spec=make_output_edge_report_spec(
-            "evaluation_outputs", spec.run_id, "evaluation"
+            "evaluation_outputs", spec.evaluation_id, "evaluation"
         ),
         layout=StorageLayout(project_root=tmp_path),
     )
@@ -907,7 +908,7 @@ def test_evaluation_outputs_feeds_bounded_encoded_summary_chunks(
 
 def test_summary_markdown_escapes_pipe_characters(tmp_path: Path) -> None:
     spec = EvaluationSpec(
-        run_id="eval_demo",
+        evaluation_id="eval_demo",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(
@@ -921,7 +922,7 @@ def test_summary_markdown_escapes_pipe_characters(tmp_path: Path) -> None:
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     metrics = make_artifact_evaluation_metrics_frame().assign(
@@ -965,7 +966,7 @@ def test_managed_evaluation_admits_fixed_writers_before_first_pull(
     tmp_path: Path,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_admission",
+        evaluation_id="eval_admission",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -973,7 +974,7 @@ def test_managed_evaluation_admits_fixed_writers_before_first_pull(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     pulled: list[bool] = []
@@ -1019,7 +1020,7 @@ def test_managed_evaluation_disk_preflight_happens_before_first_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_disk_admission",
+        evaluation_id="eval_disk_admission",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -1027,7 +1028,7 @@ def test_managed_evaluation_disk_preflight_happens_before_first_pull(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     pulled: list[bool] = []
@@ -1074,7 +1075,7 @@ def test_managed_evaluation_failure_closes_partial_writer_and_preserves_primary(
     tmp_path: Path,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_failure",
+        evaluation_id="eval_failure",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -1082,7 +1083,7 @@ def test_managed_evaluation_failure_closes_partial_writer_and_preserves_primary(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     primary = RuntimeError("managed_evaluation_primary")
@@ -1131,7 +1132,7 @@ def test_managed_evaluation_empty_output_failure_closes_summary_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_empty_failure",
+        evaluation_id="eval_empty_failure",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -1139,7 +1140,7 @@ def test_managed_evaluation_empty_output_failure_closes_summary_state(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     primary = OSError("empty_output_write_failed")
@@ -1168,7 +1169,7 @@ def test_managed_evaluation_pre_writer_failure_releases_table_state(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     spec = EvaluationSpec(
-        run_id="eval_pre_writer_failure",
+        evaluation_id="eval_pre_writer_failure",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=(make_artifact_signal_spec(),),
@@ -1176,7 +1177,7 @@ def test_managed_evaluation_pre_writer_failure_releases_table_state(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     primary = OSError("pre_writer_failure")
@@ -1232,7 +1233,7 @@ def test_managed_evaluation_persists_aggregate_beyond_ram_budget(
     )
     labels = ("label_a", "label_b")
     spec = EvaluationSpec(
-        run_id="eval_spill",
+        evaluation_id="eval_spill",
         market_id=MarketId("a_share"),
         research_dataset_id="research_demo",
         signals=signals,
@@ -1241,7 +1242,7 @@ def test_managed_evaluation_persists_aggregate_beyond_ram_budget(
     )
     report_spec = make_output_edge_report_spec(
         "evaluation_outputs",
-        spec.run_id,
+        spec.evaluation_id,
         "evaluation",
     )
     total_timestamps = 1_600

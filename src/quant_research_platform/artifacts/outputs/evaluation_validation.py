@@ -4,9 +4,6 @@ from __future__ import annotations
 
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.membership import (
-    validate_string_membership_column,
-)
 from quant_research_platform.artifacts.outputs.common_validation import (
     require_metadata_string,
     require_metadata_string_list,
@@ -14,6 +11,9 @@ from quant_research_platform.artifacts.outputs.common_validation import (
     require_optional_metadata_string,
     require_signal_metadata_list,
     validate_filter_metadata,
+)
+from quant_research_platform.artifacts.outputs.membership import (
+    validate_string_membership_column,
 )
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_RAW_REASON_CODES,
@@ -88,10 +88,11 @@ EVALUATION_ARTIFACTS = [
 ]
 _EVALUATION_OUTPUT_METADATA_KEYS = frozenset(
     {
-        "run_id",
+        "evaluation_id",
         "run_type",
         "market_id",
         "research_dataset_id",
+        "evaluation_axis",
         "signals",
         "label_columns",
         "filter_mode",
@@ -125,10 +126,11 @@ def validate_evaluation_output_metadata_shape(
     if type(metadata) is not dict or set(metadata) != _EVALUATION_OUTPUT_METADATA_KEYS:
         raise ValueError("output_manifest_metadata_invalid")
     for key in (
-        "run_id",
+        "evaluation_id",
         "run_type",
         "market_id",
         "research_dataset_id",
+        "evaluation_axis",
         "filter_mode",
     ):
         require_metadata_string(metadata, key, "output_manifest_metadata_invalid")
@@ -189,10 +191,20 @@ def validate_evaluation_output_metadata_shape(
         * len(label_columns)
     ):
         raise ValueError("output_manifest_metadata_invalid")
-    if (
-        metadata["filter_mode"] != diagnostics["filter_mode"]
-        or diagnostics["metric_rows"] < diagnostics["timestamp_count"]
-    ):
+    if metadata["filter_mode"] != diagnostics["filter_mode"]:
+        raise ValueError("output_manifest_metadata_invalid")
+    if metadata["evaluation_axis"] == "cross_sectional":
+        if diagnostics["metric_rows"] < diagnostics["timestamp_count"]:
+            raise ValueError("output_manifest_metadata_invalid")
+    elif metadata["evaluation_axis"] == "single_asset_time_series":
+        if (
+            diagnostics["timestamp_count"] <= 0
+            or diagnostics["metric_rows"] != len(signals) * len(label_columns)
+            or diagnostics["grouped_label_value_rows"] != 0
+            or diagnostics["group_spread_summary_rows"] != 0
+        ):
+            raise ValueError("output_manifest_metadata_invalid")
+    else:
         raise ValueError("output_manifest_metadata_invalid")
     try:
         evaluation_diagnostics = EvaluationDiagnostics(
@@ -221,11 +233,12 @@ def validate_evaluation_output_metadata_shape(
             error_name="output_manifest_metadata_invalid",
         )
         EvaluationSpec(
-            run_id=metadata["run_id"],
+            evaluation_id=metadata["evaluation_id"],
             market_id=MarketId(metadata["market_id"]),
             research_dataset_id=metadata["research_dataset_id"],
             signals=signals,
             label_columns=tuple(label_columns),
+            evaluation_axis=metadata["evaluation_axis"],
             filter_mode=metadata["filter_mode"],
             n_groups=evaluation_diagnostics.n_groups,
             run_type=metadata["run_type"],
@@ -299,6 +312,16 @@ def validate_evaluation_artifact_structure(
 ) -> None:
     for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
         _validate_signal_label_membership(frame, spec=spec)
+    if spec.evaluation_axis == "single_asset_time_series":
+        if (
+            not grouped_label_values.empty
+            or not group_spread_summary.empty
+            or not metrics["rankic"].isna().all()
+            or not metrics["rankic_reason"].eq("not_applicable").all()
+        ):
+            raise ValueError("single_asset_time_series_evaluation_artifact_invalid")
+    elif metrics["rankic_reason"].eq("not_applicable").any():
+        raise ValueError("cross_sectional_evaluation_artifact_invalid")
     _reject_duplicate_keys(metrics, ("timestamp", "signal", "label"), "metrics")
     _reject_duplicate_keys(
         grouped_label_values,

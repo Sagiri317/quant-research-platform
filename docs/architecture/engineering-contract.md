@@ -10,7 +10,7 @@ QRP 使用 current-contract-only。Public machine contract、owner behavior、pe
 
 ## Resource lifecycle
 
-每个 top-level resource-bearing operation 在首次数据规模 read/decode/allocation 前只 admission 一次：host-local data-scale lock 保护一个 process-local active root；该 root 只捕获一次 OS available0，并固定 operation planning target（默认约为 `available0 * 70%`，与有效显式 cap 取较小者）和 root identity。70% 是合理的默认规划余量，不是数学硬线。Lease ledger 与 lexical lease state 随 owner 生命周期可变。
+每个 top-level resource-bearing operation 在首次数据规模 read/decode/allocation 前只 admission 一次：host-local data-scale lock 保护一个 process-local active root；该 root 只捕获一次 OS available0，并固定 operation planning target（默认约为 `available0 * 70%`，与有效显式 cap 取较小者）和 root identity。70% 与派生出的 `memory_budget_bytes` 都是 soft planning reference，不是进程 RSS、真实 allocation 或逻辑 working set 的数学硬线。Lease ledger 用整数 bytes 只表达 owner 的保守粗估，以支持相加、转移和 bounded batch planning，不承诺字节级精确。只有粗估表明无法维持相对安全或 explicit cap 明确限制时才稳定失败；轻微估算/观测 overshoot 不在 70% 的精确点自动判死。Lease ledger 与 lexical lease state 随 owner 生命周期可变；borrowed baseline、native workspace 与验收 RSS 不重复计费。
 
 Nested owner 继承相同 root identity；different-policy nesting/parallel root fail closed。Lease 以 lexical owner context 管理，跨 producer/consumer 边界转移同一 logical owner，不重复计费；owner context 退出时释放资源。主要 workflow stage 按顺序执行，前一 stage 释放 transient state 后，后一 stage 复用同一个 operation budget；只为当前 stage 中真正同时存活的 allocation 准入。所有数据规模 allocation 在保守准入后进行并保持 bounded，aggregate persisted output 可以超过 RAM budget 而 exact 完成。
 

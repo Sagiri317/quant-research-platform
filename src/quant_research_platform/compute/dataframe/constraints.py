@@ -13,7 +13,6 @@ def tradability_diagnostic_counts(
     *,
     timestamp_frame: pd.DataFrame,
     signal: str,
-    spec: ComputePanelSpec,
     tradability_config: TradabilityConfig,
 ) -> dict[str, int]:
     signal_available = timestamp_frame[signal].notna()

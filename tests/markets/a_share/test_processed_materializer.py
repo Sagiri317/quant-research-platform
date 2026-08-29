@@ -49,8 +49,8 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -91,7 +91,7 @@ def _bound_first_source(source, *, bound: int = 256 * 1024):  # noqa: ANN001, AN
                 frame = next(iterator)
             except StopIteration:
                 return
-            yield _OwnedValue(frame, lease)
+            yield OwnedValue(frame, lease)
             del frame
     finally:
         close = getattr(iterator, "close", None)
@@ -117,7 +117,7 @@ def _collect_bound_first(data, policy, *, sink=None):  # noqa: ANN001, ANN202
                     except StopIteration:
                         lease.close()
                         return frames
-                    if isinstance(owned, _OwnedValue):
+                    if isinstance(owned, OwnedValue):
                         break
                     raise AssertionError("invalid_bound_first_output")
             except BaseException:
@@ -250,9 +250,7 @@ def test_a_share_output_publication_rejects_near_headroom_before_sort(
         )
 
 
-def test_sorted_output_chunks_activate_under_bound_policy_before_source_pull(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_sorted_output_chunks_activate_under_bound_policy_before_source_pull() -> None:
     policy = _publication_policy()
     spec = processed_catalog().get(MARKET_PANEL_DATA_ID)
     frame = pd.DataFrame(
@@ -514,7 +512,7 @@ def test_write_and_inspect_activates_explicit_policy(
             123,
         )
         observed.append((current_runtime_resource_policy(), True))
-        return _OwnedValue(inspection, lease)
+        return OwnedValue(inspection, lease)
 
     monkeypatch.setattr(materialization_io, "_write_dataset", capture_write)
     monkeypatch.setattr(
@@ -708,8 +706,8 @@ def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
     )
 
     def fail_if_sessions_are_read(
-        *args: object,
-        **kwargs: object,
+        *_args: object,
+        **_kwargs: object,
     ) -> pd.DatetimeIndex:
         raise AssertionError("frequency validation should run before source reads")
 

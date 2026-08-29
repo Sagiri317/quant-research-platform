@@ -145,7 +145,7 @@ def test_hft_materialization_reuses_panel_and_standard_research_dataset(
     assert "ofi_100ms" in research
     assert "future_mid_return_500ms" in research
     assert set(prediction_bundles) == {
-        f"crypto_hft_{algorithm}" for algorithm in HFT_MODEL_ALGORITHMS
+        model.model_id for model in model_catalog.list()
     }
     assert all(path.is_dir() for path in prediction_bundles.values())
     assert all(

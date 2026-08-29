@@ -24,8 +24,8 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -140,7 +140,7 @@ def _iter_owned_interim_frames(
     bound_policy = resource_policy or current_runtime_resource_policy()
 
     def activate() -> Iterator[object]:
-        with runtime_resource_policy_scope(bound_policy) as policy:
+        with runtime_resource_policy_scope(bound_policy):
             yielded = False
             empty_schema_frame: pd.DataFrame | None = None
             last_key: tuple[object, ...] | None = None
@@ -165,7 +165,6 @@ def _iter_owned_interim_frames(
                     _iter_raw_envelope_batches(
                         input_file,
                         batch_size=row_batch_size,
-                        resource_policy=policy,
                         expected_identity=expected_identity,
                     )
                 ) as raw_batches:
@@ -185,7 +184,7 @@ def _iter_owned_interim_frames(
                             except StopIteration:
                                 bound = None
                                 break
-                            if not isinstance(owned, _OwnedValue):
+                            if not isinstance(owned, OwnedValue):
                                 raise TypeError("invalid_binance_owned_frame")
                             if owned.lease is not lease:
                                 raise RuntimeError(
@@ -249,7 +248,7 @@ def _iter_owned_interim_frames(
                                 )
                             lease.shrink_to(actual_bound)
                             del batch, normalized
-                            yield _OwnedValue(filtered, lease)
+                            yield OwnedValue(filtered, lease)
                             del filtered, owned
                             try:
                                 bound = raw_batches.send(None)
@@ -273,7 +272,7 @@ def _iter_owned_interim_frames(
                 if empty_bytes + 64 * 1024 > lease.reserved_bytes:
                     raise RuntimeError("binance_record_envelope_bound_invalid")
                 lease.shrink_to(empty_bytes + 64 * 1024)
-                yield _OwnedValue(empty, lease)
+                yield OwnedValue(empty, lease)
                 lease = None
             if verify_root is not None:
                 verify_root()

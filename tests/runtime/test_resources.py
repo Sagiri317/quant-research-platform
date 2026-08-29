@@ -37,6 +37,42 @@ class _FakeMachineLock:
         self.closed = True
 
 
+def test_owned_value_release_clears_value_and_lease() -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * MIB)
+    with runtime_resource_policy_scope(policy):
+        owned = resources.OwnedValue(
+            {"payload": True},
+            policy.lease("test.owned", 128),
+        )
+        assert policy.used_memory_bytes == 128
+
+        owned.release(owner="test.owned")
+
+        assert owned.value is None
+        assert policy.used_memory_bytes == 0
+
+
+def test_soft_target_is_not_an_exact_hard_cap_but_explicit_cap_is() -> None:
+    soft = capture_test_policy(available_memory_bytes=1_000_000)
+    with runtime_resource_policy_scope(soft):
+        lease = soft.lease("test.soft.target", soft.memory_budget_bytes + 1)
+        assert soft.used_memory_bytes == 700_001
+        assert soft.planning_headroom_bytes == 0
+        lease.close()
+
+    capped = capture_test_policy(
+        available_memory_bytes=1_000_000,
+        explicit_cap_bytes=600_000,
+    )
+    with runtime_resource_policy_scope(capped):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            capped.lease("test.explicit.cap", 600_001)
+        lease = capped.lease("test.explicit.cap", 600_000)
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            lease.grow(1)
+        lease.close()
+
+
 def _patch_capture(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -81,12 +117,13 @@ def test_budget_captures_one_available_and_uses_one_planning_target(
         target = policy.memory_budget_bytes
         assert 0 < target < available
         assert policy.used_memory_bytes == 0
-        assert policy.available_memory_bytes == target
+        assert policy.planning_headroom_bytes == target
         assert policy.to_payload() == {
             "captured_available_memory_bytes": available,
             "memory_budget_bytes": target,
+            "explicit_memory_cap_bytes": None,
             "used_memory_bytes": 0,
-            "available_memory_bytes": target,
+            "planning_headroom_bytes": target,
         }
 
 

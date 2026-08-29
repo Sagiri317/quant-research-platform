@@ -31,7 +31,7 @@ from quant_research_platform.research._memory import (
 from quant_research_platform.research.filtering import _filter_mode_scope
 from quant_research_platform.runtime.resources import (
     MemoryLease,
-    _OwnedValue,
+    OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
@@ -48,7 +48,7 @@ class ModelFitResult:
     )
 
 
-type _OwnedModelFitResult = _OwnedValue[ModelFitResult]
+type _OwnedModelFitResult = OwnedValue[ModelFitResult]
 
 
 def _fit_model_result_owned_from_frames(
@@ -151,7 +151,7 @@ def _fit_linear_model_result_with_lease(
     if model_lease is None:
         return result
     model_lease.shrink_to(int(beta.nbytes))
-    return _OwnedValue(result, model_lease)
+    return OwnedValue(result, model_lease)
 
 
 def model_metadata(
@@ -221,11 +221,11 @@ def _fit_controlled_linear_model_result_owned_from_frames(
     owned_training = _collect_training_frame_owned(frames, spec)
     training, row_counts, filter_metadata = (
         owned_training.value
-        if isinstance(owned_training, _OwnedValue)
+        if isinstance(owned_training, OwnedValue)
         else owned_training
     )
     training_lease = (
-        owned_training.lease if isinstance(owned_training, _OwnedValue) else None
+        owned_training.lease if isinstance(owned_training, OwnedValue) else None
     )
     beta: np.ndarray | None = None
     metadata: dict[str, object] | None = None
@@ -256,7 +256,7 @@ def _fit_controlled_linear_model_result_owned_from_frames(
         if model_lease is None:
             return result
         model_lease.shrink_to(int(beta.nbytes))
-        return _OwnedValue(result, model_lease)
+        return OwnedValue(result, model_lease)
     except BaseException as primary:
         beta = None
         metadata = None
@@ -573,11 +573,11 @@ def _fit_estimator_model_result_owned_from_frames(
     owned_training = _collect_training_frame_owned(frames, spec)
     training, row_counts, filter_metadata = (
         owned_training.value
-        if isinstance(owned_training, _OwnedValue)
+        if isinstance(owned_training, OwnedValue)
         else owned_training
     )
     training_lease = (
-        owned_training.lease if isinstance(owned_training, _OwnedValue) else None
+        owned_training.lease if isinstance(owned_training, OwnedValue) else None
     )
     if row_counts["rows_after_input_label_dropna"] == 0:
         primary = ValueError("model_training_sample_empty")
@@ -612,7 +612,7 @@ def _fit_estimator_model_result_owned_from_frames(
         if policy is not None:
             thread_available_bytes = max(
                 0,
-                policy.available_memory_bytes
+                policy.planning_headroom_bytes
                 - target_bytes
                 - model_state_bytes,
             )
@@ -694,7 +694,7 @@ def _fit_estimator_model_result_owned_from_frames(
             training_lease.close()
             training_lease = None
         model_lease.shrink_to(model_state_bytes)
-        return _OwnedValue(result, model_lease)
+        return OwnedValue(result, model_lease)
     except BaseException as primary:
         if y is not None:
             y = None
@@ -730,7 +730,7 @@ def _collect_training_frame_owned(
     spec: ModelSpec,
 ) -> (
     tuple[pd.DataFrame, dict[str, object], dict[str, object]]
-    | _OwnedValue[tuple[pd.DataFrame, dict[str, object], dict[str, object]]]
+    | OwnedValue[tuple[pd.DataFrame, dict[str, object], dict[str, object]]]
     ):
     if spec.max_train_rows is None:
         raise ValueError("unbounded_model_training_collection")
@@ -1043,7 +1043,7 @@ def _collect_training_frame_owned(
     result = training, row_counts, filter_metadata
     if training_lease is None:
         return result
-    return _OwnedValue(result, training_lease)
+    return OwnedValue(result, training_lease)
 
 
 def _training_control_working_set_bytes(frame_bytes: int, row_count: int) -> int:

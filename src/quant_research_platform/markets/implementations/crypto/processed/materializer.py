@@ -26,7 +26,6 @@ from quant_research_platform.markets.implementations.crypto.processed import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    _release_owned_value,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import DatasetInspection
@@ -133,7 +132,6 @@ def _materialize_requested_specs(
             continue
         target_time_window = _target_time_window(
             spec,
-            specs=specs,
             requested_by_id=requested_by_id,
             core_time_window=time_window,
         )
@@ -221,10 +219,7 @@ def _inspect_existing_dependency(
         def release_inspection() -> None:
             nonlocal inspection
             inspection = None
-            _release_owned_value(
-                owned,
-                owner="crypto.materializer.inspection.result",
-            )
+            owned.release(owner="crypto.materializer.inspection.result")
 
         session_stack.callback(release_inspection)
         materialization_validation.validate_existing_panel_materialization(
@@ -303,7 +298,6 @@ def _materialize_one(
 def _target_time_window(
     spec: ProcessedDataSpec,
     *,
-    specs: Mapping[str, ProcessedDataSpec],
     requested_by_id: Mapping[str, ProcessedDataSpec],
     core_time_window: TimeWindow,
 ) -> TimeWindow:

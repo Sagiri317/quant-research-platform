@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import stat
 import sys
@@ -13,10 +12,8 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    _OwnedValue,
-)
+from quant_research_platform.contracts.json_codec import parse_qrp_json_object
+from quant_research_platform.runtime.resources import OwnedValue
 from quant_research_platform.sources.binance.validation import (
     first_present,
     strict_boolean,
@@ -102,7 +99,6 @@ def _iter_raw_envelope_batches(
     path: Path,
     *,
     batch_size: int,
-    resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None = None,
 ) -> Iterator[object]:
     raw_path = Path(path)
@@ -179,7 +175,7 @@ def _iter_raw_envelope_batches(
                 batch.append(
                     _validate_envelope(
                         _loads_json(
-                            raw.decode("utf-8", errors="strict"),
+                            raw,
                             raw_path,
                             line_number=line_number,
                         ),
@@ -195,7 +191,7 @@ def _iter_raw_envelope_batches(
                     handle,
                     expected_identity=expected_identity,
                 )
-                yield _OwnedValue(tuple(batch), lease)
+                yield OwnedValue(tuple(batch), lease)
                 del batch
             else:
                 del buffer
@@ -449,10 +445,12 @@ def _reject_raw_reparse(metadata: os.stat_result) -> None:
         raise ValueError(_RAW_IDENTITY_ERROR)
 
 
-def _loads_json(text: str, path: Path, *, line_number: int | None = None) -> Any:
+def _loads_json(raw: bytes, path: Path, *, line_number: int | None = None) -> Any:
     try:
-        return json.loads(text)
-    except json.JSONDecodeError as exc:
+        return parse_qrp_json_object(raw)
+    except ValueError as exc:
+        if str(exc) == "qrp_json_top_level_object_required":
+            raise ValueError("binance_raw_envelope_required") from exc
         location = f":{line_number}" if line_number is not None else ""
         raise ValueError(f"malformed_binance_raw_row: {path.name}{location}") from exc
 

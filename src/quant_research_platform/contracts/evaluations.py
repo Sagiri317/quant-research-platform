@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
-from typing import TYPE_CHECKING
+from datetime import date, datetime
+from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
 
@@ -18,6 +18,7 @@ from quant_research_platform.contracts.signals import (
     SignalSpec,
     _cross_signal_id_column_overlaps,
 )
+from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
@@ -29,7 +30,12 @@ if TYPE_CHECKING:
 
 
 CORRELATION_RAW_REASON_CODES = frozenset(
-    {"insufficient_observations", "zero_variance", "nonfinite_result"}
+    {
+        "insufficient_observations",
+        "zero_variance",
+        "nonfinite_result",
+        "not_applicable",
+    }
 )
 CORRELATION_SUMMARY_REASON_CODES = frozenset(
     {
@@ -37,18 +43,22 @@ CORRELATION_SUMMARY_REASON_CODES = frozenset(
         "insufficient_observations",
         "zero_variance",
         "nonfinite_result",
+        "not_applicable",
     }
 )
 GROUP_SPREAD_REASON_CODES = frozenset({"no_group_transitions"})
+EvaluationAxis = Literal["cross_sectional", "single_asset_time_series"]
+EVALUATION_AXES = frozenset({"cross_sectional", "single_asset_time_series"})
 
 
 @dataclass(frozen=True)
 class EvaluationSpec:
-    run_id: str
+    evaluation_id: str
     market_id: MarketId
     research_dataset_id: str
     signals: tuple[_SignalSpec, ...]
     label_columns: tuple[str, ...]
+    evaluation_axis: EvaluationAxis = "cross_sectional"
     filter_mode: EvaluationFilterMode = "eligible"
     n_groups: int = 5
     segment_columns: tuple[str, ...] = ()
@@ -59,12 +69,17 @@ class EvaluationSpec:
     def __post_init__(self) -> None:
         if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_evaluation_contract_version")
-        validate_run_id(self.run_id)
+        validate_run_id(self.evaluation_id)
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         _validate_non_empty_string(
             self.research_dataset_id,
             "research_dataset_id_required",
         )
+        if (
+            type(self.evaluation_axis) is not str
+            or self.evaluation_axis not in EVALUATION_AXES
+        ):
+            raise ValueError("evaluation_axis_invalid")
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_signals(self.signals)
         _validate_column_tuple(self.label_columns, "label_columns")
@@ -136,19 +151,33 @@ class EvaluationDiagnostics:
             raise ValueError("invalid_evaluation_diagnostics_count: n_groups")
         if self.n_groups < 2:
             raise ValueError("evaluation_diagnostics_n_groups_too_small")
+        parsed_bounds: list[date | datetime | None] = []
         for field_name in ("min_timestamp", "max_timestamp"):
             value = getattr(self, field_name)
+            parsed: date | datetime | None = None
             if value is not None:
                 try:
-                    parsed = date.fromisoformat(value)
+                    parsed = (
+                        datetime.fromisoformat(value)
+                        if "T" in value
+                        else date.fromisoformat(value)
+                    )
                 except (TypeError, ValueError) as exc:
                     raise ValueError(f"invalid_evaluation_{field_name}") from exc
-                if parsed.isoformat() != value:
+                if time_value_isoformat(
+                    parsed,
+                    preserve_datetime=isinstance(parsed, datetime),
+                ) != value:
                     raise ValueError(f"invalid_evaluation_{field_name}")
+            parsed_bounds.append(parsed)
+        minimum, maximum = parsed_bounds
         if (
-            self.min_timestamp is not None
-            and self.max_timestamp is not None
-            and self.min_timestamp > self.max_timestamp
+            minimum is not None
+            and maximum is not None
+            and (
+                isinstance(minimum, datetime) != isinstance(maximum, datetime)
+                or minimum > maximum
+            )
         ):
             raise ValueError("invalid_evaluation_timestamp_range")
 

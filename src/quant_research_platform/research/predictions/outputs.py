@@ -39,9 +39,8 @@ from quant_research_platform.research.models.rank_ensemble import (
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _close_lease_preserving_primary,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -51,7 +50,7 @@ from quant_research_platform.runtime.resources import (
 @dataclass(frozen=True)
 class PredictionResult:
     spec: PredictionSpec
-    output_chunks: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]
+    output_chunks: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
     model_metadata: dict[str, object]
     prediction_metadata_factory: Callable[[], dict[str, object]]
     _close: Callable[[], None] = field(
@@ -142,7 +141,6 @@ def build_prediction_result_from_frames(
             work_columns=work_columns,
         ),
         spec=spec,
-        coefficients=coefficients,
         input_columns=input_columns,
         predictor=prediction_callable(coefficients, input_columns, prediction_model),
         build_state=build_state,
@@ -272,11 +270,10 @@ def _iter_prediction_output_frames(
     frames: Iterable[pd.DataFrame],
     *,
     spec: PredictionSpec,
-    coefficients: np.ndarray,
     input_columns: tuple[str, ...],
     predictor: Callable[[pd.DataFrame], np.ndarray],
     build_state: _PredictionBuildState,
-) -> Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]]:
+) -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
     usable_columns = tuple(dict.fromkeys((*spec.primary_key, *input_columns)))
     with closing_iterator(iter(frames)) as active_frames:
         for chunk in active_frames:
@@ -318,7 +315,7 @@ def _iter_prediction_output_frames(
                 usable_mask = None
                 test_frame = None
                 output = None
-                owned_output: _OwnedValue[pd.DataFrame] | None = None
+                owned_output: OwnedValue[pd.DataFrame] | None = None
                 try:
                     usable_mask = (
                         filtered.loc[:, list(input_columns)].notna().all(axis=1)
@@ -351,7 +348,7 @@ def _iter_prediction_output_frames(
                     if working_lease is not None:
                         working_lease.shrink_to(retained_bytes)
                         working_lease.transfer("research.prediction.result")
-                        owned_output = _OwnedValue(output, working_lease)
+                        owned_output = OwnedValue(output, working_lease)
                         working_lease = None
                     test_frame = None
                     usable_mask = None
@@ -361,10 +358,7 @@ def _iter_prediction_output_frames(
                         output = None
                         filtered = None
                         if owned_output is not None and owned_output.lease.active:
-                            _close_lease_preserving_primary(
-                                owned_output.lease,
-                                owner="research.prediction.result",
-                            )
+                            owned_output.release(owner="research.prediction.result")
                 except BaseException as primary:
                     output = None
                     test_frame = None
@@ -372,7 +366,7 @@ def _iter_prediction_output_frames(
                     filtered = None
                     if owned_output is not None and owned_output.lease.active:
                         try:
-                            owned_output.lease.close()
+                            owned_output.release(owner="research.prediction.result")
                         except BaseException as cleanup_error:
                             primary.add_note(
                                 "prediction output lease release also failed: "

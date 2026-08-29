@@ -257,7 +257,7 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
 
 def _evaluation_spec() -> EvaluationSpec:
     return EvaluationSpec(
-        run_id="eval-run",
+        evaluation_id="eval-run",
         market_id=MarketId("a_share"),
         research_dataset_id="demo",
         signals=(make_price_volume_signal_spec(),),

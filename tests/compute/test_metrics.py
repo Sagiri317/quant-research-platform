@@ -68,7 +68,7 @@ def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
 def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
     monkeypatch,
 ) -> None:
-    def fail_corr(*args, **kwargs):
+    def fail_corr(*_args, **_kwargs):
         raise AssertionError("IC should use vectorized correlation math")
 
     monkeypatch.setattr(pd.Series, "corr", fail_corr)
@@ -103,7 +103,7 @@ def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
 
 
 def test_compute_grouped_label_values_does_not_call_pandas_qcut(monkeypatch) -> None:
-    def fail_qcut(*args, **kwargs):
+    def fail_qcut(*_args, **_kwargs):
         raise AssertionError("group assignment should use deterministic rank buckets")
 
     monkeypatch.setattr(pd, "qcut", fail_qcut)
@@ -120,7 +120,7 @@ def test_compute_grouped_label_values_does_not_call_pandas_qcut(monkeypatch) -> 
 def test_compute_grouped_label_values_does_not_group_assigned_pairs(
     monkeypatch,
 ) -> None:
-    def fail_assign(*args, **kwargs):
+    def fail_assign(*_args, **_kwargs):
         raise AssertionError(
             "grouped label values should aggregate rank buckets directly"
         )

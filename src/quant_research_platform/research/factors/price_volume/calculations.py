@@ -255,7 +255,6 @@ def calculate_price_volume_factors(
         if column in requested_set:
             result[column] = rolling_drawdown(
                 price,
-                group_keys,
                 group_positions,
                 window,
             )

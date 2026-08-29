@@ -21,8 +21,8 @@ import pandas as pd
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
@@ -768,7 +768,7 @@ def _require_index_info_reconstruction_headroom(
     string_builder_span_bytes = result_bytes
     returned_string_span_bytes = result_bytes
     if payload_lease is None:
-        available_bytes = resource_policy.available_memory_bytes
+        available_bytes = resource_policy.planning_headroom_bytes
     elif payload_lease.active:
         available_bytes = payload_lease.reserved_bytes
     else:
@@ -823,7 +823,7 @@ def iter_private_export_chunks_with_policy(
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
     export_path = Path(path)
-    producer_bound = max(1, resource_policy.available_memory_bytes // 2)
+    producer_bound = max(1, resource_policy.planning_headroom_bytes // 2)
     payload_lease_ref: list[MemoryLease | None] = [None]
 
     if dataset == "index_info":
@@ -907,7 +907,7 @@ def iter_private_export_chunks_with_policy(
                 row = None
                 next_header = None
                 header = None
-                yield _OwnedValue(frame, lease)
+                yield OwnedValue(frame, lease)
                 del frame, pending
                 payload_lease_ref[0] = None
         finally:
@@ -1025,7 +1025,7 @@ def _require_raw_conversion_headroom(
     payload_lease: MemoryLease | None = None,
 ) -> None:
     if payload_lease is None:
-        available_bytes = resource_policy.available_memory_bytes
+        available_bytes = resource_policy.planning_headroom_bytes
     elif payload_lease.active:
         available_bytes = payload_lease.reserved_bytes
     else:

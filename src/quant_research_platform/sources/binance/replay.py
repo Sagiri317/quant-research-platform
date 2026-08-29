@@ -29,12 +29,14 @@ from quant_research_platform.contracts.order_book import (
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
+    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
+    RECORDING_SCOPE_MARKET_TYPES,
     SPOT_MARKET_TYPE,
 )
 from quant_research_platform.sources.binance.raw_exports import (
@@ -43,16 +45,13 @@ from quant_research_platform.sources.binance.raw_exports import (
     _raw_path_session,
     _verify_raw_file_handle,
 )
-from quant_research_platform.sources.binance.recorder import (
-    RecorderStream,
-    validate_stream_payload,
-)
 from quant_research_platform.sources.binance.validation import (
     strict_boolean,
     strict_iso_timestamp,
     strict_non_negative_float,
     strict_non_negative_integer,
     strict_positive_float,
+    validate_market_payload,
 )
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -96,6 +95,10 @@ _CONNECTION_CLOSE_REASONS = frozenset(
     {"stop", "connection_problem", "depth_resync", "failure"}
 )
 _CONNECTION_INTERVAL_MAX_RECORD_BYTES = 64 * 1024
+_COVERAGE_SQLITE_PAGE_BYTES = 4096
+_COVERAGE_DISK_BATCH_ROWS = 256
+_COVERAGE_SQLITE_STARTUP_BYTES = 1024 * 1024
+_COVERAGE_SQLITE_ROW_BYTES = _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 4096
 
 
 class _DigestingReader:
@@ -162,20 +165,36 @@ class _ConnectionCoverageIndex:
             ) from exc
         if self.identity.size != descriptor["compressed_bytes"]:
             raise ValueError("binance_replay_connection_intervals_invalid")
-        self._scratch = tempfile.TemporaryDirectory(
-            prefix="qrp-binance-coverage-"
+        require_free_disk_headroom(
+            Path(tempfile.gettempdir()),
+            reserve_bytes=2 * _COVERAGE_SQLITE_STARTUP_BYTES,
         )
-        self._database = sqlite3.connect(
-            Path(self._scratch.name) / "coverage.sqlite3"
-        )
-        self._database.execute(
-            "CREATE TABLE coverage ("
-            "connection_id TEXT PRIMARY KEY, market TEXT NOT NULL, "
-            "data_kind TEXT NOT NULL, stream TEXT NOT NULL, "
-            "segment_id TEXT, opened_ns INTEGER NOT NULL, "
-            "closed_ns INTEGER NOT NULL)"
-        )
-        self._load(markets=markets, resource_policy=resource_policy)
+        self._scratch = None
+        self._database = None
+        try:
+            self._scratch = tempfile.TemporaryDirectory(
+                prefix="qrp-binance-coverage-"
+            )
+            self._database = sqlite3.connect(
+                Path(self._scratch.name) / "coverage.sqlite3"
+            )
+            startup_pages = (
+                _COVERAGE_SQLITE_STARTUP_BYTES + _COVERAGE_SQLITE_PAGE_BYTES - 1
+            ) // _COVERAGE_SQLITE_PAGE_BYTES
+            self._database.execute(
+                f"PRAGMA main.max_page_count={startup_pages}"
+            )
+            self._database.execute(
+                "CREATE TABLE coverage ("
+                "connection_id TEXT PRIMARY KEY, market TEXT NOT NULL, "
+                "data_kind TEXT NOT NULL, stream TEXT NOT NULL, "
+                "segment_id TEXT, opened_ns INTEGER NOT NULL, "
+                "closed_ns INTEGER NOT NULL)"
+            )
+            self._load(markets=markets, resource_policy=resource_policy)
+        except BaseException:
+            self.close()
+            raise
 
     def _load(
         self,
@@ -190,7 +209,17 @@ class _ConnectionCoverageIndex:
                 "binance_replay_connection_intervals_invalid"
             ) from exc
         digesting_handle = _DigestingReader(raw_handle)
-        gzip_handle = gzip.GzipFile(fileobj=digesting_handle, mode="rb")
+        try:
+            gzip_handle = gzip.GzipFile(fileobj=digesting_handle, mode="rb")
+        except BaseException as primary:
+            try:
+                raw_handle.close()
+            except BaseException as close_error:
+                primary.add_note(
+                    "Binance connection coverage raw handle close also failed: "
+                    f"{type(close_error).__name__}"
+                )
+            raise
         count = 0
         try:
             while True:
@@ -215,6 +244,13 @@ class _ConnectionCoverageIndex:
                     interval,
                     markets=markets,
                 )
+                if count % _COVERAGE_DISK_BATCH_ROWS == 0:
+                    self._admit_disk_growth(
+                        min(
+                            _COVERAGE_DISK_BATCH_ROWS,
+                            self._descriptor["record_count"] - count,
+                        )
+                    )
                 try:
                     self._database.execute(
                         "INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -264,6 +300,25 @@ class _ConnectionCoverageIndex:
                     )
                 else:
                     raise
+
+    def _admit_disk_growth(self, row_count: int) -> None:
+        assert self._scratch is not None
+        assert self._database is not None
+        growth_bytes = max(1, row_count) * _COVERAGE_SQLITE_ROW_BYTES
+        reserve_bytes = 2 * growth_bytes
+        require_free_disk_headroom(
+            Path(self._scratch.name),
+            reserve_bytes=reserve_bytes,
+        )
+        current_pages = int(
+            self._database.execute("PRAGMA main.page_count").fetchone()[0]
+        )
+        growth_pages = (
+            reserve_bytes + _COVERAGE_SQLITE_PAGE_BYTES - 1
+        ) // _COVERAGE_SQLITE_PAGE_BYTES
+        self._database.execute(
+            f"PRAGMA main.max_page_count={current_pages + growth_pages}"
+        )
 
     def coverage(
         self,
@@ -321,10 +376,39 @@ class _ConnectionCoverageIndex:
             raise ValueError("binance_replay_file_identity_mismatch")
 
     def close(self) -> None:
+        primary = sys.exception()
+        failure: BaseException | None = None
+        database = self._database
+        scratch = self._scratch
+        self._database = None
+        self._scratch = None
         try:
-            self._database.close()
-        finally:
-            self._scratch.cleanup()
+            if database is not None:
+                database.close()
+        except BaseException as close_error:
+            if primary is not None:
+                primary.add_note(
+                    "Binance connection coverage database close also failed: "
+                    f"{type(close_error).__name__}"
+                )
+            else:
+                failure = close_error
+        try:
+            if scratch is not None:
+                scratch.cleanup()
+        except BaseException as cleanup_error:
+            note = (
+                "Binance connection coverage scratch cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
+            if primary is not None:
+                primary.add_note(note)
+            elif failure is None:
+                failure = cleanup_error
+            else:
+                failure.add_note(note)
+        if failure is not None:
+            raise failure
 
 
 @dataclass(frozen=True)
@@ -361,7 +445,6 @@ class RecorderRun:
                     item,
                     manifest=self.manifest,
                     resource_policy=self.resource_policy,
-                    coverage_index=self._coverage_index,
                     record_observer=_record_observer,
                 )
                 for item in group
@@ -372,7 +455,6 @@ class RecorderRun:
             ):
                 _validate_record_coverage(
                     record,
-                    manifest=self.manifest,
                     coverage_index=self._coverage_index,
                 )
                 capture_seq = record["capture_seq"]
@@ -505,7 +587,14 @@ def _read_run_manifest(
 def _validate_run_manifest(value: object) -> None:
     if not isinstance(value, dict) or value.get("schema_id") != "qrp-binance-recorder":
         raise ValueError("binance_replay_run_manifest_identity_invalid")
-    for key in ("run_id", "venue", "symbol", "status", "market_data_status"):
+    for key in (
+        "run_id",
+        "recording_scope",
+        "venue",
+        "symbol",
+        "status",
+        "market_data_status",
+    ):
         if not isinstance(value.get(key), str) or not value[key]:
             raise ValueError("binance_replay_run_manifest_invalid")
     try:
@@ -514,17 +603,19 @@ def _validate_run_manifest(value: object) -> None:
         raise ValueError("binance_replay_run_manifest_invalid") from exc
     if value["venue"] != "binance" or value["symbol"] != "BTCUSDT":
         raise ValueError("binance_replay_run_manifest_identity_invalid")
-    if value["market_data_status"] not in {"PASS", "PARTIAL", "FAIL"}:
+    statuses = {"PASS", "PARTIAL", "FAIL"}
+    if (
+        value["status"] not in statuses
+        or value["market_data_status"] not in statuses
+        or value["status"] != value["market_data_status"]
+    ):
         raise ValueError("binance_replay_run_manifest_invalid")
     market_types = value.get("market_types")
+    recording_scope = value["recording_scope"]
     if (
-        not isinstance(market_types, list)
-        or not market_types
-        or any(
-            market not in {SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE}
-            for market in market_types
-        )
-        or len(set(market_types)) != len(market_types)
+        recording_scope not in RECORDING_SCOPE_MARKET_TYPES
+        or not isinstance(market_types, list)
+        or market_types != list(RECORDING_SCOPE_MARKET_TYPES[recording_scope])
     ):
         raise ValueError("binance_replay_run_manifest_invalid")
     market_metadata = value.get("market_metadata")
@@ -685,7 +776,6 @@ def _validate_connection_interval(
 def _validate_record_coverage(
     record: dict[str, Any],
     *,
-    manifest: dict[str, Any],
     coverage_index: _ConnectionCoverageIndex,
 ) -> None:
     data_kind = record["data_kind"]
@@ -802,7 +892,16 @@ def _sha256_file(
             _verify_raw_file_handle(handle, expected_identity=identity)
             return digest.hexdigest()
         finally:
-            handle.close()
+            primary = sys.exception()
+            try:
+                handle.close()
+            except BaseException as close_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "Binance replay file handle close also failed: "
+                    f"{type(close_error).__name__}"
+                )
 
 
 def _overlapping_capture_groups(files: list[_RunFile]) -> Iterator[list[_RunFile]]:
@@ -837,12 +936,13 @@ def _iter_raw_file(
     *,
     manifest: dict[str, Any],
     resource_policy: RuntimeResourcePolicy,
-    coverage_index: _ConnectionCoverageIndex,
     record_observer: Callable[[dict[str, Any], str, int, int], None] | None = None,
 ) -> Iterator[dict[str, Any]]:
     metadata = item.metadata
     path = root / metadata["path"]
     bound = _json_record_working_set_bytes(metadata["max_record_bytes"]) + 64 * 1024
+    if bound > resource_policy.planning_headroom_bytes:
+        raise MemoryError("runtime_memory_budget_exceeded")
     try:
         raw_handle = path.open("rb")
     except OSError as exc:
@@ -925,7 +1025,16 @@ def _iter_raw_file(
 
 
     finally:
-        raw_handle.close()
+        primary = sys.exception()
+        try:
+            raw_handle.close()
+        except BaseException as close_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "Binance replay raw handle close also failed: "
+                f"{type(close_error).__name__}"
+            )
 
 
 def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
@@ -971,13 +1080,10 @@ def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
         if "segment_id" in value:
             raise ValueError("binance_replay_segment_identity_invalid")
     if metadata["data_kind"] in {"depth", "agg_trades"}:
-        validate_stream_payload(
-            RecorderStream(
-                metadata["market"],
-                metadata["data_kind"],
-                metadata["stream"],
-                "",
-            ),
+        validate_market_payload(
+            metadata["market"],
+            metadata["data_kind"],
+            metadata["symbol"],
             value["payload"],
         )
 
@@ -1103,7 +1209,7 @@ class DepthReconstructor:
     def feed(
         self,
         record: dict[str, Any],
-    ) -> Iterator[_OwnedValue[BookState] | BookBoundary]:
+    ) -> Iterator[OwnedValue[BookState] | BookBoundary]:
         if self._invalid:
             return
         if record.get("market_type") != self.market_type:
@@ -1232,7 +1338,7 @@ class DepthReconstructor:
             self.stats.emitted_states += 1
             state_lease.transfer("binance.replay.book_state_consumer")
             transferred = True
-            yield _OwnedValue(state, state_lease)
+            yield OwnedValue(state, state_lease)
         except BaseException:
             if not transferred:
                 state_lease.close()
@@ -1360,7 +1466,7 @@ def iter_reconstructed_depth(
     required_levels: int = 10,
     max_book_levels: int = 10_000,
     stats: ReconstructionStats | None = None,
-) -> Iterator[_OwnedValue[BookState] | BookBoundary]:
+) -> Iterator[OwnedValue[BookState] | BookBoundary]:
     """Replay one venue book with one capture-ordered snapshot/delta pass."""
 
     if market_type not in run.manifest["market_types"]:

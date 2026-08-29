@@ -15,10 +15,9 @@ from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
     _close_lease_preserving_primary,
-    _OwnedValue,
-    _release_owned_value,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -65,7 +64,7 @@ def fingerprint_dataset_session(
             resource_policy=resource_policy,
         )
         result = owned.value
-        _release_owned_value(owned, owner="storage.dataset.fingerprint.result")
+        owned.release(owner="storage.dataset.fingerprint.result")
         return result
 
 
@@ -73,7 +72,7 @@ def _fingerprint_dataset_session_owned(
     context: DatasetSession,
     *,
     resource_policy: RuntimeResourcePolicy,
-) -> _OwnedValue[DatasetFingerprint]:
+) -> OwnedValue[DatasetFingerprint]:
     try:
         result_lease = resource_policy.lease(
             "storage.dataset.fingerprint.result",
@@ -100,8 +99,8 @@ def _fingerprint_dataset_session_owned_with_lease(
     *,
     resource_policy: RuntimeResourcePolicy,
     result_lease: MemoryLease,
-) -> _OwnedValue[DatasetFingerprint]:
-    payload_target_bytes = resource_policy.available_memory_bytes
+) -> OwnedValue[DatasetFingerprint]:
+    payload_target_bytes = resource_policy.planning_headroom_bytes
     operation_headroom_bytes = resource_policy.memory_budget_bytes
     operation_headroom_bytes -= resource_policy.used_memory_bytes
     if operation_headroom_bytes <= 0:
@@ -218,7 +217,7 @@ def _fingerprint_dataset_session_owned_with_lease(
         if result_bytes > result_lease.reserved_bytes:
             raise ValueError("dataset_fingerprint_result_bound_invalid")
         result_lease.shrink_to(result_bytes)
-        return _OwnedValue(result, result_lease)
+        return OwnedValue(result, result_lease)
     except BaseException:
         result = None
         raise

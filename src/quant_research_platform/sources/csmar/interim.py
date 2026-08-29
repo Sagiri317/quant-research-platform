@@ -30,8 +30,8 @@ from quant_research_platform.contracts.validation import (
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -809,7 +809,7 @@ def _iter_pruned_interim_frames(
                             owned = chunks.send(lease)
                         except StopIteration:
                             break
-                        if not isinstance(owned, _OwnedValue):
+                        if not isinstance(owned, OwnedValue):
                             raise TypeError("invalid_csmar_owned_frame")
                         if owned.lease is not lease:
                             raise RuntimeError("runtime_memory_lease_transfer_mismatch")
@@ -881,7 +881,7 @@ def _iter_pruned_interim_frames(
                         if stop < len(chunk):
                             remainder_bound = min(
                                 lease.reserved_bytes,
-                                max(1, policy.available_memory_bytes),
+                                max(1, policy.planning_headroom_bytes),
                             )
                             next_pending_lease = policy.lease(
                                 "source.csmar.interim.pending",
@@ -907,7 +907,7 @@ def _iter_pruned_interim_frames(
                         if data_id not in SOURCE_REFERENCE_DATA_IDS:
                             lease.shrink_to(chunk_bytes + pruned_bytes + 64 * 1024)
                         del report, candidate
-                        owned_output = _OwnedValue(pruned, lease)
+                        owned_output = OwnedValue(pruned, lease)
                         del pruned
                         del owned, chunk
                         pending_frame = None
@@ -979,7 +979,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + chunk_bytes + normalization_preallocation_bytes,
-        policy.available_memory_bytes,
+        policy.planning_headroom_bytes,
     )
     normalized = normalize_raw_frame(chunk, data_id)
     normalized_bytes = pandas_frame_payload_bytes(normalized)
@@ -991,7 +991,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filter_preallocation_bytes,
-        policy.available_memory_bytes,
+        policy.planning_headroom_bytes,
     )
     filtered = _filter_normalized_frame(
         normalized,
@@ -1002,14 +1002,14 @@ def _transform_interim_chunk(
     filtered_bytes = pandas_frame_payload_bytes(filtered)
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filtered_bytes,
-        policy.available_memory_bytes,
+        policy.planning_headroom_bytes,
     )
     del normalized
     if filtered.empty:
         return filtered, {}
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + filtered_bytes,
-        policy.available_memory_bytes,
+        policy.planning_headroom_bytes,
     )
     pruned, report = _apply_output_column_rules_validated(
         filtered,
@@ -1018,7 +1018,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + pandas_frame_payload_bytes(pruned),
-        policy.available_memory_bytes,
+        policy.planning_headroom_bytes,
     )
     del filtered
     return pruned, report
@@ -1119,7 +1119,7 @@ def _iter_deduped_reference_frames(
                         except StopIteration:
                             completed = True
                             break
-                        if not isinstance(owned, _OwnedValue):
+                        if not isinstance(owned, OwnedValue):
                             raise TypeError("invalid_csmar_reference_owned_frame")
                         if owned.lease is not lease:
                             raise RuntimeError("runtime_memory_lease_transfer_mismatch")
@@ -1207,7 +1207,7 @@ def _iter_deduped_reference_frames(
                                 raise ValueError("csmar_reference_bound_invalid")
                             lease.shrink_to(actual_bound)
                             del keep_positions, source_frame, owned
-                            owned_output = _OwnedValue(output, lease)
+                            owned_output = OwnedValue(output, lease)
                             del output
                             yield owned_output
                             del owned_output
@@ -1235,7 +1235,7 @@ def _iter_deduped_reference_frames(
                             raise ValueError("csmar_reference_bound_invalid")
                         lease.shrink_to(empty_bound)
                         del keep_positions, source_frame, owned
-                        owned_output = _OwnedValue(empty_output, lease)
+                        owned_output = OwnedValue(empty_output, lease)
                         del empty_output
                         yield owned_output
                         del owned_output

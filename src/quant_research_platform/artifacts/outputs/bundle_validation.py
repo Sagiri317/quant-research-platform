@@ -23,13 +23,13 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.manifests import read_bounded_qrp_json
 from quant_research_platform.storage.parquet import (
     DatasetFileIdentity,
     _opened_parquet,
     dataset_file_identity,
     parquet_decoded_working_set_bounds,
 )
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
 
 def validate_output_bundle(
@@ -201,6 +201,7 @@ def read_prediction_output_bundle(
     root: Path,
     *,
     expected_output_id: str,
+    expected_run_id: str | None = None,
     time_window=None,  # noqa: ANN001
 ) -> Iterator[tuple[dict[str, object], _PredictionLookup]]:
     lookup: _PredictionLookup | None = None
@@ -359,6 +360,7 @@ def read_prediction_output_bundle(
             manifest, _members = validate_output_bundle(
                 root,
                 expected_output_id=expected_output_id,
+                expected_run_id=expected_run_id,
                 observer=read_prediction,
             )
             if lookup is None:

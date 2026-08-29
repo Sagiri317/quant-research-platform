@@ -4,66 +4,40 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.portfolio_returns import (
-    _build_portfolio_return_record_from_positions,
+    _portfolio_return_components,
     _timestamp_label_lookup,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 
 
 def test_dataframe_portfolio_return_record_handles_empty_legs() -> None:
-    group_values = {"timestamp": pd.Timestamp("2024-01-02"), "signal": "factor"}
     label_lookup = {"A": 0.01, "B": -0.02}
 
-    long_short = _build_portfolio_return_record_from_positions(
-        group_values=group_values,
+    long_short = _portfolio_return_components(
         portfolio_mode="long_short",
         positions={"A": 1.0},
         label_lookup=label_lookup,
-        return_source_column="label",
-        turnover=1.0,
-        cost=0.0,
-        segment_columns=(),
     )
 
-    assert long_short is not None
-    assert long_short["long_count"] == 1
-    assert long_short["short_count"] == 0
-    assert long_short["gross_portfolio_return"] == pytest.approx(0.01)
+    assert long_short == pytest.approx((0.01, 0.0, 0.01, 1, 0))
 
-    long_only = _build_portfolio_return_record_from_positions(
-        group_values=group_values,
+    long_only = _portfolio_return_components(
         portfolio_mode="long_only",
         positions={"A": 1.0},
         label_lookup=label_lookup,
-        return_source_column="label",
-        turnover=1.0,
-        cost=0.001,
-        segment_columns=(),
     )
 
-    assert long_only is not None
-    assert long_only["long_count"] == 1
-    assert long_only["short_count"] == 0
-    assert long_only["net_portfolio_return"] == pytest.approx(0.009)
+    assert long_only == pytest.approx((0.01, 0.0, 0.01, 1, 0))
 
 
-def test_dataframe_portfolio_return_keeps_cash_row_and_exit_cost() -> None:
-    record = _build_portfolio_return_record_from_positions(
-        group_values={"timestamp": pd.Timestamp("2024-01-02"), "signal": "factor"},
+def test_dataframe_portfolio_return_components_keep_cash_row() -> None:
+    components = _portfolio_return_components(
         portfolio_mode="long_short",
         positions={},
         label_lookup={},
-        return_source_column="label",
-        turnover=1.0,
-        cost=0.001,
-        segment_columns=(),
     )
 
-    assert record is not None
-    assert record["gross_portfolio_return"] == 0.0
-    assert record["net_portfolio_return"] == pytest.approx(-0.001)
-    assert record["long_count"] == 0
-    assert record["short_count"] == 0
+    assert components == (0.0, 0.0, 0.0, 0, 0)
 
 
 @pytest.mark.parametrize(
@@ -74,18 +48,10 @@ def test_dataframe_portfolio_return_rejects_nonfinite_active_return(
     label_lookup: dict[str, float],
 ) -> None:
     with pytest.raises(ValueError, match="nonfinite_active_position_return"):
-        _build_portfolio_return_record_from_positions(
-            group_values={
-                "timestamp": pd.Timestamp("2024-01-02"),
-                "signal": "factor",
-            },
+        _portfolio_return_components(
             portfolio_mode="long_only",
             positions={"A": 1.0},
             label_lookup=label_lookup,
-            return_source_column="label",
-            turnover=1.0,
-            cost=0.0,
-            segment_columns=(),
         )
 
 

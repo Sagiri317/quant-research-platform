@@ -33,7 +33,6 @@ from quant_research_platform.runtime.logical_paths import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
-    _release_owned_value,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets.inspection import (
@@ -295,10 +294,7 @@ def _build_validation_summary(
             except BaseException:
                 if owned_final is not None:
                     final_inspection = None
-                    _release_owned_value(
-                        owned_final,
-                        owner="workflow.validation.reinspection.result",
-                    )
+                    owned_final.release(owner="workflow.validation.reinspection.result")
                 raise
         except MemoryError:
             raise ValueError(
@@ -308,10 +304,7 @@ def _build_validation_summary(
             raise ValueError("validation_summary_dataset_identity_changed") from None
         else:
             final_inspection = None
-            _release_owned_value(
-                owned_final,
-                owner="workflow.validation.reinspection.result",
-            )
+            owned_final.release(owner="workflow.validation.reinspection.result")
             if not unchanged:
                 raise ValueError(
                     "validation_summary_dataset_identity_changed"
@@ -419,10 +412,7 @@ def _stage_dataset_inspections(
         finally:
             if owned is not None:
                 inspection = None
-                _release_owned_value(
-                    owned,
-                    owner="workflow.validation.inspection.result",
-                )
+                owned.release(owner="workflow.validation.inspection.result")
         database.execute(
             "INSERT INTO inspections("
             "root_index, logical_layer, manifest_path, identity_hash, "

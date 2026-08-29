@@ -3,6 +3,7 @@ from __future__ import annotations
 import inspect
 import math
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.order_book import (
@@ -18,8 +19,8 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 )
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
-    iter_label_rows,
-    iter_panel_rows,
+    iter_label_frames,
+    iter_panel_frames,
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
     HFT_MODEL_LABEL_HORIZON_MS,
@@ -27,6 +28,25 @@ from quant_research_platform.markets.implementations.crypto.research_scenarios i
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from tests.helpers.binance_hft import _coverage, _quote
+
+
+def _panel_rows(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    frames = list(
+        iter_panel_frames(
+            *args,
+            market_id="crypto",
+            asset_id="btc_usdt",
+            batch_rows=2,
+            **kwargs,
+        )
+    )
+    if not frames:
+        return []
+    return pd.concat(frames, ignore_index=True).to_dict("records")
+
+
+def _row_timestamp_ms(row: dict[str, object]) -> int:
+    return pd.Timestamp(row["timestamp"]).value // 1_000_000
 
 
 def _state(
@@ -173,7 +193,7 @@ def test_unobserved_state_is_hidden_from_panel_and_taker() -> None:
     state = _state(100, event_time_ms=0, transaction_time_ms=0)
 
     rows = list(
-        iter_panel_rows(
+        _panel_rows(
             [state],
             [],
             start_ms=0,
@@ -204,7 +224,7 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
     trade_coverage = {"trade-connection-1": (0, 200_000_000)}
 
     rows = list(
-        iter_panel_rows(
+        _panel_rows(
             [initial, just_after_boundary],
             [],
             start_ms=100,
@@ -249,13 +269,13 @@ def test_panel_coverage_uses_exact_half_open_nanoseconds() -> None:
     }
 
     covered = list(
-        iter_panel_rows(
+        _panel_rows(
             **common,
             book_coverage={"book-1": (100_000_000, 300_000_000)},
         )
     )
     not_fully_covered = list(
-        iter_panel_rows(
+        _panel_rows(
             **common,
             book_coverage={"book-1": (100_000_001, 300_000_000)},
         )
@@ -267,7 +287,7 @@ def test_panel_coverage_uses_exact_half_open_nanoseconds() -> None:
 def test_trade_gap_is_missing_not_zero_volume() -> None:
     books = [_state(0), _state(300)]
     missing = list(
-        iter_panel_rows(
+        _panel_rows(
             books,
             [],
             start_ms=100,
@@ -279,7 +299,7 @@ def test_trade_gap_is_missing_not_zero_volume() -> None:
     assert missing == []
 
     complete = list(
-        iter_panel_rows(
+        _panel_rows(
             books,
             [],
             start_ms=100,
@@ -288,13 +308,13 @@ def test_trade_gap_is_missing_not_zero_volume() -> None:
             trade_coverage={"trade-connection-1": _coverage(0, 300)},
         )
     )
-    assert [row["timestamp_ms"] for row in complete] == [100, 200]
+    assert [_row_timestamp_ms(row) for row in complete] == [100, 200]
     assert [row["trade_volume_100ms"] for row in complete] == [0.0, 0.0]
 
 
 def test_depth_reconnect_does_not_make_first_partial_interval_valid() -> None:
     rows = list(
-        iter_panel_rows(
+        _panel_rows(
             [
                 _state(0),
                 _boundary(150),
@@ -307,12 +327,12 @@ def test_depth_reconnect_does_not_make_first_partial_interval_valid() -> None:
             trade_coverage={"trade-connection-1": _coverage(0, 300)},
         )
     )
-    assert [row["timestamp_ms"] for row in rows] == [100]
+    assert [_row_timestamp_ms(row) for row in rows] == [100]
 
 
 def test_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
     rows = list(
-        iter_panel_rows(
+        _panel_rows(
             [_state(0)],
             [_trade(200, connection_id="trade-connection-2")],
             start_ms=100,
@@ -324,7 +344,7 @@ def test_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
             },
         )
     )
-    assert [row["timestamp_ms"] for row in rows] == [100, 300]
+    assert [_row_timestamp_ms(row) for row in rows] == [100, 300]
 
 
 def test_maker_uses_local_observation_order_for_same_time_events() -> None:
@@ -381,7 +401,7 @@ def test_maker_uses_local_observation_order_for_same_time_events() -> None:
 def test_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> None:
     trade = _trade(50, quantity=2.0, visible_quantity=1.0)
     rows = list(
-        iter_panel_rows(
+        _panel_rows(
             [_state(0)],
             [trade],
             start_ms=100,
@@ -577,5 +597,11 @@ def test_hft_grid_is_the_only_model_and_label_step_owner() -> None:
         }
         for index in range(2)
     ]
-    labels = list(iter_label_rows(rows, horizons_ms=(HFT_GRID_MS,)))
+    labels = pd.concat(
+        iter_label_frames(
+            (pd.DataFrame(rows),),
+            horizons_ms=(HFT_GRID_MS,),
+        ),
+        ignore_index=True,
+    ).to_dict("records")
     assert labels[0][f"future_mid_return_{HFT_GRID_MS}ms"] == 0.0

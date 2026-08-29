@@ -11,8 +11,8 @@ import pandas as pd
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     RuntimeResourcePolicy,
-    _OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -146,7 +146,7 @@ def _iter_complete_time_sized_frames_impl(
     resource_policy = current_runtime_resource_policy()
     if resource_policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    pending: _OwnedValue[pd.DataFrame] | None = None
+    pending: OwnedValue[pd.DataFrame] | None = None
     pending_timestamp: pd.Timestamp | None = None
     emitted_max: pd.Timestamp | None = None
     saw_empty = False
@@ -246,14 +246,14 @@ def _iter_complete_time_sized_frames_impl(
                             continue
                         yield pending.value
                         emitted_max = pending_timestamp
-                        pending.lease.close()
+                        pending.release(owner="research.time.pending")
                         pending = None
                         pending_timestamp = None
                         start = first_stop
                     else:
                         yield pending.value
                         emitted_max = pending_timestamp
-                        pending.lease.close()
+                        pending.release(owner="research.time.pending")
                         pending = None
                         pending_timestamp = None
 
@@ -291,7 +291,7 @@ def _iter_complete_time_sized_frames_impl(
                         raise ValueError(
                             "research_indivisible_time_unit_exceeds_task_memory_budget"
                         )
-                    pending = _OwnedValue(pending_value, pending_lease)
+                    pending = OwnedValue(pending_value, pending_lease)
                 except BaseException as primary:
                     try:
                         pending_lease.close()
@@ -310,7 +310,7 @@ def _iter_complete_time_sized_frames_impl(
         yield pending.value
     finally:
         if pending is not None:
-            pending.lease.close()
+            pending.release(owner="research.time.pending")
 
 def _selected_frame_payload_bytes(
     frame: pd.DataFrame,

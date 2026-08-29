@@ -70,7 +70,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         ignore_index=True,
     )
     spec = EvaluationSpec(
-        run_id="eval_memory_safe",
+        evaluation_id="eval_memory_safe",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -194,7 +194,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
 def test_evaluation_merges_adjacent_chunks_that_split_one_timestamp() -> None:
     frame = make_filter_mode_frame()
     spec = EvaluationSpec(
-        run_id="eval_split_timestamp",
+        evaluation_id="eval_split_timestamp",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -339,7 +339,7 @@ def test_evaluation_rejects_non_monotonic_time_chunk_order() -> None:
     second = frame.assign(timestamp=pd.Timestamp("2024-01-03"))
     late_overlap = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
     spec = EvaluationSpec(
-        run_id="eval_non_monotonic_chunks",
+        evaluation_id="eval_non_monotonic_chunks",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -366,7 +366,7 @@ def test_evaluation_rejects_pending_non_monotonic_time_overlap() -> None:
     first = frame.assign(timestamp=pd.Timestamp("2024-01-03"))
     earlier = frame.assign(timestamp=pd.Timestamp("2024-01-02"))
     spec = EvaluationSpec(
-        run_id="eval_pending_non_monotonic_chunks",
+        evaluation_id="eval_pending_non_monotonic_chunks",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -446,7 +446,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
     first = frame.iloc[:3]
     second = frame.iloc[3:]
     spec = EvaluationSpec(
-        run_id="eval_boundary_over_budget",
+        evaluation_id="eval_boundary_over_budget",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -486,7 +486,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
 def test_evaluation_streaming_output_honors_shared_root_headroom() -> None:
     frame = make_filter_mode_frame()
     spec = EvaluationSpec(
-        run_id="eval_shared_headroom",
+        evaluation_id="eval_shared_headroom",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -523,7 +523,7 @@ def test_evaluation_streaming_output_honors_shared_root_headroom() -> None:
 
 def test_evaluation_rejects_invalid_time_chunk_timestamps() -> None:
     spec = EvaluationSpec(
-        run_id="bad_timestamp",
+        evaluation_id="bad_timestamp",
         market_id=MarketId("a_share"),
         research_dataset_id="demo_filter",
         signals=(make_signal_spec("factor"),),
@@ -590,7 +590,7 @@ def test_model_forced_tiny_resource_chunks_match_default_without_design_matrix(
     original_filter = model_fitting._filter_mode_scope
     filtered_chunk_rows: list[int] = []
 
-    def fail_column_stack(*args, **kwargs):
+    def fail_column_stack(*_args, **_kwargs):
         raise AssertionError("model fit must not allocate a full intercept matrix")
 
     monkeypatch.setattr(

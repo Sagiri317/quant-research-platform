@@ -23,7 +23,7 @@ from quant_research_platform.contracts.predictions import (
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     current_runtime_resource_policy,
     require_free_disk_headroom,
 )
@@ -190,7 +190,7 @@ def select_best_validation_trial(
 
 
 def evaluate_model_trial_metrics_from_chunks(
-    chunks: Iterable[pd.DataFrame | _OwnedValue[pd.DataFrame]],
+    chunks: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]],
     *,
     model_id: str,
     label_column: str,
@@ -236,9 +236,9 @@ def evaluate_model_trial_metrics_from_chunks(
                 with closing_iterator(source):
                     for item in source:
                         owned_lease = (
-                            item.lease if isinstance(item, _OwnedValue) else None
+                            item.lease if isinstance(item, OwnedValue) else None
                         )
-                        frame = item.value if isinstance(item, _OwnedValue) else item
+                        frame = item.value if isinstance(item, OwnedValue) else item
                         if frame.empty:
                             if owned_lease is not None:
                                 owned_lease.close()

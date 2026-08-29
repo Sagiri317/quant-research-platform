@@ -6,7 +6,10 @@ import hashlib
 import json
 from pathlib import Path
 
-from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+from quant_research_platform.sources.binance.ids import (
+    FUTURES_HFT_RECORDING_SCOPE,
+    FUTURES_MARKET_TYPE,
+)
 
 
 def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:
@@ -161,6 +164,7 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
     manifest = {
         "schema_id": "qrp-binance-recorder",
         "run_id": "workflow-run",
+        "recording_scope": FUTURES_HFT_RECORDING_SCOPE,
         "status": "PASS",
         "market_data_status": "PASS",
         "venue": "binance",

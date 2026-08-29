@@ -205,7 +205,7 @@ def test_model_selection_compares_common_validation_primary_keys(
             for item in chunks:
                 frame_value = (
                     item.value
-                    if isinstance(item, prediction_runner._OwnedValue)  # noqa: SLF001
+                    if isinstance(item, prediction_runner.OwnedValue)  # noqa: SLF001
                     else item
                 )
                 keys.extend(
@@ -317,7 +317,7 @@ def test_model_selection_drops_candidate_model_alias_before_lease_close(
             "research.test.candidate_model",
             1024,
         )
-        return prediction_runner._OwnedValue(  # noqa: SLF001
+        return prediction_runner.OwnedValue(  # noqa: SLF001
             prediction_runner.fitting.ModelFitResult(
                 coefficients=np.array([0.0, 1.0]),
                 metadata={},
@@ -392,7 +392,7 @@ def test_prediction_build_failure_drops_model_alias_before_lease_close(
         predictor = Predictor()
         created_refs.append(weakref.ref(predictor))
         lease = ObservingLease()
-        return prediction_runner._OwnedValue(  # noqa: SLF001
+        return prediction_runner.OwnedValue(  # noqa: SLF001
             prediction_runner.fitting.ModelFitResult(
                 coefficients=np.array([0.0, 1.0]),
                 metadata={},

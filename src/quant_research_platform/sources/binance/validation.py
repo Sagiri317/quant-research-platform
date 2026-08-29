@@ -9,12 +9,77 @@ from typing import Any
 import pandas as pd
 from pandas.errors import OutOfBoundsDatetime
 
+from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+
 BINANCE_SPOT_MARKET_TYPE = "spot"
 BINANCE_DATA_KINDS = frozenset({"klines", "agg_trades", "depth"})
 _SYMBOL_PATTERN = re.compile(r"^[A-Z0-9]+$")
 _NANOSECOND_TIMESTAMP_MAX_MILLISECONDS = (
     pd.Timestamp.max.value // pd.Timedelta(milliseconds=1).value
 )
+
+
+def validate_market_payload(
+    market_type: str,
+    data_kind: str,
+    symbol: str,
+    payload: object,
+) -> dict[str, Any]:
+    """Validate one public stream payload without endpoint ownership."""
+
+    if not isinstance(payload, dict):
+        raise ValueError("binance_recorder_payload_object_required")
+    expected_event = "depthUpdate" if data_kind == "depth" else "aggTrade"
+    if payload.get("e") != expected_event or payload.get("s") != symbol:
+        raise ValueError("binance_recorder_market_payload_identity_invalid")
+    strict_non_negative_integer(
+        payload.get("E"), error="binance_recorder_event_time_invalid"
+    )
+    if market_type == FUTURES_MARKET_TYPE:
+        if payload.get("st") != 1 or (
+            data_kind == "depth" and payload.get("ps") != symbol
+        ):
+            raise ValueError("binance_recorder_market_payload_identity_invalid")
+    if data_kind == "depth":
+        for key in ("U", "u"):
+            strict_non_negative_integer(
+                payload.get(key), error="binance_recorder_depth_id_invalid"
+            )
+        if payload["U"] > payload["u"]:
+            raise ValueError("binance_recorder_depth_id_range_invalid")
+        if market_type == FUTURES_MARKET_TYPE:
+            for key in ("T", "pu"):
+                strict_non_negative_integer(
+                    payload.get(key), error="binance_recorder_depth_id_invalid"
+                )
+        validate_depth_update_levels(
+            payload.get("b"), error="binance_recorder_depth_bids_invalid"
+        )
+        validate_depth_update_levels(
+            payload.get("a"), error="binance_recorder_depth_asks_invalid"
+        )
+        return payload
+    for key in ("a", "f", "l", "T"):
+        strict_non_negative_integer(
+            payload.get(key), error="binance_recorder_trade_id_invalid"
+        )
+    if payload["l"] < payload["f"]:
+        raise ValueError("binance_recorder_trade_id_range_invalid")
+    strict_positive_float(
+        payload.get("p"), error="binance_recorder_trade_price_invalid"
+    )
+    quantity = strict_positive_float(
+        payload.get("q"), error="binance_recorder_trade_quantity_invalid"
+    )
+    if market_type == FUTURES_MARKET_TYPE:
+        visible_quantity = strict_non_negative_float(
+            payload.get("nq"),
+            error="binance_recorder_trade_visible_quantity_invalid",
+        )
+        if visible_quantity > quantity:
+            raise ValueError("binance_recorder_trade_visible_quantity_invalid")
+    strict_boolean(payload.get("m"), error="binance_recorder_trade_side_invalid")
+    return payload
 
 
 def strict_non_empty_string(value: object, *, error: str) -> str:

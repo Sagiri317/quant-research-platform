@@ -14,6 +14,11 @@ QRP 支持本地量化研究流程，包括 data、factor、feature、label、mo
 - prediction 是模型输出。
 - signal 是评估或组合使用的排序、权重或交易意图输入。
 - evaluation 衡量 signal 或 prediction 的研究表现。
+- evaluation axis 必须符合研究横截面：多资产同一时点使用
+  `cross_sectional`；单资产 HFT 跨时点使用 `single_asset_time_series`，不得用
+  零有效观测的横截面结果冒充通过。当前 single-asset axis 用 bounded online
+  moments 计算跨时间 Pearson；未实现 exact bounded rank/group evaluation 时将
+  RankIC 与 group spread 明确标为 not applicable，不输出伪精确值。
 - portfolio 处理组合构建和收益路径。
 
 ## 当前合同唯一
@@ -22,9 +27,13 @@ QRP 支持本地量化研究流程，包括 data、factor、feature、label、mo
 
 ## 层边界
 
-research 是通用研究算法层，可以依赖 contracts、storage、runtime resources 和 `markets.session_windows`。research 不得依赖 `markets/implementations/` 或 `sources/`。A 股 factor/label binding、profile 和 scenario 由 `markets/implementations/a_share/` 持有。
+research 是通用研究算法层，可以依赖 contracts、storage 和 runtime resources。research 不得依赖 `markets/implementations/` 或 `sources/`。A 股与 Crypto 的 factor/label binding、profile 和 scenario 分别由对应 `markets/implementations/` 领域实现持有；只有真实共享的研究算法进入 research。
 
 compute 只提供数值计算核心，不持有 market session domain 工具，也不写 report/storage 产物。
+
+reports 是纯 report-content owner，可由 workflows 或负责持久化的 artifacts 调用；
+artifacts 只验证并写入内容，不反向定义 report 语义。允许 `artifacts -> reports`，
+仍禁止 `reports -> artifacts`，避免内容层依赖物理产物层。
 
 portable 的模型算法 ID、default/smoke 参数、dependency package、input kind 与 parallel classification facts 由 contracts 持有；fitting、prediction、feature importance、rank ensemble 与 validation behavior 由 research owners 持有。单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
 

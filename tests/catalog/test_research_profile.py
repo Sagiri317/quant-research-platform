@@ -14,7 +14,7 @@ from quant_research_platform.research.portfolios.engine import (
     _construct_portfolio_positions,
 )
 from quant_research_platform.runtime.resources import (
-    _OwnedValue,
+    OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
@@ -75,7 +75,7 @@ def test_a_share_profile_materializes_exact_processed_dependency_source_window(
         )
         policy = current_runtime_resource_policy()
         assert policy is not None
-        return _OwnedValue(
+        return OwnedValue(
             index,
             policy.lease("test.profile.sessions", index.nbytes),
         )
@@ -154,7 +154,7 @@ def test_profile_interim_call_reuses_ambient_root(
             )
             policy = current_runtime_resource_policy()
             assert policy is not None
-            return _OwnedValue(
+            return OwnedValue(
                 index,
                 policy.lease("test.profile.sessions", index.nbytes),
             )
