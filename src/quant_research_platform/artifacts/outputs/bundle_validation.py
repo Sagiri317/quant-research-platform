@@ -280,9 +280,7 @@ def read_prediction_output_bundle(
                 )
                 filter_row_bytes = 0 if time_window is None else decoded_row_bytes + 3
                 batch_row_bytes = decoded_row_bytes + filter_row_bytes
-                batch_headroom = (
-                    policy.memory_budget_bytes - policy.used_memory_bytes
-                )
+                batch_headroom = policy.operation_headroom_bytes
                 if decode_fixed_bytes + batch_row_bytes > batch_headroom:
                     raise MemoryError("runtime_memory_budget_exceeded")
                 batch_size = max(

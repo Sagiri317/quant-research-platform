@@ -892,6 +892,7 @@ class _StreamReader(threading.Thread):
             raise
         finally:
             primary = sys.exception()
+            first_failure: BaseException | None = None
             if opened:
                 assert closed_at is not None
                 assert closed_monotonic_ns is not None
@@ -909,17 +910,25 @@ class _StreamReader(threading.Thread):
                             f"{type(cleanup_error).__name__}"
                         )
                     else:
-                        raise
+                        first_failure = cleanup_error
             if websocket is not None:
                 try:
                     websocket.close()
                 except BaseException as cleanup_error:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        "Binance websocket close also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
+                    if primary is not None:
+                        primary.add_note(
+                            "Binance websocket close also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                    elif first_failure is None:
+                        first_failure = cleanup_error
+                    else:
+                        first_failure.add_note(
+                            "Binance websocket close also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+            if first_failure is not None:
+                raise first_failure
 
 
 def _http_get_json(
@@ -1232,7 +1241,15 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                         else:
                             cleanup_errors.append(type(cleanup_error).__name__)
                 if join_failed:
-                    writer.abort()
+                    try:
+                        writer.abort()
+                    except BaseException as cleanup_error:
+                        if active_primary is None:
+                            raise
+                        active_primary.add_note(
+                            "Binance run writer abort also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
                     if active_primary is None:
                         raise _ReaderQuiescenceFailure(
                             "binance_recorder_reader_quiescence_timeout"

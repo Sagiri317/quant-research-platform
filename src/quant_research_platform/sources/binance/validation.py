@@ -219,7 +219,7 @@ def depth_side_levels(
     error: str,
 ) -> list[tuple[float, float]]:
     if raw_levels is None:
-        return []
+        raise ValueError(error)
     if side not in {"bid", "ask"}:
         raise ValueError(error)
     if not isinstance(raw_levels, list | tuple):

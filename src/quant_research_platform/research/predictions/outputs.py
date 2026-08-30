@@ -299,9 +299,11 @@ def _iter_prediction_output_frames(
                 working_bytes = (
                     mask_bytes + test_frame_bytes + output_bytes + model_matrix_bytes
                 )
-                if policy is not None and (
-                    policy.used_memory_bytes + working_bytes
-                    > policy.memory_budget_bytes
+                if (
+                    policy is not None
+                    and policy.explicit_memory_cap_bytes is not None
+                    and policy.used_memory_bytes + working_bytes
+                    > policy.explicit_memory_cap_bytes
                 ):
                     raise ValueError(
                         "prediction_working_set_exceeds_task_memory_budget"
@@ -436,8 +438,11 @@ def _iter_prediction_work_frames(
             selected = [column for column in work_columns if column in frame.columns]
             selected_bytes = _selected_frame_payload_bytes(frame, selected)
             policy = current_runtime_resource_policy()
-            if policy is not None and (
-                policy.used_memory_bytes + selected_bytes > policy.memory_budget_bytes
+            if (
+                policy is not None
+                and policy.explicit_memory_cap_bytes is not None
+                and policy.used_memory_bytes + selected_bytes
+                > policy.explicit_memory_cap_bytes
             ):
                 raise ValueError("prediction_working_set_exceeds_task_memory_budget")
             projection_lease = None

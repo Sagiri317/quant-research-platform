@@ -109,6 +109,100 @@ def test_connection_coverage_gzip_constructor_failure_closes_raw(
         raw_handle.close()
 
 
+def test_connection_coverage_gzip_close_failure_still_closes_raw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RawHandle(io.BytesIO):
+        close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+            super().close()
+
+    class FakePath:
+        def __init__(self, handle: RawHandle) -> None:
+            self.handle = handle
+
+        def open(self, _mode: str) -> RawHandle:
+            return self.handle
+
+    class FakeDatabase:
+        def commit(self) -> None:
+            return None
+
+    class FakeGzip:
+        close_calls = 0
+
+        def readline(self, _size: int) -> bytes:
+            return b""
+
+        def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 2:
+                raise OSError("gzip-close-secondary")
+
+    raw_handle = RawHandle()
+    gzip_handle = FakeGzip()
+    monkeypatch.setattr(replay.gzip, "GzipFile", lambda **_kwargs: gzip_handle)
+    monkeypatch.setattr(
+        replay,
+        "_verify_raw_file_handle",
+        lambda *_args, **_kwargs: None,
+    )
+    index = object.__new__(replay._ConnectionCoverageIndex)
+    index._path = FakePath(raw_handle)
+    index.identity = object()
+    index._descriptor = {
+        "record_count": 0,
+        "sha256": hashlib.sha256(b"").hexdigest(),
+    }
+    index._database = FakeDatabase()
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    try:
+        with runtime_resource_policy_scope(policy):
+            with pytest.raises(OSError, match="gzip-close-secondary"):
+                index._load(
+                    markets={FUTURES_MARKET_TYPE},
+                    resource_policy=policy,
+                )
+        assert raw_handle.close_calls == 1
+    finally:
+        raw_handle.close()
+
+
+def test_recorder_run_close_failure_preserves_body_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+
+    real_close = replay._ConnectionCoverageIndex.close
+
+    def fail_close(index: object) -> None:
+        real_close(index)
+        raise OSError("coverage-close-secondary")
+
+    monkeypatch.setattr(replay._ConnectionCoverageIndex, "close", fail_close)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(KeyboardInterrupt, match="body-primary"):
+            with open_recorder_run(root, policy):
+                raise KeyboardInterrupt("body-primary")
+
+
 def test_replay_file_handle_cleanup_preserves_hash_primary(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

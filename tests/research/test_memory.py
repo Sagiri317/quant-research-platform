@@ -204,6 +204,29 @@ def test_complete_time_sized_frames_rejects_single_timestamp_over_budget() -> No
         )
 
 
+def test_complete_time_frames_allow_soft_overrun_without_explicit_cap() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2026-01-01", "2026-01-02"]),
+            "value": ["first", "second"],
+        }
+    )
+    policy = capture_test_policy(available_memory_bytes=1_000_000)
+
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("test.time.soft.blocker", policy.memory_budget_bytes):
+            chunks = list(
+                iter_complete_time_sized_frames(
+                    iter((frame,)),
+                    timestamp_column="timestamp",
+                    resource_policy=policy,
+                )
+            )
+
+    assert [chunk["value"].tolist() for chunk in chunks] == [["first"], ["second"]]
+    assert policy.used_memory_bytes == 0
+
+
 def test_complete_time_sized_frames_honor_live_root_reservations() -> None:
     frame = _single_time_frame()
     policy = capture_test_policy(

@@ -1511,6 +1511,26 @@ def test_adaptive_tuple_slice_is_admitted_before_allocation() -> None:
             batches.close()
 
 
+def test_adaptive_materialization_allows_soft_overrun_without_explicit_cap() -> None:
+    timestamp = pd.Timestamp("2024-01-02")
+    policy = capture_test_policy(available_memory_bytes=1_000_000)
+
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("test.a_share.soft.blocker", policy.memory_budget_bytes):
+            batches = materialization_planning._iter_adaptive_materialization_batches(
+                asset_ids=("a",),
+                sessions=(timestamp,),
+                session_context=(timestamp,),
+                materialize=lambda *_args: pd.DataFrame(
+                    {"asset_id": ["a"], "timestamp": [timestamp]}
+                ),
+            )
+            frames = _consume_bound_first(batches, policy)
+
+    assert len(frames) == 1
+    assert frames[0]["asset_id"].tolist() == ["a"]
+
+
 def test_active_materialization_rejects_missing_outer_policy_before_bounds(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

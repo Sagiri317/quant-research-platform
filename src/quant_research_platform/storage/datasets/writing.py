@@ -418,8 +418,6 @@ def _write_dataset_owned(
     validate_dataset_artifact_root(final_root, spec)
     final_root = require_artifact_root(final_root)
     owner_reserve_bytes = _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-    if owner_reserve_bytes >= resource_policy.memory_budget_bytes:
-        raise MemoryError("runtime_memory_budget_exceeded")
     with resource_policy.lease("storage.dataset.write", owner_reserve_bytes):
         return _write_dataset_body(
             final_root,
@@ -505,11 +503,7 @@ def _write_dataset_body(
     def _writer(temp_root: Path) -> OwnedValue[DatasetInspection]:
         nonlocal pending_result
         try:
-            if (
-                resource_policy.memory_budget_bytes
-                - resource_policy.used_memory_bytes
-                <= 0
-            ):
+            if resource_policy.operation_headroom_bytes <= 0:
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
             timestamp_columns = tuple(
                 column
@@ -532,7 +526,7 @@ def _write_dataset_body(
                     input_chunks,
                     temp_root / "data",
                     spec=spec,
-                    target_chunk_bytes=resource_policy.planning_headroom_bytes,
+                    target_chunk_bytes=resource_policy.operation_headroom_bytes,
                     key_tracker=key_tracker,
                     inventory=inventory,
                     borrowed_input=borrowed_input,
@@ -547,8 +541,7 @@ def _write_dataset_body(
                     {
                         **accumulator.payload(
                             target_chunk_bytes=(
-                                resource_policy.memory_budget_bytes
-                                - resource_policy.used_memory_bytes
+                                resource_policy.operation_headroom_bytes
                             )
                         ),
                         "schema_id": "qrp-dataset-manifest",
@@ -771,10 +764,7 @@ def _write_contents(
             raise ValueError("dataset_producer_bound_invalid")
         with ExitStack() as publication_state:
             publication_state.callback(clear_current_chunk)
-            metadata_budget = (
-                resource_policy.memory_budget_bytes
-                - resource_policy.used_memory_bytes
-            )
+            metadata_budget = resource_policy.operation_headroom_bytes
             if metadata_budget <= 0:
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
             operator_target_bytes = _dataset_write_operator_target_bytes(
@@ -812,10 +802,7 @@ def _write_contents(
                     ):
                         table = accumulator.table_for_frame(frame)
                         del table
-                    metadata_budget = (
-                        resource_policy.memory_budget_bytes
-                        - resource_policy.used_memory_bytes
-                    )
+                    metadata_budget = resource_policy.operation_headroom_bytes
                     accumulator.observe_logical_dtype_payload(
                         logical_dtypes,
                         target_chunk_bytes=metadata_budget,
@@ -934,8 +921,7 @@ def _write_contents(
                                     del table, bounded_partition
                                 for output_path in written_paths:
                                     readback_headroom = (
-                                        resource_policy.memory_budget_bytes
-                                        - resource_policy.used_memory_bytes
+                                        resource_policy.operation_headroom_bytes
                                     )
                                     if readback_headroom <= 0:
                                         raise ValueError(
@@ -968,10 +954,7 @@ def _write_contents(
     if accumulator.row_count == 0 and not saw_empty_schema:
         raise ValueError("empty_dataset_schema_missing")
     if saw_empty_schema:
-        metadata_budget = (
-            resource_policy.memory_budget_bytes
-            - resource_policy.used_memory_bytes
-        )
+        metadata_budget = resource_policy.operation_headroom_bytes
         logical_dtypes = accumulator.materialized_logical_dtypes(
             target_chunk_bytes=metadata_budget
         )
@@ -995,10 +978,7 @@ def _write_contents(
                 )
             )
             write_parquet_file(persisted_table, output_path)
-            readback_headroom = (
-                resource_policy.memory_budget_bytes
-                - resource_policy.used_memory_bytes
-            )
+            readback_headroom = resource_policy.operation_headroom_bytes
             accumulator.observe_file(
                 output_path,
                 target_chunk_bytes=target_chunk_bytes,
@@ -1147,7 +1127,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
     if policy is None:
         batch_rows = max(1, persisted.num_rows)
     else:
-        remaining = policy.memory_budget_bytes - policy.used_memory_bytes
+        remaining = policy.operation_headroom_bytes
         footer_bytes = _parquet_row_group_footer_upper_bound(
             persisted.schema,
             rows=persisted.num_rows,

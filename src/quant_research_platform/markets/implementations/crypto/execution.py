@@ -484,6 +484,8 @@ def simulate_taker(
                         latest_owned.release(owner="crypto.execution.book")
                     latest_owned = None
                     latest_state = None
+                    if position != 0.0:
+                        terminal_mid = None
                     pending.expire_all()
                     return
                 previous_state = latest_state
@@ -872,6 +874,7 @@ def simulate_maker(
     market_event_count = 0
     last_event_time_ns = 0
     last_mid: float | None = None
+    book_boundary_seen = False
     last_gross: float | None = None
     last_net: float | None = None
     all_lifetime_count = 0
@@ -929,8 +932,9 @@ def simulate_maker(
         def process_book(
             event: BookState | OwnedValue[BookState] | BookBoundary,
         ) -> None:
-            nonlocal last_mid, latest_state, latest_owned
+            nonlocal book_boundary_seen, last_mid, latest_state, latest_owned
             if isinstance(event, BookBoundary):
+                book_boundary_seen = True
                 cancel_active(event.observed_time_ns)
                 if latest_owned is not None:
                     latest_owned.release(owner="crypto.execution.book")
@@ -964,7 +968,15 @@ def simulate_maker(
                 latest_owned.release(owner="crypto.execution.book")
             latest_owned = event if isinstance(event, OwnedValue) else None
             latest_state = state
-            last_mid = _mid(state)
+            last_mid = (
+                _mid(state)
+                if _covered(
+                    observed_coverage,
+                    state.segment_id,
+                    state.observed_time_ns,
+                )
+                else None
+            )
             _resolve_observed_markouts(
                 pending,
                 state,
@@ -1179,9 +1191,14 @@ def simulate_maker(
         for order in active.values():
             finish_order(order, order.valid_until_ns, cancelled=True)
         active.clear()
-        if latest_state is not None:
-            last_mid = _mid(latest_state)
+        if latest_state is not None and last_mid is not None:
             last_gross = cash_gross + position * last_mid
+            last_net = last_gross - fees
+        elif latest_state is not None and position == 0.0:
+            last_gross = cash_gross
+            last_net = last_gross - fees
+        elif book_boundary_seen and position == 0.0:
+            last_gross = cash_gross
             last_net = last_gross - fees
         else:
             last_gross = None

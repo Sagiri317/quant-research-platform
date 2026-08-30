@@ -59,9 +59,11 @@ def _filter_mode_scope(
         filtered = frame
     else:
         working_bytes = _filter_working_set_bound(frame, mode=mode)
-        if policy is not None and (
-            policy.used_memory_bytes + working_bytes
-            > policy.memory_budget_bytes
+        if (
+            policy is not None
+            and policy.explicit_memory_cap_bytes is not None
+            and policy.used_memory_bytes + working_bytes
+            > policy.explicit_memory_cap_bytes
         ):
             raise ValueError("research_filter_working_set_exceeds_task_memory_budget")
         if policy is not None:

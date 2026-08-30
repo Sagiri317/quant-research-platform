@@ -15,6 +15,7 @@ import pandas as pd
 from quant_research_platform.contracts.json_codec import parse_qrp_json_object
 from quant_research_platform.runtime.resources import OwnedValue
 from quant_research_platform.sources.binance.validation import (
+    depth_side_levels,
     first_present,
     strict_boolean,
     strict_data_kind,
@@ -497,6 +498,18 @@ def _validate_envelope(
             raise ValueError("unexpected_binance_interval")
         if not isinstance(payload, dict):
             raise ValueError("invalid_binance_depth_payload")
+        bids = depth_side_levels(
+            payload.get("bids", ()),
+            side="bid",
+            error="invalid_binance_depth_bid",
+        )
+        asks = depth_side_levels(
+            payload.get("asks", ()),
+            side="ask",
+            error="invalid_binance_depth_ask",
+        )
+        if bids and asks and bids[0][0] >= asks[0][0]:
+            raise ValueError("crossed_binance_depth_book")
     return envelope
 
 

@@ -62,7 +62,7 @@ def crypto_asset_session_views(
         raise ValueError(error)
     with runtime_resource_policy_scope(session.resource_policy):
         selections: dict[tuple[str, ...], int] = {}
-        if session.resource_policy.planning_headroom_bytes <= 0:
+        if session.resource_policy.operation_headroom_bytes <= 0:
             raise ValueError("crypto_asset_session_views_exceed_task_memory_budget")
         current_path: Path | None = None
         current_key: tuple[str, ...] | None = None

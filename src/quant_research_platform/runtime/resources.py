@@ -170,6 +170,17 @@ class RuntimeResourcePolicy:
         with self._ledger_lock:
             return max(0, self.memory_budget_bytes - self._used_memory_bytes())
 
+    @property
+    def operation_headroom_bytes(self) -> int:
+        """Return the bounded headroom for one managed operation."""
+
+        with self._ledger_lock:
+            used = self._used_memory_bytes()
+            if self.explicit_memory_cap_bytes is not None:
+                return max(0, self.explicit_memory_cap_bytes - used)
+            planning = self.memory_budget_bytes - used
+            return planning if planning > 0 else self.memory_budget_bytes
+
     def lease(self, owner: str, reserved_bytes: int) -> MemoryLease:
         with self._ledger_lock:
             self._require_active_root()

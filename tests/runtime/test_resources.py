@@ -55,9 +55,11 @@ def test_owned_value_release_clears_value_and_lease() -> None:
 def test_soft_target_is_not_an_exact_hard_cap_but_explicit_cap_is() -> None:
     soft = capture_test_policy(available_memory_bytes=1_000_000)
     with runtime_resource_policy_scope(soft):
+        assert soft.operation_headroom_bytes == soft.memory_budget_bytes
         lease = soft.lease("test.soft.target", soft.memory_budget_bytes + 1)
         assert soft.used_memory_bytes == 700_001
         assert soft.planning_headroom_bytes == 0
+        assert soft.operation_headroom_bytes == soft.memory_budget_bytes
         lease.close()
 
     capped = capture_test_policy(
@@ -65,9 +67,11 @@ def test_soft_target_is_not_an_exact_hard_cap_but_explicit_cap_is() -> None:
         explicit_cap_bytes=600_000,
     )
     with runtime_resource_policy_scope(capped):
+        assert capped.operation_headroom_bytes == capped.explicit_memory_cap_bytes
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
             capped.lease("test.explicit.cap", 600_001)
         lease = capped.lease("test.explicit.cap", 600_000)
+        assert capped.operation_headroom_bytes == 0
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
             lease.grow(1)
         lease.close()

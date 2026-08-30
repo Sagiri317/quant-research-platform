@@ -280,6 +280,7 @@ class _ConnectionCoverageIndex:
             self._database.commit()
         finally:
             primary = sys.exception()
+            first_failure: BaseException | None = None
             try:
                 gzip_handle.close()
             except BaseException as close_error:
@@ -289,7 +290,7 @@ class _ConnectionCoverageIndex:
                         f"{type(close_error).__name__}"
                     )
                 else:
-                    raise
+                    first_failure = close_error
             try:
                 raw_handle.close()
             except BaseException as close_error:
@@ -298,8 +299,15 @@ class _ConnectionCoverageIndex:
                         "Binance connection coverage close also failed: "
                         f"{type(close_error).__name__}"
                     )
+                elif first_failure is None:
+                    first_failure = close_error
                 else:
-                    raise
+                    first_failure.add_note(
+                        "Binance connection coverage close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+            if first_failure is not None:
+                raise first_failure
 
     def _admit_disk_growth(self, row_count: int) -> None:
         assert self._scratch is not None
@@ -506,8 +514,14 @@ def open_recorder_run(
                     policy,
                     coverage_index=coverage_index,
                 )
-            except BaseException:
-                coverage_index.close()
+            except BaseException as primary:
+                try:
+                    coverage_index.close()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "Binance connection coverage cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
                 raise
             retained_bound = (
                 _json_record_working_set_bytes(manifest_identity.size) + 64 * 1024
@@ -560,7 +574,16 @@ def open_recorder_run(
                     else:
                         raise
                 finally:
-                    coverage_index.close()
+                    cleanup_primary = sys.exception()
+                    try:
+                        coverage_index.close()
+                    except BaseException as cleanup_error:
+                        if cleanup_primary is None:
+                            raise
+                        cleanup_primary.add_note(
+                            "Binance connection coverage cleanup also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
 
 
 def _read_run_manifest(
@@ -941,7 +964,7 @@ def _iter_raw_file(
     metadata = item.metadata
     path = root / metadata["path"]
     bound = _json_record_working_set_bytes(metadata["max_record_bytes"]) + 64 * 1024
-    if bound > resource_policy.planning_headroom_bytes:
+    if bound > resource_policy.operation_headroom_bytes:
         raise MemoryError("runtime_memory_budget_exceeded")
     try:
         raw_handle = path.open("rb")

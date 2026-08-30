@@ -252,13 +252,10 @@ def _inspection_runtime_metadata(
     column_roles = {
         str(column): str(role) for column, role in spec["column_roles"].items()
     }
-    remaining_headroom = (
-        context.resource_policy.memory_budget_bytes
-        - context.resource_policy.used_memory_bytes
-    )
+    remaining_headroom = context.resource_policy.operation_headroom_bytes
     if remaining_headroom <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-    target_chunk_bytes = min(target_chunk_bytes, remaining_headroom)
+    target_chunk_bytes = max(1, min(target_chunk_bytes, remaining_headroom))
     reader_upstream_headroom = remaining_headroom
     timestamp_column = context.timestamp_column
     if context.time_window is not None and timestamp_column is None:

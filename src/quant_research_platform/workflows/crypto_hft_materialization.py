@@ -86,7 +86,7 @@ def materialize_hft_processed_data(
     inspections: dict[str, DatasetInspection] = {}
     with runtime_resource_policy_scope(resource_policy) as policy:
         panel_spec = catalog.get(HFT_PANEL_DATA_ID)
-        panel_target = policy.planning_headroom_bytes // 2
+        panel_target = policy.operation_headroom_bytes // 2
         if panel_target <= _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES:
             raise MemoryError("runtime_memory_budget_exceeded")
         panel_batch_rows = (
@@ -237,7 +237,7 @@ def _panel_frame_producer(
     frames = iter(transform(chunks))
     with closing_iterator(chunks), closing_iterator(frames):
         while True:
-            producer_bound = resource_policy.planning_headroom_bytes // 2
+            producer_bound = resource_policy.operation_headroom_bytes // 2
             if producer_bound <= _FRAME_FIXED_BYTES:
                 raise MemoryError("runtime_memory_budget_exceeded")
             lease = yield producer_bound

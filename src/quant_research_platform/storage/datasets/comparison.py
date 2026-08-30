@@ -357,8 +357,7 @@ def _index_dataset_rows(
             if column not in index.primary_key
         )
         comparison_columns = (*index.primary_key, *value_columns)
-        headroom = resource_policy.memory_budget_bytes
-        headroom -= resource_policy.used_memory_bytes
+        headroom = resource_policy.operation_headroom_bytes
         if headroom <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
         exact_payload_target = headroom
@@ -367,10 +366,7 @@ def _index_dataset_rows(
 
         def index_batch(batch: pa.RecordBatch, _frame: Any) -> None:
             nonlocal duplicates
-            callback_headroom = (
-                resource_policy.memory_budget_bytes
-                - resource_policy.used_memory_bytes
-            )
+            callback_headroom = resource_policy.operation_headroom_bytes
             callback_target = min(exact_payload_target, callback_headroom)
             if callback_target <= 0:
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
@@ -388,9 +384,9 @@ def _index_dataset_rows(
         for _path, _frame in iter_dataset_file_batches(
             context,
             columns=comparison_columns,
-            target_chunk_bytes=min(
-                resource_policy.planning_headroom_bytes,
-                reader_headroom,
+            target_chunk_bytes=max(
+                1,
+                min(resource_policy.operation_headroom_bytes, reader_headroom),
             ),
             operation_headroom_bytes=reader_headroom,
             batch_observer=index_batch,

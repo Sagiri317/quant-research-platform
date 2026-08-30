@@ -93,6 +93,44 @@ def test_binance_interim_rejects_naive_depth_captured_at() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("payload_patch", "error"),
+    (
+        (
+            {"bids": [["99.0", "1.0"], ["100.0", "1.0"]]},
+            "invalid_binance_depth_bid",
+        ),
+        (
+            {"bids": [["101.0", "1.0"]], "asks": [["100.0", "1.0"]]},
+            "crossed_binance_depth_book",
+        ),
+        ({"bids": None}, "invalid_binance_depth_bid"),
+    ),
+)
+def test_binance_raw_owner_rejects_invalid_depth_semantics(
+    payload_patch: dict[str, object],
+    error: str,
+) -> None:
+    payload = {
+        "lastUpdateId": 1,
+        "bids": [["100.0", "1.0"]],
+        "asks": [["101.0", "1.5"]],
+    }
+    payload.update(payload_patch)
+
+    with pytest.raises(ValueError, match=error):
+        raw_exports._validate_envelope(
+            {
+                "source": "binance",
+                "market_type": "spot",
+                "data_kind": "depth",
+                "symbol": "BTCUSDT",
+                "captured_at": "2026-01-01T00:00:00Z",
+                "payload": payload,
+            }
+        )
+
+
 def test_binance_interim_maps_millisecond_range_failure_to_owner_error() -> None:
     maximum = pd.Timestamp.max.value // pd.Timedelta(milliseconds=1).value
     envelope = {

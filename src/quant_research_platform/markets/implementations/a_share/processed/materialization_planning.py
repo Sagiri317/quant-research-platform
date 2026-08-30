@@ -222,10 +222,7 @@ def iter_active_materialization_batches(
             ),
             active_index as index,
         ):
-            discovery_headroom = (
-                bound_policy.memory_budget_bytes
-                - bound_policy.used_memory_bytes
-            )
+            discovery_headroom = bound_policy.operation_headroom_bytes
             if discovery_headroom <= 0:
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
@@ -254,10 +251,7 @@ def iter_active_materialization_batches(
                                 if not isinstance(value, str) or not value:
                                     raise ValueError("invalid_processed_panel_asset_id")
                                 encoded_bound = sys.getsizeof(b"") + 4 * len(value)
-                                available_bytes = (
-                                    bound_policy.memory_budget_bytes
-                                    - bound_policy.used_memory_bytes
-                                )
+                                available_bytes = bound_policy.operation_headroom_bytes
                                 if encoded_bound > available_bytes:
                                     raise (
                                         materialization_io.MaterializationCapacityExceeded(
@@ -314,9 +308,7 @@ def iter_active_materialization_batches(
                     )
 
             batch_available = (
-                bound_policy.memory_budget_bytes
-                - bound_policy.used_memory_bytes
-                - batch_state_bytes
+                bound_policy.operation_headroom_bytes - batch_state_bytes
             )
             if batch_available <= 0:
                 raise materialization_io.MaterializationCapacityExceeded(
@@ -392,7 +384,7 @@ def _iter_adaptive_materialization_batches(
     """Pack assets then sessions from one immutable soft throughput target."""
     policy = current_runtime_resource_policy()
     pointer_bytes = np.dtype(object).itemsize
-    remaining = policy.memory_budget_bytes - policy.used_memory_bytes
+    remaining = policy.operation_headroom_bytes
     if remaining <= 0:
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
@@ -444,9 +436,9 @@ def _iter_adaptive_materialization_batches(
                 else (session_stop - session_start) * pointer_bytes
             )
             if (
-                policy.used_memory_bytes
-                + planned_slice_bytes
-                > policy.memory_budget_bytes
+                policy.explicit_memory_cap_bytes is not None
+                and policy.used_memory_bytes + planned_slice_bytes
+                > policy.explicit_memory_cap_bytes
             ):
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
@@ -657,9 +649,9 @@ def bounded_valid_bar_key_coverage(
     slot_count = lookback_bars + 2 + lookahead_bars
     boundary_state_bytes = int(len(asset_ids) * slot_count * np.dtype("int64").itemsize)
     if (
-        resource_policy.used_memory_bytes
-        + boundary_state_bytes
-        > resource_policy.memory_budget_bytes
+        resource_policy.explicit_memory_cap_bytes is not None
+        and resource_policy.used_memory_bytes + boundary_state_bytes
+        > resource_policy.explicit_memory_cap_bytes
     ):
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
@@ -722,9 +714,9 @@ def bounded_valid_bar_key_coverage(
             output_count * (np.dtype(np.int64).itemsize + np.dtype(object).itemsize)
         )
         if (
-            resource_policy.used_memory_bytes
-            + output_state_bytes
-            > resource_policy.memory_budget_bytes
+            resource_policy.explicit_memory_cap_bytes is not None
+            and resource_policy.used_memory_bytes + output_state_bytes
+            > resource_policy.explicit_memory_cap_bytes
         ):
             raise materialization_io.MaterializationCapacityExceeded(
                 "a_share_known_payloads_exceed_task_memory_budget"

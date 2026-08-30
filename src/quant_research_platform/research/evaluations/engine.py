@@ -1341,16 +1341,22 @@ def _iter_evaluation_compute_batches(
                 n_groups=n_groups,
             )
             candidate_bytes = planned_bytes + session_bytes
-            if (
-                resource_policy.used_memory_bytes + candidate_bytes
-                > resource_policy.memory_budget_bytes
-            ):
+            if candidate_bytes > resource_policy.planning_headroom_bytes:
                 if stop == start:
-                    with resource_policy.lease(
-                        "research.evaluation.kernel",
-                        candidate_bytes,
+                    explicit_cap = resource_policy.explicit_memory_cap_bytes
+                    if (
+                        explicit_cap is not None
+                        and resource_policy.used_memory_bytes + candidate_bytes
+                        > explicit_cap
                     ):
-                        pass
+                        with resource_policy.lease(
+                            "research.evaluation.kernel",
+                            candidate_bytes,
+                        ):
+                            pass
+                    planned_bytes = candidate_bytes
+                    stop = session_stop
+                    session_index += 1
                 break
             planned_bytes = candidate_bytes
             stop = session_stop

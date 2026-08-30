@@ -28,14 +28,14 @@ def _iter_contiguous_session_frames(
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
     frame_bytes = pandas_frame_payload_bytes(frame)
-    remaining = policy.memory_budget_bytes - policy.used_memory_bytes
+    remaining = policy.planning_headroom_bytes
     if frame_bytes <= remaining:
         yield frame
         return
 
     start = 0
     while start < len(frame):
-        remaining = policy.memory_budget_bytes - policy.used_memory_bytes
+        remaining = policy.planning_headroom_bytes
         stop = start
         output_bound = 0
         while stop < len(frame):
@@ -48,9 +48,16 @@ def _iter_contiguous_session_frames(
             session_bound = pandas_frame_payload_bytes(frame.iloc[stop:session_stop])
             if output_bound + session_bound > remaining:
                 if stop == start:
-                    raise ValueError(
-                        "research_indivisible_time_unit_exceeds_task_memory_budget"
-                    )
+                    explicit_cap = policy.explicit_memory_cap_bytes
+                    if (
+                        explicit_cap is not None
+                        and policy.used_memory_bytes + session_bound > explicit_cap
+                    ):
+                        raise ValueError(
+                            "research_indivisible_time_unit_exceeds_task_memory_budget"
+                        )
+                    output_bound = session_bound
+                    stop = session_stop
                 break
             output_bound += session_bound
             stop = session_stop
@@ -166,8 +173,9 @@ def _iter_complete_time_sized_frames_impl(
                 timestamp_column=timestamp_column,
             )
             if (
-                resource_policy.used_memory_bytes + operation_bytes
-                > resource_policy.memory_budget_bytes
+                resource_policy.explicit_memory_cap_bytes is not None
+                and resource_policy.used_memory_bytes + operation_bytes
+                > resource_policy.explicit_memory_cap_bytes
             ):
                 raise ValueError(
                     "research_indivisible_time_unit_exceeds_task_memory_budget"
@@ -183,8 +191,9 @@ def _iter_complete_time_sized_frames_impl(
                 if not timestamps.is_monotonic_increasing:
                     sort_bytes = _time_sort_working_set_bytes(frame)
                     if (
-                        resource_policy.used_memory_bytes + sort_bytes
-                        > resource_policy.memory_budget_bytes
+                        resource_policy.explicit_memory_cap_bytes is not None
+                        and resource_policy.used_memory_bytes + sort_bytes
+                        > resource_policy.explicit_memory_cap_bytes
                     ):
                         raise ValueError(
                             "research_indivisible_time_unit_exceeds_task_memory_budget"
@@ -224,8 +233,9 @@ def _iter_complete_time_sized_frames_impl(
                             pending.value
                         ) + pandas_frame_payload_bytes(right)
                         if (
-                            resource_policy.used_memory_bytes + combined_bound
-                            > resource_policy.memory_budget_bytes
+                            resource_policy.explicit_memory_cap_bytes is not None
+                            and resource_policy.used_memory_bytes + combined_bound
+                            > resource_policy.explicit_memory_cap_bytes
                         ):
                             raise ValueError(
                                 "research_time_boundary_payloads_exceed_task_memory_budget"
@@ -275,8 +285,9 @@ def _iter_complete_time_sized_frames_impl(
                 tail = frame.iloc[last_start:]
                 tail_bytes = pandas_frame_payload_bytes(tail)
                 if (
-                    resource_policy.used_memory_bytes + tail_bytes
-                    > resource_policy.memory_budget_bytes
+                    resource_policy.explicit_memory_cap_bytes is not None
+                    and resource_policy.used_memory_bytes + tail_bytes
+                    > resource_policy.explicit_memory_cap_bytes
                 ):
                     raise ValueError(
                         "research_indivisible_time_unit_exceeds_task_memory_budget"

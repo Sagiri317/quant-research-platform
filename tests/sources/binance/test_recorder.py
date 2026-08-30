@@ -494,6 +494,43 @@ def test_connection_interval_freezes_before_websocket_cleanup(
     assert order == ["interval", "websocket"]
 
 
+def test_connection_stats_close_failure_still_closes_websocket(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Websocket:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    websocket = Websocket()
+    stats = recorder._CaptureStats()
+
+    def fail_closed(*_args: object, **_kwargs: object) -> None:
+        raise OSError("stats-close-primary")
+
+    monkeypatch.setattr(stats, "closed", fail_closed)
+    monkeypatch.setattr(
+        recorder,
+        "_connect_websocket",
+        lambda *_args, **_kwargs: websocket,
+    )
+    reader = recorder._StreamReader(
+        stream=FUTURES_STREAMS[1],
+        writer=recorder._RunWriter(tmp_path),
+        stats=stats,
+        stop=threading.Event(),
+        config=RecorderConfig(tmp_path / "run", 1),
+    )
+    reader.stop.set()
+
+    with pytest.raises(OSError, match="stats-close-primary"):
+        reader._read_connection(reconnect=False)
+
+    assert websocket.closed
+
+
 def test_connection_close_time_is_frozen_at_error_detection(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -660,6 +697,55 @@ def test_recorder_does_not_publish_when_reader_join_times_out(
         recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
 
     assert not output_root.exists()
+
+
+def test_recorder_abort_failure_preserves_reader_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
+    output_root = tmp_path / "run"
+    stream = FUTURES_STREAMS[1]
+
+    class Reader:
+        def __init__(self, **kwargs: object) -> None:
+            self.name = "fake-reader"
+            self.stream = kwargs["stream"]
+            self.ready = threading.Event()
+            self.failure = "reader-failure"
+
+        def start(self) -> None:
+            self.ready.set()
+
+        def is_alive(self) -> bool:
+            return True
+
+        def join(self, timeout: float) -> None:
+            del timeout
+
+    def abort(_writer: object) -> None:
+        raise OSError("abort-secondary")
+
+    monkeypatch.setitem(
+        recorder.RECORDER_STREAMS_BY_SCOPE,
+        "futures-hft",
+        (stream,),
+    )
+    monkeypatch.setattr(
+        recorder,
+        "runtime_resource_policy_scope",
+        lambda *_args, **_kwargs: runtime_resource_policy_scope(policy),
+    )
+    monkeypatch.setattr(
+        recorder,
+        "_record_market_metadata",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(recorder, "_StreamReader", Reader)
+    monkeypatch.setattr(recorder._RunWriter, "abort", abort)
+
+    with pytest.raises(RuntimeError, match="reader_failure"):
+        recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
 
 
 def test_connection_interval_retention_is_admitted_and_released() -> None:

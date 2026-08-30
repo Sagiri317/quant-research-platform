@@ -318,6 +318,22 @@ def test_taker_does_not_fill_after_coverage_or_explicit_boundary() -> None:
     assert diagnostics["gross_pnl_usd"] == 0.0
 
 
+def test_taker_terminal_pnl_is_unknown_after_book_boundary() -> None:
+    fills = []
+    diagnostics = simulate_taker(
+        [_state(0), _boundary(50)],
+        [{"timestamp_ms": 0, "prediction": 0.02}],
+        prediction_column="prediction",
+        config=_taker_config(),
+        observed_coverage={"s1": _coverage(0, 50)},
+        on_fill=fills.append,
+    )
+
+    assert len(fills) == 1
+    assert diagnostics["gross_pnl_usd"] is None
+    assert diagnostics["net_pnl_usd"] is None
+
+
 def test_taker_markout_does_not_use_state_past_observed_coverage() -> None:
     diagnostics = simulate_taker(
         [_state(0), _state(200, bid_tick=1005, ask_tick=1015)],
@@ -428,6 +444,43 @@ def test_maker_trade_through_fills_and_boundary_blocks_stale_trade() -> None:
     assert fills[0]["fill_reason"] == "trade_through"
     assert diagnostics["trade_through_fill_events"] == 1
     assert diagnostics["gross_pnl_usd"] is None
+
+
+def test_maker_terminal_pnl_is_unknown_after_uncovered_state() -> None:
+    fills = []
+    diagnostics = simulate_maker(
+        [_state(0), _boundary(75), _state(100, segment_id="s2")],
+        [_trade(50, price="99.4", quantity="1", maker_buyer=True)],
+        [_quote(0, book_segment_id="s1")],
+        config=_maker_config(),
+        observed_coverage={"s1": _coverage(0, 75)},
+        trade_coverage={"trade-connection-1": _coverage(0, 101)},
+        on_fill=fills.append,
+    )
+
+    assert len(fills) == 1
+    assert diagnostics["gross_pnl_usd"] is None
+    assert diagnostics["net_pnl_usd"] is None
+
+
+def test_maker_terminal_pnl_preserves_flat_realized_cash_after_boundary() -> None:
+    fills = []
+    diagnostics = simulate_maker(
+        [_state(0), _boundary(75)],
+        [
+            _trade(50, price="99.4", quantity="1", maker_buyer=True),
+            _trade(60, price="100.6", quantity="1", maker_buyer=False),
+        ],
+        [_quote(0, book_segment_id="s1")],
+        config=_maker_config(),
+        observed_coverage={"s1": _coverage(0, 75)},
+        trade_coverage={"trade-connection-1": _coverage(0, 101)},
+        on_fill=fills.append,
+    )
+
+    assert len(fills) == 2
+    assert diagnostics["gross_pnl_usd"] == pytest.approx(1.0)
+    assert diagnostics["net_pnl_usd"] == pytest.approx(1.02)
 
 
 def test_latency_sweep_has_exact_requested_scenarios() -> None:

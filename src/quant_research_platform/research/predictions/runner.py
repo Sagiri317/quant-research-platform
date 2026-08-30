@@ -580,9 +580,11 @@ def _prediction_train_chunks(
         timestamp_bytes = index_bytes + 8 * len(chunk)
         mask_bytes = index_bytes + len(chunk)
         working_bytes = timestamp_bytes + mask_bytes + pandas_frame_payload_bytes(chunk)
-        if policy is not None and (
-            policy.used_memory_bytes + working_bytes
-            > policy.memory_budget_bytes
+        if (
+            policy is not None
+            and policy.explicit_memory_cap_bytes is not None
+            and policy.used_memory_bytes + working_bytes
+            > policy.explicit_memory_cap_bytes
         ):
             raise ValueError(
                 "prediction_training_working_set_exceeds_task_memory_budget"

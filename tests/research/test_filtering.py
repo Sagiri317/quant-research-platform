@@ -67,6 +67,21 @@ def test_filter_mode_scope_rejects_before_mask_allocation() -> None:
     assert policy.used_memory_bytes == 0
 
 
+def test_filter_mode_scope_allows_soft_target_overrun_without_explicit_cap() -> None:
+    frame = pd.DataFrame({"eligible": [True], "value": [10.0]})
+    policy = capture_test_policy(available_memory_bytes=1_000_000)
+
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("test.filter.soft.blocker", policy.memory_budget_bytes):
+            with _filter_mode_scope(
+                frame,
+                mode="eligible",
+                metadata_key="filter_mode",
+            ) as (filtered, _metadata):
+                assert filtered["value"].tolist() == [10.0]
+    assert policy.used_memory_bytes == 0
+
+
 def test_filter_mode_scope_owns_filtered_frame_until_exit() -> None:
     frame = pd.DataFrame(
         {

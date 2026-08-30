@@ -313,8 +313,9 @@ def read_dataset(
                     ) as context:
                         yield from iter_dataset_chunks(
                             context,
-                            target_chunk_bytes=(
-                                context.resource_policy.planning_headroom_bytes
+                            target_chunk_bytes=max(
+                                1,
+                                context.resource_policy.planning_headroom_bytes,
                             ),
                         )
                 return
@@ -326,7 +327,10 @@ def read_dataset(
             ) as context:
                 yield from iter_dataset_chunks(
                     context,
-                    target_chunk_bytes=context.resource_policy.planning_headroom_bytes,
+                    target_chunk_bytes=max(
+                        1,
+                        context.resource_policy.planning_headroom_bytes,
+                    ),
                 )
 
         return activate()
@@ -342,7 +346,10 @@ def read_dataset(
     ) as context:
         return materialize_dataset_session(
             context,
-            target_chunk_bytes=context.resource_policy.planning_headroom_bytes,
+            target_chunk_bytes=max(
+                1,
+                context.resource_policy.planning_headroom_bytes,
+            ),
             materialized_budget_bytes=context.resource_policy.memory_budget_bytes,
         )
 
@@ -400,7 +407,7 @@ def _materialize_dataset_session(
     )
     materialized_budget = min(
         configured_budget,
-        context.resource_policy.planning_headroom_bytes,
+        context.resource_policy.operation_headroom_bytes,
     )
     if materialized_budget <= 0:
         raise DatasetReadCapacityExceeded(
@@ -1424,7 +1431,7 @@ def iter_declared_parquet_member_batches(
         fixed_operation_headroom = (
             operation_headroom_bytes
             if operation_headroom_bytes is not None
-            else policy.memory_budget_bytes
+            else policy.operation_headroom_bytes
         )
 
         def current_operation_headroom(
@@ -1433,8 +1440,7 @@ def iter_declared_parquet_member_batches(
         ) -> int:
             return min(
                 maximum,
-                active_policy.memory_budget_bytes
-                - active_policy.used_memory_bytes,
+                active_policy.operation_headroom_bytes,
             )
 
         live_operation_headroom = current_operation_headroom
@@ -1492,7 +1498,7 @@ def _iter_dataset_file_batches(
     """Yield deterministic file batches after Arrow-level bounded conversion."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    policy_available = context.resource_policy.planning_headroom_bytes
+    policy_available = context.resource_policy.operation_headroom_bytes
     if operation_headroom_bytes is None:
         operation_headroom = policy_available
     else:
@@ -1515,7 +1521,7 @@ def _iter_dataset_file_batches(
     def current_operation_headroom() -> int:
         current = min(
             operation_headroom,
-            context.resource_policy.planning_headroom_bytes,
+            context.resource_policy.operation_headroom_bytes,
         ) - previous_output_bytes[0]
         if current <= 0:
             raise DatasetReadCapacityExceeded(
@@ -1756,12 +1762,13 @@ def _require_filter_preparation_overlap(
     resource_policy: RuntimeResourcePolicy,
 ) -> None:
     if (
-        resource_policy.used_memory_bytes
+        resource_policy.explicit_memory_cap_bytes is not None
+        and resource_policy.used_memory_bytes
         + input_state_bytes
         + preflight_bytes
         + sort_state_bytes
         + timsort_scratch_bytes
-        > resource_policy.memory_budget_bytes
+        > resource_policy.explicit_memory_cap_bytes
     ):
         raise DatasetReadCapacityExceeded(
             "dataset_filter_values_exceed_task_memory_budget"

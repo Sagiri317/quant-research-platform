@@ -180,10 +180,11 @@ def iter_sorted_output_chunks(
                         + 2 * np.dtype(np.intp).itemsize
                     )
                     if (
-                        bound_policy.used_memory_bytes
+                        bound_policy.explicit_memory_cap_bytes is not None
+                        and bound_policy.used_memory_bytes
                         + output_bytes
                         + key_temporary_bytes
-                        > bound_policy.memory_budget_bytes
+                        > bound_policy.explicit_memory_cap_bytes
                     ):
                         raise MaterializationCapacityExceeded(
                             "a_share_known_payloads_exceed_task_memory_budget"

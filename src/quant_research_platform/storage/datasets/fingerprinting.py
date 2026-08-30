@@ -100,9 +100,8 @@ def _fingerprint_dataset_session_owned_with_lease(
     resource_policy: RuntimeResourcePolicy,
     result_lease: MemoryLease,
 ) -> OwnedValue[DatasetFingerprint]:
-    payload_target_bytes = resource_policy.planning_headroom_bytes
-    operation_headroom_bytes = resource_policy.memory_budget_bytes
-    operation_headroom_bytes -= resource_policy.used_memory_bytes
+    payload_target_bytes = max(1, resource_policy.operation_headroom_bytes)
+    operation_headroom_bytes = resource_policy.operation_headroom_bytes
     if operation_headroom_bytes <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")
     key_columns = tuple(str(column) for column in context.spec["primary_key"])

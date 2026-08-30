@@ -466,7 +466,7 @@ def _artifact_writer_fixed_reservation(
                 index_bytes + writer_count * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
             )
         )
-        if policy.planning_headroom_bytes <= 0:
+        if policy.operation_headroom_bytes <= 0:
             stack.close()
             raise MemoryError("runtime_memory_budget_exceeded")
     return stack
@@ -509,7 +509,7 @@ def _artifact_table_write_state(
         rows=persisted.num_rows,
     )
     page_headroom = (
-        policy.planning_headroom_bytes + retained_page_bytes - footer_increment
+        policy.operation_headroom_bytes + retained_page_bytes - footer_increment
     )
     minimum_rows = 0 if persisted.num_rows == 0 else 1
     minimum_bytes = _table_parquet_page_working_set_bytes(
