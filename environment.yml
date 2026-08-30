@@ -20,6 +20,13 @@ dependencies:
   - wheel>=0.45,<1
   - ruff>=0.15,<0.16
   - httpx>=0.28,<1
+  - scipy>=1.18,<2
+  - statsmodels>=0.15,<0.16
+  - arch-py>=8,<9
+  - matplotlib-base>=3.11,<4
+  - nbconvert>=7.17,<8
+  - ipykernel>=7.3,<8
+  - pyzmq=27.0.2=py313hdb570cd_1
   - websockets>=16,<17
   - xgboost>=3,<4
   - lightgbm>=4.6,<5

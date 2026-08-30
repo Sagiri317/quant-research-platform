@@ -6,6 +6,8 @@ from collections.abc import Iterable
 
 import pandas as pd
 
+from quant_research_platform.contracts.experiments import ExperimentFold
+from quant_research_platform.contracts.time import TimeWindow, require_date_window
 from quant_research_platform.markets.implementations.a_share.validation import (
     strict_values,
 )
@@ -14,6 +16,56 @@ CURRENT_MARKET_TYPES = frozenset({1, 4, 16, 32})
 NORMALIZED_CALENDAR_COLUMNS = frozenset(
     {"calendar_date", "source_market_type", "is_trading_day"}
 )
+
+
+def build_a_share_experiment_fold(
+    calendar: pd.DataFrame,
+    *,
+    fold_id: str,
+    train: TimeWindow,
+    validation: TimeWindow,
+    development_test: TimeWindow,
+    purge_steps: int,
+    embargo_steps: int = 0,
+    complete: bool = True,
+) -> ExperimentFold:
+    """Bind one fold to exact positions in the A-share trading calendar."""
+
+    for role, window in (
+        ("train", train),
+        ("validation", validation),
+        ("development_test", development_test),
+    ):
+        require_date_window(window, context=f"a_share_experiment_{role}")
+    sessions = unified_trading_sessions(calendar)
+    positions = sessions.get_indexer(
+        pd.DatetimeIndex(
+            [
+                train.start,
+                train.end,
+                validation.start,
+                validation.end,
+                development_test.start,
+                development_test.end,
+            ]
+        )
+    )
+    if bool((positions < 0).any()):
+        raise ValueError("a_share_experiment_boundary_not_trading_session")
+    return ExperimentFold(
+        fold_id=fold_id,
+        train=train,
+        validation=validation,
+        development_test=development_test,
+        purge_steps=purge_steps,
+        embargo_steps=embargo_steps,
+        step_kind="a_share_trading_session",
+        train_end_step=int(positions[1]),
+        validation_start_step=int(positions[2]),
+        validation_end_step=int(positions[3]),
+        development_test_start_step=int(positions[4]),
+        complete=complete,
+    )
 
 
 def unified_trading_sessions(

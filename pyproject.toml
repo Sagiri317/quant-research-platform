@@ -10,6 +10,9 @@ requires-python = ">=3.13,<3.14"
 dependencies = [
   "fastapi>=0.136,<1",
   "httpx>=0.28,<1",
+  "scipy>=1.18,<2",
+  "statsmodels>=0.15,<0.16",
+  "arch>=8,<9",
   "numpy>=2.3,<2.4",
   "pandas>=3.0,<4",
   "pyarrow>=24,<25",
@@ -26,6 +29,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
   "build>=1.5,<2",
+  "matplotlib>=3.11,<4",
+  "nbconvert>=7.17,<8",
+  "ipykernel>=7.3,<8",
   "pytest>=9,<10",
   "ruff>=0.15,<0.16",
 ]

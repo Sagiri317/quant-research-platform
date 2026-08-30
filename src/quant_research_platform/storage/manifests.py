@@ -76,6 +76,55 @@ def read_bounded_qrp_json(
     return raw, parse_qrp_json_object(raw)
 
 
+def read_bounded_qrp_json_directory(
+    root: Path,
+    *,
+    max_members: int,
+) -> tuple[tuple[str, dict[str, Any]], ...]:
+    """Read one bounded directory containing only QRP JSON object files."""
+
+    if type(max_members) is not int or max_members < 0:
+        raise ValueError("dataset_metadata_member_limit_invalid")
+    candidate = require_unaliased_path(
+        Path(root), error="dataset_metadata_directory_invalid"
+    )
+    if not candidate.is_dir():
+        raise ValueError("dataset_metadata_directory_invalid")
+    try:
+        before = os.stat(candidate, follow_symlinks=False)
+        names: list[str] = []
+        with os.scandir(candidate) as entries:
+            for entry in entries:
+                if len(names) >= max_members:
+                    raise ValueError("dataset_metadata_member_limit_exceeded")
+                if (
+                    not entry.is_file(follow_symlinks=False)
+                    or Path(entry.name).suffix != ".json"
+                    or Path(entry.name).name != entry.name
+                ):
+                    raise ValueError("dataset_metadata_directory_member_invalid")
+                names.append(entry.name)
+        after = os.stat(candidate, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError("dataset_metadata_directory_invalid") from exc
+    if _directory_identity(before) != _directory_identity(after):
+        raise ValueError("dataset_metadata_directory_identity_changed")
+    result = tuple(
+        (name, read_bounded_qrp_json(candidate / name)[1]) for name in sorted(names)
+    )
+    try:
+        final = os.stat(candidate, follow_symlinks=False)
+    except OSError as exc:
+        raise ValueError("dataset_metadata_directory_invalid") from exc
+    if _directory_identity(before) != _directory_identity(final):
+        raise ValueError("dataset_metadata_directory_identity_changed")
+    return result
+
+
+def _directory_identity(value: os.stat_result) -> tuple[int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns)
+
+
 def read_manifest(path: Path) -> dict[str, Any]:
     return read_bounded_qrp_json(path)[1]
 

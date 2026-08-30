@@ -14,6 +14,9 @@ GITIGNORE = PROJECT_ROOT / ".gitignore"
 RUNTIME_DEPENDENCIES = {
     "fastapi",
     "httpx",
+    "scipy",
+    "statsmodels",
+    "arch",
     "numpy",
     "pandas",
     "pyarrow",
@@ -28,6 +31,9 @@ RUNTIME_DEPENDENCIES = {
 }
 DEV_DEPENDENCIES = {
     "build",
+    "matplotlib",
+    "nbconvert",
+    "ipykernel",
     "pytest",
     "ruff",
 }
@@ -79,6 +85,12 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
         "setuptools": ("setuptools", build_system_requires["setuptools"]),
         "wheel": ("wheel", build_system_requires["wheel"]),
         "pyarrow": ("pyarrow", runtime["pyarrow"]),
+        "arch": ("arch-py", runtime["arch"]),
+        "matplotlib": ("matplotlib-base", dev["matplotlib"]),
+        "nbconvert": ("nbconvert", dev["nbconvert"]),
+        "ipykernel": ("ipykernel", dev["ipykernel"]),
+        "scipy": ("scipy", runtime["scipy"]),
+        "statsmodels": ("statsmodels", runtime["statsmodels"]),
         "threadpoolctl": ("threadpoolctl", runtime["threadpoolctl"]),
         "pytest": ("pytest", dev["pytest"]),
         "ruff": ("ruff", dev["ruff"]),
