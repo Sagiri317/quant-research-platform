@@ -64,12 +64,20 @@ def test_recorder_scopes_bind_exact_public_streams() -> None:
     scopes = recorder.RECORDER_STREAMS_BY_SCOPE
 
     assert set(scopes) == {"futures-hft", "spot-l2"}
-    assert [(item.market_type, item.data_kind) for item in scopes["futures-hft"]] == [
-        (FUTURES_MARKET_TYPE, "depth"),
-        (FUTURES_MARKET_TYPE, "agg_trades"),
+    assert [
+        (item.symbol, item.market_type, item.data_kind)
+        for item in scopes["futures-hft"]
+    ] == [
+        ("BTCUSDT", FUTURES_MARKET_TYPE, "depth"),
+        ("BTCUSDT", FUTURES_MARKET_TYPE, "agg_trades"),
+        ("ETHUSDT", FUTURES_MARKET_TYPE, "depth"),
+        ("ETHUSDT", FUTURES_MARKET_TYPE, "agg_trades"),
     ]
-    assert [(item.market_type, item.data_kind) for item in scopes["spot-l2"]] == [
-        (SPOT_MARKET_TYPE, "depth")
+    assert [
+        (item.symbol, item.market_type, item.data_kind) for item in scopes["spot-l2"]
+    ] == [
+        ("BTCUSDT", SPOT_MARKET_TYPE, "depth"),
+        ("ETHUSDT", SPOT_MARKET_TYPE, "depth"),
     ]
     assert scopes["futures-hft"][0].url == (
         "wss://fstream.binance.com/public/ws/btcusdt@depth@100ms"
@@ -114,7 +122,11 @@ def test_rest_metadata_releases_previous_payload_before_next_admission(
                     {
                         "symbol": "BTCUSDT",
                         "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.1"}],
-                    }
+                    },
+                    {
+                        "symbol": "ETHUSDT",
+                        "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.01"}],
+                    },
                 ]
             }
         )
@@ -131,9 +143,10 @@ def test_rest_metadata_releases_previous_payload_before_next_admission(
             Writer(),
             policy,
             market_types=(SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE),
+            symbols=recorder.RESEARCH_SYMBOLS,
         )
 
-    assert observations == [False, True]
+    assert observations == [False, True, True, True]
     assert released
     assert all(used > 0 for used in released)
 
@@ -204,7 +217,8 @@ def test_stream_gzip_constructor_failure_closes_raw_and_preserves_primary(
 
     with pytest.raises(KeyboardInterrupt) as raised:
         writer._open_file(
-            ("hour", FUTURES_MARKET_TYPE, "depth", "stream"),
+            ("hour", "BTCUSDT", FUTURES_MARKET_TYPE, "depth", "stream"),
+            symbol="BTCUSDT",
             market_type=FUTURES_MARKET_TYPE,
             data_kind="depth",
             stream="stream",
@@ -303,6 +317,7 @@ def test_run_writer_rejects_disk_before_first_mutation(
     try:
         with pytest.raises(OSError, match="recorder_disk_headroom"):
             writer.write(
+                symbol="BTCUSDT",
                 market_type=FUTURES_MARKET_TYPE,
                 data_kind="depth",
                 stream="btcusdt@depth@100ms",
@@ -337,6 +352,7 @@ def test_run_writer_rechecks_cumulative_disk_and_closes_after_failure(
     monkeypatch.setattr(recorder, "_RECORDER_DISK_CHECK_BYTES", 1, raising=False)
     writer = recorder._RunWriter(tmp_path / "run")
     write_args = {
+        "symbol": "BTCUSDT",
         "market_type": FUTURES_MARKET_TYPE,
         "data_kind": "depth",
         "stream": "btcusdt@depth@100ms",
@@ -646,6 +662,7 @@ def test_connection_close_time_is_frozen_at_error_detection(
 def test_run_writer_rejects_late_writes_after_close(tmp_path: Path) -> None:
     writer = recorder._RunWriter(tmp_path)
     writer.write(
+        symbol="BTCUSDT",
         market_type=FUTURES_MARKET_TYPE,
         data_kind="agg_trades",
         stream="btcusdt@aggTrade",
@@ -659,6 +676,7 @@ def test_run_writer_rejects_late_writes_after_close(tmp_path: Path) -> None:
 
     with pytest.raises(RuntimeError, match="writer_closed"):
         writer.write(
+            symbol="BTCUSDT",
             market_type=FUTURES_MARKET_TYPE,
             data_kind="agg_trades",
             stream="btcusdt@aggTrade",

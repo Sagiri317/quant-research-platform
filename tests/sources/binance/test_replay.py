@@ -27,6 +27,7 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
+    RESEARCH_SYMBOLS,
     SPOT_L2_RECORDING_SCOPE,
     SPOT_MARKET_TYPE,
 )
@@ -447,10 +448,14 @@ def _write_run(
         "status": "PASS",
         "market_data_status": "PASS",
         "venue": "binance",
-        "symbol": "BTCUSDT",
+        "symbols": list(RESEARCH_SYMBOLS),
         "market_types": market_types,
         "market_metadata": {
-            market: {"tick_size": "0.1", "snapshot_limit": 1000} for market, *_ in files
+            symbol: {
+                market: {"tick_size": "0.1", "snapshot_limit": 1000}
+                for market, *_ in files
+            }
+            for symbol in RESEARCH_SYMBOLS
         },
         "capture": {
             "connection_intervals": {
@@ -957,7 +962,7 @@ def test_agg_trades_normalize_all_clocks_and_visible_quantity(tmp_path: Path) ->
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
-        trades = list(iter_agg_trades(run, FUTURES_MARKET_TYPE))
+        trades = list(iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
 
     assert len(trades) == 1
     trade = trades[0]
@@ -1152,7 +1157,9 @@ def test_futures_bootstrap_keeps_all_clocks_and_exact_tick_identity(
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         events = list(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+            )
         )
         state = events[0].value
         assert isinstance(state, BookState)
@@ -1189,7 +1196,9 @@ def test_snapshot_frontier_is_not_promoted_to_executable_depth(tmp_path: Path) -
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         owned = next(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=2)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=2
+            )
         )
         assert owned.value.bids == ((1000, 2.0), (990, 3.0))
         assert owned.value.asks == ((1010, 2.0), (1020, 3.0))
@@ -1242,7 +1251,9 @@ def test_insufficient_snapshot_waits_for_next_segment(tmp_path: Path) -> None:
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         events = list(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=2)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=2
+            )
         )
         assert isinstance(events[0], BookBoundary)
         assert events[0].reason == "unsupported_coverage"
@@ -1275,7 +1286,9 @@ def test_advancing_replay_keeps_previous_book_state_lease_active(
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
-        events = iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+        events = iter_reconstructed_depth(
+            run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+        )
         first = next(events)
         second = next(events)
         assert first.lease.active
@@ -1310,6 +1323,7 @@ def test_futures_zero_transaction_time_is_not_replaced_by_event_time(
             for event in iter_reconstructed_depth(
                 run,
                 FUTURES_MARKET_TYPE,
+                symbol="BTCUSDT",
                 required_levels=1,
             )
             if isinstance(event, OwnedValue)
@@ -1353,7 +1367,7 @@ def test_spot_uses_snapshot_plus_one_bootstrap(tmp_path: Path) -> None:
         owned_states = [
             event
             for event in iter_reconstructed_depth(
-                run, SPOT_MARKET_TYPE, required_levels=1
+                run, SPOT_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
             )
             if isinstance(event, OwnedValue)
         ]
@@ -1378,7 +1392,9 @@ def test_gap_emits_boundary_and_recovery_never_reuses_old_book(tmp_path: Path) -
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         events = list(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+            )
         )
         assert [
             type(event.value) if isinstance(event, OwnedValue) else type(event)
@@ -1423,7 +1439,9 @@ def test_invalid_book_emits_honest_boundary(
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         events = list(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+            )
         )
 
     assert len(events) == 1
@@ -1471,7 +1489,9 @@ def test_replay_bootstraps_snapshot_without_locator_rescan(
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         events = list(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+            )
         )
         _close_owned_events(events)
 
@@ -1499,7 +1519,9 @@ def test_snapshot_decode_and_bootstrap_share_an_active_transient_lease(
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         events = list(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+            )
         )
         _close_owned_events(events)
 
@@ -1530,10 +1552,14 @@ def test_same_run_replay_is_deterministic(tmp_path: Path) -> None:
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         first = list(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+            )
         )
         second = list(
-            iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
+            iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+            )
         )
         assert [
             event.value if isinstance(event, OwnedValue) else event for event in first

@@ -99,9 +99,10 @@ def materialize_hft_processed_data(
             iter_reconstructed_depth(
                 run,
                 FUTURES_MARKET_TYPE,
+                symbol="BTCUSDT",
                 stats=stats,
             ),
-            iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
+            iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", end_ms=end_ms),
             start_ms=start_ms,
             end_ms=end_ms,
             book_coverage=stats.coverage_segments,

@@ -42,6 +42,7 @@ from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
     RECORDING_SCOPE_MARKET_TYPES,
+    RESEARCH_SYMBOLS,
     SPOT_L2_RECORDING_SCOPE,
     SPOT_MARKET_TYPE,
 )
@@ -58,7 +59,6 @@ from quant_research_platform.storage.atomic import (
 )
 from quant_research_platform.storage.identity import require_unaliased_path
 
-SYMBOL = "BTCUSDT"
 SPOT_REST_BASE_URL = "https://data-api.binance.vision"
 FUTURES_REST_BASE_URL = "https://fapi.binance.com"
 MAX_WS_MESSAGE_BYTES = 4 * 1024 * 1024
@@ -79,6 +79,7 @@ _WS_STREAM_WORKING_SET_BYTES = (
 
 @dataclass(frozen=True)
 class RecorderStream:
+    symbol: str
     market_type: str
     data_kind: str
     stream: str
@@ -86,27 +87,29 @@ class RecorderStream:
 
 
 RECORDER_STREAMS_BY_SCOPE = {
-    FUTURES_HFT_RECORDING_SCOPE: (
+    FUTURES_HFT_RECORDING_SCOPE: tuple(
         RecorderStream(
+            symbol,
             FUTURES_MARKET_TYPE,
-            "depth",
-            "btcusdt@depth@100ms",
-            "wss://fstream.binance.com/public/ws/btcusdt@depth@100ms",
-        ),
-        RecorderStream(
-            FUTURES_MARKET_TYPE,
-            "agg_trades",
-            "btcusdt@aggTrade",
-            "wss://fstream.binance.com/market/ws/btcusdt@aggTrade",
-        ),
+            data_kind,
+            f"{symbol.lower()}@{stream_suffix}",
+            f"wss://fstream.binance.com/{channel}/ws/{symbol.lower()}@{stream_suffix}",
+        )
+        for symbol in RESEARCH_SYMBOLS
+        for data_kind, stream_suffix, channel in (
+            ("depth", "depth@100ms", "public"),
+            ("agg_trades", "aggTrade", "market"),
+        )
     ),
-    SPOT_L2_RECORDING_SCOPE: (
+    SPOT_L2_RECORDING_SCOPE: tuple(
         RecorderStream(
+            symbol,
             SPOT_MARKET_TYPE,
             "depth",
-            "btcusdt@depth@100ms",
-            "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms",
-        ),
+            f"{symbol.lower()}@depth@100ms",
+            f"wss://stream.binance.com:9443/ws/{symbol.lower()}@depth@100ms",
+        )
+        for symbol in RESEARCH_SYMBOLS
     ),
 }
 
@@ -119,10 +122,13 @@ class RecorderConfig:
     reconnect_max_seconds: float = 30.0
     connection_idle_timeout_seconds: float = 30.0
     scope: str = FUTURES_HFT_RECORDING_SCOPE
+    symbols: tuple[str, ...] = RESEARCH_SYMBOLS
 
     def validate(self) -> None:
         if type(self.scope) is not str or self.scope not in RECORDER_STREAMS_BY_SCOPE:
             raise ValueError("binance_recorder_scope_invalid")
+        if self.symbols != RESEARCH_SYMBOLS:
+            raise ValueError("binance_recorder_symbols_invalid")
         _positive_number(
             self.duration_seconds,
             error="binance_recorder_duration_invalid",
@@ -190,7 +196,7 @@ class _RunWriter:
     _closed: bool = field(default=False, init=False)
     _aborted: bool = field(default=False, init=False)
     _capture_seq: int = field(default=0, init=False)
-    _handles: dict[tuple[str, str, str, str], _OpenFile] = field(
+    _handles: dict[tuple[str, str, str, str, str], _OpenFile] = field(
         default_factory=dict,
         init=False,
     )
@@ -206,6 +212,7 @@ class _RunWriter:
     def write(
         self,
         *,
+        symbol: str,
         market_type: str,
         data_kind: str,
         stream: str,
@@ -252,11 +259,12 @@ class _RunWriter:
             for key in tuple(self._handles):
                 if key[0] != hour:
                     self._close_key(key)
-            key = (hour, market_type, data_kind, stream)
+            key = (hour, symbol, market_type, data_kind, stream)
             opened = self._handles.get(key)
             if opened is None:
                 opened = self._open_file(
                     key,
+                    symbol=symbol,
                     market_type=market_type,
                     data_kind=data_kind,
                     stream=stream,
@@ -275,7 +283,7 @@ class _RunWriter:
                 metadata["max_record_bytes"],
                 len(line),
             )
-            self._event_counts[data_kind] += 1
+            self._event_counts[f"{symbol}:{market_type}:{data_kind}"] += 1
             if metadata["record_count"] % 256 == 0:
                 opened.gzip_handle.flush()
                 opened.raw_handle.flush()
@@ -283,8 +291,9 @@ class _RunWriter:
 
     def _open_file(
         self,
-        key: tuple[str, str, str, str],
+        key: tuple[str, str, str, str, str],
         *,
+        symbol: str,
         market_type: str,
         data_kind: str,
         stream: str,
@@ -294,7 +303,7 @@ class _RunWriter:
             self.root / f"date={receive_time[:10]}" / f"hour={receive_time[11:13]}"
         )
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{market_type}_{data_kind}.jsonl.gz"
+        path = directory / f"{symbol}_{market_type}_{data_kind}.jsonl.gz"
         raw_handle = path.open("ab")
         try:
             gzip_handle = gzip.GzipFile(
@@ -312,7 +321,7 @@ class _RunWriter:
             {
                 "path": path.relative_to(self.root).as_posix(),
                 "venue": "binance",
-                "symbol": SYMBOL,
+                "symbol": symbol,
                 "market": market_type,
                 "stream": stream,
                 "data_kind": data_kind,
@@ -372,7 +381,7 @@ class _RunWriter:
         require_free_disk_headroom(self.root, reserve_bytes=2 * admitted)
         self._disk_bytes_remaining = admitted - logical_bytes
 
-    def _close_key(self, key: tuple[str, str, str, str]) -> None:
+    def _close_key(self, key: tuple[str, str, str, str, str]) -> None:
         opened = self._handles.pop(key, None)
         if opened is None:
             return
@@ -844,7 +853,7 @@ class _StreamReader(threading.Thread):
                     payload = validate_market_payload(
                         self.stream.market_type,
                         self.stream.data_kind,
-                        SYMBOL,
+                        self.stream.symbol,
                         parse_qrp_json_object(raw),
                     )
                 except (UnicodeError, ValueError):
@@ -864,6 +873,7 @@ class _StreamReader(threading.Thread):
                     if current_u > (previous_u if previous_u is not None else -1):
                         previous_u = current_u
                 self.writer.write(
+                    symbol=self.stream.symbol,
                     market_type=self.stream.market_type,
                     data_kind=self.stream.data_kind,
                     stream=self.stream.stream,
@@ -975,14 +985,14 @@ def _http_get_json(
     return payload, _utc_now(), time.monotonic_ns()
 
 
-def _selected_symbol(payload: object) -> dict[str, Any]:
+def _selected_symbol(payload: object, symbol_id: str) -> dict[str, Any]:
     if not isinstance(payload, dict) or not isinstance(payload.get("symbols"), list):
         raise ValueError("binance_recorder_exchange_info_invalid")
     symbol = next(
         (
             item
             for item in payload["symbols"]
-            if isinstance(item, dict) and item.get("symbol") == SYMBOL
+            if isinstance(item, dict) and item.get("symbol") == symbol_id
         ),
         None,
     )
@@ -996,13 +1006,14 @@ def _record_market_metadata(
     policy: RuntimeResourcePolicy,
     *,
     market_types: tuple[str, ...],
-) -> dict[str, dict[str, Any]]:
+    symbols: tuple[str, ...],
+) -> dict[str, dict[str, dict[str, Any]]]:
     requests = {
         SPOT_MARKET_TYPE: (
             SPOT_MARKET_TYPE,
             SPOT_REST_BASE_URL,
             "/api/v3/exchangeInfo",
-            {"symbol": SYMBOL},
+            None,
         ),
         FUTURES_MARKET_TYPE: (
             FUTURES_MARKET_TYPE,
@@ -1011,51 +1022,59 @@ def _record_market_metadata(
             None,
         ),
     }
-    result: dict[str, dict[str, Any]] = {}
-    for requested_market in market_types:
-        market_type, base_url, endpoint, params = requests[requested_market]
-        with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
-            payload = symbol = filters = tick_size = received = monotonic_ns = None
-            try:
-                payload, received, monotonic_ns = _http_get_json(
-                    base_url,
-                    endpoint,
-                    params=params,
-                )
-                symbol = _selected_symbol(payload)
-                filters = symbol.get("filters")
-                if not isinstance(filters, list):
-                    raise ValueError("binance_recorder_symbol_metadata_invalid")
-                tick_size = next(
-                    (
-                        item.get("tickSize")
-                        for item in filters
-                        if isinstance(item, dict)
-                        and item.get("filterType") == "PRICE_FILTER"
-                    ),
-                    None,
-                )
-                strict_positive_float(
-                    tick_size,
-                    error="binance_recorder_tick_size_invalid",
-                )
-                result[market_type] = {
-                    "tick_size": tick_size,
-                    "snapshot_limit": SNAPSHOT_LIMITS[market_type],
-                }
-                writer.write(
-                    market_type=market_type,
-                    data_kind="metadata",
-                    stream=f"REST:{endpoint}",
-                    payload=symbol,
-                    receive_time=received,
-                    receive_monotonic_ns=monotonic_ns,
-                )
-            except BaseException as error:
-                clear_exception_frames(error)
-                raise
-            finally:
+    result: dict[str, dict[str, dict[str, Any]]] = {}
+    for symbol_id in symbols:
+        result[symbol_id] = {}
+        for requested_market in market_types:
+            market_type, base_url, endpoint, params = requests[requested_market]
+            params = (
+                {"symbol": symbol_id} if market_type == SPOT_MARKET_TYPE else params
+            )
+            with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
                 payload = symbol = filters = tick_size = received = monotonic_ns = None
+                try:
+                    payload, received, monotonic_ns = _http_get_json(
+                        base_url,
+                        endpoint,
+                        params=params,
+                    )
+                    symbol = _selected_symbol(payload, symbol_id)
+                    filters = symbol.get("filters")
+                    if not isinstance(filters, list):
+                        raise ValueError("binance_recorder_symbol_metadata_invalid")
+                    tick_size = next(
+                        (
+                            item.get("tickSize")
+                            for item in filters
+                            if isinstance(item, dict)
+                            and item.get("filterType") == "PRICE_FILTER"
+                        ),
+                        None,
+                    )
+                    strict_positive_float(
+                        tick_size,
+                        error="binance_recorder_tick_size_invalid",
+                    )
+                    result[symbol_id][market_type] = {
+                        "tick_size": tick_size,
+                        "snapshot_limit": SNAPSHOT_LIMITS[market_type],
+                    }
+                    writer.write(
+                        symbol=symbol_id,
+                        market_type=market_type,
+                        data_kind="metadata",
+                        stream=f"REST:{endpoint}",
+                        payload=symbol,
+                        receive_time=received,
+                        receive_monotonic_ns=monotonic_ns,
+                    )
+                except BaseException as error:
+                    clear_exception_frames(error)
+                    raise
+                finally:
+                    payload = symbol = filters = tick_size = received = monotonic_ns = (
+                        None
+                    )
     return result
 
 
@@ -1104,7 +1123,7 @@ def _record_depth_snapshot(
                 base_url,
                 endpoint,
                 params={
-                    "symbol": SYMBOL,
+                    "symbol": reader.stream.symbol,
                     "limit": str(SNAPSHOT_LIMITS[market_type]),
                 },
             )
@@ -1113,6 +1132,7 @@ def _record_depth_snapshot(
                 raise _ConnectionProblem()
             snapshot = _validate_snapshot(payload, market_type=market_type)
             writer.write(
+                symbol=reader.stream.symbol,
                 market_type=market_type,
                 data_kind="depth_snapshot",
                 stream=f"REST:{endpoint}",
@@ -1153,7 +1173,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     cpu_start = time.process_time()
     process = psutil.Process(os.getpid())
     peak_rss = process.memory_info().rss
-    market_metadata: dict[str, dict[str, Any]] = {}
+    market_metadata: dict[str, dict[str, dict[str, Any]]] = {}
     duration_reached = False
     cleanup_errors: list[str] = []
     files: list[dict[str, Any]] = []
@@ -1172,6 +1192,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             writer,
             policy,
             market_types=market_types,
+            symbols=config.symbols,
         )
         websocket_reserve = len(streams) * _WS_STREAM_WORKING_SET_BYTES
         with policy.lease(
@@ -1294,7 +1315,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
         "status": status,
         "market_data_status": status,
         "venue": "binance",
-        "symbol": SYMBOL,
+        "symbols": list(config.symbols),
         "market_types": list(market_types),
         "market_metadata": market_metadata,
         "files": files,

@@ -39,6 +39,7 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     RECORDING_SCOPE_MARKET_TYPES,
+    RESEARCH_SYMBOLS,
     SPOT_MARKET_TYPE,
 )
 from quant_research_platform.sources.binance.raw_exports import (
@@ -440,6 +441,7 @@ class RecorderRun:
     def iter_records(
         self,
         *,
+        symbol: str | None = None,
         market_type: str | None = None,
         data_kinds: Sequence[str] | None = None,
         _record_observer: Callable[[dict[str, Any], str, int, int], None] | None = None,
@@ -448,7 +450,8 @@ class RecorderRun:
         selected = [
             item
             for item in self._files
-            if (market_type is None or item.metadata["market"] == market_type)
+            if (symbol is None or item.metadata["symbol"] == symbol)
+            and (market_type is None or item.metadata["market"] == market_type)
             and (kinds is None or item.metadata["data_kind"] in kinds)
         ]
         if not selected:
@@ -655,7 +658,6 @@ def _validate_run_manifest(value: object) -> None:
         "run_id",
         "recording_scope",
         "venue",
-        "symbol",
         "status",
         "market_data_status",
     ):
@@ -665,7 +667,11 @@ def _validate_run_manifest(value: object) -> None:
         validate_run_id(value["run_id"])
     except ValueError as exc:
         raise ValueError("binance_replay_run_manifest_invalid") from exc
-    if value["venue"] != "binance" or value["symbol"] != "BTCUSDT":
+    if (
+        value["venue"] != "binance"
+        or not isinstance(value.get("symbols"), list)
+        or value["symbols"] != list(RESEARCH_SYMBOLS)
+    ):
         raise ValueError("binance_replay_run_manifest_identity_invalid")
     statuses = {"PASS", "PARTIAL", "FAIL"}
     if (
@@ -684,19 +690,24 @@ def _validate_run_manifest(value: object) -> None:
         raise ValueError("binance_replay_run_manifest_invalid")
     market_metadata = value.get("market_metadata")
     if not isinstance(market_metadata, dict) or set(market_metadata) != set(
-        market_types
+        RESEARCH_SYMBOLS
     ):
         raise ValueError("binance_replay_market_metadata_invalid")
-    for _market, metadata in market_metadata.items():
-        if not isinstance(metadata, dict) or set(metadata) != {
-            "tick_size",
-            "snapshot_limit",
-        }:
+    for symbol_metadata in market_metadata.values():
+        if not isinstance(symbol_metadata, dict) or set(symbol_metadata) != set(
+            market_types
+        ):
             raise ValueError("binance_replay_market_metadata_invalid")
-        validate_tick_size(metadata["tick_size"])
-        limit = metadata["snapshot_limit"]
-        if isinstance(limit, bool) or type(limit) is not int or limit <= 0:
-            raise ValueError("binance_replay_market_metadata_invalid")
+        for metadata in symbol_metadata.values():
+            if not isinstance(metadata, dict) or set(metadata) != {
+                "tick_size",
+                "snapshot_limit",
+            }:
+                raise ValueError("binance_replay_market_metadata_invalid")
+            validate_tick_size(metadata["tick_size"])
+            limit = metadata["snapshot_limit"]
+            if isinstance(limit, bool) or type(limit) is not int or limit <= 0:
+                raise ValueError("binance_replay_market_metadata_invalid")
     capture = value.get("capture")
     if not isinstance(capture, dict):
         raise ValueError("binance_replay_connection_intervals_invalid")
@@ -708,7 +719,9 @@ def _validate_run_manifest(value: object) -> None:
         raise ValueError("binance_replay_run_files_missing")
     normalized: set[str] = set()
     for item in files:
-        _validate_file_manifest(item, markets=set(market_types))
+        _validate_file_manifest(
+            item, markets=set(market_types), symbols=set(RESEARCH_SYMBOLS)
+        )
         path = Path(item["path"])
         normalized_path = path.as_posix()
         if normalized_path != item["path"] or normalized_path in normalized:
@@ -716,7 +729,9 @@ def _validate_run_manifest(value: object) -> None:
         normalized.add(normalized_path)
 
 
-def _validate_file_manifest(value: object, *, markets: set[str]) -> None:
+def _validate_file_manifest(
+    value: object, *, markets: set[str], symbols: set[str]
+) -> None:
     if not isinstance(value, dict) or set(value) != _FILE_MANIFEST_KEYS:
         raise ValueError("binance_replay_file_manifest_invalid")
     path = Path(value["path"]) if isinstance(value.get("path"), str) else None
@@ -726,7 +741,7 @@ def _validate_file_manifest(value: object, *, markets: set[str]) -> None:
         or ".." in path.parts
         or not path.name.endswith(".jsonl.gz")
         or value.get("venue") != "binance"
-        or value.get("symbol") != "BTCUSDT"
+        or value.get("symbol") not in symbols
         or value.get("market") not in markets
         or not isinstance(value.get("stream"), str)
         or not value["stream"]
@@ -1063,8 +1078,8 @@ def _iter_raw_file(
                         )
                         count += 1
                         market_metadata = manifest["market_metadata"][
-                            metadata["market"]
-                        ]
+                            metadata["symbol"]
+                        ][metadata["market"]]
                         output = {
                             **record,
                             "run_id": manifest["run_id"],
@@ -1548,6 +1563,7 @@ def iter_reconstructed_depth(
     run: RecorderRun,
     market_type: str,
     *,
+    symbol: str,
     required_levels: int = 10,
     max_book_levels: int = 10_000,
     stats: ReconstructionStats | None = None,
@@ -1556,13 +1572,16 @@ def iter_reconstructed_depth(
 
     if market_type not in run.manifest["market_types"]:
         raise ValueError("binance_replay_market_type_missing")
-    metadata = run.manifest["market_metadata"][market_type]
+    if symbol not in run.manifest["symbols"]:
+        raise ValueError("binance_replay_symbol_missing")
+    metadata = run.manifest["market_metadata"][symbol][market_type]
     active_stats = stats if stats is not None else ReconstructionStats()
     reconstructor: DepthReconstructor | None = None
     active_segment: str | None = None
     pending_reconnect: tuple[str, str] | None = None
     pending_invalid_reason: str | None = None
     records = run.iter_records(
+        symbol=symbol,
         market_type=market_type,
         data_kinds=("depth_snapshot", "depth"),
     )
@@ -1709,6 +1728,7 @@ def iter_agg_trades(
     run: RecorderRun,
     market_type: str,
     *,
+    symbol: str,
     end_ms: int | None = None,
 ) -> Iterator[TradeEvent]:
     """Normalize one recorder trade stream while preserving local identity."""
@@ -1717,6 +1737,7 @@ def iter_agg_trades(
         raise ValueError("binance_replay_market_type_missing")
     previous_key: tuple[int, int, int] | None = None
     records = run.iter_records(
+        symbol=symbol,
         market_type=market_type,
         data_kinds=("agg_trades",),
     )

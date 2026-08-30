@@ -335,7 +335,7 @@ def _run_in_staging(
         taker = taker_models[_TAKER_MODEL_ID]
         maker_baseline = simulate_maker(
             book_factory(),
-            iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
+            iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", end_ms=end_ms),
             _maker_quote_schedule(
                 research_root=research_root,
                 time_window=test_window,
@@ -357,7 +357,7 @@ def _run_in_staging(
 
         maker = simulate_maker(
             book_factory(),
-            iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
+            iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", end_ms=end_ms),
             maker_prediction_schedule(),
             config=maker_config,
             observed_coverage=coverage,
@@ -498,7 +498,7 @@ def _book_events(
     *,
     end_ms: int,
 ) -> Iterator[OwnedValue[BookState] | BookBoundary]:
-    events = iter_reconstructed_depth(run, FUTURES_MARKET_TYPE)
+    events = iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT")
     with closing_iterator(events):
         for event in events:
             observed_time = (
