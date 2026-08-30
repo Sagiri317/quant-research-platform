@@ -36,6 +36,10 @@ _MODEL_ALGORITHM_FACTS = {
         "sklearn",
         default_hyperparameters={"alpha": 1.0},
     ),
+    "standardized_ridge_regression": _ModelAlgorithmFacts(
+        "sklearn",
+        default_hyperparameters={"alpha": 1.0},
+    ),
     "lasso_regression": _ModelAlgorithmFacts(
         "sklearn",
         default_hyperparameters={"alpha": 0.001, "max_iter": 10_000},

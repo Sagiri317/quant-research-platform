@@ -820,6 +820,46 @@ def taker_latency_sweep(
     ]
 
 
+def taker_cost_sensitivity(
+    result: Mapping[str, Any],
+    *,
+    fee_scenarios_bps: tuple[float, ...],
+    additional_spread_scenarios_bps: tuple[float, ...],
+) -> list[dict[str, float | str]]:
+    """Reprice actual simulated turnover under explicit additive cost scenarios."""
+
+    turnover = strict_finite_float(
+        result.get("turnover_usd"), error="hft_cost_sensitivity_result_invalid"
+    )
+    net_pnl = strict_finite_float(
+        result.get("net_pnl_usd"), error="hft_cost_sensitivity_result_invalid"
+    )
+    base_fee = strict_finite_float(
+        result.get("taker_fee_bps"), error="hft_cost_sensitivity_result_invalid"
+    )
+    scenarios = []
+    for fee_bps in fee_scenarios_bps:
+        fee = strict_finite_float(fee_bps, error="hft_cost_sensitivity_invalid")
+        if fee < 0.0:
+            raise ValueError("hft_cost_sensitivity_invalid")
+        for spread_bps in additional_spread_scenarios_bps:
+            spread = strict_finite_float(
+                spread_bps, error="hft_cost_sensitivity_invalid"
+            )
+            if spread < 0.0:
+                raise ValueError("hft_cost_sensitivity_invalid")
+            cost_delta = turnover * (fee - base_fee + spread) / 10_000.0
+            scenarios.append(
+                {
+                    "method": "constant_turnover_additive_sensitivity",
+                    "fee_bps": fee,
+                    "additional_spread_bps": spread,
+                    "net_pnl_usd": net_pnl - cost_delta,
+                }
+            )
+    return scenarios
+
+
 @dataclass
 class _MakerOrder:
     order_id: int

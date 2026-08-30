@@ -46,6 +46,8 @@ class PredictionSpec:
     model_selection_metric: str = "validation_rankic"
     model_selection_validation_start: str | None = None
     model_selection_validation_end: str | None = None
+    training_asset_ids: tuple[str, ...] = ()
+    evaluation_asset_ids: tuple[str, ...] = ()
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
@@ -104,6 +106,14 @@ class PredictionSpec:
         if self.test_end is not None and self.is_final_oos_window:
             object.__setattr__(self, "is_final_oos_window", False)
         _validate_model_selection_contract(self)
+        _validate_column_tuple(
+            self.training_asset_ids, "training_asset_ids", required=False
+        )
+        _validate_column_tuple(
+            self.evaluation_asset_ids, "evaluation_asset_ids", required=False
+        )
+        if bool(self.training_asset_ids) != bool(self.evaluation_asset_ids):
+            raise ValueError("prediction_asset_scopes_must_be_paired")
 
     @property
     def model_selection_enabled(self) -> bool:

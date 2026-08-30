@@ -219,6 +219,8 @@ def prediction_output_metadata(
         "test_start": spec.test_start,
         "test_end": spec.test_end,
         "is_final_oos_window": spec.is_final_oos_window,
+        "training_asset_ids": list(spec.training_asset_ids),
+        "evaluation_asset_ids": list(spec.evaluation_asset_ids),
         "prediction_column": spec.prediction_column,
         "primary_key": list(spec.primary_key),
         "sample_filter_mode": spec.sample_filter_mode,

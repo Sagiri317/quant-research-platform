@@ -310,8 +310,8 @@ def make_output_edge_report_spec(
 
 def make_output_edge_evaluation_diagnostics(
     *,
-    min_timestamp: str = "2024-01-02",
-    max_timestamp: str = "2024-01-02",
+    min_timestamp: str = "2024-01-02T00:00:00",
+    max_timestamp: str = "2024-01-02T00:00:00",
 ) -> EvaluationDiagnostics:
     return EvaluationDiagnostics(
         filter_mode="eligible",

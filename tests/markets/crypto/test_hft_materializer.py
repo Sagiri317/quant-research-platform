@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pandas as pd
+
 from quant_research_platform.artifacts.outputs import write_prediction_outputs
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.time import TimeWindow
@@ -19,6 +21,7 @@ from quant_research_platform.markets.implementations.crypto.research_datasets im
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
     HFT_MODEL_ALGORITHMS,
+    HFT_MULTI_ASSET_SCOPES,
     build_hft_model_catalog,
     build_hft_prediction_catalog,
 )
@@ -60,11 +63,13 @@ def test_hft_materialization_reuses_panel_and_standard_research_dataset(
             policy,
         ) as run,
     ):
-        inspections, stats = crypto_hft_materialization.materialize_hft_processed_data(
-            layout=layout,
-            run=run,
-            time_window=window,
-            resource_policy=policy,
+        inspections, stats_by_symbol = (
+            crypto_hft_materialization.materialize_hft_processed_data(
+                layout=layout,
+                run=run,
+                time_window=window,
+                resource_policy=policy,
+            )
         )
         assemble_research_dataset(
             layout=layout,
@@ -117,10 +122,11 @@ def test_hft_materialization_reuses_panel_and_standard_research_dataset(
             finally:
                 result.close()
 
-    assert inspections[HFT_PANEL_DATA_ID].row_count == 61
-    assert inspections[HFT_FACTOR_DATA_ID].row_count == 61
-    assert inspections[HFT_LABEL_DATA_ID].row_count == 61
-    assert stats.emitted_states == 61
+    assert inspections[HFT_PANEL_DATA_ID].row_count == 122
+    assert inspections[HFT_FACTOR_DATA_ID].row_count == 122
+    assert inspections[HFT_LABEL_DATA_ID].row_count == 122
+    assert stats_by_symbol["BTCUSDT"].emitted_states == 61
+    assert stats_by_symbol["ETHUSDT"].emitted_states == 61
     assert (
         inspections[HFT_PANEL_DATA_ID].manifest["source_artifact_identity"][
             "artifact_id"
@@ -140,7 +146,8 @@ def test_hft_materialization_reuses_panel_and_standard_research_dataset(
             resource_policy=policy,
         )
 
-    assert len(research) == 61
+    assert len(research) == 122
+    assert set(research["asset_id"]) == {"btc_usdt", "eth_usdt"}
     assert "segment_id" in research
     assert "ofi_100ms" in research
     assert "future_mid_return_500ms" in research
@@ -155,3 +162,9 @@ def test_hft_materialization_reuses_panel_and_standard_research_dataset(
         for metadata in model_metadata.values()
     )
     assert all("T" in metadata["train_end"] for metadata in model_metadata.values())
+    for mode, (_train_assets, evaluation_assets) in HFT_MULTI_ASSET_SCOPES.items():
+        model_id = f"crypto_hft_{mode}"
+        predictions = pd.read_parquet(
+            prediction_bundles[model_id] / "prediction.parquet"
+        )
+        assert set(predictions["asset_id"]) == set(evaluation_assets)

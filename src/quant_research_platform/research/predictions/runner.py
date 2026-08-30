@@ -255,6 +255,7 @@ def _build_prediction_result_from_research_dataset(
             _prediction_train_chunks(
                 _chunks(train_read_columns, input_columns=model_spec.input_columns),
                 train_end=train_end,
+                asset_ids=prediction_spec.training_asset_ids,
             ),
             model_spec,
             estimator=build_estimator_from_model_spec(model_spec),
@@ -347,6 +348,7 @@ def _select_prediction_model_spec(
             _prediction_train_chunks(
                 chunks(train_read_columns, input_columns=candidate_spec.input_columns),
                 train_end=pd.Timestamp(prediction_spec.train_end),
+                asset_ids=prediction_spec.training_asset_ids,
             ),
             candidate_spec,
             estimator=build_estimator_from_model_spec(candidate_spec),
@@ -565,8 +567,15 @@ def _prediction_train_chunks(
     chunks: Iterable[pd.DataFrame],
     *,
     train_end: pd.Timestamp,
+    asset_ids: tuple[str, ...] = (),
 ) -> Iterable[pd.DataFrame]:
     for chunk in chunks:
+        if asset_ids:
+            if "asset_id" not in chunk.columns:
+                raise ValueError("prediction_training_asset_id_missing")
+            chunk = chunk.loc[chunk["asset_id"].isin(asset_ids)]
+            if chunk.empty:
+                continue
         policy = current_runtime_resource_policy()
         index_bytes = int(chunk.index.memory_usage(deep=True))
         timestamp_bytes = index_bytes + 8 * len(chunk)

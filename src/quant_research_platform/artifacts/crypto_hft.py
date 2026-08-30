@@ -30,6 +30,8 @@ def write_crypto_hft_execution_artifact(
     maker: Mapping[str, Any],
     maker_baseline: Mapping[str, Any],
     latency_sweep: list[dict[str, Any]],
+    cost_sensitivity: list[dict[str, Any]],
+    multi_asset_execution: Mapping[str, Mapping[str, Mapping[str, Any]]],
 ) -> dict[str, Any]:
     lineage = {
         "source_artifact_identity": dict(source_identity),
@@ -54,6 +56,11 @@ def write_crypto_hft_execution_artifact(
             "maker": dict(maker),
             "maker_baseline": dict(maker_baseline),
             "latency_sweep": latency_sweep,
+            "cost_sensitivity": cost_sensitivity,
+            "multi_asset_execution": {
+                mode: {asset_id: dict(result) for asset_id, result in results.items()}
+                for mode, results in multi_asset_execution.items()
+            },
         }
     )
     write_json_evidence(path, payload)

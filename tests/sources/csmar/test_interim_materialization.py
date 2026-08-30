@@ -1812,6 +1812,12 @@ def test_csmar_interim_catalog_registers_source_owned_specs() -> None:
         "adjustment",
         "index_info",
         "trading_calendar",
+        "index_market",
+        "index_membership",
+        "index_weights",
+        "financial_balance",
+        "financial_income",
+        "financial_cashflow",
     }
     assert {str(spec.source_id) for spec in specs} == {"csmar"}
 

@@ -338,13 +338,14 @@ class _ConnectionCoverageIndex:
         *,
         market_type: str,
         data_kind: str,
+        symbol: str,
     ) -> dict[str, tuple[int, int]]:
         return {
             str(connection_id): (int(opened_ns), int(closed_ns))
             for connection_id, opened_ns, closed_ns in self._database.execute(
                 "SELECT connection_id, opened_ns, closed_ns FROM coverage "
-                "WHERE market = ? AND data_kind = ?",
-                (market_type, data_kind),
+                "WHERE market = ? AND data_kind = ? AND stream LIKE ?",
+                (market_type, data_kind, f"{symbol.lower()}@%"),
             )
         }
 
@@ -492,12 +493,14 @@ class RecorderRun:
         *,
         market_type: str,
         data_kind: str,
+        symbol: str,
     ) -> dict[str, tuple[int, int]]:
         if data_kind == "depth_snapshot":
             data_kind = "depth"
         return self._coverage_index.coverage(
             market_type=market_type,
             data_kind=data_kind,
+            symbol=symbol,
         )
 
 
@@ -718,6 +721,7 @@ def _validate_run_manifest(value: object) -> None:
     if not isinstance(files, list) or not files:
         raise ValueError("binance_replay_run_files_missing")
     normalized: set[str] = set()
+    present_tuples: set[tuple[str, str, str]] = set()
     for item in files:
         _validate_file_manifest(
             item, markets=set(market_types), symbols=set(RESEARCH_SYMBOLS)
@@ -727,6 +731,20 @@ def _validate_run_manifest(value: object) -> None:
         if normalized_path != item["path"] or normalized_path in normalized:
             raise ValueError("binance_replay_file_manifest_invalid")
         normalized.add(normalized_path)
+        present_tuples.add((item["symbol"], item["market"], item["data_kind"]))
+    stream_kinds = (
+        {"metadata", "depth", "depth_snapshot", "agg_trades"}
+        if recording_scope == "futures-hft"
+        else {"metadata", "depth", "depth_snapshot"}
+    )
+    required_tuples = {
+        (symbol, market, data_kind)
+        for symbol in RESEARCH_SYMBOLS
+        for market in market_types
+        for data_kind in stream_kinds
+    }
+    if value["status"] == "PASS" and present_tuples != required_tuples:
+        raise ValueError("binance_replay_run_completeness_invalid")
 
 
 def _validate_file_manifest(

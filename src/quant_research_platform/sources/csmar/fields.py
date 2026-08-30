@@ -8,6 +8,7 @@ SOURCE_IDENTIFIER_FIELDS = {
     "source_asset_id",
     "stock_code",
     "index_code",
+    "constituent_asset_id",
     "trade_date",
     "share_change_date",
     "asset_record_date",

@@ -106,6 +106,8 @@ def build_crypto_hft_report(
                 "maker": execution_payload["maker"],
                 "maker_baseline": execution_payload["maker_baseline"],
                 "latency_sweep": execution_payload["latency_sweep"],
+                "cost_sensitivity": execution_payload["cost_sensitivity"],
+                "multi_asset_execution": execution_payload["multi_asset_execution"],
             },
             "resource": dict(resource),
         }

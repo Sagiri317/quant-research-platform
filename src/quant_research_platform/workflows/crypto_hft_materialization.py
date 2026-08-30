@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Callable, Iterable, Iterator
+from dataclasses import replace
 
 import pandas as pd
 
@@ -39,6 +40,7 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
+    RESEARCH_SYMBOLS,
 )
 from quant_research_platform.sources.binance.replay import (
     ReconstructionStats,
@@ -67,7 +69,7 @@ def materialize_hft_processed_data(
     run: RecorderRun,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
-) -> tuple[dict[str, DatasetInspection], ReconstructionStats]:
+) -> tuple[dict[str, DatasetInspection], dict[str, ReconstructionStats]]:
     """Write PANEL once, then derive FACTOR and LABEL from that persisted PANEL."""
 
     if not is_intraday_time_window(time_window):
@@ -80,9 +82,10 @@ def materialize_hft_processed_data(
         raise ValueError("hft_futures_run_missing")
     start_ms = _milliseconds(time_window.start)
     end_ms = _milliseconds(time_window.end)
-    asset_id = canonical_crypto_asset_id(run.manifest["symbol"])
+    if tuple(run.manifest["symbols"]) != RESEARCH_SYMBOLS:
+        raise ValueError("hft_symbols_incomplete")
     catalog = hft_processed_catalog()
-    stats = ReconstructionStats()
+    stats_by_symbol = {symbol: ReconstructionStats() for symbol in RESEARCH_SYMBOLS}
     inspections: dict[str, DatasetInspection] = {}
     with runtime_resource_policy_scope(resource_policy) as policy:
         panel_spec = catalog.get(HFT_PANEL_DATA_ID)
@@ -95,25 +98,55 @@ def materialize_hft_processed_data(
         panel_producer_bound = (
             _FRAME_FIXED_BYTES + panel_batch_rows * _PANEL_ROW_BUFFER_BYTES
         )
-        panel_frames = iter_panel_frames(
-            iter_reconstructed_depth(
-                run,
-                FUTURES_MARKET_TYPE,
-                symbol="BTCUSDT",
-                stats=stats,
-            ),
-            iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", end_ms=end_ms),
-            start_ms=start_ms,
-            end_ms=end_ms,
-            book_coverage=stats.coverage_segments,
-            trade_coverage=run.connection_coverage(
-                market_type=FUTURES_MARKET_TYPE,
-                data_kind="agg_trades",
-            ),
-            market_id=str(MARKET_ID),
-            asset_id=asset_id,
-            batch_rows=panel_batch_rows,
-        )
+
+        symbol_batch_rows = max(1, panel_batch_rows // len(RESEARCH_SYMBOLS))
+
+        def symbol_frames(active_symbol: str):  # noqa: ANN202
+            active_stats = stats_by_symbol[active_symbol]
+            return iter_panel_frames(
+                iter_reconstructed_depth(
+                    run,
+                    FUTURES_MARKET_TYPE,
+                    symbol=active_symbol,
+                    stats=active_stats,
+                ),
+                iter_agg_trades(
+                    run,
+                    FUTURES_MARKET_TYPE,
+                    symbol=active_symbol,
+                    end_ms=end_ms,
+                ),
+                start_ms=start_ms,
+                end_ms=end_ms,
+                book_coverage=active_stats.coverage_segments,
+                trade_coverage=run.connection_coverage(
+                    market_type=FUTURES_MARKET_TYPE,
+                    data_kind="agg_trades",
+                    symbol=active_symbol,
+                ),
+                market_id=str(MARKET_ID),
+                asset_id=canonical_crypto_asset_id(active_symbol),
+                batch_rows=symbol_batch_rows,
+            )
+
+        def panel_frames():  # noqa: ANN202
+            streams = [symbol_frames(symbol) for symbol in RESEARCH_SYMBOLS]
+            try:
+                for frames in zip(*streams, strict=True):
+                    combined = pd.concat(frames, ignore_index=True)
+                    common_counts = combined.groupby("timestamp")["asset_id"].nunique()
+                    common_timestamps = common_counts.index[
+                        common_counts.eq(len(RESEARCH_SYMBOLS))
+                    ]
+                    common = combined.loc[
+                        combined["timestamp"].isin(common_timestamps)
+                    ].sort_values(["timestamp", "asset_id"], kind="mergesort")
+                    if not common.empty:
+                        yield common.reset_index(drop=True)
+            finally:
+                for stream in streams:
+                    stream.close()
+
         panel_root = layout.processed_data_root(
             panel_spec.market_id,
             panel_spec.kind,
@@ -122,7 +155,7 @@ def materialize_hft_processed_data(
         inspections[HFT_PANEL_DATA_ID] = write_dataset(
             panel_root,
             _event_frame_producer(
-                panel_frames,
+                panel_frames(),
                 columns=panel_spec.required_columns,
                 producer_bound=panel_producer_bound,
             ),
@@ -191,7 +224,7 @@ def materialize_hft_processed_data(
                 resource_policy=policy,
             )
             panel_session.verify()
-    return inspections, stats
+    return inspections, stats_by_symbol
 
 
 def _milliseconds(value: dt.datetime) -> int:
@@ -234,22 +267,35 @@ def _panel_frame_producer(
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[object]:
     target_chunk_bytes = max(1, resource_policy.operation_headroom_bytes // 8)
-    chunks = iter_dataset_chunks(session, target_chunk_bytes=target_chunk_bytes)
-    frames = iter(transform(chunks))
-    with closing_iterator(chunks), closing_iterator(frames):
-        while True:
-            producer_bound = resource_policy.operation_headroom_bytes // 2
-            if producer_bound <= _FRAME_FIXED_BYTES:
-                raise MemoryError("runtime_memory_budget_exceeded")
-            lease = yield producer_bound
-            try:
-                frame = next(frames)
-            except StopIteration:
-                return
-            output = frame.loc[:, list(columns)]
-            actual_bound = pandas_frame_payload_bytes(output) + 64 * 1024
-            if actual_bound > lease.reserved_bytes:
-                raise ValueError("hft_dataframe_producer_bound_invalid")
-            lease.shrink_to(actual_bound)
-            yield OwnedValue(output, lease)
-            del frame, output
+    for symbol in RESEARCH_SYMBOLS:
+        asset_filter = ("asset_id", "==", canonical_crypto_asset_id(symbol))
+        asset_session = replace(
+            session,
+            parquet_filters=(*(session.parquet_filters or ()), asset_filter),
+            owns_inventory=False,
+            owns_lease=False,
+        )
+        try:
+            chunks = iter_dataset_chunks(
+                asset_session, target_chunk_bytes=target_chunk_bytes
+            )
+            frames = iter(transform(chunks))
+            with closing_iterator(chunks), closing_iterator(frames):
+                while True:
+                    try:
+                        frame = next(frames)
+                    except StopIteration:
+                        break
+                    producer_bound = resource_policy.operation_headroom_bytes // 2
+                    if producer_bound <= _FRAME_FIXED_BYTES:
+                        raise MemoryError("runtime_memory_budget_exceeded")
+                    lease = yield producer_bound
+                    output = frame.loc[:, list(columns)]
+                    actual_bound = pandas_frame_payload_bytes(output) + 64 * 1024
+                    if actual_bound > lease.reserved_bytes:
+                        raise ValueError("hft_dataframe_producer_bound_invalid")
+                    lease.shrink_to(actual_bound)
+                    yield OwnedValue(output, lease)
+                    del frame, output
+        finally:
+            asset_session.verify()

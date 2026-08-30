@@ -346,9 +346,7 @@ class _EvaluationStreamingState:
                 if self._min_timestamp is None
                 else time_value_isoformat(
                     self._min_timestamp.to_pydatetime(),
-                    preserve_datetime=(
-                        self._spec.evaluation_axis == "single_asset_time_series"
-                    ),
+                    preserve_datetime=True,
                 )
             ),
             max_timestamp=(
@@ -356,9 +354,7 @@ class _EvaluationStreamingState:
                 if self._max_timestamp is None
                 else time_value_isoformat(
                     self._max_timestamp.to_pydatetime(),
-                    preserve_datetime=(
-                        self._spec.evaluation_axis == "single_asset_time_series"
-                    ),
+                    preserve_datetime=True,
                 )
             ),
             n_groups=self._n_groups,
@@ -945,13 +941,15 @@ def _iter_evaluation_filtered_chunks(
             error="invalid_evaluation_timestamp_values",
         )
         batch_timestamp_count = int(batch_timestamps.nunique())
+        batch_min = pd.Timestamp(batch_timestamps.min())
+        batch_max = pd.Timestamp(batch_timestamps.max())
         batch_min_timestamp = (
-            pd.Timestamp(batch_timestamps.min()).date().isoformat()
+            time_value_isoformat(batch_min.to_pydatetime(), preserve_datetime=True)
             if batch_timestamp_count
             else None
         )
         batch_max_timestamp = (
-            pd.Timestamp(batch_timestamps.max()).date().isoformat()
+            time_value_isoformat(batch_max.to_pydatetime(), preserve_datetime=True)
             if batch_timestamp_count
             else None
         )

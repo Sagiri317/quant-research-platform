@@ -121,6 +121,8 @@ _PREDICTION_OUTPUT_METADATA_KEYS = frozenset(
         "test_start",
         "test_end",
         "is_final_oos_window",
+        "training_asset_ids",
+        "evaluation_asset_ids",
         "prediction_column",
         "primary_key",
         "sample_filter_mode",
@@ -397,6 +399,18 @@ def validate_prediction_output_metadata_shape(
     require_metadata_string_list(
         metadata, "primary_key", "output_manifest_metadata_invalid"
     )
+    require_metadata_string_list(
+        metadata,
+        "training_asset_ids",
+        "output_manifest_metadata_invalid",
+        allow_empty=True,
+    )
+    require_metadata_string_list(
+        metadata,
+        "evaluation_asset_ids",
+        "output_manifest_metadata_invalid",
+        allow_empty=True,
+    )
     model_metadata = metadata["model_metadata"]
     prediction_metadata = metadata["prediction_metadata"]
     if type(model_metadata) is not dict or type(prediction_metadata) is not dict:
@@ -465,6 +479,8 @@ def validate_prediction_output_metadata_shape(
             model_selection_metric=model_selection_metric,
             model_selection_validation_start=model_selection_validation_start,
             model_selection_validation_end=model_selection_validation_end,
+            training_asset_ids=tuple(metadata["training_asset_ids"]),
+            evaluation_asset_ids=tuple(metadata["evaluation_asset_ids"]),
         )
         if spec.is_final_oos_window is not metadata["is_final_oos_window"]:
             raise ValueError("prediction_window_not_canonical")

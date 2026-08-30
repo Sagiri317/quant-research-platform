@@ -42,6 +42,7 @@ from quant_research_platform.contracts.evaluations import (
     strict_non_negative_count_series,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
+from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
@@ -386,12 +387,18 @@ def _write_evaluation_artifact_chunks(
                         timestamps.loc[n_obs.lt(2)].nunique()
                     )
                     chunk_min = (
-                        pd.Timestamp(timestamps.min()).date().isoformat()
+                        time_value_isoformat(
+                            pd.Timestamp(timestamps.min()).to_pydatetime(),
+                            preserve_datetime=True,
+                        )
                         if not timestamps.empty
                         else None
                     )
                     chunk_max = (
-                        pd.Timestamp(timestamps.max()).date().isoformat()
+                        time_value_isoformat(
+                            pd.Timestamp(timestamps.max()).to_pydatetime(),
+                            preserve_datetime=True,
+                        )
                         if not timestamps.empty
                         else None
                     )

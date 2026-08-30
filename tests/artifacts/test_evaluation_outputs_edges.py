@@ -790,8 +790,8 @@ def test_evaluation_outputs_writes_share_safe_summary_md(tmp_path: Path) -> None
     assert "- rows_input: `2`" in summary
     assert "- rows_after_filter: `2`" in summary
     assert "- timestamp_count: `1`" in summary
-    assert "- min_timestamp: `2024-01-02`" in summary
-    assert "- max_timestamp: `2024-01-02`" in summary
+    assert "- min_timestamp: `2024-01-02T00:00:00`" in summary
+    assert "- max_timestamp: `2024-01-02T00:00:00`" in summary
     assert "| signal | label | mean_ic | mean_rankic |" in summary
     assert "## Signal/Label Coverage Summary" in summary
     assert (
@@ -1342,6 +1342,6 @@ def test_managed_evaluation_persists_aggregate_beyond_ram_budget(
     assert diagnostics["metric_rows"] == len(persisted_metrics)
     assert diagnostics["grouped_label_value_rows"] == len(persisted_grouped)
     assert diagnostics["timestamp_count"] == total_timestamps
-    assert diagnostics["min_timestamp"] == "2000-01-01"
-    assert diagnostics["max_timestamp"] == "2004-05-18"
+    assert diagnostics["min_timestamp"] == "2000-01-01T00:00:00"
+    assert diagnostics["max_timestamp"] == "2004-05-18T00:00:00"
     assert policy.used_memory_bytes == 0

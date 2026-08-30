@@ -326,6 +326,10 @@ def _iter_prediction_output_frames(
                     usable_mask &= filtered["timestamp"] >= pd.Timestamp(
                         spec.test_start
                     )
+                    if spec.evaluation_asset_ids:
+                        usable_mask &= filtered["asset_id"].isin(
+                            spec.evaluation_asset_ids
+                        )
                     if spec.test_end is not None:
                         usable_mask &= filtered["timestamp"] <= pd.Timestamp(
                             spec.test_end

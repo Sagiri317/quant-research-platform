@@ -23,6 +23,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import (
+    strict_bool_series,
     strict_finite_numeric_series,
     strict_string_series,
     strict_timestamp_series,
@@ -74,7 +75,13 @@ DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
     "adjustment",
     "market_cap",
     "index_info",
+    "index_market",
     "trading_calendar",
+    "index_membership",
+    "index_weights",
+    "financial_balance",
+    "financial_income",
+    "financial_cashflow",
 )
 TIME_RANGE_FILTER_DATA_IDS = {MARKET_BARS_DATA_ID}
 END_ONLY_FILTER_DATA_IDS = {"market_cap"}
@@ -145,6 +152,14 @@ INDEX_INFO_INTERIM_COLUMNS: tuple[str, ...] = (
     "start_date",
     "base_date",
 )
+INDEX_RETURN_INTERIM_COLUMNS: tuple[str, ...] = (
+    "source_asset_id",
+    "timestamp",
+    "trade_date",
+    "index_name",
+    "close",
+    "period_return",
+)
 TRADING_CALENDAR_INTERIM_COLUMNS: tuple[str, ...] = (
     "timestamp",
     "calendar_date",
@@ -153,13 +168,59 @@ TRADING_CALENDAR_INTERIM_COLUMNS: tuple[str, ...] = (
     "source_day_of_week",
     "source_state",
 )
+INDEX_MEMBERSHIP_INTERIM_COLUMNS: tuple[str, ...] = (
+    "source_asset_id",
+    "constituent_asset_id",
+    "timestamp",
+    "effective_date",
+    "announcement_date",
+    "constituent_name",
+    "change_type",
+    "security_type",
+    "market_code",
+)
+INDEX_WEIGHTS_INTERIM_COLUMNS: tuple[str, ...] = (
+    "source_asset_id",
+    "constituent_asset_id",
+    "timestamp",
+    "effective_date",
+    "constituent_name",
+    "weight",
+)
+FINANCIAL_BASE_COLUMNS: tuple[str, ...] = (
+    "source_asset_id",
+    "timestamp",
+    "stock_name",
+    "report_period",
+    "report_type",
+    "is_corrected",
+    "correction_disclosure_date",
+)
+FINANCIAL_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
+    "financial_balance": (
+        *FINANCIAL_BASE_COLUMNS,
+        "total_assets",
+        "total_liabilities",
+        "total_equity",
+    ),
+    "financial_income": (
+        *FINANCIAL_BASE_COLUMNS,
+        "operating_revenue",
+        "net_income",
+    ),
+    "financial_cashflow": (*FINANCIAL_BASE_COLUMNS, "operating_cash_flow"),
+}
 INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     MARKET_BARS_DATA_ID: MARKET_BARS_INTERIM_COLUMNS,
     "stock_master": STOCK_MASTER_INTERIM_COLUMNS,
     "market_cap": MARKET_CAP_INTERIM_COLUMNS,
     "adjustment": ADJUSTMENT_INTERIM_COLUMNS,
     "index_info": INDEX_INFO_INTERIM_COLUMNS,
+    "index_market": INDEX_RETURN_INTERIM_COLUMNS,
     "trading_calendar": TRADING_CALENDAR_INTERIM_COLUMNS,
+    "index_membership": INDEX_MEMBERSHIP_INTERIM_COLUMNS,
+    "index_weights": INDEX_WEIGHTS_INTERIM_COLUMNS,
+    **FINANCIAL_COLUMNS_BY_DATA_ID,
 }
 AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
     MARKET_BARS_DATA_ID: {
@@ -415,6 +476,73 @@ def normalize_raw_frame(
 
     if data_id == "trading_calendar":
         return _normalize_trading_calendar_frame(mapped)
+    if data_id == "index_membership":
+        result = mapped
+        result["constituent_asset_id"] = normalize_stock_code(
+            result["constituent_stock_code"]
+        )
+        for column in ("effective_date", "announcement_date"):
+            result[column] = strict_timestamp_series(
+                result[column], error=f"invalid_index_membership_{column}"
+            ).dt.normalize()
+        result["timestamp"] = result["effective_date"]
+        result["source_asset_id"] = result["index_code"]
+        result.sort_values(
+            ["source_asset_id", "constituent_asset_id", "timestamp"], inplace=True
+        )
+        return result.reset_index(drop=True)
+    if data_id == "index_weights":
+        result = mapped
+        result["constituent_asset_id"] = normalize_stock_code(
+            result["constituent_stock_code"]
+        )
+        result["effective_date"] = strict_timestamp_series(
+            result["effective_date"], error="invalid_index_weight_date"
+        ).dt.normalize()
+        result["weight"] = (
+            strict_finite_numeric_series(
+                result["weight_pct"], error="invalid_index_weight"
+            )
+            / 100.0
+        )
+        if bool((result["weight"] < 0.0).any()):
+            raise ValueError("invalid_index_weight")
+        result["timestamp"] = result["effective_date"]
+        result["source_asset_id"] = result["index_code"]
+        result.sort_values(
+            ["source_asset_id", "constituent_asset_id", "timestamp"], inplace=True
+        )
+        return result.reset_index(drop=True)
+    if data_id in FINANCIAL_COLUMNS_BY_DATA_ID:
+        result = mapped
+        result["report_period"] = strict_timestamp_series(
+            result["report_period"], error="invalid_financial_report_period"
+        ).dt.normalize()
+        result["correction_disclosure_date"] = _parse_optional_csmar_date(
+            result["correction_disclosure_date"],
+            "correction_disclosure_date",
+            error_code="invalid_financial_correction_date",
+        )
+        result["is_corrected"] = strict_bool_series(
+            result["is_corrected"], error="invalid_financial_correction_flag"
+        )
+        result["report_type"] = strict_string_series(
+            result["report_type"], error="invalid_financial_report_type"
+        )
+        for column in set(FINANCIAL_COLUMNS_BY_DATA_ID[data_id]).difference(
+            FINANCIAL_BASE_COLUMNS
+        ):
+            result[column] = strict_finite_numeric_series(
+                result[column],
+                error=f"invalid_financial_value: {column}",
+                allow_null=True,
+            )
+        result["timestamp"] = result["report_period"]
+        result["source_asset_id"] = result["stock_code"]
+        result.sort_values(
+            ["source_asset_id", "timestamp", "report_type"], inplace=True
+        )
+        return result.reset_index(drop=True)
     if data_id == MARKET_BARS_DATA_ID:
         result = mapped
         result["limit_status"] = result["limit_status"].astype("float64")
@@ -506,6 +634,21 @@ def normalize_raw_frame(
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
         result.reset_index(drop=True, inplace=True)
         return result
+    if data_id == "index_market":
+        result = mapped
+        result["trade_date"] = strict_timestamp_series(
+            result["trade_date"], error="invalid_index_return_date"
+        ).dt.normalize()
+        result["period_return"] = (
+            strict_finite_numeric_series(
+                result["return_1d_pct"], error="invalid_index_return"
+            )
+            / 100.0
+        )
+        result["timestamp"] = result["trade_date"]
+        result["source_asset_id"] = result["index_code"]
+        result.sort_values(["source_asset_id", "timestamp"], inplace=True)
+        return result.reset_index(drop=True)
     raise ValueError(f"unsupported_csmar_data_id: {data_id}")
 
 
@@ -1316,6 +1459,28 @@ def _append_reference_duplicate_summary(
 
 
 def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
+    if data_id in {"index_membership", "index_weights"}:
+        primary_key = ("source_asset_id", "constituent_asset_id", "timestamp")
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
+    if data_id in FINANCIAL_COLUMNS_BY_DATA_ID:
+        primary_key = ("source_asset_id", "timestamp", "report_type")
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
     if data_id == "trading_calendar":
         primary_key = ("timestamp", "source_market_type")
         return InterimDataSpec(
@@ -1419,6 +1584,12 @@ def _date_column(data_id: str) -> str:
         "market_cap",
         "stock_master",
         "trading_calendar",
+        "index_membership",
+        "index_weights",
+        "index_market",
+        "financial_balance",
+        "financial_income",
+        "financial_cashflow",
     }:
         return "timestamp"
     raise ValueError(f"data_id_has_no_filtering_date_column: {data_id}")

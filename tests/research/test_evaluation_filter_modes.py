@@ -244,8 +244,8 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() ->
     assert eligible_diagnostics.ic_summary_rows == 1
     assert eligible_diagnostics.group_spread_summary_rows == 1
     assert eligible_diagnostics.timestamp_count == 1
-    assert eligible_diagnostics.min_timestamp == "2024-01-02"
-    assert eligible_diagnostics.max_timestamp == "2024-01-02"
+    assert eligible_diagnostics.min_timestamp == "2024-01-02T00:00:00"
+    assert eligible_diagnostics.max_timestamp == "2024-01-02T00:00:00"
     assert eligible_diagnostics.n_groups == 2
     assert eligible_diagnostics.skipped_timestamp_count == 0
     assert tradable_diagnostics.filter_columns_used == (

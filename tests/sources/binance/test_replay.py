@@ -445,8 +445,8 @@ def _write_run(
         "schema_id": "qrp-binance-recorder",
         "run_id": run_id,
         "recording_scope": recording_scope,
-        "status": "PASS",
-        "market_data_status": "PASS",
+        "status": "PARTIAL",
+        "market_data_status": "PARTIAL",
         "venue": "binance",
         "symbols": list(RESEARCH_SYMBOLS),
         "market_types": market_types,
@@ -898,7 +898,7 @@ def test_run_manifest_requires_equal_known_statuses(
         replay._validate_run_manifest(manifest)
 
 
-@pytest.mark.parametrize("status", ("PASS", "PARTIAL", "FAIL"))
+@pytest.mark.parametrize("status", ("PARTIAL", "FAIL"))
 def test_run_manifest_accepts_equal_known_statuses(
     tmp_path: Path,
     status: str,
@@ -918,6 +918,25 @@ def test_run_manifest_accepts_equal_known_statuses(
     manifest["market_data_status"] = status
 
     replay._validate_run_manifest(manifest)
+
+
+def test_pass_manifest_requires_every_btc_eth_stream_tuple(tmp_path: Path) -> None:
+    manifest = _write_run(
+        tmp_path / "run",
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    manifest["status"] = "PASS"
+    manifest["market_data_status"] = "PASS"
+
+    with pytest.raises(ValueError, match="^binance_replay_run_completeness_invalid$"):
+        replay._validate_run_manifest(manifest)
 
 
 def test_run_manifest_binds_recording_scope_to_exact_market_set(

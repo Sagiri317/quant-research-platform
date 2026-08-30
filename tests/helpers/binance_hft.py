@@ -16,6 +16,7 @@ from quant_research_platform.runtime.resources import runtime_resource_policy_sc
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
+    RESEARCH_SYMBOLS,
 )
 from tests.helpers.runtime_resources import capture_test_policy
 
@@ -153,21 +154,126 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
     files = [
         _write_file(
             root,
+            symbol="BTCUSDT",
+            data_kind="metadata",
+            stream="REST:/fapi/v1/exchangeInfo",
+            rows=[
+                _raw(
+                    9_001,
+                    {
+                        "symbol": "BTCUSDT",
+                        "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.1"}],
+                    },
+                    segment=False,
+                    connection_id="btc-metadata",
+                )
+            ],
+        ),
+        _write_file(
+            root,
+            symbol="BTCUSDT",
             data_kind="depth_snapshot",
             stream="REST:/fapi/v1/depth",
             rows=snapshot_rows,
         ),
         _write_file(
             root,
+            symbol="BTCUSDT",
             data_kind="depth",
             stream="btcusdt@depth@100ms",
             rows=depth_rows,
         ),
         _write_file(
             root,
+            symbol="BTCUSDT",
             data_kind="agg_trades",
             stream="btcusdt@aggTrade",
             rows=trade_rows,
+        ),
+        _write_file(
+            root,
+            symbol="ETHUSDT",
+            data_kind="metadata",
+            stream="REST:/fapi/v1/exchangeInfo",
+            rows=[
+                _raw(
+                    19_001,
+                    {
+                        "symbol": "ETHUSDT",
+                        "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.1"}],
+                    },
+                    segment=False,
+                    connection_id="eth-metadata",
+                )
+            ],
+        ),
+        _write_file(
+            root,
+            symbol="ETHUSDT",
+            data_kind="depth_snapshot",
+            stream="REST:/fapi/v1/depth",
+            rows=[
+                _raw(
+                    10_001,
+                    {
+                        "lastUpdateId": 100,
+                        "E": 0,
+                        "T": 0,
+                        "bids": [[f"{199.5 - index:.1f}", "2"] for index in range(10)],
+                        "asks": [[f"{200.5 + index:.1f}", "2"] for index in range(10)],
+                    },
+                    connection_id="eth-book-connection-1",
+                )
+            ],
+        ),
+        _write_file(
+            root,
+            symbol="ETHUSDT",
+            data_kind="depth",
+            stream="ethusdt@depth@100ms",
+            rows=[
+                {
+                    **row,
+                    "capture_seq": int(row["capture_seq"]) + 10_000,
+                    "receive_monotonic_ns": int(row["capture_seq"]) + 10_000,
+                    "connection_id": "eth-book-connection-1",
+                    "payload": {
+                        **row["payload"],
+                        "s": "ETHUSDT",
+                        "ps": "ETHUSDT",
+                        "b": [
+                            [f"{float(price) + 100.0:.1f}", quantity]
+                            for price, quantity in row["payload"]["b"]
+                        ],
+                        "a": [
+                            [f"{float(price) + 100.0:.1f}", quantity]
+                            for price, quantity in row["payload"]["a"]
+                        ],
+                    },
+                }
+                for row in depth_rows
+            ],
+        ),
+        _write_file(
+            root,
+            symbol="ETHUSDT",
+            data_kind="agg_trades",
+            stream="ethusdt@aggTrade",
+            rows=[
+                {
+                    **row,
+                    "capture_seq": int(row["capture_seq"]) + 10_000,
+                    "receive_monotonic_ns": int(row["capture_seq"]) + 10_000,
+                    "connection_id": "eth-trade-connection-1",
+                    "payload": {
+                        **row["payload"],
+                        "s": "ETHUSDT",
+                        "ps": "ETHUSDT",
+                        "p": f"{float(row['payload']['p']) + 100.0:.1f}",
+                    },
+                }
+                for row in trade_rows
+            ],
         ),
     ]
     connection_intervals = [
@@ -177,6 +283,30 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
             "stream": "btcusdt@depth@100ms",
             "connection_id": "book-connection-1",
             "segment_id": "segment-1",
+            "opened_at": "1970-01-01T00:00:00.000000Z",
+            "opened_monotonic_ns": 0,
+            "closed_at": "1970-01-01T00:00:10.000000Z",
+            "closed_monotonic_ns": 10_000_000_000,
+            "close_reason": "stop",
+        },
+        {
+            "market": FUTURES_MARKET_TYPE,
+            "data_kind": "depth",
+            "stream": "ethusdt@depth@100ms",
+            "connection_id": "eth-book-connection-1",
+            "segment_id": "segment-1",
+            "opened_at": "1970-01-01T00:00:00.000000Z",
+            "opened_monotonic_ns": 0,
+            "closed_at": "1970-01-01T00:00:10.000000Z",
+            "closed_monotonic_ns": 10_000_000_000,
+            "close_reason": "stop",
+        },
+        {
+            "market": FUTURES_MARKET_TYPE,
+            "data_kind": "agg_trades",
+            "stream": "ethusdt@aggTrade",
+            "connection_id": "eth-trade-connection-1",
+            "segment_id": None,
             "opened_at": "1970-01-01T00:00:00.000000Z",
             "opened_monotonic_ns": 0,
             "closed_at": "1970-01-01T00:00:10.000000Z",
@@ -209,10 +339,15 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
         "status": "PASS",
         "market_data_status": "PASS",
         "venue": "binance",
-        "symbol": "BTCUSDT",
+        "symbols": list(RESEARCH_SYMBOLS),
         "market_types": [FUTURES_MARKET_TYPE],
         "market_metadata": {
-            FUTURES_MARKET_TYPE: {"tick_size": "0.1", "snapshot_limit": 1000}
+            "BTCUSDT": {
+                FUTURES_MARKET_TYPE: {"tick_size": "0.1", "snapshot_limit": 1000}
+            },
+            "ETHUSDT": {
+                FUTURES_MARKET_TYPE: {"tick_size": "0.1", "snapshot_limit": 1000}
+            },
         },
         "capture": {
             "connection_intervals": {
@@ -261,6 +396,7 @@ def _raw(
 def _write_file(
     root: Path,
     *,
+    symbol: str,
     data_kind: str,
     stream: str,
     rows: list[dict],
@@ -269,7 +405,7 @@ def _write_file(
         root
         / "date=2026-08-27"
         / "hour=00"
-        / f"{FUTURES_MARKET_TYPE}_{data_kind}.jsonl.gz"
+        / f"{symbol}_{FUTURES_MARKET_TYPE}_{data_kind}.jsonl.gz"
     )
     path.parent.mkdir(parents=True, exist_ok=True)
     maximum = 0
@@ -282,7 +418,7 @@ def _write_file(
     return {
         "path": path.relative_to(root).as_posix(),
         "venue": "binance",
-        "symbol": "BTCUSDT",
+        "symbol": symbol,
         "market": FUTURES_MARKET_TYPE,
         "stream": stream,
         "data_kind": data_kind,

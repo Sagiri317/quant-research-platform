@@ -120,3 +120,50 @@ def _require_factor_input_columns(
         raise ValueError(
             f"missing_factor_input_columns: {family}: {', '.join(missing)}"
         )
+
+
+def calculate_fundamental_factors(
+    pit_facts: pd.DataFrame,
+    market_cap: pd.DataFrame,
+) -> pd.DataFrame:
+    """Calculate the fixed phase-1 raw fundamental factors from PIT facts."""
+
+    required_facts = {"asset_id", "timestamp", "metric_id", "value", "report_period"}
+    if not required_facts.issubset(pit_facts.columns) or not {
+        "asset_id",
+        "timestamp",
+        "market_cap",
+    }.issubset(market_cap.columns):
+        raise ValueError("a_share_fundamental_factor_columns_invalid")
+    wide = (
+        pit_facts.pivot_table(
+            index=["asset_id", "timestamp", "report_period"],
+            columns="metric_id",
+            values="value",
+            aggfunc="first",
+        )
+        .reset_index()
+        .merge(
+            market_cap.loc[:, ("asset_id", "timestamp", "market_cap")],
+            on=("asset_id", "timestamp"),
+            how="left",
+            validate="many_to_one",
+        )
+        .sort_values(["asset_id", "timestamp", "report_period"], kind="mergesort")
+    )
+
+    def ratio(numerator: str, denominator: str) -> pd.Series:
+        denominator_values = wide[denominator].where(wide[denominator] > 0.0)
+        return wide[numerator] / denominator_values
+
+    output = wide.loc[:, ("asset_id", "timestamp")].copy()
+    output["fundamental_raw_earnings_yield"] = ratio("net_income", "market_cap")
+    output["fundamental_raw_book_to_market"] = ratio("total_equity", "market_cap")
+    output["fundamental_raw_roe"] = ratio("net_income", "total_equity")
+    output["fundamental_raw_operating_cash_flow_to_assets"] = ratio(
+        "operating_cash_flow", "total_assets"
+    )
+    prior_assets = wide.groupby("asset_id", sort=False)["total_assets"].shift()
+    output["fundamental_raw_asset_growth"] = wide["total_assets"] / prior_assets - 1.0
+    output["fundamental_raw_leverage"] = ratio("total_liabilities", "total_assets")
+    return output.reset_index(drop=True)

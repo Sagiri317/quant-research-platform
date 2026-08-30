@@ -34,6 +34,7 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     TakerConfig,
     simulate_maker,
     simulate_taker,
+    taker_cost_sensitivity,
     taker_latency_sweep,
 )
 from quant_research_platform.markets.implementations.crypto.hft import HFT_GRID_MS
@@ -54,6 +55,7 @@ from quant_research_platform.markets.implementations.crypto.research_scenarios i
     HFT_EVALUATION_ID,
     HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
     HFT_MODEL_ALGORITHMS,
+    HFT_MULTI_ASSET_SCOPES,
     HFT_PRICE_MODEL_ALGORITHMS,
     build_hft_evaluation_catalog,
     build_hft_model_catalog,
@@ -182,7 +184,7 @@ def _run_in_staging(
 
     with open_recorder_run(raw_root, resource_policy) as run:
         source_run_id = str(run.manifest["run_id"])
-        inspections, reconstruction = (
+        inspections, reconstructions = (
             crypto_hft_materialization.materialize_hft_processed_data(
                 layout=layout,
                 run=run,
@@ -190,6 +192,7 @@ def _run_in_staging(
                 resource_policy=resource_policy,
             )
         )
+        reconstruction = reconstructions["BTCUSDT"]
         sample_resources()
         dataset_catalog = build_hft_research_dataset_catalog()
         research_root = assemble_research_dataset(
@@ -303,13 +306,19 @@ def _run_in_staging(
             )
             sample_resources()
         coverage = dict(reconstruction.coverage_segments)
+        coverage_by_asset = {
+            "btc_usdt": dict(reconstructions["BTCUSDT"].coverage_segments),
+            "eth_usdt": dict(reconstructions["ETHUSDT"].coverage_segments),
+        }
 
-        def book_factory() -> Iterator[BookState | BookBoundary]:
-            return _book_events(run, end_ms=end_ms)
+        def book_factory(symbol: str = "BTCUSDT") -> Iterator[BookState | BookBoundary]:
+            return _book_events(run, symbol=symbol, end_ms=end_ms)
 
-        def decisions_for(model_id: str) -> Iterator[dict[str, Any]]:
+        def decisions_for(
+            model_id: str, asset_id: str = "btc_usdt"
+        ) -> Iterator[dict[str, Any]]:
             prediction_root, output_id, prediction_spec = bundles[model_id]
-            return _prediction_decisions(
+            decisions = _prediction_decisions(
                 research_root=research_root,
                 prediction_root=prediction_root,
                 output_id=output_id,
@@ -317,6 +326,10 @@ def _run_in_staging(
                 expected_run_id=source_run_id,
                 resource_policy=resource_policy,
             )
+            with closing_iterator(decisions):
+                for row in decisions:
+                    if row["asset_id"] == asset_id:
+                        yield row
 
         price_model_ids = tuple(
             f"crypto_hft_{algorithm}" for algorithm in HFT_PRICE_MODEL_ALGORITHMS
@@ -333,6 +346,20 @@ def _run_in_staging(
             for model_id in price_model_ids
         }
         taker = taker_models[_TAKER_MODEL_ID]
+        multi_asset_execution = {}
+        for mode, (_train_assets, evaluation_assets) in HFT_MULTI_ASSET_SCOPES.items():
+            model_id = f"crypto_hft_{mode}"
+            multi_asset_execution[mode] = {
+                asset_id: simulate_taker(
+                    book_factory("BTCUSDT" if asset_id == "btc_usdt" else "ETHUSDT"),
+                    decisions_for(model_id, asset_id),
+                    prediction_column="prediction_score",
+                    config=taker_config,
+                    observed_coverage=coverage_by_asset[asset_id],
+                    resource_policy=resource_policy,
+                )
+                for asset_id in evaluation_assets
+            }
         maker_baseline = simulate_maker(
             book_factory(),
             iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", end_ms=end_ms),
@@ -346,6 +373,7 @@ def _run_in_staging(
             trade_coverage=run.connection_coverage(
                 market_type=FUTURES_MARKET_TYPE,
                 data_kind="agg_trades",
+                symbol="BTCUSDT",
             ),
             resource_policy=resource_policy,
         )
@@ -364,6 +392,7 @@ def _run_in_staging(
             trade_coverage=run.connection_coverage(
                 market_type=FUTURES_MARKET_TYPE,
                 data_kind="agg_trades",
+                symbol="BTCUSDT",
             ),
             resource_policy=resource_policy,
         )
@@ -375,6 +404,11 @@ def _run_in_staging(
             latency_scenarios_ms=_LATENCY_SCENARIOS_MS,
             observed_coverage=coverage,
             resource_policy=resource_policy,
+        )
+        cost_sensitivity = taker_cost_sensitivity(
+            taker,
+            fee_scenarios_bps=(0.5, 1.0, 2.0),
+            additional_spread_scenarios_bps=(0.0, 1.0, 2.0),
         )
         execution_relative = Path("execution") / "model_comparison.json"
         execution_payload = write_crypto_hft_execution_artifact(
@@ -394,6 +428,8 @@ def _run_in_staging(
             maker=maker,
             maker_baseline=maker_baseline,
             latency_sweep=latency,
+            cost_sensitivity=cost_sensitivity,
+            multi_asset_execution=multi_asset_execution,
         )
         sample_resources()
         wall_seconds = max(0.001, time.perf_counter() - wall_start)
@@ -496,9 +532,10 @@ def _datetime(value: int) -> dt.datetime:
 def _book_events(
     run: RecorderRun,
     *,
+    symbol: str,
     end_ms: int,
 ) -> Iterator[OwnedValue[BookState] | BookBoundary]:
-    events = iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT")
+    events = iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, symbol=symbol)
     with closing_iterator(events):
         for event in events:
             observed_time = (
@@ -600,8 +637,18 @@ def _prediction_joined_frames(
                     resource_policy.operation_headroom_bytes,
                 ),
             )
+
+            def scoped_chunks():  # noqa: ANN202
+                for frame in chunks:
+                    if prediction_spec.evaluation_asset_ids:
+                        frame = frame.loc[
+                            frame["asset_id"].isin(prediction_spec.evaluation_asset_ids)
+                        ]
+                    if not frame.empty:
+                        yield frame
+
             joined = _iter_prediction_joined_chunks(
-                chunks,
+                scoped_chunks(),
                 prediction_source=lookup,
                 primary_key=lookup.primary_key,
                 input_columns=input_columns,
@@ -636,7 +683,11 @@ def _prediction_oos_evaluation(
         research_dataset_id=prediction_spec.research_dataset_id,
         signals=(signal,),
         label_columns=(label_column,),
-        evaluation_axis="single_asset_time_series",
+        evaluation_axis=(
+            "single_asset_time_series"
+            if len(prediction_spec.evaluation_asset_ids) == 1
+            else "cross_sectional"
+        ),
     )
     frames = _prediction_joined_frames(
         research_root=research_root,
@@ -700,6 +751,8 @@ def _maker_quote_schedule(
         with closing_iterator(chunks):
             for frame in chunks:
                 for row in frame.itertuples(index=False):
+                    if str(row.asset_id) != "btc_usdt":
+                        continue
                     timestamp = pd.Timestamp(row.timestamp)
                     if timestamp.tzinfo is not None:
                         timestamp = timestamp.tz_convert("UTC").tz_localize(None)

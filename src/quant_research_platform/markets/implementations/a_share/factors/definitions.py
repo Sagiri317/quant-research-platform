@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from quant_research_platform.catalog.factors import FactorCatalog
-from quant_research_platform.contracts.factors import FactorDefinition
+from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
     market_panel_data_id,
@@ -26,3 +26,33 @@ def factor_definitions() -> tuple[FactorDefinition, ...]:
 
 def factor_catalog() -> FactorCatalog:
     return FactorCatalog(factor_definitions())
+
+
+def fundamental_factor_definitions() -> tuple[FactorDefinition, ...]:
+    facts = (
+        ("earnings_yield", ("net_income", "market_cap"), "value"),
+        ("book_to_market", ("total_equity", "market_cap"), "value"),
+        ("roe", ("net_income", "total_equity"), "quality"),
+        (
+            "operating_cash_flow_to_assets",
+            ("operating_cash_flow", "total_assets"),
+            "quality",
+        ),
+        ("asset_growth", ("total_assets",), "investment"),
+        ("leverage", ("total_liabilities", "total_assets"), "leverage"),
+    )
+    return tuple(
+        FactorDefinition(
+            factor_id=f"fundamental_raw_{name}",
+            market_id=MARKET_ID,
+            factor_set=FactorSet.SMOKE,
+            input_columns=inputs,
+            output_column=f"fundamental_raw_{name}",
+            family=family,
+            timing_semantics="point_in_time_available_at",
+            null_policy="preserve_nulls",
+            source_layer="processed",
+            required_input_data_id="a_share_pit_fundamentals",
+        )
+        for name, inputs, family in facts
+    )

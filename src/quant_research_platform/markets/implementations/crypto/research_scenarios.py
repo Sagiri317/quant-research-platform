@@ -41,9 +41,17 @@ HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ALGORITHM = "gradient_boosting_regressor"
 HFT_MODEL_ALGORITHMS = (
     *HFT_PRICE_MODEL_ALGORITHMS,
     HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ALGORITHM,
+    "standardized_ridge_regression",
 )
 HFT_MODEL_LABEL_HORIZON_MS = 500
 HFT_MODEL_LABEL_COLUMN = f"future_mid_return_{HFT_MODEL_LABEL_HORIZON_MS}ms"
+HFT_MULTI_ASSET_SCOPES = {
+    "btc_independent": (("btc_usdt",), ("btc_usdt",)),
+    "eth_independent": (("eth_usdt",), ("eth_usdt",)),
+    "pooled": (("btc_usdt", "eth_usdt"), ("btc_usdt", "eth_usdt")),
+    "leave_btc_out": (("eth_usdt",), ("btc_usdt",)),
+    "leave_eth_out": (("btc_usdt",), ("eth_usdt",)),
+}
 
 
 def build_signal_specs(
@@ -96,7 +104,7 @@ def build_hft_evaluation_catalog() -> EvaluationCatalog:
                 research_dataset_id=HFT_RESEARCH_DATASET_ID,
                 signals=build_signal_specs(columns=HFT_FACTOR_COLUMNS),
                 label_columns=HFT_LABEL_COLUMNS,
-                evaluation_axis="single_asset_time_series",
+                evaluation_axis="cross_sectional",
             ),
         )
     )
@@ -139,6 +147,18 @@ def build_hft_model_catalog(*, training_row_bound: int) -> ModelCatalog:
                 ),
                 max_train_rows=training_row_bound,
             ),
+            *(
+                ModelSpec(
+                    model_id=f"crypto_hft_{mode}",
+                    model_algorithm="standardized_ridge_regression",
+                    input_factor_columns=HFT_FACTOR_COLUMNS,
+                    label_column=HFT_MODEL_LABEL_COLUMN,
+                    random_seed=7,
+                    purge_gap_steps=HFT_MODEL_LABEL_HORIZON_MS // HFT_GRID_MS,
+                    max_train_rows=training_row_bound,
+                )
+                for mode in HFT_MULTI_ASSET_SCOPES
+            ),
         )
     )
 
@@ -170,6 +190,22 @@ def build_hft_prediction_catalog(
                 train_end=train_end,
                 test_start=test_start,
                 test_end=test_end,
+            ),
+            *(
+                PredictionSpec(
+                    prediction_id=f"crypto_hft_{mode}_prediction",
+                    model_id=f"crypto_hft_{mode}",
+                    research_dataset_id=HFT_RESEARCH_DATASET_ID,
+                    train_end=train_end,
+                    test_start=test_start,
+                    test_end=test_end,
+                    training_asset_ids=train_assets,
+                    evaluation_asset_ids=evaluation_assets,
+                )
+                for mode, (
+                    train_assets,
+                    evaluation_assets,
+                ) in HFT_MULTI_ASSET_SCOPES.items()
             ),
         )
     )

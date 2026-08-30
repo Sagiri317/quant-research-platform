@@ -25,6 +25,9 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     HFT_LABEL_COLUMNS,
 )
+from quant_research_platform.markets.implementations.crypto.research_scenarios import (
+    HFT_MULTI_ASSET_SCOPES,
+)
 from quant_research_platform.research.predictions import alignment
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout
@@ -84,7 +87,7 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
     assert report["evaluation"]["evaluation_id"] == (
         "crypto_hft_microstructure_evaluation"
     )
-    assert report["evaluation"]["evaluation_axis"] == ("single_asset_time_series")
+    assert report["evaluation"]["evaluation_axis"] == "cross_sectional"
     assert report["evaluation"]["primary_key"] == [
         "market_id",
         "asset_id",
@@ -105,9 +108,7 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
     assert evaluation_manifest["output_definition_id"] == "evaluation_outputs"
     assert evaluation_manifest["output_id"] == "crypto_hft_microstructure_evaluation"
     assert evaluation_manifest["run_id"] == "workflow-run"
-    assert evaluation_manifest["metadata"]["evaluation_axis"] == (
-        "single_asset_time_series"
-    )
+    assert evaluation_manifest["metadata"]["evaluation_axis"] == "cross_sectional"
     assert evaluation_manifest["metadata"]["research_dataset_id"] == (
         HFT_RESEARCH_DATASET_ID
     )
@@ -117,24 +118,22 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
     assert evaluation_diagnostics["max_timestamp"] == "1970-01-01T00:00:06"
     evaluation_metrics = pd.read_parquet(evaluation_root / "metrics.parquet")
     evaluation_summary = pd.read_parquet(evaluation_root / "ic_summary.parquet")
-    assert len(evaluation_metrics) == len(HFT_FACTOR_COLUMNS) * len(HFT_LABEL_COLUMNS)
+    assert len(evaluation_metrics) == (
+        len(HFT_FACTOR_COLUMNS) * len(HFT_LABEL_COLUMNS) * 61
+    )
     assert evaluation_metrics["n_obs"].max() > 1
     assert evaluation_metrics["ic"].notna().any()
-    assert evaluation_metrics["rankic"].isna().all()
-    assert set(evaluation_metrics["rankic_reason"]) == {"not_applicable"}
+    assert evaluation_metrics["rankic"].notna().any()
     assert evaluation_summary["valid_ic_count"].sum() > 0
-    assert evaluation_summary["valid_rankic_count"].sum() == 0
-    assert set(evaluation_summary["rankic_reason"]) == {"not_applicable"}
-    assert set(evaluation_summary["rankicir_reason"]) == {"not_applicable"}
+    assert evaluation_summary["valid_rankic_count"].sum() > 0
     evaluation_markdown = (evaluation_root / "summary.md").read_text(encoding="utf-8")
-    assert "evaluation_axis: `single_asset_time_series`" in evaluation_markdown
-    assert "RankIC: `not_applicable`" in evaluation_markdown
-    assert "group_spread: `not_applicable`" in evaluation_markdown
+    assert "evaluation_axis: `cross_sectional`" in evaluation_markdown
     assert set(report["models"]["prediction_outputs"]) == {
         "crypto_hft_lightgbm_regressor",
         "crypto_hft_linear_regression",
         "crypto_hft_xgboost_regressor",
         "crypto_hft_maker_bid_sell_pressure_proxy",
+        *(f"crypto_hft_{mode}" for mode in HFT_MULTI_ASSET_SCOPES),
     }
     for output_id in report["models"]["prediction_outputs"].values():
         prediction_manifest = json.loads(
@@ -223,7 +222,7 @@ def test_crypto_hft_workflow_identity_failure_publishes_nothing(
     raw_file = next(
         path
         for path in raw_root.rglob("*.jsonl.gz")
-        if path.name == "usd_s_m_futures_depth.jsonl.gz"
+        if path.name == "BTCUSDT_usd_s_m_futures_depth.jsonl.gz"
     )
     raw_file.write_bytes(raw_file.read_bytes() + b"tampered")
 

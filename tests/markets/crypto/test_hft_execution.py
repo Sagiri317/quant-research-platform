@@ -16,6 +16,7 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     TakerConfig,
     _Metrics,
     _PendingMarkouts,
+    taker_cost_sensitivity,
 )
 from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_maker as _simulate_maker,
@@ -578,6 +579,19 @@ def test_latency_sweep_has_exact_requested_scenarios() -> None:
     )
 
     assert [item["latency_ms"] for item in result] == [0, 100, 200]
+
+
+def test_cost_sensitivity_reprices_actual_turnover_and_net_pnl() -> None:
+    result = taker_cost_sensitivity(
+        {"turnover_usd": 10_000.0, "net_pnl_usd": 5.0, "taker_fee_bps": 1.0},
+        fee_scenarios_bps=(1.0, 2.0),
+        additional_spread_scenarios_bps=(0.0, 1.0),
+    )
+
+    assert [row["net_pnl_usd"] for row in result] == pytest.approx([5.0, 4.0, 4.0, 3.0])
+    assert {row["method"] for row in result} == {
+        "constant_turnover_additive_sensitivity"
+    }
 
 
 def test_taker_long_stream_retains_no_fill_or_equity_dataframe() -> None:
