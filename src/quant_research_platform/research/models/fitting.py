@@ -1322,6 +1322,7 @@ def _model_state_upper_bound_bytes(
     if algorithm in {
         "linear_regression",
         "ridge_regression",
+        "standardized_ridge_regression",
         "lasso_regression",
         "elastic_net",
         "huber_regression",

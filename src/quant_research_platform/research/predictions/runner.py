@@ -573,14 +573,15 @@ def _prediction_train_chunks(
         if asset_ids:
             if "asset_id" not in chunk.columns:
                 raise ValueError("prediction_training_asset_id_missing")
-            chunk = chunk.loc[chunk["asset_id"].isin(asset_ids)]
-            if chunk.empty:
-                continue
         policy = current_runtime_resource_policy()
         index_bytes = int(chunk.index.memory_usage(deep=True))
         timestamp_bytes = index_bytes + 8 * len(chunk)
         mask_bytes = index_bytes + len(chunk)
-        working_bytes = timestamp_bytes + mask_bytes + pandas_frame_payload_bytes(chunk)
+        payload_bytes = pandas_frame_payload_bytes(chunk)
+        asset_filter_bytes = 0 if not asset_ids else mask_bytes + payload_bytes
+        working_bytes = (
+            timestamp_bytes + mask_bytes + payload_bytes + asset_filter_bytes
+        )
         if (
             policy is not None
             and policy.explicit_memory_cap_bytes is not None
@@ -599,6 +600,12 @@ def _prediction_train_chunks(
         timestamps = None
         train = None
         try:
+            if asset_ids:
+                chunk = chunk.loc[chunk["asset_id"].isin(asset_ids)]
+                if chunk.empty:
+                    if working_lease is not None:
+                        working_lease.close()
+                    continue
             timestamps = _prediction_timestamps(chunk)
             train = chunk.loc[timestamps <= train_end]
             if train.empty:

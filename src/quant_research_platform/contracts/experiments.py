@@ -31,6 +31,8 @@ class ExperimentFold:
     validation_start_step: int
     validation_end_step: int
     development_test_start_step: int
+    development_test_end_step: int
+    final_holdout_start_step: int
     embargo_steps: int = 0
     complete: bool = True
 
@@ -57,6 +59,8 @@ class ExperimentFold:
             self.validation_start_step,
             self.validation_end_step,
             self.development_test_start_step,
+            self.development_test_end_step,
+            self.final_holdout_start_step,
         ):
             if type(value) is not int or value < 0:
                 raise ValueError("experiment_boundary_step_invalid")
@@ -67,6 +71,10 @@ class ExperimentFold:
             != self.embargo_steps
         ):
             raise ValueError("experiment_embargo_gap_invalid")
+        if self.development_test_end_step < self.development_test_start_step:
+            raise ValueError("experiment_development_boundary_step_invalid")
+        if self.final_holdout_start_step <= self.development_test_end_step:
+            raise ValueError("experiment_holdout_boundary_step_invalid")
         if type(self.complete) is not bool:
             raise ValueError("experiment_fold_complete_invalid")
 
@@ -134,6 +142,12 @@ class ExperimentPlan:
             for fold in self.folds
         ):
             raise ValueError("experiment_holdout_overlap")
+        if any(
+            fold.final_holdout_start_step - fold.development_test_end_step - 1
+            < self.max_label_lookahead_steps
+            for fold in self.folds
+        ):
+            raise ValueError("experiment_holdout_purge_gap_invalid")
         window_bounds = [self.final_holdout.start, self.final_holdout.end]
         for fold in self.folds:
             for window in (fold.train, fold.validation, fold.development_test):
@@ -280,5 +294,7 @@ def _fold_payload(fold: ExperimentFold) -> dict[str, object]:
         "validation_start_step": fold.validation_start_step,
         "validation_end_step": fold.validation_end_step,
         "development_test_start_step": fold.development_test_start_step,
+        "development_test_end_step": fold.development_test_end_step,
+        "final_holdout_start_step": fold.final_holdout_start_step,
         "complete": fold.complete,
     }

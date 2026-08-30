@@ -65,6 +65,40 @@ FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(name="a_float_shares", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="total_market_cap", role=ColumnRole.CONTEXT, dtype="float64"),
     FieldSpec(name="float_market_cap", role=ColumnRole.CONTEXT, dtype="float64"),
+    *(
+        FieldSpec(
+            name=name,
+            role=ColumnRole.CONTEXT,
+            dtype="float64",
+            nullable=True,
+        )
+        for name in (
+            "total_assets",
+            "total_liabilities",
+            "total_equity",
+            "operating_revenue",
+            "net_income",
+            "operating_cash_flow",
+            "previous_total_assets",
+            "market_cap",
+        )
+    ),
+    *(
+        FieldSpec(
+            name=f"fundamental_raw_{name}",
+            role=ColumnRole.FACTOR,
+            dtype="float64",
+            nullable=True,
+        )
+        for name in (
+            "earnings_yield",
+            "book_to_market",
+            "roe",
+            "operating_cash_flow_to_assets",
+            "asset_growth",
+            "leverage",
+        )
+    ),
     FieldSpec(name="next_bar_is_trading", role=ColumnRole.MASK, dtype="bool"),
     FieldSpec(
         name="next_bar_limit_status",

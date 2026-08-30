@@ -216,6 +216,7 @@ def _materialize_one(
         return materialize_annotations.write_annotations(
             spec,
             layout=layout,
+            source_id=source_id,
             time_window=time_window,
             policy=policy,
             sessions=sessions,

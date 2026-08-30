@@ -19,6 +19,7 @@ from quant_research_platform.contracts.validation import (
     strict_hashable_key_series,
     strict_timestamp_series,
 )
+from quant_research_platform.runtime.resources import current_runtime_resource_policy
 
 
 @dataclass(frozen=True)
@@ -147,6 +148,10 @@ def aligned_candidate_matrix(
         for column in frame.columns
     ):
         raise ValueError("candidate_matrix_numeric_required")
+    policy = current_runtime_resource_policy()
+    snapshot_bytes = len(frame) * (8 * frame.shape[1] + 2) + 64 * 1024
+    if policy is not None and snapshot_bytes > policy.operation_headroom_bytes:
+        raise MemoryError("statistical_matrix_exceeds_runtime_headroom")
     numeric = frame.astype("float64")
     complete = numeric.notna().all(axis=1)
     values = numeric.loc[complete].to_numpy(dtype="float64", copy=True)
@@ -391,17 +396,21 @@ def probabilistic_and_deflated_sharpe(
 
 
 def cscv_pbo(returns: object, *, slice_count: int, max_combinations: int) -> PboResult:
-    matrix = _finite_matrix(returns, minimum_rows=4, minimum_columns=2)
+    shape = getattr(returns, "shape", None)
+    if shape is None:
+        shape = np.shape(returns)
     if (
-        type(slice_count) is not int
+        len(shape) != 2
+        or type(slice_count) is not int
         or slice_count < 4
         or slice_count % 2
-        or len(matrix) % slice_count
+        or shape[0] % slice_count
     ):
         raise ValueError("cscv_slice_count_invalid")
     combination_count = comb(slice_count, slice_count // 2)
     if type(max_combinations) is not int or combination_count > max_combinations:
         raise ValueError("cscv_combination_budget_exceeded")
+    matrix = _finite_matrix(returns, minimum_rows=4, minimum_columns=2)
     if any(
         np.array_equal(matrix[:, left], matrix[:, right])
         for left in range(matrix.shape[1])
@@ -568,6 +577,15 @@ def _validate_alpha(alpha: float) -> None:
 def _finite_matrix(
     values: object, *, minimum_rows: int, minimum_columns: int
 ) -> np.ndarray:
+    shape = getattr(values, "shape", None)
+    if shape is None:
+        shape = np.shape(values)
+    if len(shape) != 2:
+        raise ValueError("finite_matrix_required")
+    policy = current_runtime_resource_policy()
+    snapshot_bytes = int(shape[0]) * int(shape[1]) * 8 + 64 * 1024
+    if policy is not None and snapshot_bytes > policy.operation_headroom_bytes:
+        raise MemoryError("statistical_matrix_exceeds_runtime_headroom")
     data = np.asarray(values, dtype="float64")
     if (
         data.ndim != 2

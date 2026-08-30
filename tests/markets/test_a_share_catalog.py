@@ -20,6 +20,9 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     EVALUATION_MASK_ID,
     EXECUTION_MASK_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    FUNDAMENTAL_FORWARD_RETURNS_DATASET_ID,
+    FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
+    FUNDAMENTAL_RAW_PROCESSED_DATA_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
     market_context_data_id,
@@ -109,6 +112,7 @@ def test_a_share_price_volume_spec_is_value_only_and_catalog_driven() -> None:
     registered_columns = tuple(
         definition.output_column
         for definition in factor_definitions.factor_catalog().list()
+        if definition.family == "price_volume"
     )
 
     with pytest.raises(KeyError, match="unknown_processed_data_spec"):
@@ -153,6 +157,15 @@ def test_a_share_processed_annotation_contracts_are_role_based() -> None:
     assert evaluation_mask.kind is ProcessedDataKind.ANNOTATION
     assert evaluation_mask.column_roles["eligible"] is ColumnRole.MASK
     assert evaluation_mask.column_roles["can_exit"] is ColumnRole.MASK
+    pit = catalog.get(FUNDAMENTAL_PIT_PROCESSED_DATA_ID)
+    raw = catalog.get(FUNDAMENTAL_RAW_PROCESSED_DATA_ID)
+    assert pit.kind is ProcessedDataKind.ANNOTATION
+    assert raw.kind is ProcessedDataKind.FACTOR
+    assert raw.processed_input_data_ids == (FUNDAMENTAL_PIT_PROCESSED_DATA_ID,)
+    fundamental_dataset = build_research_dataset_catalog().get(
+        FUNDAMENTAL_FORWARD_RETURNS_DATASET_ID
+    )
+    assert fundamental_dataset.input_data_ids[0] == FUNDAMENTAL_RAW_PROCESSED_DATA_ID
 
 
 def test_a_share_research_dataset_carries_input_data_ids_not_source_columns() -> None:
@@ -188,4 +201,5 @@ def _a_share_factor_columns() -> tuple[str, ...]:
     return tuple(
         definition.output_column
         for definition in factor_definitions.factor_definitions()
+        if definition.family == "price_volume"
     )

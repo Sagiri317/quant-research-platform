@@ -518,10 +518,8 @@ def normalize_raw_frame(
         result["report_period"] = strict_timestamp_series(
             result["report_period"], error="invalid_financial_report_period"
         ).dt.normalize()
-        result["correction_disclosure_date"] = _parse_optional_csmar_date(
-            result["correction_disclosure_date"],
-            "correction_disclosure_date",
-            error_code="invalid_financial_correction_date",
+        result["correction_disclosure_date"] = _parse_financial_correction_date(
+            result["correction_disclosure_date"]
         )
         result["is_corrected"] = strict_bool_series(
             result["is_corrected"], error="invalid_financial_correction_flag"
@@ -665,6 +663,24 @@ def _parse_optional_csmar_date(
         error=f"{error_code}: {column}",
         allow_null=True,
     )
+
+
+def _parse_financial_correction_date(series: pd.Series) -> pd.Series:
+    latest: list[object] = []
+    for value in series:
+        if pd.isna(value) or (isinstance(value, str) and not value.strip()):
+            latest.append(pd.NaT)
+            continue
+        tokens = [token.strip() for token in str(value).split(",")]
+        if any(not token for token in tokens):
+            raise ValueError("invalid_financial_correction_date")
+        parsed = strict_timestamp_series(
+            pd.Series(tokens), error="invalid_financial_correction_date"
+        ).dt.normalize()
+        if bool(parsed.duplicated().any()) or not parsed.is_monotonic_increasing:
+            raise ValueError("invalid_financial_correction_date")
+        latest.append(parsed.iloc[-1])
+    return pd.Series(latest, index=series.index, dtype="datetime64[ns]")
 
 
 def filter_by_source_date_range(

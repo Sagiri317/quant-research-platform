@@ -16,6 +16,7 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.factors import FactorDefinition
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.markets.implementations.a_share.ids import (
+    FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
     market_panel_data_id,
 )
 
@@ -32,6 +33,10 @@ _MARKET_PANEL_INPUT_CONTRACT = _ProcessedInputContract(
 )
 _FACTOR_FAMILY_INPUT_CONTRACTS = {
     "price_volume": _MARKET_PANEL_INPUT_CONTRACT,
+    "fundamental": _ProcessedInputContract(
+        required_input_data_ids=(FUNDAMENTAL_PIT_PROCESSED_DATA_ID,),
+        primary_input_data_id=FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
+    ),
 }
 _LABEL_FAMILY_INPUT_CONTRACTS = {
     "forward_return": _MARKET_PANEL_INPUT_CONTRACT,

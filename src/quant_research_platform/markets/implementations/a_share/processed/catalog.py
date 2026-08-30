@@ -23,6 +23,8 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     EVALUATION_MASK_ID,
     EXECUTION_MASK_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
+    FUNDAMENTAL_RAW_PROCESSED_DATA_ID,
     MARKET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
     market_context_data_id,
@@ -130,6 +132,20 @@ EVALUATION_COLUMNS: tuple[str, ...] = (
     "can_exit",
 )
 
+FUNDAMENTAL_PIT_COLUMNS: tuple[str, ...] = (
+    "market_id",
+    "asset_id",
+    "timestamp",
+    "total_assets",
+    "total_liabilities",
+    "total_equity",
+    "operating_revenue",
+    "net_income",
+    "operating_cash_flow",
+    "previous_total_assets",
+    "market_cap",
+)
+
 MARKET_BARS_SOURCE_DATA_ID = source_ids.MARKET_BARS_SOURCE_DATA_ID
 
 
@@ -141,6 +157,7 @@ def processed_catalog() -> ProcessedDataCatalog:
 
 def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
     factor_columns = _registered_factor_columns()
+    fundamental_columns = _registered_fundamental_factor_columns()
     label_columns = _registered_label_columns()
     return (
         _processed_spec(
@@ -201,11 +218,38 @@ def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
             processed_input_data_ids=(market_panel_data_id(),),
         ),
         _processed_spec(
+            kind=ProcessedDataKind.ANNOTATION,
+            data_id=FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
+            columns=FUNDAMENTAL_PIT_COLUMNS,
+            role_overrides={
+                column: ColumnRole.CONTEXT
+                for column in FUNDAMENTAL_PIT_COLUMNS
+                if column not in platform_entity_time_key()
+            },
+            source_input_data_ids=(
+                MARKET_BARS_SOURCE_DATA_ID,
+                "trading_calendar",
+                "financial_balance",
+                "financial_income",
+                "financial_cashflow",
+                "financial_disclosures",
+            ),
+        ),
+        _processed_spec(
             kind=ProcessedDataKind.FACTOR,
             data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
             columns=(*platform_entity_time_key(), *factor_columns),
             role_overrides={column: ColumnRole.FACTOR for column in factor_columns},
             processed_input_data_ids=(market_panel_data_id(),),
+        ),
+        _processed_spec(
+            kind=ProcessedDataKind.FACTOR,
+            data_id=FUNDAMENTAL_RAW_PROCESSED_DATA_ID,
+            columns=(*platform_entity_time_key(), *fundamental_columns),
+            role_overrides={
+                column: ColumnRole.FACTOR for column in fundamental_columns
+            },
+            processed_input_data_ids=(FUNDAMENTAL_PIT_PROCESSED_DATA_ID,),
         ),
         _processed_spec(
             kind=ProcessedDataKind.LABEL,
@@ -260,6 +304,15 @@ def _registered_factor_columns() -> tuple[str, ...]:
     return tuple(
         definition.output_column
         for definition in factor_definitions.factor_catalog().list()
+        if definition.required_input_data_id == market_panel_data_id()
+    )
+
+
+def _registered_fundamental_factor_columns() -> tuple[str, ...]:
+    return tuple(
+        definition.output_column
+        for definition in factor_definitions.factor_catalog().list()
+        if definition.required_input_data_id == FUNDAMENTAL_PIT_PROCESSED_DATA_ID
     )
 
 

@@ -92,6 +92,15 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
     with pytest.raises(ValueError, match="^cscv_combination_budget_exceeded$"):
         cscv_pbo(returns, slice_count=8, max_combinations=10)
 
+    class RejectMaterialization:
+        shape = (8, 3)
+
+        def __array__(self, *_args: object, **_kwargs: object) -> np.ndarray:
+            raise AssertionError("matrix_materialized_before_combination_admission")
+
+    with pytest.raises(ValueError, match="^cscv_combination_budget_exceeded$"):
+        cscv_pbo(RejectMaterialization(), slice_count=8, max_combinations=10)
+
 
 def test_psr_dsr_fixed_oracle() -> None:
     returns = np.array([0.02, -0.01, 0.03, 0.01, 0.00, 0.04, -0.02, 0.01])

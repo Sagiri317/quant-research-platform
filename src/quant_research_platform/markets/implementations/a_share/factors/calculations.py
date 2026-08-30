@@ -29,6 +29,8 @@ def calculate_factors_for_panel(
     families = tuple(dict.fromkeys(definition.family for definition in requested))
     if not requested:
         return panel_frame.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+    if families == ("fundamental",):
+        return calculate_fundamental_factors_for_panel(panel_frame)
     if families != (PRICE_VOLUME_FACTOR_FAMILY,):
         unsupported = next(
             family for family in families if family != PRICE_VOLUME_FACTOR_FAMILY
@@ -47,6 +49,21 @@ def factor_panel_input_columns(
     families = tuple(dict.fromkeys(definition.family for definition in requested))
     if not requested:
         return ("market_id", "asset_id", "timestamp")
+    if families == ("fundamental",):
+        return tuple(
+            dict.fromkeys(
+                (
+                    "market_id",
+                    "asset_id",
+                    "timestamp",
+                    *(
+                        column
+                        for definition in requested
+                        for column in definition.input_columns
+                    ),
+                )
+            )
+        )
     if families != (PRICE_VOLUME_FACTOR_FAMILY,):
         unsupported = next(
             family for family in families if family != PRICE_VOLUME_FACTOR_FAMILY
@@ -93,6 +110,8 @@ def factor_read_window_for_panel(
     families = tuple(dict.fromkeys(definition.family for definition in requested))
     if not requested:
         return read_window
+    if families == ("fundamental",):
+        return read_window
     if families != (PRICE_VOLUME_FACTOR_FAMILY,):
         unsupported = next(
             family for family in families if family != PRICE_VOLUME_FACTOR_FAMILY
@@ -128,7 +147,14 @@ def calculate_fundamental_factors(
 ) -> pd.DataFrame:
     """Calculate the fixed phase-1 raw fundamental factors from PIT facts."""
 
-    required_facts = {"asset_id", "timestamp", "metric_id", "value", "report_period"}
+    required_facts = {
+        "asset_id",
+        "timestamp",
+        "metric_id",
+        "value",
+        "report_period",
+        "previous_value",
+    }
     if not required_facts.issubset(pit_facts.columns) or not {
         "asset_id",
         "timestamp",
@@ -152,18 +178,53 @@ def calculate_fundamental_factors(
         .sort_values(["asset_id", "timestamp", "report_period"], kind="mergesort")
     )
 
-    def ratio(numerator: str, denominator: str) -> pd.Series:
-        denominator_values = wide[denominator].where(wide[denominator] > 0.0)
-        return wide[numerator] / denominator_values
+    wide["market_id"] = "a_share"
+    prior_assets = pit_facts.loc[
+        pit_facts["metric_id"].eq("total_assets"),
+        ("asset_id", "timestamp", "previous_value"),
+    ].rename(columns={"previous_value": "previous_total_assets"})
+    wide = wide.merge(
+        prior_assets,
+        on=("asset_id", "timestamp"),
+        how="left",
+        validate="one_to_one",
+    )
+    prior_assets = wide["previous_total_assets"].where(
+        wide["previous_total_assets"] > 0.0
+    )
+    wide["previous_total_assets"] = prior_assets
+    return calculate_fundamental_factors_for_panel(wide)
 
-    output = wide.loc[:, ("asset_id", "timestamp")].copy()
+
+def calculate_fundamental_factors_for_panel(panel: pd.DataFrame) -> pd.DataFrame:
+    required = {
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "net_income",
+        "market_cap",
+        "total_equity",
+        "operating_cash_flow",
+        "total_assets",
+        "previous_total_assets",
+        "total_liabilities",
+    }
+    if not required.issubset(panel.columns):
+        raise ValueError("a_share_fundamental_factor_columns_invalid")
+    output = panel.loc[:, ("market_id", "asset_id", "timestamp")].copy()
+
+    def ratio(numerator: str, denominator: str) -> pd.Series:
+        denominator_values = panel[denominator].where(panel[denominator] > 0.0)
+        return panel[numerator] / denominator_values
+
     output["fundamental_raw_earnings_yield"] = ratio("net_income", "market_cap")
     output["fundamental_raw_book_to_market"] = ratio("total_equity", "market_cap")
     output["fundamental_raw_roe"] = ratio("net_income", "total_equity")
     output["fundamental_raw_operating_cash_flow_to_assets"] = ratio(
         "operating_cash_flow", "total_assets"
     )
-    prior_assets = wide.groupby("asset_id", sort=False)["total_assets"].shift()
-    output["fundamental_raw_asset_growth"] = wide["total_assets"] / prior_assets - 1.0
+    output["fundamental_raw_asset_growth"] = (
+        ratio("total_assets", "previous_total_assets") - 1.0
+    )
     output["fundamental_raw_leverage"] = ratio("total_liabilities", "total_assets")
     return output.reset_index(drop=True)

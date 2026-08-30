@@ -30,6 +30,7 @@ def derive_annotations(
             spec.data_id
             for spec in catalog.list()
             if spec.kind is ProcessedDataKind.ANNOTATION
+            and spec.processed_input_data_ids
         }
         missing_ids = sorted(requested.difference(annotation_ids))
         if missing_ids:
@@ -41,6 +42,8 @@ def derive_annotations(
     outputs: dict[str, pd.DataFrame] = {}
     for spec in catalog.list():
         if spec.kind is not ProcessedDataKind.ANNOTATION:
+            continue
+        if not spec.processed_input_data_ids:
             continue
         if requested is not None and spec.data_id not in requested:
             continue

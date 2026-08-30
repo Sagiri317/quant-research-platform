@@ -36,8 +36,8 @@ def build_unified_research_markdown(payload: dict[str, object]) -> str:
             "",
             "## A股结果",
             "",
-            "PIT、更正、effective-date benchmark/industry、因子形式风险、"
-            "SLSQP long-only 组合与日期感知成本链已执行。",
+            "PIT、更正、effective-date benchmark、persisted raw 因子、"
+            "因子形式风险与 1d/1w/1m SLSQP 组合/成本/容量链已执行。",
             "真实 A股 model comparison、IC/RankIC 与 horizon decay："
             "`REAL_DATA_PENDING`，未用合成数值替代实证结果。",
             "",
@@ -51,7 +51,8 @@ def build_unified_research_markdown(payload: dict[str, object]) -> str:
             "## 稳健性与过拟合诊断",
             "",
             "包含 HAC、stationary bootstrap、BH/BY FDR、SPA/Reality Check、"
-            "StepM、MCS、PSR/DSR、CSCV/PBO 与 Fama-MacBeth v0；"
+            "StepM、MCS，以及明确标为预测误差改善代理的 PSR/DSR、CSCV/PBO。"
+            "A股 Fama-MacBeth v0 因真实数据未到而为 `REAL_DATA_PENDING`；"
             "合成样本不作显著性结论。",
             "",
             "## 局限",

@@ -249,6 +249,7 @@ def read_source_inputs_for_spec(
     source_id: SourceId,
     market_bars_data_id: str | None = None,
     columns_by_data_id: dict[str, Sequence[str]] | None = None,
+    time_windows_by_data_id: dict[str, TimeWindow | None] | None = None,
     asset_ids_by_data_id: dict[str, tuple[object, ...]] | None = None,
     asset_columns_by_data_id: dict[str, str] | None = None,
     resource_policy: RuntimeResourcePolicy,
@@ -263,6 +264,11 @@ def read_source_inputs_for_spec(
             inputs[data_id] = read_materialized_dataset(
                 root,
                 resource_policy=resource_policy,
+                time_window=(
+                    None
+                    if time_windows_by_data_id is None
+                    else time_windows_by_data_id.get(data_id)
+                ),
                 columns=(
                     None
                     if columns_by_data_id is None

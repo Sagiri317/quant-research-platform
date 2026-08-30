@@ -25,6 +25,7 @@ def build_a_share_experiment_fold(
     train: TimeWindow,
     validation: TimeWindow,
     development_test: TimeWindow,
+    final_holdout: TimeWindow,
     purge_steps: int,
     embargo_steps: int = 0,
     complete: bool = True,
@@ -35,6 +36,7 @@ def build_a_share_experiment_fold(
         ("train", train),
         ("validation", validation),
         ("development_test", development_test),
+        ("final_holdout", final_holdout),
     ):
         require_date_window(window, context=f"a_share_experiment_{role}")
     sessions = unified_trading_sessions(calendar)
@@ -47,6 +49,7 @@ def build_a_share_experiment_fold(
                 validation.end,
                 development_test.start,
                 development_test.end,
+                final_holdout.start,
             ]
         )
     )
@@ -64,6 +67,8 @@ def build_a_share_experiment_fold(
         validation_start_step=int(positions[2]),
         validation_end_step=int(positions[3]),
         development_test_start_step=int(positions[4]),
+        development_test_end_step=int(positions[5]),
+        final_holdout_start_step=int(positions[6]),
         complete=complete,
     )
 

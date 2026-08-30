@@ -137,6 +137,67 @@ def test_financial_raw_interim_and_pit_keep_latest_period_over_old_correction() 
     )
 
 
+def test_financial_multiple_correction_dates_and_report_period_growth_are_pit() -> None:
+    corrected = normalize_raw_frame(
+        pd.DataFrame(
+            [
+                {
+                    "Stkcd": "000001",
+                    "ShortName": "synthetic",
+                    "IfCorrect": "1",
+                    "DeclareDate": "2024-01-02, 2024-02-02",
+                    "Accper": "2023-12-31",
+                    "Typrep": "A",
+                    "A001000000": 100.0,
+                    "A002000000": 40.0,
+                    "A003000000": 60.0,
+                }
+            ]
+        ),
+        "financial_balance",
+    )
+    assert corrected["correction_disclosure_date"].iloc[0] == pd.Timestamp("2024-02-02")
+
+    metrics = {
+        "total_assets": ("FS_Combas", 80.0, 100.0),
+        "total_liabilities": ("FS_Combas", 32.0, 40.0),
+        "total_equity": ("FS_Combas", 48.0, 60.0),
+        "operating_revenue": ("FS_Comins", 24.0, 30.0),
+        "net_income": ("FS_Comins", 8.0, 10.0),
+        "operating_cash_flow": ("FS_Comscfd", 12.0, 15.0),
+    }
+    events = pd.DataFrame(
+        [
+            {
+                "asset_id": "000001",
+                "table_id": table_id,
+                "metric_id": metric_id,
+                "report_period": pd.Timestamp(report_period),
+                "available_at": pd.Timestamp(available_at),
+                "is_corrected": False,
+                "value": values[position],
+            }
+            for metric_id, (table_id, *values) in metrics.items()
+            for position, (report_period, available_at) in enumerate(
+                (("2023-12-31", "2024-01-02"), ("2024-03-31", "2024-04-02"))
+            )
+        ]
+    )
+    observations = pd.DataFrame(
+        {
+            "asset_id": ["000001", "000001"],
+            "timestamp": pd.to_datetime(["2024-04-03", "2024-04-04"]),
+        }
+    )
+    pit = materialize_pit_fundamentals(observations, events)
+    factors = factor_calculations.calculate_fundamental_factors(
+        pit,
+        observations.assign(market_cap=200.0),
+    )
+
+    assert factors["fundamental_raw_asset_growth"].tolist() == [0.25, 0.25]
+
+
 def test_idx_raw_contracts_bind_csi500_csi1000_and_industry_independently() -> None:
     membership_rows = []
     weight_rows = []
@@ -195,6 +256,7 @@ def test_idx_raw_contracts_bind_csi500_csi1000_and_industry_independently() -> N
             }
         ),
         history["weights"],
+        history["membership"],
     )
     industry = materialize_industry_history(
         pd.DataFrame(
@@ -215,3 +277,32 @@ def test_idx_raw_contracts_bind_csi500_csi1000_and_industry_independently() -> N
     assert set(history["membership"]["benchmark_id"]) == {"csi500", "csi1000"}
     assert weights["weight"].sum() == 1.0
     assert industry["csrc_2012_industry_code"].iloc[0] == "industry-a"
+    removed_membership = pd.concat(
+        (
+            history["membership"],
+            pd.DataFrame(
+                [
+                    {
+                        "benchmark_id": "csi500",
+                        "constituent_asset_id": "000001",
+                        "effective_date": pd.Timestamp("2024-01-04"),
+                        "is_member": False,
+                    }
+                ]
+            ),
+        ),
+        ignore_index=True,
+    )
+    removal = materialize_benchmark_weights(
+        pd.DataFrame(
+            {
+                "benchmark_id": ["csi500", "csi500"],
+                "constituent_asset_id": ["000001", "000001"],
+                "timestamp": pd.to_datetime(["2024-01-03", "2024-01-05"]),
+            }
+        ),
+        history["weights"],
+        removed_membership,
+    )
+    assert removal["weight"].iloc[0] == 0.6
+    assert pd.isna(removal["weight"].iloc[1])

@@ -18,9 +18,12 @@ EXECUTION_MASK_ID = "execution"
 EVALUATION_MASK_ID = "evaluation"
 
 PRICE_VOLUME_PROCESSED_DATA_ID = "price_volume"
+FUNDAMENTAL_PIT_PROCESSED_DATA_ID = "fundamental_pit"
+FUNDAMENTAL_RAW_PROCESSED_DATA_ID = "fundamental_raw"
 FORWARD_RETURNS_PROCESSED_DATA_ID = "forward_returns"
 
 PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID = "price_volume_forward_returns"
+FUNDAMENTAL_FORWARD_RETURNS_DATASET_ID = "fundamental_forward_returns"
 
 
 def market_panel_data_id(frequency: DataFrequency | str = DataFrequency.DAILY) -> str:

@@ -37,6 +37,8 @@ def _fold(
         validation_start_step=21,
         validation_end_step=22,
         development_test_start_step=23,
+        development_test_end_step=24,
+        final_holdout_start_step=45,
     )
 
 
@@ -108,6 +110,9 @@ def test_experiment_plan_rejects_nonderived_purge_and_holdout_overlap() -> None:
             plan,
             final_holdout=TimeWindow(date(2022, 12, 1), date(2023, 12, 31)),
         )
+    unsafe_fold = replace(plan.folds[-1], final_holdout_start_step=44)
+    with pytest.raises(ValueError, match="^experiment_holdout_purge_gap_invalid$"):
+        replace(plan, folds=(*plan.folds[:-1], unsafe_fold))
 
 
 def test_market_owners_bind_purge_and_embargo_to_real_steps() -> None:
@@ -125,6 +130,7 @@ def test_market_owners_bind_purge_and_embargo_to_real_steps() -> None:
         train=TimeWindow(sessions[0].date(), sessions[1].date()),
         validation=TimeWindow(sessions[4].date(), sessions[5].date()),
         development_test=TimeWindow(sessions[7].date(), sessions[8].date()),
+        final_holdout=TimeWindow(sessions[9].date(), sessions[9].date()),
         purge_steps=2,
         embargo_steps=1,
     )
@@ -141,6 +147,9 @@ def test_market_owners_bind_purge_and_embargo_to_real_steps() -> None:
         development_test=TimeWindow(
             crypto_grid[7].to_pydatetime(), crypto_grid[8].to_pydatetime()
         ),
+        final_holdout=TimeWindow(
+            crypto_grid[9].to_pydatetime(), crypto_grid[9].to_pydatetime()
+        ),
         purge_steps=2,
         embargo_steps=1,
     )
@@ -154,6 +163,7 @@ def test_market_owners_bind_purge_and_embargo_to_real_steps() -> None:
             train=TimeWindow(sessions[0].date(), sessions[1].date()),
             validation=TimeWindow(sessions[4].date(), sessions[5].date()),
             development_test=TimeWindow(sessions[7].date(), sessions[8].date()),
+            final_holdout=TimeWindow(sessions[9].date(), sessions[9].date()),
             purge_steps=1,
             embargo_steps=1,
         )

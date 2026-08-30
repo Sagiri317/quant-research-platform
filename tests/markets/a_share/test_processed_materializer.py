@@ -18,6 +18,7 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
+    PRICE_VOLUME_PROCESSED_DATA_ID,
     market_context_data_id,
     market_panel_data_id,
 )
@@ -735,7 +736,7 @@ def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
     ).exists()
 
 
-def test_materialize_processed_data_by_kind_writes_dependency_and_target(
+def test_materialize_price_volume_writes_dependency_and_target(
     tmp_path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
@@ -747,7 +748,7 @@ def test_materialize_processed_data_by_kind_writes_dependency_and_target(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        kinds=frozenset({ProcessedDataKind.FACTOR}),
+        data_ids=(PRICE_VOLUME_PROCESSED_DATA_ID,),
     )
 
     assert set(written) == {MARKET_PANEL_DATA_ID, "price_volume"}
@@ -998,7 +999,13 @@ def test_materializer_reuses_same_run_dependency_for_empty_window_tail(
         layout=layout,
         source_id=SYNTHETIC_SOURCE_ID,
         time_window=TimeWindow("2014-01-02", "2014-01-04"),
-        kinds=frozenset({ProcessedDataKind.ANNOTATION}),
+        data_ids=(
+            MARKET_CONTEXT_DATA_ID,
+            "default",
+            "as_of",
+            "execution",
+            "evaluation",
+        ),
     )
 
     assert {

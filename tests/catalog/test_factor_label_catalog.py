@@ -14,6 +14,9 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.fields import (
     field_catalog,
 )
+from quant_research_platform.markets.implementations.a_share.ids import (
+    FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
+)
 from quant_research_platform.research.factors.price_volume.presets import (
     price_volume_factor_columns,
 )
@@ -22,7 +25,11 @@ from tests.helpers import frequency_ids
 
 def test_a_share_price_volume_factor_definitions_have_input_requirements() -> None:
     catalog = factor_definitions.factor_catalog()
-    definitions = catalog.list()
+    definitions = tuple(
+        definition
+        for definition in catalog.list()
+        if definition.family == "price_volume"
+    )
     registered_fields = {spec.name for spec in field_catalog().list()}
 
     assert tuple(definition.output_column for definition in definitions) == (
@@ -76,6 +83,16 @@ def test_a_share_price_volume_factor_definitions_have_input_requirements() -> No
     )
     assert catalog.get("log_float_market_cap").base_input_columns == (
         "float_market_cap",
+    )
+    fundamental = tuple(
+        definition
+        for definition in catalog.list()
+        if definition.family == "fundamental"
+    )
+    assert len(fundamental) == 6
+    assert all(
+        definition.required_input_data_id == FUNDAMENTAL_PIT_PROCESSED_DATA_ID
+        for definition in fundamental
     )
 
 

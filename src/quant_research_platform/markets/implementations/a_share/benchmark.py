@@ -101,6 +101,7 @@ def normalize_benchmark_history(
 def materialize_benchmark_weights(
     observations: pd.DataFrame,
     weights: pd.DataFrame,
+    membership: pd.DataFrame,
 ) -> pd.DataFrame:
     """As-of materialize historical constituent weights by effective date."""
 
@@ -114,15 +115,25 @@ def materialize_benchmark_weights(
         :,
         ("benchmark_id", "constituent_asset_id", "effective_date", "weight"),
     ].copy()
+    membership_right = membership.loc[
+        :,
+        ("benchmark_id", "constituent_asset_id", "effective_date", "is_member"),
+    ].rename(columns={"effective_date": "membership_effective_date"})
     for column in ("benchmark_id", "constituent_asset_id"):
         left[column] = left[column].astype("string")
         right[column] = right[column].astype("string")
+        membership_right[column] = membership_right[column].astype("string")
     left["timestamp"] = pd.Series(
         pd.to_datetime(left["timestamp"]), index=left.index, dtype="datetime64[ns]"
     )
     right["effective_date"] = pd.Series(
         pd.to_datetime(right["effective_date"]),
         index=right.index,
+        dtype="datetime64[ns]",
+    )
+    membership_right["membership_effective_date"] = pd.Series(
+        pd.to_datetime(membership_right["membership_effective_date"]),
+        index=membership_right.index,
         dtype="datetime64[ns]",
     )
     result = pd.merge_asof(
@@ -134,6 +145,16 @@ def materialize_benchmark_weights(
         direction="backward",
         allow_exact_matches=True,
     )
+    result = pd.merge_asof(
+        result.sort_values("timestamp"),
+        membership_right.sort_values("membership_effective_date"),
+        left_on="timestamp",
+        right_on="membership_effective_date",
+        by=["benchmark_id", "constituent_asset_id"],
+        direction="backward",
+        allow_exact_matches=True,
+    )
+    result["weight"] = result["weight"].where(result["is_member"].eq(True))
     return result.sort_values(
         ["benchmark_id", "constituent_asset_id", "timestamp"], kind="mergesort"
     ).reset_index(drop=True)

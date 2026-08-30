@@ -492,7 +492,11 @@ def test_a_share_factor_outputs_are_past_only_and_key_stable_from_registry() -> 
         sessions=280,
         assets=("asset_b", "asset_a"),
     )
-    definitions = tuple(a_share_factor_definitions.factor_catalog().list())
+    definitions = tuple(
+        definition
+        for definition in a_share_factor_definitions.factor_catalog().list()
+        if definition.family == "price_volume"
+    )
     output_columns = tuple(definition.output_column for definition in definitions)
     required_inputs = tuple(
         dict.fromkeys(

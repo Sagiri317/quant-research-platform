@@ -38,6 +38,8 @@ def _plan() -> ExperimentPlan:
                 validation_start_step=1,
                 validation_end_step=1,
                 development_test_start_step=2,
+                development_test_end_step=2,
+                final_holdout_start_step=3,
             ),
         ),
         final_holdout=TimeWindow(date(2020, 1, 4), date(2020, 1, 4)),

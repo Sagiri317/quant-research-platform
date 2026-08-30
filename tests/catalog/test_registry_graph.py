@@ -7,7 +7,13 @@ from tests.helpers import frequency_ids
 
 EXPECTED_CSMAR_INTERIM_DATA_IDS = (
     "adjustment",
+    "financial_balance",
+    "financial_cashflow",
+    "financial_income",
     "index_info",
+    "index_market",
+    "index_membership",
+    "index_weights",
     frequency_ids.MARKET_BARS_DATA_ID,
     "market_cap",
     "stock_master",

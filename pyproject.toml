@@ -40,6 +40,12 @@ dev = [
 qrp = "quant_research_platform.interfaces.cli.commands:main"
 qrp-private = "quant_research_platform.interfaces.private_cli:main"
 
+[tool.setuptools.data-files]
+"share/quant-research-platform/research" = [
+  "docs/research/unified-research-interview-demo.ipynb",
+  "docs/research/unified-research-interview-demo.md",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

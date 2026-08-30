@@ -5,12 +5,12 @@ SMOKE_ONLY / SYNTHETIC_DATA / REAL_DATA_PENDING
 ## 摘要
 
 - run ID: `unified-research-interview-smoke`
-- 状态：`IMPLEMENTATION_COMPLETE / REAL_DATA_PENDING / HOLDOUT_LOCKED / READY_FOR_REAL_DATA`
+- 状态: `IMPLEMENTATION_COMPLETE / REAL_DATA_PENDING / HOLDOUT_LOCKED / READY_FOR_REAL_DATA`
 - 本材料证明仓库能力，不证明市场优势或投资收益。
 
 ## 背景与方法
 
-共同 `ExperimentPlan` 使用 calendar/grid fold、purge、validation 与 development test；候选集合固定且很小，没有自动因子发现或大范围调参。
+共同 ExperimentPlan 使用 calendar/grid fold、purge、validation、development test；固定小候选集，没有自动因子发现或大范围调参。
 
 ### 关键假设
 
@@ -20,24 +20,26 @@ SMOKE_ONLY / SYNTHETIC_DATA / REAL_DATA_PENDING
 
 ## 数据
 
-真实 CSMAR 财务导出尚未到达；展示使用确定性合成事实和可审查 fixture。输入为 `SMOKE_ONLY` workflow 生成的规范 payload，日期范围由 payload 中两个冻结协议定义。
+真实 CSMAR 财务导出尚未到达；展示使用确定性合成事实和可审查 fixture。
 
 ## A股结果
 
-PIT、更正、effective-date benchmark/industry、原始基本面因子、因子形式风险、SLSQP long-only 组合与日期感知成本链已执行。真实 A股 model comparison、IC/RankIC 与 horizon decay 为 `REAL_DATA_PENDING`；notebook 显式显示该状态，不用合成数值替代实证结果。
+PIT、更正、effective-date benchmark、persisted raw 因子、因子形式风险与 1d/1w/1m SLSQP 组合/成本/容量链已执行。
+真实 A股 model comparison、IC/RankIC 与 horizon decay：`REAL_DATA_PENDING`，未用合成数值替代实证结果。
 
 ## Crypto 结果
 
-BTC/ETH 同 run 完整性以及独立、pooled、leave-BTC-out、leave-ETH-out 均通过 persisted model/prediction/evaluation artifacts 执行。图表展示五种固定验证模式的 OOS IC、实际 taker/maker/markout，以及基于实际 turnover/PnL 的 fee/spread additive sensitivity 和 full-book latency sweep。
+BTC/ETH 同 run 完整性以及独立、pooled、leave-BTC-out、leave-ETH-out 均通过 persisted model/prediction/evaluation artifacts 执行。
+执行诊断包含实际 taker/maker、markout、fee/spread additive sensitivity 与 full-book latency sweep。
 
 ## 稳健性与过拟合诊断
 
-包含 HAC、BH/BY FDR、stationary bootstrap、SPA/Reality Check、StepM、MCS、PSR/DSR、CSCV/PBO 与 A股 Fama-MacBeth v0。合成样本只验证方法和失败语义，不作显著性结论。
+包含 HAC、stationary bootstrap、BH/BY FDR、SPA/Reality Check、StepM、MCS，以及明确标为预测误差改善代理的 PSR/DSR、CSCV/PBO。A股 Fama-MacBeth v0 因真实数据未到而为 `REAL_DATA_PENDING`；合成样本不作显著性结论。
 
 ## 局限
 
-真实财务 schema、行业历史和长期 BTC/ETH 共同录制覆盖仍等待真实数据验收。公开 L2 不提供精确 FIFO；未校准冲击仅为敏感性代理。未打开最终 holdout。
+真实财务 schema、行业历史和长期 BTC/ETH 共同录制覆盖仍等待真实数据验收。
 
 ## 结论
 
-`IMPLEMENTATION_COMPLETE / REAL_DATA_PENDING / HOLDOUT_LOCKED / READY_FOR_REAL_DATA`。当前结果是可执行能力证明，不是盈利策略或投资建议。
+`IMPLEMENTATION_COMPLETE / REAL_DATA_PENDING / HOLDOUT_LOCKED / READY_FOR_REAL_DATA`。最终 holdout 未读取。

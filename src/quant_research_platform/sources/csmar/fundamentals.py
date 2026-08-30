@@ -6,6 +6,13 @@ from collections.abc import Mapping
 
 import pandas as pd
 
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    InterimDataSpec,
+)
+from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import (
     strict_string_series,
     strict_timestamp_series,
@@ -27,6 +34,39 @@ DISCLOSURE_COLUMNS = (
     "report_period",
     "first_disclosure_date",
 )
+
+
+def financial_disclosure_interim_spec() -> InterimDataSpec:
+    """Canonical contract for the user-provided first-disclosure source."""
+
+    columns = (
+        "source_asset_id",
+        "timestamp",
+        "table_id",
+        "report_period",
+        "first_disclosure_date",
+    )
+    return InterimDataSpec(
+        data_id="financial_disclosures",
+        source_id=SourceId("csmar"),
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+        column_roles={
+            column: (
+                ColumnRole.KEY
+                if column in {"source_asset_id", "table_id", "report_period"}
+                else ColumnRole.TIMESTAMP
+            )
+            for column in columns
+        },
+        primary_key=(
+            "source_asset_id",
+            "table_id",
+            "report_period",
+            "timestamp",
+        ),
+        partition_columns=("year",),
+    )
 
 
 def financial_events_from_interim(
@@ -179,9 +219,31 @@ def materialize_pit_fundamentals(
         kind="mergesort",
         inplace=True,
     )
-    selected = candidates.groupby(
-        ["_observation_id", "table_id", "metric_id"], sort=False, as_index=False
-    ).tail(1)
+    revision_keys = [
+        "_observation_id",
+        "table_id",
+        "metric_id",
+        "report_period",
+    ]
+    revisions = candidates.groupby(revision_keys, sort=False, as_index=False).tail(1)
+    selection_keys = ["_observation_id", "table_id", "metric_id"]
+    selected = revisions.groupby(selection_keys, sort=False, as_index=False).tail(1)
+    last_two = revisions.groupby(selection_keys, sort=False, group_keys=False).tail(2)
+    previous = last_two.loc[
+        last_two.duplicated(selection_keys, keep="last"),
+        (*selection_keys, "report_period", "value"),
+    ].rename(
+        columns={
+            "report_period": "previous_report_period",
+            "value": "previous_value",
+        }
+    )
+    selected = selected.merge(
+        previous,
+        on=selection_keys,
+        how="left",
+        validate="one_to_one",
+    )
     metric_universe = events.loc[
         :, ("asset_id", "table_id", "metric_id")
     ].drop_duplicates()

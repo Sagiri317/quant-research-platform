@@ -41,6 +41,7 @@ def build_crypto_grid_experiment_fold(
     train: TimeWindow,
     validation: TimeWindow,
     development_test: TimeWindow,
+    final_holdout: TimeWindow,
     purge_steps: int,
     embargo_steps: int = 0,
     complete: bool = True,
@@ -49,7 +50,7 @@ def build_crypto_grid_experiment_fold(
 
     if any(
         not isinstance(bound, dt.datetime)
-        for window in (train, validation, development_test)
+        for window in (train, validation, development_test, final_holdout)
         for bound in (window.start, window.end)
     ):
         raise ValueError("crypto_experiment_requires_datetime_windows")
@@ -78,6 +79,7 @@ def build_crypto_grid_experiment_fold(
                 validation.end,
                 development_test.start,
                 development_test.end,
+                final_holdout.start,
             ]
         )
     )
@@ -95,6 +97,8 @@ def build_crypto_grid_experiment_fold(
         validation_start_step=int(positions[2]),
         validation_end_step=int(positions[3]),
         development_test_start_step=int(positions[4]),
+        development_test_end_step=int(positions[5]),
+        final_holdout_start_step=int(positions[6]),
         complete=complete,
     )
 

@@ -30,7 +30,11 @@ def test_factor_boundary_nan_is_allowed_without_pre_window_history() -> None:
 
     factors = factor_calculations.calculate_factors_for_panel(
         panel,
-        definitions=factor_definitions.factor_catalog().list(),
+        definitions=tuple(
+            definition
+            for definition in factor_definitions.factor_catalog().list()
+            if definition.family == "price_volume"
+        ),
     )
 
     first = factors.sort_values("timestamp").iloc[0]
@@ -44,7 +48,11 @@ def test_factor_middle_window_keeps_values_when_history_exists() -> None:
 
     factors = factor_calculations.calculate_factors_for_panel(
         panel,
-        definitions=factor_definitions.factor_catalog().list(),
+        definitions=tuple(
+            definition
+            for definition in factor_definitions.factor_catalog().list()
+            if definition.family == "price_volume"
+        ),
     )
     requested = factors.loc[
         factors["timestamp"].between(
@@ -232,7 +240,11 @@ def test_factor_calculation_fails_closed_for_missing_required_input_columns() ->
     ):
         factor_calculations.calculate_factors_for_panel(
             panel,
-            definitions=factor_definitions.factor_catalog().list(),
+            definitions=tuple(
+                definition
+                for definition in factor_definitions.factor_catalog().list()
+                if definition.family == "price_volume"
+            ),
         )
 
 

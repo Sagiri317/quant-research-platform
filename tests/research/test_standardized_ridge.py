@@ -4,6 +4,9 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.research.models.fitting import (
+    _model_state_upper_bound_bytes,
+)
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
@@ -22,3 +25,8 @@ def test_standardized_ridge_fits_scaler_on_training_rows_only() -> None:
     assert estimator._scaler.mean_.tolist() == [1.0]  # noqa: SLF001
     predictions = estimator.predict(pd.DataFrame({"feature": [100.0]}))
     assert predictions.shape == (1,)
+    small = pd.DataFrame({"feature": [0.0], "target": [0.0]})
+    large = pd.concat([small] * 10_000, ignore_index=True)
+    assert _model_state_upper_bound_bytes(
+        small, spec
+    ) == _model_state_upper_bound_bytes(large, spec)

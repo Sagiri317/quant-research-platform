@@ -37,6 +37,8 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     EVALUATION_MASK_ID,
     EXECUTION_MASK_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
+    FUNDAMENTAL_RAW_PROCESSED_DATA_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
     market_context_data_id,
     market_panel_data_id,
@@ -217,7 +219,22 @@ def test_a_share_processed_specs_declare_exact_direct_dependencies() -> None:
         AS_OF_MASK_ID: ((), (MARKET_PANEL_DATA_ID,)),
         EXECUTION_MASK_ID: ((), (MARKET_PANEL_DATA_ID,)),
         EVALUATION_MASK_ID: ((), (MARKET_PANEL_DATA_ID,)),
+        FUNDAMENTAL_PIT_PROCESSED_DATA_ID: (
+            (
+                MARKET_BARS_DATA_ID,
+                "trading_calendar",
+                "financial_balance",
+                "financial_income",
+                "financial_cashflow",
+                "financial_disclosures",
+            ),
+            (),
+        ),
         PRICE_VOLUME_PROCESSED_DATA_ID: ((), (MARKET_PANEL_DATA_ID,)),
+        FUNDAMENTAL_RAW_PROCESSED_DATA_ID: (
+            (),
+            (FUNDAMENTAL_PIT_PROCESSED_DATA_ID,),
+        ),
         FORWARD_RETURNS_PROCESSED_DATA_ID: ((), (MARKET_PANEL_DATA_ID,)),
     }
 

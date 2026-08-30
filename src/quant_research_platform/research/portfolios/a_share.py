@@ -211,6 +211,161 @@ def optimize_a_share_portfolio(
     )
 
 
+def run_a_share_portfolio_backtest(
+    panel: pd.DataFrame,
+    *,
+    exposure_columns: tuple[str, ...],
+    factor_covariance: pd.DataFrame,
+    fee_schedules: tuple[FeeSchedule, ...],
+    config: PortfolioOptimizationConfig,
+) -> dict[str, object]:
+    """Run one pre-registered rebalance schedule on a fixed daily panel."""
+
+    required = {
+        "timestamp",
+        "asset_return",
+        "current_weight",
+        "benchmark_weight",
+        "adv",
+        "asset_id",
+        "alpha",
+        "specific_variance",
+        "eligible",
+        "can_enter",
+        "can_exit",
+        *exposure_columns,
+    }
+    if not isinstance(panel, pd.DataFrame) or not required.issubset(panel.columns):
+        raise ValueError("a_share_backtest_columns_invalid")
+    frame = panel.copy()
+    frame["timestamp"] = pd.to_datetime(frame["timestamp"])
+    if bool(frame.duplicated(["timestamp", "asset_id"], keep=False).any()):
+        raise ValueError("a_share_backtest_primary_key_duplicate")
+    frame.sort_values(["timestamp", "asset_id"], kind="mergesort", inplace=True)
+    dates = pd.DatetimeIndex(frame["timestamp"].drop_duplicates())
+    rebalance_dates = _rebalance_dates(dates, config.rebalance_frequency)
+    first = frame.loc[frame["timestamp"].eq(dates[0])]
+    current = first.set_index("asset_id")["current_weight"].astype("float64")
+    if not np.isclose(current.sum(), 1.0):
+        raise ValueError("a_share_backtest_initial_weight_invalid")
+    nav = benchmark_nav = 1.0
+    cumulative_pnl = 0.0
+    factor_variance = specific_variance = 0.0
+    path_rows: list[dict[str, object]] = []
+    exposure_rows: list[dict[str, object]] = []
+    capacity_values = {limit: [] for limit in (0.01, 0.02, 0.05, 0.10)}
+    for timestamp, daily in frame.groupby("timestamp", sort=True):
+        daily = daily.copy()
+        daily.index = daily["asset_id"]
+        if set(daily.index) != set(current.index):
+            raise ValueError("a_share_backtest_asset_universe_changed")
+        daily["current_weight"] = current.reindex(daily.index)
+        turnover = cost = 0.0
+        if pd.Timestamp(timestamp) in rebalance_dates:
+            result = optimize_a_share_portfolio(
+                daily.reset_index(drop=True),
+                exposure_columns=exposure_columns,
+                factor_covariance=factor_covariance,
+                fee_schedules=fee_schedules,
+                trade_date=pd.Timestamp(timestamp).date(),
+                config=config,
+            )
+            next_weights = result.weights.reindex(daily.index)
+            changes = (next_weights - current.reindex(daily.index)).abs()
+            turnover = result.turnover
+            cost = result.estimated_cost
+            factor_variance = result.factor_variance
+            specific_variance = result.specific_variance
+            for limit in capacity_values:
+                traded = changes.gt(1e-12)
+                if bool(traded.any()):
+                    capacity_values[limit].append(
+                        float(
+                            (daily.loc[traded, "adv"] * limit / changes[traded]).min()
+                        )
+                    )
+            current = next_weights
+        weights = current.reindex(daily.index).to_numpy(dtype="float64")
+        benchmark = daily["benchmark_weight"].to_numpy(dtype="float64")
+        asset_returns = daily["asset_return"].to_numpy(dtype="float64")
+        gross_return = float(weights @ asset_returns)
+        benchmark_return = float(benchmark @ asset_returns)
+        net_return = gross_return - cost
+        active_return = net_return - benchmark_return
+        cumulative_pnl += config.portfolio_notional * net_return
+        nav *= 1.0 + net_return
+        benchmark_nav *= 1.0 + benchmark_return
+        path_rows.append(
+            {
+                "timestamp": pd.Timestamp(timestamp),
+                "gross_return": gross_return,
+                "net_return": net_return,
+                "benchmark_return": benchmark_return,
+                "active_return": active_return,
+                "constant_notional_additive_pnl": cumulative_pnl,
+                "nav": nav,
+                "benchmark_nav": benchmark_nav,
+                "active_nav": nav / benchmark_nav,
+                "turnover": turnover,
+                "cost": cost,
+                "factor_variance": factor_variance,
+                "specific_variance": specific_variance,
+            }
+        )
+        active_weights = weights - benchmark
+        for column in exposure_columns:
+            exposure_rows.append(
+                {
+                    "timestamp": pd.Timestamp(timestamp),
+                    "exposure": column,
+                    "active_value": float(
+                        active_weights @ daily[column].to_numpy(dtype="float64")
+                    ),
+                }
+            )
+    path = pd.DataFrame(path_rows)
+    path["drawdown"] = path["nav"] / path["nav"].cummax() - 1.0
+    active = path["active_return"].to_numpy(dtype="float64")
+    tracking_error = float(np.std(active, ddof=1) * np.sqrt(252.0))
+    information_ratio = (
+        None
+        if tracking_error == 0.0
+        else float(np.mean(active) * 252.0 / tracking_error)
+    )
+    return {
+        "path": path,
+        "active_exposures": pd.DataFrame(exposure_rows),
+        "summary": {
+            "rebalance_frequency": config.rebalance_frequency,
+            "tracking_error": tracking_error,
+            "information_ratio": information_ratio,
+            "total_turnover": float(path["turnover"].sum()),
+            "total_cost": float(path["cost"].sum()),
+            "maximum_drawdown": float(path["drawdown"].min()),
+            "mean_factor_variance": float(path["factor_variance"].mean()),
+            "mean_specific_variance": float(path["specific_variance"].mean()),
+            "constant_notional_additive_pnl": cumulative_pnl,
+            "compounded_nav": nav,
+            "benchmark_nav": benchmark_nav,
+            "capacity_notional": {
+                f"{int(limit * 100)}pct_adv": (
+                    None if not values else float(min(values))
+                )
+                for limit, values in capacity_values.items()
+            },
+        },
+    }
+
+
+def _rebalance_dates(
+    dates: pd.DatetimeIndex, frequency: str
+) -> frozenset[pd.Timestamp]:
+    if frequency == "1d":
+        return frozenset(dates)
+    periods = dates.to_period("W" if frequency == "1w" else "M")
+    return frozenset(dates[~periods.duplicated()])
+
+
 def _weight_bounds(
     data: pd.DataFrame, current: np.ndarray, max_weight: float
 ) -> tuple[tuple[float, float], ...]:

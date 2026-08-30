@@ -15,6 +15,8 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     DEFAULT_UNIVERSE_ID,
     EXECUTION_MASK_ID,
     FORWARD_RETURNS_PROCESSED_DATA_ID,
+    FUNDAMENTAL_FORWARD_RETURNS_DATASET_ID,
+    FUNDAMENTAL_RAW_PROCESSED_DATA_ID,
     MARKET_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
@@ -22,6 +24,7 @@ from quant_research_platform.markets.implementations.a_share.ids import (
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     _registered_factor_columns,
+    _registered_fundamental_factor_columns,
     _registered_label_columns,
 )
 from quant_research_platform.research.factors.price_volume.columns import (
@@ -65,6 +68,7 @@ def build_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
     """Return A-share research dataset specs assembled from processed data."""
 
     factor_columns = _registered_factor_columns()
+    fundamental_columns = _registered_fundamental_factor_columns()
     label_columns = _registered_label_columns()
     columns = (
         *platform_entity_time_key(),
@@ -98,6 +102,40 @@ def build_research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
                 columns,
                 factor_columns=factor_columns,
                 feature_columns=RESEARCH_DATASET_FEATURE_COLUMNS,
+                label_columns=label_columns,
+            ),
+            primary_key=platform_entity_time_key(),
+            partition_columns=("year",),
+        ),
+        ResearchDatasetSpec(
+            data_id=FUNDAMENTAL_FORWARD_RETURNS_DATASET_ID,
+            market_id=MARKET_ID,
+            input_data_ids=(
+                FUNDAMENTAL_RAW_PROCESSED_DATA_ID,
+                FORWARD_RETURNS_PROCESSED_DATA_ID,
+                market_context_data_id(),
+                DEFAULT_UNIVERSE_ID,
+                EXECUTION_MASK_ID,
+            ),
+            base_input_data_id=DEFAULT_UNIVERSE_ID,
+            factor_columns=fundamental_columns,
+            feature_columns=(),
+            feature_transforms=(),
+            label_columns=label_columns,
+            filter_columns=RESEARCH_DATASET_FILTER_COLUMNS,
+            context_columns=RESEARCH_DATASET_CONTEXT_COLUMNS,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.RESEARCH_ROW,
+            column_roles=_research_dataset_column_roles(
+                (
+                    *platform_entity_time_key(),
+                    *fundamental_columns,
+                    *label_columns,
+                    *RESEARCH_DATASET_FILTER_COLUMNS,
+                    *RESEARCH_DATASET_CONTEXT_COLUMNS,
+                ),
+                factor_columns=fundamental_columns,
+                feature_columns=(),
                 label_columns=label_columns,
             ),
             primary_key=platform_entity_time_key(),
