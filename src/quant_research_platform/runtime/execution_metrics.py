@@ -45,6 +45,7 @@ class ExecutionStepMetric:
             "unavailable_reason": self.unavailable_reason,
         }
 
+
 class ExecutionMetricsRecorder:
     def __init__(self) -> None:
         self.records: list[ExecutionStepMetric] = []
@@ -90,6 +91,7 @@ class ExecutionMetricsRecorder:
             self.records,
             run_id=run_id,
         )
+
 
 def _payload(
     records: list[ExecutionStepMetric],

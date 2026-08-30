@@ -164,10 +164,13 @@ class EvaluationDiagnostics:
                     )
                 except (TypeError, ValueError) as exc:
                     raise ValueError(f"invalid_evaluation_{field_name}") from exc
-                if time_value_isoformat(
-                    parsed,
-                    preserve_datetime=isinstance(parsed, datetime),
-                ) != value:
+                if (
+                    time_value_isoformat(
+                        parsed,
+                        preserve_datetime=isinstance(parsed, datetime),
+                    )
+                    != value
+                ):
                     raise ValueError(f"invalid_evaluation_{field_name}")
             parsed_bounds.append(parsed)
         minimum, maximum = parsed_bounds

@@ -80,9 +80,7 @@ def atomic_write_directory[T](
     require_unaliased_path(final_root.parent, error="invalid_storage_write_path")
     final_root.parent.mkdir(parents=True, exist_ok=True)
     reject_if_exists(final_root)
-    temp_root = final_root.with_name(
-        owned_scratch_name(".a-", uuid4().hex[:12])
-    )
+    temp_root = final_root.with_name(owned_scratch_name(".a-", uuid4().hex[:12]))
     claimed_temp = False
     try:
         os.mkdir(temp_root)
@@ -109,9 +107,7 @@ def _prepare_file_target(path: Path) -> tuple[Path, Path]:
     require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
     final_path.parent.mkdir(parents=True, exist_ok=True)
     require_unaliased_path(final_path, error="invalid_storage_write_path")
-    temp_path = final_path.with_name(
-        owned_scratch_name(".f-", uuid4().hex[:12])
-    )
+    temp_path = final_path.with_name(owned_scratch_name(".f-", uuid4().hex[:12]))
     require_unaliased_path(temp_path, error="invalid_storage_write_path")
     return final_path, temp_path
 
@@ -127,8 +123,7 @@ def _cleanup_claimed(
         remove_owned_scratch(path)
     except BaseException as cleanup_error:
         primary.add_note(
-            "atomic scratch cleanup also failed: "
-            f"{type(cleanup_error).__name__}"
+            f"atomic scratch cleanup also failed: {type(cleanup_error).__name__}"
         )
 
 

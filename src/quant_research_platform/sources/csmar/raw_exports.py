@@ -118,6 +118,7 @@ class RawExportIntakeResult:
     inspection: RawExportInspection | None = None
     error: str | None = None
 
+
 class _IndexInfoContinuationSpool:
     """Bounded private scratch for malformed physical-row continuations."""
 
@@ -768,15 +769,13 @@ def _require_index_info_reconstruction_headroom(
     string_builder_span_bytes = result_bytes
     returned_string_span_bytes = result_bytes
     if payload_lease is None:
-        available_bytes = resource_policy.planning_headroom_bytes
+        available_bytes = resource_policy.operation_headroom_bytes
     elif payload_lease.active:
         available_bytes = payload_lease.reserved_bytes
     else:
         available_bytes = 0
     if (
-        live_source_span_bytes
-        + string_builder_span_bytes
-        + returned_string_span_bytes
+        live_source_span_bytes + string_builder_span_bytes + returned_string_span_bytes
         > available_bytes
     ):
         raise DatasetReadCapacityExceeded(
@@ -823,7 +822,7 @@ def iter_private_export_chunks_with_policy(
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
     export_path = Path(path)
-    producer_bound = max(1, resource_policy.planning_headroom_bytes // 2)
+    producer_bound = max(1, resource_policy.operation_headroom_bytes // 2)
     payload_lease_ref: list[MemoryLease | None] = [None]
 
     if dataset == "index_info":
@@ -1025,7 +1024,7 @@ def _require_raw_conversion_headroom(
     payload_lease: MemoryLease | None = None,
 ) -> None:
     if payload_lease is None:
-        available_bytes = resource_policy.planning_headroom_bytes
+        available_bytes = resource_policy.operation_headroom_bytes
     elif payload_lease.active:
         available_bytes = payload_lease.reserved_bytes
     else:
@@ -1180,8 +1179,8 @@ def _verify_csmar_member_set(
                 namespace=namespace,
                 payload=relative,
             )
-            actual = relative + b"\0" + _file_identity_bytes(
-                raw_export_file_identity(path)
+            actual = (
+                relative + b"\0" + _file_identity_bytes(raw_export_file_identity(path))
             )
             if expected != actual:
                 raise ValueError("csmar_raw_export_identity_changed")

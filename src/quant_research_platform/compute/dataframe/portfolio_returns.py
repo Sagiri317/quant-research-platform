@@ -51,9 +51,8 @@ def _stream_weighted_portfolio_from_validated_panel(
     tradability_config: TradabilityConfig | None = None,
     cost_config: CostConfig | None = None,
     return_source_column: str | None = None,
-    previous_positions: dict[
-        tuple[object, ...], dict[str, dict[str, float]]
-    ] | None = None,
+    previous_positions: dict[tuple[object, ...], dict[str, dict[str, float]]]
+    | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Stream positions, turnover, costs, and portfolio returns."""
 
@@ -71,9 +70,7 @@ def _stream_weighted_portfolio_from_validated_panel(
     return_source_column = require_return_source_column(return_source_column)
     if return_source_column != spec.label_column:
         if return_source_column not in panel:
-            raise ValueError(
-                f"panel is missing columns: ['{return_source_column}']."
-            )
+            raise ValueError(f"panel is missing columns: ['{return_source_column}'].")
         if not pd.api.types.is_numeric_dtype(panel[return_source_column]):
             raise TypeError(
                 f"return source column {return_source_column!r} must be numeric."
@@ -154,9 +151,7 @@ def _stream_weighted_portfolio_from_validated_panel(
                 position_items = [(marker_asset, 0.0)]
             position_count = len(position_items)
             for column in segment_columns:
-                position_data[column].extend(
-                    [group_values[column]] * position_count
-                )
+                position_data[column].extend([group_values[column]] * position_count)
             position_data["timestamp"].extend([timestamp] * position_count)
             position_data["asset"].extend(asset for asset, _ in position_items)
             position_data["signal"].extend([signal] * position_count)

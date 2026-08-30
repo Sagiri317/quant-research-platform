@@ -1133,11 +1133,7 @@ def test_private_export_overflow_waits_for_next_writer_lease(
 
     def observe_frame(rows, header):  # noqa: ANN001
         observed_owners.append(
-            tuple(
-                sorted(
-                    lease.owner for lease in policy._leases if lease.active
-                )
-            )
+            tuple(sorted(lease.owner for lease in policy._leases if lease.active))
         )
         return original_raw_frame(rows, header)
 
@@ -1235,6 +1231,133 @@ def test_interim_transform_rejects_task_equal_payload_wide_row_before_mapping(
                 frames.send(lease)
             finally:
                 lease.close()
+
+
+def test_interim_tiny_conversion_keeps_soft_operation_headroom_after_overshoot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=1_000)
+    raw = pd.DataFrame(
+        {
+            "Markettype": ["4"],
+            "Clddt": ["2024-01-02"],
+            "Daywk": ["2"],
+            "State": ["O"],
+        }
+    )
+    monkeypatch.setattr(
+        interim,
+        "iter_private_export_chunks_with_policy",
+        lambda *_args, **_kwargs: _bound_first_test_frames((raw,)),
+    )
+    with runtime_resource_policy_scope(policy):
+        overshoot = policy.lease("test.csmar.interim.overshoot", 701)
+        stream = interim._iter_pruned_interim_frames(
+            data_id="trading_calendar",
+            raw_dataset="trading_calendar",
+            input_files=(Path("unused.csv"),),
+            start_date=None,
+            end_date=None,
+            overrides={},
+            chunksize=1,
+            pruning_reports=None,
+        )
+        bound = next(stream)
+        consumer = policy.lease("test.csmar.interim.consumer", bound)
+        try:
+            owned = stream.send(consumer)
+            assert isinstance(owned, OwnedValue)
+            assert len(owned.value) == 1
+            assert policy.operation_headroom_bytes == 700
+            owned.value = None
+        finally:
+            stream.close()
+            consumer.close()
+            overshoot.close()
+    assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("failure_site", ("copy", "consumer"))
+def test_interim_pending_close_failure_preserves_primary(
+    monkeypatch: pytest.MonkeyPatch,
+    failure_site: str,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=4 * 1024**2)
+    raw = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-03"], utc=True),
+            "source_market_type": ["4", "4"],
+        }
+    )
+    primary = KeyboardInterrupt(f"pending_{failure_site}_primary")
+    payload_calls = 0
+    real_payload_bytes = interim.pandas_frame_payload_bytes
+
+    def payload_bytes(frame: pd.DataFrame) -> int:
+        nonlocal payload_calls
+        payload_calls += 1
+        if failure_site == "copy" and payload_calls == 3:
+            raise primary
+        return real_payload_bytes(frame)
+
+    def transform(candidate: pd.DataFrame, **_kwargs: object):
+        if len(candidate) > 1:
+            raise interim._InterimCapacityExceeded(
+                len(candidate) + 1,
+                real_payload_bytes(raw) + 1,
+            )
+        return candidate, {}
+
+    monkeypatch.setattr(
+        interim,
+        "iter_private_export_chunks_with_policy",
+        lambda *_args, **_kwargs: _bound_first_test_frames((raw,)),
+    )
+    monkeypatch.setattr(interim, "_transform_interim_chunk", transform)
+    if failure_site == "copy":
+        monkeypatch.setattr(interim, "pandas_frame_payload_bytes", payload_bytes)
+    real_close = MemoryLease.close
+    pending_close_failed = False
+
+    def close(lease: MemoryLease) -> None:
+        nonlocal pending_close_failed
+        if lease.owner == "source.csmar.interim.pending" and not pending_close_failed:
+            pending_close_failed = True
+            real_close(lease)
+            raise OSError(f"pending_{failure_site}_close_secondary")
+        real_close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", close)
+    stream = interim._iter_pruned_interim_frames(
+        data_id="trading_calendar",
+        raw_dataset="trading_calendar",
+        input_files=(Path("unused.csv"),),
+        start_date=None,
+        end_date=None,
+        overrides={},
+        chunksize=2,
+        pruning_reports=None,
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(stream)
+        lease = policy.lease("test.csmar.interim.consumer", bound)
+        try:
+            with pytest.raises(KeyboardInterrupt) as raised:
+                if failure_site == "copy":
+                    stream.send(lease)
+                else:
+                    owned = stream.send(lease)
+                    assert isinstance(owned, OwnedValue)
+                    stream.throw(primary)
+            assert raised.value is primary
+            assert raised.value.__notes__ == [
+                "source.csmar.interim.pending lease close also failed: OSError"
+            ]
+            assert pending_close_failed
+        finally:
+            lease.close()
+            stream.close()
+    assert policy.used_memory_bytes == 0
 
 
 def test_private_export_chunks_keep_normal_wide_record_with_default_payload(
@@ -2550,9 +2673,7 @@ def test_index_info_reconstruction_admits_result_overlap_before_join(
     monkeypatch.setattr(
         raw_exports,
         "_iter_csv_records",
-        lambda *_args, **_kwargs: iter(
-            ((header, record, policy.memory_budget_bytes),)
-        ),
+        lambda *_args, **_kwargs: iter(((header, record, policy.memory_budget_bytes),)),
     )
 
     rows = iter(
@@ -3269,9 +3390,7 @@ def test_csmar_reference_dedup_delegates_typed_classification_to_storage(
     assert len(observed) == 1
     assert observed[0][0] == ("source_asset_id", "timestamp")
     assert observed[0][1] == ("stock_name",)
-    assert observed_leases == [
-        ("source.csmar.reference.index", "test.csmar.consumer")
-    ]
+    assert observed_leases == [("source.csmar.reference.index", "test.csmar.consumer")]
 
 
 def test_csmar_reference_opaque_arrow_overrun_fails_before_index_mutation(
@@ -3580,9 +3699,7 @@ def test_csmar_reference_empty_or_duplicate_returns_lease_before_next_bound(
     )
 
     observed_rows = [
-        chunk["source_asset_id"].tolist()
-        for chunk in output
-        if not chunk.empty
+        chunk["source_asset_id"].tolist() for chunk in output if not chunk.empty
     ]
     output.clear()
     del output
@@ -3681,9 +3798,7 @@ def test_csmar_source_order_validation_honors_inventory_order(
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda path, **_kwargs: _bound_first_test_frames(
-            (frames[Path(path)].copy(),)
-        ),
+        lambda path, **_kwargs: _bound_first_test_frames((frames[Path(path)].copy(),)),
     )
     monkeypatch.setattr(interim, "normalize_raw_frame", lambda frame, _data_id: frame)
     monkeypatch.setattr(
@@ -3755,9 +3870,7 @@ def test_csmar_source_order_rejects_inverse_boundaries_for_every_data_id(
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda path, **_kwargs: _bound_first_test_frames(
-            frames_by_path[Path(path)]
-        ),
+        lambda path, **_kwargs: _bound_first_test_frames(frames_by_path[Path(path)]),
     )
     monkeypatch.setattr(interim, "normalize_raw_frame", lambda frame, _data_id: frame)
     monkeypatch.setattr(
@@ -3813,9 +3926,7 @@ def test_csmar_source_order_accepts_equal_and_empty_boundaries_for_every_data_id
     monkeypatch.setattr(
         interim,
         "iter_private_export_chunks_with_policy",
-        lambda path, **_kwargs: _bound_first_test_frames(
-            frames_by_path[Path(path)]
-        ),
+        lambda path, **_kwargs: _bound_first_test_frames(frames_by_path[Path(path)]),
     )
     monkeypatch.setattr(interim, "normalize_raw_frame", lambda frame, _data_id: frame)
     monkeypatch.setattr(
@@ -4121,9 +4232,7 @@ def test_csmar_materialization_forwards_operation_policy_target_to_exact_index(
 
     assert policy_calls
     assert dataset_policies == [policy]
-    expected_target = 256 * 1024 - int(
-        frame.memory_usage(index=True, deep=True).sum()
-    )
+    expected_target = 256 * 1024 - int(frame.memory_usage(index=True, deep=True).sum())
     assert observed_targets == [expected_target]
     assert write_policies == [policy]
 
@@ -4273,6 +4382,7 @@ def test_csmar_materializer_consumes_spill_order_without_prefetch(
 
     monkeypatch.setattr(interim, "dataset_files_with_identity_by_id", indexed_files)
     monkeypatch.setattr(interim, "_iter_interim_frames", frames)
+
     def write_dataset(_root, data, **kwargs):  # noqa: ANN001, ANN202
         _collect_bound_first_frames(data, kwargs["resource_policy"])
 
@@ -4359,10 +4469,14 @@ def test_csmar_materializer_rejects_member_addition_before_publication(
             chunksize=1,
         )
 
-    assert not StorageLayout(project_root=tmp_path).interim_data_root(
-        csmar_ids.SOURCE_ID,
-        "trading_calendar",
-    ).exists()
+    assert (
+        not StorageLayout(project_root=tmp_path)
+        .interim_data_root(
+            csmar_ids.SOURCE_ID,
+            "trading_calendar",
+        )
+        .exists()
+    )
 
 
 def test_csmar_materializer_rejects_member_removal_before_publication(
@@ -4389,10 +4503,14 @@ def test_csmar_materializer_rejects_member_removal_before_publication(
             chunksize=1,
         )
 
-    assert not StorageLayout(project_root=tmp_path).interim_data_root(
-        csmar_ids.SOURCE_ID,
-        "trading_calendar",
-    ).exists()
+    assert (
+        not StorageLayout(project_root=tmp_path)
+        .interim_data_root(
+            csmar_ids.SOURCE_ID,
+            "trading_calendar",
+        )
+        .exists()
+    )
 
 
 @pytest.mark.parametrize("chunksize", (0, True, 1.5))
@@ -4575,27 +4693,27 @@ def test_csmar_market_bars_daily_materializer_streams_chunks_to_storage(
             yield from _bound_first_test_frames(
                 (
                     pd.DataFrame(
-                {
-                    "source_asset_id": ["000001"],
-                    "timestamp": [pd.Timestamp("2024-01-02")],
-                    "trade_date": [pd.Timestamp("2024-01-02")],
-                    "market_type": [4],
-                    "trading_status_code": [1],
-                    "filling_flag": ["0"],
-                    "open": [10.0],
-                    "high": [10.5],
-                    "low": [9.8],
-                    "close": [10.2],
-                    "volume": [1000],
-                    "amount": [10200.0],
-                    "prev_close": [9.9],
-                    "limit_status": [0],
-                    "period_return": [0.03],
-                    "adj_close": [10.2],
-                    "adj_open": [10.0],
-                    "float_market_cap": [100.0],
-                    "total_market_cap": [200.0],
-                    "turnover": [0.01],
+                        {
+                            "source_asset_id": ["000001"],
+                            "timestamp": [pd.Timestamp("2024-01-02")],
+                            "trade_date": [pd.Timestamp("2024-01-02")],
+                            "market_type": [4],
+                            "trading_status_code": [1],
+                            "filling_flag": ["0"],
+                            "open": [10.0],
+                            "high": [10.5],
+                            "low": [9.8],
+                            "close": [10.2],
+                            "volume": [1000],
+                            "amount": [10200.0],
+                            "prev_close": [9.9],
+                            "limit_status": [0],
+                            "period_return": [0.03],
+                            "adj_close": [10.2],
+                            "adj_open": [10.0],
+                            "float_market_cap": [100.0],
+                            "total_market_cap": [200.0],
+                            "turnover": [0.01],
                         }
                     ),
                 )
@@ -4605,12 +4723,12 @@ def test_csmar_market_bars_daily_materializer_streams_chunks_to_storage(
             yield from _bound_first_test_frames(
                 (
                     pd.DataFrame(
-                {
-                    "source_asset_id": ["000001"],
-                    "timestamp": [pd.Timestamp("2024-01-02")],
-                    "share_change_date": [pd.Timestamp("2024-01-02")],
-                    "total_shares": [200.0],
-                    "a_float_shares": [100.0],
+                        {
+                            "source_asset_id": ["000001"],
+                            "timestamp": [pd.Timestamp("2024-01-02")],
+                            "share_change_date": [pd.Timestamp("2024-01-02")],
+                            "total_shares": [200.0],
+                            "a_float_shares": [100.0],
                         }
                     ),
                 )
@@ -4919,9 +5037,12 @@ def test_private_export_first_frame_reserves_owner_known_decode_buffers(
         ),
     )
 
-    with runtime_resource_policy_scope(policy), pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="csmar_raw_working_set_exceeds_task_memory_budget",
+    with (
+        runtime_resource_policy_scope(policy),
+        pytest.raises(
+            storage_errors.DatasetReadCapacityExceeded,
+            match="csmar_raw_working_set_exceeds_task_memory_budget",
+        ),
     ):
         chunks = raw_exports.iter_private_export_chunks_with_policy(
             Path("unused.csv"),

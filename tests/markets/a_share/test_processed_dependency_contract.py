@@ -1453,9 +1453,7 @@ def test_dataset_coverage_checks_timestamps_without_series_transform(
     )
     _patch_planning_reader(
         monkeypatch,
-        lambda *_args, **_kwargs: iter(
-            (pd.DataFrame({"timestamp": sessions}),)
-        ),
+        lambda *_args, **_kwargs: iter((pd.DataFrame({"timestamp": sessions}),)),
     )
     monkeypatch.setattr(
         strict_values,
@@ -2163,19 +2161,19 @@ def test_valid_bar_boundary_admits_state_before_array_allocation(
         materialization_io.MaterializationCapacityExceeded,
         match="a_share_known_payloads_exceed_task_memory_budget",
     ):
-            with runtime_resource_policy_scope(policy):
-                with policy.lease(
-                    "test.a_share.preexisting",
-                    policy.memory_budget_bytes - 1,
-                ):
-                    materialization_planning.bounded_valid_bar_key_coverage(
-                        SimpleNamespace(),  # type: ignore[arg-type]
-                        asset_ids=("a",),
-                        core_sessions=(pd.Timestamp("2024-01-03"),),
-                        lookback_bars=1,
-                        lookahead_bars=1,
-                        resource_policy=policy,
-                    )
+        with runtime_resource_policy_scope(policy):
+            with policy.lease(
+                "test.a_share.preexisting",
+                policy.memory_budget_bytes - 1,
+            ):
+                materialization_planning.bounded_valid_bar_key_coverage(
+                    SimpleNamespace(),  # type: ignore[arg-type]
+                    asset_ids=("a",),
+                    core_sessions=(pd.Timestamp("2024-01-03"),),
+                    lookback_bars=1,
+                    lookahead_bars=1,
+                    resource_policy=policy,
+                )
 
 
 def test_valid_bar_output_capacity_is_checked_before_dataframe_construction(
@@ -2360,8 +2358,8 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
         sessions=(pd.Timestamp("2024-01-02"),),
         resource_policy=policy,
         valid_bar_offsets=(0, 0),
-        materialize=lambda assets, sessions, _session_context, _keys: (
-            pd.DataFrame({"asset_id": assets, "timestamp": sessions})
+        materialize=lambda assets, sessions, _session_context, _keys: pd.DataFrame(
+            {"asset_id": assets, "timestamp": sessions}
         ),
     )
 
@@ -2377,9 +2375,7 @@ def test_valid_bar_index_build_counts_session_and_cache_and_cleans_up(
         scratch_parent=Path(tempfile.gettempdir()),
     ).retained_memory_bytes
     assert len(build_observations) == 1
-    active_count, cache_bytes, asset_ids, time_window = (
-        build_observations[0]
-    )
+    active_count, cache_bytes, asset_ids, time_window = build_observations[0]
     assert active_count == 2
     assert cache_bytes == 2 * expected_cache_bytes
     assert asset_ids == ("a",)

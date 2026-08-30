@@ -120,9 +120,7 @@ def _with_annotation_masks(
         listing_age >= min_listing_trading_days
     ).astype(bool)
     result["eligible_liquidity"] = (
-        amount.gt(0)
-        & volume.gt(0)
-        & turnover.fillna(-1).ge(0)
+        amount.gt(0) & volume.gt(0) & turnover.fillna(-1).ge(0)
     ).astype(bool)
     result["eligible_base"] = (is_scope & is_trading & ~is_st & ~is_pt).astype(bool)
     result["eligible"] = (

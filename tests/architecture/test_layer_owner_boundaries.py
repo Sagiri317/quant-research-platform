@@ -101,13 +101,8 @@ def test_owner_layer_import_boundaries_are_enforced(
     violations: list[str] = []
     for root, forbidden_prefixes in LAYER_BOUNDARIES.items():
         for edge in import_edges_under(import_edges, SOURCE_ROOT / root):
-            if any(
-                edge.module.startswith(prefix)
-                for prefix in forbidden_prefixes
-            ):
-                violations.append(
-                    f"{edge.path.as_posix()}:{edge.lineno}:{edge.module}"
-                )
+            if any(edge.module.startswith(prefix) for prefix in forbidden_prefixes):
+                violations.append(f"{edge.path.as_posix()}:{edge.lineno}:{edge.module}")
 
     assert violations == []
 
@@ -202,8 +197,7 @@ def test_physical_writes_require_storage_or_artifacts_owner() -> None:
 
 def test_live_source_physical_writes_stay_in_writer_owners() -> None:
     sources = {
-        path: path.read_text(encoding="utf-8")
-        for path in SOURCE_ROOT.rglob("*.py")
+        path: path.read_text(encoding="utf-8") for path in SOURCE_ROOT.rglob("*.py")
     }
 
     assert _physical_writer_violations(sources) == []
@@ -300,11 +294,7 @@ def _static_write_mode(call: ast.Call, position: int) -> bool:
     mode: ast.AST | None = call.args[position] if len(call.args) > position else None
     if mode is None:
         mode = next(
-            (
-                keyword.value
-                for keyword in call.keywords
-                if keyword.arg == "mode"
-            ),
+            (keyword.value for keyword in call.keywords if keyword.arg == "mode"),
             None,
         )
     return (

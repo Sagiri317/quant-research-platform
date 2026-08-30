@@ -87,9 +87,7 @@ def write_factors(
         row_count=1,
     )
     calculation_row_vectors = (len(definitions) + 3) * 8
-    operation_row_bound = (
-        input_row_buffer + output_row_buffer + calculation_row_vectors
-    )
+    operation_row_bound = input_row_buffer + output_row_buffer + calculation_row_vectors
 
     def chunks() -> Iterable[object]:
         def materialize(
@@ -108,19 +106,17 @@ def write_factors(
                     ),
                     core_sessions=current_sessions,
                 )
-                processed_inputs = (
-                    materialization_io.read_processed_inputs_for_spec(
-                        spec,
-                        layout=layout,
-                        processed_catalog=catalog,
-                        time_window=read_window,
-                        columns_by_data_id={
-                            contract.primary_input_data_id: panel_input_columns,
-                        },
-                        resource_policy=policy,
-                        asset_ids=asset_ids,
-                        cleanup_stack=live,
-                    )
+                processed_inputs = materialization_io.read_processed_inputs_for_spec(
+                    spec,
+                    layout=layout,
+                    processed_catalog=catalog,
+                    time_window=read_window,
+                    columns_by_data_id={
+                        contract.primary_input_data_id: panel_input_columns,
+                    },
+                    resource_policy=policy,
+                    asset_ids=asset_ids,
+                    cleanup_stack=live,
                 )
                 materialization_validation.validate_processed_input_contract(
                     spec,
@@ -130,17 +126,11 @@ def write_factors(
                 )
                 panel = processed_inputs[contract.primary_input_data_id]
                 panel_bytes = pandas_frame_payload_bytes(panel)
-                output_buffer = (
-                    materialization_planning.registered_output_buffer_bytes(
-                        spec,
-                        row_count=len(panel),
-                    )
+                output_buffer = materialization_planning.registered_output_buffer_bytes(
+                    spec,
+                    row_count=len(panel),
                 )
-                calculation_vectors = (
-                    len(panel)
-                    * (len(definitions) + 3)
-                    * 8
-                )
+                calculation_vectors = len(panel) * (len(definitions) + 3) * 8
                 factor_bound = panel_bytes + output_buffer + calculation_vectors
                 live.enter_context(
                     policy.lease("a_share.factor.calculate", factor_bound)

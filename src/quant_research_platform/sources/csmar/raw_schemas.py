@@ -73,6 +73,7 @@ FILENAME_RE = re.compile(
     r"export-(?P<export>\d{8})\.(?P<extension>csv)$"
 )
 
+
 def parse_raw_filename(path: str | Path) -> RawFileMetadata:
     """Parse the recommended raw CSMAR file name format."""
 
@@ -417,7 +418,7 @@ class _BoundedCsvRecords:
             self._record_lease = payload_lease
             parser_bound = min(
                 _CSV_PARSER_WORKSPACE_BOUND_BYTES,
-                self._resource_policy.planning_headroom_bytes,
+                self._resource_policy.operation_headroom_bytes,
             )
             try:
                 self._parser_lease = self._resource_policy.lease(
@@ -435,7 +436,7 @@ class _BoundedCsvRecords:
                 owner="source.csmar.csv.record",
             )
             self._record_lease = None
-        available = self._resource_policy.planning_headroom_bytes
+        available = self._resource_policy.operation_headroom_bytes
         parser_bound = min(_CSV_PARSER_WORKSPACE_BOUND_BYTES, available)
         record_bound = min(
             _CSV_RECORD_LEASE_BOUND_BYTES,
@@ -498,9 +499,7 @@ class _BoundedCsvRecords:
         ):
             return None
         lease = self._record_lease
-        available = (
-            0 if lease is None else lease.reserved_bytes - self._limit_bytes
-        )
+        available = 0 if lease is None else lease.reserved_bytes - self._limit_bytes
         if available <= self._limit_bytes:
             return None
         line = self._handle.readline(self._limit_bytes + 1)
@@ -771,28 +770,26 @@ class _BoundedCsvRecords:
         except BaseException as exc:
             if primary is not None:
                 primary.add_note(
-                    "csmar raw handle verification also failed: "
-                    f"{type(exc).__name__}"
+                    f"csmar raw handle verification also failed: {type(exc).__name__}"
                 )
             elif failure is None:
                 failure = exc
             else:
                 failure.add_note(
-                    "csmar raw handle verification also failed: "
-                    f"{type(exc).__name__}"
+                    f"csmar raw handle verification also failed: {type(exc).__name__}"
                 )
         try:
             self._handle.close()
         except BaseException as exc:
             if primary is not None:
                 primary.add_note(
-                    "csmar raw handle close also failed: " f"{type(exc).__name__}"
+                    f"csmar raw handle close also failed: {type(exc).__name__}"
                 )
             elif failure is None:
                 failure = exc
             else:
                 failure.add_note(
-                    "csmar raw handle close also failed: " f"{type(exc).__name__}"
+                    f"csmar raw handle close also failed: {type(exc).__name__}"
                 )
         if self._spool is not None:
             spool = self._spool
@@ -802,15 +799,13 @@ class _BoundedCsvRecords:
             except BaseException as exc:
                 if primary is not None:
                     primary.add_note(
-                        "csmar raw spool close also failed: "
-                        f"{type(exc).__name__}"
+                        f"csmar raw spool close also failed: {type(exc).__name__}"
                     )
                 elif failure is None:
                     failure = exc
                 else:
                     failure.add_note(
-                        "csmar raw spool close also failed: "
-                        f"{type(exc).__name__}"
+                        f"csmar raw spool close also failed: {type(exc).__name__}"
                     )
         parser_lease = self._parser_lease
         if parser_lease is not None:
@@ -953,9 +948,7 @@ def _read_export_header_under_policy(
     try:
         record = next(rows, None)
         columns = (
-            tuple(materialize_header_record(record[0]))
-            if record is not None
-            else ()
+            tuple(materialize_header_record(record[0])) if record is not None else ()
         )
         if not columns:
             raise ValueError("malformed_csmar_csv_row")
@@ -967,8 +960,7 @@ def _read_export_header_under_policy(
             if primary is None:
                 raise
             primary.add_note(
-                "CSMAR CSV row cleanup also failed: "
-                f"{type(close_error).__name__}"
+                f"CSMAR CSV row cleanup also failed: {type(close_error).__name__}"
             )
     if len(columns) != len(set(columns)):
         raise ValueError("duplicate_csmar_provider_column")

@@ -110,7 +110,7 @@ def _inspect_dataset_session_owned(
     try:
         runtime = _inspection_runtime_metadata(
             context,
-            target_chunk_bytes=resource_policy.planning_headroom_bytes,
+            target_chunk_bytes=resource_policy.operation_headroom_bytes,
         )
         columns = physical_schema_columns(context.schema)
     except BaseException:
@@ -162,10 +162,7 @@ def _inspection_operation_bound(context: DatasetSession) -> int:
     )
     workspace_bound = (
         dataset_partition_state_reserve_bytes(context)
-        + sum(
-            len(str(column).encode("utf-8")) + 32
-            for column in columns
-        )
+        + sum(len(str(column).encode("utf-8")) + 32 for column in columns)
         + 4096
     )
     return EXACT_KEY_SQLITE_CACHE_BYTES + workspace_bound + result_bound

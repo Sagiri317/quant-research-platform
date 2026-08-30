@@ -108,9 +108,9 @@ def test_all_model_algorithm_ids_fit_and_predict_synthetic_data(
                 assert predictions.attrs["model_metadata"]["input_columns"] == [
                     "factor"
                 ]
-                assert predictions.attrs["model_metadata"][
-                    "feature_importance"
-                ] == {"factor": 1.0}
+                assert predictions.attrs["model_metadata"]["feature_importance"] == {
+                    "factor": 1.0
+                }
         finally:
             result_owned.lease.close()
 
@@ -416,9 +416,7 @@ def test_model_metadata_matches_actual_execution_owner(
             (frame,), spec, estimator=estimator
         )
         try:
-            dependency_status = dict(
-                result_owned.value.metadata["dependency_status"]
-            )
+            dependency_status = dict(result_owned.value.metadata["dependency_status"])
         finally:
             result_owned.lease.close()
 

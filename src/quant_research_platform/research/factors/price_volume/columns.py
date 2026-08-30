@@ -60,6 +60,8 @@ PRICE_VOLUME_FEATURE_EXCLUDE_COLUMNS: frozenset[str] = frozenset(
         "timestamp",
     }
 )
+
+
 def price_volume_factor_columns_for_windows(
     windows: Iterable[int],
 ) -> tuple[str, ...]:

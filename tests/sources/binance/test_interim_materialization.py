@@ -178,10 +178,14 @@ def test_binance_materializer_rejects_relevant_member_addition_before_publicatio
             data_ids=("market_bars_1m",),
         )
 
-    assert not StorageLayout(project_root=tmp_path).interim_data_root(
-        ids.SOURCE_ID,
-        "market_bars_1m",
-    ).exists()
+    assert (
+        not StorageLayout(project_root=tmp_path)
+        .interim_data_root(
+            ids.SOURCE_ID,
+            "market_bars_1m",
+        )
+        .exists()
+    )
 
 
 def test_binance_materializer_rejects_relevant_member_removal_before_publication(
@@ -206,10 +210,14 @@ def test_binance_materializer_rejects_relevant_member_removal_before_publication
             data_ids=("market_bars_1m",),
         )
 
-    assert not StorageLayout(project_root=tmp_path).interim_data_root(
-        ids.SOURCE_ID,
-        "market_bars_1m",
-    ).exists()
+    assert (
+        not StorageLayout(project_root=tmp_path)
+        .interim_data_root(
+            ids.SOURCE_ID,
+            "market_bars_1m",
+        )
+        .exists()
+    )
 
 
 def test_binance_materializer_rejects_discovery_to_open_replacement(
@@ -349,10 +357,14 @@ def test_binance_materializer_rejects_out_of_order_interim_before_publication(
             row_batch_size=row_batch_size,
         )
 
-    assert not StorageLayout(project_root=tmp_path).interim_data_root(
-        ids.SOURCE_ID,
-        data_id,
-    ).exists()
+    assert (
+        not StorageLayout(project_root=tmp_path)
+        .interim_data_root(
+            ids.SOURCE_ID,
+            data_id,
+        )
+        .exists()
+    )
 
 
 def test_binance_interim_materializer_writes_multiple_batches(

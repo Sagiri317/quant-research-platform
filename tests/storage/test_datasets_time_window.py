@@ -88,9 +88,7 @@ def test_partitioned_empty_dataset_keeps_root_sentinel_for_windowed_reads(
     with open_dataset_session(root, columns=None, time_window=window) as session:
         assert tuple(session.read_paths) == (root / "data" / "part-000.parquet",)
     materialized = read_dataset(root, time_window=window)
-    chunks = list(
-        read_dataset(root, time_window=window, mode=DatasetReadMode.CHUNKED)
-    )
+    chunks = list(read_dataset(root, time_window=window, mode=DatasetReadMode.CHUNKED))
     assert materialized.empty
     assert len(chunks) == 1 and chunks[0].empty
     assert tuple(materialized.dtypes.astype(str)) == tuple(chunks[0].dtypes.astype(str))
@@ -151,9 +149,7 @@ def test_dataset_session_filtered_view_owns_path_selection(
         policy = session.resource_policy
         retained_before = policy.used_memory_bytes
         parent_lease = session._lease
-        with session.filtered_view(
-            TimeWindow("2015-01-01", "2015-12-31")
-        ) as view:
+        with session.filtered_view(TimeWindow("2015-01-01", "2015-12-31")) as view:
             assert view.path_selection is not None
             assert {path.parent.name for path in view.read_paths} == {"year=2015"}
             view.close()
@@ -189,9 +185,7 @@ def test_dataset_session_filtered_view_preserves_body_primary(
         monkeypatch.setattr(inventory_type, "release_path_selection", fail_release)
         try:
             with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
-                with session.filtered_view(
-                    TimeWindow("2015-01-01", "2015-12-31")
-                ):
+                with session.filtered_view(TimeWindow("2015-01-01", "2015-12-31")):
                     raise primary
         finally:
             monkeypatch.setattr(
@@ -268,9 +262,7 @@ def test_time_window_normalizes_timezone_aware_bounds_to_naive_utc(
         {
             "market_id": ["crypto", "crypto"],
             "asset_id": ["btc_usdt", "btc_usdt"],
-            "timestamp": pd.to_datetime(
-                ["2026-07-05 23:59:00", "2026-07-06 00:00:00"]
-            ),
+            "timestamp": pd.to_datetime(["2026-07-05 23:59:00", "2026-07-06 00:00:00"]),
             "value": [1.0, 2.0],
         }
     )

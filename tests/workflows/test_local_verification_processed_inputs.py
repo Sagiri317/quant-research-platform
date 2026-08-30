@@ -74,11 +74,7 @@ def test_local_verification_workflow_preserves_dataset_manifests(
         )
     )
     manifest = inspect_dataset(
-        run_root
-        / "data"
-        / "interim"
-        / "csmar"
-        / frequency_ids.MARKET_BARS_DATA_ID
+        run_root / "data" / "interim" / "csmar" / frequency_ids.MARKET_BARS_DATA_ID
     ).manifest
 
     assert result.status == "NOT_RUN"

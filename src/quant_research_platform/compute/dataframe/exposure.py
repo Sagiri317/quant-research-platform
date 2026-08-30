@@ -36,9 +36,7 @@ def summarize_exposure(
         if column not in count_frame:
             raise ValueError(f"returns is missing columns: ['{column}'].")
         if not pd.api.types.is_numeric_dtype(count_frame[column]):
-            raise ValueError(
-                f"returns column {column!r} must contain numeric values."
-            )
+            raise ValueError(f"returns column {column!r} must contain numeric values.")
         count_frame[column] = strict_integer_series(
             count_frame[column],
             error=f"returns column {column!r} must contain finite integer values.",
@@ -75,12 +73,8 @@ def summarize_exposure(
                 "mean_net_exposure": float(group["net_exposure"].mean()),
                 "max_gross_exposure": float(group["gross_exposure"].max()),
                 "max_abs_net_exposure": float(group["net_exposure"].abs().max()),
-                "mean_long_count": float(
-                    count_group["long_count"].mean()
-                ),
-                "mean_short_count": float(
-                    count_group["short_count"].mean()
-                ),
+                "mean_long_count": float(count_group["long_count"].mean()),
+                "mean_short_count": float(count_group["short_count"].mean()),
                 "mean_position_count": float(group["position_count"].mean()),
             }
         )

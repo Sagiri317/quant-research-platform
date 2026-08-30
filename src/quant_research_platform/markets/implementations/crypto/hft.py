@@ -19,8 +19,8 @@ from quant_research_platform.contracts.order_book import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
-    HFT_MAKER_BID_FILL_RATIO_PROXY_COLUMN,
-    HFT_MAKER_FILL_PROXY_HORIZON_MS,
+    HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN,
+    HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import OwnedValue
@@ -422,18 +422,10 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
             previous_time=previous_time,
         )
         mid = _finite_column(frame, "mid", "hft_factor_mid_invalid")
-        bid_price = _finite_column(
-            frame, "best_bid_price", "hft_factor_book_invalid"
-        )
-        ask_price = _finite_column(
-            frame, "best_ask_price", "hft_factor_book_invalid"
-        )
-        bid_quantity = _finite_column(
-            frame, "best_bid_qty", "hft_factor_book_invalid"
-        )
-        ask_quantity = _finite_column(
-            frame, "best_ask_qty", "hft_factor_book_invalid"
-        )
+        bid_price = _finite_column(frame, "best_bid_price", "hft_factor_book_invalid")
+        ask_price = _finite_column(frame, "best_ask_price", "hft_factor_book_invalid")
+        bid_quantity = _finite_column(frame, "best_bid_qty", "hft_factor_book_invalid")
+        ask_quantity = _finite_column(frame, "best_ask_qty", "hft_factor_book_invalid")
         spread = ask_price - bid_price
         if bool(np.any(mid <= 0)) or bool(np.any(spread <= 0)):
             raise ValueError("hft_factor_book_invalid")
@@ -602,10 +594,7 @@ def _validated_grid_arrays(
         and previous_time is not None
         and timestamps[0] - previous_time != HFT_GRID_MS
     ) or bool(
-        np.any(
-            (~boundaries[1:])
-            & (timestamps[1:] - timestamps[:-1] != HFT_GRID_MS)
-        )
+        np.any((~boundaries[1:]) & (timestamps[1:] - timestamps[:-1] != HFT_GRID_MS))
     ):
         raise ValueError("hft_grid_non_contiguous")
     return timestamps, segments, boundaries
@@ -662,7 +651,7 @@ def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFr
         values = future / mid - 1.0
         output[f"future_mid_return_{horizon}ms"] = values
         output[f"future_mid_direction_{horizon}ms"] = np.sign(values)
-    if HFT_MAKER_FILL_PROXY_HORIZON_MS in horizons:
+    if HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS in horizons:
         best_bid_quantity = pd.Series(
             _finite_column(
                 frame,
@@ -684,12 +673,12 @@ def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFr
         if bool(taker_sell_volume.lt(0).any()):
             raise ValueError("hft_label_taker_sell_volume_invalid")
         grouped_sell = taker_sell_volume.groupby(segment_groups, sort=False)
-        steps = HFT_MAKER_FILL_PROXY_HORIZON_MS // HFT_GRID_MS
+        steps = HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS // HFT_GRID_MS
         future_sell_volume = pd.concat(
             tuple(grouped_sell.shift(-step) for step in range(1, steps + 1)),
             axis=1,
         ).sum(axis=1, min_count=steps)
-        output[HFT_MAKER_BID_FILL_RATIO_PROXY_COLUMN] = (
+        output[HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN] = (
             future_sell_volume / best_bid_quantity
         ).clip(lower=0.0, upper=1.0)
     return output

@@ -260,13 +260,9 @@ def _build_prediction_result_from_research_dataset(
             estimator=build_estimator_from_model_spec(model_spec),
         )
         model_result = (
-            owned_model.value
-            if isinstance(owned_model, OwnedValue)
-            else owned_model
+            owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
         )
-        model_lease = (
-            owned_model.lease if isinstance(owned_model, OwnedValue) else None
-        )
+        model_lease = owned_model.lease if isinstance(owned_model, OwnedValue) else None
     except ValueError as exc:
         if str(exc) == "model_training_sample_empty":
             raise ValueError("empty_training_window") from exc
@@ -356,13 +352,9 @@ def _select_prediction_model_spec(
             estimator=build_estimator_from_model_spec(candidate_spec),
         )
         model_result = (
-            owned_model.value
-            if isinstance(owned_model, OwnedValue)
-            else owned_model
+            owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
         )
-        model_lease = (
-            owned_model.lease if isinstance(owned_model, OwnedValue) else None
-        )
+        model_lease = owned_model.lease if isinstance(owned_model, OwnedValue) else None
         validation_read_columns = tuple(
             dict.fromkeys(
                 (

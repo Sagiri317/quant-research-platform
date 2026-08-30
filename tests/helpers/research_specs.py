@@ -194,8 +194,8 @@ def correctness_research_dataset_catalog(
     return ResearchDatasetCatalog(
         (
             make_demo_research_dataset_spec(
-            feature_columns=feature_columns,
-            feature_transforms=feature_transforms,
+                feature_columns=feature_columns,
+                feature_transforms=feature_transforms,
             ),
         )
     )

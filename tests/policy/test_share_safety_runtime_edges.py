@@ -117,8 +117,7 @@ def test_typed_identifiers_are_not_free_text_stock_guesses() -> None:
     for data_id in ("dataset_600000", "stock_master", "market_bars_1m"):
         assert evidence_json_value_unsafe_reason({"data_id": data_id}) is None
     assert (
-        evidence_json_value_unsafe_reason({"message": "run_000001"})
-        == "stock_sample"
+        evidence_json_value_unsafe_reason({"message": "run_000001"}) == "stock_sample"
     )
     assert (
         evidence_json_value_unsafe_reason({"message": "dataset_600000"})
@@ -351,6 +350,8 @@ def test_stock_code_detector_does_not_flag_hash_payloads() -> None:
 def test_stock_code_detector_covers_a_share_exchange_suffixes(text: str) -> None:
     assert unsafe_for_share_reason(text) == "stock_code_sample"
     assert sanitize_shared_text(text) == text
+
+
 @pytest.mark.parametrize(
     ("text", "reason"),
     [

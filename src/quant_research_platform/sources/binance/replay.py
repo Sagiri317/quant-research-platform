@@ -160,9 +160,7 @@ class _ConnectionCoverageIndex:
                 missing_is_file_not_found=False,
             )
         except (OSError, ValueError) as exc:
-            raise ValueError(
-                "binance_replay_connection_intervals_invalid"
-            ) from exc
+            raise ValueError("binance_replay_connection_intervals_invalid") from exc
         if self.identity.size != descriptor["compressed_bytes"]:
             raise ValueError("binance_replay_connection_intervals_invalid")
         require_free_disk_headroom(
@@ -172,18 +170,14 @@ class _ConnectionCoverageIndex:
         self._scratch = None
         self._database = None
         try:
-            self._scratch = tempfile.TemporaryDirectory(
-                prefix="qrp-binance-coverage-"
-            )
+            self._scratch = tempfile.TemporaryDirectory(prefix="qrp-binance-coverage-")
             self._database = sqlite3.connect(
                 Path(self._scratch.name) / "coverage.sqlite3"
             )
             startup_pages = (
                 _COVERAGE_SQLITE_STARTUP_BYTES + _COVERAGE_SQLITE_PAGE_BYTES - 1
             ) // _COVERAGE_SQLITE_PAGE_BYTES
-            self._database.execute(
-                f"PRAGMA main.max_page_count={startup_pages}"
-            )
+            self._database.execute(f"PRAGMA main.max_page_count={startup_pages}")
             self._database.execute(
                 "CREATE TABLE coverage ("
                 "connection_id TEXT PRIMARY KEY, market TEXT NOT NULL, "
@@ -205,9 +199,7 @@ class _ConnectionCoverageIndex:
         try:
             raw_handle = self._path.open("rb")
         except OSError as exc:
-            raise ValueError(
-                "binance_replay_connection_intervals_invalid"
-            ) from exc
+            raise ValueError("binance_replay_connection_intervals_invalid") from exc
         digesting_handle = _DigestingReader(raw_handle)
         try:
             gzip_handle = gzip.GzipFile(fileobj=digesting_handle, mode="rb")
@@ -433,8 +425,7 @@ class RecorderRun:
         *,
         market_type: str | None = None,
         data_kinds: Sequence[str] | None = None,
-        _record_observer: Callable[[dict[str, Any], str, int, int], None]
-        | None = None,
+        _record_observer: Callable[[dict[str, Any], str, int, int], None] | None = None,
     ) -> Iterator[dict[str, Any]]:
         kinds = None if data_kinds is None else frozenset(data_kinds)
         selected = [
@@ -815,10 +806,9 @@ def _validate_record_coverage(
     )
     if bounds is None:
         raise ValueError("binance_replay_connection_coverage_invalid")
-    if (
-        interval_kind == "depth"
-        and record.get("segment_id") != coverage_index.segment_id(connection_id)
-    ):
+    if interval_kind == "depth" and record.get(
+        "segment_id"
+    ) != coverage_index.segment_id(connection_id):
         raise ValueError("binance_replay_connection_coverage_invalid")
     observed_time = record["observed_time_ns"]
     if not bounds[0] <= observed_time < bounds[1]:
@@ -832,9 +822,9 @@ def _capture_run_files(
     *,
     coverage_index: _ConnectionCoverageIndex,
 ) -> tuple[_RunFile, ...]:
-    declared_paths = {
-        item["path"] for item in manifest["files"]
-    } | {manifest["capture"]["connection_intervals"]["path"]}
+    declared_paths = {item["path"] for item in manifest["files"]} | {
+        manifest["capture"]["connection_intervals"]["path"]
+    }
     _verify_exact_run_tree(root, declared_paths)
     coverage_index.verify_file(root, resource_policy=policy)
     result = []
@@ -1045,7 +1035,6 @@ def _iter_raw_file(
                     )
                 else:
                     raise
-
 
     finally:
         primary = sys.exception()
@@ -1306,8 +1295,7 @@ class DepthReconstructor:
             if price_tick <= self._known_ask_ceiling_tick
         }
         if (
-            _projected_level_count(self._bids, known_bid_updates)
-            > self.max_book_levels
+            _projected_level_count(self._bids, known_bid_updates) > self.max_book_levels
             or _projected_level_count(self._asks, known_ask_updates)
             > self.max_book_levels
         ):

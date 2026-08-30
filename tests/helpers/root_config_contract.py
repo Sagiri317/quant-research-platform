@@ -65,9 +65,7 @@ def render_minimal_pyproject_from_root_contract(
     ]
     if include_project_deps:
         project_deps = [project_dependency_requirement("pyarrow", repo_root)]
-        lines.append(
-            f"dependencies = {_toml_inline_array(project_deps)}"
-        )
+        lines.append(f"dependencies = {_toml_inline_array(project_deps)}")
     if include_dev_deps:
         lines.extend(
             [

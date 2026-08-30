@@ -188,8 +188,7 @@ class ExactPrimaryKeyIndex:
             self.close()
         except BaseException as cleanup_error:
             exc_value.add_note(
-                "exact key index cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
+                f"exact key index cleanup also failed: {type(cleanup_error).__name__}"
             )
 
     def close(self) -> None:
@@ -684,8 +683,7 @@ class ExactPrimaryKeyIndex:
         if not isinstance(namespace, str) or not namespace:
             raise ValueError("invalid_exact_key_namespace")
         row = connection.execute(
-            "SELECT value FROM exact_keys "
-            "WHERE namespace = ? AND payload = ?",
+            "SELECT value FROM exact_keys WHERE namespace = ? AND payload = ?",
             (namespace, bytes(payload)),
         ).fetchone()
         return None if row is None or row[0] is None else bytes(row[0])

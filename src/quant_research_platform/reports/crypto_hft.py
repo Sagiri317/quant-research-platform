@@ -91,10 +91,7 @@ def build_crypto_hft_report(
                     for model_id, evaluation in prediction_evaluations.items()
                 },
                 "metadata": {
-                    model_id: {
-                        key: metadata[key]
-                        for key in _MODEL_REPORT_KEYS
-                    }
+                    model_id: {key: metadata[key] for key in _MODEL_REPORT_KEYS}
                     for model_id, metadata in model_metadata.items()
                 },
             },

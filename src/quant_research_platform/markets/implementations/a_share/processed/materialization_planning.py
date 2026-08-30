@@ -120,7 +120,7 @@ def require_dataset_coverage(
         ) as session:
             chunks = iter_dataset_chunks(
                 session,
-                target_chunk_bytes=resource_policy.planning_headroom_bytes,
+                target_chunk_bytes=resource_policy.operation_headroom_bytes,
             )
             with closing_iterator(chunks):
                 for chunk in chunks:
@@ -176,9 +176,7 @@ def iter_active_materialization_batches(
         if type(valid_bar_offsets) is not tuple or len(valid_bar_offsets) != 2:
             raise ValueError("invalid_valid_bar_offset")
         for offset in valid_bar_offsets:
-            require_non_negative_int(
-                offset, error="invalid_valid_bar_offset"
-            )
+            require_non_negative_int(offset, error="invalid_valid_bar_offset")
     if (
         isinstance(sessions, pd.DatetimeIndex)
         and type(sessions) is not pd.DatetimeIndex
@@ -307,9 +305,7 @@ def iter_active_materialization_batches(
                         materialize=materialize,
                     )
 
-            batch_available = (
-                bound_policy.operation_headroom_bytes - batch_state_bytes
-            )
+            batch_available = bound_policy.operation_headroom_bytes - batch_state_bytes
             if batch_available <= 0:
                 raise materialization_io.MaterializationCapacityExceeded(
                     "a_share_known_payloads_exceed_task_memory_budget"
@@ -391,14 +387,10 @@ def _iter_adaptive_materialization_batches(
         )
     producer_headroom_bytes = 128 * 1024
     producer_workspace_row_bound = (
-        None
-        if output_row_bound_bytes is None
-        else 3 * output_row_bound_bytes
+        None if output_row_bound_bytes is None else 3 * output_row_bound_bytes
     )
     producer_output_row_bound = (
-        None
-        if output_row_bound_bytes is None
-        else 4 * output_row_bound_bytes
+        None if output_row_bound_bytes is None else 4 * output_row_bound_bytes
     )
     cell_limit = (
         len(asset_ids) * len(sessions)
@@ -515,12 +507,8 @@ def session_batch_window(
     warmup_sessions: int = 0,
     lookahead_sessions: int = 0,
 ) -> TimeWindow:
-    require_non_negative_int(
-        warmup_sessions, error="invalid_a_share_session_offset"
-    )
-    require_non_negative_int(
-        lookahead_sessions, error="invalid_a_share_session_offset"
-    )
+    require_non_negative_int(warmup_sessions, error="invalid_a_share_session_offset")
+    require_non_negative_int(lookahead_sessions, error="invalid_a_share_session_offset")
     first_session = current_sessions[0]
     last_session = current_sessions[-1]
     first = bisect_left(sessions, first_session)
@@ -564,14 +552,12 @@ def _build_valid_bar_key_index(
         time_window=time_window,
         resource_policy=resource_policy,
         row_filters=(
-            ()
-            if asset_ids is None
-            else (("asset_id", "in", tuple(asset_ids)),)
+            () if asset_ids is None else (("asset_id", "in", tuple(asset_ids)),)
         ),
     ) as session:
         frames = iter_dataset_chunks(
             session,
-            target_chunk_bytes=resource_policy.planning_headroom_bytes,
+            target_chunk_bytes=resource_policy.operation_headroom_bytes,
         )
         with closing_iterator(frames):
             for frame in frames:
@@ -617,9 +603,7 @@ def bounded_valid_bar_key_coverage(
     """Query current assets' exact sparse boundary from one built disk index."""
 
     require_non_negative_int(lookback_bars, error="invalid_valid_bar_offset")
-    require_non_negative_int(
-        lookahead_bars, error="invalid_valid_bar_offset"
-    )
+    require_non_negative_int(lookahead_bars, error="invalid_valid_bar_offset")
     if not asset_ids:
         raise ValueError("invalid_processed_panel_asset_id")
     try:
@@ -770,12 +754,8 @@ def available_trading_sessions(
     resource_policy: RuntimeResourcePolicy,
 ) -> OwnedValue[pd.DatetimeIndex]:
     require_date_window(time_window, context="a_share_trading_sessions")
-    require_non_negative_int(
-        lookback_sessions, error="invalid_a_share_session_offset"
-    )
-    require_non_negative_int(
-        lookahead_sessions, error="invalid_a_share_session_offset"
-    )
+    require_non_negative_int(lookback_sessions, error="invalid_a_share_session_offset")
+    require_non_negative_int(lookahead_sessions, error="invalid_a_share_session_offset")
     calendar_root = layout.interim_data_root(source_id, "trading_calendar")
     owned_inspection = _inspect_dataset_owned(
         calendar_root,
@@ -798,7 +778,7 @@ def available_trading_sessions(
         + position_state_bytes
         + maximum_selected_output_bytes
     )
-    if compact_peak_bytes > resource_policy.planning_headroom_bytes:
+    if compact_peak_bytes > resource_policy.operation_headroom_bytes:
         raise materialization_io.MaterializationCapacityExceeded(
             "a_share_known_payloads_exceed_task_memory_budget"
         )
@@ -815,7 +795,7 @@ def available_trading_sessions(
         transform_row_bytes = (
             2 * np.dtype(np.bool_).itemsize + np.dtype(np.int64).itemsize
         )
-        reader_headroom_bytes = resource_policy.planning_headroom_bytes
+        reader_headroom_bytes = resource_policy.operation_headroom_bytes
         if reader_headroom_bytes <= 0:
             raise materialization_io.MaterializationCapacityExceeded(
                 "a_share_known_payloads_exceed_task_memory_budget"
@@ -912,9 +892,7 @@ def available_trading_sessions(
         values = session_values[:session_position]
         values.sort(kind="heapsort")
         session_lease.grow(
-            boolean_state_bytes
-            + position_state_bytes
-            + maximum_selected_output_bytes
+            boolean_state_bytes + position_state_bytes + maximum_selected_output_bytes
         )
         keep = np.empty(len(values), dtype=np.bool_)
         if len(values):

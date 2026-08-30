@@ -60,9 +60,7 @@ def write_annotations(
         row_count=1,
     )
     annotation_row_vectors = len(spec.required_columns) * 8
-    operation_row_bound = (
-        input_row_buffer + output_row_buffer + annotation_row_vectors
-    )
+    operation_row_bound = input_row_buffer + output_row_buffer + annotation_row_vectors
 
     def chunks() -> Iterable[object]:
         def materialize(
@@ -76,16 +74,14 @@ def write_annotations(
                     current_sessions,
                     lookahead_sessions=1,
                 )
-                processed_inputs = (
-                    materialization_io.read_processed_inputs_for_spec(
-                        spec,
-                        layout=layout,
-                        processed_catalog=catalog,
-                        time_window=read_window,
-                        resource_policy=policy,
-                        asset_ids=asset_ids,
-                        cleanup_stack=live,
-                    )
+                processed_inputs = materialization_io.read_processed_inputs_for_spec(
+                    spec,
+                    layout=layout,
+                    processed_catalog=catalog,
+                    time_window=read_window,
+                    resource_policy=policy,
+                    asset_ids=asset_ids,
+                    cleanup_stack=live,
                 )
                 materialization_validation.validate_processed_input_contract(
                     spec,
@@ -95,11 +91,9 @@ def write_annotations(
                 )
                 panel = processed_inputs[contract.primary_input_data_id]
                 panel_bytes = pandas_frame_payload_bytes(panel)
-                output_buffer = (
-                    materialization_planning.registered_output_buffer_bytes(
-                        spec,
-                        row_count=len(panel),
-                    )
+                output_buffer = materialization_planning.registered_output_buffer_bytes(
+                    spec,
+                    row_count=len(panel),
                 )
                 annotation_bound = panel_bytes + output_buffer
                 live.enter_context(

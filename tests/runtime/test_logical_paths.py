@@ -58,9 +58,7 @@ def test_dataset_layer_from_path_uses_dataset_root_segments() -> None:
 
 
 def test_run_result_dataset_layers_are_the_exact_workflow_owner_set() -> None:
-    assert RUN_RESULT_DATASET_LAYERS == frozenset(
-        {"interim", "processed", "research"}
-    )
+    assert RUN_RESULT_DATASET_LAYERS == frozenset({"interim", "processed", "research"})
 
 
 def test_generated_markers_only_include_current_run_tree() -> None:

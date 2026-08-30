@@ -103,9 +103,7 @@ def test_terminal_writer_propagates_close_only_failure_once(
     close_failure = OSError("close_failed")
     source = _TerminalInput(
         values=(
-            pd.DataFrame(
-                {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
-            ),
+            pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}),
         )
         if owner == "prediction"
         else (),
@@ -465,14 +463,10 @@ def test_chunk_writer_disk_preflight_happens_before_first_pull(
 
     def frames():  # type: ignore[no-untyped-def]
         pulls.append("pulled")
-        yield pd.DataFrame(
-            {"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]}
-        )
+        yield pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-01")], "value": [1.0]})
 
     def reject(_path: Path, *, reserve_bytes: int) -> int:
-        assert reserve_bytes == (
-            parquet_writers._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
-        )
+        assert reserve_bytes == (parquet_writers._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES)
         raise OSError("disk_preflight")
 
     monkeypatch.setattr(parquet_writers, "require_free_disk_headroom", reject)

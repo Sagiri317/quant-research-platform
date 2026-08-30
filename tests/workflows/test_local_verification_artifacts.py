@@ -176,9 +176,7 @@ def test_local_verification_publishes_completed_run_only_after_summary(
     expected_layers = {
         path.relative_to(run_root).parts[1] for path in dataset_manifest_paths
     }
-    actual_layers = {
-        layer["logical_layer"] for layer in run_payload["data"]["layers"]
-    }
+    actual_layers = {layer["logical_layer"] for layer in run_payload["data"]["layers"]}
     represented_manifests = {
         dataset["manifest_path"]
         for layer in run_payload["data"]["layers"]

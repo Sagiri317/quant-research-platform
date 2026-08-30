@@ -431,7 +431,7 @@ def _iter_core_window_chunks(
 def _validation_chunk_target_bytes(
     resource_policy: RuntimeResourcePolicy,
 ) -> int:
-    return max(1, resource_policy.planning_headroom_bytes // 8)
+    return max(1, resource_policy.operation_headroom_bytes // 8)
 
 
 def _key_projection_view(

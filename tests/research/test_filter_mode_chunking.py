@@ -54,6 +54,7 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import quant_research_platform.research._memory as memory_owner
+
     frame = pd.concat(
         [
             make_filter_mode_frame().assign(
@@ -159,14 +160,22 @@ def test_evaluation_forced_tiny_resource_chunks_match_default_and_trim_columns(
         (0, ("timestamp", "signal", "label")),
         (1, ("timestamp", "signal", "label", "group")),
     ):
-        baseline_frame = pd.concat(
-            [output[index] for output in baseline_outputs],
-            ignore_index=True,
-        ).sort_values(list(sort_columns), kind="mergesort").reset_index(drop=True)
-        forced_frame = pd.concat(
-            [output[index] for output in forced_outputs],
-            ignore_index=True,
-        ).sort_values(list(sort_columns), kind="mergesort").reset_index(drop=True)
+        baseline_frame = (
+            pd.concat(
+                [output[index] for output in baseline_outputs],
+                ignore_index=True,
+            )
+            .sort_values(list(sort_columns), kind="mergesort")
+            .reset_index(drop=True)
+        )
+        forced_frame = (
+            pd.concat(
+                [output[index] for output in forced_outputs],
+                ignore_index=True,
+            )
+            .sort_values(list(sort_columns), kind="mergesort")
+            .reset_index(drop=True)
+        )
         pd.testing.assert_frame_equal(
             forced_frame,
             baseline_frame,
@@ -442,6 +451,7 @@ def test_evaluation_rejects_timestamp_boundary_overlap_over_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import quant_research_platform.research._memory as memory_owner
+
     frame = make_filter_mode_frame()
     first = frame.iloc[:3]
     second = frame.iloc[3:]

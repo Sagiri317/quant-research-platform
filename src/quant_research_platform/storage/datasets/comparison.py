@@ -101,10 +101,13 @@ def _compare_datasets_under_policy(
                     resource_policy=issued_policy,
                 )
                 left = left_owned.value
+
                 def release_left() -> None:
                     nonlocal left
                     left = None
-                    left_owned.release(owner="storage.dataset.comparison.left.fingerprint")
+                    left_owned.release(
+                        owner="storage.dataset.comparison.left.fingerprint"
+                    )
 
                 retained.callback(release_left)
                 left_identity_lease = issued_policy.lease(
@@ -142,10 +145,13 @@ def _compare_datasets_under_policy(
                     resource_policy=issued_policy,
                 )
                 right = right_owned.value
+
                 def release_right() -> None:
                     nonlocal right
                     right = None
-                    right_owned.release(owner="storage.dataset.comparison.right.fingerprint")
+                    right_owned.release(
+                        owner="storage.dataset.comparison.right.fingerprint"
+                    )
 
                 retained.callback(release_right)
                 right_identity_lease = issued_policy.lease(

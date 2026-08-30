@@ -132,6 +132,7 @@ def test_profile_interim_call_reuses_ambient_root(
     calls: list[dict[str, object]] = []
 
     if profile_id is None:
+
         def materialize(**kwargs):  # noqa: ANN003
             calls.append(kwargs)
             data_ids = tuple(kwargs.get("data_ids", ("direct",)))
@@ -166,6 +167,7 @@ def test_profile_interim_call_reuses_ambient_root(
             sessions,
         )
     else:
+
         def materialize(**kwargs):  # noqa: ANN003
             calls.append(kwargs)
             return object()

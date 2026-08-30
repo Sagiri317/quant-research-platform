@@ -149,9 +149,9 @@ def _iter_owned_interim_frames(
                 ordered_input_files: Iterable[Path | _RawInputFile] = tuple(
                     sorted(
                         input_files,
-                        key=lambda entry: entry[0]
-                        if isinstance(entry, tuple)
-                        else entry,
+                        key=lambda entry: (
+                            entry[0] if isinstance(entry, tuple) else entry
+                        ),
                     )
                 )
             else:

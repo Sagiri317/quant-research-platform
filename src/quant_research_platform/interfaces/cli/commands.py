@@ -39,8 +39,7 @@ def catalog_labels() -> None:
     typer.echo("label_id,market_id,horizon,definition_version")
     for item in queries.list_labels(research_profile()).items:
         typer.echo(
-            f"{item.label_id},{item.market_id},{item.horizon},"
-            f"{item.definition_version}"
+            f"{item.label_id},{item.market_id},{item.horizon},{item.definition_version}"
         )
 
 
@@ -69,7 +68,6 @@ def research_dataset_requirements(
 
 def main() -> None:
     app()
-
 
 
 if __name__ == "__main__":

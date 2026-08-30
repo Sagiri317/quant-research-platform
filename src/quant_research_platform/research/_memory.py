@@ -28,14 +28,14 @@ def _iter_contiguous_session_frames(
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
     frame_bytes = pandas_frame_payload_bytes(frame)
-    remaining = policy.planning_headroom_bytes
+    remaining = policy.operation_headroom_bytes
     if frame_bytes <= remaining:
         yield frame
         return
 
     start = 0
     while start < len(frame):
-        remaining = policy.planning_headroom_bytes
+        remaining = policy.operation_headroom_bytes
         stop = start
         output_bound = 0
         while stop < len(frame):
@@ -322,6 +322,7 @@ def _iter_complete_time_sized_frames_impl(
     finally:
         if pending is not None:
             pending.release(owner="research.time.pending")
+
 
 def _selected_frame_payload_bytes(
     frame: pd.DataFrame,

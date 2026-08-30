@@ -28,8 +28,7 @@ def validate_metadata_row_count_chain(
     error_name: str,
 ) -> None:
     first, second, third = (
-        require_non_negative_metadata_int(metadata, key, error_name)
-        for key in keys
+        require_non_negative_metadata_int(metadata, key, error_name) for key in keys
     )
     if not (0 <= third <= second <= first):
         raise ValueError(error_name)

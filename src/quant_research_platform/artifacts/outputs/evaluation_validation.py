@@ -179,9 +179,7 @@ def validate_evaluation_output_metadata_shape(
     max_timestamp = require_optional_metadata_string(
         diagnostics, "max_timestamp", "output_manifest_metadata_invalid"
     )
-    if (diagnostics["min_timestamp"] is None) != (
-        diagnostics["max_timestamp"] is None
-    ):
+    if (diagnostics["min_timestamp"] is None) != (diagnostics["max_timestamp"] is None):
         raise ValueError("output_manifest_metadata_invalid")
     if not (
         diagnostics["rows_after_filter_mode"] <= diagnostics["rows_input"]
@@ -269,7 +267,8 @@ def validate_evaluation_diagnostics_consistency(
 ) -> None:
     if not (
         0 <= rows_after_filter_mode <= rows_input
-        and 0 <= rows_after_signal_label_dropna
+        and 0
+        <= rows_after_signal_label_dropna
         <= rows_after_filter_mode * len(spec.signals) * len(spec.label_columns)
     ):
         raise ValueError("evaluation_diagnostics_inconsistent")
@@ -347,8 +346,7 @@ def validate_evaluation_artifact_structure(
             tuple(
                 column
                 for column in ic_summary.columns
-                if column not in {"signal", "label"}
-                and not column.endswith("_reason")
+                if column not in {"signal", "label"} and not column.endswith("_reason")
             ),
         ),
         (
@@ -356,8 +354,7 @@ def validate_evaluation_artifact_structure(
             tuple(
                 column
                 for column in group_spread_summary.columns
-                if column not in {"signal", "label"}
-                and not column.endswith("_reason")
+                if column not in {"signal", "label"} and not column.endswith("_reason")
             ),
         ),
     ):
@@ -443,9 +440,7 @@ def validate_evaluation_artifact_structure(
             metrics[reason_column],
             strict=True,
         ):
-            insufficient = (
-                type(reason) is str and reason == "insufficient_observations"
-            )
+            insufficient = type(reason) is str and reason == "insufficient_observations"
             if int(n_obs) < 2:
                 if not (pd.isna(value) and insufficient):
                     raise ValueError("invalid_evaluation_statistic_reason")

@@ -21,8 +21,8 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
     HFT_LABEL_COLUMNS,
-    HFT_MAKER_BID_FILL_RATIO_PROXY_COLUMN,
-    HFT_MAKER_FILL_PROXY_HORIZON_MS,
+    HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN,
+    HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS,
 )
 from quant_research_platform.research.factors.microstructure.columns import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
@@ -36,11 +36,11 @@ HFT_PRICE_MODEL_ALGORITHMS = (
     "linear_regression",
     "xgboost_regressor",
 )
-HFT_MAKER_FILL_MODEL_ID = "crypto_hft_maker_bid_fill_ratio_proxy"
-HFT_MAKER_FILL_MODEL_ALGORITHM = "gradient_boosting_regressor"
+HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID = "crypto_hft_maker_bid_sell_pressure_proxy"
+HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ALGORITHM = "gradient_boosting_regressor"
 HFT_MODEL_ALGORITHMS = (
     *HFT_PRICE_MODEL_ALGORITHMS,
-    HFT_MAKER_FILL_MODEL_ALGORITHM,
+    HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ALGORITHM,
 )
 HFT_MODEL_LABEL_HORIZON_MS = 500
 HFT_MODEL_LABEL_COLUMN = f"future_mid_return_{HFT_MODEL_LABEL_HORIZON_MS}ms"
@@ -129,12 +129,14 @@ def build_hft_model_catalog(*, training_row_bound: int) -> ModelCatalog:
         (
             *price_models,
             ModelSpec(
-                model_id=HFT_MAKER_FILL_MODEL_ID,
-                model_algorithm=HFT_MAKER_FILL_MODEL_ALGORITHM,
+                model_id=HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
+                model_algorithm=HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ALGORITHM,
                 input_factor_columns=HFT_FACTOR_COLUMNS,
-                label_column=HFT_MAKER_BID_FILL_RATIO_PROXY_COLUMN,
+                label_column=HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN,
                 random_seed=7,
-                purge_gap_steps=HFT_MAKER_FILL_PROXY_HORIZON_MS // HFT_GRID_MS,
+                purge_gap_steps=(
+                    HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS // HFT_GRID_MS
+                ),
                 max_train_rows=training_row_bound,
             ),
         )
@@ -162,8 +164,8 @@ def build_hft_prediction_catalog(
         (
             *price_predictions,
             PredictionSpec(
-                prediction_id=f"{HFT_MAKER_FILL_MODEL_ID}_prediction",
-                model_id=HFT_MAKER_FILL_MODEL_ID,
+                prediction_id=f"{HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID}_prediction",
+                model_id=HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
                 research_dataset_id=HFT_RESEARCH_DATASET_ID,
                 train_end=train_end,
                 test_start=test_start,

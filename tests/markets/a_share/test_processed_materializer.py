@@ -165,9 +165,7 @@ def test_a_share_output_publication_rejects_unordered_chunks_and_boundaries() ->
         policy = _publication_policy()
         _collect_bound_first(
             materialization_io.iter_sorted_output_chunks(
-                _bound_first_source(
-                    (frame(["2014-01-03"]), frame(["2014-01-02"]))
-                ),
+                _bound_first_source((frame(["2014-01-03"]), frame(["2014-01-02"]))),
                 spec,
                 resource_policy=policy,
             ),
@@ -699,8 +697,8 @@ def test_materialize_processed_data_rejects_non_daily_active_profile_before_io(
     catalog = ProcessedDataCatalog(
         (
             replace(
-            processed_catalog().get(MARKET_PANEL_DATA_ID),
-            frequency=frequency,
+                processed_catalog().get(MARKET_PANEL_DATA_ID),
+                frequency=frequency,
             ),
         )
     )

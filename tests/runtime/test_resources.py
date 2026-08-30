@@ -62,6 +62,18 @@ def test_soft_target_is_not_an_exact_hard_cap_but_explicit_cap_is() -> None:
         assert soft.operation_headroom_bytes == soft.memory_budget_bytes
         lease.close()
 
+    high_cap = capture_test_policy(
+        available_memory_bytes=1_000,
+        explicit_cap_bytes=900,
+    )
+    with runtime_resource_policy_scope(high_cap):
+        assert high_cap.memory_budget_bytes == 700
+        assert high_cap.operation_headroom_bytes == 700
+        lease = high_cap.lease("test.high.cap", 701)
+        assert high_cap.planning_headroom_bytes == 0
+        assert high_cap.operation_headroom_bytes == 199
+        lease.close()
+
     capped = capture_test_policy(
         available_memory_bytes=1_000_000,
         explicit_cap_bytes=600_000,
@@ -141,9 +153,7 @@ def test_explicit_cap_only_lowers_budget(monkeypatch: pytest.MonkeyPatch) -> Non
         explicit_cap_bytes=expected_budget + MIB
     ) as high:
         assert high.memory_budget_bytes == expected_budget
-    with runtime_resource_policy_scope(
-        explicit_cap_bytes=expected_budget - MIB
-    ) as low:
+    with runtime_resource_policy_scope(explicit_cap_bytes=expected_budget - MIB) as low:
         assert low.memory_budget_bytes == expected_budget - MIB
 
 

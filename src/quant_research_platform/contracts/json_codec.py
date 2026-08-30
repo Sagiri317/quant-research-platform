@@ -24,6 +24,8 @@ _JSON_INDENT = 2
 _TEXT_CHUNK_CHARACTERS = 16 * 1024
 _TUPLE_BASE_BYTES = ().__sizeof__()
 _POINTER_BYTES = struct.calcsize("P")
+
+
 def parse_qrp_json_object(raw: bytes) -> dict[str, Any]:
     """Decode one strict UTF-8 QRP-owned JSON object."""
 
@@ -249,13 +251,11 @@ def _close_lazy_json_values(
                 cleanup_failure = exc
             elif primary is not None:
                 primary.add_note(
-                    "lazy JSON value close also failed: "
-                    f"{type(exc).__name__}"
+                    f"lazy JSON value close also failed: {type(exc).__name__}"
                 )
             else:
                 cleanup_failure.add_note(
-                    "lazy JSON value close also failed: "
-                    f"{type(exc).__name__}"
+                    f"lazy JSON value close also failed: {type(exc).__name__}"
                 )
     if cleanup_failure is not None:
         raise cleanup_failure

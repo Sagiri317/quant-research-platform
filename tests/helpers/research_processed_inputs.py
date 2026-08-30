@@ -43,42 +43,42 @@ def make_dummy_processed_catalog(
 def _demo_processed_catalog() -> ProcessedDataCatalog:
     return ProcessedDataCatalog(
         (
-        _processed_spec(
-            data_id="demo_factors",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.FACTOR,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                DEMO_FACTOR_COLUMN: ColumnRole.FACTOR,
-            },
-        ),
-        _processed_spec(
-            data_id="demo_labels",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.LABEL,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                DEMO_LABEL_COLUMN: ColumnRole.LABEL,
-            },
-        ),
-        _processed_spec(
-            data_id="demo_annotations",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.ANNOTATION,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "eligible": ColumnRole.UNIVERSE,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-                "market_type": ColumnRole.CONTEXT,
-            },
-        ),
+            _processed_spec(
+                data_id="demo_factors",
+                market_id=MarketId("a_share"),
+                kind=ProcessedDataKind.FACTOR,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    DEMO_FACTOR_COLUMN: ColumnRole.FACTOR,
+                },
+            ),
+            _processed_spec(
+                data_id="demo_labels",
+                market_id=MarketId("a_share"),
+                kind=ProcessedDataKind.LABEL,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    DEMO_LABEL_COLUMN: ColumnRole.LABEL,
+                },
+            ),
+            _processed_spec(
+                data_id="demo_annotations",
+                market_id=MarketId("a_share"),
+                kind=ProcessedDataKind.ANNOTATION,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    "eligible": ColumnRole.UNIVERSE,
+                    "can_enter": ColumnRole.MASK,
+                    "can_exit": ColumnRole.MASK,
+                    "market_type": ColumnRole.CONTEXT,
+                },
+            ),
         )
     )
 
@@ -86,41 +86,41 @@ def _demo_processed_catalog() -> ProcessedDataCatalog:
 def _filter_processed_catalog() -> ProcessedDataCatalog:
     return ProcessedDataCatalog(
         (
-        _processed_spec(
-            data_id="demo_factor",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.FACTOR,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "factor": ColumnRole.FACTOR,
-            },
-        ),
-        _processed_spec(
-            data_id="demo_label",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.LABEL,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "label": ColumnRole.LABEL,
-            },
-        ),
-        _processed_spec(
-            data_id="demo_annotation",
-            market_id=MarketId("a_share"),
-            kind=ProcessedDataKind.ANNOTATION,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "eligible": ColumnRole.UNIVERSE,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-            },
-        ),
+            _processed_spec(
+                data_id="demo_factor",
+                market_id=MarketId("a_share"),
+                kind=ProcessedDataKind.FACTOR,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    "factor": ColumnRole.FACTOR,
+                },
+            ),
+            _processed_spec(
+                data_id="demo_label",
+                market_id=MarketId("a_share"),
+                kind=ProcessedDataKind.LABEL,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    "label": ColumnRole.LABEL,
+                },
+            ),
+            _processed_spec(
+                data_id="demo_annotation",
+                market_id=MarketId("a_share"),
+                kind=ProcessedDataKind.ANNOTATION,
+                column_roles={
+                    "market_id": ColumnRole.KEY,
+                    "asset_id": ColumnRole.KEY,
+                    "timestamp": ColumnRole.TIMESTAMP,
+                    "eligible": ColumnRole.UNIVERSE,
+                    "can_enter": ColumnRole.MASK,
+                    "can_exit": ColumnRole.MASK,
+                },
+            ),
         )
     )
 
@@ -256,14 +256,11 @@ def write_demo_processed_inputs(
     _write_processed_frames(
         layout,
         processed_catalog,
-        {
-            data_id: frame.loc[:, columns]
-            for data_id, columns in frames_by_id.items()
-        }
+        {data_id: frame.loc[:, columns] for data_id, columns in frames_by_id.items()}
         | {
             "demo_labels": labels.loc[
-            :,
-            ["market_id", "asset_id", "timestamp", DEMO_LABEL_COLUMN],
+                :,
+                ["market_id", "asset_id", "timestamp", DEMO_LABEL_COLUMN],
             ],
         },
     )

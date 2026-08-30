@@ -270,9 +270,9 @@ def evaluate_model_trial_metrics_from_chunks(
                                 owned_lease.close()
                 database.commit()
                 validation_row_count = int(
-                    database.execute(
-                        "SELECT COUNT(*) FROM validation_rows"
-                    ).fetchone()[0]
+                    database.execute("SELECT COUNT(*) FROM validation_rows").fetchone()[
+                        0
+                    ]
                 )
                 if validation_row_count == 0:
                     raise ValueError("empty_model_selection_validation_window")
@@ -293,9 +293,10 @@ def evaluate_model_trial_metrics_from_chunks(
                         ")",
                         (purge_gap_steps,),
                     )
-                if database.execute(
-                    "SELECT 1 FROM validation_rows LIMIT 1"
-                ).fetchone() is None:
+                if (
+                    database.execute("SELECT 1 FROM validation_rows LIMIT 1").fetchone()
+                    is None
+                ):
                     raise ValueError("empty_model_selection_validation_window")
                 (
                     validation_rows,
@@ -446,22 +447,14 @@ class _ScaledCorrelation:
     def update(self, left: float, right: float) -> None:
         left_magnitude = abs(left)
         if left_magnitude > self.left_scale:
-            ratio = (
-                self.left_scale / left_magnitude
-                if self.left_scale
-                else 0.0
-            )
+            ratio = self.left_scale / left_magnitude if self.left_scale else 0.0
             self.left_mean *= ratio
             self.left_m2 *= ratio * ratio
             self.covariance *= ratio
             self.left_scale = left_magnitude
         right_magnitude = abs(right)
         if right_magnitude > self.right_scale:
-            ratio = (
-                self.right_scale / right_magnitude
-                if self.right_scale
-                else 0.0
-            )
+            ratio = self.right_scale / right_magnitude if self.right_scale else 0.0
             self.right_mean *= ratio
             self.right_m2 *= ratio * ratio
             self.covariance *= ratio
@@ -652,9 +645,7 @@ def build_model_selection_metadata(
         raise ValueError("selected_model_not_in_candidates")
     records = trial_metrics.loc[
         :, ("model_id", *VALIDATION_METRIC_COLUMNS, *VALIDATION_METRIC_REASON_COLUMNS)
-    ].to_dict(
-        "records"
-    )
+    ].to_dict("records")
     for record in records:
         for key in (
             "validation_ic",

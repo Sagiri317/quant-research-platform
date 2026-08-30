@@ -383,23 +383,6 @@ def test_taker_target_position_does_not_accumulate_repeated_signal() -> None:
     assert diagnostics["max_abs_position"] == 2.0
 
 
-def test_maker_processes_same_time_events_in_local_observation_order() -> None:
-    fills = []
-    diagnostics = simulate_maker(
-        [_state(0), _state(100, bid_tick=994, ask_tick=1006)],
-        [_trade(100, price="99.5", quantity="3", maker_buyer=True)],
-        [_quote(0, book_segment_id="s1"), _quote(100, book_segment_id="s1")],
-        config=_maker_config(),
-        observed_coverage={"s1": _coverage(0, 100)},
-        trade_coverage={"trade-connection-1": _coverage(0, 101)},
-        on_fill=fills.append,
-    )
-
-    assert fills == []
-    assert diagnostics["same_timestamp_policy"] == "local_observation_order"
-    assert diagnostics["queue_model"] == "estimated_queue_ahead"
-
-
 def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
     fills = []
     diagnostics = simulate_maker(

@@ -277,9 +277,7 @@ def _update_performance_stats_batch(
         )
         stats["drawdown_recovery"] = ""
         stats["drawdown_start_index"] = (
-            period_offset + peak_position
-            if peak_position >= 0
-            else previous_peak_index
+            period_offset + peak_position if peak_position >= 0 else previous_peak_index
         )
         stats["drawdown_recovery_index"] = None
         recovery_positions = np.flatnonzero(
@@ -371,9 +369,11 @@ def calculate_additive_cumulative_returns(
             result.loc[positions, output_column] = _ordered_cumulative(
                 result.loc[positions, source_column].to_numpy(copy=False)
             )
-    result["high_water_mark"] = result.groupby(group_columns, sort=False)[
-        "additive_cumulative_net_return"
-    ].cummax().clip(lower=0.0)
+    result["high_water_mark"] = (
+        result.groupby(group_columns, sort=False)["additive_cumulative_net_return"]
+        .cummax()
+        .clip(lower=0.0)
+    )
     result["drawdown"] = (
         result["additive_cumulative_net_return"] - result["high_water_mark"]
     )
@@ -471,27 +471,19 @@ def _performance_summary_record(
         else periods - 1
     )
     drawdown_duration = (
-        end_index - int(stats["drawdown_start_index"])
-        if max_drawdown < 0
-        else 0
+        end_index - int(stats["drawdown_start_index"]) if max_drawdown < 0 else 0
     )
 
     sharpe, sharpe_reason = _ratio_result(mean_net, volatility)
     sortino, sortino_reason = _ratio_result(mean_net, downside_volatility)
-    calmar, calmar_reason = _ratio_result(
-        float(stats["net_sum"]), abs(max_drawdown)
-    )
+    calmar, calmar_reason = _ratio_result(float(stats["net_sum"]), abs(max_drawdown))
     skew, skew_reason = _moment_result(stats, order=3)
     kurtosis, kurtosis_reason = _moment_result(stats, order=4)
     tail_ratio, tail_ratio_reason = _ratio_result(abs(q95), abs(var_95))
     wins = int(stats["wins"])
     losses = int(stats["losses"])
-    average_win = (
-        float(stats["win_sum"]) / wins if wins else None
-    )
-    average_loss = (
-        float(stats["loss_sum"]) / losses if losses else None
-    )
+    average_win = float(stats["win_sum"]) / wins if wins else None
+    average_loss = float(stats["loss_sum"]) / losses if losses else None
     average_win_reason = None if wins else "no_positive_returns"
     average_loss_reason = None if losses else "no_negative_returns"
     if not losses:
@@ -610,9 +602,7 @@ def _moment_result(
     else:
         m4 = float(stats["net_m4_scaled"]) / count
         g2 = m4 / m2**2 - 3.0
-        value = ((count - 1) / ((count - 2) * (count - 3))) * (
-            (count + 1) * g2 + 6.0
-        )
+        value = ((count - 1) / ((count - 2) * (count - 3))) * ((count + 1) * g2 + 6.0)
     if not np.isfinite(value):
         return None, "nonfinite_result"
     return float(value), None
@@ -631,9 +621,13 @@ def _update_scaled_variance(
         batch_scale = 1.0
     previous_count = int(stats["periods"])
     previous_scale = float(stats[f"{prefix}_scale"])
-    current_scale = batch_scale if previous_count == 0 else max(
-        previous_scale,
-        batch_scale,
+    current_scale = (
+        batch_scale
+        if previous_count == 0
+        else max(
+            previous_scale,
+            batch_scale,
+        )
     )
     if (
         previous_count
@@ -653,13 +647,9 @@ def _update_scaled_variance(
             )
         if prefix == "net":
             if stats["net_m3_scaled"]:
-                stats["net_m3_scaled"] = (
-                    float(stats["net_m3_scaled"]) * factor**3
-                )
+                stats["net_m3_scaled"] = float(stats["net_m3_scaled"]) * factor**3
             if stats["net_m4_scaled"]:
-                stats["net_m4_scaled"] = (
-                    float(stats["net_m4_scaled"]) * factor**4
-                )
+                stats["net_m4_scaled"] = float(stats["net_m4_scaled"]) * factor**4
     stats[f"{prefix}_scale"] = current_scale
     normalized = values / current_scale
     batch_mean = float(normalized.mean())
@@ -790,20 +780,14 @@ def _validate_returns_frame(
         )
     numeric_columns = list(required_numeric_columns)
     if include_performance_columns:
-        numeric_columns.extend(
-            ["gross_portfolio_return", "turnover", "cost"]
-        )
+        numeric_columns.extend(["gross_portfolio_return", "turnover", "cost"])
     else:
         numeric_columns.extend(
-            column
-            for column in ("gross_portfolio_return", "cost")
-            if column in result
+            column for column in ("gross_portfolio_return", "cost") if column in result
         )
     for column in numeric_columns:
         if not pd.api.types.is_numeric_dtype(result[column]):
-            raise ValueError(
-                f"returns column {column!r} must contain numeric values."
-            )
+            raise ValueError(f"returns column {column!r} must contain numeric values.")
         result[column] = strict_finite_numeric_series(
             result[column],
             error=f"returns column {column!r} must contain finite numeric values.",

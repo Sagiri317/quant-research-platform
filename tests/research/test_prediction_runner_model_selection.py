@@ -63,16 +63,16 @@ def test_prediction_runner_selects_model_using_validation_metric(
     prediction_catalog = PredictionCatalog(
         (
             PredictionSpec(
-            prediction_id="prediction_demo",
-            model_id="base_model",
-            research_dataset_id="research_demo",
-            train_end="2024-01-03",
-            test_start="2024-01-07",
-            test_end="2024-01-08",
-            candidate_model_ids=("candidate_model",),
-            model_selection_metric="validation_mse",
-            model_selection_validation_start="2024-01-04",
-            model_selection_validation_end="2024-01-06",
+                prediction_id="prediction_demo",
+                model_id="base_model",
+                research_dataset_id="research_demo",
+                train_end="2024-01-03",
+                test_start="2024-01-07",
+                test_end="2024-01-08",
+                candidate_model_ids=("candidate_model",),
+                model_selection_metric="validation_mse",
+                model_selection_validation_start="2024-01-04",
+                model_selection_validation_end="2024-01-06",
             ),
         )
     )
@@ -134,11 +134,11 @@ def test_prediction_runner_preloads_selected_models_before_root_capture(
     prediction_catalog = PredictionCatalog(
         (
             PredictionSpec(
-            prediction_id="prediction_demo",
-            model_id="base_model",
-            research_dataset_id="research_demo",
-            train_end="2024-01-03",
-            test_start="2024-01-04",
+                prediction_id="prediction_demo",
+                model_id="base_model",
+                research_dataset_id="research_demo",
+                train_end="2024-01-03",
+                test_start="2024-01-04",
             ),
         )
     )
@@ -488,17 +488,17 @@ def test_prediction_runner_applies_sample_filter_to_validation_metrics(
     prediction_catalog = PredictionCatalog(
         (
             PredictionSpec(
-            prediction_id="prediction_demo",
-            model_id="base_model",
-            research_dataset_id="research_demo",
-            train_end="2024-01-03",
-            test_start="2024-01-07",
-            test_end="2024-01-08",
-            candidate_model_ids=("candidate_model",),
-            model_selection_metric="validation_mse",
-            model_selection_validation_start="2024-01-04",
-            model_selection_validation_end="2024-01-06",
-            sample_filter_mode="eligible",
+                prediction_id="prediction_demo",
+                model_id="base_model",
+                research_dataset_id="research_demo",
+                train_end="2024-01-03",
+                test_start="2024-01-07",
+                test_end="2024-01-08",
+                candidate_model_ids=("candidate_model",),
+                model_selection_metric="validation_mse",
+                model_selection_validation_start="2024-01-04",
+                model_selection_validation_end="2024-01-06",
+                sample_filter_mode="eligible",
             ),
         )
     )
@@ -553,14 +553,14 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
     prediction_catalog = PredictionCatalog(
         (
             PredictionSpec(
-            prediction_id="prediction_demo",
-            model_id="base_model",
-            research_dataset_id="research_demo",
-            train_end="2024-01-03",
-            test_start="2024-01-07",
-            candidate_model_ids=("candidate_model",),
-            model_selection_validation_start="2024-01-04",
-            model_selection_validation_end="2024-01-06",
+                prediction_id="prediction_demo",
+                model_id="base_model",
+                research_dataset_id="research_demo",
+                train_end="2024-01-03",
+                test_start="2024-01-07",
+                candidate_model_ids=("candidate_model",),
+                model_selection_validation_start="2024-01-04",
+                model_selection_validation_end="2024-01-06",
             ),
         )
     )

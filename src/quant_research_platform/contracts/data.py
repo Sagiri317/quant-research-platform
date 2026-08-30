@@ -102,9 +102,7 @@ def require_supported_data_frequency(
 ) -> DataFrequency:
     frequency = normalize_data_frequency(value)
     if frequency not in supported:
-        raise ValueError(
-            f"unsupported_data_frequency: {context}: {frequency.value}"
-        )
+        raise ValueError(f"unsupported_data_frequency: {context}: {frequency.value}")
     return frequency
 
 
@@ -150,9 +148,7 @@ class DataSpec:
         )
         if self.partition_columns not in ((), ("year",)):
             raise ValueError("unsupported_partitioning")
-        missing = [
-            column for column in self.primary_key if column not in column_roles
-        ]
+        missing = [column for column in self.primary_key if column not in column_roles]
         if missing:
             raise ValueError(f"missing_primary_key_columns: {', '.join(missing)}")
         object.__setattr__(self, "frequency", frequency)

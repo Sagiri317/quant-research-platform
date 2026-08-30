@@ -151,6 +151,7 @@ def test_publish_replace_rolls_back_old_good_on_candidate_failure(
     assert (source / "value").read_text(encoding="utf-8") == "new"
     assert not backup.exists()
 
+
 def test_atomic_write_text_rename_failure_cleans_operation_temp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -131,7 +131,7 @@ def _iter_panel_chunks(
     ):
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        available_bytes = max(1, resource_policy.planning_headroom_bytes)
+        available_bytes = max(1, resource_policy.operation_headroom_bytes)
         chunk_target_bytes = max(1, available_bytes // 8)
         producer_bound = max(1, available_bytes // 2)
         bar_session = input_sessions[source_ids.market_bars_source_data_id(spec)]
@@ -207,7 +207,7 @@ def _iter_panel_chunks(
                                 prepared_bars,
                                 trade_chunks=trade_chunks,
                                 depth_chunks=depth_chunks,
-                                payload_target_bytes=resource_policy.planning_headroom_bytes,
+                                payload_target_bytes=resource_policy.operation_headroom_bytes,
                                 trade_continuity_state=trade_continuity_state,
                                 max_quote_age=panels.DEFAULT_MAX_QUOTE_AGE,
                                 _output_stack=output_stack,

@@ -70,9 +70,7 @@ class _EvaluationStreamingState:
         self._n_groups = n_groups
         self._summary_reservation = ExitStack()
         if resource_policy is not None:
-            domain_size = max(1, len(spec.signals)) * max(
-                1, len(spec.label_columns)
-            )
+            domain_size = max(1, len(spec.signals)) * max(1, len(spec.label_columns))
             self._summary_reservation.enter_context(
                 resource_policy.lease(
                     "research.evaluation.summary.state",
@@ -235,9 +233,7 @@ class _EvaluationStreamingState:
                 if first_value is None:
                     first_value = value
                 if previous_value is not None:
-                    monotonicity_sum += float(
-                        np.sign(value - previous_value)
-                    )
+                    monotonicity_sum += float(np.sign(value - previous_value))
                     monotonicity_count += 1
                 previous_value = value
                 last_value = value
@@ -290,28 +286,18 @@ class _EvaluationStreamingState:
                     "signal": signal,
                     "label": label,
                     "top_group_mean_label_value": float(stats["top_sum"]) / count,
-                    "bottom_group_mean_label_value": float(
-                        stats["bottom_sum"]
-                    )
+                    "bottom_group_mean_label_value": float(stats["bottom_sum"]) / count,
+                    "top_bottom_label_value_spread_mean": float(stats["spread_sum"])
                     / count,
-                    "top_bottom_label_value_spread_mean": float(
-                        stats["spread_sum"]
-                    )
-                    / count,
-                    "top_bottom_label_value_spread_hit_rate": float(
-                        stats["hit_sum"]
-                    )
+                    "top_bottom_label_value_spread_hit_rate": float(stats["hit_sum"])
                     / count,
                     "group_monotonicity_score": (
                         None
                         if monotonicity_count == 0
-                        else float(stats["monotonicity_sum"])
-                        / monotonicity_count
+                        else float(stats["monotonicity_sum"]) / monotonicity_count
                     ),
                     "group_monotonicity_score_reason": (
-                        "no_group_transitions"
-                        if monotonicity_count == 0
-                        else None
+                        "no_group_transitions" if monotonicity_count == 0 else None
                     ),
                 }
             )
@@ -361,8 +347,7 @@ class _EvaluationStreamingState:
                 else time_value_isoformat(
                     self._min_timestamp.to_pydatetime(),
                     preserve_datetime=(
-                        self._spec.evaluation_axis
-                        == "single_asset_time_series"
+                        self._spec.evaluation_axis == "single_asset_time_series"
                     ),
                 )
             ),
@@ -372,8 +357,7 @@ class _EvaluationStreamingState:
                 else time_value_isoformat(
                     self._max_timestamp.to_pydatetime(),
                     preserve_datetime=(
-                        self._spec.evaluation_axis
-                        == "single_asset_time_series"
+                        self._spec.evaluation_axis == "single_asset_time_series"
                     ),
                 )
             ),
@@ -409,8 +393,7 @@ class EvaluationResult:
             if primary is None:
                 raise
             primary.add_note(
-                "evaluation result cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
+                f"evaluation result cleanup also failed: {type(cleanup_error).__name__}"
             )
 
 
@@ -655,10 +638,7 @@ def _iter_single_asset_time_series_output_chunks(
                     max(
                         64 * 1024,
                         len(filtered) * (numeric_column_count * 8 + 32)
-                        + 2
-                        * _TIME_SERIES_MOMENT_BLOCK_ROWS
-                        * numeric_column_count
-                        * 8,
+                        + 2 * _TIME_SERIES_MOMENT_BLOCK_ROWS * numeric_column_count * 8,
                     ),
                 )
                 try:
@@ -930,9 +910,7 @@ def _iter_evaluation_filtered_chunks(
     asset_column: str,
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[OwnedValue[_EvaluationOutputChunk]]:
-    rows_input = strict_non_negative_count_value(
-        filter_metadata["rows_input"]
-    )
+    rows_input = strict_non_negative_count_value(filter_metadata["rows_input"])
     rows_after_filter = strict_non_negative_count_value(
         filter_metadata["rows_after_filter_mode"]
     )
@@ -1066,12 +1044,10 @@ def _iter_evaluation_batch_outputs(
             )
             try:
                 usable = compute_frame.loc[:, list(compute_columns)].copy()
-                metrics, grouped_label_values = (
-                    compute_ic_and_grouped_label_values(
-                        usable,
-                        compute_spec,
-                        n_groups=n_groups,
-                    )
+                metrics, grouped_label_values = compute_ic_and_grouped_label_values(
+                    usable,
+                    compute_spec,
+                    n_groups=n_groups,
                 )
                 del usable
                 n_obs = strict_non_negative_count_series(metrics["n_obs"])
@@ -1153,9 +1129,7 @@ def _iter_evaluation_batch_outputs(
         label_grouped.clear()
         metadata = {
             "rows_input": rows_input if not metadata_emitted else 0,
-            "rows_after_filter_mode": rows_after_filter
-            if not metadata_emitted
-            else 0,
+            "rows_after_filter_mode": rows_after_filter if not metadata_emitted else 0,
             "filter_columns_used": list(filter_metadata["filter_columns_used"]),
             "filter_definition": str(filter_metadata["filter_definition"]),
             "timestamp_count": batch_timestamp_count,
@@ -1292,8 +1266,7 @@ def _evaluation_batch_peak_bytes(
         kernel_peak = max(kernel_peak, retained_before_kernel + kernel_bound)
         retained_before_kernel += output_bound
     concat_peak = (
-        retained_before_kernel
-        + max(64 * 1024, retained_before_kernel * 2)
+        retained_before_kernel + max(64 * 1024, retained_before_kernel * 2)
         if len(output_bounds) > 1
         else 0
     )
@@ -1329,9 +1302,7 @@ def _iter_evaluation_compute_batches(
         planned_bytes = 0
         while stop < len(frame):
             session_stop = (
-                int(stops[session_index])
-                if session_index < len(stops)
-                else len(frame)
+                int(stops[session_index]) if session_index < len(stops) else len(frame)
             )
             session = frame.iloc[stop:session_stop]
             session_bytes = _evaluation_batch_peak_bytes(
@@ -1341,7 +1312,7 @@ def _iter_evaluation_compute_batches(
                 n_groups=n_groups,
             )
             candidate_bytes = planned_bytes + session_bytes
-            if candidate_bytes > resource_policy.planning_headroom_bytes:
+            if candidate_bytes > resource_policy.operation_headroom_bytes:
                 if stop == start:
                     explicit_cap = resource_policy.explicit_memory_cap_bytes
                     if (
@@ -1404,8 +1375,10 @@ def _iter_evaluation_work_frames(
         selected = [column for column in work_columns if column in frame.columns]
         projection_bytes = _selected_frame_payload_bytes(frame, selected)
         selected_set = set(selected)
-        added_signal_bytes = 8 * len(frame) * sum(
-            signal.signal_id not in selected_set for signal in spec.signals
+        added_signal_bytes = (
+            8
+            * len(frame)
+            * sum(signal.signal_id not in selected_set for signal in spec.signals)
         )
         normalized_bound = projection_bytes + added_signal_bytes
         normalized_lease = resource_policy.lease(

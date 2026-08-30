@@ -74,8 +74,9 @@ def test_training_controls_reject_invalid_timestamps_before_selection(
             control(frame, spec)
 
 
-def test_training_controls_parse_supported_date_strings_without_epoch_guessing(
-) -> None:
+def test_training_controls_parse_supported_date_strings_without_epoch_guessing() -> (
+    None
+):
     frame = pd.DataFrame(
         {
             "timestamp": ["20240101", "2024-01-02"],
@@ -758,11 +759,14 @@ def test_model_state_bound_uses_real_resolved_estimator_defaults(
     )
     estimator = build_estimator_from_model_spec(spec)
 
-    assert model_fitting._model_state_upper_bound_bytes(  # noqa: SLF001
-        frame,
-        spec,
-        estimator=estimator,
-    ) <= maximum_bytes
+    assert (
+        model_fitting._model_state_upper_bound_bytes(  # noqa: SLF001
+            frame,
+            spec,
+            estimator=estimator,
+        )
+        <= maximum_bytes
+    )
 
 
 def test_model_fit_envelope_does_not_recharge_preloaded_backend_image() -> None:
@@ -898,9 +902,7 @@ def test_model_threads_adapt_to_live_planning_headroom(
     state_bytes = model_fitting._model_state_upper_bound_bytes(frame, spec)  # noqa: SLF001
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024 * 1024,
-        explicit_cap_bytes=(
-            input_bytes + state_bytes + base + 2 * (one - base)
-        ),
+        explicit_cap_bytes=(input_bytes + state_bytes + base + 2 * (one - base)),
     )
 
     class Estimator:
@@ -1078,8 +1080,7 @@ def test_estimator_target_and_model_state_stay_reserved_through_metadata(
             and np.dtype(dtype) == np.dtype("float64")
         ):
             assert (
-                policy.used_memory_bytes
-                >= len(series) * np.dtype("float64").itemsize
+                policy.used_memory_bytes >= len(series) * np.dtype("float64").itemsize
             )
         return original_to_numpy(series, *args, **kwargs)
 

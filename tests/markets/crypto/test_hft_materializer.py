@@ -144,9 +144,7 @@ def test_hft_materialization_reuses_panel_and_standard_research_dataset(
     assert "segment_id" in research
     assert "ofi_100ms" in research
     assert "future_mid_return_500ms" in research
-    assert set(prediction_bundles) == {
-        model.model_id for model in model_catalog.list()
-    }
+    assert set(prediction_bundles) == {model.model_id for model in model_catalog.list()}
     assert all(path.is_dir() for path in prediction_bundles.values())
     assert all(
         metadata["max_train_rows"] == inspections[HFT_PANEL_DATA_ID].row_count

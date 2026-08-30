@@ -406,6 +406,7 @@ def test_crypto_factor_only_panel_dependency_window_uses_factor_warmup(
     monkeypatch,
 ) -> None:
     calls: list[tuple[str, TimeWindow]] = []
+
     def record(name: str):
         def wrapped(*_: Any, time_window: TimeWindow, **__: Any) -> object:
             calls.append((name, time_window))
@@ -464,6 +465,7 @@ def test_crypto_label_only_panel_dependency_window_uses_label_lookahead(
     monkeypatch,
 ) -> None:
     calls: list[tuple[str, TimeWindow]] = []
+
     def record(name: str):
         def wrapped(*_: Any, time_window: TimeWindow, **__: Any) -> object:
             calls.append((name, time_window))

@@ -123,8 +123,7 @@ def validate_output_bundle(
             if primary is None:
                 raise
             primary.add_note(
-                "output bundle verification also failed: "
-                f"{type(verify_error).__name__}"
+                f"output bundle verification also failed: {type(verify_error).__name__}"
             )
     return manifest, admitted_identities
 

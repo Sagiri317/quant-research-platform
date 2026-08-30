@@ -455,10 +455,12 @@ def test_crypto_producer_admits_before_panel_pull(
 
     @contextmanager
     def asset_views(current, **_kwargs):  # noqa: ANN001
-        yield ((
-            ("BTCUSDT",) if owner == "panel" else ("crypto", "btc_usdt"),
-            current,
-        ),)
+        yield (
+            (
+                ("BTCUSDT",) if owner == "panel" else ("crypto", "btc_usdt"),
+                current,
+            ),
+        )
 
     def panels(*_args, **_kwargs):  # noqa: ANN002, ANN003
         pulled.append(True)
@@ -537,10 +539,12 @@ def test_crypto_factor_admits_each_segment_before_carry_append(
 
     @contextmanager
     def asset_views(current, **_kwargs):  # noqa: ANN001
-        yield ((
-            ("crypto", "btc_usdt"),
-            current,
-        ),)
+        yield (
+            (
+                ("crypto", "btc_usdt"),
+                current,
+            ),
+        )
 
     monkeypatch.setattr(
         materialization_validation,
@@ -560,6 +564,7 @@ def test_crypto_factor_admits_each_segment_before_carry_append(
         real_close(lease)
 
     monkeypatch.setattr(MemoryLease, "close", record_close)
+
     def capture_core_mask(current, *_args, **_kwargs):  # noqa: ANN001, ANN003
         panel_reference.append(weakref.ref(current))
         return pd.Series(True, index=current.index)
@@ -646,9 +651,7 @@ def test_crypto_carry_and_buffer_cap_fixed_allowance_to_admitted_bound(
     producer_bound = policy.memory_budget_bytes - target_headroom - 1
     reader_reserve = policy.memory_budget_bytes - producer_bound - target_headroom
     assert (
-        pandas_frame_payload_bytes(
-            frame.tail(materialize_labels.LABEL_LOOKAHEAD_BARS)
-        )
+        pandas_frame_payload_bytes(frame.tail(materialize_labels.LABEL_LOOKAHEAD_BARS))
         > target_headroom
     )
     session = _dataset_session_stub(policy)
@@ -745,6 +748,7 @@ def test_crypto_label_buffer_lease_survives_output_and_closes_on_close(
         "iter_dataset_chunks",
         lambda *_args, **_kwargs: iter((first, second)),
     )
+
     def capture_core_mask(current, *_args, **_kwargs):  # noqa: ANN001, ANN003
         panel_references.append(weakref.ref(current))
         return pd.Series(True, index=current.index)
@@ -1322,11 +1326,7 @@ def test_panel_validation_projects_input_before_key_workspace(
 
     def chunks(view, *, target_chunk_bytes: int, **_kwargs):  # noqa: ANN001
         observed.append((tuple(view.logical_columns), target_chunk_bytes))
-        frame = (
-            full_frame
-            if "value" in view.logical_columns
-            else projected
-        )
+        frame = full_frame if "value" in view.logical_columns else projected
         with policy.lease(
             "storage.arrow.to_pandas",
             pandas_frame_payload_bytes(frame),
@@ -1857,6 +1857,7 @@ def test_existing_dependency_reuse_passes_same_resource_policy(
         "open_dataset_session",
         lambda *_args, **_kwargs: nullcontext(_dataset_session_stub(policy)),
     )
+
     def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
         return OwnedValue(
             inspection,

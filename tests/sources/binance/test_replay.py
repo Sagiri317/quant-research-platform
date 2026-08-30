@@ -47,9 +47,7 @@ def _raw(
     return {
         "capture_seq": capture_seq,
         "receive_time": "2026-08-27T00:00:00.123456Z",
-        "observed_time_ns": pd.Timestamp(
-            "2026-08-27T00:00:00.123456Z"
-        ).value,
+        "observed_time_ns": pd.Timestamp("2026-08-27T00:00:00.123456Z").value,
         "receive_monotonic_ns": capture_seq * 10,
         "connection_id": connection_id,
         "segment_id": segment_id,
@@ -326,9 +324,7 @@ def _agg_trade(
     return {
         "capture_seq": capture_seq,
         "receive_time": "2026-08-27T00:00:00.123456Z",
-        "observed_time_ns": pd.Timestamp(
-            "2026-08-27T00:00:00.123456Z"
-        ).value,
+        "observed_time_ns": pd.Timestamp("2026-08-27T00:00:00.123456Z").value,
         "receive_monotonic_ns": capture_seq * 10,
         "connection_id": "trade-connection-1",
         "payload": {
@@ -423,9 +419,7 @@ def _write_run(
                     "data_kind": kind,
                     "stream": stream,
                     "connection_id": connection_id,
-                    "segment_id": (
-                        str(row["segment_id"]) if kind == "depth" else None
-                    ),
+                    "segment_id": (str(row["segment_id"]) if kind == "depth" else None),
                     "opened_at": "2026-08-27T00:00:00.000000Z",
                     "opened_monotonic_ns": 0,
                     "closed_at": "2026-08-27T00:00:01.000000Z",
@@ -912,7 +906,7 @@ def test_insufficient_snapshot_waits_for_next_segment(tmp_path: Path) -> None:
             (
                 FUTURES_MARKET_TYPE,
                 "depth",
-                    "btcusdt@depth@100ms",
+                "btcusdt@depth@100ms",
                 [
                     _futures_delta(
                         2, 90, 100, previous=0, transaction_time=10, segment_id="s1"
@@ -925,7 +919,7 @@ def test_insufficient_snapshot_waits_for_next_segment(tmp_path: Path) -> None:
             (
                 FUTURES_MARKET_TYPE,
                 "depth_snapshot",
-                    "REST:/fapi/v1/depth",
+                "REST:/fapi/v1/depth",
                 [
                     _snapshot(
                         1,
@@ -1033,7 +1027,7 @@ def test_spot_uses_snapshot_plus_one_bootstrap(tmp_path: Path) -> None:
             (
                 SPOT_MARKET_TYPE,
                 "depth",
-                    "btcusdt@depth@100ms",
+                "btcusdt@depth@100ms",
                 [
                     _spot_delta(2, 10, 11, event_time=10, segment_id="s1"),
                     _spot_delta(3, 12, 12, event_time=20, segment_id="s1"),
@@ -1042,7 +1036,7 @@ def test_spot_uses_snapshot_plus_one_bootstrap(tmp_path: Path) -> None:
             (
                 SPOT_MARKET_TYPE,
                 "depth_snapshot",
-                    "REST:/api/v3/depth",
+                "REST:/api/v3/depth",
                 [
                     _snapshot(
                         1,
@@ -1243,11 +1237,9 @@ def test_same_run_replay_is_deterministic(tmp_path: Path) -> None:
             iter_reconstructed_depth(run, FUTURES_MARKET_TYPE, required_levels=1)
         )
         assert [
-            event.value if isinstance(event, OwnedValue) else event
-            for event in first
+            event.value if isinstance(event, OwnedValue) else event for event in first
         ] == [
-            event.value if isinstance(event, OwnedValue) else event
-            for event in second
+            event.value if isinstance(event, OwnedValue) else event for event in second
         ]
         _close_owned_events(first)
         _close_owned_events(second)

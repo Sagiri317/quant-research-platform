@@ -1,11 +1,11 @@
-# Data Directory
+# 数据目录
 
 本目录不用于提交数据文件。
 
-- private data 不进入 git。
-- generated row-level data 不进入 git。
-- vendor marker、本地绝对路径、stock-code sample 不进入 git。
-- `.run/` 只保存本地 output/evidence/input artifact，不是 tracked tool source。
+- 私有数据不进入 git。
+- 生成的行级数据不进入 git。
+- vendor marker、本地绝对路径、股票代码样本不进入 git。
+- `.run/` 只保存本地输出/证据/输入 artifact，不是受 Git 跟踪的工具源代码。
 
 数据合同见 `docs/data/README.md`。
 

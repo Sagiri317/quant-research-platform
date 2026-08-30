@@ -309,18 +309,19 @@ def test_calculate_additive_cumulative_returns_rejects_invalid_numeric_input() -
     with pytest.raises(ValueError, match="net_portfolio_return"):
         calculate_additive_cumulative_returns(returns)
     with pytest.raises(ValueError, match="net_portfolio_return.*numeric"):
-        calculate_additive_cumulative_returns(returns.assign(net_portfolio_return=["0.1"]))
+        calculate_additive_cumulative_returns(
+            returns.assign(net_portfolio_return=["0.1"])
+        )
 
 
-def test_performance_final_additive_returns_match_ordered_cumulative_tail_exactly(
-) -> None:
+def test_performance_final_additive_returns_match_ordered_cumulative_tail_exactly() -> (
+    None
+):
     rng = np.random.default_rng(20260823)
     values = rng.normal(0.0, 0.01, 100_000)
     returns = pd.DataFrame(
         {
-            "timestamp": pd.date_range(
-                "2024-01-01", periods=len(values), freq="min"
-            ),
+            "timestamp": pd.date_range("2024-01-01", periods=len(values), freq="min"),
             "signal": ["factor"] * len(values),
             "gross_portfolio_return": values,
             "turnover": np.ones(len(values)),
@@ -442,9 +443,7 @@ def test_performance_variance_uses_exact_variation_state() -> None:
         )
 
     constant = summarize_performance(make_returns(np.full(3, 1e16))).iloc[0]
-    tiny = summarize_performance(
-        make_returns(np.array([0.0, 1e-320, 2e-320]))
-    ).iloc[0]
+    tiny = summarize_performance(make_returns(np.array([0.0, 1e-320, 2e-320]))).iloc[0]
 
     assert constant["volatility_net_portfolio_return"] == 0.0
     assert pd.isna(constant["sharpe_like"])

@@ -49,9 +49,9 @@ def calculate_microstructure_factors(
     result["relative_spread"] = (spread / mid_price).mask(mid_price.le(0))
 
     depth_denominator = bid_depth + ask_depth
-    result["depth_imbalance"] = (
-        (bid_depth - ask_depth) / depth_denominator
-    ).mask(depth_denominator.le(0))
+    result["depth_imbalance"] = ((bid_depth - ask_depth) / depth_denominator).mask(
+        depth_denominator.le(0)
+    )
 
     quote_denominator = bid_quantity + ask_quantity
     microprice = (

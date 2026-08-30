@@ -14,9 +14,7 @@ class EvaluationCatalog(ImmutableCatalog[EvaluationSpec]):
         seen: set[str] = set()
         for spec in values:
             if spec.evaluation_id in seen:
-                raise ValueError(
-                    f"duplicate_evaluation_spec: {spec.evaluation_id}"
-                )
+                raise ValueError(f"duplicate_evaluation_spec: {spec.evaluation_id}")
             seen.add(spec.evaluation_id)
         super().__init__(sorted(values, key=lambda spec: spec.evaluation_id))
 

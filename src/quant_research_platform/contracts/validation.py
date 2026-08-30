@@ -54,9 +54,8 @@ def strict_string_series(
     is_fast_string = isinstance(result.dtype, pd.StringDtype)
     if not is_fast_string:
         inferred = pd.api.types.infer_dtype(non_null, skipna=False)
-        is_fast_string = (
-            inferred in {"empty", "string", "unicode"}
-            and bool(non_null.map(type).eq(str).all())
+        is_fast_string = inferred in {"empty", "string", "unicode"} and bool(
+            non_null.map(type).eq(str).all()
         )
     if is_fast_string:
         output = result.astype("string")
@@ -303,10 +302,9 @@ def _strict_numeric_series(
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
-    is_native_numeric = (
-        pd.api.types.is_numeric_dtype(series.dtype)
-        and not pd.api.types.is_bool_dtype(series.dtype)
-    )
+    is_native_numeric = pd.api.types.is_numeric_dtype(
+        series.dtype
+    ) and not pd.api.types.is_bool_dtype(series.dtype)
     if is_native_numeric:
         numeric = pd.to_numeric(series, errors="coerce")
         non_null = numeric.loc[~null_mask]

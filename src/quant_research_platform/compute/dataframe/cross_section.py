@@ -301,11 +301,7 @@ def _summarize_correlation_aggregates(
         std = np.nan
     else:
         variance = m2 / count
-        std = (
-            float(np.sqrt(max(0.0, variance)))
-            if np.isfinite(variance)
-            else np.nan
-        )
+        std = float(np.sqrt(max(0.0, variance))) if np.isfinite(variance) else np.nan
     ratio = _safe_ratio(mean, std, valid_count=count)
     return {
         "mean": mean,

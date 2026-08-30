@@ -96,23 +96,23 @@ def materialize_hft_processed_data(
             _FRAME_FIXED_BYTES + panel_batch_rows * _PANEL_ROW_BUFFER_BYTES
         )
         panel_frames = iter_panel_frames(
-                iter_reconstructed_depth(
-                    run,
-                    FUTURES_MARKET_TYPE,
-                    stats=stats,
-                ),
-                iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
-                start_ms=start_ms,
-                end_ms=end_ms,
-                book_coverage=stats.coverage_segments,
-                trade_coverage=run.connection_coverage(
-                    market_type=FUTURES_MARKET_TYPE,
-                    data_kind="agg_trades",
-                ),
-                market_id=str(MARKET_ID),
-                asset_id=asset_id,
-                batch_rows=panel_batch_rows,
-            )
+            iter_reconstructed_depth(
+                run,
+                FUTURES_MARKET_TYPE,
+                stats=stats,
+            ),
+            iter_agg_trades(run, FUTURES_MARKET_TYPE, end_ms=end_ms),
+            start_ms=start_ms,
+            end_ms=end_ms,
+            book_coverage=stats.coverage_segments,
+            trade_coverage=run.connection_coverage(
+                market_type=FUTURES_MARKET_TYPE,
+                data_kind="agg_trades",
+            ),
+            market_id=str(MARKET_ID),
+            asset_id=asset_id,
+            batch_rows=panel_batch_rows,
+        )
         panel_root = layout.processed_data_root(
             panel_spec.market_id,
             panel_spec.kind,
@@ -232,7 +232,7 @@ def _panel_frame_producer(
     columns: tuple[str, ...],
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[object]:
-    target_chunk_bytes = max(1, resource_policy.planning_headroom_bytes // 8)
+    target_chunk_bytes = max(1, resource_policy.operation_headroom_bytes // 8)
     chunks = iter_dataset_chunks(session, target_chunk_bytes=target_chunk_bytes)
     frames = iter(transform(chunks))
     with closing_iterator(chunks), closing_iterator(frames):

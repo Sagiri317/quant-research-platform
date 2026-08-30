@@ -275,8 +275,7 @@ def _opened_parquet(
                 parquet_stack.enter_context(
                     policy.lease(
                         "storage.parquet.metadata",
-                        _PARQUET_METADATA_FIXED_WORKSPACE_BYTES
-                        + 20 * footer_length,
+                        _PARQUET_METADATA_FIXED_WORKSPACE_BYTES + 20 * footer_length,
                     )
                 )
             parquet_file = pq.ParquetFile(handle)
@@ -336,8 +335,7 @@ def _opened_parquet(
                 handle.close()
             except BaseException as close_error:
                 primary.add_note(
-                    "parquet handle close also failed: "
-                    f"{type(close_error).__name__}"
+                    f"parquet handle close also failed: {type(close_error).__name__}"
                 )
 
 
@@ -438,9 +436,7 @@ def _target_batch_rows(
             page_decode_bytes
             + max(
                 0,
-                logical_required_bytes
-                - fixed_decode_bytes
-                - source_batch_bytes,
+                logical_required_bytes - fixed_decode_bytes - source_batch_bytes,
             )
             if filtered
             else max(page_decode_bytes, logical_required_bytes)
@@ -639,8 +635,10 @@ def _parquet_row_group_footer_upper_bound(
 def _zstd_compressed_bound(source_bytes: int) -> int:
     """Return the codec's exact ZSTD_COMPRESSBOUND for one page payload."""
 
-    return source_bytes + (source_bytes >> 8) + (
-        ((128 << 10) - source_bytes) >> 11 if source_bytes < 128 << 10 else 0
+    return (
+        source_bytes
+        + (source_bytes >> 8)
+        + (((128 << 10) - source_bytes) >> 11 if source_bytes < 128 << 10 else 0)
     )
 
 

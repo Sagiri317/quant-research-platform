@@ -56,6 +56,7 @@ FORBIDDEN_PUBLIC_MARKERS = (
     "row sample",
 )
 
+
 def test_api_01_routes_are_exact_public_surface() -> None:
     api = create_app()
     routes = {
@@ -94,9 +95,9 @@ def test_openapi_success_responses_use_closed_typed_schemas() -> None:
     }
 
     for path, schema_ref in expected.items():
-        response_schema = schema["paths"][path]["get"]["responses"]["200"][
-            "content"
-        ]["application/json"]["schema"]
+        response_schema = schema["paths"][path]["get"]["responses"]["200"]["content"][
+            "application/json"
+        ]["schema"]
         assert response_schema == {"$ref": schema_ref}
 
     for name in (

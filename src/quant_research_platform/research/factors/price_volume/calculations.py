@@ -47,14 +47,10 @@ def calculate_price_volume_factors(
 ) -> pd.DataFrame:
     """Add requested price-volume factors without future data."""
 
-    requested = tuple(
-        dict.fromkeys(factor_columns or price_volume_factor_columns())
-    )
+    requested = tuple(dict.fromkeys(factor_columns or price_volume_factor_columns()))
     unsupported = unsupported_price_volume_factors(requested)
     if unsupported:
-        raise ValueError(
-            "unsupported_price_volume_factors: " + ", ".join(unsupported)
-        )
+        raise ValueError("unsupported_price_volume_factors: " + ", ".join(unsupported))
 
     required_inputs = tuple(
         dict.fromkeys(
@@ -100,28 +96,25 @@ def calculate_price_volume_factors(
             for window in required_windows
         )
     )
-    needs_returns = (
-        price_volume_window_column("rev", 1) in requested_set
-        or any(
-            price_volume_window_column(prefix, window) in requested_set
-            for prefix in (
-                "vol",
-                "downside_vol",
-                "upside_vol",
-                "max_return",
-                "min_return",
-                "skew",
-                "kurt",
-                "amihud",
-                "ret_amount_corr",
-                "ret_volume_corr",
-                "ret_turnover_corr",
-                "trend_efficiency",
-                "signed_amount_flow",
-                "ret_amount_imbalance",
-            )
-            for window in required_windows
+    needs_returns = price_volume_window_column("rev", 1) in requested_set or any(
+        price_volume_window_column(prefix, window) in requested_set
+        for prefix in (
+            "vol",
+            "downside_vol",
+            "upside_vol",
+            "max_return",
+            "min_return",
+            "skew",
+            "kurt",
+            "amihud",
+            "ret_amount_corr",
+            "ret_volume_corr",
+            "ret_turnover_corr",
+            "trend_efficiency",
+            "signed_amount_flow",
+            "ret_amount_imbalance",
         )
+        for window in required_windows
     )
     needs_amount = any(
         price_volume_window_column(prefix, window) in requested_set
@@ -153,31 +146,11 @@ def calculate_price_volume_factors(
         )
         for window in required_windows
     )
-    price = (
-        _numeric(result[price_column])
-        if needs_price
-        else None
-    )
-    returns = (
-        _numeric(result[return_column])
-        if needs_returns
-        else None
-    )
-    amount = (
-        _numeric(result[amount_column])
-        if needs_amount
-        else None
-    )
-    volume = (
-        _numeric(result[volume_column])
-        if needs_volume
-        else None
-    )
-    turnover = (
-        _numeric(result[turnover_column])
-        if needs_turnover
-        else None
-    )
+    price = _numeric(result[price_column]) if needs_price else None
+    returns = _numeric(result[return_column]) if needs_returns else None
+    amount = _numeric(result[amount_column]) if needs_amount else None
+    volume = _numeric(result[volume_column]) if needs_volume else None
+    turnover = _numeric(result[turnover_column]) if needs_turnover else None
     price_grouped = price.groupby(group_keys, sort=False) if price is not None else None
     amount_grouped = (
         amount.groupby(group_keys, sort=False) if amount is not None else None
@@ -448,9 +421,7 @@ def calculate_price_volume_factors(
     ):
         amplitude = (
             _numeric(result[high_column]) - _numeric(result[low_column])
-        ) / valid_denominator(
-            _numeric(result[prev_close_column])
-        )
+        ) / valid_denominator(_numeric(result[prev_close_column]))
         amplitude = finite_or_nan(amplitude)
     for window in required_windows:
         column = price_volume_window_column("amihud", window)

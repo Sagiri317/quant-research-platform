@@ -156,7 +156,7 @@ def _iter_joined_processed_chunks(
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
     base_data_id = _base_input_data_id(dataset_spec)
-    producer_bound = max(1, policy.planning_headroom_bytes // 2)
+    producer_bound = max(1, policy.operation_headroom_bytes // 2)
     lease = yield producer_bound
     chunk_windows = _iter_research_chunk_windows_from_base_input(
         sessions[base_data_id],
@@ -420,8 +420,6 @@ def _join_processed_inputs(
             raise first_failure
 
 
-
-
 def _iter_research_chunk_windows_from_base_input(
     base_session: DatasetSession,
     *,
@@ -439,14 +437,12 @@ def _iter_research_chunk_windows_from_base_input(
         with closing_iterator(
             iter_dataset_chunks(
                 session,
-                target_chunk_bytes=policy.planning_headroom_bytes,
+                target_chunk_bytes=policy.operation_headroom_bytes,
             )
         ) as chunks:
             for chunk in chunks:
                 timestamps = chunk["timestamp"]
-                timestamp_bytes = int(
-                    timestamps.memory_usage(index=True, deep=True)
-                )
+                timestamp_bytes = int(timestamps.memory_usage(index=True, deep=True))
                 with policy.lease(
                     "research.assembler.timestamp.windows",
                     max(1, timestamp_bytes + len(timestamps) * 32),
@@ -562,7 +558,7 @@ def _read_processed_input(
     with session.filtered_view(time_window) as view:
         return materialize_dataset_session_owned(
             view,
-            target_chunk_bytes=policy.planning_headroom_bytes,
+            target_chunk_bytes=policy.operation_headroom_bytes,
         )
 
 

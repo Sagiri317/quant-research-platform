@@ -104,10 +104,10 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
         make_local_verification_config(
             run_root=run_root,
             start_date="2014-01-01",
-                end_date="2016-12-31",
-                profile=profile,
-                explicit_memory_cap_bytes=explicit_cap,
-            )
+            end_date="2016-12-31",
+            profile=profile,
+            explicit_memory_cap_bytes=explicit_cap,
+        )
     )
     run_config = json.loads((run_root / "run.json").read_text(encoding="utf-8"))[
         "config"
@@ -127,8 +127,7 @@ def test_local_verification_workflow_uses_one_runtime_policy_snapshot(
     assert policy_payload["memory_budget_bytes"] == explicit_cap
     assert policy_payload["explicit_memory_cap_bytes"] == explicit_cap
     assert (
-        policy_payload["used_memory_bytes"]
-        + policy_payload["planning_headroom_bytes"]
+        policy_payload["used_memory_bytes"] + policy_payload["planning_headroom_bytes"]
         == policy_payload["memory_budget_bytes"]
     )
 

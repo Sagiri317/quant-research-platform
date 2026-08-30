@@ -565,9 +565,7 @@ def simulate_taker(
                             created_orders += 1
                             side = "buy" if delta > 0 else "sell"
                             levels = (
-                                latest_state.asks
-                                if delta > 0
-                                else latest_state.bids
+                                latest_state.asks if delta > 0 else latest_state.bids
                             )
                             requested = min(abs(delta), config.order_quantity)
                             remaining = requested
@@ -629,9 +627,7 @@ def simulate_taker(
                                 metrics.observe_fill(fill)
                                 pending.add(fill)
                 gross = (
-                    None
-                    if current_mid is None
-                    else cash_gross + position * current_mid
+                    None if current_mid is None else cash_gross + position * current_mid
                 )
                 net = None if gross is None else gross - fees
                 equity = {
@@ -639,9 +635,7 @@ def simulate_taker(
                     "decision_time_ms": decision_time,
                     "effective_time_ms": effective_time,
                     "state_observed_time_ms": (
-                        None
-                        if latest_state is None
-                        else latest_state.observed_time_ms
+                        None if latest_state is None else latest_state.observed_time_ms
                     ),
                     "position": position,
                     "gross_pnl_usd": gross,
@@ -782,7 +776,9 @@ def _market_events(
             trade_next = next(trade_events, None)
             while book_next is not None or trade_next is not None:
                 if trade_next is None or (
-                    book_next is not None and _book_key(book_next) <= (
+                    book_next is not None
+                    and _book_key(book_next)
+                    <= (
                         trade_next.observed_time_ns,
                         trade_next.receive_monotonic_ns,
                         trade_next.capture_seq,
@@ -945,10 +941,7 @@ def simulate_maker(
                 return
             previous_state = latest_state
             state = _book_value(event)
-            if (
-                latest_state is not None
-                and state.segment_id != latest_state.segment_id
-            ):
+            if latest_state is not None and state.segment_id != latest_state.segment_id:
                 cancel_active(state.observed_time_ns)
             elif latest_state is not None:
                 desired = {
@@ -1059,8 +1052,7 @@ def simulate_maker(
                     ),
                     "markout_target_time_ns": (
                         timestamp_ns
-                        + config.markout_horizon_ms
-                        * _NANOSECONDS_PER_MILLISECOND
+                        + config.markout_horizon_ms * _NANOSECONDS_PER_MILLISECOND
                     ),
                 }
                 position += signed * fill_quantity
@@ -1222,9 +1214,7 @@ def simulate_maker(
             None if last_gross is None else last_gross - metrics.spread_capture_pnl
         ),
         "average_order_lifetime_ms": (
-            all_lifetime_sum_ns
-            / _NANOSECONDS_PER_MILLISECOND
-            / all_lifetime_count
+            all_lifetime_sum_ns / _NANOSECONDS_PER_MILLISECOND / all_lifetime_count
             if all_lifetime_count
             else None
         ),

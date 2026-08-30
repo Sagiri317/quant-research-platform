@@ -72,9 +72,7 @@ def _import_edges_from_trees(ast_trees: dict[Path, ast.AST]) -> tuple[ImportEdge
                     ImportEdge(
                         path,
                         node.lineno,
-                        module
-                        if alias.name == "*"
-                        else f"{module}.{alias.name}",
+                        module if alias.name == "*" else f"{module}.{alias.name}",
                     )
                     for alias in node.names
                 )
@@ -93,7 +91,5 @@ def import_edges_under(
         return tuple(edge for edge in import_edges if edge.path == root)
     root_text = root.as_posix().rstrip("/") + "/"
     return tuple(
-        edge
-        for edge in import_edges
-        if edge.path.as_posix().startswith(root_text)
+        edge for edge in import_edges if edge.path.as_posix().startswith(root_text)
     )

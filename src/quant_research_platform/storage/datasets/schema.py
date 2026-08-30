@@ -91,9 +91,7 @@ _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
         "validation_status",
     }
 )
-_DATASET_INPUT_IDENTITY_KEYS = frozenset(
-    {"data_id", "manifest_hash", "spec_hash"}
-)
+_DATASET_INPUT_IDENTITY_KEYS = frozenset({"data_id", "manifest_hash", "spec_hash"})
 _SOURCE_ARTIFACT_IDENTITY_KEYS = frozenset(
     {"schema_id", "artifact_id", "manifest_hash"}
 )
@@ -316,15 +314,12 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
     if not column_roles_are_valid_mapping or not spec.column_roles:
         raise ValueError("dataset_column_roles_invalid")
     if any(
-        type(column) is not str
-        or not column
-        or type(role) is not ColumnRole
+        type(column) is not str or not column or type(role) is not ColumnRole
         for column, role in spec.column_roles.items()
     ):
         raise ValueError("dataset_column_roles_invalid")
-    if (
-        type(spec.required_columns) is not tuple
-        or spec.required_columns != tuple(spec.column_roles)
+    if type(spec.required_columns) is not tuple or spec.required_columns != tuple(
+        spec.column_roles
     ):
         raise ValueError("dataset_required_columns_invalid")
     if not set(primary_key).issubset(spec.column_roles):
@@ -512,17 +507,14 @@ def logical_dtype_payload_from_frame(
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("dataset_frame_required")
     selected = (
-        tuple(str(column) for column in frame.columns)
-        if columns is None
-        else columns
+        tuple(str(column) for column in frame.columns) if columns is None else columns
     )
     if any(column not in frame for column in selected):
         raise ValueError("dataset_column_not_found")
     return {
         "schema_id": "qrp-dataset-part-logical-dtypes",
         "columns": [
-            _logical_dtype_descriptor(str(column), frame[column])
-            for column in selected
+            _logical_dtype_descriptor(str(column), frame[column]) for column in selected
         ],
     }
 
@@ -610,9 +602,7 @@ def require_frame_logical_dtype_metadata_within_target(
         descriptor: Mapping[str, Any],
     ) -> Iterable[Mapping[str, Any]]:
         dtype = frame[str(descriptor["name"])].dtype
-        return (
-            _typed_category_value_payload(value) for value in dtype.categories
-        )
+        return (_typed_category_value_payload(value) for value in dtype.categories)
 
     return require_logical_dtype_metadata_within_target(
         payload,
@@ -628,9 +618,7 @@ def _validated_category_payloads(
 ) -> Iterable[Mapping[str, Any]]:
     for payload in payloads:
         try:
-            canonical = _typed_category_value_payload(
-                _typed_category_value(payload)
-            )
+            canonical = _typed_category_value_payload(_typed_category_value(payload))
             matches = canonical_identity_bytes(canonical) == canonical_identity_bytes(
                 payload
             )
@@ -1299,9 +1287,7 @@ def validate_dataset_manifest_payload(
     ):
         raise ValueError("dataset_manifest_schema_id_invalid")
     expected_keys = (
-        (set(spec) - {"schema_id"})
-        | _DATASET_MANIFEST_RUNTIME_KEYS
-        | {"schema_id"}
+        (set(spec) - {"schema_id"}) | _DATASET_MANIFEST_RUNTIME_KEYS | {"schema_id"}
     )
     actual_keys = set(manifest)
     if not expected_keys.issubset(actual_keys) or not (
@@ -1342,9 +1328,7 @@ def validate_dataset_manifest_payload(
     )
     if canonical_json_hash(physical_schema) != schema_hash:
         raise ValueError("manifest_schema_hash_mismatch")
-    logical_dtypes = validate_logical_dtype_payload(
-        manifest.get("logical_dtypes")
-    )
+    logical_dtypes = validate_logical_dtype_payload(manifest.get("logical_dtypes"))
     if [item["name"] for item in logical_dtypes["columns"]] != columns:
         raise ValueError("manifest_logical_dtypes_mismatch")
     logical_dtype_hash = _require_hash(
@@ -1404,16 +1388,19 @@ def validate_dataset_manifest_payload(
         error="manifest_label_nan_profile_invalid",
     )
     row_count = manifest["row_count"]
-    if any(
-        count > row_count
-        for counts in (
-            null_counts,
-            non_finite_counts,
-            factor_counts,
-            label_counts,
+    if (
+        any(
+            count > row_count
+            for counts in (
+                null_counts,
+                non_finite_counts,
+                factor_counts,
+                label_counts,
+            )
+            for count in counts.values()
         )
-        for count in counts.values()
-    ) or manifest["duplicate_primary_key_count"] > row_count:
+        or manifest["duplicate_primary_key_count"] > row_count
+    ):
         raise ValueError("manifest_summary_count_invalid")
     timestamp_column = timestamp_column_from_spec_payload(spec)
     if timestamp_column is not None:
@@ -1486,8 +1473,7 @@ def validate_dataset_manifest_consumable(manifest: Mapping[str, Any]) -> None:
         or manifest.get("duplicate_primary_key_count") != 0
         or not isinstance(non_finite_counts, Mapping)
         or any(
-            type(count) is not int or count != 0
-            for count in non_finite_counts.values()
+            type(count) is not int or count != 0 for count in non_finite_counts.values()
         )
     ):
         raise ValueError("dataset_manifest_not_consumable")
@@ -1533,10 +1519,11 @@ def _validate_physical_type_payload(value: object) -> None:
         return
     if kind == "float":
         _require_exact_keys(value, {"kind", "bit_width"})
-        if (
-            not _is_exact_int(value["bit_width"])
-            or value["bit_width"] not in {16, 32, 64}
-        ):
+        if not _is_exact_int(value["bit_width"]) or value["bit_width"] not in {
+            16,
+            32,
+            64,
+        }:
             raise ValueError("manifest_physical_schema_invalid")
         return
     if kind == "decimal":
@@ -1605,9 +1592,7 @@ def _validate_physical_type_payload(value: object) -> None:
         _validate_physical_field_payload(value["value_field"])
         return
     if kind == "map":
-        _require_exact_keys(
-            value, {"kind", "keys_sorted", "key_field", "item_field"}
-        )
+        _require_exact_keys(value, {"kind", "keys_sorted", "key_field", "item_field"})
         if type(value["keys_sorted"]) is not bool:
             raise ValueError("manifest_physical_schema_invalid")
         _validate_physical_field_payload(value["key_field"])
@@ -1616,9 +1601,7 @@ def _validate_physical_type_payload(value: object) -> None:
         _validate_physical_field_payload(value["item_field"])
         return
     if kind == "dictionary":
-        _require_exact_keys(
-            value, {"kind", "index_type", "value_type", "ordered"}
-        )
+        _require_exact_keys(value, {"kind", "index_type", "value_type", "ordered"})
         if type(value["ordered"]) is not bool:
             raise ValueError("manifest_physical_schema_invalid")
         _validate_physical_type_payload(value["index_type"])

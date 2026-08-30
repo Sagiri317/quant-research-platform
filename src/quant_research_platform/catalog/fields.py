@@ -36,6 +36,7 @@ class FieldCatalog(ImmutableCatalog[FieldSpec]):
         except StopIteration as exc:
             raise KeyError(f"unknown_field: {name}") from exc
 
+
 _CANONICAL_FIELD_NAMES = CanonicalFieldNames(
     market_id="market_id",
     asset_id="asset_id",

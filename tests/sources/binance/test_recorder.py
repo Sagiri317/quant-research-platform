@@ -148,9 +148,7 @@ def test_stream_gzip_constructor_failure_closes_raw_and_preserves_primary(
 
     assert raised.value is primary
     assert raw_handle.close_calls == 1
-    assert raised.value.__notes__ == [
-        "Binance raw handle close also failed: OSError"
-    ]
+    assert raised.value.__notes__ == ["Binance raw handle close also failed: OSError"]
     assert writer._handles == {}
 
 
@@ -298,9 +296,7 @@ def test_recorder_validates_spot_and_futures_depth_semantics() -> None:
     spot, futures = SPOT_STREAMS[0], FUTURES_STREAMS[0]
 
     assert _validate_stream(spot, _depth_payload(SPOT_MARKET_TYPE))["u"] == 12
-    assert (
-        _validate_stream(futures, _depth_payload(FUTURES_MARKET_TYPE))["pu"] == 9
-    )
+    assert _validate_stream(futures, _depth_payload(FUTURES_MARKET_TYPE))["pu"] == 9
 
     with pytest.raises(ValueError, match="market_payload_identity_invalid"):
         _validate_stream(

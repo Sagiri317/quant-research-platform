@@ -309,8 +309,7 @@ def _write_evaluation_artifact_chunks(
             pending_states[name].enter_context(
                 policy.lease(
                     "artifacts.parquet.pending",
-                    max(1, table.nbytes)
-                    + _EVALUATION_PENDING_TABLE_OVERHEAD_BYTES,
+                    max(1, table.nbytes) + _EVALUATION_PENDING_TABLE_OVERHEAD_BYTES,
                 )
             )
         pending_tables[name].append(table)
@@ -372,9 +371,7 @@ def _write_evaluation_artifact_chunks(
                 if spec.evaluation_axis == "single_asset_time_series":
                     chunk_timestamp_count = int(metadata["timestamp_count"])
                     timestamp_count += chunk_timestamp_count
-                    skipped_timestamp_count += int(
-                        metadata["skipped_timestamp_count"]
-                    )
+                    skipped_timestamp_count += int(metadata["skipped_timestamp_count"])
                     chunk_min = metadata["min_timestamp"]
                     chunk_max = metadata["max_timestamp"]
                     if (

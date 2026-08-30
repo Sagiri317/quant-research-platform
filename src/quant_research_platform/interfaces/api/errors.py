@@ -75,11 +75,7 @@ def _validation_error_details(exc: RequestValidationError) -> ApiErrorDetails:
     for item in exc.errors():
         raw_loc = item.get("loc", ())
         loc = (
-            tuple(
-                part
-                for part in raw_loc
-                if type(part) in {str, int}
-            )[:16]
+            tuple(part for part in raw_loc if type(part) in {str, int})[:16]
             if isinstance(raw_loc, (tuple, list))
             else ()
         )

@@ -484,6 +484,7 @@ class _RunWriter:
         with self._lock:
             return dict(sorted(self._event_counts.items()))
 
+
 def _sha256_path(path: Path, resource_policy: RuntimeResourcePolicy) -> str:
     with resource_policy.lease("binance.recorder.file_hash", 128 * 1024):
         digest = hashlib.sha256()
@@ -492,6 +493,7 @@ def _sha256_path(path: Path, resource_policy: RuntimeResourcePolicy) -> str:
             while count := handle.readinto(buffer):
                 digest.update(memoryview(buffer)[:count])
         return digest.hexdigest()
+
 
 @contextmanager
 def _writer_lifecycle(
@@ -788,9 +790,7 @@ class _StreamReader(threading.Thread):
                 self._connection_id = connection_id
                 self._segment_id = segment_id
                 self._snapshot_ack = (
-                    threading.Event()
-                    if self.stream.data_kind == "depth"
-                    else None
+                    threading.Event() if self.stream.data_kind == "depth" else None
                 )
             self.stats.opened(
                 self.stream,
@@ -1156,9 +1156,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             policy,
             market_types=market_types,
         )
-        websocket_reserve = (
-            len(streams) * MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
-        )
+        websocket_reserve = len(streams) * MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
         with policy.lease(
             "binance.recorder.websocket_buffers",
             websocket_reserve,
@@ -1188,21 +1186,15 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                 for reader in readers:
                     remaining = max(0.0, deadline - time.monotonic())
                     if not reader.ready.wait(remaining):
-                        raise TimeoutError(
-                            "binance_recorder_stream_connect_timeout"
-                        )
+                        raise TimeoutError("binance_recorder_stream_connect_timeout")
                 depth_readers = [
-                    reader
-                    for reader in readers
-                    if reader.stream.data_kind == "depth"
+                    reader for reader in readers if reader.stream.data_kind == "depth"
                 ]
                 for reader in depth_readers:
                     remaining = max(0.0, deadline - time.monotonic())
                     generation = reader.current_identity()[0]
                     if not reader.wait_for_snapshot(generation, remaining):
-                        raise TimeoutError(
-                            "binance_recorder_snapshot_ack_timeout"
-                        )
+                        raise TimeoutError("binance_recorder_snapshot_ack_timeout")
                 started_at = _utc_now()
                 started_clock = time.monotonic()
                 cpu_start = time.process_time()
@@ -1218,9 +1210,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                         if reader.failure is not None:
                             raise RuntimeError("binance_recorder_reader_failure")
                         if not reader.is_alive():
-                            raise RuntimeError(
-                                "binance_recorder_reader_thread_died"
-                            )
+                            raise RuntimeError("binance_recorder_reader_thread_died")
             finally:
                 active_primary = sys.exception()
                 stop.set()

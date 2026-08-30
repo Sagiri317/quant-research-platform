@@ -15,20 +15,14 @@ API_VERSION = "0.1"
 def list_factors(profile: ResearchProfile) -> FactorCatalogResponse:
     return FactorCatalogResponse(
         api_version=API_VERSION,
-        items=[
-            item.to_manifest()
-            for item in profile.factors.list()
-        ],
+        items=[item.to_manifest() for item in profile.factors.list()],
     )
 
 
 def list_labels(profile: ResearchProfile) -> LabelCatalogResponse:
     return LabelCatalogResponse(
         api_version=API_VERSION,
-        items=[
-            item.to_manifest()
-            for item in profile.labels.list()
-        ],
+        items=[item.to_manifest() for item in profile.labels.list()],
     )
 
 

@@ -54,13 +54,13 @@ _PORTFOLIO_SUMMARY_FIXED_WORKING_BYTES = 64 * 1024
 def write_portfolio_outputs(
     *,
     output_chunks: Iterable[
-        Mapping[str, pd.DataFrame]
-        | OwnedValue[Mapping[str, pd.DataFrame]]
+        Mapping[str, pd.DataFrame] | OwnedValue[Mapping[str, pd.DataFrame]]
     ],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     additive_cumulative_returns_factory: Callable[
         [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
-    ] | None = None,
+    ]
+    | None = None,
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
@@ -79,14 +79,14 @@ def write_portfolio_outputs(
 
 def _write_portfolio_output_chunks(
     output_chunks: Iterable[
-        Mapping[str, pd.DataFrame]
-        | OwnedValue[Mapping[str, pd.DataFrame]]
+        Mapping[str, pd.DataFrame] | OwnedValue[Mapping[str, pd.DataFrame]]
     ],
     *,
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     additive_cumulative_returns_factory: Callable[
         [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
-    ] | None = None,
+    ]
+    | None = None,
     spec: PortfolioSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
@@ -190,8 +190,7 @@ def _write_portfolio_output_chunks(
 
 def _write_portfolio_row_artifact_chunks(
     artifact_chunks: Iterable[
-        Mapping[str, pd.DataFrame]
-        | OwnedValue[Mapping[str, pd.DataFrame]]
+        Mapping[str, pd.DataFrame] | OwnedValue[Mapping[str, pd.DataFrame]]
     ],
     *,
     temp_root: Path,
@@ -200,7 +199,8 @@ def _write_portfolio_row_artifact_chunks(
     spec: PortfolioSpec,
     additive_cumulative_returns_factory: Callable[
         [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
-    ] | None = None,
+    ]
+    | None = None,
 ) -> dict[str, int]:
     all_row_artifacts = (
         row_artifacts
@@ -262,9 +262,7 @@ def _write_portfolio_row_artifact_chunks(
             ExitStack(),
         )
         writer_state.enter_context(table_state)
-        decoded_metadata[artifact_name] = dict(
-            persisted.schema.metadata or {}
-        )
+        decoded_metadata[artifact_name] = dict(persisted.schema.metadata or {})
         writer = writers.get(artifact_name)
         if writer is None:
             try:

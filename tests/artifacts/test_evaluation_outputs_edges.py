@@ -1323,23 +1323,16 @@ def test_managed_evaluation_persists_aggregate_beyond_ram_budget(
     )
     assert logical_persisted_bytes > policy.memory_budget_bytes
     persisted_metrics = pd.read_parquet(output_bundle / "metrics.parquet")
-    persisted_grouped = pd.read_parquet(
-        output_bundle / "grouped_label_values.parquet"
-    )
+    persisted_grouped = pd.read_parquet(output_bundle / "grouped_label_values.parquet")
     assert len(persisted_metrics) == total_timestamps * len(signals) * len(labels)
-    assert (
-        len(persisted_grouped)
-        == total_timestamps * len(signals) * len(labels) * 2
-    )
-    assert not persisted_metrics.duplicated(
-        ["timestamp", "signal", "label"]
-    ).any()
+    assert len(persisted_grouped) == total_timestamps * len(signals) * len(labels) * 2
+    assert not persisted_metrics.duplicated(["timestamp", "signal", "label"]).any()
     assert not persisted_grouped.duplicated(
         ["timestamp", "signal", "label", "group"]
     ).any()
-    first_metric = persisted_metrics.sort_values(
-        ["timestamp", "signal", "label"]
-    ).iloc[0]
+    first_metric = persisted_metrics.sort_values(["timestamp", "signal", "label"]).iloc[
+        0
+    ]
     assert first_metric["signal"] == "signal_0"
     assert first_metric["label"] == "label_a"
     assert first_metric["ic"] == 1.0

@@ -22,7 +22,7 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
-from tests.helpers.binance_hft import _coverage
+from tests.helpers.binance_hft import _coverage, _panel_rows, _row_timestamp_ms
 from tests.helpers.runtime_resources import capture_test_policy
 
 
@@ -83,25 +83,6 @@ def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEve
         visible_quantity=quantity,
         buyer_is_maker=maker_buyer,
     )
-
-
-def _panel_rows(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-    frames = list(
-        iter_panel_frames(
-            *args,
-            market_id="crypto",
-            asset_id="btc_usdt",
-            batch_rows=2,
-            **kwargs,
-        )
-    )
-    if not frames:
-        return []
-    return pd.concat(frames, ignore_index=True).to_dict("records")
-
-
-def _row_timestamp_ms(row: dict[str, object]) -> int:
-    return pd.Timestamp(row["timestamp"]).value // 1_000_000
 
 
 def test_l1_ofi_uses_exact_integer_tick_identity() -> None:
@@ -331,7 +312,7 @@ def test_labels_are_exact_horizon_same_segment_and_keep_zero_distinct_from_nan()
     assert math.isnan(labels[1]["future_mid_return_200ms"])
 
 
-def test_maker_bid_fill_ratio_proxy_uses_future_observed_sell_flow() -> None:
+def test_maker_bid_sell_pressure_proxy_uses_future_observed_sell_flow() -> None:
     sell_volume = [0.0, 0.5, 0.5, 0.5, 0.5, 0.0, 0.0]
     frame = pd.DataFrame(
         {
@@ -354,9 +335,13 @@ def test_maker_bid_fill_ratio_proxy_uses_future_observed_sell_flow() -> None:
         ignore_index=True,
     )
 
-    assert labels.loc[0, "maker_bid_fill_ratio_proxy_500ms"] == 1.0
-    assert labels.loc[1, "maker_bid_fill_ratio_proxy_500ms"] == 0.75
-    assert labels["maker_bid_fill_ratio_proxy_500ms"].iloc[-1:].isna().all()
+    assert "maker_bid_sell_pressure_proxy_500ms" in labels
+    assert set(column for column in labels if column.startswith("maker_bid_")) == {
+        "maker_bid_sell_pressure_proxy_500ms"
+    }
+    assert labels.loc[0, "maker_bid_sell_pressure_proxy_500ms"] == 1.0
+    assert labels.loc[1, "maker_bid_sell_pressure_proxy_500ms"] == 0.75
+    assert labels["maker_bid_sell_pressure_proxy_500ms"].iloc[-1:].isna().all()
 
 
 def test_factor_and_label_rows_reject_non_grid_gap_in_same_segment() -> None:
@@ -391,9 +376,7 @@ def test_factor_and_label_frames_match_across_chunk_boundaries() -> None:
             start_ms=0,
             end_ms=14 * HFT_GRID_MS,
             book_coverage={"s1": _coverage(0, 14 * HFT_GRID_MS + 1)},
-            trade_coverage={
-                "trade-connection-1": _coverage(0, 14 * HFT_GRID_MS + 1)
-            },
+            trade_coverage={"trade-connection-1": _coverage(0, 14 * HFT_GRID_MS + 1)},
         )
     )
     chunks = (panel.iloc[:7].copy(), panel.iloc[7:].copy())

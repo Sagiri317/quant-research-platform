@@ -297,9 +297,7 @@ def test_schema_inventory_streams_accumulated_items_over_budget(
         item = deepcopy(base_item)
         artifact_id = artifact_root.name
         item["artifact_id"] = artifact_id
-        item["logical_relative_root"] = (
-            f"data/processed/a_share/factor/{artifact_id}"
-        )
+        item["logical_relative_root"] = f"data/processed/a_share/factor/{artifact_id}"
         item["warnings"] = ["w" * 1000]
         kwargs["retained_items"].enter_context(
             kwargs["resource_policy"].lease("schema.inventory.items", 500)
@@ -329,9 +327,7 @@ def test_schema_inventory_item_state_is_admitted_before_aggregation(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=16 * 1024,
     )
-    artifact_root = (
-        tmp_path / "data" / "processed" / "a_share" / "market_bars" / "demo"
-    )
+    artifact_root = tmp_path / "data" / "processed" / "a_share" / "market_bars" / "demo"
     inspection = SimpleNamespace(
         spec={"primary_key": ["timestamp"], "partition_columns": []},
         columns=("timestamp", "value"),
@@ -342,11 +338,13 @@ def test_schema_inventory_item_state_is_admitted_before_aggregation(
         date_min="2026-01-01",
         date_max="2026-01-01",
     )
+
     def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
         return OwnedValue(
             inspection,
             resource_policy.lease("test.schema.inspection", 0),
         )
+
     monkeypatch.setattr(
         schema_inventory,
         "_inspect_dataset_session_owned",

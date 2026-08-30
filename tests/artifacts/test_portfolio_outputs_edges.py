@@ -108,6 +108,8 @@ def test_portfolio_statistic_reason_pair_rejects_tampering(mutation: str) -> Non
             artifact_name="performance_summary",
             spec=spec,
         )
+
+
 def test_public_portfolio_writer_forwards_cumulative_factory(
     tmp_path: Path,
 ) -> None:
@@ -119,9 +121,7 @@ def test_public_portfolio_writer_forwards_cumulative_factory(
         if name != "additive_cumulative_returns"
     )
     output_bundle = public_write_portfolio_outputs(
-        output_chunks=(
-            {name: artifacts[name] for name in row_artifacts},
-        ),
+        output_chunks=({name: artifacts[name] for name in row_artifacts},),
         summary_factory=lambda: {
             name: artifacts[name]
             for name in artifacts
@@ -364,9 +364,11 @@ def test_portfolio_row_writers_disk_preflight_happens_before_first_pull(
         )
 
     assert pulls == 0
-    assert observed["reserve_bytes"] == (
-        len(row_artifacts) + 1
-    ) * portfolio_outputs._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+    assert (
+        observed["reserve_bytes"]
+        == (len(row_artifacts) + 1)
+        * portfolio_outputs._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+    )
     assert not (tmp_path / "outputs" / output_spec.output_id).exists()
     assert not list((tmp_path / "outputs").glob(".a-*"))
 
@@ -749,9 +751,7 @@ def test_portfolio_metadata_reuses_complete_business_owner_graph(
     elif mutation == "weight_mode":
         metadata["weight_config"]["portfolio_mode"] = "unknown"
     elif mutation == "weight_quantile_sum":
-        metadata["weight_config"].update(
-            {"top_quantile": 0.8, "bottom_quantile": 0.8}
-        )
+        metadata["weight_config"].update({"top_quantile": 0.8, "bottom_quantile": 0.8})
     elif mutation == "weight_inverse_risk":
         metadata["weight_config"].update(
             {"method": "inverse_vol_scaled_quantile", "risk_column": None}
@@ -782,9 +782,7 @@ def test_portfolio_metadata_reuses_complete_business_owner_graph(
     elif mutation == "signal_filter_column":
         metadata["signals"][0]["source_column"] = "eligible"
     else:
-        metadata["signals"][0]["source_column"] = metadata[
-            "return_source_column"
-        ]
+        metadata["signals"][0]["source_column"] = metadata["return_source_column"]
 
     with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
         validation.validate_portfolio_output_metadata_shape(metadata)

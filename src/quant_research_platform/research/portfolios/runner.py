@@ -76,13 +76,12 @@ _PORTFOLIO_SQLITE_STARTUP_BYTES = 64 * _PORTFOLIO_SQLITE_PAGE_BYTES
 class PortfolioResult:
     spec: PortfolioSpec
     output_chunks: Iterable[
-        Mapping[str, pd.DataFrame]
-        | OwnedValue[Mapping[str, pd.DataFrame]]
+        Mapping[str, pd.DataFrame] | OwnedValue[Mapping[str, pd.DataFrame]]
     ]
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]]
-    additive_cumulative_returns_factory: Callable[
-        [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
-    ] | None = field(
+    additive_cumulative_returns_factory: (
+        Callable[[], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]] | None
+    ) = field(
         default=None,
         repr=False,
         compare=False,
@@ -111,8 +110,7 @@ class PortfolioResult:
             if primary is None:
                 raise
             primary.add_note(
-                "portfolio result cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
+                f"portfolio result cleanup also failed: {type(cleanup_error).__name__}"
             )
 
 
@@ -298,9 +296,7 @@ def _build_portfolio_result_from_research_dataset(
         "feature": tuple(dataset_spec.feature_columns),
         "prediction": tuple(signal.source_column for signal in prediction_signals),
     }
-    summary_state = _PortfolioSummaryState(
-        resource_policy=resource_policy
-    )
+    summary_state = _PortfolioSummaryState(resource_policy=resource_policy)
     try:
         summary_state.state_lease = resource_policy.lease(
             "research.portfolio.state",
@@ -317,7 +313,7 @@ def _build_portfolio_result_from_research_dataset(
         if prediction_input is not None:
             input_chunks = _align_prediction_joined_chunks(
                 input_chunks,
-                    prediction_source=prediction_input[0],
+                prediction_source=prediction_input[0],
                 primary_key=prediction_input[1],
                 input_columns=prediction_input[2],
                 sample_filter_mode=prediction_input[3],
@@ -545,16 +541,12 @@ def _iter_portfolio_output_chunks(
     *,
     source_columns_by_kind,
     resource_policy: RuntimeResourcePolicy | None,
-) -> Iterable[
-    dict[str, pd.DataFrame] | OwnedValue[dict[str, pd.DataFrame]]
-]:
+) -> Iterable[dict[str, pd.DataFrame] | OwnedValue[dict[str, pd.DataFrame]]]:
     temporal_state = _PortfolioTemporalState()
     saw_rows = False
     rolling_lease: MemoryLease | None = None
     input_cleanup = ExitStack()
-    active_chunks = input_cleanup.enter_context(
-        closing_iterator(iter(chunks))
-    )
+    active_chunks = input_cleanup.enter_context(closing_iterator(iter(chunks)))
 
     try:
         for chunk in active_chunks:
@@ -692,9 +684,7 @@ def _observe_portfolio_summary_chunks(
         dict[str, pd.DataFrame] | OwnedValue[dict[str, pd.DataFrame]]
     ],
     summary_state: _PortfolioSummaryState,
-) -> Iterable[
-    dict[str, pd.DataFrame] | OwnedValue[dict[str, pd.DataFrame]]
-]:
+) -> Iterable[dict[str, pd.DataFrame] | OwnedValue[dict[str, pd.DataFrame]]]:
     completed = False
     try:
         with closing_iterator(iter(output_chunks)) as active_chunks:
@@ -855,6 +845,7 @@ def _append_portfolio_return_summary(
                 float(long_count),
                 float(short_count),
             )
+
     database.executemany(
         """
         INSERT INTO returns(
@@ -962,9 +953,9 @@ def _portfolio_return_summary_frame(
     )
     if tuple(selected.columns) != tuple(RETURNS_COLUMNS):
         selected = selected.loc[:, RETURNS_COLUMNS]
-    return selected.sort_values(
-        ["signal", "timestamp"], kind="mergesort"
-    ).reset_index(drop=True)
+    return selected.sort_values(["signal", "timestamp"], kind="mergesort").reset_index(
+        drop=True
+    )
 
 
 def _iter_portfolio_additive_cumulative_chunks(
@@ -980,7 +971,7 @@ def _iter_portfolio_additive_cumulative_chunks(
     else:
         fixed_bound = _PORTFOLIO_PERIOD_WORKING_BYTES
         per_row_bound = _PORTFOLIO_ROW_WORKING_BYTES
-        available = policy.planning_headroom_bytes
+        available = policy.operation_headroom_bytes
         batch_rows = max(
             1,
             min(1024, max(1, (available - fixed_bound) // per_row_bound)),
@@ -1060,12 +1051,8 @@ def _iter_portfolio_additive_cumulative_chunks(
                             {
                                 "timestamp": pd.Timestamp(timestamp),
                                 "signal": signal_id,
-                                "gross_portfolio_return": float(
-                                    gross_values[position]
-                                ),
-                                "net_portfolio_return": float(
-                                    net_values[position]
-                                ),
+                                "gross_portfolio_return": float(gross_values[position]),
+                                "net_portfolio_return": float(net_values[position]),
                                 "cost": float(cost_values[position]),
                                 "additive_cumulative_gross_return": float(
                                     gross_cumulative[position]
@@ -1184,9 +1171,7 @@ def _portfolio_summary_memory_bound(
     return_rows = 0
     if database is not None:
         signal_rows = int(
-            database.execute(
-                "SELECT COUNT(DISTINCT signal) FROM returns"
-            ).fetchone()[0]
+            database.execute("SELECT COUNT(DISTINCT signal) FROM returns").fetchone()[0]
         )
         return_rows = int(
             database.execute("SELECT COUNT(*) FROM returns").fetchone()[0]
@@ -1210,8 +1195,7 @@ def _portfolio_summary_memory_bound(
     )
     batch_rows = min(_PORTFOLIO_STATS_BATCH_ROWS, return_rows)
     batch_bound = (
-        _PORTFOLIO_PERIOD_WORKING_BYTES
-        + batch_rows * _PORTFOLIO_ROW_WORKING_BYTES
+        _PORTFOLIO_PERIOD_WORKING_BYTES + batch_rows * _PORTFOLIO_ROW_WORKING_BYTES
         if batch_rows
         else 0
     )
@@ -1403,8 +1387,7 @@ def _close_portfolio_summary_state(summary_state: _PortfolioSummaryState) -> Non
                     cleanup_error = exc
             else:
                 primary.add_note(
-                    "portfolio summary lease close also failed: "
-                    f"{type(exc).__name__}"
+                    f"portfolio summary lease close also failed: {type(exc).__name__}"
                 )
     database = summary_state.return_database
     summary_state.return_database = None
@@ -1417,8 +1400,7 @@ def _close_portfolio_summary_state(summary_state: _PortfolioSummaryState) -> Non
                     cleanup_error = exc
             else:
                 primary.add_note(
-                    "portfolio return database close also failed: "
-                    f"{type(exc).__name__}"
+                    f"portfolio return database close also failed: {type(exc).__name__}"
                 )
     scratch = summary_state.return_scratch
     summary_state.return_scratch = None
@@ -1445,8 +1427,7 @@ def _close_portfolio_summary_state(summary_state: _PortfolioSummaryState) -> Non
                     cleanup_error = exc
             else:
                 primary.add_note(
-                    "portfolio state lease close also failed: "
-                    f"{type(exc).__name__}"
+                    f"portfolio state lease close also failed: {type(exc).__name__}"
                 )
     if cleanup_error is not None:
         raise cleanup_error
@@ -1490,16 +1471,8 @@ def _portfolio_exposure_summary(
                 "mean_net_exposure": float(stats["net_sum"]) / periods,
                 "max_gross_exposure": float(stats["max_gross"]),
                 "max_abs_net_exposure": float(stats["max_abs_net"]),
-                "mean_long_count": (
-                    long_sum / count_rows
-                    if count_rows
-                    else 0.0
-                ),
-                "mean_short_count": (
-                    short_sum / count_rows
-                    if count_rows
-                    else 0.0
-                ),
+                "mean_long_count": (long_sum / count_rows if count_rows else 0.0),
+                "mean_short_count": (short_sum / count_rows if count_rows else 0.0),
                 "mean_position_count": (float(stats["position_count_sum"]) / periods),
             }
         )

@@ -75,9 +75,7 @@ def _artifact_frame_bound(
     column_count = len(frame.columns)
     index_bytes = int(frame.index.memory_usage(deep=True))
     arrow_bytes = payload_bytes + row_count * 9 * column_count
-    timestamp_bytes = (
-        index_bytes + 9 * row_count if "timestamp" in key_columns else 0
-    )
+    timestamp_bytes = index_bytes + 9 * row_count if "timestamp" in key_columns else 0
     key_mask_bytes = index_bytes + row_count if key_columns else 0
     return payload_bytes + arrow_bytes + timestamp_bytes + key_mask_bytes
 

@@ -58,11 +58,9 @@ def write_panel(
         )
     finally:
         owned_inspection.release(owner="a_share.panel.source.inspection")
-    market_bars_row_buffer = (
-        materialization_planning.registered_output_buffer_bytes(
-            spec,
-            row_count=1,
-        )
+    market_bars_row_buffer = materialization_planning.registered_output_buffer_bytes(
+        spec,
+        row_count=1,
     )
     source_join_row_buffer = market_bars_row_buffer
     output_row_buffer = market_bars_row_buffer
@@ -140,18 +138,12 @@ def write_panel(
                     ),
                 )
                 market_bars_bytes = pandas_frame_payload_bytes(market_bars)
-                output_buffer = (
-                    materialization_planning.registered_output_buffer_bytes(
-                        spec,
-                        row_count=len(market_bars),
-                    )
+                output_buffer = materialization_planning.registered_output_buffer_bytes(
+                    spec,
+                    row_count=len(market_bars),
                 )
-                panel_bound = (
-                    output_buffer + source_bytes + market_bars_bytes
-                )
-                live.enter_context(
-                    policy.lease("a_share.panel.calculate", panel_bound)
-                )
+                panel_bound = output_buffer + source_bytes + market_bars_bytes
+                live.enter_context(policy.lease("a_share.panel.calculate", panel_bound))
                 panel = panels.compute_market_panel(
                     market_bars,
                     stock_master=stock_master,

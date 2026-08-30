@@ -42,6 +42,7 @@ def test_hft_catalog_has_one_panel_factor_label_and_research_path() -> None:
     )
     assert research.base_input_data_id == HFT_PANEL_DATA_ID
 
+
 def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> None:
     models = build_hft_model_catalog(training_row_bound=100).list()
 

@@ -77,7 +77,9 @@ def _write_evaluation_output(
             make_artifact_evaluation_group_spread_summary_frame()
             if group_spread_summary is None
             else group_spread_summary,
-            make_artifact_evaluation_metrics_frame().iloc[0:0].assign(
+            make_artifact_evaluation_metrics_frame()
+            .iloc[0:0]
+            .assign(
                 mean_n_obs=pd.Series(dtype="float64"),
                 min_n_obs=pd.Series(dtype="float64"),
                 non_empty_period_count=pd.Series(dtype="int64"),

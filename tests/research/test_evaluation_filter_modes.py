@@ -293,13 +293,11 @@ def test_evaluation_filter_modes_and_diagnostics_use_hand_calculated_values() ->
         [0.015, 0.045]
     )
     assert tradable_metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert tradable_grouped["mean_label_value"].tolist() == pytest.approx(
-        [0.01, 0.02]
-    )
+    assert tradable_grouped["mean_label_value"].tolist() == pytest.approx([0.01, 0.02])
     assert unfiltered_metrics.loc[0, "ic"] == pytest.approx(1.0)
-    assert unfiltered_grouped[
-        "mean_label_value"
-    ].tolist() == pytest.approx([0.02, 0.045])
+    assert unfiltered_grouped["mean_label_value"].tolist() == pytest.approx(
+        [0.02, 0.045]
+    )
 
 
 def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
@@ -346,9 +344,7 @@ def test_evaluation_all_nan_signal_label_reports_empty_diagnostics() -> None:
     assert metrics["ic"].isna().all()
     assert metrics["rankic"].isna().all()
     assert metrics["ic_reason"].tolist() == ["insufficient_observations"]
-    assert metrics["rankic_reason"].tolist() == [
-        "insufficient_observations"
-    ]
+    assert metrics["rankic_reason"].tolist() == ["insufficient_observations"]
     assert grouped.empty
     assert spread.empty
     assert diagnostics.rows_input == 6
@@ -794,9 +790,7 @@ def test_evaluation_filter_columns_fail_closed(
                 _iter_evaluation_output_chunks(
                     (frame,),
                     spec=spec,
-                    signal_columns=tuple(
-                        signal.signal_id for signal in spec.signals
-                    ),
+                    signal_columns=tuple(signal.signal_id for signal in spec.signals),
                     label_columns=spec.label_columns,
                     n_groups=spec.n_groups,
                     asset_column="asset_id",

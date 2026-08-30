@@ -261,9 +261,10 @@ def _build_validation_summary(
             "checked_count": len(layer_summaries),
         },
         "share_safety_scan": safety,
-        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "created_at": datetime.now(UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
     }
     for root, initial_identity, inspection_error, _facts in _iter_staged_inspections(
         database,
@@ -288,8 +289,7 @@ def _build_validation_summary(
                     )
                     final_inspection = owned_final.value
                     unchanged = (
-                        _inspection_identity_hash(final_inspection)
-                        == initial_identity
+                        _inspection_identity_hash(final_inspection) == initial_identity
                     )
             except BaseException:
                 if owned_final is not None:
@@ -306,9 +306,7 @@ def _build_validation_summary(
             final_inspection = None
             owned_final.release(owner="workflow.validation.reinspection.result")
             if not unchanged:
-                raise ValueError(
-                    "validation_summary_dataset_identity_changed"
-                )
+                raise ValueError("validation_summary_dataset_identity_changed")
     return summary
 
 
@@ -439,10 +437,12 @@ def _iter_staged_inspections(
     database: sqlite3.Connection,
     dataset_roots: tuple[Path, ...],
 ) -> Iterator[tuple[Path, str | None, str | None, dict[str, object] | None]]:
-    with closing(database.execute(
-        "SELECT root_index, identity_hash, inspection_error, facts_json "
-        "FROM inspections ORDER BY root_index"
-    )) as rows:
+    with closing(
+        database.execute(
+            "SELECT root_index, identity_hash, inspection_error, facts_json "
+            "FROM inspections ORDER BY root_index"
+        )
+    ) as rows:
         for root_index, identity_hash, inspection_error, facts_json in rows:
             yield (
                 dataset_roots[int(root_index)],
@@ -695,12 +695,14 @@ def _validate_layer_summary_graph(
         date_min: str | None = None
         date_max: str | None = None
         failed_count = 0
-        with closing(database.execute(
-            "SELECT root_index, manifest_path, facts_json "
-            "FROM inspections WHERE logical_layer = ? "
-            "AND inspection_error IS NULL ORDER BY manifest_path",
-            (logical_layer,),
-        )) as rows:
+        with closing(
+            database.execute(
+                "SELECT root_index, manifest_path, facts_json "
+                "FROM inspections WHERE logical_layer = ? "
+                "AND inspection_error IS NULL ORDER BY manifest_path",
+                (logical_layer,),
+            )
+        ) as rows:
             for _root_index, manifest_path, facts_json in rows:
                 facts = json.loads(facts_json)
                 item = {
@@ -744,10 +746,9 @@ def _validate_layer_summary_graph(
                         else max(date_max, str(facts["date_max"]))
                     )
                 if not facts["manifest_consumable"]:
-                    if (
-                        failed_count >= len(declared_failed)
-                        or declared_failed[failed_count] != str(facts["data_id"])
-                    ):
+                    if failed_count >= len(declared_failed) or declared_failed[
+                        failed_count
+                    ] != str(facts["data_id"]):
                         raise ValueError(
                             "validation_summary_layer_declaration_mismatch"
                         )
@@ -762,13 +763,15 @@ def _validate_layer_summary_graph(
             ("invalid", declared_invalid),
         ):
             observed_count = 0
-            with closing(database.execute(
-                "SELECT manifest_path FROM inspections "
-                "WHERE logical_layer = ? AND inspection_error = ? "
-                "ORDER BY manifest_path",
-                (logical_layer, error_name),
-            )) as rows:
-                for manifest_path, in rows:
+            with closing(
+                database.execute(
+                    "SELECT manifest_path FROM inspections "
+                    "WHERE logical_layer = ? AND inspection_error = ? "
+                    "ORDER BY manifest_path",
+                    (logical_layer, error_name),
+                )
+            ) as rows:
+                for (manifest_path,) in rows:
                     if (
                         observed_count >= len(declared)
                         or declared[observed_count] != manifest_path
@@ -791,9 +794,7 @@ def _validate_layer_summary_graph(
             "failed_dataset_validations": declared_failed,
             "layer_validation_status": (
                 "PASS"
-                if not declared_missing
-                and not declared_invalid
-                and not declared_failed
+                if not declared_missing and not declared_invalid and not declared_failed
                 else "FAIL"
             ),
         }
@@ -821,6 +822,7 @@ def _validate_layer_summary_graph(
         declared_invalid_all,
         declared_failed_all,
     )
+
 
 def _merge_profile(target: dict[str, int], value: object) -> None:
     profile = cast(Mapping[str, int], value)

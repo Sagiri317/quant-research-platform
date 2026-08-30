@@ -53,7 +53,6 @@ class BookBoundary:
         return self.observed_time_ns // 1_000_000
 
 
-
 @dataclass(frozen=True)
 class TradeEvent:
     capture_seq: int

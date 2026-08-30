@@ -52,7 +52,7 @@ from quant_research_platform.markets.implementations.crypto.research_datasets im
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
     HFT_EVALUATION_ID,
-    HFT_MAKER_FILL_MODEL_ID,
+    HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
     HFT_MODEL_ALGORITHMS,
     HFT_PRICE_MODEL_ALGORITHMS,
     build_hft_evaluation_catalog,
@@ -349,7 +349,7 @@ def _run_in_staging(
         )
 
         def maker_prediction_schedule() -> Iterator[dict[str, Any]]:
-            for row in decisions_for(HFT_MAKER_FILL_MODEL_ID):
+            for row in decisions_for(HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID):
                 if row.pop("prediction_score") >= 0.5:
                     yield row
 
@@ -376,9 +376,9 @@ def _run_in_staging(
         execution_payload = write_crypto_hft_execution_artifact(
             staging / execution_relative,
             taker_model_id=_TAKER_MODEL_ID,
-            maker_policy_id="public_l2_fill_ratio_proxy_gated_maker",
+            maker_policy_id="public_l2_sell_pressure_proxy_gated_maker",
             maker_prediction_used=True,
-            maker_model_id=HFT_MAKER_FILL_MODEL_ID,
+            maker_model_id=HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
             source_identity=run.source_identity,
             panel_id=HFT_PANEL_DATA_ID,
             factor_id=HFT_FACTOR_DATA_ID,
@@ -593,7 +593,7 @@ def _prediction_joined_frames(
                 session,
                 target_chunk_bytes=max(
                     1,
-                    resource_policy.planning_headroom_bytes,
+                    resource_policy.operation_headroom_bytes,
                 ),
             )
             joined = _iter_prediction_joined_chunks(
@@ -691,7 +691,7 @@ def _maker_quote_schedule(
     ) as session:
         chunks = iter_dataset_chunks(
             session,
-            target_chunk_bytes=max(1, resource_policy.planning_headroom_bytes),
+            target_chunk_bytes=max(1, resource_policy.operation_headroom_bytes),
         )
         with closing_iterator(chunks):
             for frame in chunks:

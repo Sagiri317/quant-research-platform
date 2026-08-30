@@ -56,17 +56,18 @@ def _write_prediction_output(
     if output_chunks is None:
         output_chunks = () if frame is None else (frame,)
     if model_metadata is None:
-        model_metadata = (
-            {} if frame is None else frame.attrs.get("model_metadata", {})
-        )
+        model_metadata = {} if frame is None else frame.attrs.get("model_metadata", {})
     metadata_factory = prediction_metadata_factory
     if metadata_factory is None:
         if frame is None:
+
             def metadata_factory():
                 return {}
         else:
+
             def metadata_factory():
                 return frame.attrs.get("prediction_metadata", {})
+
     return outputs.write_prediction_outputs(
         spec=spec,
         output_spec=output_spec,
@@ -753,8 +754,7 @@ def test_prediction_parquet_native_reservation_lives_through_writer_close(
 
         def _observe(self, event: str) -> None:
             assert (
-                policy.used_memory_bytes
-                > parquet_writers.EXACT_KEY_SQLITE_CACHE_BYTES
+                policy.used_memory_bytes > parquet_writers.EXACT_KEY_SQLITE_CACHE_BYTES
             )
             events.append(event)
 

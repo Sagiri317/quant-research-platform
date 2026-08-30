@@ -24,8 +24,7 @@ def handle_preserving_primary(handle: Any) -> Iterator[Any]:
             handle.close()
         except BaseException as close_error:
             primary.add_note(
-                "scratch handle close also failed: "
-                f"{type(close_error).__name__}"
+                f"scratch handle close also failed: {type(close_error).__name__}"
             )
         raise
     else:
@@ -109,14 +108,13 @@ def open_owned_scratch_file(
             os.close(descriptor)
         except BaseException as cleanup_error:
             primary.add_note(
-                "scratch descriptor close also failed: "
-                f"{type(cleanup_error).__name__}"
+                f"scratch descriptor close also failed: {type(cleanup_error).__name__}"
             )
         try:
             remove_owned_scratch(path)
         except BaseException as cleanup_error:
             primary.add_note(
-                "scratch cleanup also failed: " f"{type(cleanup_error).__name__}"
+                f"scratch cleanup also failed: {type(cleanup_error).__name__}"
             )
         raise
 

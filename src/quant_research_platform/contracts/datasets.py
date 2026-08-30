@@ -55,8 +55,7 @@ class ResearchDatasetSpec(DataSpec):
             MappingProxyType(dict(self.column_roles)),
         )
         if not isinstance(self.key_coverage, Mapping) or any(
-            type(data_id) is not str or not data_id
-            for data_id in self.key_coverage
+            type(data_id) is not str or not data_id for data_id in self.key_coverage
         ):
             raise ValueError("invalid_research_key_coverage")
         if any(type(policy) is not str for policy in self.key_coverage.values()):

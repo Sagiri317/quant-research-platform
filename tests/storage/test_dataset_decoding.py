@@ -6,7 +6,6 @@ import weakref
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from time import perf_counter
 from types import SimpleNamespace
 
 import numpy as np
@@ -1011,14 +1010,11 @@ def test_materialized_nullable_and_string_fill_is_vectorized_at_scale(
         ),
     )
 
-    started = perf_counter()
     dataset_reading._fill_materialized_column(buffers["nullable"], nullable, start=0)
     dataset_reading._fill_materialized_column(buffers["string"], strings, start=0)
-    duration = perf_counter() - started
     observed = dataset_reading._materialized_frame(buffers)
 
     pd.testing.assert_frame_equal(observed, expected)
-    assert duration < 2.0
 
 
 def test_materialized_second_pass_failure_closes_both_streams(

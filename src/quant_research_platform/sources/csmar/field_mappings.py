@@ -196,6 +196,7 @@ COLUMN_ALIASES = {
     },
 }
 
+
 def _validate_mapping_facts(
     mappings: Mapping[str, Mapping[str, str]],
     aliases_by_dataset: Mapping[str, Mapping[str, tuple[str, ...]]],
@@ -228,6 +229,8 @@ COLUMN_ALIASES = MappingProxyType(
         for name, values in COLUMN_ALIASES.items()
     }
 )
+
+
 def missing_raw_columns(frame: pd.DataFrame, dataset: str) -> list[str]:
     """Return provider columns missing from a mappable raw export frame."""
 

@@ -54,9 +54,7 @@ def _iter_test_raw_envelopes(
                         if not isinstance(owned, OwnedValue):
                             raise TypeError("invalid_binance_owned_frame")
                         if owned.lease is not lease:
-                            raise RuntimeError(
-                                "runtime_memory_lease_transfer_mismatch"
-                            )
+                            raise RuntimeError("runtime_memory_lease_transfer_mismatch")
                         lease.transfer("tests.binance.raw.consumer")
                         yield from owned.value
                         del owned
@@ -87,10 +85,14 @@ def test_binance_materializer_rejects_file_alias_before_publication(
             raw_root=raw_root,
             data_ids=("market_bars_1m",),
         )
-    assert not StorageLayout(project_root=tmp_path).interim_data_root(
-        ids.SOURCE_ID,
-        "market_bars_1m",
-    ).exists()
+    assert (
+        not StorageLayout(project_root=tmp_path)
+        .interim_data_root(
+            ids.SOURCE_ID,
+            "market_bars_1m",
+        )
+        .exists()
+    )
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
         tuple(_iter_test_raw_envelopes(alias_file))
@@ -118,10 +120,14 @@ def test_binance_materializer_rejects_directory_alias_before_publication(
             raw_root=raw_root,
             data_ids=("market_bars_1m",),
         )
-    assert not StorageLayout(project_root=tmp_path).interim_data_root(
-        ids.SOURCE_ID,
-        "market_bars_1m",
-    ).exists()
+    assert (
+        not StorageLayout(project_root=tmp_path)
+        .interim_data_root(
+            ids.SOURCE_ID,
+            "market_bars_1m",
+        )
+        .exists()
+    )
 
 
 def test_binance_raw_reader_rejects_replacement_before_open(tmp_path: Path) -> None:
@@ -453,6 +459,7 @@ def test_binance_raw_exports_rejects_invalid_market_payload_values(
     _write_jsonl(trade_path, trade)
     with pytest.raises(ValueError, match="invalid_binance_agg_trade_id_range"):
         tuple(_iter_test_raw_envelopes(trade_path))
+
 
 def test_binance_raw_exports_rejects_taker_buy_volume_above_volume(
     tmp_path: Path,

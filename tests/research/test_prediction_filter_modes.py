@@ -123,10 +123,10 @@ def test_prediction_sample_filter_modes_metadata_and_label_free_generation(
     model_catalog = ModelCatalog(
         (
             ModelSpec(
-            model_id="linear_eligible",
-            model_algorithm="linear_regression",
-            input_factor_columns=("factor",),
-            label_column="label",
+                model_id="linear_eligible",
+                model_algorithm="linear_regression",
+                input_factor_columns=("factor",),
+                label_column="label",
             ),
         )
     )
@@ -283,22 +283,22 @@ def test_prediction_open_ended_oos_model_metadata_uses_effective_test_end(
     model_catalog = ModelCatalog(
         (
             ModelSpec(
-            model_id="linear_open_ended",
-            model_algorithm="linear_regression",
-            input_factor_columns=("factor",),
-            label_column="label",
+                model_id="linear_open_ended",
+                model_algorithm="linear_regression",
+                input_factor_columns=("factor",),
+                label_column="label",
             ),
         )
     )
     prediction_catalog = PredictionCatalog(
         (
             PredictionSpec(
-            prediction_id="pred_open_ended",
-            model_id="linear_open_ended",
-            research_dataset_id="demo_filter",
-            train_end="2024-01-02",
-            test_start="2024-01-03",
-            test_end=None,
+                prediction_id="pred_open_ended",
+                model_id="linear_open_ended",
+                research_dataset_id="demo_filter",
+                train_end="2024-01-02",
+                test_start="2024-01-03",
+                test_end=None,
             ),
         )
     )
@@ -351,22 +351,22 @@ def test_prediction_handoff_records_window_override_metadata(tmp_path: Path) -> 
     model_catalog = ModelCatalog(
         (
             ModelSpec(
-            model_id="linear_eligible",
-            model_algorithm="linear_regression",
-            input_factor_columns=("factor",),
-            label_column="label",
+                model_id="linear_eligible",
+                model_algorithm="linear_regression",
+                input_factor_columns=("factor",),
+                label_column="label",
             ),
         )
     )
     prediction_catalog = PredictionCatalog(
         (
             PredictionSpec(
-            prediction_id="pred_override",
-            model_id="linear_eligible",
-            research_dataset_id="demo_filter",
-            train_end="2024-01-01",
-            test_start="2024-01-04",
-            test_end="2024-01-04",
+                prediction_id="pred_override",
+                model_id="linear_eligible",
+                research_dataset_id="demo_filter",
+                train_end="2024-01-01",
+                test_start="2024-01-04",
+                test_end="2024-01-04",
             ),
         )
     )
@@ -439,22 +439,22 @@ def test_prediction_handoff_model_fit_does_not_read_test_window_labels(
     model_catalog = ModelCatalog(
         (
             ModelSpec(
-            model_id="linear_eligible",
-            model_algorithm="linear_regression",
-            input_factor_columns=("factor",),
-            label_column="label",
+                model_id="linear_eligible",
+                model_algorithm="linear_regression",
+                input_factor_columns=("factor",),
+                label_column="label",
             ),
         )
     )
     prediction_catalog = PredictionCatalog(
         (
             PredictionSpec(
-            prediction_id="pred_no_leakage",
-            model_id="linear_eligible",
-            research_dataset_id="demo_filter",
-            train_end="2024-01-02",
-            test_start="2024-01-03",
-            test_end="2024-01-03",
+                prediction_id="pred_no_leakage",
+                model_id="linear_eligible",
+                research_dataset_id="demo_filter",
+                train_end="2024-01-02",
+                test_start="2024-01-03",
+                test_end="2024-01-03",
             ),
         )
     )
@@ -763,22 +763,22 @@ def test_prediction_handoff_empty_training_window_fails_closed(
     model_catalog = ModelCatalog(
         (
             ModelSpec(
-            model_id="linear_eligible",
-            model_algorithm="linear_regression",
-            input_factor_columns=("factor",),
-            label_column="label",
+                model_id="linear_eligible",
+                model_algorithm="linear_regression",
+                input_factor_columns=("factor",),
+                label_column="label",
             ),
         )
     )
     prediction_catalog = PredictionCatalog(
         (
             PredictionSpec(
-            prediction_id="pred_empty_train",
-            model_id="linear_eligible",
-            research_dataset_id="demo_filter",
-            train_end="2024-01-02",
-            test_start="2024-01-03",
-            test_end="2024-01-03",
+                prediction_id="pred_empty_train",
+                model_id="linear_eligible",
+                research_dataset_id="demo_filter",
+                train_end="2024-01-02",
+                test_start="2024-01-03",
+                test_end="2024-01-03",
             ),
         )
     )

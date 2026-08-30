@@ -174,9 +174,7 @@ def _fingerprint_dataset_session_owned_with_lease(
         partition_hash_sum[partition] = (
             partition_hash_sum.get(partition, 0) + chunk_sum
         ) % 2**64
-        partition_hash_xor[partition] = (
-            partition_hash_xor.get(partition, 0) ^ chunk_xor
-        )
+        partition_hash_xor[partition] = partition_hash_xor.get(partition, 0) ^ chunk_xor
 
     content_hash = canonical_json_hash(
         {
@@ -307,10 +305,7 @@ def _iter_fingerprint_hashes(
             data_type = arrow_schema.field(column).type
             if pa.types.is_nested(data_type) or (
                 column in primary_key
-                and (
-                    pa.types.is_float32(data_type)
-                    or pa.types.is_float64(data_type)
-                )
+                and (pa.types.is_float32(data_type) or pa.types.is_float64(data_type))
             ):
                 raise ValueError("unsupported_dataset_fingerprint_value")
     if len(frame) == 0:

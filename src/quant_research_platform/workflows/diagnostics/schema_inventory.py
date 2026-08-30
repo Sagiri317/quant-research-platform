@@ -75,8 +75,7 @@ def iter_schema_inventory_items(
             () if important_null_count_columns is None else important_null_count_columns
         )
         if any(
-            type(column) is not str
-            or not column
+            type(column) is not str or not column
             for column in declared_important_columns
         ):
             raise ValueError("schema_inventory_important_columns_invalid")
@@ -88,6 +87,7 @@ def iter_schema_inventory_items(
             *(data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)),
         ):
             require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
+
         def generate() -> Iterator[dict[str, Any]]:
             for artifact_root in _iter_dataset_artifact_roots(root):
                 with ExitStack() as item_state:
@@ -135,9 +135,7 @@ def write_schema_inventory(
                 rendered = render_qrp_json_object(item)
                 prefix = "\n" if not found else ",\n"
                 found = True
-                yield prefix + "\n".join(
-                    "  " + line for line in rendered.splitlines()
-                )
+                yield prefix + "\n".join("  " + line for line in rendered.splitlines())
         if not found:
             raise ValueError("schema_inventory_no_datasets_found")
         yield '\n  ],\n  "schema_id": "qrp-schema-inventory"\n}\n'
@@ -508,16 +506,16 @@ def _inventory_item_upper_bound_bytes(
 ) -> int:
     year_count = 0
     if date_min is not None and date_max is not None:
-        year_count = date.fromisoformat(date_max).year - date.fromisoformat(
-            date_min
-        ).year + 1
+        year_count = (
+            date.fromisoformat(date_max).year - date.fromisoformat(date_min).year + 1
+        )
     text_bytes = len(logical_root.encode("utf-8")) + sum(
         len(value.encode("utf-8"))
         for value in (*columns, *primary_key, *partition_columns, *important_columns)
     )
-    item_entries = 2 * len(columns) + 2 * len(primary_key) + len(
-        important_columns
-    ) + year_count
+    item_entries = (
+        2 * len(columns) + 2 * len(primary_key) + len(important_columns) + year_count
+    )
     return 16 * 1024 + 4 * text_bytes + 512 * item_entries
 
 
@@ -543,7 +541,7 @@ def _aggregate_dataset_stats(
     duplicate_primary_key_count = exact_duplicate_count
     chunks = iter_dataset_chunks(
         session,
-        target_chunk_bytes=resource_policy.planning_headroom_bytes,
+        target_chunk_bytes=resource_policy.operation_headroom_bytes,
     )
     with closing_iterator(chunks):
         for frame in chunks:

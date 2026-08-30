@@ -19,7 +19,7 @@ def closing_iterator(iterator: Iterator[object]) -> Iterator[object]:
                 close()
         except BaseException as cleanup_error:
             primary.add_note(
-                "iterator close also failed: " f"{type(cleanup_error).__name__}"
+                f"iterator close also failed: {type(cleanup_error).__name__}"
             )
         raise
     else:

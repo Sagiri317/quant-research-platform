@@ -259,9 +259,13 @@ def test_tradability_constraints_apply_real_buy_sell_permissions(
     can_sell: bool,
     expected: float,
 ) -> None:
-    frame = _compute_frame().iloc[[0]].assign(
-        can_enter=can_buy,
-        can_exit=can_sell,
+    frame = (
+        _compute_frame()
+        .iloc[[0]]
+        .assign(
+            can_enter=can_buy,
+            can_exit=can_sell,
+        )
     )
     spec = ComputePanelSpec(signal_columns=("signal",), label_column="label")
     config = TradabilityConfig(

@@ -114,8 +114,7 @@ def write_evaluation_outputs_from_chunks(
 def write_portfolio_outputs(
     *,
     output_chunks: Iterable[
-        Mapping[str, pd.DataFrame]
-        | OwnedValue[Mapping[str, pd.DataFrame]]
+        Mapping[str, pd.DataFrame] | OwnedValue[Mapping[str, pd.DataFrame]]
     ],
     summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
     additive_cumulative_returns_factory: Callable[

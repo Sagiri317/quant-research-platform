@@ -123,10 +123,14 @@ def test_price_volume_moments_distinguish_constant_from_tiny_variation() -> None
     panel.loc[5, "period_return"] = -1e-320
     panel.loc[:, "turnover"] = panel["period_return"]
 
-    result = calculate_price_volume_factors(
-        panel,
-        factor_columns=("vol_5d", "downside_vol_5d", "skew_5d", "kurt_5d"),
-    ).sort_values(list(KEY_COLUMNS)).reset_index(drop=True)
+    result = (
+        calculate_price_volume_factors(
+            panel,
+            factor_columns=("vol_5d", "downside_vol_5d", "skew_5d", "kurt_5d"),
+        )
+        .sort_values(list(KEY_COLUMNS))
+        .reset_index(drop=True)
+    )
 
     assert result.loc[4, "vol_5d"] == 0.0
     assert result.loc[4, ["skew_5d", "kurt_5d"]].isna().all()
@@ -203,12 +207,12 @@ def test_reference_qrp_window_moment_distinguishes_constant_from_variation() -> 
     constant_kurt = reference_qrp_window_moment_by_asset(
         constant, groups, 5, "kurt"
     ).iloc[-1]
-    varied_skew = reference_qrp_window_moment_by_asset(
-        varied, groups, 5, "skew"
-    ).iloc[-1]
-    varied_kurt = reference_qrp_window_moment_by_asset(
-        varied, groups, 5, "kurt"
-    ).iloc[-1]
+    varied_skew = reference_qrp_window_moment_by_asset(varied, groups, 5, "skew").iloc[
+        -1
+    ]
+    varied_kurt = reference_qrp_window_moment_by_asset(varied, groups, 5, "kurt").iloc[
+        -1
+    ]
 
     assert pd.isna(constant_skew)
     assert pd.isna(constant_kurt)

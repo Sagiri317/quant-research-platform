@@ -21,10 +21,8 @@ from tests.storage.low_level_fixtures import (
 def test_storage_duplicate_primary_key_fails_closed(tmp_path: Path) -> None:
     frame = pd.concat(
         [
-            make_correctness_dataset_frame(value_column="factor_value")
-            .iloc[:1],
-            make_correctness_dataset_frame(value_column="factor_value")
-            .iloc[:1],
+            make_correctness_dataset_frame(value_column="factor_value").iloc[:1],
+            make_correctness_dataset_frame(value_column="factor_value").iloc[:1],
         ],
         ignore_index=True,
     )

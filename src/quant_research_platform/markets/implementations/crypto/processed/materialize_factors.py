@@ -112,13 +112,14 @@ def _iter_factor_chunks(
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        available_bytes = max(1, resource_policy.planning_headroom_bytes)
+        available_bytes = max(1, resource_policy.operation_headroom_bytes)
         chunk_target_bytes = max(1, available_bytes // 8)
         producer_bound = max(1, available_bytes // 2)
         active_key: tuple[str, str] | None = None
         active_carry: pd.DataFrame | None = None
         carry_lease: MemoryLease | None = None
         order_state = validation.OrderedDependencyState()
+
         def close_carry() -> None:
             nonlocal active_carry, carry_lease
             active_carry = None
@@ -126,12 +127,15 @@ def _iter_factor_chunks(
                 carry_lease.close()
                 carry_lease = None
 
-        with ExitStack() as cleanup, validation.crypto_asset_session_views(
-            panel_session,
-            columns=("market_id", "asset_id"),
-            target_chunk_bytes=chunk_target_bytes,
-            error="invalid_crypto_panel_physical_asset_grouping",
-        ) as asset_views:
+        with (
+            ExitStack() as cleanup,
+            validation.crypto_asset_session_views(
+                panel_session,
+                columns=("market_id", "asset_id"),
+                target_chunk_bytes=chunk_target_bytes,
+                error="invalid_crypto_panel_physical_asset_grouping",
+            ) as asset_views,
+        ):
             cleanup.callback(close_carry)
             lease: MemoryLease | None = None
             for (market_id, asset_id), asset_session in asset_views:
@@ -192,7 +196,7 @@ def _iter_factor_chunks(
                         output = factors.loc[factors[_CORE_ROW]].copy()
                         carry_bound = min(
                             max(1, lease.reserved_bytes),
-                            max(1, resource_policy.planning_headroom_bytes),
+                            max(1, resource_policy.operation_headroom_bytes),
                         )
                         next_carry_lease = resource_policy.lease(
                             "crypto.factor.carry",
@@ -232,9 +236,7 @@ def _iter_factor_chunks(
                             result_bytes = pandas_frame_payload_bytes(result)
                             producer_payload_bytes = pandas_frame_payload_bytes(panel)
                             actual_bound = (
-                                result_bytes
-                                + producer_payload_bytes
-                                + 128 * 1024
+                                result_bytes + producer_payload_bytes + 128 * 1024
                             )
                             if actual_bound > lease.reserved_bytes:
                                 raise ValueError("crypto_factor_bound_invalid")

@@ -128,8 +128,9 @@ def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> 
     positions = pd.DataFrame(position_rows)
     chunks = tuple(
         (
-            returns.loc[returns["timestamp"].isin(timestamps[start : start + 2])]
-            .reset_index(drop=True),
+            returns.loc[
+                returns["timestamp"].isin(timestamps[start : start + 2])
+            ].reset_index(drop=True),
             positions.loc[
                 positions["timestamp"].isin(timestamps[start : start + 2])
             ].reset_index(drop=True),
@@ -153,7 +154,9 @@ def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> 
         )
     summary_state.returns_complete = True
     actual_additive_cumulative = pd.concat(
-        list(portfolio_runner._iter_portfolio_additive_cumulative_chunks(summary_state)),
+        list(
+            portfolio_runner._iter_portfolio_additive_cumulative_chunks(summary_state)
+        ),
         ignore_index=True,
     )
     try:
@@ -209,9 +212,11 @@ def test_portfolio_streaming_diagnostics_match_canonical_two_signal_chunks() -> 
         assert a_cumulative["drawdown"].tolist() == pytest.approx(
             [-0.10, -0.08, -0.06, -0.04, -0.02, 0.0]
         )
-        a_summary = actual["performance_summary"].loc[
-            lambda frame: frame["signal"] == "a"
-        ].iloc[0]
+        a_summary = (
+            actual["performance_summary"]
+            .loc[lambda frame: frame["signal"] == "a"]
+            .iloc[0]
+        )
         assert a_summary["max_drawdown"] == pytest.approx(-0.10)
         assert a_summary["drawdown_duration"] == len(timestamps)
         assert a_summary["max_drawdown_start"] == ""
@@ -367,8 +372,7 @@ def test_portfolio_return_summary_checks_disk_before_sqlite_growth(
     assert len(calls) == 2
     assert state.return_database is not None
     assert (
-        state.return_database.execute("SELECT COUNT(*) FROM returns").fetchone()[0]
-        == 0
+        state.return_database.execute("SELECT COUNT(*) FROM returns").fetchone()[0] == 0
     )
     portfolio_runner._close_portfolio_summary_state(state)
     assert state.return_database is None
@@ -423,11 +427,7 @@ def test_portfolio_return_summary_grows_main_and_temp_page_caps_before_insert(
         )
         for schema, startup_cap in startup_caps.items():
             assert (
-                int(
-                    database.execute(
-                        f"PRAGMA {schema}.max_page_count"
-                    ).fetchone()[0]
-                )
+                int(database.execute(f"PRAGMA {schema}.max_page_count").fetchone()[0])
                 > startup_cap
             )
         assert (
@@ -484,10 +484,7 @@ def test_portfolio_return_summary_admits_cumulative_query_workspace(
         portfolio_runner._portfolio_summary_outputs(state)
         assert phases == ["query"]
         assert calls[-1] >= (
-            2
-            * 2
-            * rows
-            * portfolio_runner._PORTFOLIO_SQLITE_ROW_DISK_BYTES
+            2 * 2 * rows * portfolio_runner._PORTFOLIO_SQLITE_ROW_DISK_BYTES
         )
         assert calls[-1] > calls[-2]
     finally:
@@ -969,9 +966,7 @@ def test_dense_portfolio_temporal_state_matches_full_for_lag_zero_one_n(
             "timestamp": np.repeat(timestamps, 3),
             "asset_id": ["A", "B", "C"] * 6,
             "raw": [
-                float((step + asset) % 5)
-                for step in range(6)
-                for asset in range(3)
+                float((step + asset) % 5) for step in range(6) for asset in range(3)
             ],
             "forward_return": [0.01, -0.02, 0.03] * 6,
         }
@@ -1012,9 +1007,7 @@ def test_portfolio_runner_joins_persisted_prediction_primary_key_with_explicit_g
         prediction_frame=prediction,
         prediction_metadata=manifest["metadata"],
     )
-    expected_chunks = [
-        item.value for item in expected_result.output_chunks
-    ]
+    expected_chunks = [item.value for item in expected_result.output_chunks]
     expected_summary = expected_result.summary_factory()
     expected_result.close()
 
@@ -1354,19 +1347,19 @@ def _prediction_portfolio_inputs(tmp_path):
     portfolio_catalog = PortfolioCatalog(
         (
             PortfolioSpec(
-            portfolio_id="demo_prediction_portfolio",
-            market_id=MarketId("a_share"),
-            research_dataset_id=dataset_spec.data_id,
-            signals=(
-                SignalSpec(
-                    signal_id=prediction_spec.prediction_id,
-                    source_column=prediction_spec.prediction_column,
-                    source_kind="prediction",
+                portfolio_id="demo_prediction_portfolio",
+                market_id=MarketId("a_share"),
+                research_dataset_id=dataset_spec.data_id,
+                signals=(
+                    SignalSpec(
+                        signal_id=prediction_spec.prediction_id,
+                        source_column=prediction_spec.prediction_column,
+                        source_kind="prediction",
+                    ),
                 ),
-            ),
-            return_source_column="forward_return",
-            rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
-            execution_lag_steps=0,
+                return_source_column="forward_return",
+                rebalance_frequency=frequency_ids.DAILY_FREQUENCY_SLUG,
+                execution_lag_steps=0,
             ),
         )
     )

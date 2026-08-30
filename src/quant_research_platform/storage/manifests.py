@@ -252,9 +252,10 @@ def build_layer_summary(
         "invalid_dataset_manifests": invalid,
         "failed_dataset_validations": failed,
         "layer_validation_status": status,
-        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "created_at": datetime.now(UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
     }
     return payload
 
@@ -277,9 +278,10 @@ def build_run_data_summary(
         "layers": layers,
         "run_validation_status": "PASS" if not failed else "FAIL",
         "failed_layers": failed,
-        "created_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "created_at": datetime.now(UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
     }
     return payload
 

@@ -40,8 +40,7 @@ def price_volume_factor_definitions(
                 output_column=factor_id,
                 display_name=factor_id,
                 description=(
-                    "Price-volume factor registered by the QRP 0.1 "
-                    "factor catalog."
+                    "Price-volume factor registered by the QRP 0.1 factor catalog."
                 ),
                 family=PRICE_VOLUME_FACTOR_FAMILY,
                 required_windows=required_windows(factor_id),

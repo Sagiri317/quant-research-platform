@@ -191,10 +191,13 @@ def run_local_verification(
     preflight_model_specs(config.profile.models.list())
     staged_root = run_root.with_name(owned_scratch_name(".lv-", uuid4().hex[:8]))
     staged_claimed = False
-    with runtime_resource_policy_scope(
-        None,
-        explicit_cap_bytes=config.explicit_memory_cap_bytes,
-    ) as resource_policy, ExitStack() as retained_state:
+    with (
+        runtime_resource_policy_scope(
+            None,
+            explicit_cap_bytes=config.explicit_memory_cap_bytes,
+        ) as resource_policy,
+        ExitStack() as retained_state,
+    ):
         try:
             if replacing:
                 _cleanup_previous_generation(run_root, run_id=run_id)
@@ -518,9 +521,10 @@ def _run_local_verification_with_policy(
     seed_payload = _read_run_json(run_root)
     run_payload = {
         **seed_payload,
-        "completed_at": datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-            "+00:00", "Z"
-        ),
+        "completed_at": datetime.now(UTC)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
         "status": status_payload,
         "code": {},
         "config": {
@@ -799,8 +803,8 @@ def _run_json_path(run_root: Path) -> Path:
 
 
 def _write_seed_run_json(run_root: Path, *, run_id: str) -> Path:
-    created_at = datetime.now(UTC).replace(microsecond=0).isoformat().replace(
-        "+00:00", "Z"
+    created_at = (
+        datetime.now(UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
     )
     return write_json_evidence(
         _run_json_path(run_root),

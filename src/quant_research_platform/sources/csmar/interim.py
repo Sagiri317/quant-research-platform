@@ -32,6 +32,7 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     OwnedValue,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
@@ -515,9 +516,7 @@ def _parse_optional_csmar_date(
     error_code: str,
 ) -> pd.Series:
     text = series.copy()
-    blank = text.map(
-        lambda value: isinstance(value, str) and not value.strip()
-    )
+    blank = text.map(lambda value: isinstance(value, str) and not value.strip())
     return strict_timestamp_series(
         text.mask(blank),
         error=f"{error_code}: {column}",
@@ -589,9 +588,7 @@ def _iter_interim_frames(
                         )
                         source_metadata = source_parent.lstat()
                         if not stat.S_ISDIR(source_metadata.st_mode):
-                            raise ValueError(
-                                "csmar_reference_source_volume_mismatch"
-                            )
+                            raise ValueError("csmar_reference_source_volume_mismatch")
                         source_device = source_metadata.st_dev
                     else:
                         source_device = None
@@ -881,7 +878,7 @@ def _iter_pruned_interim_frames(
                         if stop < len(chunk):
                             remainder_bound = min(
                                 lease.reserved_bytes,
-                                max(1, policy.planning_headroom_bytes),
+                                max(1, policy.operation_headroom_bytes),
                             )
                             next_pending_lease = policy.lease(
                                 "source.csmar.interim.pending",
@@ -902,7 +899,10 @@ def _iter_pruned_interim_frames(
                                 next_pending_bound = remainder_bound
                                 next_pending_span = span
                             except BaseException:
-                                next_pending_lease.close()
+                                _close_lease_preserving_primary(
+                                    next_pending_lease,
+                                    owner="source.csmar.interim.pending",
+                                )
                                 raise
                         if data_id not in SOURCE_REFERENCE_DATA_IDS:
                             lease.shrink_to(chunk_bytes + pruned_bytes + 64 * 1024)
@@ -952,7 +952,10 @@ def _iter_pruned_interim_frames(
             finally:
                 pending_frame = None
                 if pending_lease is not None:
-                    pending_lease.close()
+                    _close_lease_preserving_primary(
+                        pending_lease,
+                        owner="source.csmar.interim.pending",
+                    )
                     pending_lease = None
                 pending_bound = None
                 pending_span = None
@@ -979,7 +982,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + chunk_bytes + normalization_preallocation_bytes,
-        policy.planning_headroom_bytes,
+        policy.operation_headroom_bytes,
     )
     normalized = normalize_raw_frame(chunk, data_id)
     normalized_bytes = pandas_frame_payload_bytes(normalized)
@@ -991,7 +994,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filter_preallocation_bytes,
-        policy.planning_headroom_bytes,
+        policy.operation_headroom_bytes,
     )
     filtered = _filter_normalized_frame(
         normalized,
@@ -1002,14 +1005,14 @@ def _transform_interim_chunk(
     filtered_bytes = pandas_frame_payload_bytes(filtered)
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filtered_bytes,
-        policy.planning_headroom_bytes,
+        policy.operation_headroom_bytes,
     )
     del normalized
     if filtered.empty:
         return filtered, {}
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + filtered_bytes,
-        policy.planning_headroom_bytes,
+        policy.operation_headroom_bytes,
     )
     pruned, report = _apply_output_column_rules_validated(
         filtered,
@@ -1018,7 +1021,7 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + pandas_frame_payload_bytes(pruned),
-        policy.planning_headroom_bytes,
+        policy.operation_headroom_bytes,
     )
     del filtered
     return pruned, report
@@ -1150,9 +1153,7 @@ def _iter_deduped_reference_frames(
                             )
                             position_bytes = len(source_frame) * array("Q").itemsize
                             conservative_bound = (
-                                3 * source_frame_bytes
-                                + position_bytes
-                                + 64 * 1024
+                                3 * source_frame_bytes + position_bytes + 64 * 1024
                             )
                             if conservative_bound > lease.reserved_bytes:
                                 del source_frame, owned
@@ -1187,9 +1188,9 @@ def _iter_deduped_reference_frames(
                                 del table
                         exact_duplicate_count += duplicate_count
                         if keep_positions:
-                            output = source_frame.iloc[
-                                keep_positions.view
-                            ].reset_index(drop=True)
+                            output = source_frame.iloc[keep_positions.view].reset_index(
+                                drop=True
+                            )
                             output_bytes = pandas_frame_payload_bytes(output)
                             actual_bound = (
                                 source_frame_bytes

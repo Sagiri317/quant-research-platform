@@ -233,9 +233,7 @@ def _calculate_market_panel(
     )
     count_matches = panel["covered_trade_count"].eq(trade_count)
     invalid_trade_feed = (zero_trade_summary & feed_present) | (
-        positive_trade_summary
-        & feed_present
-        & ~(quantity_matches & count_matches)
+        positive_trade_summary & feed_present & ~(quantity_matches & count_matches)
     )
     if invalid_trade_feed.any():
         raise ValueError("invalid_crypto_trade_flow_coverage")
@@ -303,9 +301,10 @@ def _panel_temporary_upper_bound(panel: pd.DataFrame) -> int:
         + quote_merge_columns
         + 2 * len(PANEL_COLUMNS)
     )
-    return len(panel) * (
-        simultaneous_cells * pointer + 6 * pointer
-    ) + simultaneous_cells * 1024
+    return (
+        len(panel) * (simultaneous_cells * pointer + 6 * pointer)
+        + simultaneous_cells * 1024
+    )
 
 
 def normalize_trade_chunk(trades: pd.DataFrame) -> pd.DataFrame:
@@ -531,9 +530,8 @@ def _validate_depth_level_values(frame: pd.DataFrame) -> None:
 
 def _validate_one_minute_bar_contract(frame: pd.DataFrame) -> None:
     timestamps = frame["timestamp"]
-    if (
-        not bool(timestamps.eq(frame["open_time"]).all())
-        or not bool(timestamps.eq(timestamps.dt.floor("min")).all())
+    if not bool(timestamps.eq(frame["open_time"]).all()) or not bool(
+        timestamps.eq(timestamps.dt.floor("min")).all()
     ):
         raise ValueError("invalid_crypto_bar_open_time")
     expected_close = timestamps + pd.Timedelta(milliseconds=59_999)
@@ -567,9 +565,12 @@ def _validate_exact_string_column(
     expected: str,
     error: str,
 ) -> None:
-    if column not in frame or not frame[column].map(
-        lambda value: isinstance(value, str) and value == expected
-    ).all():
+    if (
+        column not in frame
+        or not frame[column]
+        .map(lambda value: isinstance(value, str) and value == expected)
+        .all()
+    ):
         raise ValueError(error)
 
 

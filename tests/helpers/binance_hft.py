@@ -6,6 +6,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pandas as pd
+
+from quant_research_platform.markets.implementations.crypto.hft import (
+    iter_panel_frames,
+)
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
@@ -29,6 +34,25 @@ def _quote(
         "book_segment_id": book_segment_id,
         "trade_connection_id": trade_connection_id,
     }
+
+
+def _panel_rows(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    frames = list(
+        iter_panel_frames(
+            *args,
+            market_id="crypto",
+            asset_id="btc_usdt",
+            batch_rows=2,
+            **kwargs,
+        )
+    )
+    if not frames:
+        return []
+    return pd.concat(frames, ignore_index=True).to_dict("records")
+
+
+def _row_timestamp_ms(row: dict[str, object]) -> int:
+    return pd.Timestamp(row["timestamp"]).value // 1_000_000
 
 
 def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:

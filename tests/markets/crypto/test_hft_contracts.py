@@ -20,33 +20,18 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
     iter_label_frames,
-    iter_panel_frames,
 )
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
     HFT_MODEL_LABEL_HORIZON_MS,
     build_hft_model_catalog,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
-from tests.helpers.binance_hft import _coverage, _quote
-
-
-def _panel_rows(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-    frames = list(
-        iter_panel_frames(
-            *args,
-            market_id="crypto",
-            asset_id="btc_usdt",
-            batch_rows=2,
-            **kwargs,
-        )
-    )
-    if not frames:
-        return []
-    return pd.concat(frames, ignore_index=True).to_dict("records")
-
-
-def _row_timestamp_ms(row: dict[str, object]) -> int:
-    return pd.Timestamp(row["timestamp"]).value // 1_000_000
+from tests.helpers.binance_hft import (
+    _coverage,
+    _panel_rows,
+    _quote,
+    _row_timestamp_ms,
+)
 
 
 def _state(
@@ -65,9 +50,7 @@ def _state(
 ) -> BookState:
     sequence = observed_time_ms + 1 if capture_seq is None else capture_seq
     monotonic = (
-        observed_time_ms + 1
-        if receive_monotonic_ns is None
-        else receive_monotonic_ns
+        observed_time_ms + 1 if receive_monotonic_ns is None else receive_monotonic_ns
     )
     return BookState(
         capture_seq=sequence,
@@ -118,9 +101,7 @@ def _trade(
 ) -> TradeEvent:
     sequence = observed_time_ms + 10 if capture_seq is None else capture_seq
     monotonic = (
-        observed_time_ms + 10
-        if receive_monotonic_ns is None
-        else receive_monotonic_ns
+        observed_time_ms + 10 if receive_monotonic_ns is None else receive_monotonic_ns
     )
     return TradeEvent(
         capture_seq=sequence,
@@ -577,8 +558,8 @@ def test_maker_quote_schedule_has_no_prediction_surface() -> None:
             [],
             [{"timestamp_ms": 0, "prediction_score": 1.0}],
             config=_maker_config(),
-        observed_coverage={"book-1": _coverage(0, 100)},
-        trade_coverage={"trade-connection-1": _coverage(0, 100)},
+            observed_coverage={"book-1": _coverage(0, 100)},
+            trade_coverage={"trade-connection-1": _coverage(0, 100)},
         )
 
 

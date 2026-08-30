@@ -181,8 +181,7 @@ class DatasetSessionInventory:
             self.close()
         except BaseException as cleanup_error:
             primary.add_note(
-                "dataset inventory cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
+                f"dataset inventory cleanup also failed: {type(cleanup_error).__name__}"
             )
 
     def close(self) -> None:
@@ -740,8 +739,7 @@ def _close_cursor_preserving_primary(cursor: sqlite3.Cursor) -> None:
         cursor.close()
     except BaseException as close_error:
         primary.add_note(
-            "dataset inventory cursor close also failed: "
-            f"{type(close_error).__name__}"
+            f"dataset inventory cursor close also failed: {type(close_error).__name__}"
         )
 
 

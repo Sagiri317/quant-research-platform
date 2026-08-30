@@ -178,11 +178,8 @@ def write_low_level_parquet_artifact(
     """Construct low-level parquet fixtures for storage-adjacent tests."""
 
     effective_primary_key = tuple(primary_key)
-    if (
-        not effective_primary_key
-        or any(
-            type(column) is not str or not column for column in effective_primary_key
-        )
+    if not effective_primary_key or any(
+        type(column) is not str or not column for column in effective_primary_key
     ):
         raise ValueError("low_level_fixture_primary_key_required")
     spec = {

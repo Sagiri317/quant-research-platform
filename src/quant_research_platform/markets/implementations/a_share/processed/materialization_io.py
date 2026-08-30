@@ -302,7 +302,7 @@ def read_materialized_dataset(
     ) as session:
         owned = materialize_dataset_session_owned(
             session,
-            target_chunk_bytes=resource_policy.planning_headroom_bytes,
+            target_chunk_bytes=resource_policy.operation_headroom_bytes,
             materialized_budget_bytes=resource_policy.memory_budget_bytes,
         )
         cleanup_stack.callback(

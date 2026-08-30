@@ -37,10 +37,7 @@ class FeatureTransformSpec:
         _validate_column_tuple(self.output_columns, "output_columns")
         if len(self.source_columns) != len(self.output_columns):
             raise ValueError("feature_transform_source_output_count_mismatch")
-        if (
-            type(self.transform) is not str
-            or self.transform not in FEATURE_TRANSFORMS
-        ):
+        if type(self.transform) is not str or self.transform not in FEATURE_TRANSFORMS:
             raise ValueError("unsupported_feature_transform")
         if (
             type(self.fillna_policy) is not str

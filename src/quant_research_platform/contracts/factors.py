@@ -91,15 +91,16 @@ class FactorDefinition:
             if type(getattr(self, field_name)) is not str:
                 raise ValueError(f"factor_{field_name}_must_be_string")
         object.__setattr__(self, "grain", normalize_data_grain(self.grain))
-        if type(self.required_windows) is not tuple or any(
-            type(window) is not int or isinstance(window, bool)
-            for window in self.required_windows
-        ) or len(set(self.required_windows)) != len(self.required_windows):
-            raise ValueError("factor_required_windows_invalid")
-        if any(
-            window <= 0
-            for window in self.required_windows
+        if (
+            type(self.required_windows) is not tuple
+            or any(
+                type(window) is not int or isinstance(window, bool)
+                for window in self.required_windows
+            )
+            or len(set(self.required_windows)) != len(self.required_windows)
         ):
+            raise ValueError("factor_required_windows_invalid")
+        if any(window <= 0 for window in self.required_windows):
             raise ValueError("factor_required_windows_must_be_positive")
         for field_name in ("lookback_window", "window"):
             value = getattr(self, field_name)

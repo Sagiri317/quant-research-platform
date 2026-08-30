@@ -44,6 +44,7 @@ _PRIMARY_EXCEPTION_TYPES = (
     GeneratorExit,
 )
 
+
 def _open_inventory_for_failure(data_root: Path, scratch_parent: Path):
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with runtime_resource_policy_scope(policy):
@@ -52,8 +53,6 @@ def _open_inventory_for_failure(data_root: Path, scratch_parent: Path):
             scratch_parent=scratch_parent,
             resource_policy=policy,
         )
-
-
 
 
 def test_shared_path_move_is_fail_if_destination_exists(tmp_path: Path) -> None:
@@ -956,9 +955,7 @@ def test_opened_parquet_close_preserves_generator_exit(
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(GeneratorExit):
-            with physical._opened_parquet(
-                Path("part.parquet"), expected_identity=None
-            ):
+            with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
                 raise GeneratorExit()
     assert policy.used_memory_bytes == 0
 
@@ -1028,9 +1025,7 @@ def test_opened_parquet_reserves_metadata_for_lifetime_and_scales_with_footer(
         monkeypatch.setattr(physical.pq, "ParquetFile", construct)
 
         with runtime_resource_policy_scope(policy):
-            with physical._opened_parquet(
-                Path("part.parquet"), expected_identity=None
-            ):
+            with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
                 events.append(("body", policy.used_memory_bytes))
 
         assert [event[1] for event in events] == [events[0][1]] * 3
@@ -1105,9 +1100,7 @@ def test_opened_parquet_rejects_metadata_before_constructor_and_releases_lease(
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            with physical._opened_parquet(
-                Path("part.parquet"), expected_identity=None
-            ):
+            with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
                 pass
 
     assert constructor_calls == 0

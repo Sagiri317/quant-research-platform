@@ -71,9 +71,13 @@ def _fit_linear_model_result_owned_from_frames(
     spec: ModelSpec,
 ) -> ModelFitResult | _OwnedModelFitResult:
     policy = current_runtime_resource_policy()
-    model_lease = None if policy is None else policy.lease(
-        "research.model.fitted",
-        _linear_model_state_upper_bound_bytes(spec),
+    model_lease = (
+        None
+        if policy is None
+        else policy.lease(
+            "research.model.fitted",
+            _linear_model_state_upper_bound_bytes(spec),
+        )
     )
     try:
         return _fit_linear_model_result_with_lease(
@@ -87,8 +91,7 @@ def _fit_linear_model_result_owned_from_frames(
                 model_lease.close()
             except BaseException as cleanup_error:
                 primary.add_note(
-                    "model lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
+                    f"model lease release also failed: {type(cleanup_error).__name__}"
                 )
         raise
 
@@ -276,8 +279,7 @@ def _fit_controlled_linear_model_result_owned_from_frames(
                 model_lease.close()
             except BaseException as cleanup_error:
                 primary.add_note(
-                    "model lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
+                    f"model lease release also failed: {type(cleanup_error).__name__}"
                 )
         raise
 
@@ -323,10 +325,10 @@ def fit_linear_coefficients(
                 first_usable_reservation.close()
                 first_usable_reservation = ExitStack()
             with _filter_mode_scope(
-                    chunk,
-                    mode=spec.sample_filter_mode,
-                    metadata_key="sample_filter_mode",
-                ) as (filtered, metadata):
+                chunk,
+                mode=spec.sample_filter_mode,
+                metadata_key="sample_filter_mode",
+            ) as (filtered, metadata):
                 rows_input += _strict_non_negative_count_value(metadata["rows_input"])
                 rows_after_filter += _strict_non_negative_count_value(
                     metadata["rows_after_filter_mode"]
@@ -612,9 +614,7 @@ def _fit_estimator_model_result_owned_from_frames(
         if policy is not None:
             thread_available_bytes = max(
                 0,
-                policy.planning_headroom_bytes
-                - target_bytes
-                - model_state_bytes,
+                policy.operation_headroom_bytes - target_bytes - model_state_bytes,
             )
         threads = _effective_model_thread_count(
             training,
@@ -719,8 +719,7 @@ def _fit_estimator_model_result_owned_from_frames(
                 model_lease.close()
             except BaseException as cleanup_error:
                 primary.add_note(
-                    "model lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
+                    f"model lease release also failed: {type(cleanup_error).__name__}"
                 )
         raise
 
@@ -731,7 +730,7 @@ def _collect_training_frame_owned(
 ) -> (
     tuple[pd.DataFrame, dict[str, object], dict[str, object]]
     | OwnedValue[tuple[pd.DataFrame, dict[str, object], dict[str, object]]]
-    ):
+):
     if spec.max_train_rows is None:
         raise ValueError("unbounded_model_training_collection")
     required = set(spec.input_columns)
@@ -827,8 +826,7 @@ def _collect_training_frame_owned(
                         projection_lease = None
                     continue
                 combined_payload_bytes = (
-                    pandas_frame_payload_bytes(capped_training)
-                    + usable_payload_bytes
+                    pandas_frame_payload_bytes(capped_training) + usable_payload_bytes
                 )
                 concat_lease = None
                 if resource_policy is not None:
@@ -854,9 +852,7 @@ def _collect_training_frame_owned(
                         projection_lease.close()
                         projection_lease = None
                     if concat_lease is not None:
-                        concat_lease.shrink_to(
-                            pandas_frame_payload_bytes(combined)
-                        )
+                        concat_lease.shrink_to(pandas_frame_payload_bytes(combined))
                         concat_lease.transfer("research.model.training")
                         training_lease = concat_lease
                         concat_lease = None

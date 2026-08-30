@@ -48,9 +48,9 @@ class PortfolioComputationResult:
 @dataclass
 class _PortfolioTemporalState:
     lag_history: pd.DataFrame = field(default_factory=pd.DataFrame)
-    previous_positions: dict[
-        tuple[object, ...], dict[str, dict[str, float]]
-    ] = field(default_factory=dict)
+    previous_positions: dict[tuple[object, ...], dict[str, dict[str, float]]] = field(
+        default_factory=dict
+    )
 
 
 def _construct_portfolio_positions(

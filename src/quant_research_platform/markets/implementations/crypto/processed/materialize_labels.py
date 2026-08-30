@@ -117,13 +117,14 @@ def _iter_label_chunks(
     if panel_session.resource_policy is not resource_policy:
         raise RuntimeError("runtime_resource_policy_conflict")
     with runtime_resource_policy_scope(resource_policy):
-        available_bytes = max(1, resource_policy.planning_headroom_bytes)
+        available_bytes = max(1, resource_policy.operation_headroom_bytes)
         chunk_target_bytes = max(1, available_bytes // 8)
         producer_bound = max(1, available_bytes // 2)
         buffer = pd.DataFrame()
         buffer_lease: MemoryLease | None = None
         active_market_asset: tuple[str, str] | None = None
         order_state = validation.OrderedDependencyState()
+
         def close_buffer() -> None:
             nonlocal buffer, buffer_lease
             buffer = pd.DataFrame()
@@ -132,17 +133,18 @@ def _iter_label_chunks(
                 buffer_lease = None
 
         def next_producer_bound() -> int:
-            retained_tail = (
-                0 if buffer_lease is None else buffer_lease.reserved_bytes
-            )
+            retained_tail = 0 if buffer_lease is None else buffer_lease.reserved_bytes
             return max(1, producer_bound - retained_tail)
 
-        with ExitStack() as cleanup, validation.crypto_asset_session_views(
-            panel_session,
-            columns=("market_id", "asset_id"),
-            target_chunk_bytes=chunk_target_bytes,
-            error="invalid_crypto_panel_physical_asset_grouping",
-        ) as asset_views:
+        with (
+            ExitStack() as cleanup,
+            validation.crypto_asset_session_views(
+                panel_session,
+                columns=("market_id", "asset_id"),
+                target_chunk_bytes=chunk_target_bytes,
+                error="invalid_crypto_panel_physical_asset_grouping",
+            ) as asset_views,
+        ):
             cleanup.callback(close_buffer)
             lease: MemoryLease | None = None
             for (market_id, asset_id), asset_session in asset_views:
@@ -227,8 +229,7 @@ def _iter_label_chunks(
                                 :, spec.required_columns
                             ]
                             actual_bound = (
-                                pandas_frame_payload_bytes(output)
-                                + 128 * 1024
+                                pandas_frame_payload_bytes(output) + 128 * 1024
                             )
                             if actual_bound > lease.reserved_bytes:
                                 raise ValueError("crypto_label_bound_invalid")
@@ -265,10 +266,7 @@ def _iter_label_chunks(
                     lease = yield next_producer_bound()
                 finalized = _final_label_output(buffer, spec)
                 if not finalized.empty:
-                    actual_bound = (
-                        pandas_frame_payload_bytes(finalized)
-                        + 128 * 1024
-                    )
+                    actual_bound = pandas_frame_payload_bytes(finalized) + 128 * 1024
                     if actual_bound > lease.reserved_bytes:
                         raise ValueError("crypto_label_bound_invalid")
                     lease.shrink_to(actual_bound)

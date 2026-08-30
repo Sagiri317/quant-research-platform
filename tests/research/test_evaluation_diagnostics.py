@@ -173,16 +173,10 @@ def test_single_asset_time_series_values_are_chunk_exact(case: str) -> None:
         return metrics
 
     chunks_127 = evaluate(
-        tuple(
-            frame.iloc[start : start + 127]
-            for start in range(0, row_count, 127)
-        )
+        tuple(frame.iloc[start : start + 127] for start in range(0, row_count, 127))
     )
     chunks_251 = evaluate(
-        tuple(
-            frame.iloc[start : start + 251]
-            for start in range(0, row_count, 251)
-        )
+        tuple(frame.iloc[start : start + 251] for start in range(0, row_count, 251))
     )
 
     pd.testing.assert_frame_equal(chunks_127, chunks_251, check_exact=True)

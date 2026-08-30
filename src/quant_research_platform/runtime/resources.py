@@ -176,10 +176,18 @@ class RuntimeResourcePolicy:
 
         with self._ledger_lock:
             used = self._used_memory_bytes()
-            if self.explicit_memory_cap_bytes is not None:
-                return max(0, self.explicit_memory_cap_bytes - used)
             planning = self.memory_budget_bytes - used
-            return planning if planning > 0 else self.memory_budget_bytes
+            if planning > 0:
+                return planning
+            if self.explicit_memory_cap_bytes is None:
+                return self.memory_budget_bytes
+            return max(
+                0,
+                min(
+                    self.memory_budget_bytes,
+                    self.explicit_memory_cap_bytes - used,
+                ),
+            )
 
     def lease(self, owner: str, reserved_bytes: int) -> MemoryLease:
         with self._ledger_lock:
@@ -341,8 +349,7 @@ def _close_runtime_resource_policy(
             _ACTIVE_RUNTIME_RESOURCE_POLICY = None
         if primary is not None:
             primary.add_note(
-                "runtime machine-lock release also failed: "
-                f"{type(exc).__name__}"
+                f"runtime machine-lock release also failed: {type(exc).__name__}"
             )
             return
         raise RuntimeError("runtime_machine_lock_release_failed") from exc

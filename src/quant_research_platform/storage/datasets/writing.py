@@ -107,6 +107,7 @@ class DatasetWriteReceipt:
     session: DatasetSession
     exact_primary_key_index: ExactPrimaryKeyIndex
 
+
 @dataclass
 class _WriteStats:
     spec: DataSpec
@@ -718,9 +719,7 @@ def _write_contents(
                 ):
                     raise ValueError("invalid_dataset_producer_handoff")
                 if handoff_lease.reserved_bytes < handoff_bound:
-                    handoff_lease.grow(
-                        handoff_bound - handoff_lease.reserved_bytes
-                    )
+                    handoff_lease.grow(handoff_bound - handoff_lease.reserved_bytes)
                 handoff_lease.transfer("storage.dataset.producer")
                 producer_lease = handoff_lease
             else:
@@ -1006,9 +1005,7 @@ def _dataset_write_operator_target_bytes(
 ) -> int:
     if frame.empty:
         return operation_headroom_bytes
-    fixed_bytes = (
-        2 * _ARROW_FRAME_FIXED_BYTES + _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
-    )
+    fixed_bytes = 2 * _ARROW_FRAME_FIXED_BYTES + _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
     available = operation_headroom_bytes - fixed_bytes
     if available <= 0:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget")

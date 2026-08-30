@@ -84,9 +84,7 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
     assert report["evaluation"]["evaluation_id"] == (
         "crypto_hft_microstructure_evaluation"
     )
-    assert report["evaluation"]["evaluation_axis"] == (
-        "single_asset_time_series"
-    )
+    assert report["evaluation"]["evaluation_axis"] == ("single_asset_time_series")
     assert report["evaluation"]["primary_key"] == [
         "market_id",
         "asset_id",
@@ -113,13 +111,8 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
     assert evaluation_manifest["metadata"]["research_dataset_id"] == (
         HFT_RESEARCH_DATASET_ID
     )
-    assert (
-        evaluation_manifest["metadata"]["evaluation_diagnostics"]["rows_input"]
-        > 0
-    )
-    evaluation_diagnostics = evaluation_manifest["metadata"][
-        "evaluation_diagnostics"
-    ]
+    assert evaluation_manifest["metadata"]["evaluation_diagnostics"]["rows_input"] > 0
+    evaluation_diagnostics = evaluation_manifest["metadata"]["evaluation_diagnostics"]
     assert evaluation_diagnostics["min_timestamp"] == "1970-01-01T00:00:00"
     assert evaluation_diagnostics["max_timestamp"] == "1970-01-01T00:00:06"
     evaluation_metrics = pd.read_parquet(evaluation_root / "metrics.parquet")
@@ -133,9 +126,7 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
     assert evaluation_summary["valid_rankic_count"].sum() == 0
     assert set(evaluation_summary["rankic_reason"]) == {"not_applicable"}
     assert set(evaluation_summary["rankicir_reason"]) == {"not_applicable"}
-    evaluation_markdown = (evaluation_root / "summary.md").read_text(
-        encoding="utf-8"
-    )
+    evaluation_markdown = (evaluation_root / "summary.md").read_text(encoding="utf-8")
     assert "evaluation_axis: `single_asset_time_series`" in evaluation_markdown
     assert "RankIC: `not_applicable`" in evaluation_markdown
     assert "group_spread: `not_applicable`" in evaluation_markdown
@@ -143,7 +134,7 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
         "crypto_hft_lightgbm_regressor",
         "crypto_hft_linear_regression",
         "crypto_hft_xgboost_regressor",
-        "crypto_hft_maker_bid_fill_ratio_proxy",
+        "crypto_hft_maker_bid_sell_pressure_proxy",
     }
     for output_id in report["models"]["prediction_outputs"].values():
         prediction_manifest = json.loads(
@@ -154,11 +145,11 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
         assert prediction_manifest["run_id"] == "workflow-run"
     assert report["execution"]["taker_model_id"] == "crypto_hft_linear_regression"
     assert report["execution"]["maker_policy_id"] == (
-        "public_l2_fill_ratio_proxy_gated_maker"
+        "public_l2_sell_pressure_proxy_gated_maker"
     )
     assert report["execution"]["maker_prediction_used"] is True
     assert report["execution"]["maker_model_id"] == (
-        "crypto_hft_maker_bid_fill_ratio_proxy"
+        "crypto_hft_maker_bid_sell_pressure_proxy"
     )
     assert set(report["execution"]["taker_models"]) == {
         "crypto_hft_lightgbm_regressor",
@@ -173,7 +164,7 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
     )
     assert execution_artifact["taker_model_id"] == "crypto_hft_linear_regression"
     assert execution_artifact["maker_policy_id"] == (
-        "public_l2_fill_ratio_proxy_gated_maker"
+        "public_l2_sell_pressure_proxy_gated_maker"
     )
     assert execution_artifact["maker_prediction_used"] is True
     assert "maker_baseline" in execution_artifact
@@ -192,9 +183,10 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
     assert report["resource"]["planning_headroom_bytes"] >= 0
     assert report["resource"]["explicit_memory_cap_bytes"] == 256 * 1024**2
     assert report["resource"]["memory_budget_bytes"] <= 256 * 1024**2
-    assert report["resource"]["sampled_peak_reserved_bytes"] <= report["resource"][
-        "memory_budget_bytes"
-    ]
+    assert (
+        report["resource"]["sampled_peak_reserved_bytes"]
+        <= report["resource"]["memory_budget_bytes"]
+    )
     assert report["resource"]["wall_seconds"] > 0
     assert report["resource"]["threads"] >= 1
     assert (output_root / "report.json").is_file()
@@ -394,9 +386,7 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
     extra_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     lookup = _PredictionLookup({valid_key: 0.5, (timestamps[2], "btc_usdt"): 0.7})
     with runtime_resource_policy_scope(extra_policy):
-        with pytest.raises(
-            ValueError, match="misaligned_persisted_prediction_keys"
-        ):
+        with pytest.raises(ValueError, match="misaligned_persisted_prediction_keys"):
             list(
                 crypto_hft._prediction_decisions(
                     research_root=Path("research"),

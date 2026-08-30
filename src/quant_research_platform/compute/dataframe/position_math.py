@@ -90,11 +90,9 @@ def build_signal_positions(
                 upper_ranks >= observation_count - target_long_count + 1
             ]
             short_leg = eligible_indices[lower_ranks <= target_short_count]
-            strictly_separated = (
-                weight_config.portfolio_mode == "long_only"
-                or float(signal_values[short_leg].max())
-                < float(signal_values[long_leg].min())
-            )
+            strictly_separated = weight_config.portfolio_mode == "long_only" or float(
+                signal_values[short_leg].max()
+            ) < float(signal_values[long_leg].min())
         else:
             long_leg = np.array([], dtype=np.intp)
             short_leg = np.array([], dtype=np.intp)
@@ -116,11 +114,7 @@ def build_signal_positions(
                 else _leg_weights(
                     asset_values=asset_values[short_leg],
                     signal_values=signal_values[short_leg],
-                    risk_values=(
-                        None
-                        if risk_array is None
-                    else risk_array[short_leg]
-                    ),
+                    risk_values=(None if risk_array is None else risk_array[short_leg]),
                     weight_config=weight_config,
                     sign=-1.0,
                 )

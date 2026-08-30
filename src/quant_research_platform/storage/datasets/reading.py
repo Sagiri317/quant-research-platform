@@ -191,8 +191,7 @@ class DatasetSession:
             self.close()
         except BaseException as cleanup_error:
             exc_value.add_note(
-                "dataset session cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
+                f"dataset session cleanup also failed: {type(cleanup_error).__name__}"
             )
 
     def verify(self) -> None:
@@ -207,10 +206,7 @@ class DatasetSession:
         manifest_identity = dataset_file_identity(
             self.root / "_manifest" / "manifest.json"
         )
-        if (
-            _file_identity_bytes(manifest_identity)
-            != self.manifest_identity_bytes
-        ):
+        if _file_identity_bytes(manifest_identity) != self.manifest_identity_bytes:
             raise ValueError("dataset_manifest_identity_changed")
         manifest_bytes, _ = read_bounded_qrp_json(
             self.root / "_manifest" / "manifest.json",
@@ -315,7 +311,7 @@ def read_dataset(
                             context,
                             target_chunk_bytes=max(
                                 1,
-                                context.resource_policy.planning_headroom_bytes,
+                                context.resource_policy.operation_headroom_bytes,
                             ),
                         )
                 return
@@ -329,7 +325,7 @@ def read_dataset(
                     context,
                     target_chunk_bytes=max(
                         1,
-                        context.resource_policy.planning_headroom_bytes,
+                        context.resource_policy.operation_headroom_bytes,
                     ),
                 )
 
@@ -348,7 +344,7 @@ def read_dataset(
             context,
             target_chunk_bytes=max(
                 1,
-                context.resource_policy.planning_headroom_bytes,
+                context.resource_policy.operation_headroom_bytes,
             ),
             materialized_budget_bytes=context.resource_policy.memory_budget_bytes,
         )
@@ -1001,9 +997,7 @@ def dataset_session_from_inventory(
     )
     session_lease = resource_policy.lease(
         "storage.dataset.session",
-        spec_stat_span_bytes
-        + manifest_stat_span_bytes
-        + metadata_identity_span_bytes,
+        spec_stat_span_bytes + manifest_stat_span_bytes + metadata_identity_span_bytes,
     )
     session: DatasetSession | None = None
     try:
@@ -1519,10 +1513,13 @@ def _iter_dataset_file_batches(
     previous_output_bytes = [0]
 
     def current_operation_headroom() -> int:
-        current = min(
-            operation_headroom,
-            context.resource_policy.operation_headroom_bytes,
-        ) - previous_output_bytes[0]
+        current = (
+            min(
+                operation_headroom,
+                context.resource_policy.operation_headroom_bytes,
+            )
+            - previous_output_bytes[0]
+        )
         if current <= 0:
             raise DatasetReadCapacityExceeded(
                 "dataset_working_set_exceeds_task_memory_budget"
@@ -1546,7 +1543,7 @@ def _iter_dataset_file_batches(
                     _previous_output_bytes=previous_output_bytes,
                     _operation_headroom=current_operation_headroom,
                 )
-                ) as member_batches:
+            ) as member_batches:
                 while True:
                     try:
                         frame = next(member_batches)
@@ -1566,7 +1563,7 @@ def _verify_preserving_primary(context: DatasetSession) -> None:
         context.verify()
     except BaseException as verification_error:
         primary.add_note(
-            "dataset verification also failed: " f"{type(verification_error).__name__}"
+            f"dataset verification also failed: {type(verification_error).__name__}"
         )
 
 
@@ -1861,8 +1858,8 @@ def _arrow_batch_to_bounded_pandas(
         if operation_headroom_bytes is None
         else _validated_target_chunk_bytes(operation_headroom_bytes)
     )
-    source_row_bytes, source_fixed_bytes = (
-        record_batch_decoded_working_set_bounds(batch)
+    source_row_bytes, source_fixed_bytes = record_batch_decoded_working_set_bounds(
+        batch
     )
     source_row_bytes += (
         len(batch.schema.names) * _PANDAS_OBJECT_CELL_BYTES
@@ -1908,9 +1905,7 @@ def _arrow_batch_to_bounded_pandas(
         )
         previous_output_bound = previous_output_bytes[0]
         parent_buffer_bytes = (
-            batch.get_total_buffer_size()
-            if _operation_headroom is None
-            else 0
+            batch.get_total_buffer_size() if _operation_headroom is None else 0
         )
         conversion_budget = (
             None
@@ -1980,9 +1975,7 @@ def _arrow_batch_to_bounded_pandas(
             )
             if (
                 current_operation_headroom is not None
-                and parent_buffer_bytes
-                + previous_output_bound
-                + actual_working_bytes
+                and parent_buffer_bytes + previous_output_bound + actual_working_bytes
                 > current_operation_headroom
             ):
                 raise DatasetReadCapacityExceeded(

@@ -199,12 +199,8 @@ def _session_offset_time_window(
     lookahead_sessions: int,
 ) -> TimeWindow:
     require_date_window(time_window, context="a_share_dependency_session_offset")
-    require_non_negative_int(
-        lookback_sessions, error="invalid_a_share_session_offset"
-    )
-    require_non_negative_int(
-        lookahead_sessions, error="invalid_a_share_session_offset"
-    )
+    require_non_negative_int(lookback_sessions, error="invalid_a_share_session_offset")
+    require_non_negative_int(lookahead_sessions, error="invalid_a_share_session_offset")
     if len(sessions) == 0 or (lookback_sessions <= 0 and lookahead_sessions <= 0):
         return time_window
     start = pd.Timestamp(time_window.start).normalize()

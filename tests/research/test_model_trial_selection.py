@@ -96,9 +96,7 @@ def test_select_best_validation_trial_fails_closed_on_bad_inputs() -> None:
 
     with pytest.raises(ValueError, match="duplicate_trial_id"):
         select_best_validation_trial(
-            pd.DataFrame(
-                {"trial_id": ["a", "a"], "validation_loss": [0.2, 0.1]}
-            ),
+            pd.DataFrame({"trial_id": ["a", "a"], "validation_loss": [0.2, 0.1]}),
             **kwargs,
         )
 
@@ -425,9 +423,7 @@ def test_ic_weighted_rank_ensemble_rejects_rank_roundoff_zero() -> None:
 def test_ic_weighted_rank_ensemble_uses_equal_time_rankic_aggregation() -> None:
     frame = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(
-                ["2024-01-01"] * 3 + ["2024-01-02"] * 6
-            ),
+            "timestamp": pd.to_datetime(["2024-01-01"] * 3 + ["2024-01-02"] * 6),
             "factor": [0, 1, 2, 0, 1, 2, 3, 4, 5],
             "inverse": [0, -1, -2, 0, -1, -2, -3, -4, -5],
             "label": [1, 2, 3, 3, 4, 6, 5, 2, 1],
@@ -506,9 +502,7 @@ def test_ic_weighted_rank_ensemble_excludes_only_undefined_inputs() -> None:
     assert ensemble.columns == ("factor",)
     assert ensemble.coefficient_count == 1
     assert ensemble.weights == pytest.approx((1.0,))
-    assert ensemble.predict(frame).tolist() == pytest.approx(
-        [0.25, 0.5, 0.75, 1.0]
-    )
+    assert ensemble.predict(frame).tolist() == pytest.approx([0.25, 0.5, 0.75, 1.0])
 
 
 def test_chunked_trial_metrics_match_exact_purge_and_tie_oracle() -> None:
@@ -545,12 +539,8 @@ def test_chunked_trial_metrics_complete_when_aggregate_exceeds_target() -> None:
         start = chunk_index * 1000
         return pd.DataFrame(
             {
-                "timestamp": pd.date_range(
-                    "2024-01-01", periods=1000, freq="min"
-                ),
-                "asset_id": [
-                    f"asset_{row % 10}" for row in range(start, start + 1000)
-                ],
+                "timestamp": pd.date_range("2024-01-01", periods=1000, freq="min"),
+                "asset_id": [f"asset_{row % 10}" for row in range(start, start + 1000)],
                 "label": np.arange(start, start + 1000, dtype="float64"),
                 "prediction": np.arange(start, start + 1000, dtype="float64") + 0.25,
             }
@@ -884,9 +874,7 @@ def test_chunked_trial_metrics_grows_main_and_temp_page_caps_before_insert(
             )
             startup_caps = {
                 schema: int(
-                    database.execute(
-                        f"PRAGMA {schema}.max_page_count"
-                    ).fetchone()[0]
+                    database.execute(f"PRAGMA {schema}.max_page_count").fetchone()[0]
                 )
                 for schema in ("main", "temp")
             }
@@ -897,9 +885,7 @@ def test_chunked_trial_metrics_grows_main_and_temp_page_caps_before_insert(
             )
             first_batch_caps = {
                 schema: int(
-                    database.execute(
-                        f"PRAGMA {schema}.max_page_count"
-                    ).fetchone()[0]
+                    database.execute(f"PRAGMA {schema}.max_page_count").fetchone()[0]
                 )
                 for schema in ("main", "temp")
             }
@@ -911,16 +897,14 @@ def test_chunked_trial_metrics_grows_main_and_temp_page_caps_before_insert(
             for schema, startup_cap in startup_caps.items():
                 assert (
                     int(
-                        database.execute(
-                            f"PRAGMA {schema}.max_page_count"
-                        ).fetchone()[0]
+                        database.execute(f"PRAGMA {schema}.max_page_count").fetchone()[
+                            0
+                        ]
                     )
                     > startup_cap
                 )
             assert (
-                int(
-                    database.execute("PRAGMA temp.max_page_count").fetchone()[0]
-                )
+                int(database.execute("PRAGMA temp.max_page_count").fetchone()[0])
                 > first_batch_caps["temp"]
             )
     assert len(calls) == 3

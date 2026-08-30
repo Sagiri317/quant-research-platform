@@ -1869,6 +1869,7 @@ def test_dataset_partition_and_manifest_shape_helpers() -> None:
             )
         )
 
+
 def test_dataset_spec_payload_accepts_exact_base_variant_and_rejects_extras() -> None:
     base_spec = {
         "schema_id": "qrp-dataset-spec",
