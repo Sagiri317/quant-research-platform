@@ -17,7 +17,10 @@ from quant_research_platform.contracts.order_book import (
     TradeEvent,
     tick_to_price,
 )
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_float,
+    strict_timestamp_series,
+)
 from quant_research_platform.markets.implementations.crypto.labels.definitions import (
     HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN,
     HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS,
@@ -175,13 +178,13 @@ def iter_panel_frames(
                     previous_trade_time = trade_time
                     trade = next_trade
                     next_trade = next(active_trades, None)
-                    quantity = _number(
+                    quantity = strict_finite_float(
                         trade.quantity,
-                        "hft_trade_quantity_invalid",
+                        error="hft_trade_quantity_invalid",
                     )
-                    visible = _number(
+                    visible = strict_finite_float(
                         trade.visible_quantity,
-                        "hft_trade_visible_quantity_invalid",
+                        error="hft_trade_visible_quantity_invalid",
                     )
                     if (
                         quantity <= 0
@@ -269,18 +272,6 @@ def _book_observed_time(
         if isinstance(event, OwnedValue)
         else event.observed_time_ns
     )
-
-
-def _number(value: object, error: str) -> float:
-    if isinstance(value, bool):
-        raise ValueError(error)
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(error) from exc
-    if not math.isfinite(number):
-        raise ValueError(error)
-    return number
 
 
 def _panel_column_buffers() -> dict[str, list[Any]]:

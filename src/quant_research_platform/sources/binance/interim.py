@@ -20,7 +20,10 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    clear_exception_frames,
+    strict_timestamp_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -184,41 +187,55 @@ def _iter_owned_interim_frames(
                             except StopIteration:
                                 bound = None
                                 break
-                            if not isinstance(owned, OwnedValue):
-                                raise TypeError("invalid_binance_owned_frame")
-                            if owned.lease is not lease:
-                                raise RuntimeError(
-                                    "runtime_memory_lease_transfer_mismatch"
+                            batch = normalized = filtered = None
+                            try:
+                                if not isinstance(owned, OwnedValue):
+                                    raise TypeError("invalid_binance_owned_frame")
+                                if owned.lease is not lease:
+                                    raise RuntimeError(
+                                        "runtime_memory_lease_transfer_mismatch"
+                                    )
+                                batch = owned.value
+                                batch_bytes = (
+                                    sum(max(1, len(str(item))) for item in batch) * 64
                                 )
-                            batch = owned.value
-                            if data_id == ids.market_bars_data_id():
-                                normalized = _normalize_klines(batch)
-                            elif data_id == ids.aggregate_trades_data_id():
-                                normalized = _normalize_aggregate_trades(batch)
-                            elif data_id == ids.depth_levels_data_id():
-                                normalized = _normalize_depth(batch)
-                            else:
-                                raise ValueError(
-                                    f"unsupported_binance_data_id: {data_id}"
+                                normalization_bound = 3 * batch_bytes + 64 * 1024
+                                if normalization_bound > lease.reserved_bytes:
+                                    lease.grow(
+                                        normalization_bound - lease.reserved_bytes
+                                    )
+                                if data_id == ids.market_bars_data_id():
+                                    normalized = _normalize_klines(batch)
+                                elif data_id == ids.aggregate_trades_data_id():
+                                    normalized = _normalize_aggregate_trades(batch)
+                                elif data_id == ids.depth_levels_data_id():
+                                    normalized = _normalize_depth(batch)
+                                else:
+                                    raise ValueError(
+                                        f"unsupported_binance_data_id: {data_id}"
+                                    )
+                                _validate_normalized_order(
+                                    normalized,
+                                    data_id=data_id,
+                                    previous_key=None,
                                 )
-                            _validate_normalized_order(
-                                normalized,
-                                data_id=data_id,
-                                previous_key=None,
-                            )
-                            last_key = _validate_normalized_boundary(
-                                normalized,
-                                data_id=data_id,
-                                previous_key=last_key,
-                            )
-                            empty_schema_frame = normalized.iloc[:0].copy()
-                            filtered = _filter_time_window(
-                                normalized,
-                                start_date=start_date,
-                                end_date=end_date,
-                            )
+                                last_key = _validate_normalized_boundary(
+                                    normalized,
+                                    data_id=data_id,
+                                    previous_key=last_key,
+                                )
+                                empty_schema_frame = normalized.iloc[:0].copy()
+                                filtered = _filter_time_window(
+                                    normalized,
+                                    start_date=start_date,
+                                    end_date=end_date,
+                                )
+                            except BaseException as error:
+                                clear_exception_frames(error)
+                                owned = batch = normalized = filtered = None
+                                raise
                             if filtered.empty:
-                                del batch, normalized, filtered
+                                owned = batch = normalized = filtered = None
                                 try:
                                     bound = raw_batches.send(None)
                                 except StopIteration:
@@ -231,25 +248,29 @@ def _iter_owned_interim_frames(
                                     )
                                 continue
                             yielded = True
-                            batch_bytes = (
-                                sum(max(1, len(str(item))) for item in batch) * 64
-                            )
-                            normalized_bytes = pandas_frame_payload_bytes(normalized)
-                            filtered_bytes = pandas_frame_payload_bytes(filtered)
-                            actual_bound = (
-                                batch_bytes
-                                + normalized_bytes
-                                + filtered_bytes
-                                + 64 * 1024
-                            )
-                            if actual_bound > lease.reserved_bytes:
-                                raise RuntimeError(
-                                    "binance_record_envelope_bound_invalid"
+                            try:
+                                normalized_bytes = pandas_frame_payload_bytes(
+                                    normalized
                                 )
-                            lease.shrink_to(actual_bound)
-                            del batch, normalized
+                                filtered_bytes = pandas_frame_payload_bytes(filtered)
+                                actual_bound = (
+                                    batch_bytes
+                                    + normalized_bytes
+                                    + filtered_bytes
+                                    + 64 * 1024
+                                )
+                                if actual_bound > lease.reserved_bytes:
+                                    raise RuntimeError(
+                                        "binance_record_envelope_bound_invalid"
+                                    )
+                                lease.shrink_to(actual_bound)
+                            except BaseException as error:
+                                clear_exception_frames(error)
+                                owned = batch = normalized = filtered = None
+                                raise
+                            owned = batch = normalized = None
                             yield OwnedValue(filtered, lease)
-                            del filtered, owned
+                            filtered = None
                             try:
                                 bound = raw_batches.send(None)
                             except StopIteration:

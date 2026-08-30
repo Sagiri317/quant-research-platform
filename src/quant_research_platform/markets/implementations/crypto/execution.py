@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-import math
+import struct
 import tempfile
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack
@@ -11,20 +11,29 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.contracts.json_codec import (
+    json_record_working_set_bytes,
+    parse_qrp_json_object,
+)
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
     TradeEvent,
     tick_to_price,
 )
+from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     OwnedValue,
+    RuntimeResourcePolicy,
     require_free_disk_headroom,
 )
 
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
 _PENDING_MARKOUT_DISK_CHECK_BYTES = 1024 * 1024
+_PENDING_MARKOUT_LENGTH = struct.Struct(">Q")
+_PENDING_MARKOUT_JSON_OVERHEAD_BYTES = 64 * 1024
+_EXECUTION_WORKSPACE_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -60,10 +69,10 @@ class MakerConfig:
     def __post_init__(self) -> None:
         _positive(self.order_quantity, "hft_maker_order_quantity_invalid")
         _positive(self.max_position, "hft_maker_position_size_invalid")
-        _finite(self.maker_fee_bps, "hft_maker_fee_invalid")
-        target = _finite(
+        strict_finite_float(self.maker_fee_bps, error="hft_maker_fee_invalid")
+        target = strict_finite_float(
             self.inventory_target,
-            "hft_maker_inventory_target_invalid",
+            error="hft_maker_inventory_target_invalid",
         )
         if abs(target) > self.max_position:
             raise ValueError("hft_maker_inventory_target_invalid")
@@ -74,27 +83,15 @@ class MakerConfig:
         )
 
 
-def _finite(value: object, error: str) -> float:
-    if isinstance(value, bool):
-        raise ValueError(error)
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(error) from exc
-    if not math.isfinite(number):
-        raise ValueError(error)
-    return number
-
-
 def _positive(value: object, error: str) -> float:
-    number = _finite(value, error)
+    number = strict_finite_float(value, error=error)
     if number <= 0:
         raise ValueError(error)
     return number
 
 
 def _nonnegative(value: object, error: str) -> float:
-    number = _finite(value, error)
+    number = strict_finite_float(value, error=error)
     if number < 0:
         raise ValueError(error)
     return number
@@ -110,6 +107,26 @@ def _positive_integer(value: object, error: str) -> int:
     if isinstance(value, bool) or type(value) is not int or value <= 0:
         raise ValueError(error)
     return value
+
+
+def _pending_markout_max_json_bytes(fill: Mapping[str, Any]) -> int:
+    total = 2
+    for index, (key, value) in enumerate(fill.items()):
+        total += (1 if index else 0) + 2 + 12 * len(key) + 1
+        if isinstance(value, str):
+            total += 2 + 12 * len(value)
+        elif value is None:
+            total += 4
+        elif isinstance(value, bool):
+            total += 5
+        elif type(value) is int:
+            digits = max(1, (abs(value).bit_length() * 30103) // 100000 + 1)
+            total += digits + (1 if value < 0 else 0)
+        elif type(value) is float:
+            total += 24
+        else:
+            raise TypeError("hft_pending_markout_value_invalid")
+    return total
 
 
 @dataclass
@@ -193,7 +210,8 @@ class _PendingMarkouts:
     def __init__(
         self,
         metrics: _Metrics,
-        on_fill: Callable[[dict[str, Any]], None] | None,
+        on_fill: Callable[[Mapping[str, Any]], None] | None,
+        resource_policy: RuntimeResourcePolicy,
     ) -> None:
         self._temp_root = Path(tempfile.gettempdir())
         require_free_disk_headroom(
@@ -203,9 +221,10 @@ class _PendingMarkouts:
         self._disk_bytes_remaining = _PENDING_MARKOUT_DISK_CHECK_BYTES
         self._file = tempfile.TemporaryFile(mode="w+b")
         self._read_offset = 0
-        self._next: tuple[dict[str, Any], int] | None = None
+        self._next: tuple[OwnedValue[dict[str, Any]], int] | None = None
         self._metrics = metrics
         self._on_fill = on_fill
+        self._resource_policy = resource_policy
 
     def __enter__(self) -> _PendingMarkouts:
         return self
@@ -218,7 +237,8 @@ class _PendingMarkouts:
     ) -> None:
         cleanup_failure: BaseException | None = None
         try:
-            self.expire_all()
+            if primary is None:
+                self.expire_all()
         except BaseException as cleanup_error:
             if primary is not None:
                 primary.add_note(
@@ -227,6 +247,19 @@ class _PendingMarkouts:
                 )
             else:
                 cleanup_failure = cleanup_error
+        try:
+            self._discard_next()
+        except BaseException as release_error:
+            note = (
+                "execution pending markout lease release also failed: "
+                f"{type(release_error).__name__}"
+            )
+            if primary is not None:
+                primary.add_note(note)
+            elif cleanup_failure is None:
+                cleanup_failure = release_error
+            else:
+                cleanup_failure.add_note(note)
         try:
             self._file.close()
         except BaseException as close_error:
@@ -246,21 +279,36 @@ class _PendingMarkouts:
             raise cleanup_failure
 
     def add(self, fill: dict[str, Any]) -> None:
-        payload = (
-            json.dumps(fill, separators=(",", ":"), allow_nan=False).encode("utf-8")
-            + b"\n"
+        max_payload_bytes = _pending_markout_max_json_bytes(fill)
+        working_set_bytes = (
+            json_record_working_set_bytes(max_payload_bytes)
+            + _PENDING_MARKOUT_JSON_OVERHEAD_BYTES
         )
-        if len(payload) > self._disk_bytes_remaining:
-            admitted = max(_PENDING_MARKOUT_DISK_CHECK_BYTES, len(payload))
-            require_free_disk_headroom(
-                self._temp_root,
-                reserve_bytes=2 * admitted,
-            )
-            self._disk_bytes_remaining = admitted
-        self._disk_bytes_remaining -= len(payload)
-        self._file.seek(0, 2)
-        self._file.write(payload)
-        self._file.flush()
+        with self._resource_policy.lease(
+            "crypto.execution.pending_markout.encode",
+            working_set_bytes,
+        ):
+            payload = json.dumps(
+                fill,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            if len(payload) > max_payload_bytes:
+                raise AssertionError("hft_pending_markout_json_bound_invalid")
+            record_bytes = _PENDING_MARKOUT_LENGTH.size + len(payload)
+            if record_bytes > self._disk_bytes_remaining:
+                admitted = max(_PENDING_MARKOUT_DISK_CHECK_BYTES, record_bytes)
+                require_free_disk_headroom(
+                    self._temp_root,
+                    reserve_bytes=2 * admitted,
+                )
+                self._disk_bytes_remaining = admitted
+            self._disk_bytes_remaining -= record_bytes
+            self._file.seek(0, 2)
+            self._file.write(_PENDING_MARKOUT_LENGTH.pack(len(payload)))
+            self._file.write(payload)
+            self._file.flush()
+            del payload
 
     def resolve(
         self,
@@ -273,8 +321,11 @@ class _PendingMarkouts:
         previous_mid = None if previous_state is None else _mid(previous_state)
         while (fill := self._peek()) is not None:
             if fill["segment_id"] != state.segment_id:
-                self._finalize(fill, future_mid=None)
-                self._pop()
+                try:
+                    self._finalize(fill, future_mid=None)
+                finally:
+                    del fill
+                    self._pop()
                 continue
             target = fill["markout_target_time_ns"]
             if state.observed_time_ns < target:
@@ -289,28 +340,74 @@ class _PendingMarkouts:
                 markout_mid = previous_mid
             else:
                 markout_mid = None
-            self._finalize(fill, future_mid=markout_mid)
-            self._pop()
+            try:
+                self._finalize(fill, future_mid=markout_mid)
+            finally:
+                del fill
+                self._pop()
 
     def expire_all(self) -> None:
         while (fill := self._peek()) is not None:
-            self._finalize(fill, future_mid=None)
-            self._pop()
+            try:
+                self._finalize(fill, future_mid=None)
+            finally:
+                del fill
+                self._pop()
 
     def _peek(self) -> dict[str, Any] | None:
         if self._next is not None:
-            return self._next[0]
+            return self._next[0].value
         self._file.seek(self._read_offset)
-        line = self._file.readline()
-        if not line:
+        header = self._file.read(_PENDING_MARKOUT_LENGTH.size)
+        if not header:
             return None
-        self._next = (json.loads(line), self._file.tell())
-        return self._next[0]
+        if len(header) != _PENDING_MARKOUT_LENGTH.size:
+            raise RuntimeError("hft_pending_markout_record_invalid")
+        payload_bytes = _PENDING_MARKOUT_LENGTH.unpack(header)[0]
+        del header
+        if payload_bytes <= 0:
+            raise RuntimeError("hft_pending_markout_record_invalid")
+        working_set_bytes = (
+            json_record_working_set_bytes(payload_bytes)
+            + _PENDING_MARKOUT_JSON_OVERHEAD_BYTES
+        )
+        lease = self._resource_policy.lease(
+            "crypto.execution.pending_markout.decode",
+            working_set_bytes,
+        )
+        try:
+            payload = self._file.read(payload_bytes)
+            if len(payload) != payload_bytes:
+                raise RuntimeError("hft_pending_markout_record_invalid")
+            try:
+                fill = parse_qrp_json_object(payload)
+            except ValueError as error:
+                raise RuntimeError("hft_pending_markout_record_invalid") from error
+            lease.transfer("crypto.execution.pending_markout")
+            self._next = (OwnedValue(fill, lease), self._file.tell())
+            return fill
+        except BaseException as primary:
+            try:
+                lease.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "execution pending markout lease release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+            raise
 
     def _pop(self) -> None:
         assert self._next is not None
-        self._read_offset = self._next[1]
+        owned, self._read_offset = self._next
         self._next = None
+        owned.release(owner="crypto.execution.pending_markout")
+
+    def _discard_next(self) -> None:
+        if self._next is None:
+            return
+        owned = self._next[0]
+        self._next = None
+        owned.release(owner="crypto.execution.pending_markout")
 
     def _finalize(
         self,
@@ -443,10 +540,11 @@ def simulate_taker(
     prediction_column: str,
     config: TakerConfig,
     observed_coverage: Mapping[str, tuple[int, int]],
-    on_fill: Callable[[dict[str, Any]], None] | None = None,
-    on_equity: Callable[[dict[str, Any]], None] | None = None,
+    resource_policy: RuntimeResourcePolicy,
+    on_fill: Callable[[Mapping[str, Any]], None] | None = None,
+    on_equity: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Use the latest actually known valid L2 state at effective time."""
+    """Use the latest known L2 state; observers borrow rows during each call."""
 
     events = iter(_checked_book_events(book_events))
     active_decisions = iter(_checked_decisions(decisions))
@@ -468,9 +566,13 @@ def simulate_taker(
     market_event_count = 0
 
     with (
+        resource_policy.lease(
+            "crypto.execution.taker.workspace",
+            _EXECUTION_WORKSPACE_BYTES,
+        ),
         closing_iterator(events),
         closing_iterator(active_decisions),
-        _PendingMarkouts(metrics, on_fill) as pending,
+        _PendingMarkouts(metrics, on_fill, resource_policy) as pending,
     ):
         try:
             next_event = next(events, None)
@@ -518,9 +620,9 @@ def simulate_taker(
 
             for row in active_decisions:
                 decision_time = row["timestamp_ms"]
-                prediction = _finite(
+                prediction = strict_finite_float(
                     row.get(prediction_column),
-                    "hft_prediction_invalid",
+                    error="hft_prediction_invalid",
                 )
                 effective_time = decision_time + config.latency_ms
                 effective_time_ns = effective_time * _NANOSECONDS_PER_MILLISECOND
@@ -698,6 +800,7 @@ def taker_latency_sweep(
     config: TakerConfig,
     latency_scenarios_ms: tuple[int, ...],
     observed_coverage: Mapping[str, tuple[int, int]],
+    resource_policy: RuntimeResourcePolicy,
 ) -> list[dict[str, Any]]:
     if any(
         isinstance(value, bool) or type(value) is not int or value < 0
@@ -711,6 +814,7 @@ def taker_latency_sweep(
             prediction_column=prediction_column,
             config=replace(config, latency_ms=latency_ms),
             observed_coverage=observed_coverage,
+            resource_policy=resource_policy,
         )
         for latency_ms in latency_scenarios_ms
     ]
@@ -750,9 +854,9 @@ def _checked_trades(
                 raise ValueError("hft_execution_time_non_monotonic")
             previous = key
             _positive(trade.quantity, "hft_execution_trade_quantity_invalid")
-            visible = _finite(
+            visible = strict_finite_float(
                 trade.visible_quantity,
-                "hft_execution_trade_visible_quantity_invalid",
+                error="hft_execution_trade_visible_quantity_invalid",
             )
             if visible < 0 or visible > trade.quantity:
                 raise ValueError("hft_execution_trade_visible_quantity_invalid")
@@ -845,10 +949,11 @@ def simulate_maker(
     config: MakerConfig,
     observed_coverage: Mapping[str, tuple[int, int]],
     trade_coverage: Mapping[str, tuple[int, int]],
-    on_fill: Callable[[dict[str, Any]], None] | None = None,
-    on_equity: Callable[[dict[str, Any]], None] | None = None,
+    resource_policy: RuntimeResourcePolicy,
+    on_fill: Callable[[Mapping[str, Any]], None] | None = None,
+    on_equity: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Simulate the model-free public-L2 maker baseline."""
+    """Simulate public-L2 maker fills; observers borrow rows during each call."""
 
     events = iter(_market_events(book_events, trades))
     active_decisions = iter(_checked_quote_schedule(quote_schedule))
@@ -891,9 +996,13 @@ def simulate_maker(
             cancelled_orders += 1
 
     with (
+        resource_policy.lease(
+            "crypto.execution.maker.workspace",
+            _EXECUTION_WORKSPACE_BYTES,
+        ),
         closing_iterator(events),
         closing_iterator(active_decisions),
-        _PendingMarkouts(metrics, on_fill) as pending,
+        _PendingMarkouts(metrics, on_fill, resource_policy) as pending,
         ExitStack() as cleanup,
     ):
 

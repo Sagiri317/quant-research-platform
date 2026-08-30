@@ -4,6 +4,7 @@ import datetime as dt
 import gzip
 import hashlib
 import json
+from functools import wraps
 from pathlib import Path
 
 import pandas as pd
@@ -11,10 +12,26 @@ import pandas as pd
 from quant_research_platform.markets.implementations.crypto.hft import (
     iter_panel_frames,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
 )
+from tests.helpers.runtime_resources import capture_test_policy
+
+
+def with_test_resource_policy(function):  # noqa: ANN001, ANN201
+    @wraps(function)
+    def invoke(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+        for name in ("on_fill", "on_equity"):
+            observer = kwargs.get(name)
+            if observer is not None:
+                kwargs[name] = lambda value, sink=observer: sink(dict(value))
+        with runtime_resource_policy_scope(policy):
+            return function(*args, resource_policy=policy, **kwargs)
+
+    return invoke
 
 
 def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:

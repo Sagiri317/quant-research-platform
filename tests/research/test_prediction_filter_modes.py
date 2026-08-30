@@ -526,7 +526,9 @@ def test_prediction_outputs_fail_closed_errors_are_specific() -> None:
         )
 
 
-def test_prediction_outputs_accept_equivalent_timezone_representations() -> None:
+def test_prediction_value_validator_accepts_equivalent_timezone_representations() -> (
+    None
+):
     spec = PredictionSpec(
         prediction_id="pred_equivalent_timezones",
         model_id="linear_eligible",

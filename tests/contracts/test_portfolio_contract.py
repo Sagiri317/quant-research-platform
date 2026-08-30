@@ -9,9 +9,19 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
+    WeightConfig,
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from tests.helpers import frequency_ids
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf"), 10**4000])
+def test_weight_config_invalid_quantile_uses_range_error(value: float) -> None:
+    with pytest.raises(
+        ValueError,
+        match=r"top_quantile must be greater than 0 and at most 1\.",
+    ):
+        WeightConfig(top_quantile=value)
 
 
 def test_portfolio_diagnostics_config_validates_column_sets() -> None:

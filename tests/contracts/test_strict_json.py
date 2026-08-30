@@ -16,9 +16,17 @@ from quant_research_platform.contracts.json_codec import (
     bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
+    json_record_working_set_bytes,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
+
+
+def test_json_record_working_set_bound_validates_bytes_and_grows() -> None:
+    assert json_record_working_set_bytes(2) > json_record_working_set_bytes(1) > 1
+    for value in (True, -1, 1.0):
+        with pytest.raises(ValueError, match="json_record_bytes_invalid"):
+            json_record_working_set_bytes(value)  # type: ignore[arg-type]
 
 
 def test_bounded_strict_renderer_matches_existing_renderer_for_lazy_arrays() -> None:

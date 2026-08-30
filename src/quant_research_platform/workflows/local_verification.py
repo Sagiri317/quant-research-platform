@@ -267,6 +267,7 @@ def _run_local_verification_with_policy(
     prediction_catalog = config.profile.build_prediction_catalog(
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
+        test_end=effective_windows["prediction_test_end"],
     )
     prediction_specs = prediction_catalog.list()
     representative_prediction_ids = tuple(

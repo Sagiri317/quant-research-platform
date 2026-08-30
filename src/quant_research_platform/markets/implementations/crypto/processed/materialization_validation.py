@@ -15,6 +15,7 @@ import pandas as pd
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
+    clear_exception_frames,
     strict_hashable_key_series,
     strict_timestamp_series,
 )
@@ -306,15 +307,22 @@ def _validate_receipt_key_coverage(
             "crypto.validation.keys",
             max(1, pandas_frame_payload_bytes(frame)),
         ):
-            keys = _normalized_primary_keys(frame, primary_key, error=error)
-            if pandas_frame_payload_bytes(keys) > chunk_target_bytes:
-                raise ValueError(error)
+            keys: pd.DataFrame | None = None
             try:
+                keys = _normalized_primary_keys(frame, primary_key, error=error)
+                if pandas_frame_payload_bytes(keys) > chunk_target_bytes:
+                    raise ValueError(error)
                 duplicates = index.add_frame(keys, namespace=_EXPECTED_KEY_NAMESPACE)
-            except ValueError as exc:
-                raise ValueError(error) from exc
-            if duplicates:
-                raise ValueError(error)
+                if duplicates:
+                    raise ValueError(error)
+            except ValueError as exception:
+                clear_exception_frames(exception)
+                raise ValueError(error) from exception
+            except BaseException as exception:
+                clear_exception_frames(exception)
+                raise
+            finally:
+                keys = None
     missing_count, extra_count = index.difference_counts(
         expected_namespace=_EXPECTED_KEY_NAMESPACE,
         actual_namespace="dataset",
@@ -496,13 +504,21 @@ def _iter_normalized_primary_key_rows(
             "crypto.validation.keys",
             max(1, pandas_frame_payload_bytes(frame)),
         ):
-            keys = _normalized_primary_keys(frame, primary_key, error=error)
-            for row in keys.itertuples(index=False, name=None):
-                normalized = tuple(row)
-                if previous is not None and normalized <= previous:
-                    raise ValueError(error)
-                previous = normalized
-                yield normalized
+            keys: pd.DataFrame | None = None
+            try:
+                try:
+                    keys = _normalized_primary_keys(frame, primary_key, error=error)
+                except BaseException as exception:
+                    clear_exception_frames(exception)
+                    raise
+                for row in keys.itertuples(index=False, name=None):
+                    normalized = tuple(row)
+                    if previous is not None and normalized <= previous:
+                        raise ValueError(error)
+                    previous = normalized
+                    yield normalized
+            finally:
+                keys = None
 
 
 def validated_ordered_dependency_chunk(

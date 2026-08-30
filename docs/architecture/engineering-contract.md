@@ -38,7 +38,7 @@ LOCAL_ONLY 与 REVIEW_SAFE 分离。REVIEW_SAFE 内容不得包含私有行、se
 ```text
 git diff --check
 conda run -n <env> ruff format --check .
-conda run -n <env> ruff check .
+conda run -n <env> ruff check . --no-cache
 conda run -n <env> python -m pytest -q -o "addopts=--import-mode=importlib --strict-markers" tests
 conda run -n <env> python -m build --no-isolation --sdist --outdir <sdist-run>
 conda run -n <env> python -m build --no-isolation --wheel --outdir <wheel-run>

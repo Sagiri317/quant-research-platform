@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from math import isfinite
 
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -16,7 +15,10 @@ from quant_research_platform.contracts.signals import (
     SignalSpec,
     _cross_signal_id_column_overlaps,
 )
-from quant_research_platform.contracts.validation import _validate_column_tuple
+from quant_research_platform.contracts.validation import (
+    _validate_column_tuple,
+    strict_finite_float,
+)
 
 WEIGHT_METHODS = {
     "equal_weight_quantile",
@@ -266,16 +268,19 @@ class PortfolioSpec:
 def _validate_quantile(value: float, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{name} must be numeric.")
-    if not 0 < float(value) <= 1:
-        raise ValueError(f"{name} must be greater than 0 and at most 1.")
+    error = f"{name} must be greater than 0 and at most 1."
+    numeric = strict_finite_float(value, error=error)
+    if not 0 < numeric <= 1:
+        raise ValueError(error)
 
 
 def _validate_nonnegative(value: float, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{name} must be numeric.")
-    numeric = float(value)
-    if not isfinite(numeric) or numeric < 0:
-        raise ValueError(f"{name} must be nonnegative.")
+    error = f"{name} must be nonnegative."
+    numeric = strict_finite_float(value, error=error)
+    if numeric < 0:
+        raise ValueError(error)
 
 
 def _validate_optional_column_name(value: str | None, name: str) -> None:

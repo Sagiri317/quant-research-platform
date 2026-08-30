@@ -26,6 +26,22 @@ _TUPLE_BASE_BYTES = ().__sizeof__()
 _POINTER_BYTES = struct.calcsize("P")
 
 
+def json_record_working_set_bytes(record_bytes: int) -> int:
+    """Return a conservative raw/text/decoded JSON record working set."""
+
+    if type(record_bytes) is not int or record_bytes < 0:
+        raise ValueError("json_record_bytes_invalid")
+    unit = max(
+        sys.getsizeof({}),
+        sys.getsizeof([]),
+        sys.getsizeof(0),
+        sys.getsizeof(""),
+    )
+    raw_and_text = 5 * record_bytes + sys.getsizeof(b"") + sys.getsizeof("")
+    decoded_and_normalized = (record_bytes + 1) * unit
+    return raw_and_text + decoded_and_normalized
+
+
 def parse_qrp_json_object(raw: bytes) -> dict[str, Any]:
     """Decode one strict UTF-8 QRP-owned JSON object."""
 

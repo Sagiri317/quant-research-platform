@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import warnings
+import weakref
 from datetime import timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -9,6 +10,43 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.contracts.validation as validation
+
+
+def test_clear_exception_frames_releases_distinct_cause_and_context() -> None:
+    released: list[str] = []
+
+    class Payload:
+        pass
+
+    def capture(error_type, payload):  # noqa: ANN001, ANN202
+        try:
+            raise error_type("validation failure")
+        except error_type as error:
+            return error
+
+    cause_payload = Payload()
+    context_payload = Payload()
+    weakref.finalize(cause_payload, released.append, "cause")
+    weakref.finalize(context_payload, released.append, "context")
+    cause = capture(TypeError, cause_payload)
+    context = capture(ValueError, context_payload)
+    primary = RuntimeError("primary")
+    primary.__cause__ = cause
+    primary.__context__ = context
+    del cause_payload, context_payload
+
+    validation.clear_exception_frames(primary)
+
+    assert sorted(released) == ["cause", "context"]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [True, None, "not-a-number", float("nan"), math.inf, -math.inf, 10**4000],
+)
+def test_strict_finite_float_maps_invalid_scalars_to_owner_error(value: object) -> None:
+    with pytest.raises(ValueError, match="invalid_contract_scalar"):
+        validation.strict_finite_float(value, error="invalid_contract_scalar")
 
 
 @pytest.mark.parametrize("value", [None, pd.NA, float("nan")])

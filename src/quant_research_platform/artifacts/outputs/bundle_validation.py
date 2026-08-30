@@ -16,6 +16,7 @@ import pyarrow.compute as pc
 from quant_research_platform.artifacts.outputs.manifest import (
     validate_output_manifest_business_envelope,
 )
+from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
@@ -298,53 +299,63 @@ def read_prediction_output_bundle(
                         "artifacts.prediction.read.batch",
                         batch_working_bytes,
                     ):
+                        batch = table = timestamps = keep = None
                         try:
-                            batch = next(batches)
-                        except StopIteration:
-                            break
-                        table = pa.Table.from_batches([batch])
-                        timestamps = table.column("timestamp")
-                        if bool(
-                            pc.any(
-                                pc.less(timestamps, pa.scalar(pd.Timestamp(test_start)))
-                            ).as_py()
-                        ) or (
-                            test_end is not None
-                            and bool(
+                            try:
+                                batch = next(batches)
+                            except StopIteration:
+                                break
+                            table = pa.Table.from_batches([batch])
+                            timestamps = table.column("timestamp")
+                            if bool(
                                 pc.any(
-                                    pc.greater(
+                                    pc.less(
                                         timestamps,
-                                        pa.scalar(pd.Timestamp(test_end)),
+                                        pa.scalar(pd.Timestamp(test_start)),
                                     )
                                 ).as_py()
-                            )
-                        ):
-                            raise ValueError("persisted_prediction_window_mismatch")
-                        duplicates = key_index.add_float_value_table(
-                            table,
-                            namespace="prediction-bundle-validation",
-                            value_column=prediction_column,
-                            payload_target_bytes=batch_working_bytes,
-                        )
-                        if duplicates:
-                            raise ValueError("duplicate_persisted_prediction_keys")
-                        if time_window is not None:
-                            keep = pc.and_(
-                                pc.greater_equal(
-                                    timestamps,
-                                    pa.scalar(pd.Timestamp(time_window.start)),
-                                ),
-                                pc.less_equal(
-                                    timestamps,
-                                    pa.scalar(pd.Timestamp(time_window.end)),
-                                ),
-                            )
-                            table = table.filter(keep)
-                        if table.num_rows:
-                            lookup.add_table(
+                            ) or (
+                                test_end is not None
+                                and bool(
+                                    pc.any(
+                                        pc.greater(
+                                            timestamps,
+                                            pa.scalar(pd.Timestamp(test_end)),
+                                        )
+                                    ).as_py()
+                                )
+                            ):
+                                raise ValueError("persisted_prediction_window_mismatch")
+                            duplicates = key_index.add_float_value_table(
                                 table,
-                                payload_headroom_bytes=batch_working_bytes,
+                                namespace="prediction-bundle-validation",
+                                value_column=prediction_column,
+                                payload_target_bytes=batch_working_bytes,
                             )
+                            if duplicates:
+                                raise ValueError("duplicate_persisted_prediction_keys")
+                            if time_window is not None:
+                                keep = pc.and_(
+                                    pc.greater_equal(
+                                        timestamps,
+                                        pa.scalar(pd.Timestamp(time_window.start)),
+                                    ),
+                                    pc.less_equal(
+                                        timestamps,
+                                        pa.scalar(pd.Timestamp(time_window.end)),
+                                    ),
+                                )
+                                table = table.filter(keep)
+                            if table.num_rows:
+                                lookup.add_table(
+                                    table,
+                                    payload_headroom_bytes=batch_working_bytes,
+                                )
+                        except BaseException as error:
+                            clear_exception_frames(error)
+                            raise
+                        finally:
+                            batch = table = timestamps = keep = None
                 if lookup.row_count == 0:
                     raise ValueError("empty_prediction_window")
         except Exception as exc:

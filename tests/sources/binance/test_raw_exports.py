@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import weakref
 from pathlib import Path
 
 import pandas as pd
@@ -439,6 +440,80 @@ def test_binance_raw_exports_does_not_require_interval_for_trades_or_depth(
 
     assert tuple(_iter_test_raw_envelopes(trade_path))[0]["data_kind"] == "agg_trades"
     assert tuple(_iter_test_raw_envelopes(depth_path))[0]["data_kind"] == "depth"
+
+
+def test_binance_raw_exports_admits_valid_large_depth_record(tmp_path: Path) -> None:
+    path = tmp_path / "depth.jsonl"
+    envelope = _envelope(data_kind="depth")
+    envelope["payload"] = {
+        "lastUpdateId": 1,
+        "bids": [[f"{1000 - index / 10:.1f}", "1.0"] for index in range(500)],
+        "asks": [[f"{1000.1 + index / 10:.1f}", "1.0"] for index in range(500)],
+    }
+    _write_jsonl(path, envelope)
+    policy = capture_test_policy(
+        available_memory_bytes=512 * 1024**2,
+        explicit_cap_bytes=256 * 1024**2,
+    )
+
+    rows = tuple(_iter_test_raw_envelopes(path, resource_policy=policy))
+
+    assert len(rows) == 1
+    assert len(rows[0]["payload"]["bids"]) == 500
+    assert len(rows[0]["payload"]["asks"]) == 500
+
+
+def test_large_legacy_file_with_small_records_starts_from_scan_bound(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "large.jsonl"
+    line = (
+        json.dumps(_envelope(data_kind="klines"), separators=(",", ":")).encode("utf-8")
+        + b"\n"
+    )
+    path.write_bytes(line * (9 * 1024**2 // len(line) + 1))
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+    rows = _iter_test_raw_envelopes(path, resource_policy=policy)
+
+    try:
+        assert next(rows)["data_kind"] == "klines"
+    finally:
+        rows.close()
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_invalid_legacy_envelope_releases_decode_inside_owner_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "raw.jsonl"
+    _write_jsonl(path, _envelope(data_kind="klines"))
+    released: list[int] = []
+    loads_json = raw_exports._loads_json
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    class TrackedEnvelope(dict):
+        pass
+
+    def track_envelope(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        tracked = TrackedEnvelope(loads_json(*args, **kwargs))
+        tracked["source"] = "invalid"
+        weakref.finalize(tracked, lambda: released.append(policy.used_memory_bytes))
+        return tracked
+
+    monkeypatch.setattr(raw_exports, "_loads_json", track_envelope)
+    with pytest.raises(ValueError, match="invalid_binance_raw_envelope_source"):
+        tuple(_iter_test_raw_envelopes(path, resource_policy=policy))
+
+    assert released
+    assert all(used > 0 for used in released)
 
 
 def test_binance_raw_exports_rejects_invalid_market_payload_values(

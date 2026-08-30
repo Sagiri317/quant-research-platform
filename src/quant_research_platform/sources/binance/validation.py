@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import math
 import re
 from typing import Any
 
 import pandas as pd
 from pandas.errors import OutOfBoundsDatetime
 
+from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 
 BINANCE_SPOT_MARKET_TYPE = "spot"
@@ -115,18 +115,6 @@ def strict_market_type(
     if market_type != BINANCE_SPOT_MARKET_TYPE:
         raise ValueError(error)
     return market_type
-
-
-def strict_finite_float(value: object, *, error: str) -> float:
-    if isinstance(value, bool):
-        raise ValueError(error)
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
-    if not math.isfinite(number):
-        raise ValueError(error)
-    return number
 
 
 def strict_positive_float(value: object, *, error: str) -> float:

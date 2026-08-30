@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share import (
     research_scenarios,
@@ -245,6 +246,79 @@ def test_research_profile_covers_required_models_predictions_and_signals() -> No
     ]
 
 
+def test_a_share_prediction_identity_binds_model_label_and_test_period() -> None:
+    label_variant = research_scenarios.build_prediction_specs(
+        train_end="2023-12-31",
+        test_start="2024-01-01",
+        test_end="2024-06-30",
+        model_algorithm_ids=("linear_regression",),
+        return_source_column="forward_return_5d",
+    )[0]
+    first_period = research_scenarios.build_prediction_specs(
+        train_end="2023-12-31",
+        test_start="2024-01-01",
+        test_end="2024-06-30",
+        model_algorithm_ids=("linear_regression",),
+        return_source_column="forward_return_20d",
+    )[0]
+    disjoint_period = research_scenarios.build_prediction_specs(
+        train_end="2024-06-30",
+        test_start="2024-07-01",
+        test_end="2024-12-31",
+        model_algorithm_ids=("linear_regression",),
+        return_source_column="forward_return_20d",
+    )[0]
+    open_period = research_scenarios.build_prediction_specs(
+        train_end="2023-12-31",
+        test_start="2024-01-01",
+        test_end=None,
+        model_algorithm_ids=("linear_regression",),
+        return_source_column="forward_return_20d",
+    )[0]
+
+    assert label_variant.model_id == "linear_regression_forward_return_5d"
+    assert first_period.model_id == "linear_regression_forward_return_20d"
+    assert validate_run_id(first_period.prediction_id) == first_period.prediction_id
+    assert validate_run_id(open_period.prediction_id) == open_period.prediction_id
+    assert (
+        len(
+            {
+                label_variant.prediction_id,
+                first_period.prediction_id,
+                disjoint_period.prediction_id,
+                open_period.prediction_id,
+            }
+        )
+        == 4
+    )
+
+
+def test_a_share_prediction_identity_normalizes_intraday_periods() -> None:
+    first = research_scenarios.build_prediction_specs(
+        train_end="2023-12-31T16:00:00-08:00",
+        test_start="2024-01-02T00:00:00Z",
+        test_end="2024-06-30T00:00:00.000001Z",
+        model_algorithm_ids=("linear_regression",),
+    )[0]
+    equivalent = research_scenarios.build_prediction_specs(
+        train_end="2024-01-01T00:00:00Z",
+        test_start="2024-01-01T19:00:00-05:00",
+        test_end="2024-06-29T19:00:00.000001-05:00",
+        model_algorithm_ids=("linear_regression",),
+    )[0]
+    different_microsecond = research_scenarios.build_prediction_specs(
+        train_end="2024-01-01T00:00:00Z",
+        test_start="2024-01-02T00:00:00Z",
+        test_end="2024-06-30T00:00:00.000002Z",
+        model_algorithm_ids=("linear_regression",),
+    )[0]
+
+    assert first.prediction_id == equivalent.prediction_id
+    assert first.prediction_id != different_microsecond.prediction_id
+    assert validate_run_id(first.prediction_id) == first.prediction_id
+    assert len(first.prediction_id) <= 128
+
+
 def test_a_share_scenario_has_distinct_default_and_smoke_model_parameters() -> None:
     default = research_scenarios.build_model_specs(
         model_algorithm_ids=("random_forest_regressor",),
@@ -263,7 +337,11 @@ def test_a_share_scenario_has_distinct_default_and_smoke_model_parameters() -> N
 
 
 def test_a_share_scenario_adds_prediction_portfolio_and_keeps_factor() -> None:
-    prediction_id = "linear_regression_mom_20d_prediction_2015"
+    prediction_id = research_scenarios.build_prediction_specs(
+        train_end="2014-12-31",
+        test_start="2015-01-01",
+        model_algorithm_ids=("linear_regression",),
+    )[0].prediction_id
 
     portfolios = research_scenarios.build_portfolio_specs(
         prediction_id=prediction_id,

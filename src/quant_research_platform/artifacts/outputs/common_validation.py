@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import pandas as pd
@@ -15,6 +14,7 @@ from quant_research_platform.contracts.filtering import (
 )
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.storage.layout import StorageLayout
 
 _SIGNAL_METADATA_KEYS = frozenset(
@@ -107,8 +107,9 @@ def require_finite_metadata_number(
     error_name: str,
 ) -> int | float:
     value = metadata[key]
-    if type(value) not in {int, float} or not math.isfinite(value):
+    if type(value) not in {int, float}:
         raise ValueError(error_name)
+    strict_finite_float(value, error=error_name)
     return value
 
 

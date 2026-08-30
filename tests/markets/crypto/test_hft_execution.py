@@ -16,16 +16,22 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     TakerConfig,
     _Metrics,
     _PendingMarkouts,
-    simulate_maker,
-    simulate_taker,
-    taker_latency_sweep,
+)
+from quant_research_platform.markets.implementations.crypto.execution import (
+    simulate_maker as _simulate_maker,
+)
+from quant_research_platform.markets.implementations.crypto.execution import (
+    simulate_taker as _simulate_taker,
+)
+from quant_research_platform.markets.implementations.crypto.execution import (
+    taker_latency_sweep as _taker_latency_sweep,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
-from tests.helpers.binance_hft import _coverage, _quote
+from tests.helpers.binance_hft import _coverage, _quote, with_test_resource_policy
 from tests.helpers.runtime_resources import capture_test_policy
 
 
@@ -117,6 +123,11 @@ def _maker_config() -> MakerConfig:
     )
 
 
+simulate_taker = with_test_resource_policy(_simulate_taker)
+simulate_maker = with_test_resource_policy(_simulate_maker)
+taker_latency_sweep = with_test_resource_policy(_taker_latency_sweep)
+
+
 def test_market_event_first_trade_failure_releases_first_book_and_children() -> None:
     primary = KeyboardInterrupt("trade_primary")
 
@@ -200,6 +211,7 @@ def test_pending_markout_close_failure_preserves_body_primary() -> None:
     handle = FailingClose()
     pending = object.__new__(_PendingMarkouts)
     pending._file = handle
+    pending._next = None
     pending.expire_all = lambda: None
 
     with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
@@ -231,8 +243,9 @@ def test_pending_markout_rejects_disk_before_tempfile(
         ),
     )
 
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with pytest.raises(OSError, match="pending_markout_disk_headroom"):
-        _PendingMarkouts(_Metrics(), None)
+        _PendingMarkouts(_Metrics(), None, policy)
 
 
 def test_pending_markout_rechecks_disk_and_closes_after_failure(
@@ -258,7 +271,8 @@ def test_pending_markout_rechecks_disk_and_closes_after_failure(
         1,
         raising=False,
     )
-    pending = _PendingMarkouts(_Metrics(), None)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    pending = _PendingMarkouts(_Metrics(), None, policy)
     fill = {
         "fill_qty": 1.0,
         "fill_price": 100.0,
@@ -267,12 +281,99 @@ def test_pending_markout_rechecks_disk_and_closes_after_failure(
         "markout_target_time_ns": 1,
     }
 
-    with pytest.raises(OSError, match="pending_markout_disk_headroom"):
-        with pending:
-            pending.add(fill)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(OSError, match="pending_markout_disk_headroom"):
+            with pending:
+                pending.add(fill)
 
     assert len(calls) == 2
     assert pending._file.closed is True
+
+
+def test_pending_markout_encode_and_retained_decode_are_admitted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+    observed: list[tuple[str, int]] = []
+    dumps = execution.json.dumps
+    parse_json = execution.parse_qrp_json_object
+
+    def observe_encode(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        observed.append(("encode", policy.used_memory_bytes))
+        return dumps(*args, **kwargs)
+
+    def observe_decode(raw: bytes):
+        observed.append(("decode", policy.used_memory_bytes))
+        return parse_json(raw)
+
+    monkeypatch.setattr(execution.json, "dumps", observe_encode)
+    monkeypatch.setattr(execution, "parse_qrp_json_object", observe_decode)
+    fill = {
+        "fill_qty": 1.0,
+        "fill_price": 100.0,
+        "side": "buy",
+        "segment_id": "s1",
+        "markout_target_time_ns": 1,
+    }
+
+    with runtime_resource_policy_scope(policy):
+        with _PendingMarkouts(_Metrics(), None, policy) as pending:
+            pending.add(fill)
+            assert policy.used_memory_bytes == 0
+            assert pending._peek() == fill
+            assert policy.used_memory_bytes > 0
+            pending.expire_all()
+            assert policy.used_memory_bytes == 0
+
+    assert {name for name, _used in observed} == {"encode", "decode"}
+    assert all(used > 0 for _name, used in observed)
+
+
+def test_execution_rejects_fill_before_explicit_cap_is_crossed() -> None:
+    policy = capture_test_policy(
+        available_memory_bytes=1024 * 1024,
+        explicit_cap_bytes=1,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            _simulate_taker(
+                [_state(0)],
+                [{"timestamp_ms": 0, "prediction": 0.02}],
+                prediction_column="prediction",
+                config=_taker_config(),
+                observed_coverage={"s1": _coverage(0, 1)},
+                resource_policy=policy,
+            )
+
+    assert policy.used_memory_bytes == 0
+
+
+def test_failing_fill_observer_is_not_replayed_during_cleanup() -> None:
+    calls: list[int] = []
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    def fail(fill):  # noqa: ANN001, ANN202
+        calls.append(fill["order_id"])
+        raise KeyboardInterrupt("observer_primary")
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(KeyboardInterrupt, match="observer_primary"):
+            _simulate_taker(
+                [_state(0), _state(200)],
+                [{"timestamp_ms": 0, "prediction": 0.02}],
+                prediction_column="prediction",
+                config=_taker_config(),
+                observed_coverage={"s1": _coverage(0, 300)},
+                resource_policy=policy,
+                on_fill=fail,
+            )
+
+    assert calls == [1]
+    assert policy.used_memory_bytes == 0
 
 
 def test_taker_walks_known_l2_and_reports_partial_coverage_honestly() -> None:

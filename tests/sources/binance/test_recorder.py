@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import threading
+import weakref
 from pathlib import Path
 
 import pytest
@@ -79,6 +80,70 @@ def test_recorder_scopes_bind_exact_public_streams() -> None:
     assert scopes["spot-l2"][0].url == (
         "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms"
     )
+
+
+def test_websocket_reservation_covers_queue_and_current_decode() -> None:
+    assert recorder._WS_STREAM_WORKING_SET_BYTES == (
+        recorder.MAX_WS_QUEUE * recorder.MAX_WS_MESSAGE_BYTES * 4
+        + recorder.json_record_working_set_bytes(recorder.MAX_WS_MESSAGE_BYTES)
+        + 64 * 1024
+    )
+
+
+def test_rest_metadata_releases_previous_payload_before_next_admission(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    released: list[int] = []
+    observations: list[bool] = []
+    policy = capture_test_policy(
+        available_memory_bytes=2 * 1024**3,
+        explicit_cap_bytes=1024**3,
+    )
+
+    class Payload(dict):
+        pass
+
+    def get_json(*_args, **_kwargs):  # noqa: ANN202
+        if observations:
+            observations.append(bool(released))
+        else:
+            observations.append(False)
+        payload = Payload(
+            {
+                "symbols": [
+                    {
+                        "symbol": "BTCUSDT",
+                        "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.1"}],
+                    }
+                ]
+            }
+        )
+        weakref.finalize(payload, released.append, policy.used_memory_bytes)
+        return payload, recorder._utc_now(), 1
+
+    class Writer:
+        def write(self, **_kwargs) -> None:
+            return None
+
+    monkeypatch.setattr(recorder, "_http_get_json", get_json)
+    with runtime_resource_policy_scope(policy):
+        recorder._record_market_metadata(
+            Writer(),
+            policy,
+            market_types=(SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE),
+        )
+
+    assert observations == [False, True]
+    assert released
+    assert all(used > 0 for used in released)
+
+
+def test_depth_validation_maps_large_json_integer_to_stable_owner_error() -> None:
+    payload = _depth_payload(FUTURES_MARKET_TYPE)
+    payload["b"] = [[10**4000, "1.0"]]
+
+    with pytest.raises(ValueError, match="binance_recorder_depth_bids_invalid"):
+        _validate_stream(FUTURES_STREAMS[0], payload)
 
 
 def test_run_writer_handle_cleanup_preserves_active_primary(tmp_path: Path) -> None:

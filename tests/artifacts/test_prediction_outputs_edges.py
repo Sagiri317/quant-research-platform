@@ -1375,7 +1375,7 @@ def test_prediction_outputs_reject_unparseable_prediction_timestamp(
         )
 
 
-def test_prediction_outputs_accept_equivalent_timezone_representations(
+def test_artifact_writer_accepts_equivalent_timezone_representations(
     tmp_path: Path,
 ) -> None:
     spec = make_output_edge_prediction_spec()

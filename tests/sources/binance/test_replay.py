@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import tempfile
+import weakref
 from pathlib import Path
 
 import pandas as pd
@@ -466,6 +467,304 @@ def _write_run(
         encoding="utf-8",
     )
     return manifest
+
+
+def test_recorder_run_retains_manifest_lease_through_final_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    retained_bound = (
+        replay.json_record_working_set_bytes((root / "run.json").stat().st_size)
+        + 64 * 1024
+    )
+    observed: list[int] = []
+    capture_run_files = replay._capture_run_files
+
+    def observe_manifest_owner(*args, **kwargs):  # noqa: ANN202
+        observed.append(args[2].used_memory_bytes)
+        return capture_run_files(*args, **kwargs)
+
+    monkeypatch.setattr(replay, "_capture_run_files", observe_manifest_owner)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        with open_recorder_run(root, policy):
+            pass
+
+    assert len(observed) == 2
+    assert observed[0] >= retained_bound
+    assert observed[1] >= 2 * retained_bound
+
+
+def test_successful_run_releases_manifests_inside_owner_leases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    released: list[int] = []
+    parse_json = replay.parse_qrp_json_object
+    canonical_hash = replay.canonical_json_hash
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    class TrackedManifest(dict):
+        pass
+
+    def track_manifest(raw: bytes):
+        value = parse_json(raw)
+        if value.get("schema_id") != "qrp-binance-recorder":
+            return value
+        tracked = TrackedManifest(value)
+        weakref.finalize(tracked, lambda: released.append(policy.used_memory_bytes))
+        return tracked
+
+    monkeypatch.setattr(replay, "parse_qrp_json_object", track_manifest)
+    monkeypatch.setattr(
+        replay,
+        "canonical_json_hash",
+        lambda value: canonical_hash(dict(value)),
+    )
+    with runtime_resource_policy_scope(policy):
+        with open_recorder_run(root, policy) as run:
+            assert run.manifest["run_id"] == "run-1"
+        assert run.manifest == {}
+
+    assert len(released) == 2
+    assert all(used > 0 for used in released)
+
+
+def test_connection_interval_decode_holds_max_record_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    expected_bound = (
+        replay.json_record_working_set_bytes(
+            replay._CONNECTION_INTERVAL_MAX_RECORD_BYTES
+        )
+        + 64 * 1024
+    )
+    observed: list[int] = []
+    released: list[int] = []
+    parse_json = replay.parse_qrp_json_object
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    def observe_interval_owner(raw: bytes):
+        value = parse_json(raw)
+        if b'"opened_at"' not in raw:
+            return value
+        observed.append(policy.used_memory_bytes)
+
+        class TrackedInterval(dict):
+            pass
+
+        tracked = TrackedInterval(value)
+        weakref.finalize(tracked, lambda: released.append(policy.used_memory_bytes))
+        return tracked
+
+    monkeypatch.setattr(replay, "parse_qrp_json_object", observe_interval_owner)
+    with runtime_resource_policy_scope(policy):
+        with open_recorder_run(root, policy):
+            pass
+
+    assert observed
+    assert min(observed) >= expected_bound
+    assert released
+    assert min(released) >= expected_bound
+
+
+def test_invalid_connection_interval_releases_decode_inside_owner_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    expected_bound = (
+        replay.json_record_working_set_bytes(
+            replay._CONNECTION_INTERVAL_MAX_RECORD_BYTES
+        )
+        + 64 * 1024
+    )
+    released: list[int] = []
+    parse_json = replay.parse_qrp_json_object
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    class TrackedInterval(dict):
+        pass
+
+    def track_interval(raw: bytes):
+        value = parse_json(raw)
+        if b'"opened_at"' not in raw:
+            return value
+        tracked = TrackedInterval(value)
+        tracked["market"] = "invalid"
+        weakref.finalize(tracked, lambda: released.append(policy.used_memory_bytes))
+        return tracked
+
+    monkeypatch.setattr(replay, "parse_qrp_json_object", track_interval)
+
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            ValueError,
+            match="binance_replay_connection_intervals_invalid",
+        ):
+            with open_recorder_run(root, policy):
+                pass
+
+    assert released
+    assert min(released) >= expected_bound
+
+
+def test_invalid_manifest_releases_decode_inside_owner_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    expected_bound = (
+        replay.json_record_working_set_bytes((root / "run.json").stat().st_size)
+        + 64 * 1024
+    )
+    released: list[int] = []
+    parse_json = replay.parse_qrp_json_object
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    class TrackedManifest(dict):
+        pass
+
+    def track_manifest(raw: bytes):
+        value = parse_json(raw)
+        if value.get("schema_id") != "qrp-binance-recorder":
+            return value
+        tracked = TrackedManifest(value)
+        tracked["venue"] = "invalid"
+        weakref.finalize(tracked, lambda: released.append(policy.used_memory_bytes))
+        return tracked
+
+    monkeypatch.setattr(replay, "parse_qrp_json_object", track_manifest)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            ValueError,
+            match="binance_replay_run_manifest_identity_invalid",
+        ):
+            with open_recorder_run(root, policy):
+                pass
+
+    assert released
+    assert min(released) >= expected_bound
+
+
+def test_invalid_raw_record_releases_decode_inside_owner_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1)],
+            )
+        ],
+    )
+    released: list[int] = []
+    parse_json = replay.parse_qrp_json_object
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2,
+    )
+
+    class TrackedRecord(dict):
+        pass
+
+    def track_record(raw: bytes):
+        value = parse_json(raw)
+        if "capture_seq" not in value:
+            return value
+        tracked = TrackedRecord(value)
+        tracked["capture_seq"] = -1
+        weakref.finalize(tracked, lambda: released.append(policy.used_memory_bytes))
+        return tracked
+
+    monkeypatch.setattr(replay, "parse_qrp_json_object", track_record)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="binance_replay_capture_seq_missing"):
+            with open_recorder_run(root, policy) as run:
+                tuple(run.iter_records(market_type=FUTURES_MARKET_TYPE))
+
+    assert released
+    assert all(used > 0 for used in released)
 
 
 def test_connection_coverage_rejects_disk_before_scratch(

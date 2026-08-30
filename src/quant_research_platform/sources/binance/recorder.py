@@ -7,7 +7,6 @@ import datetime as dt
 import gzip
 import hashlib
 import json
-import math
 import os
 import sys
 import threading
@@ -25,7 +24,14 @@ import psutil
 from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as _connect_websocket
 
-from quant_research_platform.contracts.json_codec import parse_qrp_json_object
+from quant_research_platform.contracts.json_codec import (
+    json_record_working_set_bytes,
+    parse_qrp_json_object,
+)
+from quant_research_platform.contracts.validation import (
+    clear_exception_frames,
+    strict_finite_float,
+)
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -38,9 +44,6 @@ from quant_research_platform.sources.binance.ids import (
     RECORDING_SCOPE_MARKET_TYPES,
     SPOT_L2_RECORDING_SCOPE,
     SPOT_MARKET_TYPE,
-)
-from quant_research_platform.sources.binance.raw_exports import (
-    _json_record_working_set_bytes,
 )
 from quant_research_platform.sources.binance.validation import (
     strict_iso_timestamp,
@@ -65,7 +68,12 @@ REST_REQUEST_TIMEOUT_SECONDS = 15.0
 SNAPSHOT_LIMITS = {SPOT_MARKET_TYPE: 5000, FUTURES_MARKET_TYPE: 1000}
 _RECORDER_DISK_CHECK_BYTES = 1024 * 1024
 _REST_WORKING_SET_BYTES = (
-    _json_record_working_set_bytes(MAX_REST_RESPONSE_BYTES) + 64 * 1024
+    json_record_working_set_bytes(MAX_REST_RESPONSE_BYTES) + 64 * 1024
+)
+_WS_STREAM_WORKING_SET_BYTES = (
+    MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
+    + json_record_working_set_bytes(MAX_WS_MESSAGE_BYTES)
+    + 64 * 1024
 )
 
 
@@ -132,13 +140,8 @@ class RecorderConfig:
 
 
 def _positive_number(value: object, *, error: str) -> float:
-    if isinstance(value, bool):
-        raise ValueError(error)
-    try:
-        number = float(value)
-    except (TypeError, ValueError, OverflowError) as exc:
-        raise ValueError(error) from exc
-    if not math.isfinite(number) or number <= 0:
+    number = strict_finite_float(value, error=error)
+    if number <= 0:
         raise ValueError(error)
     return number
 
@@ -1012,40 +1015,47 @@ def _record_market_metadata(
     for requested_market in market_types:
         market_type, base_url, endpoint, params = requests[requested_market]
         with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
-            payload, received, monotonic_ns = _http_get_json(
-                base_url,
-                endpoint,
-                params=params,
-            )
-            symbol = _selected_symbol(payload)
-            filters = symbol.get("filters")
-            if not isinstance(filters, list):
-                raise ValueError("binance_recorder_symbol_metadata_invalid")
-            tick_size = next(
-                (
-                    item.get("tickSize")
-                    for item in filters
-                    if isinstance(item, dict)
-                    and item.get("filterType") == "PRICE_FILTER"
-                ),
-                None,
-            )
-            strict_positive_float(
-                tick_size,
-                error="binance_recorder_tick_size_invalid",
-            )
-            result[market_type] = {
-                "tick_size": tick_size,
-                "snapshot_limit": SNAPSHOT_LIMITS[market_type],
-            }
-            writer.write(
-                market_type=market_type,
-                data_kind="metadata",
-                stream=f"REST:{endpoint}",
-                payload=symbol,
-                receive_time=received,
-                receive_monotonic_ns=monotonic_ns,
-            )
+            payload = symbol = filters = tick_size = received = monotonic_ns = None
+            try:
+                payload, received, monotonic_ns = _http_get_json(
+                    base_url,
+                    endpoint,
+                    params=params,
+                )
+                symbol = _selected_symbol(payload)
+                filters = symbol.get("filters")
+                if not isinstance(filters, list):
+                    raise ValueError("binance_recorder_symbol_metadata_invalid")
+                tick_size = next(
+                    (
+                        item.get("tickSize")
+                        for item in filters
+                        if isinstance(item, dict)
+                        and item.get("filterType") == "PRICE_FILTER"
+                    ),
+                    None,
+                )
+                strict_positive_float(
+                    tick_size,
+                    error="binance_recorder_tick_size_invalid",
+                )
+                result[market_type] = {
+                    "tick_size": tick_size,
+                    "snapshot_limit": SNAPSHOT_LIMITS[market_type],
+                }
+                writer.write(
+                    market_type=market_type,
+                    data_kind="metadata",
+                    stream=f"REST:{endpoint}",
+                    payload=symbol,
+                    receive_time=received,
+                    receive_monotonic_ns=monotonic_ns,
+                )
+            except BaseException as error:
+                clear_exception_frames(error)
+                raise
+            finally:
+                payload = symbol = filters = tick_size = received = monotonic_ns = None
     return result
 
 
@@ -1088,30 +1098,37 @@ def _record_depth_snapshot(
     if before[0] != generation:
         raise _ConnectionProblem()
     with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
-        payload, received, monotonic_ns = _http_get_json(
-            base_url,
-            endpoint,
-            params={
-                "symbol": SYMBOL,
-                "limit": str(SNAPSHOT_LIMITS[market_type]),
-            },
-        )
-        after = reader.current_identity()
-        if before != after:
-            raise _ConnectionProblem()
-        snapshot = _validate_snapshot(payload, market_type=market_type)
-        writer.write(
-            market_type=market_type,
-            data_kind="depth_snapshot",
-            stream=f"REST:{endpoint}",
-            payload=snapshot,
-            receive_time=received,
-            receive_monotonic_ns=monotonic_ns,
-            connection_id=after[1],
-            segment_id=after[2],
-        )
-        if not reader.acknowledge_snapshot(generation):
-            raise _ConnectionProblem()
+        payload = snapshot = received = monotonic_ns = after = None
+        try:
+            payload, received, monotonic_ns = _http_get_json(
+                base_url,
+                endpoint,
+                params={
+                    "symbol": SYMBOL,
+                    "limit": str(SNAPSHOT_LIMITS[market_type]),
+                },
+            )
+            after = reader.current_identity()
+            if before != after:
+                raise _ConnectionProblem()
+            snapshot = _validate_snapshot(payload, market_type=market_type)
+            writer.write(
+                market_type=market_type,
+                data_kind="depth_snapshot",
+                stream=f"REST:{endpoint}",
+                payload=snapshot,
+                receive_time=received,
+                receive_monotonic_ns=monotonic_ns,
+                connection_id=after[1],
+                segment_id=after[2],
+            )
+            if not reader.acknowledge_snapshot(generation):
+                raise _ConnectionProblem()
+        except BaseException as error:
+            clear_exception_frames(error)
+            raise
+        finally:
+            payload = snapshot = received = monotonic_ns = after = None
 
 
 def record(config: RecorderConfig) -> dict[str, Any]:
@@ -1156,7 +1173,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             policy,
             market_types=market_types,
         )
-        websocket_reserve = len(streams) * MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
+        websocket_reserve = len(streams) * _WS_STREAM_WORKING_SET_BYTES
         with policy.lease(
             "binance.recorder.websocket_buffers",
             websocket_reserve,

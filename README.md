@@ -50,7 +50,7 @@ qrp research-datasets requirements <dataset_id>
 
 ```text
 conda run -n <env> ruff format --check .
-conda run -n <env> ruff check .
+conda run -n <env> ruff check . --no-cache
 conda run -n <env> pytest -q
 conda run -n <env> python -m build --no-isolation --sdist --wheel --outdir <run-dir>
 ```

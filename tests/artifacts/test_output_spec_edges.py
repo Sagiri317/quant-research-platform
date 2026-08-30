@@ -16,6 +16,15 @@ from tests.artifacts.output_edge_fixtures import (
 )
 
 
+def test_finite_metadata_number_maps_large_integer_to_owner_error() -> None:
+    with pytest.raises(ValueError, match="invalid_metadata_number"):
+        output_common_validation.require_finite_metadata_number(
+            {"value": 10**4000},
+            "value",
+            "invalid_metadata_number",
+        )
+
+
 @pytest.mark.parametrize(
     "output_id",
     (

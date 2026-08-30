@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.models import ModelCatalog
@@ -31,6 +32,7 @@ from quant_research_platform.contracts.predictions import (
     PredictionSpec,
 )
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.ids import (
     MARKET_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
@@ -183,20 +185,27 @@ def build_prediction_specs(
     return_source_column: str = DEFAULT_RETURN_SOURCE_COLUMN,
     test_end: str | None = DEFAULT_TEST_END,
 ) -> tuple[PredictionSpec, ...]:
-    return tuple(
-        PredictionSpec(
-            prediction_id=(
-                f"{model_algorithm}_{DEFAULT_MOMENTUM_COLUMN}_prediction_"
-                f"{test_start[:4]}"
-            ),
-            model_id=_model_id(model_algorithm, return_source_column),
-            research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
-            train_end=train_end,
-            test_start=test_start,
-            test_end=test_end,
+    specs: list[PredictionSpec] = []
+    for model_algorithm in sorted(model_algorithm_ids):
+        model_id = _model_id(model_algorithm, return_source_column)
+        period = "_".join(
+            (
+                _prediction_time_token(train_end),
+                _prediction_time_token(test_start),
+                _prediction_time_token(test_end),
+            )
         )
-        for model_algorithm in sorted(model_algorithm_ids)
-    )
+        specs.append(
+            PredictionSpec(
+                prediction_id=f"{model_id}_prediction_{period}",
+                model_id=model_id,
+                research_dataset_id=PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+                train_end=train_end,
+                test_start=test_start,
+                test_end=test_end,
+            )
+        )
+    return tuple(specs)
 
 
 def build_evaluation_specs(
@@ -334,4 +343,17 @@ def build_portfolio_catalog(
 
 
 def _model_id(model_algorithm: str, return_source_column: str) -> str:
-    return f"{model_algorithm}_{DEFAULT_MOMENTUM_COLUMN}_{return_source_column}"
+    return f"{model_algorithm}_{return_source_column}"
+
+
+def _prediction_time_token(value: str | None) -> str:
+    if value is None:
+        return "open"
+    bound = TimeWindow(value, value).start
+    if isinstance(bound, datetime):
+        elapsed = bound - datetime.min
+        microseconds = (
+            elapsed.days * 86_400 + elapsed.seconds
+        ) * 1_000_000 + elapsed.microseconds
+        return f"t{microseconds:x}"
+    return f"d{bound.toordinal():x}"

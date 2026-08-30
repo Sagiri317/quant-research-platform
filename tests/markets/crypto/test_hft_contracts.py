@@ -14,8 +14,12 @@ from quant_research_platform.contracts.order_book import (
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
-    simulate_maker,
-    simulate_taker,
+)
+from quant_research_platform.markets.implementations.crypto.execution import (
+    simulate_maker as _simulate_maker,
+)
+from quant_research_platform.markets.implementations.crypto.execution import (
+    simulate_taker as _simulate_taker,
 )
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
@@ -31,7 +35,11 @@ from tests.helpers.binance_hft import (
     _panel_rows,
     _quote,
     _row_timestamp_ms,
+    with_test_resource_policy,
 )
+
+simulate_taker = with_test_resource_policy(_simulate_taker)
+simulate_maker = with_test_resource_policy(_simulate_maker)
 
 
 def _state(

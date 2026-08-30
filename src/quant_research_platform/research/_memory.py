@@ -8,7 +8,10 @@ from contextlib import ExitStack
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    clear_exception_frames,
+    strict_timestamp_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -126,21 +129,32 @@ def iter_complete_session_frames(
                     + boundary_bytes
                 )
                 with policy.lease("research.session.inspect", inspection_bytes):
-                    timestamps = strict_timestamp_series(
-                        frame[timestamp_column],
-                        error="invalid_time_chunk_timestamp_values",
-                    )
-                    values = timestamps.to_numpy(dtype="datetime64[ns]", copy=False)
-                    stops = np.flatnonzero(values[1:] != values[:-1]) + 1
-                    if len(stops) == 0:
-                        yield frame
-                        continue
-                    start = 0
-                    for raw_stop in stops:
-                        stop = int(raw_stop)
-                        yield frame.iloc[start:stop]
-                        start = stop
-                    yield frame.iloc[start:]
+                    timestamps = values = stops = None
+                    try:
+                        try:
+                            timestamps = strict_timestamp_series(
+                                frame[timestamp_column],
+                                error="invalid_time_chunk_timestamp_values",
+                            )
+                        except BaseException as error:
+                            clear_exception_frames(error)
+                            raise
+                        values = timestamps.to_numpy(
+                            dtype="datetime64[ns]",
+                            copy=False,
+                        )
+                        stops = np.flatnonzero(values[1:] != values[:-1]) + 1
+                        if len(stops) == 0:
+                            yield frame
+                            continue
+                        start = 0
+                        for raw_stop in stops:
+                            stop = int(raw_stop)
+                            yield frame.iloc[start:stop]
+                            start = stop
+                        yield frame.iloc[start:]
+                    finally:
+                        timestamps = values = stops = None
 
     return activate()
 

@@ -17,6 +17,7 @@ from typing import Any
 
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
+    json_record_working_set_bytes,
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.order_book import (
@@ -27,6 +28,7 @@ from quant_research_platform.contracts.order_book import (
     validate_tick_size,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
+from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -41,7 +43,6 @@ from quant_research_platform.sources.binance.ids import (
 )
 from quant_research_platform.sources.binance.raw_exports import (
     _capture_raw_file_identity,
-    _json_record_working_set_bytes,
     _raw_path_session,
     _verify_raw_file_handle,
 )
@@ -214,53 +215,64 @@ class _ConnectionCoverageIndex:
             raise
         count = 0
         try:
+            interval_bound = (
+                json_record_working_set_bytes(_CONNECTION_INTERVAL_MAX_RECORD_BYTES)
+                + 64 * 1024
+            )
             while True:
                 with resource_policy.lease(
                     "binance.replay.connection_interval",
-                    _json_record_working_set_bytes(1024) + 64 * 1024,
+                    interval_bound,
                 ):
-                    line = gzip_handle.readline(
-                        _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 1
-                    )
-                if not line:
-                    break
-                if len(line) > _CONNECTION_INTERVAL_MAX_RECORD_BYTES:
-                    raise ValueError("binance_replay_connection_intervals_invalid")
-                try:
-                    interval = parse_qrp_json_object(line)
-                except (UnicodeError, ValueError) as exc:
-                    raise ValueError(
-                        "binance_replay_connection_intervals_invalid"
-                    ) from exc
-                opened_ns, closed_ns = _validate_connection_interval(
-                    interval,
-                    markets=markets,
-                )
-                if count % _COVERAGE_DISK_BATCH_ROWS == 0:
-                    self._admit_disk_growth(
-                        min(
-                            _COVERAGE_DISK_BATCH_ROWS,
-                            self._descriptor["record_count"] - count,
+                    line: bytes | None = None
+                    interval: dict[str, Any] | None = None
+                    try:
+                        line = gzip_handle.readline(
+                            _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 1
                         )
-                    )
-                try:
-                    self._database.execute(
-                        "INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            interval["connection_id"],
-                            interval["market"],
-                            interval["data_kind"],
-                            interval["stream"],
-                            interval["segment_id"],
-                            opened_ns,
-                            closed_ns,
-                        ),
-                    )
-                except sqlite3.IntegrityError as exc:
-                    raise ValueError(
-                        "binance_replay_connection_intervals_invalid"
-                    ) from exc
-                count += 1
+                        if not line:
+                            break
+                        if len(line) > _CONNECTION_INTERVAL_MAX_RECORD_BYTES:
+                            raise ValueError(
+                                "binance_replay_connection_intervals_invalid"
+                            )
+                        try:
+                            interval = parse_qrp_json_object(line)
+                        except (UnicodeError, ValueError) as exc:
+                            raise ValueError(
+                                "binance_replay_connection_intervals_invalid"
+                            ) from exc
+                        opened_ns, closed_ns = _validate_connection_interval(
+                            interval,
+                            markets=markets,
+                        )
+                        if count % _COVERAGE_DISK_BATCH_ROWS == 0:
+                            self._admit_disk_growth(
+                                min(
+                                    _COVERAGE_DISK_BATCH_ROWS,
+                                    self._descriptor["record_count"] - count,
+                                )
+                            )
+                        try:
+                            self._database.execute(
+                                "INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                (
+                                    interval["connection_id"],
+                                    interval["market"],
+                                    interval["data_kind"],
+                                    interval["stream"],
+                                    interval["segment_id"],
+                                    opened_ns,
+                                    closed_ns,
+                                ),
+                            )
+                        except sqlite3.IntegrityError as exc:
+                            raise ValueError(
+                                "binance_replay_connection_intervals_invalid"
+                            ) from exc
+                        count += 1
+                    finally:
+                        del interval, line
             gzip_handle.close()
             digesting_handle.drain()
             if (
@@ -382,6 +394,7 @@ class _ConnectionCoverageIndex:
         scratch = self._scratch
         self._database = None
         self._scratch = None
+        self._descriptor = {}
         try:
             if database is not None:
                 database.close()
@@ -411,7 +424,7 @@ class _ConnectionCoverageIndex:
             raise failure
 
 
-@dataclass(frozen=True)
+@dataclass
 class RecorderRun:
     root: Path
     manifest: dict[str, Any]
@@ -419,6 +432,10 @@ class RecorderRun:
     resource_policy: RuntimeResourcePolicy
     _files: tuple[_RunFile, ...] = field(repr=False)
     _coverage_index: _ConnectionCoverageIndex = field(repr=False)
+
+    def _retire(self) -> None:
+        self.manifest = {}
+        self._files = ()
 
     def iter_records(
         self,
@@ -491,111 +508,144 @@ def open_recorder_run(
     run_root = Path(root)
     with runtime_resource_policy_scope(resource_policy) as policy:
         with _raw_path_session(run_root) as verify_root:
-            manifest, manifest_identity = _read_run_manifest(run_root, policy)
-            coverage_index = _ConnectionCoverageIndex(
-                run_root,
-                manifest["capture"]["connection_intervals"],
-                markets=set(manifest["market_types"]),
-                resource_policy=policy,
-            )
-            try:
-                files = _capture_run_files(
-                    run_root,
-                    manifest,
-                    policy,
-                    coverage_index=coverage_index,
-                )
-            except BaseException as primary:
+            with _read_run_manifest(run_root, policy) as (
+                manifest,
+                manifest_identity,
+            ):
+                coverage_index: _ConnectionCoverageIndex | None = None
+                files: tuple[_RunFile, ...] = ()
+                run: RecorderRun | None = None
                 try:
-                    coverage_index.close()
-                except BaseException as cleanup_error:
-                    primary.add_note(
-                        "Binance connection coverage cleanup also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-                raise
-            retained_bound = (
-                _json_record_working_set_bytes(manifest_identity.size) + 64 * 1024
-            )
-            run = RecorderRun(
-                root=run_root,
-                manifest=manifest,
-                source_identity={
-                    "schema_id": "qrp-binance-recorder",
-                    "artifact_id": manifest["run_id"],
-                    "manifest_hash": canonical_json_hash(manifest),
-                },
-                resource_policy=policy,
-                _files=files,
-                _coverage_index=coverage_index,
-            )
-            try:
-                with policy.lease("binance.replay.run_metadata", retained_bound):
-                    yield run
-            finally:
-                primary = sys.exception()
-                try:
-                    verify_root()
-                    current_manifest, current_identity = _read_run_manifest(
+                    coverage_index = _ConnectionCoverageIndex(
                         run_root,
-                        policy,
+                        manifest["capture"]["connection_intervals"],
+                        markets=set(manifest["market_types"]),
+                        resource_policy=policy,
                     )
-                    if (
-                        current_identity != manifest_identity
-                        or canonical_json_hash(current_manifest)
-                        != run.source_identity["manifest_hash"]
-                    ):
-                        raise ValueError("binance_replay_run_identity_changed")
-                    current_files = _capture_run_files(
-                        run_root,
-                        current_manifest,
-                        policy,
-                        coverage_index=coverage_index,
-                    )
-                    if tuple(item.identity for item in current_files) != tuple(
-                        item.identity for item in files
-                    ):
-                        raise ValueError("binance_replay_file_identity_changed")
-                except BaseException as verify_error:
-                    if primary is not None:
-                        primary.add_note(
-                            "Binance recorder run verification also failed: "
-                            f"{type(verify_error).__name__}"
-                        )
-                    else:
-                        raise
-                finally:
-                    cleanup_primary = sys.exception()
                     try:
-                        coverage_index.close()
-                    except BaseException as cleanup_error:
-                        if cleanup_primary is None:
-                            raise
-                        cleanup_primary.add_note(
-                            "Binance connection coverage cleanup also failed: "
-                            f"{type(cleanup_error).__name__}"
+                        files = _capture_run_files(
+                            run_root,
+                            manifest,
+                            policy,
+                            coverage_index=coverage_index,
                         )
+                    except BaseException as primary:
+                        try:
+                            coverage_index.close()
+                        except BaseException as cleanup_error:
+                            primary.add_note(
+                                "Binance connection coverage cleanup also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        raise
+                    run = RecorderRun(
+                        root=run_root,
+                        manifest=manifest,
+                        source_identity={
+                            "schema_id": "qrp-binance-recorder",
+                            "artifact_id": manifest["run_id"],
+                            "manifest_hash": canonical_json_hash(manifest),
+                        },
+                        resource_policy=policy,
+                        _files=files,
+                        _coverage_index=coverage_index,
+                    )
+                    try:
+                        yield run
+                    finally:
+                        primary = sys.exception()
+                        try:
+                            verify_root()
+                            with _read_run_manifest(run_root, policy) as (
+                                current_manifest,
+                                current_identity,
+                            ):
+                                current_files: tuple[_RunFile, ...] = ()
+                                try:
+                                    if (
+                                        current_identity != manifest_identity
+                                        or canonical_json_hash(current_manifest)
+                                        != run.source_identity["manifest_hash"]
+                                    ):
+                                        raise ValueError(
+                                            "binance_replay_run_identity_changed"
+                                        )
+                                    current_files = _capture_run_files(
+                                        run_root,
+                                        current_manifest,
+                                        policy,
+                                        coverage_index=coverage_index,
+                                    )
+                                    if tuple(
+                                        item.identity for item in current_files
+                                    ) != tuple(item.identity for item in files):
+                                        raise ValueError(
+                                            "binance_replay_file_identity_changed"
+                                        )
+                                finally:
+                                    current_files = ()
+                                    current_manifest = None
+                        except BaseException as verify_error:
+                            if primary is not None:
+                                primary.add_note(
+                                    "Binance recorder run verification also failed: "
+                                    f"{type(verify_error).__name__}"
+                                )
+                            else:
+                                raise
+                        finally:
+                            cleanup_primary = sys.exception()
+                            try:
+                                coverage_index.close()
+                            except BaseException as cleanup_error:
+                                if cleanup_primary is None:
+                                    raise
+                                cleanup_primary.add_note(
+                                    "Binance connection coverage cleanup also failed: "
+                                    f"{type(cleanup_error).__name__}"
+                                )
+                finally:
+                    if run is not None:
+                        run._retire()
+                    files = ()
+                    coverage_index = None
+                    manifest = None
 
 
+@contextmanager
 def _read_run_manifest(
     root: Path,
     policy: RuntimeResourcePolicy,
-) -> tuple[dict[str, Any], DatasetFileIdentity]:
+) -> Iterator[tuple[dict[str, Any], DatasetFileIdentity]]:
     path = root / "run.json"
     identity = _capture_raw_file_identity(path)
     if identity.size <= 0:
         raise ValueError("binance_replay_run_manifest_invalid")
-    bound = _json_record_working_set_bytes(identity.size) + 64 * 1024
-    with policy.lease("binance.replay.manifest", bound):
+    bound = json_record_working_set_bytes(identity.size) + 64 * 1024
+    with policy.lease("binance.replay.manifest", bound) as lease:
+        raw: bytes | None = None
+        manifest: dict[str, Any] | None = None
         try:
-            raw = path.read_bytes()
-            manifest = parse_qrp_json_object(raw)
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise ValueError("binance_replay_run_manifest_invalid") from exc
-        if _capture_raw_file_identity(path) != identity:
-            raise ValueError("binance_replay_run_identity_changed")
-        _validate_run_manifest(manifest)
-        return manifest, identity
+            try:
+                raw = path.read_bytes()
+                manifest = parse_qrp_json_object(raw)
+            except (OSError, UnicodeError, ValueError) as exc:
+                raise ValueError("binance_replay_run_manifest_invalid") from exc
+            if _capture_raw_file_identity(path) != identity:
+                raise ValueError("binance_replay_run_identity_changed")
+            _validate_run_manifest(manifest)
+        except BaseException as error:
+            clear_exception_frames(error)
+            raw = None
+            manifest = None
+            raise
+        raw = None
+        assert manifest is not None
+        lease.transfer("binance.replay.run_metadata")
+        try:
+            yield manifest, identity
+        finally:
+            manifest = None
 
 
 def _validate_run_manifest(value: object) -> None:
@@ -749,42 +799,46 @@ def _validate_connection_interval(
     *,
     markets: set[str],
 ) -> tuple[int, int]:
-    if not isinstance(value, dict) or set(value) != _CONNECTION_INTERVAL_KEYS:
-        raise ValueError("binance_replay_connection_intervals_invalid")
-    if (
-        value.get("market") not in markets
-        or value.get("data_kind") not in {"depth", "agg_trades"}
-        or not isinstance(value.get("stream"), str)
-        or not value["stream"]
-        or not isinstance(value.get("connection_id"), str)
-        or not value["connection_id"]
-    ):
-        raise ValueError("binance_replay_connection_intervals_invalid")
-    if value["data_kind"] == "depth":
-        if not isinstance(value.get("segment_id"), str) or not value["segment_id"]:
+    try:
+        if not isinstance(value, dict) or set(value) != _CONNECTION_INTERVAL_KEYS:
             raise ValueError("binance_replay_connection_intervals_invalid")
-    elif value.get("segment_id") is not None:
-        raise ValueError("binance_replay_connection_intervals_invalid")
-    opened = strict_iso_timestamp(
-        value.get("opened_at"),
-        error="binance_replay_connection_intervals_invalid",
-    )
-    closed = strict_iso_timestamp(
-        value.get("closed_at"),
-        error="binance_replay_connection_intervals_invalid",
-    )
-    if closed < opened:
-        raise ValueError("binance_replay_connection_intervals_invalid")
-    for key in ("opened_monotonic_ns", "closed_monotonic_ns"):
-        strict_non_negative_integer(
-            value.get(key),
+        if (
+            value.get("market") not in markets
+            or value.get("data_kind") not in {"depth", "agg_trades"}
+            or not isinstance(value.get("stream"), str)
+            or not value["stream"]
+            or not isinstance(value.get("connection_id"), str)
+            or not value["connection_id"]
+        ):
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        if value["data_kind"] == "depth":
+            if not isinstance(value.get("segment_id"), str) or not value["segment_id"]:
+                raise ValueError("binance_replay_connection_intervals_invalid")
+        elif value.get("segment_id") is not None:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        opened = strict_iso_timestamp(
+            value.get("opened_at"),
             error="binance_replay_connection_intervals_invalid",
         )
-    if value["closed_monotonic_ns"] < value["opened_monotonic_ns"]:
-        raise ValueError("binance_replay_connection_intervals_invalid")
-    if value["close_reason"] not in _CONNECTION_CLOSE_REASONS:
-        raise ValueError("binance_replay_connection_intervals_invalid")
-    return opened.value, closed.value
+        closed = strict_iso_timestamp(
+            value.get("closed_at"),
+            error="binance_replay_connection_intervals_invalid",
+        )
+        if closed < opened:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        for key in ("opened_monotonic_ns", "closed_monotonic_ns"):
+            strict_non_negative_integer(
+                value.get(key),
+                error="binance_replay_connection_intervals_invalid",
+            )
+        if value["closed_monotonic_ns"] < value["opened_monotonic_ns"]:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        if value["close_reason"] not in _CONNECTION_CLOSE_REASONS:
+            raise ValueError("binance_replay_connection_intervals_invalid")
+        return opened.value, closed.value
+    except BaseException:
+        value = None
+        raise
 
 
 def _validate_record_coverage(
@@ -953,7 +1007,7 @@ def _iter_raw_file(
 ) -> Iterator[dict[str, Any]]:
     metadata = item.metadata
     path = root / metadata["path"]
-    bound = _json_record_working_set_bytes(metadata["max_record_bytes"]) + 64 * 1024
+    bound = json_record_working_set_bytes(metadata["max_record_bytes"]) + 64 * 1024
     if bound > resource_policy.operation_headroom_bytes:
         raise MemoryError("runtime_memory_budget_exceeded")
     try:
@@ -974,45 +1028,65 @@ def _iter_raw_file(
                 with resource_policy.lease("binance.replay.record", bound):
                     line = gzip_handle.readline(metadata["max_record_bytes"] + 1)
                     if not line:
+                        line = None
                         break
-                    if len(line) > metadata["max_record_bytes"]:
-                        raise ValueError("binance_replay_raw_record_too_large")
+                    record: dict[str, Any] | None = None
                     try:
-                        record = parse_qrp_json_object(line)
-                    except (UnicodeError, ValueError) as exc:
-                        raise ValueError("binance_replay_raw_json_invalid") from exc
-                    _validate_raw_record(record, metadata=metadata)
-                    capture_seq = record["capture_seq"]
-                    if previous is not None and capture_seq <= previous:
-                        raise ValueError("binance_replay_capture_seq_non_monotonic")
-                    previous = capture_seq
-                    if record_observer is not None:
-                        record_observer(
-                            record,
-                            metadata["path"],
-                            record_index,
-                            len(line),
+                        if len(line) > metadata["max_record_bytes"]:
+                            raise ValueError("binance_replay_raw_record_too_large")
+                        try:
+                            record = parse_qrp_json_object(line)
+                        except (UnicodeError, ValueError) as exc:
+                            raise ValueError("binance_replay_raw_json_invalid") from exc
+                        _validate_raw_record(record, metadata=metadata)
+                        capture_seq = record["capture_seq"]
+                        if previous is not None and capture_seq <= previous:
+                            raise ValueError("binance_replay_capture_seq_non_monotonic")
+                        previous = capture_seq
+                        if record_observer is not None:
+                            record_observer(
+                                record,
+                                metadata["path"],
+                                record_index,
+                                len(line),
+                            )
+                        record_index += 1
+                        minimum = (
+                            capture_seq
+                            if minimum is None
+                            else min(minimum, capture_seq)
                         )
-                    record_index += 1
-                    minimum = (
-                        capture_seq if minimum is None else min(minimum, capture_seq)
-                    )
-                    maximum = (
-                        capture_seq if maximum is None else max(maximum, capture_seq)
-                    )
-                    count += 1
-                    market_metadata = manifest["market_metadata"][metadata["market"]]
-                    yield {
-                        **record,
-                        "run_id": manifest["run_id"],
-                        "venue": metadata["venue"],
-                        "symbol": metadata["symbol"],
-                        "market_type": metadata["market"],
-                        "stream": metadata["stream"],
-                        "data_kind": metadata["data_kind"],
-                        "tick_size": market_metadata["tick_size"],
-                        "snapshot_limit": market_metadata["snapshot_limit"],
-                    }
+                        maximum = (
+                            capture_seq
+                            if maximum is None
+                            else max(maximum, capture_seq)
+                        )
+                        count += 1
+                        market_metadata = manifest["market_metadata"][
+                            metadata["market"]
+                        ]
+                        output = {
+                            **record,
+                            "run_id": manifest["run_id"],
+                            "venue": metadata["venue"],
+                            "symbol": metadata["symbol"],
+                            "market_type": metadata["market"],
+                            "stream": metadata["stream"],
+                            "data_kind": metadata["data_kind"],
+                            "tick_size": market_metadata["tick_size"],
+                            "snapshot_limit": market_metadata["snapshot_limit"],
+                        }
+                    except BaseException as error:
+                        clear_exception_frames(error)
+                        record = None
+                        line = None
+                        raise
+                    try:
+                        yield output
+                    finally:
+                        output = None
+                        record = None
+                        line = None
             if (
                 count != metadata["record_count"]
                 or minimum != metadata["capture_seq_min"]
@@ -1531,7 +1605,7 @@ def iter_reconstructed_depth(
                     try:
                         with run.resource_policy.lease(
                             "binance.replay.snapshot",
-                            _json_record_working_set_bytes(1024) + 64 * 1024,
+                            json_record_working_set_bytes(1024) + 64 * 1024,
                         ):
                             reconstructor.bootstrap(record)
                     except ValueError as error:

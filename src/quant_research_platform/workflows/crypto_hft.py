@@ -328,6 +328,7 @@ def _run_in_staging(
                 prediction_column="prediction_score",
                 config=taker_config,
                 observed_coverage=coverage,
+                resource_policy=resource_policy,
             )
             for model_id in price_model_ids
         }
@@ -346,6 +347,7 @@ def _run_in_staging(
                 market_type=FUTURES_MARKET_TYPE,
                 data_kind="agg_trades",
             ),
+            resource_policy=resource_policy,
         )
 
         def maker_prediction_schedule() -> Iterator[dict[str, Any]]:
@@ -363,6 +365,7 @@ def _run_in_staging(
                 market_type=FUTURES_MARKET_TYPE,
                 data_kind="agg_trades",
             ),
+            resource_policy=resource_policy,
         )
         latency = taker_latency_sweep(
             book_factory,
@@ -371,6 +374,7 @@ def _run_in_staging(
             config=taker_config,
             latency_scenarios_ms=_LATENCY_SCENARIOS_MS,
             observed_coverage=coverage,
+            resource_policy=resource_policy,
         )
         execution_relative = Path("execution") / "model_comparison.json"
         execution_payload = write_crypto_hft_execution_artifact(

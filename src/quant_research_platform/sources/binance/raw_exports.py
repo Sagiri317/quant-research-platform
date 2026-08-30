@@ -12,7 +12,11 @@ from typing import Any
 
 import pandas as pd
 
-from quant_research_platform.contracts.json_codec import parse_qrp_json_object
+from quant_research_platform.contracts.json_codec import (
+    json_record_working_set_bytes,
+    parse_qrp_json_object,
+)
+from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.runtime.resources import OwnedValue
 from quant_research_platform.sources.binance.validation import (
     depth_side_levels,
@@ -111,11 +115,7 @@ def _iter_raw_envelope_batches(
         raise ValueError("empty_binance_raw_file")
     if raw_path.suffix != ".jsonl":
         raise ValueError("unsupported_binance_raw_file_extension")
-    raw_file_size = max(1, expected_identity.size)
-    producer_bound = max(
-        256 * 1024,
-        4 * min(raw_file_size, 8 * 1024 * 1024) + _SCAN_BUFFER_BYTES,
-    )
+    producer_bound = 256 * 1024
     line_number = 0
     yielded = False
 
@@ -156,15 +156,12 @@ def _iter_raw_envelope_batches(
                 if record_length == 0:
                     end_of_file = True
                     break
-                record_bound = _json_record_working_set_bytes(record_length)
-                if (
-                    batch_working_bytes + record_bound + 64 * 1024
-                    > lease.reserved_bytes
-                ):
+                record_bound = json_record_working_set_bytes(record_length)
+                required_bound = batch_working_bytes + record_bound + 64 * 1024
+                if required_bound > lease.reserved_bytes:
                     if batch:
                         break
-                    del buffer
-                    raise RuntimeError("binance_record_envelope_bound_invalid")
+                    lease.grow(required_bound - lease.reserved_bytes)
                 raw = handle.read(record_length)
                 line_number += 1
                 if raw.isspace():
@@ -173,16 +170,25 @@ def _iter_raw_envelope_batches(
                 records_in_batch += 1
                 batch_working_bytes += record_bound
                 yielded = True
-                batch.append(
-                    _validate_envelope(
-                        _loads_json(
-                            raw,
-                            raw_path,
-                            line_number=line_number,
-                        ),
+                decoded: dict[str, Any] | None = None
+                validated: dict[str, Any] | None = None
+                try:
+                    decoded = _loads_json(
+                        raw,
+                        raw_path,
+                        line_number=line_number,
                     )
-                )
-                del raw
+                    validated = _validate_envelope(decoded)
+                    batch.append(validated)
+                except BaseException as error:
+                    clear_exception_frames(error)
+                    raw = None
+                    decoded = None
+                    validated = None
+                    raise
+                raw = None
+                decoded = None
+                validated = None
             if batch:
                 actual_bound = batch_working_bytes + 64 * 1024
                 del buffer
@@ -284,18 +290,6 @@ def _next_record_length(handle: Any, buffer: bytearray) -> int:
             handle.seek(start)
             return length
         length += count
-
-
-def _json_record_working_set_bytes(record_bytes: int) -> int:
-    unit = max(
-        sys.getsizeof({}),
-        sys.getsizeof([]),
-        sys.getsizeof(0),
-        sys.getsizeof(""),
-    )
-    raw_and_text = 5 * record_bytes + sys.getsizeof(b"") + sys.getsizeof("")
-    decoded_and_normalized = (record_bytes + 1) * unit
-    return raw_and_text + decoded_and_normalized
 
 
 def _raw_kind_location(

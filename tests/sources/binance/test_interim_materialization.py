@@ -657,6 +657,49 @@ def test_binance_raw_iterator_closes_without_closing_consumer_lease(
     assert policy.used_memory_bytes == 0
 
 
+def test_binance_normalization_failure_releases_batch_before_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    released: list[int] = []
+
+    class TrackedEnvelope(dict):
+        pass
+
+    def raw_batches(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        lease = yield 256 * 1024
+        envelope = TrackedEnvelope(_kline_envelope(0))
+        weakref.finalize(envelope, lambda: released.append(policy.used_memory_bytes))
+        yield OwnedValue((envelope,), lease)
+
+    monkeypatch.setattr(interim, "_iter_raw_envelope_batches", raw_batches)
+    monkeypatch.setattr(
+        interim,
+        "_normalize_klines",
+        lambda _batch: (_ for _ in ()).throw(ValueError("normalize_primary")),
+    )
+    iterator = interim._iter_owned_interim_frames(
+        data_id="market_bars_1m",
+        input_files=(tmp_path / "unused.jsonl",),
+        resource_policy=policy,
+    )
+
+    with runtime_resource_policy_scope(policy):
+        bound = next(iterator)
+        lease = policy.lease("test.binance.normalize", bound)
+        try:
+            with pytest.raises(ValueError, match="normalize_primary"):
+                iterator.send(lease)
+            assert released
+            assert all(used > 0 for used in released)
+        finally:
+            iterator.close()
+            lease.close()
+
+    assert policy.used_memory_bytes == 0
+
+
 def test_binance_raw_bound_pull_admits_scan_before_record_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -716,18 +759,21 @@ def test_binance_raw_output_suspension_has_no_scan_record_duplicate(
     assert policy.used_memory_bytes == 0
 
 
-def test_binance_raw_oversize_first_record_fails_before_read_or_decode(
+def test_binance_raw_explicit_cap_rejects_oversize_before_read_or_decode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "raw.jsonl"
     _append_jsonl(path, _kline_envelope(0))
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=256 * 1024,
+    )
     declared: list[int] = []
     monkeypatch.setattr(raw_exports, "_next_record_length", lambda *_args: 1)
     monkeypatch.setattr(
         raw_exports,
-        "_json_record_working_set_bytes",
+        "json_record_working_set_bytes",
         lambda _record_bytes: declared[0] + 1,
     )
     monkeypatch.setattr(
@@ -744,10 +790,7 @@ def test_binance_raw_oversize_first_record_fails_before_read_or_decode(
         lease = policy.lease("test.binance.raw", bound)
         declared.append(lease.reserved_bytes)
         try:
-            with pytest.raises(
-                RuntimeError,
-                match="binance_record_envelope_bound_invalid",
-            ):
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
                 stream.send(lease)
         finally:
             stream.close()
