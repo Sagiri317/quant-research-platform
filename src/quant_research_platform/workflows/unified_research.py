@@ -57,6 +57,7 @@ from quant_research_platform.research.experiments import (
 from quant_research_platform.research.portfolios.a_share import (
     FeeSchedule,
     PortfolioOptimizationConfig,
+    estimate_a_share_factor_risk,
     run_a_share_portfolio_backtest,
 )
 from quant_research_platform.research.statistics import (
@@ -72,9 +73,6 @@ from quant_research_platform.research.statistics import (
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
-)
-from quant_research_platform.sources.csmar.fundamentals import (
-    financial_disclosure_interim_spec,
 )
 from quant_research_platform.sources.csmar.interim import (
     MARKET_BARS_DATA_ID,
@@ -220,18 +218,25 @@ def _a_share_smoke(output_root: Path) -> tuple[dict[str, object], ExperimentPlan
         sessions[10:40],
         benchmark_weights=benchmark["portfolio_benchmark_weights"],
     )
-    covariance = pd.DataFrame(
-        [[0.02, 0.0], [0.0, 0.01]],
-        index=["beta", "size"],
-        columns=["beta", "size"],
+    risk_estimate = estimate_a_share_factor_risk(
+        portfolio_panel.assign(risk_weight=portfolio_panel["benchmark_weight"]),
+        exposure_columns=("beta", "size"),
+        weight_column="risk_weight",
+        ewma_half_life=10.0,
+        diagonal_shrinkage=0.2,
+        annualization_factor=252.0,
+    )
+    portfolio_panel["specific_variance"] = portfolio_panel["asset_id"].map(
+        risk_estimate.specific_variance
     )
     schedules = (FeeSchedule(date(2020, 1, 1), 2.0, 2.0, 10.0, 0.1),)
     portfolios = {}
     for frequency in ("1d", "1w", "1m"):
         result = run_a_share_portfolio_backtest(
             portfolio_panel,
+            benchmark_returns=benchmark["portfolio_benchmark_returns"],
             exposure_columns=("beta", "size"),
-            factor_covariance=covariance,
+            factor_covariance=risk_estimate.factor_covariance,
             fee_schedules=schedules,
             config=PortfolioOptimizationConfig(
                 frequency,
@@ -279,6 +284,28 @@ def _a_share_smoke(output_root: Path) -> tuple[dict[str, object], ExperimentPlan
             "factor_artifacts": factor_artifacts,
             "benchmark_ids": sorted(benchmark["benchmark_ids"]),
             "benchmark_weight_rows": benchmark["weight_rows"],
+            "benchmark_return_rows": [
+                {
+                    **row,
+                    "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
+                }
+                for row in benchmark["portfolio_benchmark_returns"].to_dict("records")
+            ],
+            "risk_model": {
+                "estimator": "cross_sectional_wls_ewma_diagonal_shrinkage",
+                "ewma_half_life": risk_estimate.ewma_half_life,
+                "diagonal_shrinkage": risk_estimate.diagonal_shrinkage,
+                "annualization_factor": risk_estimate.annualization_factor,
+                "factor_returns": [
+                    {
+                        **row,
+                        "timestamp": pd.Timestamp(row["timestamp"]).isoformat(),
+                    }
+                    for row in risk_estimate.factor_returns.to_dict("records")
+                ],
+                "factor_covariance": risk_estimate.factor_covariance.to_dict(),
+                "specific_variance": risk_estimate.specific_variance.to_dict(),
+            },
             "portfolios": portfolios,
             "model_status": "REAL_DATA_PENDING",
             "horizon_decay_status": "REAL_DATA_PENDING",
@@ -294,16 +321,16 @@ def _a_share_portfolio_panel(
 ) -> pd.DataFrame:
     assets = tuple(benchmark_weights)
     benchmark = tuple(benchmark_weights.values())
-    exposures = ((1.0, -0.2), (0.9, 0.3))
+    exposures = ((1.0, -0.2), (0.9, 0.3), (1.1, 0.1))
     alpha_cycles = (
-        (0.05, -0.02),
-        (-0.02, 0.06),
-        (0.03, 0.01),
+        (0.005, -0.002, 0.001),
+        (-0.002, 0.006, 0.002),
+        (0.003, 0.001, -0.001),
     )
     return_cycles = (
-        (0.002, -0.001),
-        (-0.001, 0.0025),
-        (0.0003, -0.0005),
+        (0.002, -0.001, 0.0007),
+        (-0.001, 0.0025, 0.0004),
+        (0.0003, -0.0005, 0.0015),
     )
     rows = []
     for step, timestamp in enumerate(sessions):
@@ -316,8 +343,7 @@ def _a_share_portfolio_panel(
                     "alpha": alpha_cycles[step % 3][position],
                     "current_weight": benchmark[position],
                     "benchmark_weight": benchmark[position],
-                    "specific_variance": 0.01,
-                    "adv": (5_000_000.0, 4_000_000.0)[position],
+                    "adv": (5_000_000.0, 4_000_000.0, 3_000_000.0)[position],
                     "eligible": True,
                     "can_enter": True,
                     "can_exit": True,
@@ -384,6 +410,9 @@ def _persist_a_share_fundamental_fixture(
         **interim,
         "trading_calendar": calendar,
         MARKET_BARS_DATA_ID: pd.DataFrame(market_rows),
+        "financial_disclosures": normalize_raw_frame(
+            disclosures, "financial_disclosures"
+        ),
     }
     for data_id, frame in source_frames.items():
         spec = catalog.get(data_id)
@@ -394,16 +423,6 @@ def _persist_a_share_fundamental_fixture(
             resource_policy=policy,
             borrowed_input=True,
         )
-    disclosure_spec = financial_disclosure_interim_spec()
-    disclosure_frame = disclosures.rename(columns={"asset_id": "source_asset_id"})
-    disclosure_frame.insert(1, "timestamp", disclosure_frame["first_disclosure_date"])
-    write_dataset(
-        layout.interim_data_root(source_id, disclosure_spec.data_id),
-        disclosure_frame.loc[:, disclosure_spec.required_columns],
-        spec=disclosure_spec,
-        resource_policy=policy,
-        borrowed_input=True,
-    )
     target_window = TimeWindow(target_sessions[0].date(), target_sessions[-1].date())
     inspections = a_share_materializer.materialize_processed_data(
         layout=layout,
@@ -497,7 +516,11 @@ def _benchmark_smoke(sessions: pd.DatetimeIndex) -> dict[str, object]:
     weight_rows = []
     return_rows = []
     for index_code in ("000905", "000852"):
-        for stock, weight in (("000001", 60.0), ("000002", 40.0)):
+        for stock, weight in (
+            ("000001", 50.0),
+            ("000002", 30.0),
+            ("000003", 20.0),
+        ):
             membership_rows.append(
                 {
                     "Indexcd": index_code,
@@ -519,20 +542,21 @@ def _benchmark_smoke(sessions: pd.DatetimeIndex) -> dict[str, object]:
                     "Weight": weight,
                 }
             )
-        return_rows.append(
-            {
-                "Indexcd": index_code,
-                "Idxtrd01": sessions[2],
-                "Idxtrd02": 100.0,
-                "Idxtrd03": 101.0,
-                "Idxtrd04": 99.0,
-                "Idxtrd05": 100.5,
-                "Idxtrd06": 1.0,
-                "Idxtrd07": 1.0,
-                "Idxtrd08": 1.0,
-                "Idxtrd09": "synthetic",
-            }
-        )
+        for step, timestamp in enumerate(sessions[10:40]):
+            return_rows.append(
+                {
+                    "Indexcd": index_code,
+                    "Idxtrd01": timestamp,
+                    "Idxtrd02": 100.0,
+                    "Idxtrd03": 101.0,
+                    "Idxtrd04": 99.0,
+                    "Idxtrd05": 100.5,
+                    "Idxtrd06": 1.0,
+                    "Idxtrd07": 1.0,
+                    "Idxtrd08": (0.08, -0.03, 0.05)[step % 3],
+                    "Idxtrd09": "synthetic",
+                }
+            )
     history = normalize_benchmark_history(
         membership_interim=normalize_raw_frame(
             pd.DataFrame(membership_rows), "index_membership"
@@ -564,6 +588,12 @@ def _benchmark_smoke(sessions: pd.DatetimeIndex) -> dict[str, object]:
         ]
         .set_index("constituent_asset_id")["weight"]
         .to_dict(),
+        "portfolio_benchmark_returns": history["returns"]
+        .loc[
+            history["returns"]["benchmark_id"].eq("csi500"),
+            ("timestamp", "period_return"),
+        ]
+        .rename(columns={"period_return": "benchmark_return"}),
     }
 
 

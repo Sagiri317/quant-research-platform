@@ -9,6 +9,7 @@ EXPECTED_CSMAR_INTERIM_DATA_IDS = (
     "adjustment",
     "financial_balance",
     "financial_cashflow",
+    "financial_disclosures",
     "financial_income",
     "index_info",
     "index_market",

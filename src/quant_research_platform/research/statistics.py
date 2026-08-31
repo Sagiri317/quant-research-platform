@@ -142,6 +142,10 @@ def aligned_candidate_matrix(
         or not frame.index.is_unique
     ):
         raise ValueError("candidate_matrix_identity_invalid")
+    if not isinstance(frame.index, (pd.DatetimeIndex, pd.RangeIndex)) or not (
+        frame.index.is_monotonic_increasing
+    ):
+        raise ValueError("candidate_matrix_time_order_invalid")
     if any(
         not pd.api.types.is_numeric_dtype(frame[column])
         or pd.api.types.is_bool_dtype(frame[column])
@@ -605,17 +609,17 @@ def _loss_inputs(
         if isinstance(benchmark_losses, pd.Series)
         else pd.Series(benchmark_losses, name="__benchmark_loss__")
     )
-    models = (
-        model_losses.copy()
-        if isinstance(model_losses, pd.DataFrame)
-        else pd.DataFrame(model_losses)
-    )
+    if not isinstance(model_losses, pd.DataFrame):
+        raise ValueError("loss_matrix_candidate_id_invalid")
+    models = model_losses.copy()
     if not isinstance(benchmark_losses, pd.Series) and len(benchmark) != len(models):
         raise ValueError("loss_matrix_length_mismatch")
     if "__benchmark_loss__" in models.columns:
         raise ValueError("loss_matrix_candidate_id_invalid")
-    if not all(type(column) is str and column for column in models.columns):
-        models.columns = tuple(f"candidate_{index}" for index in range(models.shape[1]))
+    if models.columns.has_duplicates or not all(
+        type(column) is str and column for column in models.columns
+    ):
+        raise ValueError("loss_matrix_candidate_id_invalid")
     combined = pd.concat((benchmark, models), axis=1, join="inner")
     return aligned_candidate_matrix(combined, minimum_observations=3)
 

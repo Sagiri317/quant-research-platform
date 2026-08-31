@@ -248,9 +248,12 @@ def _common_symbol_panel_frames(
     records: list[tuple[object, ...]] = []
     with ExitStack() as live:
         active = [live.enter_context(closing_iterator(stream)) for stream in streams]
-        try:
-            current = [next(stream) for stream in active]
-        except StopIteration:
+        empty = object()
+        current = [next(stream, empty) for stream in active]
+        if any(row is empty for row in current):
+            for stream in active:
+                for _row in stream:
+                    pass
             return
         ended = False
         while not ended:

@@ -210,6 +210,13 @@ FINANCIAL_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     ),
     "financial_cashflow": (*FINANCIAL_BASE_COLUMNS, "operating_cash_flow"),
 }
+FINANCIAL_DISCLOSURE_INTERIM_COLUMNS: tuple[str, ...] = (
+    "source_asset_id",
+    "timestamp",
+    "table_id",
+    "report_period",
+    "first_disclosure_date",
+)
 INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     MARKET_BARS_DATA_ID: MARKET_BARS_INTERIM_COLUMNS,
     "stock_master": STOCK_MASTER_INTERIM_COLUMNS,
@@ -220,6 +227,7 @@ INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     "trading_calendar": TRADING_CALENDAR_INTERIM_COLUMNS,
     "index_membership": INDEX_MEMBERSHIP_INTERIM_COLUMNS,
     "index_weights": INDEX_WEIGHTS_INTERIM_COLUMNS,
+    "financial_disclosures": FINANCIAL_DISCLOSURE_INTERIM_COLUMNS,
     **FINANCIAL_COLUMNS_BY_DATA_ID,
 }
 AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
@@ -465,6 +473,13 @@ def normalize_raw_frame(
     frame: pd.DataFrame,
     data_id: str,
 ) -> pd.DataFrame:
+    if data_id == "financial_disclosures" and set(frame.columns) != {
+        "asset_id",
+        "table_id",
+        "report_period",
+        "first_disclosure_date",
+    }:
+        raise ValueError("financial_disclosures_raw_schema_invalid")
     mapped = map_columns(frame, _raw_dataset_for_interim(data_id))
     if "stock_code" in mapped.columns:
         mapped["stock_code"] = normalize_stock_code(mapped["stock_code"])
@@ -541,6 +556,31 @@ def normalize_raw_frame(
             ["source_asset_id", "timestamp", "report_type"], inplace=True
         )
         return result.reset_index(drop=True)
+    if data_id == "financial_disclosures":
+        result = mapped
+        result["source_asset_id"] = strict_string_series(
+            result["asset_id"], error="invalid_financial_disclosure_asset"
+        )
+        result["table_id"] = strict_string_series(
+            result["table_id"], error="invalid_financial_disclosure_table"
+        )
+        if not set(result["table_id"]).issubset(
+            {"FS_Combas", "FS_Comins", "FS_Comscfd"}
+        ):
+            raise ValueError("invalid_financial_disclosure_table")
+        for column in ("report_period", "first_disclosure_date"):
+            result[column] = strict_timestamp_series(
+                result[column], error=f"invalid_financial_disclosure_{column}"
+            ).dt.normalize()
+        result["timestamp"] = result["first_disclosure_date"]
+        key = ["source_asset_id", "table_id", "report_period"]
+        if bool(result.duplicated(key, keep=False).any()):
+            raise ValueError("duplicate_financial_disclosure_key")
+        return (
+            result.loc[:, FINANCIAL_DISCLOSURE_INTERIM_COLUMNS]
+            .sort_values([*key, "timestamp"], kind="mergesort")
+            .reset_index(drop=True)
+        )
     if data_id == MARKET_BARS_DATA_ID:
         result = mapped
         result["limit_status"] = result["limit_status"].astype("float64")
@@ -1486,6 +1526,25 @@ def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
             primary_key=primary_key,
             partition_columns=("year",),
         )
+    if data_id == "financial_disclosures":
+        primary_key = (
+            "source_asset_id",
+            "table_id",
+            "report_period",
+            "timestamp",
+        )
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles={
+                **_column_roles(columns, primary_key=primary_key),
+                "first_disclosure_date": ColumnRole.TIMESTAMP,
+            },
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
     if data_id in FINANCIAL_COLUMNS_BY_DATA_ID:
         primary_key = ("source_asset_id", "timestamp", "report_type")
         return InterimDataSpec(
@@ -1606,6 +1665,7 @@ def _date_column(data_id: str) -> str:
         "financial_balance",
         "financial_income",
         "financial_cashflow",
+        "financial_disclosures",
     }:
         return "timestamp"
     raise ValueError(f"data_id_has_no_filtering_date_column: {data_id}")

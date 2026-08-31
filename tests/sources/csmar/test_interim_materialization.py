@@ -1818,6 +1818,7 @@ def test_csmar_interim_catalog_registers_source_owned_specs() -> None:
         "financial_balance",
         "financial_income",
         "financial_cashflow",
+        "financial_disclosures",
     }
     assert {str(spec.source_id) for spec in specs} == {"csmar"}
 

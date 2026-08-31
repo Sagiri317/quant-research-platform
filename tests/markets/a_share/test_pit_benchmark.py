@@ -18,7 +18,10 @@ from quant_research_platform.sources.csmar.fundamentals import (
     financial_events_from_interim,
     materialize_pit_fundamentals,
 )
-from quant_research_platform.sources.csmar.interim import normalize_raw_frame
+from quant_research_platform.sources.csmar.interim import (
+    interim_catalog,
+    normalize_raw_frame,
+)
 
 
 def _financial_interim() -> dict[str, pd.DataFrame]:
@@ -199,6 +202,28 @@ def test_financial_multiple_correction_dates_and_report_period_growth_are_pit() 
     assert factors["fundamental_raw_asset_growth"].tolist() == [0.25, 0.25]
 
 
+def test_first_disclosure_uses_registered_strict_source_adapter() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "asset_id": "000001",
+                "table_id": "FS_Combas",
+                "report_period": "2023-12-31",
+                "first_disclosure_date": "2024-03-30",
+            }
+        ]
+    )
+
+    normalized = normalize_raw_frame(raw, "financial_disclosures")
+    spec = interim_catalog().get("financial_disclosures")
+
+    assert tuple(normalized.columns) == spec.required_columns
+    assert normalized["source_asset_id"].iloc[0] == "000001"
+    assert normalized["timestamp"].iloc[0] == pd.Timestamp("2024-03-30")
+    with pytest.raises(ValueError, match="^financial_disclosures_raw_schema_invalid$"):
+        normalize_raw_frame(raw.assign(vendor_unknown=1), "financial_disclosures")
+
+
 def test_pit_materialization_does_not_allocate_observation_event_cross_product(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -226,8 +251,68 @@ def test_pit_materialization_does_not_allocate_observation_event_cross_product(
     monkeypatch.setattr(pd.DataFrame, "merge", reject_cross_product)
     output = materialize_pit_fundamentals(observations, events)
 
-    assert len(output) == 100
-    assert output["previous_value"].notna().all()
+    assert len(output) == 600
+    total_assets = output.loc[output["metric_id"].eq("total_assets")]
+    assert len(total_assets) == 100
+    assert total_assets["previous_value"].notna().all()
+
+
+def test_pit_fixed_metrics_are_explicit_and_state_keeps_only_current_previous() -> None:
+    events = pd.DataFrame(
+        [
+            {
+                "asset_id": "000001",
+                "table_id": "FS_Combas",
+                "metric_id": "total_assets",
+                "report_period": pd.Timestamp(report_period),
+                "available_at": pd.Timestamp(available_at),
+                "is_corrected": is_corrected,
+                "value": value,
+            }
+            for report_period, available_at, is_corrected, value in (
+                ("2023-03-31", "2023-04-01", False, 100.0),
+                ("2023-09-30", "2023-10-01", False, 300.0),
+                ("2023-06-30", "2023-10-02", False, 200.0),
+                ("2023-03-31", "2023-10-03", True, 110.0),
+            )
+        ]
+    )
+    observations = pd.DataFrame(
+        {"asset_id": ["000001"], "timestamp": [pd.Timestamp("2023-10-04")]}
+    )
+
+    pit = materialize_pit_fundamentals(observations, events)
+    factors = factor_calculations.calculate_fundamental_factors(
+        pit, observations.assign(market_cap=1_000.0)
+    )
+
+    assert set(pit["metric_id"]) == {
+        "total_assets",
+        "total_liabilities",
+        "total_equity",
+        "operating_revenue",
+        "net_income",
+        "operating_cash_flow",
+    }
+    assert len(pit) == 6
+    total_assets = pit.loc[pit["metric_id"].eq("total_assets")].iloc[0]
+    assert total_assets["report_period"] == pd.Timestamp("2023-09-30")
+    assert total_assets["value"] == 300.0
+    assert total_assets["previous_report_period"] == pd.Timestamp("2023-06-30")
+    assert total_assets["previous_value"] == 200.0
+    assert factors["fundamental_raw_asset_growth"].iloc[0] == 0.5
+    assert (
+        factors.drop(
+            columns=[
+                "market_id",
+                "asset_id",
+                "timestamp",
+                "fundamental_raw_asset_growth",
+            ]
+        )
+        .isna()
+        .all(axis=None)
+    )
 
 
 def test_idx_raw_contracts_bind_csi500_csi1000_and_industry_independently() -> None:

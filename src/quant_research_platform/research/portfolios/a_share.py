@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_string_series,
+    strict_timestamp_series,
+)
 
 
 @dataclass(frozen=True)
@@ -19,6 +23,18 @@ class FeeSchedule:
     sell_commission_bps: float
     stamp_duty_bps: float
     transfer_fee_bps: float
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.effective_date, date) or any(
+            type(value) is not float or not np.isfinite(value) or value < 0.0
+            for value in (
+                self.buy_commission_bps,
+                self.sell_commission_bps,
+                self.stamp_duty_bps,
+                self.transfer_fee_bps,
+            )
+        ):
+            raise ValueError("a_share_fee_schedule_invalid")
 
 
 @dataclass(frozen=True)
@@ -46,6 +62,136 @@ class PortfolioOptimizationResult:
     estimated_cost: float
     maximum_adv_participation: float
     rebalance_frequency: str
+    marginal_active_risk: pd.Series
+    component_active_risk: pd.Series
+
+
+@dataclass(frozen=True)
+class AShareFactorRiskEstimate:
+    factor_returns: pd.DataFrame
+    factor_covariance: pd.DataFrame
+    specific_variance: pd.Series
+    ewma_half_life: float
+    diagonal_shrinkage: float
+    annualization_factor: float
+
+
+def estimate_a_share_factor_risk(
+    history: pd.DataFrame,
+    *,
+    exposure_columns: tuple[str, ...],
+    weight_column: str,
+    ewma_half_life: float,
+    diagonal_shrinkage: float,
+    annualization_factor: float,
+) -> AShareFactorRiskEstimate:
+    """Estimate factor returns by WLS, then EWMA/shrunk factor and specific risk."""
+
+    required = {
+        "timestamp",
+        "asset_id",
+        "asset_return",
+        weight_column,
+        *exposure_columns,
+    }
+    if (
+        not isinstance(history, pd.DataFrame)
+        or not exposure_columns
+        or not required.issubset(history.columns)
+        or type(ewma_half_life) is not float
+        or not np.isfinite(ewma_half_life)
+        or ewma_half_life <= 0.0
+        or type(diagonal_shrinkage) is not float
+        or not 0.0 <= diagonal_shrinkage <= 1.0
+        or type(annualization_factor) is not float
+        or not np.isfinite(annualization_factor)
+        or annualization_factor <= 0.0
+    ):
+        raise ValueError("a_share_risk_model_contract_invalid")
+    frame = history.loc[:, list(required)].copy()
+    frame["timestamp"] = strict_timestamp_series(
+        frame["timestamp"], error="a_share_risk_model_timestamp_invalid"
+    )
+    frame["asset_id"] = strict_string_series(
+        frame["asset_id"], error="a_share_risk_model_asset_invalid"
+    )
+    if bool(frame.duplicated(["timestamp", "asset_id"], keep=False).any()):
+        raise ValueError("a_share_risk_model_primary_key_duplicate")
+    for column in ("asset_return", weight_column, *exposure_columns):
+        frame[column] = strict_finite_numeric_series(
+            frame[column], error="a_share_risk_model_numeric_invalid"
+        )
+    if bool((frame[weight_column] <= 0.0).any()):
+        raise ValueError("a_share_risk_model_weight_invalid")
+    factor_rows = []
+    residual_rows = []
+    for timestamp, cross_section in frame.groupby("timestamp", sort=True):
+        if len(cross_section) <= len(exposure_columns):
+            raise ValueError("a_share_risk_model_cross_section_insufficient")
+        exposures = cross_section.loc[:, exposure_columns].to_numpy(dtype="float64")
+        returns = cross_section["asset_return"].to_numpy(dtype="float64")
+        root_weights = np.sqrt(cross_section[weight_column].to_numpy(dtype="float64"))
+        weighted_exposures = exposures * root_weights[:, None]
+        if np.linalg.matrix_rank(weighted_exposures) != len(exposure_columns):
+            raise ValueError("a_share_risk_model_exposure_rank_invalid")
+        factor_return = np.linalg.lstsq(
+            weighted_exposures,
+            returns * root_weights,
+            rcond=None,
+        )[0]
+        residuals = returns - exposures @ factor_return
+        factor_rows.append(
+            {
+                "timestamp": timestamp,
+                **dict(zip(exposure_columns, factor_return, strict=True)),
+            }
+        )
+        residual_rows.extend(
+            {
+                "timestamp": timestamp,
+                "asset_id": asset_id,
+                "residual": residual,
+            }
+            for asset_id, residual in zip(
+                cross_section["asset_id"], residuals, strict=True
+            )
+        )
+    factor_returns = pd.DataFrame(factor_rows)
+    if len(factor_returns) < 2:
+        raise ValueError("a_share_risk_model_history_insufficient")
+    factor_values = factor_returns.loc[:, exposure_columns].to_numpy(dtype="float64")
+    ewma_weights = _ewma_weights(len(factor_values), ewma_half_life)
+    centered = factor_values - np.average(factor_values, axis=0, weights=ewma_weights)
+    covariance = (centered * ewma_weights[:, None]).T @ centered
+    covariance = (1.0 - diagonal_shrinkage) * covariance + diagonal_shrinkage * np.diag(
+        np.diag(covariance)
+    )
+    covariance *= annualization_factor
+    factor_covariance = pd.DataFrame(
+        covariance, index=exposure_columns, columns=exposure_columns
+    )
+    residual_frame = pd.DataFrame(residual_rows)
+    specific_variance = residual_frame.groupby("asset_id", sort=True)["residual"].apply(
+        lambda values: float(
+            np.dot(_ewma_weights(len(values), ewma_half_life), values.to_numpy() ** 2)
+            * annualization_factor
+        )
+    )
+    specific_variance.name = "specific_variance"
+    return AShareFactorRiskEstimate(
+        factor_returns=factor_returns,
+        factor_covariance=factor_covariance,
+        specific_variance=specific_variance,
+        ewma_half_life=ewma_half_life,
+        diagonal_shrinkage=diagonal_shrinkage,
+        annualization_factor=annualization_factor,
+    )
+
+
+def _ewma_weights(count: int, half_life: float) -> np.ndarray:
+    decay = 0.5 ** (1.0 / half_life)
+    weights = decay ** np.arange(count - 1, -1, -1, dtype="float64")
+    return weights / weights.sum()
 
 
 def optimize_a_share_portfolio(
@@ -184,6 +330,16 @@ def optimize_a_share_portfolio(
         raise ValueError("a_share_optimizer_failed")
     weights = np.asarray(result.x, dtype="float64")
     risk, factor_risk, specific_risk = components(weights)
+    active = weights - benchmark
+    covariance_with_portfolio = exposures @ factor_cov @ (exposures.T @ active)
+    covariance_with_portfolio += specific * active
+    active_risk = float(np.sqrt(risk))
+    marginal = (
+        covariance_with_portfolio / active_risk
+        if active_risk
+        else np.zeros_like(active)
+    )
+    component = active * marginal
     participation = (
         np.abs(weights - current)
         * config.portfolio_notional
@@ -208,12 +364,19 @@ def optimize_a_share_portfolio(
         estimated_cost=transaction_cost(weights),
         maximum_adv_participation=float(participation.max(initial=0.0)),
         rebalance_frequency=config.rebalance_frequency,
+        marginal_active_risk=pd.Series(
+            marginal, index=data["asset_id"], name="marginal_active_risk"
+        ),
+        component_active_risk=pd.Series(
+            component, index=data["asset_id"], name="component_active_risk"
+        ),
     )
 
 
 def run_a_share_portfolio_backtest(
     panel: pd.DataFrame,
     *,
+    benchmark_returns: pd.DataFrame,
     exposure_columns: tuple[str, ...],
     factor_covariance: pd.DataFrame,
     fee_schedules: tuple[FeeSchedule, ...],
@@ -243,6 +406,24 @@ def run_a_share_portfolio_backtest(
         raise ValueError("a_share_backtest_primary_key_duplicate")
     frame.sort_values(["timestamp", "asset_id"], kind="mergesort", inplace=True)
     dates = pd.DatetimeIndex(frame["timestamp"].drop_duplicates())
+    if not isinstance(benchmark_returns, pd.DataFrame) or not {
+        "timestamp",
+        "benchmark_return",
+    }.issubset(benchmark_returns.columns):
+        raise ValueError("a_share_benchmark_return_columns_invalid")
+    benchmark_frame = benchmark_returns.loc[:, ("timestamp", "benchmark_return")].copy()
+    benchmark_frame["timestamp"] = strict_timestamp_series(
+        benchmark_frame["timestamp"], error="a_share_benchmark_return_timestamp_invalid"
+    )
+    benchmark_frame["benchmark_return"] = strict_finite_numeric_series(
+        benchmark_frame["benchmark_return"],
+        error="a_share_benchmark_return_value_invalid",
+    )
+    if bool(benchmark_frame["timestamp"].duplicated(keep=False).any()):
+        raise ValueError("a_share_benchmark_return_key_duplicate")
+    benchmark_by_date = benchmark_frame.set_index("timestamp")["benchmark_return"]
+    if set(benchmark_by_date.index) != set(dates):
+        raise ValueError("a_share_benchmark_return_alignment_invalid")
     rebalance_dates = _rebalance_dates(dates, config.rebalance_frequency)
     first = frame.loc[frame["timestamp"].eq(dates[0])]
     current = first.set_index("asset_id")["current_weight"].astype("float64")
@@ -251,15 +432,26 @@ def run_a_share_portfolio_backtest(
     nav = benchmark_nav = 1.0
     cumulative_pnl = 0.0
     factor_variance = specific_variance = 0.0
+    predicted_active_risk = 0.0
+    marginal_active_risk: dict[str, float] = {}
+    component_active_risk: dict[str, float] = {}
     path_rows: list[dict[str, object]] = []
     exposure_rows: list[dict[str, object]] = []
     capacity_values = {limit: [] for limit in (0.01, 0.02, 0.05, 0.10)}
     for timestamp, daily in frame.groupby("timestamp", sort=True):
         daily = daily.copy()
         daily.index = daily["asset_id"]
-        if set(daily.index) != set(current.index):
-            raise ValueError("a_share_backtest_asset_universe_changed")
-        daily["current_weight"] = current.reindex(daily.index)
+        missing_assets = current.index.difference(daily.index)
+        if bool((current.reindex(missing_assets).abs() > 1e-12).any()):
+            raise ValueError("a_share_backtest_held_asset_missing")
+        current = current.drop(missing_assets)
+        new_assets = daily.index.difference(current.index)
+        if len(new_assets):
+            current = pd.concat(
+                (current, pd.Series(0.0, index=new_assets, dtype="float64"))
+            )
+        current = current.reindex(daily.index)
+        daily["current_weight"] = current
         turnover = cost = 0.0
         if pd.Timestamp(timestamp) in rebalance_dates:
             result = optimize_a_share_portfolio(
@@ -276,6 +468,9 @@ def run_a_share_portfolio_backtest(
             cost = result.estimated_cost
             factor_variance = result.factor_variance
             specific_variance = result.specific_variance
+            predicted_active_risk = result.predicted_active_risk
+            marginal_active_risk = result.marginal_active_risk.to_dict()
+            component_active_risk = result.component_active_risk.to_dict()
             for limit in capacity_values:
                 traded = changes.gt(1e-12)
                 if bool(traded.any()):
@@ -289,7 +484,7 @@ def run_a_share_portfolio_backtest(
         benchmark = daily["benchmark_weight"].to_numpy(dtype="float64")
         asset_returns = daily["asset_return"].to_numpy(dtype="float64")
         gross_return = float(weights @ asset_returns)
-        benchmark_return = float(benchmark @ asset_returns)
+        benchmark_return = float(benchmark_by_date.loc[pd.Timestamp(timestamp)])
         net_return = gross_return - cost
         active_return = net_return - benchmark_return
         cumulative_pnl += config.portfolio_notional * net_return
@@ -310,6 +505,7 @@ def run_a_share_portfolio_backtest(
                 "cost": cost,
                 "factor_variance": factor_variance,
                 "specific_variance": specific_variance,
+                "predicted_active_risk": predicted_active_risk,
             }
         )
         active_weights = weights - benchmark
@@ -353,6 +549,9 @@ def run_a_share_portfolio_backtest(
             "maximum_drawdown": float(path["drawdown"].min()),
             "mean_factor_variance": float(path["factor_variance"].mean()),
             "mean_specific_variance": float(path["specific_variance"].mean()),
+            "latest_predicted_active_risk": predicted_active_risk,
+            "marginal_active_risk": marginal_active_risk,
+            "component_active_risk": component_active_risk,
             "constant_notional_additive_pnl": cumulative_pnl,
             "compounded_nav": nav,
             "benchmark_nav": benchmark_nav,

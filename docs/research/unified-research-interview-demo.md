@@ -24,7 +24,7 @@ SMOKE_ONLY / SYNTHETIC_DATA / REAL_DATA_PENDING
 
 ## A股结果
 
-PIT、更正、effective-date benchmark、persisted raw 因子、因子形式风险与 1d/1w/1m SLSQP 组合/成本/容量链已执行。
+PIT、更正、effective-date benchmark、persisted raw 因子、WLS/EWMA-shrinkage 因子与特异风险、marginal risk，以及 1d/1w/1m SLSQP 组合/成本/容量链已执行。
 真实 A股 model comparison、IC/RankIC 与 horizon decay：`REAL_DATA_PENDING`，未用合成数值替代实证结果。
 
 ## Crypto 结果
@@ -38,7 +38,7 @@ BTC/ETH 同 run 完整性以及独立、pooled、leave-BTC-out、leave-ETH-out �
 
 ## 局限
 
-真实财务 schema、行业历史和长期 BTC/ETH 共同录制覆盖仍等待真实数据验收。
+真实财务导出、行业历史和长期 BTC/ETH 共同录制覆盖仍等待真实数据验收。
 
 ## 结论
 

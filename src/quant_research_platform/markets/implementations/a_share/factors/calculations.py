@@ -161,21 +161,41 @@ def calculate_fundamental_factors(
         "market_cap",
     }.issubset(market_cap.columns):
         raise ValueError("a_share_fundamental_factor_columns_invalid")
-    wide = (
+    values = (
         pit_facts.pivot_table(
-            index=["asset_id", "timestamp", "report_period"],
+            index=["asset_id", "timestamp"],
             columns="metric_id",
             values="value",
             aggfunc="first",
         )
+        .reindex(
+            columns=(
+                "total_assets",
+                "total_liabilities",
+                "total_equity",
+                "operating_revenue",
+                "net_income",
+                "operating_cash_flow",
+            )
+        )
         .reset_index()
+    )
+    wide = (
+        pit_facts.loc[:, ("asset_id", "timestamp")]
+        .drop_duplicates()
+        .merge(
+            values,
+            on=("asset_id", "timestamp"),
+            how="left",
+            validate="one_to_one",
+        )
         .merge(
             market_cap.loc[:, ("asset_id", "timestamp", "market_cap")],
             on=("asset_id", "timestamp"),
             how="left",
             validate="many_to_one",
         )
-        .sort_values(["asset_id", "timestamp", "report_period"], kind="mergesort")
+        .sort_values(["asset_id", "timestamp"], kind="mergesort")
     )
 
     wide["market_id"] = "a_share"

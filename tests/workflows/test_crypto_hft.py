@@ -46,8 +46,12 @@ def _maker_config() -> MakerConfig:
 
 
 def test_crypto_research_status_requires_every_symbol_reconstruction() -> None:
-    clean = ReconstructionStats()
-    invalid_eth = ReconstructionStats(invalid_segments=1)
+    clean = ReconstructionStats(
+        valid_segments=1, coverage_segments={"segment-1": (0, 1)}
+    )
+    invalid_eth = ReconstructionStats(
+        invalid_segments=1, coverage_segments={"segment-1": (0, 1)}
+    )
 
     assert (
         crypto_hft._aggregate_research_status(
@@ -63,6 +67,12 @@ def test_crypto_research_status_requires_every_symbol_reconstruction() -> None:
     )
     assert (
         crypto_hft._aggregate_research_status("PASS", {"BTCUSDT": clean}) == "PARTIAL"
+    )
+    assert (
+        crypto_hft._aggregate_research_status(
+            "PASS", {"BTCUSDT": ReconstructionStats(), "ETHUSDT": clean}
+        )
+        == "PARTIAL"
     )
 
 

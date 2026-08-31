@@ -2,18 +2,10 @@
 
 from __future__ import annotations
 
-from bisect import insort
 from collections.abc import Mapping
 
 import pandas as pd
 
-from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.data import (
-    DataFrequency,
-    DataGrain,
-    InterimDataSpec,
-)
-from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_string_series,
@@ -30,45 +22,16 @@ FINANCIAL_VALUE_COLUMNS = {
     "financial_income": ("operating_revenue", "net_income"),
     "financial_cashflow": ("operating_cash_flow",),
 }
+FINANCIAL_METRICS_BY_TABLE_ID = {
+    FINANCIAL_TABLE_CODE_BY_DATA_ID[data_id]: metrics
+    for data_id, metrics in FINANCIAL_VALUE_COLUMNS.items()
+}
 DISCLOSURE_COLUMNS = (
     "asset_id",
     "table_id",
     "report_period",
     "first_disclosure_date",
 )
-
-
-def financial_disclosure_interim_spec() -> InterimDataSpec:
-    """Canonical contract for the user-provided first-disclosure source."""
-
-    columns = (
-        "source_asset_id",
-        "timestamp",
-        "table_id",
-        "report_period",
-        "first_disclosure_date",
-    )
-    return InterimDataSpec(
-        data_id="financial_disclosures",
-        source_id=SourceId("csmar"),
-        frequency=DataFrequency.DAILY,
-        grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-        column_roles={
-            column: (
-                ColumnRole.KEY
-                if column in {"source_asset_id", "table_id", "report_period"}
-                else ColumnRole.TIMESTAMP
-            )
-            for column in columns
-        },
-        primary_key=(
-            "source_asset_id",
-            "table_id",
-            "report_period",
-            "timestamp",
-        ),
-        partition_columns=("year",),
-    )
 
 
 def financial_events_from_interim(
@@ -238,62 +201,81 @@ def materialize_pit_fundamentals(
     ]
     if bool(event_data.duplicated(event_key, keep=False).any()):
         raise ValueError("csmar_financial_event_key_duplicate")
+    expected_pairs = {
+        (table_id, metric_id)
+        for table_id, metric_ids in FINANCIAL_METRICS_BY_TABLE_ID.items()
+        for metric_id in metric_ids
+    }
+    if not set(
+        zip(event_data["table_id"], event_data["metric_id"], strict=True)
+    ).issubset(expected_pairs):
+        raise ValueError("csmar_pit_metric_invalid")
     observations_by_asset = {
         asset_id: group.sort_values("timestamp", kind="mergesort")
         for asset_id, group in left.groupby("asset_id", sort=False)
     }
-    records: list[dict[str, object]] = []
-    for (asset_id, table_id, metric_id), group in event_data.groupby(
+    event_group_indices = event_data.groupby(
         ["asset_id", "table_id", "metric_id"], sort=False
-    ):
-        observed = observations_by_asset.get(asset_id)
-        if observed is None:
-            continue
-        ordered_events = group.sort_values(
-            ["available_at", "report_period"], kind="mergesort"
-        )
-        event_stream = iter(
-            ordered_events.loc[
-                :, ("report_period", "available_at", "is_corrected", "value")
-            ].itertuples(index=False, name=None)
-        )
-        next_event = next(event_stream, None)
-        periods: list[pd.Timestamp] = []
-        latest_by_period: dict[pd.Timestamp, tuple[object, object, object]] = {}
-        for observation in observed.itertuples(index=False):
-            while next_event is not None and next_event[1] <= observation.timestamp:
-                report_period = next_event[0]
-                if report_period not in latest_by_period:
-                    insort(periods, report_period)
-                latest_by_period[report_period] = next_event[1:]
+    ).groups
+    records: list[dict[str, object]] = []
+    for asset_id, observed in observations_by_asset.items():
+        for table_id, metric_ids in FINANCIAL_METRICS_BY_TABLE_ID.items():
+            for metric_id in metric_ids:
+                key = (asset_id, table_id, metric_id)
+                indices = event_group_indices.get(key)
+                ordered_events = (
+                    event_data.loc[
+                        indices,
+                        ("report_period", "available_at", "is_corrected", "value"),
+                    ].sort_values(["available_at", "report_period"], kind="mergesort")
+                    if indices is not None
+                    else pd.DataFrame(
+                        columns=(
+                            "report_period",
+                            "available_at",
+                            "is_corrected",
+                            "value",
+                        )
+                    )
+                )
+                event_stream = iter(ordered_events.itertuples(index=False, name=None))
                 next_event = next(event_stream, None)
-            if periods:
-                current_period = periods[-1]
-                available_at, is_corrected, value = latest_by_period[current_period]
-            else:
-                current_period = available_at = pd.NaT
-                is_corrected = pd.NA
-                value = float("nan")
-            if len(periods) > 1:
-                previous_period = periods[-2]
-                previous_value = latest_by_period[previous_period][2]
-            else:
-                previous_period = pd.NaT
-                previous_value = float("nan")
-            records.append(
-                {
-                    "asset_id": asset_id,
-                    "timestamp": observation.timestamp,
-                    "table_id": table_id,
-                    "metric_id": metric_id,
-                    "report_period": current_period,
-                    "available_at": available_at,
-                    "is_corrected": is_corrected,
-                    "value": value,
-                    "previous_report_period": previous_period,
-                    "previous_value": previous_value,
-                }
-            )
+                current = None
+                previous = None
+                for observation in observed.itertuples(index=False):
+                    while (
+                        next_event is not None
+                        and next_event[1] <= observation.timestamp
+                    ):
+                        report_period = next_event[0]
+                        if current is None or report_period > current[0]:
+                            previous = current
+                            current = next_event
+                        elif report_period == current[0]:
+                            current = next_event
+                        elif previous is None or report_period > previous[0]:
+                            previous = next_event
+                        elif report_period == previous[0]:
+                            previous = next_event
+                        next_event = next(event_stream, None)
+                    records.append(
+                        {
+                            "asset_id": asset_id,
+                            "timestamp": observation.timestamp,
+                            "table_id": table_id,
+                            "metric_id": metric_id,
+                            "report_period": pd.NaT if current is None else current[0],
+                            "available_at": pd.NaT if current is None else current[1],
+                            "is_corrected": pd.NA if current is None else current[2],
+                            "value": float("nan") if current is None else current[3],
+                            "previous_report_period": (
+                                pd.NaT if previous is None else previous[0]
+                            ),
+                            "previous_value": (
+                                float("nan") if previous is None else previous[3]
+                            ),
+                        }
+                    )
     output_columns = (
         "asset_id",
         "timestamp",

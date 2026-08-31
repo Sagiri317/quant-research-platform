@@ -537,7 +537,12 @@ def _aggregate_research_status(
         "PASS"
         if market_data_status == "PASS"
         and set(reconstructions) == set(RESEARCH_SYMBOLS)
-        and all(item.invalid_segments == 0 for item in reconstructions.values())
+        and all(
+            item.invalid_segments == 0
+            and item.valid_segments > 0
+            and bool(item.coverage_segments)
+            for item in reconstructions.values()
+        )
         else "PARTIAL"
     )
 

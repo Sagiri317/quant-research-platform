@@ -110,6 +110,10 @@ def test_unified_smoke_consumes_persisted_market_statistics_and_ledger_owners(
         "reason": "real_data_pending",
     }
     assert payload["a_share"]["factor_rows"]
+    risk_model = payload["a_share"]["risk_model"]
+    assert risk_model["estimator"] == ("cross_sectional_wls_ewma_diagonal_shrinkage")
+    assert len(risk_model["factor_returns"]) == 30
+    assert set(risk_model["specific_variance"]) == {"000001", "000002", "000003"}
     assert payload["a_share"]["factor_artifacts"]["persisted_data_ids"] == [
         "fundamental_pit",
         "fundamental_raw",
@@ -136,6 +140,22 @@ def test_unified_smoke_consumes_persisted_market_statistics_and_ledger_owners(
         portfolio["active_exposures"] and portfolio["path"]
         for portfolio in payload["a_share"]["portfolios"].values()
     )
+    official_returns = [
+        row["benchmark_return"] for row in payload["a_share"]["benchmark_return_rows"]
+    ]
+    assert [
+        row["benchmark_return"]
+        for row in payload["a_share"]["portfolios"]["1w"]["path"]
+    ] == official_returns
+    weekly_summary = payload["a_share"]["portfolios"]["1w"]["summary"]
+    assert sum(weekly_summary["component_active_risk"].values()) == pytest.approx(
+        weekly_summary["latest_predicted_active_risk"]
+    )
+    assert set(weekly_summary["marginal_active_risk"]) == {
+        "000001",
+        "000002",
+        "000003",
+    }
     assert payload["a_share"]["model_status"] == "REAL_DATA_PENDING"
     ledger_paths = sorted((output_root / "experiment-ledger" / "crypto").glob("*.json"))
     assert len(ledger_paths) == 5

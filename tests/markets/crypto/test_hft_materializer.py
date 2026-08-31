@@ -87,6 +87,33 @@ def test_common_panel_alignment_ignores_asymmetric_frame_boundaries() -> None:
     assert eth_tail_consumed == [True]
 
 
+def test_common_panel_initial_empty_stream_still_drains_required_symbols() -> None:
+    columns = ("timestamp", "asset_id", "value")
+    exhausted = []
+
+    def btc_frames():  # noqa: ANN202
+        yield pd.DataFrame(
+            [(pd.Timestamp("2024-01-01"), "btc_usdt", 1)], columns=columns
+        )
+        exhausted.append("BTCUSDT")
+
+    def eth_frames():  # noqa: ANN202
+        exhausted.append("ETHUSDT")
+        return
+        yield  # pragma: no cover
+
+    output = list(
+        crypto_hft_materialization._common_symbol_panel_frames(
+            {"BTCUSDT": btc_frames(), "ETHUSDT": eth_frames()},
+            columns=columns,
+            batch_rows=2,
+        )
+    )
+
+    assert output == []
+    assert exhausted == ["ETHUSDT", "BTCUSDT"]
+
+
 def test_hft_materialization_reuses_panel_and_standard_research_dataset(
     tmp_path: Path,
 ) -> None:

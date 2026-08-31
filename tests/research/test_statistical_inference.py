@@ -36,6 +36,12 @@ def test_common_candidate_coverage_is_intersection_without_imputation() -> None:
     assert insufficient.reason == "insufficient_common_coverage"
     with pytest.raises(ValueError, match="^candidate_matrix_numeric_required$"):
         aligned_candidate_matrix(pd.DataFrame({"a": ["1", "2"]}))
+    unordered = pd.DataFrame(
+        {"a": [0.1, 0.2, 0.3]},
+        index=pd.to_datetime(["2024-01-03", "2024-01-01", "2024-01-02"]),
+    )
+    with pytest.raises(ValueError, match="^candidate_matrix_time_order_invalid$"):
+        aligned_candidate_matrix(unordered)
 
 
 @pytest.mark.parametrize(
@@ -174,6 +180,18 @@ def test_multiple_comparison_rejects_disjoint_time_indexes() -> None:
     assert spa.status == "UNDEFINED"
     assert spa.reason == "insufficient_common_coverage"
     assert stepm.status == "UNDEFINED"
+    duplicate_non_string_ids = pd.DataFrame(
+        [[0.1, 0.2]] * 8,
+        columns=[1, 1],
+    )
+    with pytest.raises(ValueError, match="^loss_matrix_candidate_id_invalid$"):
+        spa_reality_check(
+            pd.Series([0.3] * 8),
+            duplicate_non_string_ids,
+            block_size=1,
+            repetitions=9,
+            seed=1,
+        )
 
 
 def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:

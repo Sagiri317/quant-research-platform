@@ -152,6 +152,15 @@ RAW_TABLE_CONTRACTS = MappingProxyType(
                 "C001000000",
             ),
         ),
+        "financial_disclosures": _RawTableContract(
+            table_code="USER_FINANCIAL_DISCLOSURES",
+            required_columns=(
+                "asset_id",
+                "table_id",
+                "report_period",
+                "first_disclosure_date",
+            ),
+        ),
         "trading_calendar": _RawTableContract(
             table_code="TRDNEW_Cale",
             required_columns=("Markettype", "Clddt", "Daywk", "State"),
@@ -283,6 +292,12 @@ COLUMN_MAPPINGS = {
         "Accper": "report_period",
         "Typrep": "report_type",
         "C001000000": "operating_cash_flow",
+    },
+    "financial_disclosures": {
+        "asset_id": "asset_id",
+        "table_id": "table_id",
+        "report_period": "report_period",
+        "first_disclosure_date": "first_disclosure_date",
     },
     "trading_calendar": {
         "Markettype": "source_market_type",
