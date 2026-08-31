@@ -13,6 +13,11 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.calendar import (
     unified_trading_sessions,
 )
+from quant_research_platform.markets.implementations.a_share.fundamentals import (
+    FINANCIAL_TABLE_CODE_BY_DATA_ID,
+    financial_events_from_interim,
+    materialize_pit_fundamentals,
+)
 from quant_research_platform.markets.implementations.a_share.ids import (
     FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
     MARKET_ID,
@@ -35,11 +40,6 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
-)
-from quant_research_platform.sources.csmar.fundamentals import (
-    FINANCIAL_TABLE_CODE_BY_DATA_ID,
-    financial_events_from_interim,
-    materialize_pit_fundamentals,
 )
 from quant_research_platform.storage.datasets import DatasetInspection
 from quant_research_platform.storage.layout import StorageLayout

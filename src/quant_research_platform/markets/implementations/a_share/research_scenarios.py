@@ -91,6 +91,7 @@ DEFAULT_RETURN_SOURCE_COLUMN = forward_return_label_column(
     SCENARIO_DEFAULTS.return_horizon,
     SCENARIO_DEFAULTS.frequency,
 )
+DEFAULT_EVALUATION_ID = f"signal_{DEFAULT_RETURN_SOURCE_COLUMN}"
 _DEFAULT_PORTFOLIO_RETURN_SOURCE_COLUMN = forward_return_label_column(
     1,
     SCENARIO_DEFAULTS.frequency,

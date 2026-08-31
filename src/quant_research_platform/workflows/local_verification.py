@@ -23,7 +23,6 @@ from quant_research_platform.artifacts.outputs import (
 )
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
-from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
@@ -262,8 +261,8 @@ def _run_local_verification_with_policy(
         effective_windows["evaluation_end_date"],
     )
     catalogs = config.profile
-    research_dataset_id = _only_research_dataset_id(config.profile)
-    evaluation_id = _only_evaluation_id(config.profile)
+    research_dataset_id = _selected_research_dataset_id(config.profile)
+    evaluation_id = _selected_evaluation_id(config.profile)
     prediction_catalog = config.profile.build_prediction_catalog(
         train_end=effective_windows["prediction_train_end"],
         test_start=effective_windows["prediction_test_start"],
@@ -298,14 +297,7 @@ def _run_local_verification_with_policy(
             layout=storage_layout,
             source_id=source_id,
             time_window=time_window,
-            kinds=frozenset(
-                {
-                    ProcessedDataKind.PANEL,
-                    ProcessedDataKind.ANNOTATION,
-                    ProcessedDataKind.FACTOR,
-                    ProcessedDataKind.LABEL,
-                }
-            ),
+            data_ids=catalogs.research_datasets.get(research_dataset_id).input_data_ids,
             resource_policy=resource_policy,
         )
         record.output_rows = sum(item.row_count for item in processed_result.values())
@@ -612,18 +604,24 @@ def _output_spec(
     )
 
 
-def _only_research_dataset_id(profile: ResearchProfile) -> str:
-    specs = profile.research_datasets.list()
-    if len(specs) != 1:
-        raise ValueError("ambiguous_research_dataset")
-    return specs[0].data_id
+def _selected_research_dataset_id(profile: ResearchProfile) -> str:
+    data_id = profile.local_verification_research_dataset_id
+    try:
+        profile.research_datasets.get(data_id)
+    except KeyError as error:
+        raise ValueError("profile_research_dataset_missing") from error
+    return data_id
 
 
-def _only_evaluation_id(profile: ResearchProfile) -> str:
-    specs = profile.evaluations.list()
-    if len(specs) != 1:
-        raise ValueError("ambiguous_evaluation")
-    return specs[0].evaluation_id
+def _selected_evaluation_id(profile: ResearchProfile) -> str:
+    evaluation_id = profile.local_verification_evaluation_id
+    try:
+        evaluation = profile.evaluations.get(evaluation_id)
+    except KeyError as error:
+        raise ValueError("profile_evaluation_missing") from error
+    if evaluation.research_dataset_id != profile.local_verification_research_dataset_id:
+        raise ValueError("profile_evaluation_dataset_mismatch")
+    return evaluation_id
 
 
 def _optional_portfolio_ids(portfolio_catalog) -> tuple[str, ...]:

@@ -41,6 +41,9 @@ from quant_research_platform.markets.implementations.a_share import (
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
+from quant_research_platform.markets.implementations.a_share.ids import (
+    PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
+)
 from quant_research_platform.markets.implementations.a_share.labels import (
     definitions as label_definitions,
 )
@@ -67,6 +70,9 @@ from quant_research_platform.markets.implementations.crypto import (
 )
 from quant_research_platform.markets.implementations.crypto.factors import (
     definitions as crypto_factor_definitions,
+)
+from quant_research_platform.markets.implementations.crypto.ids import (
+    HFT_RESEARCH_DATASET_ID,
 )
 from quant_research_platform.markets.implementations.crypto.labels import (
     definitions as crypto_label_definitions,
@@ -156,6 +162,8 @@ class ResearchProfile:
     processed: ProcessedDataCatalog
     research_datasets: ResearchDatasetCatalog
     evaluations: EvaluationCatalog
+    local_verification_research_dataset_id: str
+    local_verification_evaluation_id: str
     models: ModelCatalog
     source_id: SourceId
     build_prediction_catalog: PredictionCatalogBuilder
@@ -208,6 +216,12 @@ def _a_share_csmar_research_profile() -> ResearchProfile:
         processed=processed_catalog_module.processed_catalog(),
         research_datasets=(a_share_research_datasets.build_research_dataset_catalog()),
         evaluations=a_share_research_scenarios.build_evaluation_catalog(),
+        local_verification_research_dataset_id=(
+            PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID
+        ),
+        local_verification_evaluation_id=(
+            a_share_research_scenarios.DEFAULT_EVALUATION_ID
+        ),
         models=a_share_research_scenarios.build_model_catalog(),
         source_id=csmar_ids.SOURCE_ID,
         build_prediction_catalog=a_share_research_scenarios.build_prediction_catalog,
@@ -228,6 +242,8 @@ def _crypto_binance_research_profile() -> ResearchProfile:
         processed=crypto_processed_catalog_module.processed_catalog(),
         research_datasets=crypto_research_datasets.build_research_dataset_catalog(),
         evaluations=crypto_research_scenarios.build_evaluation_catalog(),
+        local_verification_research_dataset_id=HFT_RESEARCH_DATASET_ID,
+        local_verification_evaluation_id=crypto_research_scenarios.HFT_EVALUATION_ID,
         models=ModelCatalog(),
         source_id=binance_ids.SOURCE_ID,
         build_prediction_catalog=_empty_prediction_catalog,

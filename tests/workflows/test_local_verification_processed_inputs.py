@@ -7,7 +7,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.time import TimeWindow
@@ -202,14 +201,12 @@ def test_local_verification_workflow_runs_real_tiny_research_stack(
         == "linear_regression"
     )
 
-    def materialize_processed(layout, kinds):
-        assert kinds == frozenset(
-            {
-                ProcessedDataKind.PANEL,
-                ProcessedDataKind.ANNOTATION,
-                ProcessedDataKind.FACTOR,
-                ProcessedDataKind.LABEL,
-            }
+    def materialize_processed(layout, data_ids):
+        assert (
+            data_ids
+            == base_profile.research_datasets.get(
+                base_profile.local_verification_research_dataset_id
+            ).input_data_ids
         )
         return persist_tiny_a_share_processed_inputs(layout, base_profile)
 

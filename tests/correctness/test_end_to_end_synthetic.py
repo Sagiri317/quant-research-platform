@@ -4,9 +4,17 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share.ids import (
+    AS_OF_MASK_ID,
+    DEFAULT_UNIVERSE_ID,
+    EVALUATION_MASK_ID,
+    EXECUTION_MASK_ID,
+    FORWARD_RETURNS_PROCESSED_DATA_ID,
+    PRICE_VOLUME_PROCESSED_DATA_ID,
+    market_context_data_id,
+)
 from quant_research_platform.markets.implementations.a_share.processed import (
     materializer as materializer,
 )
@@ -52,12 +60,14 @@ def test_synthetic_raw_to_research_dataset_correctness_path(tmp_path: Path) -> N
         layout=layout,
         source_id=SourceId("csmar"),
         time_window=time_window,
-        kinds=frozenset(
-            {
-                ProcessedDataKind.ANNOTATION,
-                ProcessedDataKind.FACTOR,
-                ProcessedDataKind.LABEL,
-            }
+        data_ids=(
+            market_context_data_id(),
+            DEFAULT_UNIVERSE_ID,
+            AS_OF_MASK_ID,
+            EXECUTION_MASK_ID,
+            EVALUATION_MASK_ID,
+            PRICE_VOLUME_PROCESSED_DATA_ID,
+            FORWARD_RETURNS_PROCESSED_DATA_ID,
         ),
     )
     assemble_research_dataset(

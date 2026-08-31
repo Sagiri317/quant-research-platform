@@ -174,8 +174,8 @@ def test_evaluation_outputs_reject_existing_output_bundle_without_writes(
             ic_summary=make_price_volume_evaluation_ic_summary_frame(),
             group_spread_summary=make_price_volume_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=make_output_edge_evaluation_diagnostics(
-                min_timestamp="2014-01-03",
-                max_timestamp="2014-01-03",
+                min_timestamp="2014-01-03T00:00:00",
+                max_timestamp="2014-01-03T00:00:00",
             ),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),
@@ -243,8 +243,8 @@ def test_evaluation_outputs_clean_temp_root_after_mid_write_failure(
             ic_summary=make_price_volume_evaluation_ic_summary_frame(),
             group_spread_summary=make_price_volume_evaluation_group_spread_summary_frame(),
             evaluation_diagnostics=make_output_edge_evaluation_diagnostics(
-                min_timestamp="2014-01-03",
-                max_timestamp="2014-01-03",
+                min_timestamp="2014-01-03T00:00:00",
+                max_timestamp="2014-01-03T00:00:00",
             ),
             spec=_evaluation_spec(),
             output_spec=_evaluation_outputs_spec(),

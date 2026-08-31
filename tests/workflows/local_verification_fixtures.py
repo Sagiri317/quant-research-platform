@@ -176,15 +176,17 @@ def stub_processed_builder(*, on_call=None, materialize=None):
         layout,
         source_id,
         time_window,
-        kinds,
         resource_policy,
+        data_ids=None,
+        kinds=None,
     ):
         del source_id, time_window, resource_policy
+        assert kinds is None
         if on_call is not None:
             on_call()
         if materialize is not None:
-            return materialize(layout, kinds)
-        del kinds
+            return materialize(layout, data_ids)
+        del data_ids
         artifact_root = (
             layout.project_root / "data" / "processed" / "a_share" / "factor"
         ) / "price_volume"
@@ -198,10 +200,11 @@ def empty_processed_inputs(
     layout,
     source_id,
     time_window,
-    kinds,
     resource_policy,
+    data_ids=None,
+    kinds=None,
 ) -> dict[str, object]:
-    del layout, source_id, time_window, kinds, resource_policy
+    del layout, source_id, time_window, data_ids, kinds, resource_policy
     return {}
 
 

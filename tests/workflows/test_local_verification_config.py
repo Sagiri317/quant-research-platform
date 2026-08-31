@@ -355,33 +355,52 @@ def test_local_verification_skips_prediction_window_validation_for_predictionles
     }
 
 
-def test_local_verification_resolves_only_profile_dataset_and_evaluation() -> None:
+def test_local_verification_resolves_selected_profile_dataset_and_evaluation() -> None:
     profile = research_profile()
 
-    assert module._only_research_dataset_id(profile) == "price_volume_forward_returns"
-    assert module._only_evaluation_id(profile) == "signal_forward_return_20d"
+    assert module._selected_research_dataset_id(profile) == (
+        "price_volume_forward_returns"
+    )
+    assert module._selected_evaluation_id(profile) == "signal_forward_return_20d"
 
 
-def test_local_verification_rejects_ambiguous_profile_dataset() -> None:
+def test_local_verification_rejects_missing_selected_profile_dataset() -> None:
     profile = research_profile()
     dataset = profile.research_datasets.list()[0]
     catalog = ResearchDatasetCatalog(
         (dataset, replace(dataset, data_id="other_research_dataset"))
     )
 
-    with pytest.raises(ValueError, match="ambiguous_research_dataset"):
-        module._only_research_dataset_id(replace(profile, research_datasets=catalog))
+    with pytest.raises(ValueError, match="profile_research_dataset_missing"):
+        module._selected_research_dataset_id(
+            replace(profile, research_datasets=catalog)
+        )
 
 
-def test_local_verification_rejects_ambiguous_profile_evaluation() -> None:
+def test_local_verification_uses_explicit_profile_evaluation() -> None:
     profile = research_profile()
     evaluation = profile.evaluations.list()[0]
     catalog = EvaluationCatalog(
         (evaluation, replace(evaluation, evaluation_id="other_evaluation"))
     )
 
-    with pytest.raises(ValueError, match="ambiguous_evaluation"):
-        module._only_evaluation_id(replace(profile, evaluations=catalog))
+    expanded = replace(profile, evaluations=catalog)
+    assert module._selected_evaluation_id(expanded) == (
+        profile.local_verification_evaluation_id
+    )
+    with pytest.raises(ValueError, match="profile_evaluation_missing"):
+        module._selected_evaluation_id(
+            replace(expanded, local_verification_evaluation_id="missing")
+        )
+
+    mismatched = replace(
+        evaluation,
+        research_dataset_id="other_research_dataset",
+    )
+    with pytest.raises(ValueError, match="profile_evaluation_dataset_mismatch"):
+        module._selected_evaluation_id(
+            replace(profile, evaluations=EvaluationCatalog((mismatched,)))
+        )
 
 
 def test_local_verification_workflow_resolves_independent_windows(

@@ -14,7 +14,7 @@ from quant_research_platform.markets.implementations.a_share.factors import (
 from quant_research_platform.markets.implementations.a_share.factors import (
     definitions as factor_definitions,
 )
-from quant_research_platform.sources.csmar.fundamentals import (
+from quant_research_platform.markets.implementations.a_share.fundamentals import (
     financial_events_from_interim,
     materialize_pit_fundamentals,
 )

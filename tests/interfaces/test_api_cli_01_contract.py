@@ -20,13 +20,13 @@ from quant_research_platform.interfaces.models import (
     LabelCatalogResponse,
     ResearchDatasetRequirementsResponse,
 )
+from quant_research_platform.markets.implementations.a_share.factors import (
+    definitions as factor_definitions,
+)
 from quant_research_platform.markets.implementations.a_share.ids import (
     FORWARD_RETURNS_PROCESSED_DATA_ID,
     PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID,
     PRICE_VOLUME_PROCESSED_DATA_ID,
-)
-from quant_research_platform.research.factors.price_volume.presets import (
-    price_volume_factor_columns,
 )
 
 app = cli_commands_module.app
@@ -127,7 +127,11 @@ def test_api_01_endpoints_respond_without_provider_source_markers() -> None:
     combined = "\n".join(str(payload) for payload in payloads)
     _assert_public_text_has_no_provider_source_markers(combined)
 
-    assert len(responses[0].json()["items"]) == len(price_volume_factor_columns())
+    factor_items = responses[0].json()["items"]
+    assert len(factor_items) == len(factor_definitions.factor_catalog().list())
+    assert "fundamental_raw_asset_growth" in {
+        item["factor_id"] for item in factor_items
+    }
     assert responses[1].json()["items"][0]["definition_version"] == "0.1"
     requirements = responses[2].json()
     assert requirements["dataset_id"] == PRICE_VOLUME_FORWARD_RETURNS_DATASET_ID

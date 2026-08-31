@@ -1,4 +1,4 @@
-"""PIT financial events derived from the strict CSMAR interim contracts."""
+"""A-share PIT financial availability and fixed-metric materialization."""
 
 from __future__ import annotations
 
