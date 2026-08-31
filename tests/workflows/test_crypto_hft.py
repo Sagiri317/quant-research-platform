@@ -30,6 +30,7 @@ from quant_research_platform.markets.implementations.crypto.research_scenarios i
 )
 from quant_research_platform.research.predictions import alignment
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.sources.binance.replay import ReconstructionStats
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows.crypto_hft import run_crypto_hft_experiment
 from tests.helpers.binance_hft import write_binance_hft_run
@@ -42,6 +43,27 @@ def _taker_config() -> TakerConfig:
 
 def _maker_config() -> MakerConfig:
     return MakerConfig(1.0, 2.0, -1.0, 0.0, 0.0, 500)
+
+
+def test_crypto_research_status_requires_every_symbol_reconstruction() -> None:
+    clean = ReconstructionStats()
+    invalid_eth = ReconstructionStats(invalid_segments=1)
+
+    assert (
+        crypto_hft._aggregate_research_status(
+            "PASS", {"BTCUSDT": clean, "ETHUSDT": clean}
+        )
+        == "PASS"
+    )
+    assert (
+        crypto_hft._aggregate_research_status(
+            "PASS", {"BTCUSDT": clean, "ETHUSDT": invalid_eth}
+        )
+        == "PARTIAL"
+    )
+    assert (
+        crypto_hft._aggregate_research_status("PASS", {"BTCUSDT": clean}) == "PARTIAL"
+    )
 
 
 def test_crypto_hft_workflow_closes_standard_chain_and_execution(
@@ -73,6 +95,12 @@ def test_crypto_hft_workflow_closes_standard_chain_and_execution(
 
     assert report["status"] == "PASS"
     assert report["run_id"] == "workflow-run"
+    reconstruction_by_symbol = report["data_quality"]["reconstruction_by_symbol"]
+    assert set(reconstruction_by_symbol) == {"BTCUSDT", "ETHUSDT"}
+    assert report["data_quality"]["invalid_segments"] == sum(
+        item["invalid_segments"] for item in reconstruction_by_symbol.values()
+    )
+    assert all(item["coverage_segments"] for item in reconstruction_by_symbol.values())
     assert report["lineage"]["source_artifact_identity"]["artifact_id"] == (
         "workflow-run"
     )

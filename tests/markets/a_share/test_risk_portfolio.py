@@ -10,6 +10,7 @@ from quant_research_platform.research.portfolios.a_share import (
     FeeSchedule,
     PortfolioOptimizationConfig,
     optimize_a_share_portfolio,
+    run_a_share_portfolio_backtest,
 )
 
 
@@ -122,3 +123,43 @@ def test_optimizer_enforces_hard_name_cap_and_psd_risk() -> None:
             trade_date=date(2024, 6, 1),
             config=replace(config, max_weight=0.9),
         )
+
+
+def test_weekly_holdings_drift_between_rebalances_without_hidden_trades() -> None:
+    panel = pd.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "asset_id": asset_id,
+                "asset_return": asset_return,
+                "alpha": 0.0,
+                "current_weight": 0.5,
+                "benchmark_weight": 0.5,
+                "specific_variance": 1.0,
+                "adv": 1_000_000.0,
+                "eligible": True,
+                "can_enter": True,
+                "can_exit": True,
+                "beta": 1.0,
+            }
+            for timestamp, returns in (
+                (pd.Timestamp("2024-01-08"), (1.0, 0.0)),
+                (pd.Timestamp("2024-01-09"), (0.0, 1.0)),
+            )
+            for asset_id, asset_return in zip(("a", "b"), returns, strict=True)
+        ]
+    )
+    result = run_a_share_portfolio_backtest(
+        panel,
+        exposure_columns=("beta",),
+        factor_covariance=pd.DataFrame([[0.0]], index=["beta"], columns=["beta"]),
+        fee_schedules=(FeeSchedule(date(2024, 1, 1), 1.0, 1.0, 1.0, 1.0),),
+        config=PortfolioOptimizationConfig(
+            "1w", 1_000_000.0, 0.8, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0
+        ),
+    )
+    path = result["path"]
+
+    assert path["turnover"].tolist() == pytest.approx([0.0, 0.0], abs=1e-8)
+    assert path["gross_return"].tolist() == pytest.approx([0.5, 1.0 / 3.0])
+    assert path["nav"].tolist() == pytest.approx([1.5, 2.0])

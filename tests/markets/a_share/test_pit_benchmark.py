@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pandas as pd
+import pytest
 
 from quant_research_platform.markets.implementations.a_share.benchmark import (
     materialize_benchmark_weights,
@@ -196,6 +197,37 @@ def test_financial_multiple_correction_dates_and_report_period_growth_are_pit() 
     )
 
     assert factors["fundamental_raw_asset_growth"].tolist() == [0.25, 0.25]
+
+
+def test_pit_materialization_does_not_allocate_observation_event_cross_product(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations = pd.DataFrame(
+        {
+            "asset_id": ["000001"] * 100,
+            "timestamp": pd.date_range("2024-06-01", periods=100, freq="D"),
+        }
+    )
+    events = pd.DataFrame(
+        {
+            "asset_id": ["000001"] * 100,
+            "table_id": ["FS_Combas"] * 100,
+            "metric_id": ["total_assets"] * 100,
+            "report_period": pd.date_range("2000-03-31", periods=100, freq="QE"),
+            "available_at": pd.date_range("2000-04-01", periods=100, freq="QE"),
+            "is_corrected": [False] * 100,
+            "value": [float(value) for value in range(100)],
+        }
+    )
+
+    def reject_cross_product(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("pit_must_not_use_dataframe_merge")
+
+    monkeypatch.setattr(pd.DataFrame, "merge", reject_cross_product)
+    output = materialize_pit_fundamentals(observations, events)
+
+    assert len(output) == 100
+    assert output["previous_value"].notna().all()
 
 
 def test_idx_raw_contracts_bind_csi500_csi1000_and_industry_independently() -> None:

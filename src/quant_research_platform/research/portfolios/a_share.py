@@ -323,6 +323,15 @@ def run_a_share_portfolio_backtest(
                     ),
                 }
             )
+        ending_values = weights * (1.0 + asset_returns)
+        ending_total = float(ending_values.sum())
+        if ending_total <= 0.0:
+            raise ValueError("a_share_backtest_non_positive_holdings")
+        current = pd.Series(
+            ending_values / ending_total,
+            index=daily.index,
+            dtype="float64",
+        )
     path = pd.DataFrame(path_rows)
     path["drawdown"] = path["nav"] / path["nav"].cummax() - 1.0
     active = path["active_return"].to_numpy(dtype="float64")

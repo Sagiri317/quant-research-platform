@@ -88,8 +88,12 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+from quant_research_platform.sources.binance.ids import (
+    FUTURES_MARKET_TYPE,
+    RESEARCH_SYMBOLS,
+)
 from quant_research_platform.sources.binance.replay import (
+    ReconstructionStats,
     RecorderRun,
     iter_agg_trades,
     iter_reconstructed_depth,
@@ -192,7 +196,7 @@ def _run_in_staging(
                 resource_policy=resource_policy,
             )
         )
-        reconstruction = reconstructions["BTCUSDT"]
+        btc_reconstruction = reconstructions["BTCUSDT"]
         sample_resources()
         dataset_catalog = build_hft_research_dataset_catalog()
         research_root = assemble_research_dataset(
@@ -305,7 +309,7 @@ def _run_in_staging(
                 )
             )
             sample_resources()
-        coverage = dict(reconstruction.coverage_segments)
+        coverage = dict(btc_reconstruction.coverage_segments)
         coverage_by_asset = {
             "btc_usdt": dict(reconstructions["BTCUSDT"].coverage_segments),
             "eth_usdt": dict(reconstructions["ETHUSDT"].coverage_segments),
@@ -445,11 +449,8 @@ def _run_in_staging(
                 for metadata in model_metadata_by_id.values()
             ),
         )
-        research_status = (
-            "PASS"
-            if run.manifest["market_data_status"] == "PASS"
-            and reconstruction.invalid_segments == 0
-            else "PARTIAL"
+        research_status = _aggregate_research_status(
+            str(run.manifest["market_data_status"]), reconstructions
         )
         report = build_crypto_hft_report(
             run_id=source_run_id,
@@ -457,7 +458,10 @@ def _run_in_staging(
             research_status=research_status,
             evaluation_status=evaluation_status,
             evaluation_valid_ic_count=evaluation_valid_ic_count,
-            reconstruction=asdict(reconstruction),
+            reconstructions={
+                symbol: asdict(reconstruction)
+                for symbol, reconstruction in reconstructions.items()
+            },
             raw_record_count=raw_record_count,
             row_counts={
                 "panel": inspections[HFT_PANEL_DATA_ID].row_count,
@@ -523,6 +527,19 @@ def _run_in_staging(
         )
         write_json_evidence(staging / "report.json", report)
         return report
+
+
+def _aggregate_research_status(
+    market_data_status: str,
+    reconstructions: dict[str, ReconstructionStats],
+) -> str:
+    return (
+        "PASS"
+        if market_data_status == "PASS"
+        and set(reconstructions) == set(RESEARCH_SYMBOLS)
+        and all(item.invalid_segments == 0 for item in reconstructions.values())
+        else "PARTIAL"
+    )
 
 
 def _datetime(value: int) -> dt.datetime:

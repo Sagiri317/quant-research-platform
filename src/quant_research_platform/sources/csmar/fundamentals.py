@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import insort
 from collections.abc import Mapping
 
 import pandas as pd
@@ -14,6 +15,7 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
     strict_string_series,
     strict_timestamp_series,
 )
@@ -190,6 +192,7 @@ def materialize_pit_fundamentals(
         "metric_id",
         "report_period",
         "available_at",
+        "is_corrected",
         "value",
     }
     if not required_events.issubset(events.columns):
@@ -203,65 +206,108 @@ def materialize_pit_fundamentals(
     )
     if bool(left.duplicated(["asset_id", "timestamp"], keep=False).any()):
         raise ValueError("csmar_pit_observation_key_duplicate")
-    left["_observation_id"] = range(len(left))
-    candidates = left.merge(events, on="asset_id", how="left", validate="many_to_many")
-    candidates = candidates.loc[
-        candidates["available_at"].le(candidates["timestamp"])
-    ].copy()
-    candidates.sort_values(
-        [
-            "_observation_id",
+    event_data = events.loc[
+        :,
+        (
+            "asset_id",
             "table_id",
             "metric_id",
             "report_period",
             "available_at",
-        ],
-        kind="mergesort",
-        inplace=True,
+            "is_corrected",
+            "value",
+        ),
+    ].copy()
+    for column in ("asset_id", "table_id", "metric_id"):
+        event_data[column] = strict_string_series(
+            event_data[column], error=f"csmar_pit_{column}_invalid"
+        )
+    for column in ("report_period", "available_at"):
+        event_data[column] = strict_timestamp_series(
+            event_data[column], error=f"csmar_pit_{column}_invalid"
+        )
+    event_data["value"] = strict_finite_numeric_series(
+        event_data["value"], error="csmar_pit_value_invalid", allow_null=True
     )
-    revision_keys = [
-        "_observation_id",
+    event_key = [
+        "asset_id",
         "table_id",
         "metric_id",
         "report_period",
+        "available_at",
     ]
-    revisions = candidates.groupby(revision_keys, sort=False, as_index=False).tail(1)
-    selection_keys = ["_observation_id", "table_id", "metric_id"]
-    selected = revisions.groupby(selection_keys, sort=False, as_index=False).tail(1)
-    last_two = revisions.groupby(selection_keys, sort=False, group_keys=False).tail(2)
-    previous = last_two.loc[
-        last_two.duplicated(selection_keys, keep="last"),
-        (*selection_keys, "report_period", "value"),
-    ].rename(
-        columns={
-            "report_period": "previous_report_period",
-            "value": "previous_value",
-        }
-    )
-    selected = selected.merge(
-        previous,
-        on=selection_keys,
-        how="left",
-        validate="one_to_one",
-    )
-    metric_universe = events.loc[
-        :, ("asset_id", "table_id", "metric_id")
-    ].drop_duplicates()
-    expected = left.merge(
-        metric_universe, on="asset_id", how="left", validate="many_to_many"
-    )
-    output = expected.merge(
-        selected.drop(columns=["asset_id", "timestamp"]),
-        on=("_observation_id", "table_id", "metric_id"),
-        how="left",
-        validate="one_to_one",
-    )
-    return (
-        output.drop(columns="_observation_id")
-        .sort_values(
-            ["asset_id", "timestamp", "table_id", "metric_id"],
-            kind="mergesort",
-            na_position="last",
+    if bool(event_data.duplicated(event_key, keep=False).any()):
+        raise ValueError("csmar_financial_event_key_duplicate")
+    observations_by_asset = {
+        asset_id: group.sort_values("timestamp", kind="mergesort")
+        for asset_id, group in left.groupby("asset_id", sort=False)
+    }
+    records: list[dict[str, object]] = []
+    for (asset_id, table_id, metric_id), group in event_data.groupby(
+        ["asset_id", "table_id", "metric_id"], sort=False
+    ):
+        observed = observations_by_asset.get(asset_id)
+        if observed is None:
+            continue
+        ordered_events = group.sort_values(
+            ["available_at", "report_period"], kind="mergesort"
         )
-        .reset_index(drop=True)
+        event_stream = iter(
+            ordered_events.loc[
+                :, ("report_period", "available_at", "is_corrected", "value")
+            ].itertuples(index=False, name=None)
+        )
+        next_event = next(event_stream, None)
+        periods: list[pd.Timestamp] = []
+        latest_by_period: dict[pd.Timestamp, tuple[object, object, object]] = {}
+        for observation in observed.itertuples(index=False):
+            while next_event is not None and next_event[1] <= observation.timestamp:
+                report_period = next_event[0]
+                if report_period not in latest_by_period:
+                    insort(periods, report_period)
+                latest_by_period[report_period] = next_event[1:]
+                next_event = next(event_stream, None)
+            if periods:
+                current_period = periods[-1]
+                available_at, is_corrected, value = latest_by_period[current_period]
+            else:
+                current_period = available_at = pd.NaT
+                is_corrected = pd.NA
+                value = float("nan")
+            if len(periods) > 1:
+                previous_period = periods[-2]
+                previous_value = latest_by_period[previous_period][2]
+            else:
+                previous_period = pd.NaT
+                previous_value = float("nan")
+            records.append(
+                {
+                    "asset_id": asset_id,
+                    "timestamp": observation.timestamp,
+                    "table_id": table_id,
+                    "metric_id": metric_id,
+                    "report_period": current_period,
+                    "available_at": available_at,
+                    "is_corrected": is_corrected,
+                    "value": value,
+                    "previous_report_period": previous_period,
+                    "previous_value": previous_value,
+                }
+            )
+    output_columns = (
+        "asset_id",
+        "timestamp",
+        "table_id",
+        "metric_id",
+        "report_period",
+        "available_at",
+        "is_corrected",
+        "value",
+        "previous_report_period",
+        "previous_value",
+    )
+    return pd.DataFrame.from_records(records, columns=output_columns).sort_values(
+        ["asset_id", "timestamp", "table_id", "metric_id"],
+        kind="mergesort",
+        ignore_index=True,
     )

@@ -33,7 +33,7 @@ def build_crypto_hft_report(
     research_status: str,
     evaluation_status: str,
     evaluation_valid_ic_count: int,
-    reconstruction: Mapping[str, Any],
+    reconstructions: Mapping[str, Mapping[str, Any]],
     raw_record_count: int,
     row_counts: Mapping[str, int],
     algorithms: tuple[str, ...],
@@ -51,6 +51,11 @@ def build_crypto_hft_report(
     execution_payload: Mapping[str, Any],
     resource: Mapping[str, Any],
 ) -> dict[str, Any]:
+    reconstruction_counts = {
+        key: sum(int(item[key]) for item in reconstructions.values())
+        for key in next(iter(reconstructions.values()))
+        if key != "coverage_segments"
+    }
     return replace_nonfinite_json_numbers(
         {
             "schema_id": "qrp-crypto-hft-report",
@@ -65,7 +70,10 @@ def build_crypto_hft_report(
             "execution_status": research_status,
             "lineage": dict(execution_payload["lineage"]),
             "data_quality": {
-                **dict(reconstruction),
+                **reconstruction_counts,
+                "reconstruction_by_symbol": {
+                    symbol: dict(item) for symbol, item in reconstructions.items()
+                },
                 "raw_record_count": raw_record_count,
                 "panel_rows": row_counts["panel"],
                 "factor_rows": row_counts["factor"],

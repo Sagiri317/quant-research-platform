@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.markets.implementations.crypto.research_scenarios import (
@@ -72,6 +73,13 @@ def test_unified_smoke_consumes_persisted_market_statistics_and_ledger_owners(
                 "predictive_score_overfit",
             }.issubset(role)
             assert role["common_observations"] == 8
+            assert role["predictive_score_overfit"]["trial_count"] == len(
+                role["candidate_ids"]
+            )
+            assert (
+                role["predictive_score_overfit"]["trial_candidate_ids"]
+                == role["candidate_ids"]
+            )
     assert set(payload["statistics"]["role_metrics"]) == {
         "validation",
         "development_test",
@@ -80,14 +88,23 @@ def test_unified_smoke_consumes_persisted_market_statistics_and_ledger_owners(
         set(metrics) == set(HFT_MULTI_ASSET_SCOPES)
         for metrics in payload["statistics"]["role_metrics"].values()
     )
-    assert payload["statistics"]["global"]["a_share"] == {
+    global_statistics = payload["statistics"]["global"]
+    assert len(global_statistics["candidate_ids"]) == 8
+    assert {
+        row["candidate_id"] for row in global_statistics["candidate_dispositions"]
+    } == set(global_statistics["candidate_ids"])
+    assert all(
+        row["status"] == "UNDEFINED"
+        for row in global_statistics["candidate_dispositions"]
+    )
+    assert global_statistics["multiple_testing"] == {
         "status": "UNDEFINED",
-        "reason": "real_data_pending",
-        "candidate_count": 3,
+        "reason": "no_common_time_by_candidate_matrix",
+        "included_candidate_ids": [],
+        "excluded_candidate_ids": global_statistics["candidate_ids"],
+        "fdr_bh": [],
+        "fdr_by": [],
     }
-    assert len(payload["statistics"]["global"]["candidate_ids"]) == 8
-    for role in payload["statistics"]["global"]["crypto"].values():
-        assert len(role["comparison_ids"]) == len(role["fdr_bh"]) == len(role["fdr_by"])
     assert payload["statistics"]["fama_macbeth"] == {
         "status": "UNDEFINED",
         "reason": "real_data_pending",
@@ -154,6 +171,33 @@ def test_unified_smoke_consumes_persisted_market_statistics_and_ledger_owners(
     assert "sys.path" not in source
     assert "repo_root" not in source
     assert "write_synthetic_hft_recorder_run" in source
+    for required in (
+        "active_exposures",
+        "horizon_decay_status",
+        "fdr_bh",
+        "fdr_by",
+        "capacity_notional",
+        "tracking_error",
+        "information_ratio",
+    ):
+        assert required in source
+
+
+def test_family_statistics_count_every_candidate_once() -> None:
+    losses = pd.DataFrame(
+        {
+            "independent": [1.0, 1.2, 0.9, 1.1, 0.8, 1.3, 0.7, 1.4],
+            "pooled": [0.8, 1.0, 0.7, 0.95, 0.75, 1.05, 0.65, 1.1],
+            "leave_out": [1.3, 1.1, 1.4, 1.2, 1.5, 1.0, 1.6, 0.9],
+        }
+    )
+
+    result = unified_research._statistics_for_loss_matrix(losses)
+
+    assert result["hypothesis_ids"] == ["pooled", "leave_out"]
+    assert len(result["fdr_bh"]) == len(result["fdr_by"]) == 2
+    assert result["predictive_score_overfit"]["trial_candidate_ids"] == list(losses)
+    assert result["predictive_score_overfit"]["trial_count"] == 3
 
 
 def test_unified_parent_publish_is_atomic_on_late_failure(

@@ -682,8 +682,6 @@ def _statistics_from_crypto_artifacts(
             losses = frame if losses is None else losses.join(frame, how="inner")
         matrices[asset_id] = losses
     family_results: dict[str, dict[str, object]] = {}
-    global_p_values: dict[str, list[float]] = {role: [] for role in role_windows}
-    global_comparisons: dict[str, list[str]] = {role: [] for role in role_windows}
     for asset_id, losses in matrices.items():
         family_results[asset_id] = {}
         for role, window in role_windows.items():
@@ -694,20 +692,10 @@ def _statistics_from_crypto_artifacts(
             ]
             result = _statistics_for_loss_matrix(role_losses)
             family_results[asset_id][role] = result
-            for candidate_id, hac in zip(
-                role_losses.columns[1:], result["hac"], strict=True
-            ):
-                global_comparisons[role].append(f"{asset_id}:{candidate_id}")
-                global_p_values[role].append(hac["p_value"])
-    global_results = {}
-    for role in role_windows:
-        bh = fdr_adjust(global_p_values[role], method="BH")
-        by = fdr_adjust(global_p_values[role], method="BY")
-        global_results[role] = {
-            "comparison_ids": global_comparisons[role],
-            "fdr_bh": bh.adjusted_p_values.tolist(),
-            "fdr_by": by.adjusted_p_values.tolist(),
-        }
+    global_candidate_ids = [
+        *[f"a_share:{candidate}" for candidate in a_plan.candidate_ids],
+        *[f"crypto:{candidate}" for candidate in crypto_plan.candidate_ids],
+    ]
     return {
         "families": family_results,
         "role_metrics": {
@@ -722,16 +710,27 @@ def _statistics_from_crypto_artifacts(
             for role in role_windows
         },
         "global": {
-            "candidate_ids": [
-                *[f"a_share:{candidate}" for candidate in a_plan.candidate_ids],
-                *[f"crypto:{candidate}" for candidate in crypto_plan.candidate_ids],
+            "candidate_ids": global_candidate_ids,
+            "candidate_dispositions": [
+                {
+                    "candidate_id": candidate_id,
+                    "status": "UNDEFINED",
+                    "reason": (
+                        "real_data_pending"
+                        if candidate_id.startswith("a_share:")
+                        else "incomparable_evaluation_scope_for_global_matrix"
+                    ),
+                }
+                for candidate_id in global_candidate_ids
             ],
-            "a_share": {
+            "multiple_testing": {
                 "status": "UNDEFINED",
-                "reason": "real_data_pending",
-                "candidate_count": len(a_plan.candidate_ids),
+                "reason": "no_common_time_by_candidate_matrix",
+                "included_candidate_ids": [],
+                "excluded_candidate_ids": global_candidate_ids,
+                "fdr_bh": [],
+                "fdr_by": [],
             },
-            "crypto": global_results,
         },
         "fama_macbeth": {
             "status": "UNDEFINED",
@@ -761,23 +760,35 @@ def _statistics_for_loss_matrix(losses: pd.DataFrame) -> dict[str, object]:
         benchmark, alternatives, block_size=2, repetitions=99, seed=7
     )
     mcs = model_confidence_set(losses, block_size=2, repetitions=99, seed=7)
-    score_improvements = benchmark.to_numpy()[:, None] - alternatives.to_numpy()
+    predictive_scores = -losses.to_numpy()
     trial_sharpes = [
         float(np.mean(column) / np.std(column, ddof=1))
-        for column in score_improvements.T
+        for column in predictive_scores.T
     ]
-    sharpe = probabilistic_and_deflated_sharpe(
-        score_improvements[:, int(np.argmax(trial_sharpes))],
-        benchmark_sharpe=0.0,
-        trial_sharpes=trial_sharpes,
-    )
-    pbo = cscv_pbo(score_improvements, slice_count=4, max_combinations=6)
+    sharpe = None
+    sharpe_reason = None
+    try:
+        sharpe = probabilistic_and_deflated_sharpe(
+            predictive_scores[:, int(np.argmax(trial_sharpes))],
+            benchmark_sharpe=0.0,
+            trial_sharpes=trial_sharpes,
+        )
+    except ValueError as error:
+        if str(error) not in {
+            "sharpe_zero_variance",
+            "sharpe_variance_invalid",
+            "trial_sharpe_dispersion_undefined",
+        }:
+            raise
+        sharpe_reason = str(error)
+    pbo = cscv_pbo(predictive_scores, slice_count=4, max_combinations=6)
     p_values = [result.p_value for result in hac_results]
     fdr_bh = fdr_adjust(p_values, method="BH")
     fdr_by = fdr_adjust(p_values, method="BY")
     return {
         "common_observations": len(losses),
         "candidate_ids": list(losses.columns),
+        "hypothesis_ids": list(alternatives.columns),
         "hac": [
             {"mean": result.mean, "p_value": result.p_value} for result in hac_results
         ],
@@ -798,9 +809,13 @@ def _statistics_for_loss_matrix(losses: pd.DataFrame) -> dict[str, object]:
             "excluded": list(mcs.excluded),
         },
         "predictive_score_overfit": {
-            "input_semantics": "benchmark_squared_error_minus_candidate_squared_error",
-            "psr": sharpe.psr,
-            "dsr": sharpe.dsr,
+            "input_semantics": "negative_squared_error_proxy_not_pnl",
+            "trial_candidate_ids": list(losses.columns),
+            "trial_count": len(trial_sharpes),
+            "psr_dsr_status": "DEFINED" if sharpe is not None else "UNDEFINED",
+            "psr_dsr_reason": sharpe_reason,
+            "psr": None if sharpe is None else sharpe.psr,
+            "dsr": None if sharpe is None else sharpe.dsr,
             "pbo": pbo.pbo,
             "pbo_status": pbo.status,
         },

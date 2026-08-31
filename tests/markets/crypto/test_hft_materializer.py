@@ -46,6 +46,47 @@ from tests.helpers.binance_hft import write_binance_hft_run
 from tests.helpers.runtime_resources import capture_test_policy
 
 
+def test_common_panel_alignment_ignores_asymmetric_frame_boundaries() -> None:
+    columns = ("timestamp", "asset_id", "value")
+    timestamps = pd.date_range("2024-01-01", periods=4, freq="100ms")
+    eth_tail_consumed = []
+
+    def frame(asset_id: str, positions: tuple[int, ...]) -> pd.DataFrame:
+        return pd.DataFrame(
+            [
+                {
+                    "timestamp": timestamps[position],
+                    "asset_id": asset_id,
+                    "value": position,
+                }
+                for position in positions
+            ],
+            columns=columns,
+        )
+
+    def eth_frames():  # noqa: ANN202
+        yield frame("eth_usdt", (0, 1, 2))
+        yield frame("eth_usdt", (3,))
+        eth_tail_consumed.append(True)
+
+    output = list(
+        crypto_hft_materialization._common_symbol_panel_frames(
+            {
+                "BTCUSDT": iter((frame("btc_usdt", (0,)), frame("btc_usdt", (1, 2)))),
+                "ETHUSDT": eth_frames(),
+            },
+            columns=columns,
+            batch_rows=4,
+        )
+    )
+    combined = pd.concat(output, ignore_index=True)
+
+    assert [len(frame) for frame in output] == [4, 2]
+    assert combined.groupby("timestamp")["asset_id"].nunique().tolist() == [2, 2, 2]
+    assert len(combined) == 6
+    assert eth_tail_consumed == [True]
+
+
 def test_hft_materialization_reuses_panel_and_standard_research_dataset(
     tmp_path: Path,
 ) -> None:

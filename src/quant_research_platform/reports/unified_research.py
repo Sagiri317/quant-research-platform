@@ -52,6 +52,7 @@ def build_unified_research_markdown(payload: dict[str, object]) -> str:
             "",
             "包含 HAC、stationary bootstrap、BH/BY FDR、SPA/Reality Check、"
             "StepM、MCS，以及明确标为预测误差改善代理的 PSR/DSR、CSCV/PBO。"
+            "跨8个账本候选没有共同 T×K，global 多重检验明确为 `UNDEFINED`。"
             "A股 Fama-MacBeth v0 因真实数据未到而为 `REAL_DATA_PENDING`；"
             "合成样本不作显著性结论。",
             "",

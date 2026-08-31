@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections.abc import Callable, Iterable, Iterator
+from contextlib import ExitStack
 from dataclasses import replace
 
 import pandas as pd
@@ -130,22 +131,11 @@ def materialize_hft_processed_data(
             )
 
         def panel_frames():  # noqa: ANN202
-            streams = [symbol_frames(symbol) for symbol in RESEARCH_SYMBOLS]
-            try:
-                for frames in zip(*streams, strict=True):
-                    combined = pd.concat(frames, ignore_index=True)
-                    common_counts = combined.groupby("timestamp")["asset_id"].nunique()
-                    common_timestamps = common_counts.index[
-                        common_counts.eq(len(RESEARCH_SYMBOLS))
-                    ]
-                    common = combined.loc[
-                        combined["timestamp"].isin(common_timestamps)
-                    ].sort_values(["timestamp", "asset_id"], kind="mergesort")
-                    if not common.empty:
-                        yield common.reset_index(drop=True)
-            finally:
-                for stream in streams:
-                    stream.close()
+            yield from _common_symbol_panel_frames(
+                {symbol: symbol_frames(symbol) for symbol in RESEARCH_SYMBOLS},
+                columns=panel_spec.required_columns,
+                batch_rows=panel_batch_rows,
+            )
 
         panel_root = layout.processed_data_root(
             panel_spec.market_id,
@@ -225,6 +215,83 @@ def materialize_hft_processed_data(
             )
             panel_session.verify()
     return inspections, stats_by_symbol
+
+
+def _common_symbol_panel_frames(
+    frames_by_symbol: dict[str, Iterable[pd.DataFrame]],
+    *,
+    columns: tuple[str, ...],
+    batch_rows: int,
+) -> Iterator[pd.DataFrame]:
+    """Merge sorted symbol rows by timestamp, independent of frame boundaries."""
+
+    if set(frames_by_symbol) != set(RESEARCH_SYMBOLS) or batch_rows < len(
+        RESEARCH_SYMBOLS
+    ):
+        raise ValueError("hft_common_panel_inputs_invalid")
+    timestamp_position = columns.index("timestamp")
+
+    def rows(frames: Iterable[pd.DataFrame]) -> Iterator[tuple[object, ...]]:
+        previous = None
+        with closing_iterator(iter(frames)) as active:
+            for frame in active:
+                if tuple(frame.columns) != columns:
+                    raise ValueError("hft_panel_frame_columns_invalid")
+                for row in frame.itertuples(index=False, name=None):
+                    timestamp = row[timestamp_position]
+                    if previous is not None and timestamp <= previous:
+                        raise ValueError("hft_symbol_panel_timestamp_invalid")
+                    previous = timestamp
+                    yield row
+
+    streams = [rows(frames_by_symbol[symbol]) for symbol in RESEARCH_SYMBOLS]
+    records: list[tuple[object, ...]] = []
+    with ExitStack() as live:
+        active = [live.enter_context(closing_iterator(stream)) for stream in streams]
+        try:
+            current = [next(stream) for stream in active]
+        except StopIteration:
+            return
+        ended = False
+        while not ended:
+            target = max(row[timestamp_position] for row in current)
+            for index, stream in enumerate(active):
+                while current[index][timestamp_position] < target:
+                    try:
+                        current[index] = next(stream)
+                    except StopIteration:
+                        ended = True
+                        break
+                if ended:
+                    break
+            if ended:
+                break
+            if any(row[timestamp_position] != target for row in current):
+                continue
+            if records and len(records) + len(current) > batch_rows:
+                yield pd.DataFrame.from_records(records, columns=columns).sort_values(
+                    ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+                )
+                records.clear()
+            records.extend(current)
+            for index, stream in enumerate(active):
+                try:
+                    current[index] = next(stream)
+                except StopIteration:
+                    ended = True
+            if len(records) >= batch_rows:
+                yield pd.DataFrame.from_records(records, columns=columns).sort_values(
+                    ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+                )
+                records.clear()
+        if ended:
+            for stream in active:
+                for _row in stream:
+                    pass
+        if records:
+            yield pd.DataFrame.from_records(records, columns=columns).sort_values(
+                ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+            )
 
 
 def _milliseconds(value: dt.datetime) -> int:
