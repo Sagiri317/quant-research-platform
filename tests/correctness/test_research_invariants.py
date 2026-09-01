@@ -13,7 +13,6 @@ from quant_research_platform.contracts.portfolios import (
     WeightConfig,
 )
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
@@ -64,7 +63,7 @@ from quant_research_platform.sources.choice.interim import readiness
 from quant_research_platform.sources.csmar.interim import interim_catalog
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows.materialization import materialize_processed_data
+from quant_research_platform.workflows import research
 from tests.helpers.runtime_resources import capture_test_policy
 
 
@@ -603,28 +602,13 @@ def test_common_materialization_builds_panel_then_pv_facts(tmp_path) -> None:
                 resource_policy=policy,
                 borrowed_input=True,
             )
-        materialize_processed_data(
-            layout=layout,
-            time_window=TimeWindow(sessions[0].date(), sessions[-1].date()),
-            data_ids=("price_volume_facts",),
-            resource_policy=policy,
-        )
-        materialize_processed_data(
-            layout=layout,
-            time_window=TimeWindow(sessions[0].date(), sessions[-1].date()),
-            data_ids=("forward_returns",),
-            resource_policy=policy,
-        )
         from quant_research_platform.profiles.research import research_profile
-        from quant_research_platform.research.datasets.assembler import (
-            assemble_research_dataset,
-        )
 
-        assemble_research_dataset(
+        result = research.dataset_build(
+            profile=research_profile(),
             layout=layout,
-            dataset_catalog=research_profile().research_datasets,
-            processed_catalog=research_profile().processed,
             dataset_id="pv_all",
-            time_window=TimeWindow(sessions[0].date(), sessions[-1].date()),
-            resource_policy=policy,
+            start_date=sessions[0].date().isoformat(),
+            end_date=sessions[-1].date().isoformat(),
         )
+        assert result["status"] == "COMPLETE"

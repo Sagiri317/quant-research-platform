@@ -51,7 +51,10 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
 
     profile = replace(
         base_profile,
-        materialize_interim_data=materialize_fixture,
+        producer_bindings={
+            **base_profile.producer_bindings,
+            **{data_id: materialize_fixture for data_id in source_frames},
+        },
     )
     start = source_frames["trading_calendar"]["timestamp"].min().date()
     end = source_frames["trading_calendar"]["timestamp"].max().date()
@@ -65,7 +68,7 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
             end_date=time_window[1],
             data_ids=tuple(source_frames),
         )
-        dataset_root = research.dataset_build(
+        dataset_result = research.dataset_build(
             profile=profile,
             layout=layout,
             dataset_id="pv_all",
@@ -93,7 +96,8 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
             "report_build",
         ],
         "dataset_id": "pv_all",
-        "dataset_exists": Path(dataset_root).is_dir(),
+        "dataset_exists": layout.research_dataset_root("a_share", "pv_all").is_dir(),
+        "dataset_status": dataset_result["status"],
         "research_status": research_result["status"],
         "report_status": report["status"],
     }

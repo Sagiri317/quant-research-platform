@@ -57,6 +57,61 @@ def test_research_and_profile_owners_have_no_provider_traversal() -> None:
     assert "memory_budget_bytes" not in profile
 
 
+def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
+    profile_path = SOURCE_ROOT / "profiles" / "research.py"
+    profile_tree = ast.parse(
+        profile_path.read_text(encoding="utf-8"),
+        filename=profile_path.as_posix(),
+    )
+    forbidden_prefixes = (
+        "quant_research_platform.storage",
+        "quant_research_platform.runtime",
+        "quant_research_platform.workflows",
+    )
+    imports = _imported_modules(profile_tree)
+    assert all(
+        not module.startswith(forbidden)
+        for module in imports
+        for forbidden in forbidden_prefixes
+    )
+    assert {
+        "StorageLayout",
+        "RuntimeResourcePolicy",
+        "InterimMaterializer",
+        "ProcessedMaterializer",
+    }.isdisjoint(_defined_symbols(profile_tree))
+
+    resolver_owner = SOURCE_ROOT / "workflows" / "research.py"
+    resolver_defs = []
+    for path in (SOURCE_ROOT / "workflows").rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
+        for node in ast.walk(tree):
+            if isinstance(
+                node, (ast.FunctionDef, ast.AsyncFunctionDef)
+            ) and node.name in {
+                "resolve_target_graph",
+                "plan_targets",
+            }:
+                resolver_defs.append((node.name, path))
+    assert resolver_defs == [
+        ("resolve_target_graph", resolver_owner),
+        ("plan_targets", resolver_owner),
+    ]
+    assert not (SOURCE_ROOT / "workflows" / "materialization.py").exists()
+
+
+def test_workflow_production_statuses_have_no_readiness_aliases() -> None:
+    literals: set[str] = set()
+    for path in SOURCE_ROOT.rglob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
+        literals.update(
+            node.value
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant) and type(node.value) is str
+        )
+    assert {"READY", "STALE"}.isdisjoint(literals)
+
+
 def test_tracked_surfaces_have_no_retired_naming() -> None:
     violations: list[str] = []
     repository_root = Path(__file__).resolve().parents[2]
@@ -105,6 +160,16 @@ def _defined_symbols(tree: ast.AST) -> set[str]:
         elif isinstance(node, ast.keyword) and node.arg is not None:
             symbols.add(node.arg)
     return symbols
+
+
+def _imported_modules(tree: ast.AST) -> set[str]:
+    modules: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.module is not None:
+            modules.add(node.module)
+    return modules
 
 
 def _is_retired_symbol(symbol: str) -> bool:

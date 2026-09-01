@@ -40,7 +40,12 @@ GET  /api/0.1/research-datasets/{dataset_id}/requirements
 qrp catalog factors
 qrp catalog labels
 qrp research-datasets requirements <dataset_id>
-qrp research run --start-date <date> --end-date <date> [--holdout]
+qrp data materialize --profile a_share_csmar_choice
+qrp dataset build <dataset_id> --profile a_share_csmar_choice --start-date <date> --end-date <date>
+qrp research run --profile a_share_csmar_choice --start-date <date> --end-date <date> [--holdout]
+qrp report build --profile a_share_csmar_choice
+qrp status --profile a_share_csmar_choice
+qrp inspect <dataset_id> --profile a_share_csmar_choice
 ```
 
 Research runs default to development; `--holdout` fails closed until a frozen development identity is available.

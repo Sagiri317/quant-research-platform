@@ -8,7 +8,10 @@ from pathlib import Path
 import typer
 
 from quant_research_platform.interfaces import queries
-from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.profiles.research import (
+    A_SHARE_PROFILE_ID,
+    research_profile,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 
@@ -64,6 +67,7 @@ def research_dataset_requirements(
 
 @data_app.command("materialize")
 def data_materialize(
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
     raw_root: Path = typer.Option(Path("data/raw/csmar"), "--raw-root"),  # noqa: B008
     start_date: str | None = typer.Option(None, "--start-date"),  # noqa: B008
@@ -72,7 +76,7 @@ def data_materialize(
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
 ) -> None:
     result = research.data_materialize(
-        profile=research_profile(),
+        profile=research_profile(profile),
         layout=StorageLayout(project_root=project_root),
         raw_root=raw_root,
         start_date=start_date,
@@ -86,6 +90,7 @@ def data_materialize(
 @dataset_app.command("build")
 def dataset_build(
     dataset_id: str = typer.Argument(...),  # noqa: B008
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     start_date: str = typer.Option(..., "--start-date"),  # noqa: B008
     end_date: str = typer.Option(..., "--end-date"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
@@ -93,7 +98,7 @@ def dataset_build(
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
     result = research.dataset_build(
-        profile=research_profile(),
+        profile=research_profile(profile),
         layout=StorageLayout(project_root=project_root),
         dataset_id=dataset_id,
         start_date=start_date,
@@ -106,7 +111,8 @@ def dataset_build(
 
 @research_app.command("run")
 def research_run(
-    scenario_id: str = typer.Option("pv_all", "--scenario-id"),  # noqa: B008
+    scenario_id: str | None = typer.Option(None, "--scenario-id"),  # noqa: B008
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     start_date: str = typer.Option(..., "--start-date"),  # noqa: B008
     end_date: str = typer.Option(..., "--end-date"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
@@ -115,10 +121,18 @@ def research_run(
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
     try:
+        selected_profile = research_profile(profile)
         result = research.research_run(
-            profile=research_profile(),
+            profile=selected_profile,
             layout=StorageLayout(project_root=project_root),
-            scenario_id=scenario_id,
+            scenario_id=(
+                scenario_id
+                or (
+                    "pv_all"
+                    if selected_profile.profile_id == A_SHARE_PROFILE_ID
+                    else selected_profile.research_datasets.list()[0].data_id
+                )
+            ),
             start_date=start_date,
             end_date=end_date,
             holdout=holdout,
@@ -133,15 +147,24 @@ def research_run(
 
 @report_app.command("build")
 def report_build(
-    scenario_id: str = typer.Option("pv_all", "--scenario-id"),  # noqa: B008
+    scenario_id: str | None = typer.Option(None, "--scenario-id"),  # noqa: B008
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
+    selected_profile = research_profile(profile)
     result = research.report_build(
-        profile=research_profile(),
+        profile=selected_profile,
         layout=StorageLayout(project_root=project_root),
-        scenario_id=scenario_id,
+        scenario_id=(
+            scenario_id
+            or (
+                "pv_all"
+                if selected_profile.profile_id == A_SHARE_PROFILE_ID
+                else selected_profile.research_datasets.list()[0].data_id
+            )
+        ),
         plan=plan,
         rebuild=rebuild,
     )
@@ -150,11 +173,12 @@ def report_build(
 
 @app.command("status")
 def status(
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
 ) -> None:
     _echo_result(
         research.status(
-            profile=research_profile(),
+            profile=research_profile(profile),
             layout=StorageLayout(project_root=project_root),
         )
     )
@@ -163,11 +187,12 @@ def status(
 @app.command("inspect")
 def inspect(
     dataset_id: str = typer.Argument(...),  # noqa: B008
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
 ) -> None:
     _echo_result(
         research.inspect(
-            profile=research_profile(),
+            profile=research_profile(profile),
             layout=StorageLayout(project_root=project_root),
             dataset_id=dataset_id,
         )

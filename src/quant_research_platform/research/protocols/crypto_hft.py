@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.models import ModelCatalog
@@ -23,6 +25,7 @@ from quant_research_platform.research.labels.forward_returns import (
 from quant_research_platform.research.randomness import ROOT_SEED
 
 MARKET_ID = MarketId("crypto")
+PROTOCOL_ID = "crypto_hft"
 MICROSTRUCTURE_DATASET_ID = "microstructure_forward_returns"
 HFT_RESEARCH_DATASET_ID = "binance_futures_hft_research_100ms"
 HFT_FACTOR_COLUMNS = (
@@ -80,6 +83,39 @@ HFT_MULTI_ASSET_SCOPES = {
 }
 HFT_EVALUATION_ID = "crypto_hft_microstructure_evaluation"
 EVALUATION_ID = "microstructure_forward_returns_evaluation"
+
+
+@dataclass(frozen=True)
+class CryptoProtocol:
+    scenario_id: str = HFT_RESEARCH_DATASET_ID
+    access_window: str = "development"
+
+    def __post_init__(self) -> None:
+        if self.scenario_id not in {
+            HFT_RESEARCH_DATASET_ID,
+            MICROSTRUCTURE_DATASET_ID,
+        }:
+            raise ValueError("unknown_crypto_scenario")
+        if self.access_window not in {"development", "holdout"}:
+            raise ValueError("unknown_crypto_access_window")
+
+    @property
+    def protocol_id(self) -> str:
+        return PROTOCOL_ID
+
+    def manifest(self) -> dict[str, object]:
+        return {
+            "protocol_id": self.protocol_id,
+            "scenario_id": self.scenario_id,
+            "access_window": self.access_window,
+        }
+
+
+def protocol(
+    scenario_id: str = HFT_RESEARCH_DATASET_ID,
+    access_window: str = "development",
+) -> CryptoProtocol:
+    return CryptoProtocol(scenario_id, access_window)
 
 
 def build_signal_specs(

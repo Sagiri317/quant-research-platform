@@ -10,7 +10,6 @@ from quant_research_platform.interfaces.queries import list_factors
 from quant_research_platform.profiles.research import research_profile
 
 FORBIDDEN_PUBLIC_MARKERS = (
-    "csmar",
     "provider_id",
     "source_id",
     "data/raw",
@@ -142,6 +141,18 @@ def test_cli_exposes_only_current_research_surface() -> None:
     assert report_help.exit_code == 0, report_help.output
     assert "--phase" not in report_help.output
     assert "--protocol-frozen" not in report_help.output
+
+    for args in (
+        ["data", "materialize"],
+        ["dataset", "build", "pv_all"],
+        ["research", "run"],
+        ["report", "build"],
+        ["status"],
+        ["inspect", "pv_all"],
+    ):
+        result = runner.invoke(app, [*args, "--help"])
+        assert result.exit_code == 0, result.output
+        assert "--profile" in result.output
 
     holdout = runner.invoke(
         app,
