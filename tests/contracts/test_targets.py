@@ -37,6 +37,7 @@ def test_target_spec_and_plan_are_immutable_control_contracts() -> None:
         "producer_binding": "a_share_dataset",
         "decision": "BUILD",
         "blocker": None,
+        "rebuild": False,
     }
 
 
@@ -65,6 +66,13 @@ def test_target_result_allows_only_declared_states_and_reasons() -> None:
         TargetResult(target_id="dataset", status=TargetStatus.BLOCKED)
     with pytest.raises(ValueError, match="target_result_reason_required"):
         TargetResult(target_id="dataset", status=TargetStatus.FAILED)
+    with pytest.raises(ValueError, match="failed_target_identity_not_allowed"):
+        TargetResult(
+            target_id="dataset",
+            status=TargetStatus.FAILED,
+            reason="failed",
+            instance_identity="a" * 64,
+        )
     with pytest.raises(ValueError, match="target_result_reason_invalid"):
         TargetResult(
             target_id="dataset",
@@ -81,6 +89,26 @@ def test_build_plan_requires_requested_identity() -> None:
             producer_id="producer",
             decision=PlanDecision.BUILD,
         )
+
+    with pytest.raises(ValueError, match="build_matching_identity_requires_rebuild"):
+        TargetPlan(
+            target_id="dataset",
+            upstream_target_ids=(),
+            producer_id="producer",
+            decision=PlanDecision.BUILD,
+            requested_identity="a" * 64,
+            matching_instance_identity="a" * 64,
+        )
+    rebuilt = TargetPlan(
+        target_id="dataset",
+        upstream_target_ids=(),
+        producer_id="producer",
+        decision=PlanDecision.BUILD,
+        requested_identity="a" * 64,
+        matching_instance_identity="a" * 64,
+        rebuild=True,
+    )
+    assert rebuilt.payload()["rebuild"] is True
 
 
 def test_producer_binding_is_typed_and_frozen() -> None:

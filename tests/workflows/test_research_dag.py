@@ -485,6 +485,17 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
     assert planned_target["decision"] == "BUILD"
     assert planned_target["matching_instance_identity"] == old_root.name
     assert planned_target["requested_identity"] == old_root.name
+    normal_plan = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        plan=True,
+    )
+    assert normal_plan["targets"][0]["decision"] == "REUSE"
+    assert normal_plan["targets"][0]["matching_instance_identity"] == old_root.name
 
     rebuilt = research.data_materialize(
         profile=profile,
@@ -553,6 +564,664 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
     )
     assert failed_snapshot == before
     assert calls == 3
+
+
+def _calendar_rebuild_profile(
+    variant: str,
+    *,
+    marker: Path,
+    failure: BaseException | None = None,
+) -> tuple[object, str, dict[str, int]]:
+    data_id = "trading_calendar"
+    calls = {"count": 0}
+
+    def producer(**kwargs: object) -> InterimImportResult:
+        calls["count"] += 1
+        if calls["count"] > 1 and failure is not None:
+            raise failure
+        producer_layout = kwargs["layout"]
+        spec = research_profile().interim.get(data_id)
+        output_root = producer_layout.target_root(
+            data_id,
+            producer_layout.interim_data_root(spec.source_id, data_id),
+        )
+        count = 1 if calls["count"] == 1 or variant != "row" else 2
+        values = {
+            "timestamp": pd.date_range("2020-01-02", periods=count),
+            "calendar_date": pd.date_range("2020-01-02", periods=count),
+            "source_market_type": [4 if calls["count"] == 1 else 5] * count,
+            "is_trading_day": [True] * count,
+            "source_day_of_week": [4] * count,
+            "source_state": ["O" if calls["count"] == 1 else "C"] * count,
+        }
+        frame = pd.DataFrame(values)
+        if variant == "schema" and calls["count"] > 1:
+            frame["is_trading_day"] = pd.Series([1] * count, dtype="int64")
+        if variant == "value" and calls["count"] > 1:
+            frame["source_market_type"] = [4] * count
+            frame["source_state"] = ["C"] * count
+        if variant == "key" and calls["count"] > 1:
+            frame["source_state"] = ["O"] * count
+        write_dataset(
+            output_root,
+            frame,
+            spec=spec,
+            instance_metadata=kwargs["instance_metadata"],
+            resource_policy=kwargs["resource_policy"],
+            borrowed_input=True,
+        )
+        return InterimImportResult(
+            artifact_roots={data_id: output_root},
+            skipped=(),
+            pruning_report_text="test",
+        )
+
+    def source_identity(raw: Path, _data_id: str) -> str:
+        return content_hash_for_files(
+            ((data_id, raw / marker.name),),
+            error="source_identity_invalid",
+        )
+
+    return (
+        replace(
+            research_profile(),
+            producer_bindings={
+                data_id: ProducerBinding(
+                    ProducerKind.INTERIM,
+                    producer,
+                    source_identity=source_identity,
+                ),
+            },
+        ),
+        data_id,
+        calls,
+    )
+
+
+@pytest.mark.parametrize(
+    ("variant", "comparison_status"),
+    (
+        ("value", "CONTENT_MISMATCH"),
+        ("row", "ROW_COUNT_MISMATCH"),
+        ("key", "CONTENT_MISMATCH"),
+        ("schema", "SCHEMA_MISMATCH"),
+    ),
+)
+def test_rebuild_comparison_mismatch_families_preserve_old_good(
+    tmp_path: Path,
+    variant: str,
+    comparison_status: str,
+) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile(variant, marker=marker)
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    old_root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        first["target_results"][0]["instance_identity"],
+    )
+    before = tuple(
+        (
+            path.relative_to(old_root).as_posix(),
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in old_root.rglob("*")
+        if path.is_file()
+    )
+
+    rebuilt = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        rebuild=True,
+    )
+
+    after = tuple(
+        (
+            path.relative_to(old_root).as_posix(),
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in old_root.rglob("*")
+        if path.is_file()
+    )
+    assert rebuilt["status"] == "FAILED"
+    assert rebuilt["target_results"][0]["status"] == "FAILED"
+    assert rebuilt["target_results"][0]["reason"] == (
+        f"rebuild_comparison_{comparison_status.lower()}"
+    )
+    assert rebuilt["rebuild_evidence"][0]["comparison_status"] == comparison_status
+    assert before == after
+    assert calls["count"] == 2
+    assert tuple((tmp_path / ".run").glob(".r-*"))
+
+
+def test_rebuild_corrupt_old_good_returns_inspection_failed(
+    tmp_path: Path,
+) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    old_root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        first["target_results"][0]["instance_identity"],
+    )
+    (old_root / "_manifest" / "manifest.json").unlink()
+
+    rebuilt = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        rebuild=True,
+    )
+
+    assert rebuilt["status"] == "FAILED"
+    assert rebuilt["target_results"][0]["status"] == "FAILED"
+    assert rebuilt["target_results"][0]["reason"] == (
+        "rebuild_comparison_inspection_failed"
+    )
+    assert rebuilt["rebuild_evidence"][0]["comparison_status"] == ("INSPECTION_FAILED")
+    assert calls["count"] == 2
+    assert tuple((tmp_path / ".run").glob(".r-*"))
+
+
+def test_rebuild_compare_primary_is_preserved_with_candidate_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    old_root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        first["target_results"][0]["instance_identity"],
+    )
+    before = tuple(
+        (
+            path.relative_to(old_root).as_posix(),
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in old_root.rglob("*")
+        if path.is_file()
+    )
+
+    class PrimaryError(Exception):
+        pass
+
+    primary = PrimaryError("comparison failure")
+
+    def raise_primary(*_args: object, **_kwargs: object) -> DatasetComparison:
+        raise primary
+
+    monkeypatch.setattr(research, "compare_datasets", raise_primary)
+    with pytest.raises(PrimaryError) as caught:
+        research.data_materialize(
+            profile=profile,
+            layout=layout,
+            raw_root=raw_root,
+            start_date="2020-01-01",
+            end_date="2020-12-31",
+            data_ids=(data_id,),
+            rebuild=True,
+        )
+
+    after = tuple(
+        (
+            path.relative_to(old_root).as_posix(),
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in old_root.rglob("*")
+        if path.is_file()
+    )
+    assert caught.value is primary
+    assert before == after
+    assert calls["count"] == 2
+    assert tuple((tmp_path / ".run").glob(".r-*"))
+
+
+def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
+    tmp_path: Path,
+) -> None:
+    class PrimaryError(Exception):
+        pass
+
+    primary = PrimaryError("producer failure")
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile(
+        "value",
+        marker=marker,
+        failure=primary,
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    old_root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        first["target_results"][0]["instance_identity"],
+    )
+
+    with pytest.raises(PrimaryError) as caught:
+        research.data_materialize(
+            profile=profile,
+            layout=layout,
+            raw_root=raw_root,
+            start_date="2020-01-01",
+            end_date="2020-12-31",
+            data_ids=(data_id,),
+            rebuild=True,
+        )
+
+    assert caught.value is primary
+    assert read_dataset_manifest_evidence(old_root)["data_id"] == data_id
+    assert calls["count"] == 2
+    assert tuple((tmp_path / ".run").glob(".r-*"))
+
+
+def test_rebuild_producer_validation_failure_preserves_candidate(
+    tmp_path: Path,
+) -> None:
+    primary = ValueError("producer validation failure")
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile(
+        "value",
+        marker=marker,
+        failure=primary,
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    old_root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        first["target_results"][0]["instance_identity"],
+    )
+
+    with pytest.raises(ValueError) as caught:
+        research.data_materialize(
+            profile=profile,
+            layout=layout,
+            raw_root=raw_root,
+            start_date="2020-01-01",
+            end_date="2020-12-31",
+            data_ids=(data_id,),
+            rebuild=True,
+        )
+
+    assert caught.value is primary
+    assert read_dataset_manifest_evidence(old_root)["data_id"] == data_id
+    assert calls["count"] == 2
+    assert tuple((tmp_path / ".run").glob(".r-*"))
+
+
+@pytest.mark.parametrize("exception_type", (KeyboardInterrupt, SystemExit))
+def test_rebuild_producer_control_base_exception_preserves_candidate(
+    tmp_path: Path,
+    exception_type: type[BaseException],
+) -> None:
+    primary = exception_type("producer control failure")
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile(
+        "value",
+        marker=marker,
+        failure=primary,
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    old_root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        first["target_results"][0]["instance_identity"],
+    )
+
+    with pytest.raises(exception_type) as caught:
+        research.data_materialize(
+            profile=profile,
+            layout=layout,
+            raw_root=raw_root,
+            start_date="2020-01-01",
+            end_date="2020-12-31",
+            data_ids=(data_id,),
+            rebuild=True,
+        )
+
+    assert caught.value is primary
+    assert read_dataset_manifest_evidence(old_root)["data_id"] == data_id
+    assert calls["count"] == 2
+    assert tuple((tmp_path / ".run").glob(".r-*"))
+
+
+def test_rebuild_raw_mutation_before_candidate_build_blocks_without_empty_scratch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    old_identity = first["target_results"][0]["instance_identity"]
+
+    plan = research._plan_targets
+
+    def mutate_after_plan(**kwargs: object) -> dict[str, object]:
+        result = plan(**kwargs)
+        marker.write_bytes(b"changed")
+        return result
+
+    monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
+    rebuilt = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        rebuild=True,
+    )
+
+    assert rebuilt["status"] == "BLOCKED"
+    assert rebuilt["target_results"] == [
+        {
+            "target_id": data_id,
+            "status": "BLOCKED",
+            "reason": "source_identity_changed",
+            "instance_identity": None,
+        }
+    ]
+    assert rebuilt["rebuild_evidence"] == []
+    assert calls["count"] == 1
+    assert not tuple((tmp_path / ".run").glob(".r-*"))
+    assert old_identity is not None
+
+
+def test_rebuild_without_old_good_is_a_normal_immutable_build(
+    tmp_path: Path,
+) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
+
+    result = research.data_materialize(
+        profile=profile,
+        layout=StorageLayout(project_root=tmp_path),
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        rebuild=True,
+    )
+
+    assert result["status"] == "COMPLETE"
+    assert result["target_results"][0]["status"] == "BUILT"
+    assert result["rebuild_evidence"] == []
+    assert calls["count"] == 1
+    assert not tuple((tmp_path / ".run").glob(".r-*"))
+
+
+def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
+    tmp_path: Path,
+) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    binding = profile.producer_bindings[data_id]
+
+    def blocked_producer(**_kwargs: object) -> InterimImportResult:
+        calls["count"] += 1
+        return InterimImportResult(
+            artifact_roots={},
+            skipped=(data_id,),
+            pruning_report_text="blocked",
+        )
+
+    blocked_profile = replace(
+        profile,
+        producer_bindings={
+            data_id: ProducerBinding(
+                ProducerKind.INTERIM,
+                blocked_producer,
+                source_identity=binding.source_identity,
+            )
+        },
+    )
+    result = research.data_materialize(
+        profile=blocked_profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        rebuild=True,
+    )
+
+    assert first["status"] == "COMPLETE"
+    assert result["status"] == "BLOCKED"
+    assert result["target_results"] == [
+        {
+            "target_id": data_id,
+            "status": "BLOCKED",
+            "reason": "external_data_unavailable",
+            "instance_identity": None,
+        }
+    ]
+    assert result["rebuild_evidence"] == []
+    assert calls["count"] == 2
+    assert not tuple((tmp_path / ".run").glob(".r-*"))
+
+
+def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    profile, source_id, source_calls = _calendar_rebuild_profile(
+        "value",
+        marker=marker,
+    )
+    descendant_id = "market_bars_1d"
+    descendant_calls = {"count": 0}
+
+    def descendant_producer(**kwargs: object) -> InterimImportResult:
+        descendant_calls["count"] += 1
+        spec = profile.interim.get(descendant_id)
+        frame = pd.DataFrame(
+            {
+                column: pd.Series(
+                    dtype=(
+                        "datetime64[ns]" if role is ColumnRole.TIMESTAMP else "string"
+                    )
+                )
+                for column, role in spec.column_roles.items()
+            }
+        )
+        producer_layout = kwargs["layout"]
+        output_root = producer_layout.target_root(
+            descendant_id,
+            producer_layout.interim_data_root(spec.source_id, descendant_id),
+        )
+        write_dataset(
+            output_root,
+            frame,
+            spec=spec,
+            instance_metadata=kwargs["instance_metadata"],
+            resource_policy=kwargs["resource_policy"],
+            borrowed_input=True,
+        )
+        return InterimImportResult(
+            artifact_roots={descendant_id: output_root},
+            skipped=(),
+            pruning_report_text="test",
+        )
+
+    profile = replace(
+        profile,
+        producer_bindings={
+            **profile.producer_bindings,
+            descendant_id: ProducerBinding(
+                ProducerKind.INTERIM,
+                descendant_producer,
+                source_identity=lambda raw, _data_id: content_hash_for_files(
+                    ((descendant_id, raw / marker.name),),
+                    error="source_identity_invalid",
+                ),
+            ),
+        },
+    )
+    declared_specs = (
+        TargetSpec(source_id, producer_id=source_id),
+        TargetSpec(
+            descendant_id,
+            dependencies=(source_id,),
+            producer_id=descendant_id,
+        ),
+    )
+
+    def target_specs(
+        _profile: object,
+        *,
+        action: str,
+        protocol: object,
+    ) -> tuple[TargetSpec, ...]:
+        del action, protocol
+        return declared_specs
+
+    monkeypatch.setattr(research, "_target_specs", target_specs)
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(descendant_id,),
+    )
+    assert first["status"] == "COMPLETE"
+    assert source_calls["count"] == 1
+    assert descendant_calls["count"] == 1
+
+    failed = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(descendant_id,),
+        rebuild=True,
+    )
+
+    results = {item["target_id"]: item for item in failed["target_results"]}
+    assert failed["status"] == "FAILED"
+    assert results[source_id]["status"] == "FAILED"
+    assert results[source_id]["reason"] == ("rebuild_comparison_content_mismatch")
+    assert results[descendant_id] == {
+        "target_id": descendant_id,
+        "status": "BLOCKED",
+        "reason": f"dependency_blocked: {source_id}",
+        "instance_identity": None,
+    }
+    assert source_calls["count"] == 2
+    assert descendant_calls["count"] == 1
+    assert tuple((tmp_path / ".run").glob(".r-*"))
 
 
 def test_csmar_dataset_action_resolves_a_valid_auxiliary_root(

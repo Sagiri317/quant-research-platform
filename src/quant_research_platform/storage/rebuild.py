@@ -54,10 +54,10 @@ def rebuild_candidate_workspace(
         raise
     finally:
         if not workspace._preserve:
+            primary = sys.exception()
             try:
                 remove_owned_scratch(root)
             except BaseException as cleanup_error:
-                primary = sys.exception()
                 if primary is None:
                     raise
                 primary.add_note(

@@ -80,6 +80,7 @@ class TargetPlan:
     requested_identity: str | None = None
     matching_instance_identity: str | None = None
     upstream_identities: Mapping[str, str] = MappingProxyType({})
+    rebuild: bool = False
 
     def __post_init__(self) -> None:
         _require_identifier(self.target_id, "target_id_required")
@@ -90,6 +91,8 @@ class TargetPlan:
         if self.producer_id is not None:
             _require_identifier(self.producer_id, "target_producer_id_invalid")
         object.__setattr__(self, "decision", PlanDecision(self.decision))
+        if type(self.rebuild) is not bool:
+            raise ValueError("target_rebuild_invalid")
         for field_name in ("requested_identity", "matching_instance_identity"):
             value = getattr(self, field_name)
             if value is not None:
@@ -103,6 +106,8 @@ class TargetPlan:
                 raise ValueError("matching_instance_identity_mismatch")
             if self.decision not in {PlanDecision.BUILD, PlanDecision.REUSE}:
                 raise ValueError("matching_instance_decision_invalid")
+            if self.decision is PlanDecision.BUILD and not self.rebuild:
+                raise ValueError("build_matching_identity_requires_rebuild")
         if self.decision is PlanDecision.REUSE and (
             self.requested_identity is None or self.matching_instance_identity is None
         ):
@@ -138,6 +143,7 @@ class TargetPlan:
             "producer_binding": self.producer_id,
             "decision": self.decision.value,
             "blocker": self.blocker,
+            "rebuild": self.rebuild,
         }
 
 
@@ -168,6 +174,8 @@ class TargetResult:
             raise ValueError("target_result_reason_required")
         if self.status is TargetStatus.BLOCKED and self.instance_identity is not None:
             raise ValueError("blocked_target_identity_not_allowed")
+        if self.status is TargetStatus.FAILED and self.instance_identity is not None:
+            raise ValueError("failed_target_identity_not_allowed")
         if self.status in {TargetStatus.BUILT, TargetStatus.REUSED} and (
             self.reason is not None
         ):

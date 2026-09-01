@@ -257,6 +257,18 @@ def _plan_targets(
                         target_id=spec.target_id,
                         requested_identity=requested_identity,
                     )
+                    if (
+                        blocker == "persisted_instance_invalid"
+                        and rebuild
+                        and _instance_path_exists(
+                            profile=profile,
+                            layout=layout,
+                            target_id=spec.target_id,
+                            instance_identity=requested_identity,
+                        )
+                    ):
+                        matching_instance_identity = requested_identity
+                        blocker = None
                     if blocker is None:
                         decision = (
                             PlanDecision.BUILD
@@ -274,6 +286,7 @@ def _plan_targets(
             requested_identity=requested_identity,
             matching_instance_identity=matching_instance_identity,
             upstream_identities=upstream_identities,
+            rebuild=rebuild,
         )
         plans.append(plan)
         by_id[spec.target_id] = plan
@@ -638,6 +651,7 @@ def _execute_action_with_policy(
     results: dict[str, TargetResult] = {}
     rebuild_evidence: list[dict[str, object]] = []
     candidate_workspace: RebuildCandidateWorkspace | None = None
+    candidate_materialized = False
     with ExitStack() as operation:
         for spec in ordered:
             planned = plans[spec.target_id]
@@ -715,6 +729,7 @@ def _execute_action_with_policy(
             )
             if is_candidate:
                 if result.status is TargetStatus.BUILT and output_root is not None:
+                    candidate_materialized = True
                     old_good_root = _target_instance_root(
                         profile,
                         layout,
@@ -740,7 +755,12 @@ def _execute_action_with_policy(
                             status=TargetStatus.FAILED,
                             reason=(f"rebuild_comparison_{comparison.status.lower()}"),
                         )
-                elif candidate_workspace is not None:
+                elif candidate_workspace is not None and (
+                    candidate_materialized
+                    or output_root is not None
+                    and output_root.exists()
+                ):
+                    assert candidate_workspace is not None
                     candidate_workspace.preserve()
                     rebuild_evidence.append(
                         {
@@ -1215,6 +1235,23 @@ def _target_instance_root(
     if logical_root is None:
         raise ValueError("target_logical_root_missing")
     return layout.instance_root(logical_root, instance_identity)
+
+
+def _instance_path_exists(
+    *,
+    profile: ResearchProfile,
+    layout: StorageLayout,
+    target_id: str,
+    instance_identity: str,
+) -> bool:
+    logical_root = _target_logical_root(profile, layout, target_id)
+    return (
+        logical_root is not None
+        and layout.instance_root(
+            logical_root,
+            instance_identity,
+        ).exists()
+    )
 
 
 def _target_layout(
