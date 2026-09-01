@@ -18,6 +18,7 @@ from quant_research_platform.profiles.research import (
 )
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.sources.csmar.interim import InterimImportResult
+from quant_research_platform.storage.datasets.types import DatasetComparison
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import content_hash_for_files
 from quant_research_platform.storage.layout import StorageLayout
@@ -336,7 +337,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
         {
             "target_id": data_id,
             "status": "BLOCKED",
-            "blocker": "source_identity_changed",
+            "reason": "source_identity_changed",
             "instance_identity": None,
         }
     ]
@@ -385,6 +386,173 @@ def test_data_target_identity_ignores_unrelated_protocol_factor_scope(
     core_target = core_plan["targets"][0]
     full_target = full_plan["targets"][0]
     assert core_target["requested_identity"] == full_target["requested_identity"]
+
+
+def test_same_identity_rebuild_matches_and_preserves_old_good(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    data_id = "market_bars_1d"
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"stable")
+    calls = 0
+
+    def producer(**kwargs: object) -> InterimImportResult:
+        nonlocal calls
+        calls += 1
+        producer_layout = kwargs["layout"]
+        spec = research_profile().interim.get(data_id)
+        output_root = producer_layout.target_root(
+            data_id,
+            producer_layout.interim_data_root(spec.source_id, data_id),
+        )
+        frame = pd.DataFrame(
+            {
+                column: pd.Series(
+                    dtype="datetime64[ns]" if role is ColumnRole.TIMESTAMP else "string"
+                )
+                for column, role in spec.column_roles.items()
+            }
+        )
+        write_dataset(
+            output_root,
+            frame,
+            spec=spec,
+            instance_metadata=kwargs["instance_metadata"],
+            resource_policy=kwargs["resource_policy"],
+            borrowed_input=True,
+        )
+        return InterimImportResult(
+            artifact_roots={data_id: output_root},
+            skipped=(),
+            pruning_report_text="test",
+        )
+
+    def source_identity(raw: Path, _data_id: str) -> str:
+        return content_hash_for_files(
+            ((data_id, raw / marker.name),),
+            error="source_identity_invalid",
+        )
+
+    profile = replace(
+        research_profile(),
+        producer_bindings={
+            data_id: ProducerBinding(
+                ProducerKind.INTERIM,
+                producer,
+                source_identity=source_identity,
+            ),
+        },
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    old_root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        first["target_results"][0]["instance_identity"],
+    )
+    before = tuple(
+        (
+            path.relative_to(old_root).as_posix(),
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in old_root.rglob("*")
+        if path.is_file()
+    )
+
+    rebuild_plan = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        plan=True,
+        rebuild=True,
+    )
+    planned_target = rebuild_plan["targets"][0]
+    assert planned_target["decision"] == "BUILD"
+    assert planned_target["matching_instance_identity"] == old_root.name
+    assert planned_target["requested_identity"] == old_root.name
+
+    rebuilt = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        rebuild=True,
+    )
+
+    after = tuple(
+        (
+            path.relative_to(old_root).as_posix(),
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in old_root.rglob("*")
+        if path.is_file()
+    )
+    assert rebuilt["status"] == "COMPLETE"
+    assert rebuilt["target_results"][0]["status"] == "BUILT"
+    assert rebuilt["target_results"][0]["instance_identity"] == old_root.name
+    assert rebuilt["rebuild_evidence"][0]["comparison_status"] == "MATCH"
+    assert before == after
+    assert calls == 2
+    assert not tuple((tmp_path / ".run").glob(".r-*"))
+
+    def mismatch(*_args: object, **_kwargs: object) -> DatasetComparison:
+        return DatasetComparison(
+            status="CONTENT_MISMATCH",
+            matches=False,
+            summary={},
+            layout_delta={},
+        )
+
+    monkeypatch.setattr(research, "compare_datasets", mismatch)
+    failed = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        rebuild=True,
+    )
+    assert failed["status"] == "FAILED"
+    assert failed["target_results"][0]["status"] == "FAILED"
+    assert failed["target_results"][0]["reason"] == (
+        "rebuild_comparison_content_mismatch"
+    )
+    assert failed["rebuild_evidence"][0]["comparison_status"] == "CONTENT_MISMATCH"
+    assert tuple((tmp_path / ".run").glob(".r-*"))
+    failed_snapshot = tuple(
+        (
+            path.relative_to(old_root).as_posix(),
+            path.read_bytes(),
+            path.stat().st_ino,
+            path.stat().st_size,
+            path.stat().st_mtime_ns,
+        )
+        for path in old_root.rglob("*")
+        if path.is_file()
+    )
+    assert failed_snapshot == before
+    assert calls == 3
 
 
 def test_csmar_dataset_action_resolves_a_valid_auxiliary_root(
@@ -472,10 +640,7 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
         rebuild=True,
     )
     assert rebuild["status"] == "BLOCKED"
-    assert any(
-        item["blocker"] == "semantic_identity_not_available"
-        for item in rebuild["target_results"]
-    )
+    assert all("reason" in item for item in rebuild["target_results"])
 
 
 def test_inspect_and_status_never_treat_a_directory_as_a_complete_target(
@@ -508,7 +673,12 @@ def test_a_share_synthetic_chain_uses_the_single_resolver(tmp_path: Path) -> Non
     assert result["dataset_repeat_status"] == "COMPLETE"
     assert result["dataset_target_status"] == "BUILT"
     assert result["dataset_repeat_target_status"] == "REUSED"
+    assert result["dataset_rebuild_status"] == "COMPLETE"
+    assert result["dataset_rebuild_target_status"] == "BUILT"
+    assert result["dataset_rebuild_evidence_count"] > 0
     assert result["source_producer_calls_on_repeat"] == 0
+    assert result["source_producer_calls_on_rebuild"] > 0
+    assert not tuple((tmp_path / ".run").glob(".r-*"))
     assert result["research_status"] == "BLOCKED"
     assert result["report_status"] == "BLOCKED"
 

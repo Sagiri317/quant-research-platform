@@ -74,6 +74,7 @@ def data_materialize(
     end_date: str | None = typer.Option(None, "--end-date"),  # noqa: B008
     data_id: list[str] | None = typer.Option(None, "--data-id"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
+    rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
     result = research.data_materialize(
         profile=research_profile(profile),
@@ -83,6 +84,7 @@ def data_materialize(
         end_date=end_date,
         data_ids=None if data_id is None else tuple(data_id),
         plan=plan,
+        rebuild=rebuild,
     )
     _echo_result(result)
 

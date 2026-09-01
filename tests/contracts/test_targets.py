@@ -46,18 +46,31 @@ def test_target_result_allows_only_declared_states_and_reasons() -> None:
         status=TargetStatus.BUILT,
         instance_identity="a" * 64,
     )
-    assert result.payload()["status"] == "BUILT"
+    assert result.payload() == {
+        "target_id": "dataset",
+        "status": "BUILT",
+        "reason": None,
+        "instance_identity": "a" * 64,
+    }
     with pytest.raises(ValueError, match="target_instance_identity_required"):
         TargetResult(target_id="dataset", status=TargetStatus.BUILT)
     with pytest.raises(ValueError, match="blocked_target_identity_not_allowed"):
         TargetResult(
             target_id="dataset",
             status=TargetStatus.BLOCKED,
-            blocker="blocked",
+            reason="blocked",
             instance_identity="a" * 64,
         )
-    with pytest.raises(ValueError, match="blocked_target_reason_required"):
+    with pytest.raises(ValueError, match="target_result_reason_required"):
         TargetResult(target_id="dataset", status=TargetStatus.BLOCKED)
+    with pytest.raises(ValueError, match="target_result_reason_required"):
+        TargetResult(target_id="dataset", status=TargetStatus.FAILED)
+    with pytest.raises(ValueError, match="target_result_reason_invalid"):
+        TargetResult(
+            target_id="dataset",
+            status=TargetStatus.FAILED,
+            reason=123,  # type: ignore[arg-type]
+        )
 
 
 def test_build_plan_requires_requested_identity() -> None:

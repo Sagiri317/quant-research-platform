@@ -112,6 +112,16 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
             end_date=time_window[1],
             raw_root=raw_root,
         )
+        producer_calls_after_repeat = len(producer_calls)
+        rebuild_result = research.dataset_build(
+            profile=profile,
+            layout=layout,
+            dataset_id="pv_all",
+            start_date=time_window[0],
+            end_date=time_window[1],
+            raw_root=raw_root,
+            rebuild=True,
+        )
         research_result = research.research_run(
             profile=profile,
             layout=layout,
@@ -145,9 +155,18 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
             for item in repeat_result["target_results"]
             if item["target_id"] == "pv_all"
         ),
+        "dataset_rebuild_status": rebuild_result["status"],
+        "dataset_rebuild_target_status": next(
+            item["status"]
+            for item in rebuild_result["target_results"]
+            if item["target_id"] == "pv_all"
+        ),
+        "dataset_rebuild_evidence_count": len(rebuild_result["rebuild_evidence"]),
         "source_producer_calls": producer_calls_after_first,
-        "source_producer_calls_on_repeat": len(producer_calls)
+        "source_producer_calls_on_repeat": producer_calls_after_repeat
         - producer_calls_after_first,
+        "source_producer_calls_on_rebuild": len(producer_calls)
+        - producer_calls_after_repeat,
         "research_status": research_result["status"],
         "report_status": report["status"],
         "blocker": "formal_research_capabilities_not_implemented",

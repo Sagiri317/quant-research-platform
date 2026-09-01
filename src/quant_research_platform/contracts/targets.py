@@ -101,8 +101,8 @@ class TargetPlan:
         if self.matching_instance_identity is not None:
             if self.requested_identity != self.matching_instance_identity:
                 raise ValueError("matching_instance_identity_mismatch")
-            if self.decision is not PlanDecision.REUSE:
-                raise ValueError("matching_instance_requires_reuse")
+            if self.decision not in {PlanDecision.BUILD, PlanDecision.REUSE}:
+                raise ValueError("matching_instance_decision_invalid")
         if self.decision is PlanDecision.REUSE and (
             self.requested_identity is None or self.matching_instance_identity is None
         ):
@@ -145,7 +145,7 @@ class TargetPlan:
 class TargetResult:
     target_id: str
     status: TargetStatus
-    blocker: str | None = None
+    reason: str | None = None
     instance_identity: str | None = None
 
     def __post_init__(self) -> None:
@@ -157,18 +157,27 @@ class TargetResult:
             self.instance_identity is None
         ):
             raise ValueError("target_instance_identity_required")
+        if self.reason is not None and (
+            type(self.reason) is not str or not self.reason
+        ):
+            raise ValueError("target_result_reason_invalid")
+        if (
+            self.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}
+            and not self.reason
+        ):
+            raise ValueError("target_result_reason_required")
         if self.status is TargetStatus.BLOCKED and self.instance_identity is not None:
             raise ValueError("blocked_target_identity_not_allowed")
-        if self.status is TargetStatus.BLOCKED and not self.blocker:
-            raise ValueError("blocked_target_reason_required")
-        if self.status is not TargetStatus.BLOCKED and self.blocker is not None:
-            raise ValueError("target_blocker_not_applicable")
+        if self.status in {TargetStatus.BUILT, TargetStatus.REUSED} and (
+            self.reason is not None
+        ):
+            raise ValueError("target_result_reason_not_applicable")
 
     def payload(self) -> dict[str, object]:
         return {
             "target_id": self.target_id,
             "status": self.status.value,
-            "blocker": self.blocker,
+            "reason": self.reason,
             "instance_identity": self.instance_identity,
         }
 

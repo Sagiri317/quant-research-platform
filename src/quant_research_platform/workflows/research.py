@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ from quant_research_platform.contracts.targets import (
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.storage.datasets.comparison import compare_datasets
 from quant_research_platform.storage.datasets.inspection import (
     inspect_dataset as inspect_physical_dataset,
 )
@@ -44,6 +46,10 @@ from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import validate_instance_identity
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+from quant_research_platform.storage.rebuild import (
+    RebuildCandidateWorkspace,
+    rebuild_candidate_workspace,
+)
 from quant_research_platform.storage.software_identity import (
     ProductionSoftwareIdentity,
     production_software_identity,
@@ -159,107 +165,104 @@ def _plan_targets(
         requested_identity: str | None = None
         matching_instance_identity: str | None = None
         decision = PlanDecision.BLOCKED
-        if rebuild:
-            blocker = "semantic_identity_not_available"
+        blocked_dependency = next(
+            (
+                dependency
+                for dependency in spec.dependencies
+                if by_id[dependency].decision is PlanDecision.BLOCKED
+            ),
+            None,
+        )
+        if blocked_dependency is not None:
+            blocker = f"dependency_blocked: {blocked_dependency}"
+        elif data_spec is None or spec.producer_id is None:
+            blocker = "capability_not_implemented"
         else:
-            blocked_dependency = next(
-                (
-                    dependency
-                    for dependency in spec.dependencies
-                    if by_id[dependency].decision is PlanDecision.BLOCKED
-                ),
-                None,
-            )
-            if blocked_dependency is not None:
-                blocker = f"dependency_blocked: {blocked_dependency}"
-            elif data_spec is None or spec.producer_id is None:
-                blocker = "capability_not_implemented"
+            binding = profile.producer_bindings.get(spec.producer_id)
+            if binding is None:
+                blocker = "producer_binding_missing"
+            elif binding.kind is not _producer_kind(data_spec):
+                blocker = "producer_binding_kind_mismatch"
+            elif (
+                isinstance(data_spec, InterimDataSpec)
+                and binding.source_identity is None
+            ):
+                blocker = "source_identity_resolver_missing"
             else:
-                binding = profile.producer_bindings.get(spec.producer_id)
-                if binding is None:
-                    blocker = "producer_binding_missing"
-                elif binding.kind is not _producer_kind(data_spec):
-                    blocker = "producer_binding_kind_mismatch"
-                elif (
-                    isinstance(data_spec, InterimDataSpec)
-                    and binding.source_identity is None
-                ):
-                    blocker = "source_identity_resolver_missing"
-                else:
-                    raw_identity = None
-                    resolved_source_root = source_root
-                    if isinstance(data_spec, InterimDataSpec):
-                        if binding.source_root_resolver is not None:
-                            try:
-                                resolved = binding.source_root_resolver(
-                                    source_root,
-                                    spec.target_id,
-                                )
-                            except ValueError as exc:
-                                blocker = (
-                                    str(exc)
-                                    if str(exc)
-                                    in {
-                                        "csmar_source_root_ambiguous",
-                                        "csmar_raw_export_identity_changed",
-                                    }
-                                    else "source_root_invalid"
-                                )
-                            else:
-                                if resolved is None:
-                                    blocker = "source_root_unavailable"
-                                elif not isinstance(resolved, Path):
-                                    blocker = "source_root_invalid"
-                                else:
-                                    resolved_source_root = resolved
-                        if blocker is None:
-                            try:
-                                raw_identity = binding.source_identity(
-                                    resolved_source_root,
-                                    spec.target_id,
-                                )
-                            except ValueError:
-                                blocker = "source_identity_invalid"
-                        if blocker is None and resolved_source_roots is not None:
-                            resolved_source_roots[spec.target_id] = resolved_source_root
-                    if (
-                        blocker is None
-                        and isinstance(data_spec, InterimDataSpec)
-                        and raw_identity is None
-                    ):
-                        blocker = "raw_content_identity_unavailable"
-                    elif blocker is None and raw_identity is not None:
+                raw_identity = None
+                resolved_source_root = source_root
+                if isinstance(data_spec, InterimDataSpec):
+                    if binding.source_root_resolver is not None:
                         try:
-                            validate_instance_identity(raw_identity)
-                        except ValueError:
-                            blocker = "raw_content_identity_invalid"
-                    if blocker is None and any(
-                        dependency not in upstream_identities
-                        for dependency in spec.dependencies
-                    ):
-                        blocker = "upstream_identity_unavailable"
-                    if blocker is None:
-                        envelope = _target_envelope(
-                            profile=profile,
-                            data_spec=data_spec,
-                            research_window=window,
-                            upstream_identities=upstream_identities,
-                            software_identity=software,
-                            raw_content_identity=raw_identity,
-                        )
-                        requested_identity = envelope.instance_identity
-                        matching_instance_identity, blocker = _matching_instance(
-                            profile=profile,
-                            layout=layout,
-                            target_id=spec.target_id,
-                            requested_identity=requested_identity,
-                        )
-                        if blocker is None:
-                            decision = (
-                                PlanDecision.REUSE
-                                if matching_instance_identity is not None
-                                else PlanDecision.BUILD
+                            resolved = binding.source_root_resolver(
+                                source_root,
+                                spec.target_id,
                             )
+                        except ValueError as exc:
+                            blocker = (
+                                str(exc)
+                                if str(exc)
+                                in {
+                                    "csmar_source_root_ambiguous",
+                                    "csmar_raw_export_identity_changed",
+                                }
+                                else "source_root_invalid"
+                            )
+                        else:
+                            if resolved is None:
+                                blocker = "source_root_unavailable"
+                            elif not isinstance(resolved, Path):
+                                blocker = "source_root_invalid"
+                            else:
+                                resolved_source_root = resolved
+                    if blocker is None:
+                        try:
+                            raw_identity = binding.source_identity(
+                                resolved_source_root,
+                                spec.target_id,
+                            )
+                        except ValueError:
+                            blocker = "source_identity_invalid"
+                    if blocker is None and resolved_source_roots is not None:
+                        resolved_source_roots[spec.target_id] = resolved_source_root
+                if (
+                    blocker is None
+                    and isinstance(data_spec, InterimDataSpec)
+                    and raw_identity is None
+                ):
+                    blocker = "raw_content_identity_unavailable"
+                elif blocker is None and raw_identity is not None:
+                    try:
+                        validate_instance_identity(raw_identity)
+                    except ValueError:
+                        blocker = "raw_content_identity_invalid"
+                if blocker is None and any(
+                    dependency not in upstream_identities
+                    for dependency in spec.dependencies
+                ):
+                    blocker = "upstream_identity_unavailable"
+                if blocker is None:
+                    envelope = _target_envelope(
+                        profile=profile,
+                        data_spec=data_spec,
+                        research_window=window,
+                        upstream_identities=upstream_identities,
+                        software_identity=software,
+                        raw_content_identity=raw_identity,
+                    )
+                    requested_identity = envelope.instance_identity
+                    matching_instance_identity, blocker = _matching_instance(
+                        profile=profile,
+                        layout=layout,
+                        target_id=spec.target_id,
+                        requested_identity=requested_identity,
+                    )
+                    if blocker is None:
+                        decision = (
+                            PlanDecision.BUILD
+                            if rebuild or matching_instance_identity is None
+                            else PlanDecision.REUSE
+                        )
         if blocker is not None:
             decision = PlanDecision.BLOCKED
         plan = TargetPlan(
@@ -304,6 +307,7 @@ def data_materialize(
     end_date: str | None,
     data_ids: tuple[str, ...] | None = None,
     plan: bool = False,
+    rebuild: bool = False,
 ) -> dict[str, object]:
     selected = tuple(data_ids or (spec.data_id for spec in profile.interim.list()))
     if plan:
@@ -313,6 +317,7 @@ def data_materialize(
             terminal_targets=selected,
             layout=layout,
             raw_root=raw_root,
+            rebuild=rebuild,
             research_window=_research_window(
                 _protocol(profile, _default_scenario_id(profile)),
                 None,
@@ -329,6 +334,7 @@ def data_materialize(
         raw_root=raw_root,
         start_date=start_date,
         end_date=end_date,
+        rebuild=rebuild,
         research_window=_research_window(
             _protocol(profile, _default_scenario_id(profile)),
             None,
@@ -630,65 +636,125 @@ def _execute_action_with_policy(
     ordered = resolve_target_graph(specs, terminal_targets)
     plans = {item["target_id"]: item for item in plan["targets"]}  # type: ignore[index]
     results: dict[str, TargetResult] = {}
-    for spec in ordered:
-        planned = plans[spec.target_id]
-        if planned["decision"] == PlanDecision.BLOCKED.value:
-            results[spec.target_id] = TargetResult(
-                target_id=spec.target_id,
-                status=TargetStatus.BLOCKED,
-                blocker=str(planned["blocker"]),
+    rebuild_evidence: list[dict[str, object]] = []
+    candidate_workspace: RebuildCandidateWorkspace | None = None
+    with ExitStack() as operation:
+        for spec in ordered:
+            planned = plans[spec.target_id]
+            if planned["decision"] == PlanDecision.BLOCKED.value:
+                results[spec.target_id] = TargetResult(
+                    target_id=spec.target_id,
+                    status=TargetStatus.BLOCKED,
+                    reason=str(planned["blocker"]),
+                )
+                continue
+            blocked_dependency = next(
+                (
+                    dependency
+                    for dependency in spec.dependencies
+                    if results[dependency].status
+                    in {TargetStatus.BLOCKED, TargetStatus.FAILED}
+                ),
+                None,
             )
-            continue
-        blocked_dependency = next(
-            (
-                dependency
-                for dependency in spec.dependencies
-                if results[dependency].status
-                in {TargetStatus.BLOCKED, TargetStatus.FAILED}
-            ),
-            None,
-        )
-        if blocked_dependency is not None:
-            results[spec.target_id] = TargetResult(
-                target_id=spec.target_id,
-                status=TargetStatus.BLOCKED,
-                blocker=f"dependency_blocked: {blocked_dependency}",
-            )
-            continue
-        if planned["decision"] == PlanDecision.REUSE.value:
-            results[spec.target_id] = _reuse_target(
-                profile=profile,
-                layout=layout,
-                spec=spec,
-                planned=planned,
-                policy=policy,
-                raw_root=resolved_source_roots.get(spec.target_id, source_root),
-            )
-            continue
-        results[spec.target_id] = _build_target(
-            profile=profile,
-            layout=layout,
-            spec=spec,
-            planned=planned,
-            research_window=window,
-            software_identity=software,
-            target_layout=_target_layout(
+            if blocked_dependency is not None:
+                results[spec.target_id] = TargetResult(
+                    target_id=spec.target_id,
+                    status=TargetStatus.BLOCKED,
+                    reason=f"dependency_blocked: {blocked_dependency}",
+                )
+                continue
+            if planned["decision"] == PlanDecision.REUSE.value:
+                results[spec.target_id] = _reuse_target(
+                    profile=profile,
+                    layout=layout,
+                    spec=spec,
+                    planned=planned,
+                    policy=policy,
+                    raw_root=resolved_source_roots.get(spec.target_id, source_root),
+                )
+                continue
+            is_candidate = rebuild and planned["matching_instance_identity"] is not None
+            if is_candidate and candidate_workspace is None:
+                candidate_workspace = operation.enter_context(
+                    rebuild_candidate_workspace(layout)
+                )
+            output_layout = layout
+            output_root: Path | None = None
+            if candidate_workspace is not None and is_candidate:
+                output_layout = candidate_workspace.layout
+                output_root = _target_instance_root(
+                    profile,
+                    output_layout,
+                    spec.target_id,
+                    planned["requested_identity"],
+                )
+            target_layout = _target_layout(
                 profile=profile,
                 layout=layout,
                 spec=spec,
                 plans=plans,
-            ),
-            policy=policy,
-            time_window=time_window,
-            raw_root=resolved_source_roots.get(spec.target_id, source_root),
-            start_date=start_date,
-            end_date=end_date,
-        )
+            )
+            if output_root is not None:
+                target_layout = target_layout.with_target_roots(
+                    {spec.target_id: output_root}
+                )
+            result = _build_target(
+                profile=profile,
+                layout=output_layout,
+                spec=spec,
+                planned=planned,
+                research_window=window,
+                software_identity=software,
+                target_layout=target_layout,
+                policy=policy,
+                time_window=time_window,
+                raw_root=resolved_source_roots.get(spec.target_id, source_root),
+                start_date=start_date,
+                end_date=end_date,
+            )
+            if is_candidate:
+                if result.status is TargetStatus.BUILT and output_root is not None:
+                    old_good_root = _target_instance_root(
+                        profile,
+                        layout,
+                        spec.target_id,
+                        planned["requested_identity"],
+                    )
+                    comparison = compare_datasets(
+                        old_good_root,
+                        output_root,
+                        resource_policy=policy,
+                    )
+                    rebuild_evidence.append(
+                        {
+                            "target_id": spec.target_id,
+                            "candidate_token": candidate_workspace.token,
+                            "comparison_status": comparison.status,
+                        }
+                    )
+                    if comparison.status != "MATCH":
+                        candidate_workspace.preserve()
+                        result = TargetResult(
+                            target_id=spec.target_id,
+                            status=TargetStatus.FAILED,
+                            reason=(f"rebuild_comparison_{comparison.status.lower()}"),
+                        )
+                elif candidate_workspace is not None:
+                    candidate_workspace.preserve()
+                    rebuild_evidence.append(
+                        {
+                            "target_id": spec.target_id,
+                            "candidate_token": candidate_workspace.token,
+                            "comparison_status": "BUILD_BLOCKED",
+                        }
+                    )
+            results[spec.target_id] = result
     status_value = _run_status(results.values())
     top_level_blockers = [
-        {"target_id": result.target_id, "reason": result.blocker}
+        {"target_id": result.target_id, "reason": result.reason}
         for result in results.values()
-        if result.blocker is not None
+        if result.reason is not None
     ]
     return {
         "stage": action,
@@ -697,6 +763,7 @@ def _execute_action_with_policy(
         "terminal_targets": list(sorted(terminal_targets)),
         "target_results": [result.payload() for result in results.values()],
         "blockers": top_level_blockers,
+        "rebuild_evidence": rebuild_evidence,
     }
 
 
@@ -719,28 +786,28 @@ def _build_target(
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.BLOCKED,
-            blocker="producer_binding_missing",
+            reason="producer_binding_missing",
         )
     requested_identity = planned["requested_identity"]
     if type(requested_identity) is not str:
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.BLOCKED,
-            blocker="requested_identity_unavailable",
+            reason="requested_identity_unavailable",
         )
     data_spec = _catalog_data_spec(profile, spec.target_id)
     if data_spec is None:
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.BLOCKED,
-            blocker="capability_not_implemented",
+            reason="capability_not_implemented",
         )
     binding = profile.producer_bindings[spec.producer_id]
     if binding.kind is not _producer_kind(data_spec):
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.BLOCKED,
-            blocker="producer_binding_kind_mismatch",
+            reason="producer_binding_kind_mismatch",
         )
     producer = binding.producer
     raw_identity: str | None = None
@@ -749,7 +816,7 @@ def _build_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="source_identity_resolver_missing",
+                reason="source_identity_resolver_missing",
             )
         try:
             raw_identity = binding.source_identity(raw_root, spec.target_id)
@@ -757,13 +824,13 @@ def _build_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="source_identity_invalid",
+                reason="source_identity_invalid",
             )
         if raw_identity is None:
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="raw_content_identity_unavailable",
+                reason="raw_content_identity_unavailable",
             )
         try:
             validate_instance_identity(raw_identity)
@@ -771,7 +838,7 @@ def _build_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="raw_content_identity_invalid",
+                reason="raw_content_identity_invalid",
             )
     envelope = _target_envelope(
         profile=profile,
@@ -785,7 +852,7 @@ def _build_target(
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.BLOCKED,
-            blocker="source_identity_changed",
+            reason="source_identity_changed",
         )
     output_root = _target_instance_root(
         profile,
@@ -815,7 +882,7 @@ def _build_target(
                 return TargetResult(
                     target_id=spec.target_id,
                     status=TargetStatus.BLOCKED,
-                    blocker="external_data_unavailable",
+                    reason="external_data_unavailable",
                 )
             raise
         roots = getattr(result, "artifact_roots", {})
@@ -824,7 +891,7 @@ def _build_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="external_data_unavailable",
+                reason="external_data_unavailable",
             )
         if Path(roots[spec.target_id]) != output_root:
             raise ValueError("producer_output_root_mismatch")
@@ -841,7 +908,7 @@ def _build_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="producer_binding_kind_mismatch",
+                reason="producer_binding_kind_mismatch",
             )
         frame = producer(
             processed_spec,
@@ -872,7 +939,7 @@ def _build_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="producer_binding_kind_mismatch",
+                reason="producer_binding_kind_mismatch",
             )
         producer(
             layout=target_layout,
@@ -892,7 +959,7 @@ def _build_target(
     return TargetResult(
         target_id=spec.target_id,
         status=TargetStatus.BLOCKED,
-        blocker="capability_not_implemented",
+        reason="capability_not_implemented",
     )
 
 
@@ -923,7 +990,7 @@ def _reuse_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="source_identity_resolver_missing",
+                reason="source_identity_resolver_missing",
             )
         try:
             raw_identity = binding.source_identity(raw_root, spec.target_id)
@@ -931,7 +998,7 @@ def _reuse_target(
                 return TargetResult(
                     target_id=spec.target_id,
                     status=TargetStatus.BLOCKED,
-                    blocker="raw_content_identity_unavailable",
+                    reason="raw_content_identity_unavailable",
                 )
             validate_instance_identity(raw_identity)
             metadata = envelope["semantic_metadata"]
@@ -947,13 +1014,13 @@ def _reuse_target(
                 return TargetResult(
                     target_id=spec.target_id,
                     status=TargetStatus.BLOCKED,
-                    blocker="source_identity_changed",
+                    reason="source_identity_changed",
                 )
         except ValueError:
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                blocker="source_identity_invalid",
+                reason="source_identity_invalid",
             )
     inspect_physical_dataset(
         root,
