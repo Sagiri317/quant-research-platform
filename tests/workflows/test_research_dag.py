@@ -3,8 +3,10 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.targets import (
     ProducerBinding,
     ProducerKind,
@@ -15,6 +17,8 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.sources.csmar.interim import InterimImportResult
+from quant_research_platform.storage.datasets.writing import write_dataset
+from quant_research_platform.storage.identity import content_hash_for_files
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 from quant_research_platform.workflows.smoke import run_research_synthetic_smoke
@@ -80,7 +84,7 @@ def test_crypto_plan_is_blocked_when_generic_producers_are_unbound(
 
     assert plan["status"] == "BLOCKED"
     assert any(
-        item["reason"] == "producer_binding_missing" for item in plan["blockers"]
+        item["reason"] == "capability_not_implemented" for item in plan["blockers"]
     )
 
 
@@ -146,7 +150,7 @@ def test_declared_processed_dependencies_are_not_removed_from_the_plan(
         target for target in plan["targets"] if target["target_id"] == "market_panel_1d"
     )
     assert panel["decision"] == "BLOCKED"
-    assert panel["blocker"] == "semantic_identity_not_available"
+    assert panel["blocker"] == "dependency_blocked: market_bars_1d"
     assert {
         "industry_classification",
         "industry_classification_sets",
@@ -167,16 +171,45 @@ def test_interim_binding_receives_one_requested_target(tmp_path: Path) -> None:
         requested = kwargs["data_ids"]
         assert type(requested) is tuple
         calls.append(requested)
+        spec = research_profile().interim.get(data_id)
+        frame = pd.DataFrame(
+            {
+                column: pd.Series(
+                    dtype="datetime64[ns]" if role is ColumnRole.TIMESTAMP else "string"
+                )
+                for column, role in spec.column_roles.items()
+            }
+        )
+        producer_layout = kwargs["layout"]
+        output_root = producer_layout.target_root(
+            data_id,
+            producer_layout.interim_data_root(spec.source_id, data_id),
+        )
+        write_dataset(
+            output_root,
+            frame,
+            spec=spec,
+            instance_metadata=kwargs["instance_metadata"],
+            resource_policy=kwargs["resource_policy"],
+            borrowed_input=True,
+        )
         return InterimImportResult(
-            artifact_roots={data_id: tmp_path / data_id},
+            artifact_roots={data_id: output_root},
             skipped=(),
             pruning_report_text="test",
         )
 
+    def source_identity(_raw_root: Path, _data_id: str) -> str:
+        return "a" * 64
+
     profile = replace(
         research_profile(),
         producer_bindings={
-            data_id: ProducerBinding(ProducerKind.INTERIM, producer),
+            data_id: ProducerBinding(
+                ProducerKind.INTERIM,
+                producer,
+                source_identity=source_identity,
+            ),
         },
     )
     result = research.data_materialize(
@@ -189,7 +222,94 @@ def test_interim_binding_receives_one_requested_target(tmp_path: Path) -> None:
     )
 
     assert calls == [(data_id,)]
-    assert result["status"] == "BLOCKED"
+    assert result["status"] == "COMPLETE"
+
+
+def test_source_identity_mutation_builds_a_new_immutable_instance(
+    tmp_path: Path,
+) -> None:
+    data_id = "market_bars_1d"
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    marker = raw_root / "source.raw"
+    marker.write_bytes(b"before")
+    calls = 0
+
+    def producer(**kwargs: object) -> InterimImportResult:
+        nonlocal calls
+        calls += 1
+        producer_layout = kwargs["layout"]
+        spec = research_profile().interim.get(data_id)
+        output_root = producer_layout.target_root(
+            data_id,
+            producer_layout.interim_data_root(spec.source_id, data_id),
+        )
+        frame = pd.DataFrame(
+            {
+                column: pd.Series(
+                    dtype="datetime64[ns]" if role is ColumnRole.TIMESTAMP else "string"
+                )
+                for column, role in spec.column_roles.items()
+            }
+        )
+        write_dataset(
+            output_root,
+            frame,
+            spec=spec,
+            instance_metadata=kwargs["instance_metadata"],
+            resource_policy=kwargs["resource_policy"],
+            borrowed_input=True,
+        )
+        return InterimImportResult(
+            artifact_roots={data_id: output_root},
+            skipped=(),
+            pruning_report_text="test",
+        )
+
+    def source_identity(raw: Path, _data_id: str) -> str:
+        return content_hash_for_files(
+            ((marker.name, raw / marker.name),),
+            error="source_identity_invalid",
+        )
+
+    profile = replace(
+        research_profile(),
+        producer_bindings={
+            data_id: ProducerBinding(
+                ProducerKind.INTERIM,
+                producer,
+                source_identity=source_identity,
+            ),
+        },
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    first = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    marker.write_bytes(b"after")
+    second = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+
+    first_identity = first["target_results"][0]["instance_identity"]
+    second_identity = second["target_results"][0]["instance_identity"]
+    assert first["status"] == second["status"] == "COMPLETE"
+    assert first_identity != second_identity
+    assert calls == 2
+    instances = tuple(
+        (layout.interim_data_root("csmar", data_id) / "instances").iterdir()
+    )
+    assert {path.name for path in instances} == {first_identity, second_identity}
 
 
 def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> None:
@@ -276,7 +396,11 @@ def test_a_share_synthetic_chain_uses_the_single_resolver(tmp_path: Path) -> Non
     result = run_research_synthetic_smoke(tmp_path)
 
     assert result["status"] == "BLOCKED"
-    assert result["dataset_status"] == "BLOCKED"
+    assert result["dataset_status"] == "COMPLETE"
+    assert result["dataset_repeat_status"] == "COMPLETE"
+    assert result["dataset_target_status"] == "BUILT"
+    assert result["dataset_repeat_target_status"] == "REUSED"
+    assert result["source_producer_calls_on_repeat"] == 0
     assert result["research_status"] == "BLOCKED"
     assert result["report_status"] == "BLOCKED"
 
@@ -285,6 +409,6 @@ def test_a_share_synthetic_chain_uses_the_single_resolver(tmp_path: Path) -> Non
         layout=StorageLayout(project_root=tmp_path),
         dataset_id="pv_all",
     )
-    assert inspection["physical_manifest_valid"] is True
+    assert inspection["instances"]
     assert inspection["status"] == "BLOCKED"
-    assert inspection["blocker"] == "semantic_identity_not_available"
+    assert inspection["blocker"] == "request_identity_required"

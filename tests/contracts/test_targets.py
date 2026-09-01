@@ -31,6 +31,8 @@ def test_target_spec_and_plan_are_immutable_control_contracts() -> None:
         "target_id": "dataset",
         "upstream_target_ids": ["panel"],
         "requested_identity": None,
+        "matching_instance_identity": None,
+        "upstream_identities": {},
         "producer_binding": "a_share_dataset",
         "decision": "BUILD",
         "blocker": None,

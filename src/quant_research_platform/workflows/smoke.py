@@ -18,6 +18,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.writing import write_dataset
+from quant_research_platform.storage.identity import content_hash_for_files
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 
@@ -31,29 +32,45 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
     source_frames = _synthetic_source_frames()
     for spec in base_profile.interim.list():
         source_frames.setdefault(spec.data_id, _empty_source_frame(spec))
+    raw_root = project_root / "synthetic-raw"
+    raw_root.mkdir(parents=True, exist_ok=True)
+    for data_id in source_frames:
+        (raw_root / f"{data_id}.raw").write_bytes(data_id.encode("utf-8"))
+    producer_calls: list[str] = []
 
     def materialize_fixture(**kwargs: object) -> InterimImportResult:
         policy = current_runtime_resource_policy()
         if policy is None:
             raise RuntimeError("runtime_resource_policy_not_active")
         requested = kwargs.get("data_ids")
-        if type(requested) is not tuple or not requested:
+        if type(requested) is not tuple or len(requested) != 1:
             raise ValueError("synthetic_data_ids_required")
+        producer_layout = kwargs.get("layout")
+        instance_metadata = kwargs.get("instance_metadata")
+        if not isinstance(producer_layout, StorageLayout) or not isinstance(
+            instance_metadata, dict
+        ):
+            raise ValueError("synthetic_target_output_required")
         roots: dict[str, Path] = {}
         for data_id in requested:
             if type(data_id) is not str:
                 raise ValueError("synthetic_data_id_invalid")
             frame = source_frames[data_id]
             spec = base_profile.interim.get(data_id)
-            root = layout.interim_data_root(spec.source_id, spec.data_id)
+            output_root = producer_layout.target_root(
+                data_id,
+                producer_layout.interim_data_root(spec.source_id, data_id),
+            )
+            producer_calls.append(data_id)
             write_dataset(
-                root,
+                output_root,
                 frame,
                 spec=spec,
+                instance_metadata=instance_metadata,
                 resource_policy=policy,
                 borrowed_input=True,
             )
-            roots[data_id] = root
+            roots[data_id] = output_root
         return InterimImportResult(
             artifact_roots=roots,
             skipped=(),
@@ -65,7 +82,11 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
         producer_bindings={
             **base_profile.producer_bindings,
             **{
-                data_id: ProducerBinding(ProducerKind.INTERIM, materialize_fixture)
+                data_id: ProducerBinding(
+                    ProducerKind.INTERIM,
+                    materialize_fixture,
+                    source_identity=_synthetic_source_identity,
+                )
                 for data_id in source_frames
             },
         },
@@ -80,6 +101,16 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
             dataset_id="pv_all",
             start_date=time_window[0],
             end_date=time_window[1],
+            raw_root=raw_root,
+        )
+        producer_calls_after_first = len(producer_calls)
+        repeat_result = research.dataset_build(
+            profile=profile,
+            layout=layout,
+            dataset_id="pv_all",
+            start_date=time_window[0],
+            end_date=time_window[1],
+            raw_root=raw_root,
         )
         research_result = research.research_run(
             profile=profile,
@@ -103,9 +134,23 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
         "dataset_id": "pv_all",
         "dataset_exists": layout.research_dataset_root("a_share", "pv_all").is_dir(),
         "dataset_status": dataset_result["status"],
+        "dataset_repeat_status": repeat_result["status"],
+        "dataset_target_status": next(
+            item["status"]
+            for item in dataset_result["target_results"]
+            if item["target_id"] == "pv_all"
+        ),
+        "dataset_repeat_target_status": next(
+            item["status"]
+            for item in repeat_result["target_results"]
+            if item["target_id"] == "pv_all"
+        ),
+        "source_producer_calls": producer_calls_after_first,
+        "source_producer_calls_on_repeat": len(producer_calls)
+        - producer_calls_after_first,
         "research_status": research_result["status"],
         "report_status": report["status"],
-        "blocker": "semantic_identity_not_available",
+        "blocker": "formal_research_capabilities_not_implemented",
     }
 
 
@@ -117,6 +162,16 @@ def _empty_source_frame(spec: InterimDataSpec) -> pd.DataFrame:
             )
             for column, role in spec.column_roles.items()
         }
+    )
+
+
+def _synthetic_source_identity(raw_root: Path, data_id: str) -> str | None:
+    path = Path(raw_root) / f"{data_id}.raw"
+    if not path.is_file():
+        return None
+    return content_hash_for_files(
+        ((path.name, path),),
+        error="synthetic_source_identity_invalid",
     )
 
 

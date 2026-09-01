@@ -34,6 +34,9 @@ from quant_research_platform.sources.csmar.interim import (
 from quant_research_platform.sources.csmar.interim import (
     materialize_interim_data as csmar_interim_producer,
 )
+from quant_research_platform.sources.csmar.interim import (
+    source_content_identity as csmar_source_identity,
+)
 
 
 @dataclass(frozen=True)
@@ -120,7 +123,9 @@ def _a_share_profile() -> ResearchProfile:
         producer_bindings={
             **{
                 spec.data_id: ProducerBinding(
-                    ProducerKind.INTERIM, csmar_interim_producer
+                    ProducerKind.INTERIM,
+                    csmar_interim_producer,
+                    source_identity=csmar_source_identity,
                 )
                 for spec in interim.list()
                 if str(spec.source_id) == "csmar"

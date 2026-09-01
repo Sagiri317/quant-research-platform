@@ -32,6 +32,8 @@ def test_profiles_use_stable_ids_and_immutable_producer_bindings() -> None:
         isinstance(value, ProducerBinding)
         for value in crypto.producer_bindings.values()
     )
+    assert a_share.producer_bindings["market_bars_1d"].source_identity is not None
+    assert crypto.producer_bindings["market_bars_1m"].source_identity is None
 
 
 def test_profile_selector_rejects_derived_identity() -> None:

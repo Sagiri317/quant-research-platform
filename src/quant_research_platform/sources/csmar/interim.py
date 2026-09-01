@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 import sys
 from array import array
@@ -48,11 +49,17 @@ from quant_research_platform.sources.csmar.raw_exports import (
     dataset_files_with_identity_by_id,
     iter_private_export_chunks_with_policy,
 )
+from quant_research_platform.sources.csmar.raw_schemas import (
+    expected_metadata_sidecar_path,
+    infer_dataset_from_native_export,
+    parse_raw_filename,
+)
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
+    content_hash_for_files,
     require_artifact_root,
     require_unaliased_path,
 )
@@ -573,6 +580,90 @@ def interim_specs() -> tuple[InterimDataSpec, ...]:
 
 def interim_catalog() -> InterimDataCatalog:
     return InterimDataCatalog(interim_specs())
+
+
+def source_content_identity(raw_root: Path, data_id: str) -> str | None:
+    """Return one raw content identity for a CSMAR interim target."""
+
+    root = require_unaliased_path(
+        Path(raw_root),
+        error="csmar_raw_export_identity_changed",
+    )
+    if not root.exists():
+        return None
+    if not root.is_dir():
+        raise ValueError("csmar_raw_export_identity_changed")
+    root_identity = _source_directory_identity(root)
+    target = data_id.casefold()
+    selected: list[tuple[str, Path]] = []
+    try:
+        pending = [root]
+        while pending:
+            directory = pending.pop()
+            with os.scandir(directory) as entries:
+                children = sorted(entries, key=lambda entry: entry.name)
+            for entry in children:
+                path = Path(entry.path)
+                require_unaliased_path(
+                    path,
+                    error="csmar_raw_export_identity_changed",
+                )
+                if entry.is_symlink():
+                    raise ValueError("csmar_raw_export_identity_changed")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                    continue
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if path.suffix.lower() != ".csv":
+                    continue
+                if (
+                    "[DES]" in path.name
+                    or "__description__" in path.name
+                    or ".metadata." in path.name
+                ):
+                    continue
+                try:
+                    dataset = parse_raw_filename(path).dataset
+                except ValueError:
+                    try:
+                        dataset = infer_dataset_from_native_export(path)
+                    except ValueError:
+                        dataset = None
+                matches = dataset is not None and dataset.casefold() == target
+                if not matches:
+                    matches = path.stem.casefold() == target
+                if not matches:
+                    matches = target in {
+                        part.casefold() for part in path.relative_to(root).parts
+                    }
+                if not matches:
+                    continue
+                selected.append((path.relative_to(root).as_posix(), path))
+                sidecar = expected_metadata_sidecar_path(path)
+                if sidecar.exists():
+                    selected.append((sidecar.relative_to(root).as_posix(), sidecar))
+    except OSError as exc:
+        raise ValueError("csmar_raw_export_identity_changed") from exc
+    if not selected:
+        return None
+    identity = content_hash_for_files(
+        selected,
+        error="csmar_raw_export_identity_changed",
+    )
+    if _source_directory_identity(root) != root_identity:
+        raise ValueError("csmar_raw_export_identity_changed")
+    return identity
+
+
+def _source_directory_identity(path: Path) -> tuple[int, int, int, int]:
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise ValueError("csmar_raw_export_identity_changed") from exc
+    if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+        raise ValueError("csmar_raw_export_identity_changed")
+    return (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns)
 
 
 def normalize_raw_frame(
@@ -1135,6 +1226,7 @@ def materialize_interim_data(
     override_path: Path | None = None,
     chunksize: int = 500_000,
     resource_policy: RuntimeResourcePolicy | None = None,
+    instance_metadata: Mapping[str, object] | None = None,
 ) -> InterimImportResult:
     with runtime_resource_policy_scope(resource_policy):
         return _materialize_interim_data(
@@ -1145,6 +1237,7 @@ def materialize_interim_data(
             end_date=end_date,
             override_path=override_path,
             chunksize=chunksize,
+            instance_metadata=instance_metadata,
         )
 
 
@@ -1157,6 +1250,7 @@ def _materialize_interim_data(
     end_date: str | None,
     override_path: Path | None,
     chunksize: int,
+    instance_metadata: Mapping[str, object] | None,
 ) -> InterimImportResult:
     resource_policy = current_runtime_resource_policy()
     if resource_policy is None:
@@ -1211,7 +1305,10 @@ def _materialize_interim_data(
                 pending.discard(data_id)
                 spec = catalog.get(data_id)
                 artifact_root = require_artifact_root(
-                    layout.interim_data_root(spec.source_id, spec.data_id)
+                    layout.target_root(
+                        spec.data_id,
+                        layout.interim_data_root(spec.source_id, spec.data_id),
+                    )
                 )
                 frames = _iter_interim_frames(
                     data_id=data_id,
@@ -1231,6 +1328,7 @@ def _materialize_interim_data(
                             frames,
                             spec=spec,
                             resource_policy=resource_policy,
+                            instance_metadata=instance_metadata,
                         )
                     except ValueError as exc:
                         if str(exc) != "empty_dataset_schema_missing":

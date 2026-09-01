@@ -56,6 +56,7 @@ def assemble_research_dataset(
     dataset_id: str,
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy | None = None,
+    instance_metadata: Mapping[str, object] | None = None,
 ) -> Path:
     """Assemble one registered research dataset from processed inputs."""
     with runtime_resource_policy_scope(resource_policy):
@@ -65,6 +66,7 @@ def assemble_research_dataset(
             processed_catalog=processed_catalog,
             dataset_id=dataset_id,
             time_window=time_window,
+            instance_metadata=instance_metadata,
         )
 
 
@@ -75,6 +77,7 @@ def _assemble_research_dataset_impl(
     processed_catalog: ProcessedDataCatalog,
     dataset_id: str,
     time_window: TimeWindow,
+    instance_metadata: Mapping[str, object] | None,
 ) -> Path:
     policy = current_runtime_resource_policy()
     if policy is None:
@@ -95,6 +98,7 @@ def _assemble_research_dataset_impl(
             processed_catalog=processed_catalog,
             time_window=time_window,
             input_sessions=input_sessions,
+            instance_metadata=instance_metadata,
         )
 
 
@@ -105,16 +109,16 @@ def _assemble_research_dataset_from_sessions(
     processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
     input_sessions: Mapping[str, DatasetSession],
+    instance_metadata: Mapping[str, object] | None,
 ) -> Path:
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    input_identities = _input_dataset_identities(
-        dataset_spec=spec,
-        sessions=input_sessions,
-    )
     artifact_root = require_artifact_root(
-        layout.research_dataset_root(spec.market_id, spec.data_id)
+        layout.target_root(
+            spec.data_id,
+            layout.research_dataset_root(spec.market_id, spec.data_id),
+        )
     )
     chunks = _iter_joined_processed_chunks(
         dataset_spec=spec,
@@ -127,19 +131,22 @@ def _assemble_research_dataset_from_sessions(
         for session in input_sessions.values():
             session.verify()
 
-    instance_metadata: dict[str, object] = {
-        "input_dataset_identities": input_identities,
-    }
-    base_manifest = input_sessions[spec.base_input_data_id].manifest
-    if "source_artifact_identity" in base_manifest:
-        instance_metadata["source_artifact_identity"] = base_manifest[
-            "source_artifact_identity"
-        ]
+    metadata = dict(instance_metadata or {})
+    if "common_manifest" not in metadata:
+        metadata["input_dataset_identities"] = _input_dataset_identities(
+            dataset_spec=spec,
+            sessions=input_sessions,
+        )
+        base_manifest = input_sessions[spec.base_input_data_id].manifest
+        if "source_artifact_identity" in base_manifest:
+            metadata["source_artifact_identity"] = base_manifest[
+                "source_artifact_identity"
+            ]
     write_dataset(
         artifact_root,
         chunks,
         spec=spec,
-        instance_metadata=instance_metadata,
+        instance_metadata=metadata,
         staged_validator=verify_input_sessions,
         resource_policy=policy,
     )
@@ -806,10 +813,13 @@ def _open_input_dataset_sessions(
             processed_spec,
             existing_columns=existing_columns,
         )
-        root = layout.processed_data_root(
-            processed_spec.market_id,
-            processed_spec.kind,
-            processed_spec.data_id,
+        root = layout.target_root(
+            data_id,
+            layout.processed_data_root(
+                processed_spec.market_id,
+                processed_spec.kind,
+                processed_spec.data_id,
+            ),
         )
         try:
             session = stack.enter_context(

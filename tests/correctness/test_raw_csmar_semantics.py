@@ -102,6 +102,28 @@ def test_raw_export_discovery_contract_keeps_csv_only(
         raw_schemas.inspect_raw_export_file(txt_description)
 
 
+def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
+    bars = tmp_path / (
+        "csmar__market_bars_1d__all_market_types__full__export-20260605.csv"
+    )
+    unrelated = tmp_path / (
+        "csmar__stock_master__all_market_types__full__export-20260605.csv"
+    )
+    bars.write_bytes(b"bars-before")
+    unrelated.write_bytes(b"stock-before")
+
+    first = interim.source_content_identity(tmp_path, "market_bars_1d")
+    assert first is not None
+
+    unrelated.write_bytes(b"stock-after")
+    assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+
+    bars.write_bytes(b"bars-after")
+    second = interim.source_content_identity(tmp_path, "market_bars_1d")
+    assert second is not None
+    assert second != first
+
+
 def test_dirty_index_info_csv_audit_counts_and_semantics(tmp_path: Path) -> None:
     index_path = tmp_path / "index_info_dirty.csv"
     index_path.write_text(

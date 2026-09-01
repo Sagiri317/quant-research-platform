@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import stat
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,6 +60,35 @@ def dataset_file_identity(path: Path) -> DatasetFileIdentity:
     if not stat.S_ISREG(before.st_mode) or int(before.st_ino) <= 0:
         raise ValueError("invalid_dataset_part_files")
     return dataset_file_identity_from_stat(before)
+
+
+def content_hash_for_files(
+    files: Iterable[tuple[str, Path]],
+    *,
+    error: str,
+) -> str:
+    ordered = sorted(tuple(files), key=lambda item: item[0])
+    if not ordered or len({logical_id for logical_id, _ in ordered}) != len(ordered):
+        raise ValueError(error)
+    digest = hashlib.sha256()
+    for logical_id, path in ordered:
+        if type(logical_id) is not str or not logical_id:
+            raise ValueError(error)
+        logical_bytes = logical_id.encode("utf-8")
+        try:
+            identity = dataset_file_identity(path)
+            digest.update(len(logical_bytes).to_bytes(8, "big"))
+            digest.update(logical_bytes)
+            digest.update(identity.size.to_bytes(8, "big"))
+            with Path(path).open("rb") as handle:
+                while chunk := handle.read(1024 * 1024):
+                    digest.update(chunk)
+                after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+        except (OSError, ValueError) as exc:
+            raise ValueError(error) from exc
+        if after != identity:
+            raise ValueError(error)
+    return digest.hexdigest()
 
 
 def require_artifact_root(root: Path) -> Path:

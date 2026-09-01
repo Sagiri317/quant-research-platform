@@ -276,7 +276,8 @@ def _fundamental_pit_frame(
 
 
 def _source_available(layout: StorageLayout, spec: Any) -> bool:
-    return layout.interim_data_root(spec.source_id, spec.data_id).exists()
+    root = layout.interim_data_root(spec.source_id, spec.data_id)
+    return layout.target_root(spec.data_id, root).exists()
 
 
 def _read_source(
@@ -287,7 +288,10 @@ def _read_source(
     policy: RuntimeResourcePolicy,
     optional: bool,
 ) -> pd.DataFrame:
-    root = layout.interim_data_root(spec.source_id, spec.data_id)
+    root = layout.target_root(
+        spec.data_id,
+        layout.interim_data_root(spec.source_id, spec.data_id),
+    )
     if not root.exists() and optional:
         return pd.DataFrame(columns=spec.required_columns)
     if not root.exists():
@@ -303,10 +307,13 @@ def _read_processed(
     time_window: TimeWindow,
     policy: RuntimeResourcePolicy,
 ) -> pd.DataFrame:
-    dataset_root = layout.processed_data_root(
-        spec.market_id,
-        spec.kind,
+    dataset_root = layout.target_root(
         spec.data_id,
+        layout.processed_data_root(
+            spec.market_id,
+            spec.kind,
+            spec.data_id,
+        ),
     )
     if not dataset_root.exists():
         raise ValueError(f"missing_processed_dependency: {spec.data_id}")
