@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import nullcontext
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
@@ -142,6 +143,22 @@ def _feature_transform_workspace_bytes(
                 vector_bytes,  # ranked values
             )
         )
+    elif transform.transform == "mad_winsorize":
+        transform_state = sum((vector_bytes, vector_bytes, vector_bytes))
+    elif transform.transform == "mad_winsorized_zscore":
+        transform_state = sum(
+            (
+                vector_bytes,
+                vector_bytes,
+                vector_bytes,
+                vector_bytes,
+                vector_bytes,
+                vector_bytes,
+                row_count,
+            )
+        )
+    elif transform.transform == "mad_winsorized_rank":
+        transform_state = sum((vector_bytes, vector_bytes, vector_bytes, vector_bytes))
     elif transform.transform == "fillna_median":
         transform_state = vector_bytes + vector_bytes  # medians + filled values
     else:
@@ -205,6 +222,18 @@ def _transform_values(
             method="average",
             pct=True,
         )
+    if transform.transform == "mad_winsorize":
+        return _mad_winsorize(values, grouped)
+    if transform.transform == "mad_winsorized_zscore":
+        clipped = _mad_winsorize(values, grouped)
+        return _zscore(clipped, clipped.groupby(timestamps, sort=False))
+    if transform.transform == "mad_winsorized_rank":
+        clipped = _mad_winsorize(values, grouped)
+        return clipped.groupby(timestamps, sort=False).rank(method="average", pct=True)
+    if transform.transform == "missing_indicator":
+        return values.isna().astype("float64")
+    if transform.transform == "observed_indicator":
+        return values.notna().astype("float64")
     if transform.transform == "fillna_zero":
         return values.fillna(0.0)
     if transform.transform == "fillna_median":
@@ -222,6 +251,172 @@ def _winsorize(
     lower = grouped.transform(lambda item: item.quantile(lower_q))
     upper = grouped.transform(lambda item: item.quantile(upper_q))
     return values.clip(lower=lower, upper=upper)
+
+
+def _mad_winsorize(
+    values: pd.Series,
+    grouped: pd.core.groupby.SeriesGroupBy,
+) -> pd.Series:
+    def clip(group: pd.Series) -> pd.Series:
+        valid = group.dropna()
+        if valid.empty:
+            return group
+        median = float(valid.median())
+        mad = float(np.median(np.abs(valid.to_numpy(dtype="float64") - median)))
+        if mad == 0.0:
+            return group
+        bound = 3.0 * 1.4826 * mad
+        return group.clip(median - bound, median + bound)
+
+    return grouped.transform(clip)
+
+
+def neutralize_cross_section(
+    frame: pd.DataFrame,
+    *,
+    factor_columns: tuple[str, ...],
+    industry_column: str = "industry_level1_code",
+    size_column: str = "log_float_market_cap",
+    minimum_observations: int = 100,
+) -> pd.DataFrame:
+    """Equal-weight, no-intercept industry/size residualization by date."""
+
+    required = {"timestamp", industry_column, *factor_columns}
+    if not required.issubset(frame.columns):
+        raise ValueError("neutralization_columns_invalid")
+    if type(minimum_observations) is not int or minimum_observations < 1:
+        raise ValueError("neutralization_minimum_observations_invalid")
+    result = frame.copy()
+    for column in factor_columns:
+        result[column] = np.nan
+    for _timestamp, positions in result.groupby("timestamp", sort=False).groups.items():
+        cross = frame.loc[positions]
+        industry = cross[industry_column]
+        valid_industry = industry.notna()
+        dummies = pd.get_dummies(industry, dtype="float64").loc[valid_industry]
+        if dummies.empty:
+            continue
+        for factor in factor_columns:
+            values = strict_finite_numeric_series(
+                cross.loc[valid_industry, factor],
+                error=f"invalid_neutralization_factor: {factor}",
+                allow_null=True,
+            )
+            valid = values.notna()
+            if factor != size_column and size_column not in cross:
+                raise ValueError("neutralization_size_column_required")
+            if factor == size_column:
+                design = dummies.loc[valid]
+            else:
+                size = strict_finite_numeric_series(
+                    cross.loc[valid_industry, size_column],
+                    error="invalid_neutralization_size",
+                    allow_null=True,
+                )
+                valid &= size.notna()
+                design = pd.concat(
+                    [
+                        dummies.loc[valid],
+                        (size.loc[valid] - size.loc[valid].mean()).rename("size"),
+                    ],
+                    axis=1,
+                )
+            if len(design) < max(minimum_observations, 5 * design.shape[1]):
+                continue
+            matrix = design.to_numpy(dtype="float64", copy=False)
+            if np.linalg.matrix_rank(matrix) != matrix.shape[1]:
+                continue
+            target = values.loc[design.index].to_numpy(dtype="float64", copy=False)
+            beta, *_ = np.linalg.lstsq(matrix, target, rcond=None)
+            result.loc[design.index, factor] = target - matrix @ beta
+    return result
+
+
+def canonical_feature_pipeline(
+    frame: pd.DataFrame,
+    *,
+    factor_columns: tuple[str, ...],
+    size_column: str = "log_float_market_cap",
+    industry_column: str = "industry_level1_code",
+) -> pd.DataFrame:
+    """Apply scenario-universe -> MAD winsor -> neutralize -> population zscore."""
+
+    if "scenario_universe" not in frame:
+        raise ValueError("feature_scenario_universe_required")
+    universe = frame["scenario_universe"]
+    if not pd.api.types.is_bool_dtype(universe) or universe.isna().any():
+        raise ValueError("feature_scenario_universe_invalid")
+    scoped = frame.loc[universe].copy()
+    if industry_column not in scoped:
+        raise ValueError("feature_industry_context_missing")
+    if scoped[industry_column].isna().any():
+        raise ValueError("feature_industry_context_missing")
+    if size_column in factor_columns:
+        if size_column not in scoped or scoped[size_column].isna().any():
+            raise ValueError("feature_size_context_missing")
+    winsorized = scoped.copy()
+    for factor in factor_columns:
+        values = strict_finite_numeric_series(
+            winsorized[factor],
+            error=f"invalid_feature_factor: {factor}",
+            allow_null=True,
+        )
+        winsorized[factor] = _mad_winsorize(
+            values,
+            values.groupby(winsorized["timestamp"], sort=False),
+        )
+    residualized = neutralize_cross_section(
+        winsorized,
+        factor_columns=factor_columns,
+        industry_column=industry_column,
+        size_column=size_column,
+    )
+    feature_values: dict[str, pd.Series] = {}
+    result = frame.copy()
+    for factor in factor_columns:
+        values = residualized[factor]
+        raw_missing = scoped[factor].isna()
+        scoped_feature = (
+            values.groupby(scoped["timestamp"], sort=False)
+            .transform(_stable_zscore)
+            .fillna(0.0)
+        )
+        feature = pd.Series(np.nan, index=result.index, dtype="float64")
+        feature.loc[scoped.index] = scoped_feature
+        missing = pd.Series(0, index=result.index, dtype="int8")
+        observed = pd.Series(0, index=result.index, dtype="int8")
+        missing.loc[scoped.index] = raw_missing.astype("int8")
+        observed.loc[scoped.index] = raw_missing.eq(False).astype("int8")
+        feature_values[f"feature_{factor}"] = feature
+        feature_values[f"feature_missing_{factor}"] = missing
+        feature_values[f"feature_observed_{factor}"] = observed
+    return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)
+
+
+def preprocess_risk_exposures(
+    frame: pd.DataFrame,
+    *,
+    style_columns: tuple[str, ...],
+    timestamp_column: str = "timestamp",
+) -> pd.DataFrame:
+    """Winsorize risk styles at 3 MAD then population-zscore by date."""
+
+    required = {timestamp_column, *style_columns}
+    if not required.issubset(frame.columns):
+        raise ValueError("risk_exposure_columns_invalid")
+    result = frame.copy()
+    for column in style_columns:
+        values = strict_finite_numeric_series(
+            result[column],
+            error=f"invalid_risk_exposure: {column}",
+            allow_null=True,
+        )
+        grouped = values.groupby(result[timestamp_column], sort=False)
+        clipped = _mad_winsorize(values, grouped)
+        result[column] = clipped.groupby(
+            result[timestamp_column], sort=False
+        ).transform(_stable_zscore)
+    return result
 
 
 def _zscore(

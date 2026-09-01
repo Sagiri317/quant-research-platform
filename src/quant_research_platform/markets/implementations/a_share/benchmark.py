@@ -73,8 +73,8 @@ def normalize_benchmark_history(
     totals = weights.groupby(["benchmark_id", "effective_date"])["weight"].sum()
     if not bool(np.isclose(totals.to_numpy(), 1.0, atol=1e-6).all()):
         raise ValueError("a_share_benchmark_weight_sum_invalid")
-    membership_state = pd.merge_asof(
-        weights.sort_values("effective_date"),
+    membership_state = pd.merge(
+        weights,
         membership.loc[
             :,
             (
@@ -83,11 +83,10 @@ def normalize_benchmark_history(
                 "effective_date",
                 "is_member",
             ),
-        ].sort_values("effective_date"),
-        on="effective_date",
-        by=["benchmark_id", "constituent_asset_id"],
-        direction="backward",
-        allow_exact_matches=True,
+        ],
+        on=["benchmark_id", "constituent_asset_id", "effective_date"],
+        how="left",
+        validate="many_to_one",
     )
     if bool(membership_state["is_member"].ne(True).any()):
         raise ValueError("a_share_benchmark_weight_membership_invalid")
@@ -115,14 +114,9 @@ def materialize_benchmark_weights(
         :,
         ("benchmark_id", "constituent_asset_id", "effective_date", "weight"),
     ].copy()
-    membership_right = membership.loc[
-        :,
-        ("benchmark_id", "constituent_asset_id", "effective_date", "is_member"),
-    ].rename(columns={"effective_date": "membership_effective_date"})
     for column in ("benchmark_id", "constituent_asset_id"):
         left[column] = left[column].astype("string")
         right[column] = right[column].astype("string")
-        membership_right[column] = membership_right[column].astype("string")
     left["timestamp"] = pd.Series(
         pd.to_datetime(left["timestamp"]), index=left.index, dtype="datetime64[ns]"
     )
@@ -131,28 +125,29 @@ def materialize_benchmark_weights(
         index=right.index,
         dtype="datetime64[ns]",
     )
-    membership_right["membership_effective_date"] = pd.Series(
-        pd.to_datetime(membership_right["membership_effective_date"]),
-        index=membership_right.index,
-        dtype="datetime64[ns]",
-    )
-    result = pd.merge_asof(
+    membership_right = membership.loc[
+        :, ("benchmark_id", "constituent_asset_id", "effective_date", "is_member")
+    ].copy()
+    for column in ("benchmark_id", "constituent_asset_id"):
+        membership_right[column] = membership_right[column].astype("string")
+    membership_right["effective_date"] = pd.to_datetime(
+        membership_right["effective_date"]
+    ).astype("datetime64[ns]")
+    state = pd.merge_asof(
         left.sort_values("timestamp"),
-        right.sort_values("effective_date"),
+        membership_right.sort_values("effective_date"),
         left_on="timestamp",
         right_on="effective_date",
         by=["benchmark_id", "constituent_asset_id"],
         direction="backward",
         allow_exact_matches=True,
     )
-    result = pd.merge_asof(
-        result.sort_values("timestamp"),
-        membership_right.sort_values("membership_effective_date"),
-        left_on="timestamp",
-        right_on="membership_effective_date",
-        by=["benchmark_id", "constituent_asset_id"],
-        direction="backward",
-        allow_exact_matches=True,
+    exact_weights = right.rename(columns={"effective_date": "timestamp"})
+    result = state.merge(
+        exact_weights,
+        on=["benchmark_id", "constituent_asset_id", "timestamp"],
+        how="left",
+        validate="one_to_one",
     )
     result["weight"] = result["weight"].where(result["is_member"].eq(True))
     return result.sort_values(
@@ -169,14 +164,23 @@ def materialize_industry_history(
     if not {"asset_id", "timestamp"}.issubset(observations.columns) or not {
         "source_asset_id",
         "timestamp",
-        "csrc_2012_industry_code",
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
     }.issubset(stock_master_interim.columns):
         raise ValueError("a_share_industry_schema_invalid")
     return (
         pd.merge_asof(
             observations.sort_values("timestamp"),
             stock_master_interim.loc[
-                :, ("source_asset_id", "timestamp", "csrc_2012_industry_code")
+                :,
+                (
+                    "source_asset_id",
+                    "timestamp",
+                    "industry_standard_id",
+                    "industry_level1_code",
+                    "industry_level1_name",
+                ),
             ]
             .rename(columns={"source_asset_id": "asset_id"})
             .sort_values("timestamp"),

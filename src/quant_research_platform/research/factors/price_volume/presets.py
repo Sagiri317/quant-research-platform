@@ -2,11 +2,20 @@
 
 from __future__ import annotations
 
-from .columns import price_volume_factor_columns_for_windows, price_volume_window_column
+from .columns import (
+    FORMAL_CORE_PRICE_VOLUME_FACTORS,
+    FORMAL_PRICE_VOLUME_FACTORS,
+    price_volume_factor_columns_for_windows,
+    price_volume_window_column,
+)
 
 PRICE_VOLUME_STANDARD_PRESET = "standard"
 PRICE_VOLUME_CORE_PRESET = "core"
 PRICE_VOLUME_SMOKE_PRESET = "smoke"
+PRICE_VOLUME_FORMAL_PRESET = "formal"
+
+FORMAL_PV25 = FORMAL_PRICE_VOLUME_FACTORS
+CORE_PV = FORMAL_CORE_PRICE_VOLUME_FACTORS
 
 _PRICE_VOLUME_STANDARD_WINDOWS: tuple[int, ...] = (1, 5, 10, 20, 60, 120, 252)
 
@@ -49,9 +58,10 @@ STANDARD_PRICE_VOLUME_FACTORS: tuple[str, ...] = (
 )
 
 PRICE_VOLUME_FACTOR_PRESETS: dict[str, tuple[str, ...]] = {
-    PRICE_VOLUME_STANDARD_PRESET: STANDARD_PRICE_VOLUME_FACTORS,
+    PRICE_VOLUME_STANDARD_PRESET: FORMAL_PRICE_VOLUME_FACTORS,
     PRICE_VOLUME_CORE_PRESET: CORE_PRICE_VOLUME_FACTORS,
     PRICE_VOLUME_SMOKE_PRESET: SMOKE_PRICE_VOLUME_FACTORS,
+    PRICE_VOLUME_FORMAL_PRESET: FORMAL_PRICE_VOLUME_FACTORS,
 }
 
 

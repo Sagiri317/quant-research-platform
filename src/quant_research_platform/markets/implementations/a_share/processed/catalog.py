@@ -1,4 +1,4 @@
-"""A-share processed data specs."""
+"""A-share market-fact bindings for the common processed-data DAG."""
 
 from __future__ import annotations
 
@@ -11,36 +11,32 @@ from quant_research_platform.contracts.data import (
     ProcessedDataKind,
     ProcessedDataSpec,
 )
-from quant_research_platform.markets.implementations.a_share.factors import (
-    definitions as factor_definitions,
-)
-from quant_research_platform.markets.implementations.a_share.fields import (
-    field_catalog,
-)
 from quant_research_platform.markets.implementations.a_share.ids import (
-    AS_OF_MASK_ID,
-    DEFAULT_UNIVERSE_ID,
-    EVALUATION_MASK_ID,
     EXECUTION_MASK_ID,
-    FORWARD_RETURNS_PROCESSED_DATA_ID,
-    FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
-    FUNDAMENTAL_RAW_PROCESSED_DATA_ID,
+    FORWARD_RETURNS_DATA_ID,
+    FUNDAMENTAL_DATA_ID,
+    FUNDAMENTAL_PIT_ID,
     MARKET_ID,
-    PRICE_VOLUME_PROCESSED_DATA_ID,
-    market_context_data_id,
-    market_panel_data_id,
+    MARKET_PANEL_ID,
+    PRICE_VOLUME_DATA_ID,
 )
-from quant_research_platform.markets.implementations.a_share.labels import (
-    definitions as label_definitions,
+from quant_research_platform.research.factors.expectations.definitions import (
+    EXPECTATIONS_FACTORS,
 )
-from quant_research_platform.markets.implementations.a_share.processed import (
-    source_ids as source_ids,
+from quant_research_platform.research.factors.fundamental.definitions import (
+    FUNDAMENTAL_FACTORS,
 )
+from quant_research_platform.research.factors.price_volume.columns import (
+    FORMAL_PRICE_VOLUME_FACTORS,
+)
+from quant_research_platform.research.labels.forward_returns import (
+    forward_return_available_at_column,
+    forward_return_label_column,
+)
+from quant_research_platform.research.protocols.a_share import LABEL_HORIZONS
 
-PANEL_COLUMNS: tuple[str, ...] = (
-    "market_id",
-    "asset_id",
-    "timestamp",
+PANEL_COLUMNS = (
+    *platform_entity_time_key(),
     "session_date",
     "available_at",
     "stock_name",
@@ -56,271 +52,197 @@ PANEL_COLUMNS: tuple[str, ...] = (
     "prev_close",
     "volume",
     "amount",
-    "turnover",
+    "after_hours_volume",
+    "after_hours_amount",
     "period_return",
+    "turnover",
     "limit_status",
-    "is_limit_up",
-    "is_limit_down",
     "is_trading",
+    "is_a_share_scope",
     "is_st",
     "is_pt",
-    "is_a_share_scope",
+    "scenario_universe",
     "listing_date",
     "delisting_date",
-    "company_status",
-    "status_change_date",
-    "listing_age_days",
     "listing_age_trading_days",
-    "csrc_2012_industry_code",
-    "csrc_2012_industry_name",
+    "industry_standard_id",
+    "industry_level1_code",
+    "industry_level1_name",
     "share_change_date",
     "total_shares",
     "a_float_shares",
     "total_market_cap",
     "float_market_cap",
 )
-
-CONTEXT_COLUMNS: tuple[str, ...] = (
-    "market_id",
-    "asset_id",
-    "timestamp",
-    "market_type",
-    "is_st",
-    "is_pt",
-    "limit_status",
-    "listing_age_trading_days",
-    "csrc_2012_industry_code",
-    "csrc_2012_industry_name",
-    "total_market_cap",
-    "float_market_cap",
-    "amount",
-    "turnover",
-)
-
-DEFAULT_UNIVERSE_COLUMNS: tuple[str, ...] = (
-    "market_id",
-    "asset_id",
-    "timestamp",
-    "eligible_base",
-    "eligible_after_listing_age",
-    "eligible_liquidity",
-    "eligible",
-)
-
-AS_OF_COLUMNS: tuple[str, ...] = (
-    "market_id",
-    "asset_id",
-    "timestamp",
-    "eligible",
-)
-
-EXECUTION_COLUMNS: tuple[str, ...] = (
-    "market_id",
-    "asset_id",
-    "timestamp",
-    "next_bar_is_trading",
-    "next_bar_limit_status",
-    "can_enter",
-    "can_exit",
-)
-
-EVALUATION_COLUMNS: tuple[str, ...] = (
-    "market_id",
-    "asset_id",
-    "timestamp",
-    "eligible",
-    "can_exit",
-)
-
-FUNDAMENTAL_PIT_COLUMNS: tuple[str, ...] = (
-    "market_id",
-    "asset_id",
-    "timestamp",
+EXECUTION_COLUMNS = (*platform_entity_time_key(), "can_enter", "can_exit")
+FINANCIAL_PIT_COLUMNS = (
+    *platform_entity_time_key(),
     "total_assets",
     "total_liabilities",
-    "total_equity",
+    "parent_equity",
+    "cash",
+    "short_term_borrowings",
+    "current_portion_noncurrent_liabilities",
+    "long_term_borrowings",
+    "bonds_payable",
     "operating_revenue",
-    "net_income",
+    "operating_cost",
+    "consolidated_net_income",
+    "parent_net_income",
     "operating_cash_flow",
+    "capex_cash_paid",
     "previous_total_assets",
-    "market_cap",
+    "previous_parent_equity",
+    "previous_parent_net_income",
+    "previous_operating_revenue",
+    "average_total_assets",
+    "average_parent_equity",
+    "operating_revenue_ttm",
+    "operating_cost_ttm",
+    "consolidated_net_income_ttm",
+    "parent_net_income_ttm",
+    "operating_cash_flow_ttm",
+    "capex_cash_paid_ttm",
 )
-
-MARKET_BARS_SOURCE_DATA_ID = source_ids.MARKET_BARS_SOURCE_DATA_ID
+LABEL_COLUMNS = tuple(
+    column
+    for horizon in LABEL_HORIZONS
+    for column in (
+        forward_return_label_column(horizon),
+        forward_return_available_at_column(horizon),
+    )
+)
+LABEL_COLUMNS = (*LABEL_COLUMNS, "model_target")
+FACTOR_COLUMNS = tuple(FORMAL_PRICE_VOLUME_FACTORS)
 
 
 def processed_catalog() -> ProcessedDataCatalog:
-    """Return the first-stage A-share 0.1 processed data specs."""
-
-    return ProcessedDataCatalog(_processed_specs())
-
-
-def _processed_specs() -> tuple[ProcessedDataSpec, ...]:
-    factor_columns = _registered_factor_columns()
-    fundamental_columns = _registered_fundamental_factor_columns()
-    label_columns = _registered_label_columns()
-    return (
-        _processed_spec(
-            kind=ProcessedDataKind.PANEL,
-            data_id=market_panel_data_id(),
-            columns=PANEL_COLUMNS,
-            source_input_data_ids=(
-                MARKET_BARS_SOURCE_DATA_ID,
-                "stock_master",
-                "market_cap",
-                "trading_calendar",
+    return ProcessedDataCatalog(
+        (
+            _spec(
+                MARKET_PANEL_ID,
+                ProcessedDataKind.PANEL,
+                PANEL_COLUMNS,
+                source_input_data_ids=(
+                    "market_bars_1d",
+                    "stock_master",
+                    "market_cap",
+                    "trading_calendar",
+                    "industry_classification",
+                    "industry_classification_sets",
+                    "industry_classification_versions",
+                    "listing_status_changes",
+                    "stock_info_changes",
+                    "stock_info_annual",
+                    "trading_no_limit",
+                    "special_treatment_changes",
+                ),
             ),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.ANNOTATION,
-            data_id=market_context_data_id(),
-            columns=CONTEXT_COLUMNS,
-            processed_input_data_ids=(market_panel_data_id(),),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.ANNOTATION,
-            data_id=DEFAULT_UNIVERSE_ID,
-            columns=DEFAULT_UNIVERSE_COLUMNS,
-            role_overrides={
-                "eligible_base": ColumnRole.UNIVERSE,
-                "eligible_after_listing_age": ColumnRole.UNIVERSE,
-                "eligible_liquidity": ColumnRole.UNIVERSE,
-                "eligible": ColumnRole.UNIVERSE,
-            },
-            processed_input_data_ids=(market_panel_data_id(),),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.ANNOTATION,
-            data_id=AS_OF_MASK_ID,
-            columns=AS_OF_COLUMNS,
-            role_overrides={"eligible": ColumnRole.MASK},
-            processed_input_data_ids=(market_panel_data_id(),),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.ANNOTATION,
-            data_id=EXECUTION_MASK_ID,
-            columns=EXECUTION_COLUMNS,
-            role_overrides={
-                "next_bar_is_trading": ColumnRole.MASK,
-                "can_enter": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-            },
-            processed_input_data_ids=(market_panel_data_id(),),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.ANNOTATION,
-            data_id=EVALUATION_MASK_ID,
-            columns=EVALUATION_COLUMNS,
-            role_overrides={
-                "eligible": ColumnRole.MASK,
-                "can_exit": ColumnRole.MASK,
-            },
-            processed_input_data_ids=(market_panel_data_id(),),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.ANNOTATION,
-            data_id=FUNDAMENTAL_PIT_PROCESSED_DATA_ID,
-            columns=FUNDAMENTAL_PIT_COLUMNS,
-            role_overrides={
-                column: ColumnRole.CONTEXT
-                for column in FUNDAMENTAL_PIT_COLUMNS
-                if column not in platform_entity_time_key()
-            },
-            source_input_data_ids=(
-                MARKET_BARS_SOURCE_DATA_ID,
-                "trading_calendar",
-                "financial_balance",
-                "financial_income",
-                "financial_cashflow",
-                "financial_disclosures",
+            _spec(
+                EXECUTION_MASK_ID,
+                ProcessedDataKind.ANNOTATION,
+                EXECUTION_COLUMNS,
+                processed_input_data_ids=(MARKET_PANEL_ID,),
             ),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.FACTOR,
-            data_id=PRICE_VOLUME_PROCESSED_DATA_ID,
-            columns=(*platform_entity_time_key(), *factor_columns),
-            role_overrides={column: ColumnRole.FACTOR for column in factor_columns},
-            processed_input_data_ids=(market_panel_data_id(),),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.FACTOR,
-            data_id=FUNDAMENTAL_RAW_PROCESSED_DATA_ID,
-            columns=(*platform_entity_time_key(), *fundamental_columns),
-            role_overrides={
-                column: ColumnRole.FACTOR for column in fundamental_columns
-            },
-            processed_input_data_ids=(FUNDAMENTAL_PIT_PROCESSED_DATA_ID,),
-        ),
-        _processed_spec(
-            kind=ProcessedDataKind.LABEL,
-            data_id=FORWARD_RETURNS_PROCESSED_DATA_ID,
-            columns=(*platform_entity_time_key(), *label_columns),
-            role_overrides={column: ColumnRole.LABEL for column in label_columns},
-            processed_input_data_ids=(market_panel_data_id(),),
-        ),
+            _spec(
+                FUNDAMENTAL_PIT_ID,
+                ProcessedDataKind.ANNOTATION,
+                FINANCIAL_PIT_COLUMNS,
+                processed_input_data_ids=(MARKET_PANEL_ID,),
+                source_input_data_ids=(
+                    "trading_calendar",
+                    "financial_balance",
+                    "financial_income",
+                    "financial_cashflow",
+                    "financial_first_disclosure",
+                ),
+            ),
+            _spec(
+                PRICE_VOLUME_DATA_ID,
+                ProcessedDataKind.FACTOR,
+                (*platform_entity_time_key(), *FACTOR_COLUMNS),
+                processed_input_data_ids=(MARKET_PANEL_ID,),
+                factor_columns=FACTOR_COLUMNS,
+            ),
+            _spec(
+                FUNDAMENTAL_DATA_ID,
+                ProcessedDataKind.FACTOR,
+                (*platform_entity_time_key(), *FUNDAMENTAL_FACTORS),
+                processed_input_data_ids=(FUNDAMENTAL_PIT_ID, MARKET_PANEL_ID),
+                factor_columns=FUNDAMENTAL_FACTORS,
+            ),
+            _spec(
+                "expectations_factors",
+                ProcessedDataKind.FACTOR,
+                (*platform_entity_time_key(), *EXPECTATIONS_FACTORS),
+                processed_input_data_ids=(MARKET_PANEL_ID,),
+                source_input_data_ids=("analyst_forecast",),
+                factor_columns=EXPECTATIONS_FACTORS,
+            ),
+            _spec(
+                FORWARD_RETURNS_DATA_ID,
+                ProcessedDataKind.LABEL,
+                (*platform_entity_time_key(), *LABEL_COLUMNS),
+                processed_input_data_ids=(MARKET_PANEL_ID, EXECUTION_MASK_ID),
+                label_columns=LABEL_COLUMNS,
+            ),
+        )
     )
 
 
-def _processed_spec(
-    *,
-    kind: ProcessedDataKind,
+def _spec(
     data_id: str,
+    kind: ProcessedDataKind,
     columns: tuple[str, ...],
-    role_overrides: dict[str, ColumnRole] | None = None,
+    *,
     source_input_data_ids: tuple[str, ...] = (),
     processed_input_data_ids: tuple[str, ...] = (),
+    factor_columns: tuple[str, ...] = (),
+    label_columns: tuple[str, ...] = (),
 ) -> ProcessedDataSpec:
+    roles = {column: _role(column, factor_columns, label_columns) for column in columns}
     return ProcessedDataSpec(
         data_id=data_id,
         market_id=MARKET_ID,
         kind=kind,
-        source_input_data_ids=source_input_data_ids,
-        processed_input_data_ids=processed_input_data_ids,
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles=_column_roles(columns, role_overrides=role_overrides),
+        column_roles=roles,
         primary_key=platform_entity_time_key(),
         partition_columns=("year",),
+        source_input_data_ids=source_input_data_ids,
+        processed_input_data_ids=processed_input_data_ids,
     )
 
 
-def _column_roles(
-    columns: tuple[str, ...],
-    *,
-    role_overrides: dict[str, ColumnRole] | None = None,
-) -> dict[str, ColumnRole]:
-    fields = field_catalog()
-    overrides = role_overrides or {}
-    roles: dict[str, ColumnRole] = {}
-    for column in columns:
-        if column in overrides:
-            roles[column] = overrides[column]
-        else:
-            roles[column] = fields.get(column).role
-    return roles
-
-
-def _registered_factor_columns() -> tuple[str, ...]:
-    return tuple(
-        definition.output_column
-        for definition in factor_definitions.factor_catalog().list()
-        if definition.required_input_data_id == market_panel_data_id()
-    )
-
-
-def _registered_fundamental_factor_columns() -> tuple[str, ...]:
-    return tuple(
-        definition.output_column
-        for definition in factor_definitions.factor_catalog().list()
-        if definition.required_input_data_id == FUNDAMENTAL_PIT_PROCESSED_DATA_ID
-    )
-
-
-def _registered_label_columns() -> tuple[str, ...]:
-    return tuple(
-        definition.output_column
-        for definition in sorted(
-            label_definitions.label_catalog().list(),
-            key=lambda item: item.horizon,
-        )
-    )
+def _role(
+    column: str,
+    factor_columns: tuple[str, ...],
+    label_columns: tuple[str, ...],
+) -> ColumnRole:
+    if column in factor_columns:
+        return ColumnRole.FACTOR
+    if column in label_columns:
+        return ColumnRole.LABEL
+    if column == "timestamp":
+        return ColumnRole.TIMESTAMP
+    if column in platform_entity_time_key():
+        return ColumnRole.KEY
+    if column in {
+        "can_enter",
+        "can_exit",
+        "is_trading",
+        "is_st",
+        "is_pt",
+        "is_a_share_scope",
+    }:
+        return ColumnRole.MASK
+    if column == "scenario_universe":
+        return ColumnRole.UNIVERSE
+    if column in {
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    }:
+        return ColumnRole.CONTEXT
+    return ColumnRole.CONTEXT

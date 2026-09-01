@@ -29,6 +29,12 @@ from quant_research_platform.research._memory import (
     iter_complete_time_sized_frames,
 )
 from quant_research_platform.research.filtering import _filter_mode_scope
+from quant_research_platform.research.models.scaler import (
+    LinearScaledPredictor,
+    ModelMatrixScaler,
+    ScaledPredictor,
+    equal_date_sample_weights,
+)
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     OwnedValue,
@@ -102,7 +108,13 @@ def _fit_linear_model_result_with_lease(
     *,
     model_lease: MemoryLease | None,
 ) -> ModelFitResult | _OwnedModelFitResult:
-    if spec.max_train_rows is not None or spec.purge_gap_steps > 0:
+    if spec.max_train_rows is None:
+        return _fit_unbounded_linear_model_result(
+            frames,
+            spec,
+            model_lease=model_lease,
+        )
+    if spec.max_train_rows is not None:
         return _fit_controlled_linear_model_result_owned_from_frames(
             frames,
             spec,
@@ -157,6 +169,73 @@ def _fit_linear_model_result_with_lease(
     return OwnedValue(result, model_lease)
 
 
+def _fit_unbounded_linear_model_result(
+    frames: Iterable[pd.DataFrame],
+    spec: ModelSpec,
+    *,
+    model_lease: MemoryLease | None,
+) -> ModelFitResult | _OwnedModelFitResult:
+    owned_training = _collect_training_frame_owned(frames, spec)
+    collected = (
+        owned_training.value
+        if isinstance(owned_training, OwnedValue)
+        else owned_training
+    )
+    training, row_counts, filter_metadata = collected
+    training_lease = (
+        owned_training.lease if isinstance(owned_training, OwnedValue) else None
+    )
+    try:
+        if training.empty:
+            raise ValueError("model_training_sample_empty")
+        weights = equal_date_sample_weights(training["timestamp"])
+        matrix = training.loc[:, spec.input_columns]
+        scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
+        transformed = scaler.transform(matrix).to_numpy(dtype="float64")
+        design = np.column_stack((np.ones(len(transformed)), transformed))
+        weighted = np.sqrt(weights)
+        with threadpool_limits(limits=1, user_api="blas"):
+            beta, *_ = np.linalg.lstsq(
+                design * weighted[:, None],
+                training[spec.label_column].to_numpy(dtype="float64") * weighted,
+                rcond=None,
+            )
+        predictor = LinearScaledPredictor(
+            coefficients=tuple(float(value) for value in beta),
+            scaler=scaler,
+        )
+        metadata = model_metadata(
+            spec,
+            filter_metadata=filter_metadata,
+            row_counts=row_counts,
+            coefficient_count=len(beta),
+            feature_importance=feature_importance.linear_feature_importance(spec, beta),
+            scaler=scaler,
+        )
+        result = ModelFitResult(
+            coefficients=beta,
+            metadata=metadata,
+            prediction_model=predictor,
+        )
+        if training_lease is not None:
+            training_lease.close()
+            training_lease = None
+        if model_lease is None:
+            return result
+        model_lease.shrink_to(int(beta.nbytes))
+        return OwnedValue(result, model_lease)
+    except BaseException as primary:
+        if training_lease is not None:
+            try:
+                training_lease.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "unbounded linear training lease release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        raise
+
+
 def model_metadata(
     spec: ModelSpec,
     *,
@@ -166,6 +245,7 @@ def model_metadata(
     feature_importance: dict[str, float] | None = None,
     feature_importance_status: str | None = None,
     resolved_hyperparameters: dict[str, object] | None = None,
+    scaler: ModelMatrixScaler | None = None,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {
         "model_algorithm": spec.model_algorithm,
@@ -200,11 +280,12 @@ def model_metadata(
         ),
         "random_seed": spec.random_seed,
         "max_train_rows": spec.max_train_rows,
-        "purge_gap_steps": spec.purge_gap_steps,
         "dependency_status": dependencies.require_model_dependency(
             spec.model_algorithm,
         ),
         "coefficient_count": coefficient_count,
+        "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
+        "scaler": None if scaler is None else scaler.to_payload(),
     }
     if feature_importance is not None:
         metadata["feature_importance"] = feature_importance
@@ -236,9 +317,25 @@ def _fit_controlled_linear_model_result_owned_from_frames(
     try:
         if row_counts["rows_after_input_label_dropna"] == 0:
             raise ValueError("model_training_sample_empty")
-        beta = fit_linear_coefficients_exact(
-            training,
-            spec,
+        weights = equal_date_sample_weights(training["timestamp"])
+        scaler = ModelMatrixScaler.fit(
+            training.loc[:, spec.input_columns],
+            sample_weight=weights,
+        )
+        transformed = scaler.transform(training.loc[:, spec.input_columns]).to_numpy(
+            dtype="float64"
+        )
+        design = np.column_stack((np.ones(len(transformed)), transformed))
+        weighted = np.sqrt(weights)
+        with threadpool_limits(limits=1, user_api="blas"):
+            beta, *_ = np.linalg.lstsq(
+                design * weighted[:, None],
+                training[spec.label_column].to_numpy(dtype="float64") * weighted,
+                rcond=None,
+            )
+        predictor = LinearScaledPredictor(
+            coefficients=tuple(float(value) for value in beta),
+            scaler=scaler,
         )
         metadata = model_metadata(
             spec,
@@ -246,10 +343,12 @@ def _fit_controlled_linear_model_result_owned_from_frames(
             row_counts=row_counts,
             coefficient_count=int(len(beta)),
             feature_importance=feature_importance.linear_feature_importance(spec, beta),
+            scaler=scaler,
         )
         result = ModelFitResult(
             coefficients=beta,
             metadata=metadata,
+            prediction_model=predictor,
         )
         training = None
         owned_training = None
@@ -672,6 +771,9 @@ def _fit_estimator_model_result_owned_from_frames(
                 predictor,
             ),
             resolved_hyperparameters=resolved_hyperparameters,
+            scaler=(
+                predictor.scaler if isinstance(predictor, ScaledPredictor) else None
+            ),
         )
         coefficient_values = getattr(predictor, "coefficients", None)
         if coefficient_values is None:
@@ -731,8 +833,6 @@ def _collect_training_frame_owned(
     tuple[pd.DataFrame, dict[str, object], dict[str, object]]
     | OwnedValue[tuple[pd.DataFrame, dict[str, object], dict[str, object]]]
 ):
-    if spec.max_train_rows is None:
-        raise ValueError("unbounded_model_training_collection")
     required = set(spec.input_columns)
     required.add(spec.label_column)
     required.add("timestamp")
@@ -798,9 +898,13 @@ def _collect_training_frame_owned(
                             len(filtered),
                         ),
                     )
-                usable = filtered.dropna(
-                    subset=[*spec.input_columns, spec.label_column]
-                ).loc[:, selected_columns]
+                drop_columns = (
+                    [spec.label_column]
+                    if spec.model_algorithm
+                    in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"}
+                    else [*spec.input_columns, spec.label_column]
+                )
+                usable = filtered.dropna(subset=drop_columns).loc[:, selected_columns]
                 usable_payload_bytes = pandas_frame_payload_bytes(usable)
                 if usable_payload_bytes > usable_bound:
                     raise ValueError(
@@ -1073,6 +1177,24 @@ def _fit_predictor(
         if spec.model_algorithm in {"xgboost_regressor", "lightgbm_regressor"}
         else 1
     )
+    if spec.model_algorithm not in {
+        "single_factor_baseline",
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    }:
+        matrix = training.loc[:, spec.input_columns]
+        weights = equal_date_sample_weights(training["timestamp"])
+        scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
+        scaled_matrix = scaler.transform(matrix)
+        with (
+            threadpool_limits(limits=1, user_api="blas"),
+            threadpool_limits(
+                limits=openmp_threads,
+                user_api="openmp",
+            ),
+        ):
+            estimator.fit(scaled_matrix, y, sample_weight=weights)
+        return ScaledPredictor(estimator, scaler)
     with (
         threadpool_limits(limits=1, user_api="blas"),
         threadpool_limits(
@@ -1322,7 +1444,6 @@ def _model_state_upper_bound_bytes(
     if algorithm in {
         "linear_regression",
         "ridge_regression",
-        "standardized_ridge_regression",
         "lasso_regression",
         "elastic_net",
         "huber_regression",

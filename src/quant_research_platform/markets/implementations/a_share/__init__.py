@@ -1,1 +1,1 @@
-"""A-share calendar, processed data, masks, bindings, and scenarios."""
+"""A-share calendar, processed data, masks, and market bindings."""

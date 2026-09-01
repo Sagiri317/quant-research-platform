@@ -5,17 +5,22 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.portfolio_constants import (
+    EXECUTION_COLUMNS,
+    NAV_RETURN_COLUMNS,
+    REALIZED_HOLDINGS_CASH_COLUMNS,
+    TARGET_WEIGHT_COLUMNS,
+)
 from quant_research_platform.compute.dataframe.portfolio_returns import (
     _stream_weighted_portfolio_from_validated_panel,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.portfolios import (
-    SUPPORTED_REBALANCE_FREQUENCIES,
+    EXECUTION_RETURN_COLUMN,
+    REBALANCE_SCHEDULES,
     PortfolioSpec,
-    normalize_rebalance_frequency,
 )
 from quant_research_platform.contracts.validation import (
     strict_string_series,
@@ -43,12 +48,21 @@ class PortfolioComputationResult:
     capacity_diagnostics: pd.DataFrame
     numeric_exposure_diagnostics: pd.DataFrame
     categorical_exposure_diagnostics: pd.DataFrame
+    target_weights: pd.DataFrame = field(default_factory=pd.DataFrame)
+    executions: pd.DataFrame = field(default_factory=pd.DataFrame)
+    realized_holdings_cash: pd.DataFrame = field(default_factory=pd.DataFrame)
+    nav_returns: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 @dataclass
 class _PortfolioTemporalState:
-    lag_history: pd.DataFrame = field(default_factory=pd.DataFrame)
     previous_positions: dict[tuple[object, ...], dict[str, dict[str, float]]] = field(
+        default_factory=dict
+    )
+    cash_weights: dict[tuple[object, ...], dict[str, float]] = field(
+        default_factory=dict
+    )
+    previous_returns: dict[tuple[object, ...], dict[str, dict[str, float]]] = field(
         default_factory=dict
     )
 
@@ -64,11 +78,8 @@ def _construct_portfolio_positions(
 
     if temporal_state is None:
         temporal_state = _PortfolioTemporalState()
-    if (
-        normalize_rebalance_frequency(spec.rebalance_frequency)
-        not in SUPPORTED_REBALANCE_FREQUENCIES
-    ):
-        raise ValueError("unsupported_portfolio_rebalance_frequency")
+    if spec.rebalance_schedule not in REBALANCE_SCHEDULES:
+        raise ValueError("unsupported_portfolio_rebalance_schedule")
     panel = _portfolio_panel(
         frame,
         spec,
@@ -79,7 +90,7 @@ def _construct_portfolio_positions(
     signal_ids = tuple(signal.signal_id for signal in spec.signals)
     compute_spec = ComputePanelSpec(
         signal_columns=signal_ids,
-        label_column=spec.return_source_column,
+        label_column=EXECUTION_RETURN_COLUMN,
         timestamp_column="timestamp",
         asset_column="asset_id",
     )
@@ -91,8 +102,11 @@ def _construct_portfolio_positions(
             portfolio_signals=signal_ids,
             tradability_config=spec.tradability_config,
             cost_config=spec.cost_config,
-            return_source_column=spec.return_source_column,
+            economic_return_column=EXECUTION_RETURN_COLUMN,
             previous_positions=temporal_state.previous_positions,
+            cash_weights=temporal_state.cash_weights,
+            previous_returns=temporal_state.previous_returns,
+            rebalance_schedule=spec.rebalance_schedule,
         )
     )
     capacity_diagnostics = build_capacity_diagnostics(
@@ -110,6 +124,11 @@ def _construct_portfolio_positions(
         panel,
         spec.diagnostics_config,
     )
+    target_weights, executions, realized_holdings_cash = _accounting_frames(
+        positions,
+        turnover,
+    )
+    nav_returns = _nav_return_frame(portfolio_returns)
     return PortfolioComputationResult(
         spec=spec,
         positions=positions,
@@ -120,7 +139,113 @@ def _construct_portfolio_positions(
         capacity_diagnostics=capacity_diagnostics,
         numeric_exposure_diagnostics=numeric_exposure_diagnostics,
         categorical_exposure_diagnostics=categorical_exposure_diagnostics,
+        target_weights=target_weights,
+        executions=executions,
+        realized_holdings_cash=realized_holdings_cash,
+        nav_returns=nav_returns,
     )
+
+
+def _accounting_frames(
+    positions: pd.DataFrame,
+    turnover: pd.DataFrame,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    target = positions.rename(columns={"position": "target_weight"}).loc[
+        :, TARGET_WEIGHT_COLUMNS
+    ]
+    if positions.empty:
+        empty = pd.DataFrame(columns=list(EXECUTION_COLUMNS))
+        holdings = pd.DataFrame(columns=list(REALIZED_HOLDINGS_CASH_COLUMNS))
+        return target, empty, holdings
+    sorted_positions = positions.sort_values(
+        ["signal", "timestamp", "asset"], kind="mergesort"
+    )
+    turnover_lookup = {
+        (row.signal, pd.Timestamp(row.timestamp)): float(row.turnover)
+        for row in turnover.itertuples(index=False)
+    }
+    execution_rows: list[dict[str, object]] = []
+    holdings_rows: list[dict[str, object]] = []
+    previous_by_signal: dict[str, dict[str, float]] = {}
+    for (signal, timestamp), group in sorted_positions.groupby(
+        ["signal", "timestamp"], sort=True
+    ):
+        previous = previous_by_signal.get(str(signal), {})
+        current = dict(zip(group["asset"], group["position"], strict=True))
+        assets = sorted(set(previous).union(current))
+        is_trade = turnover_lookup.get((signal, pd.Timestamp(timestamp)), 0.0) > 0.0
+        cash_weight = 1.0 - sum(float(value) for value in current.values())
+        for asset in assets:
+            pre_trade = float(previous.get(asset, 0.0))
+            realized = float(current.get(asset, 0.0))
+            delta = realized - pre_trade
+            execution_rows.append(
+                {
+                    "timestamp": timestamp,
+                    "asset": asset,
+                    "signal": signal,
+                    "side": (
+                        "buy"
+                        if is_trade and delta > 0.0
+                        else "sell"
+                        if is_trade and delta < 0.0
+                        else "none"
+                    ),
+                    "pre_trade_weight": pre_trade,
+                    "target_weight": realized,
+                    "realized_weight": realized,
+                    "blocked": False,
+                }
+            )
+            holdings_rows.append(
+                {
+                    "timestamp": timestamp,
+                    "asset": asset,
+                    "signal": signal,
+                    "realized_weight": realized,
+                    "cash_weight": cash_weight,
+                }
+            )
+        holdings_rows.append(
+            {
+                "timestamp": timestamp,
+                "asset": "__cash__",
+                "signal": signal,
+                "realized_weight": cash_weight,
+                "cash_weight": cash_weight,
+            }
+        )
+        previous = current
+        previous_by_signal[str(signal)] = previous
+    executions = pd.DataFrame.from_records(execution_rows, columns=EXECUTION_COLUMNS)
+    holdings = pd.DataFrame.from_records(
+        holdings_rows,
+        columns=REALIZED_HOLDINGS_CASH_COLUMNS,
+    )
+    return target, executions, holdings
+
+
+def _nav_return_frame(portfolio_returns: pd.DataFrame) -> pd.DataFrame:
+    if portfolio_returns.empty:
+        return pd.DataFrame(columns=NAV_RETURN_COLUMNS)
+    result = portfolio_returns.loc[
+        :,
+        (
+            "timestamp",
+            "signal",
+            "gross_portfolio_return",
+            "net_portfolio_return",
+            "cost",
+            "turnover",
+        ),
+    ].copy()
+    result["nav"] = (
+        result.groupby("signal", sort=False)["net_portfolio_return"]
+        .transform(lambda values: (1.0 + values).cumprod())
+        .astype("float64")
+    )
+    result["cumulative_cost"] = result.groupby("signal", sort=False)["cost"].cumsum()
+    return result.loc[:, NAV_RETURN_COLUMNS]
 
 
 def _portfolio_panel(
@@ -144,7 +269,7 @@ def _portfolio_panel(
     required = {
         "asset_id",
         "timestamp",
-        spec.return_source_column,
+        EXECUTION_RETURN_COLUMN,
         *(signal.source_column for signal in spec.signals),
         *(column for column in optional_columns if column is not None),
     }
@@ -167,41 +292,4 @@ def _portfolio_panel(
     )
     panel["timestamp"] = timestamps
     panel["asset_id"] = assets
-    _apply_execution_lag(panel, spec, temporal_state)
     return panel
-
-
-def _apply_execution_lag(
-    panel: pd.DataFrame,
-    spec: PortfolioSpec,
-    state: _PortfolioTemporalState,
-) -> None:
-    lag = int(spec.execution_lag_steps)
-    if lag == 0:
-        return
-    signal_ids = [signal.signal_id for signal in spec.signals]
-    columns = ["asset_id", "timestamp", *signal_ids]
-    current = panel.loc[:, columns].copy()
-    current["_portfolio_row"] = np.arange(len(current), dtype="int64")
-    if state.lag_history.empty:
-        working = current
-    else:
-        history = state.lag_history.copy()
-        history["_portfolio_row"] = -1
-        working = pd.concat([history, current], ignore_index=True)
-    ordered = working.sort_values(["asset_id", "timestamp"], kind="mergesort")
-    shifted = ordered.groupby("asset_id", sort=False)[signal_ids].shift(lag)
-    current_mask = ordered["_portfolio_row"].ge(0).to_numpy()
-    row_positions = ordered.loc[current_mask, "_portfolio_row"].to_numpy(
-        dtype="int64",
-        copy=False,
-    )
-    output = np.empty((len(panel), len(signal_ids)), dtype="float64")
-    output[row_positions] = shifted.loc[current_mask, signal_ids].to_numpy()
-    panel.loc[:, signal_ids] = output
-    state.lag_history = (
-        ordered.groupby("asset_id", sort=False, group_keys=False)
-        .tail(lag)
-        .loc[:, columns]
-        .reset_index(drop=True)
-    )

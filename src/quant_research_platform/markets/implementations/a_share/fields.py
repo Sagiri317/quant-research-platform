@@ -1,114 +1,114 @@
-"""A-share market-specific field catalog."""
+"""A-share market facts and execution-binding fields."""
 
 from __future__ import annotations
 
 from quant_research_platform.catalog.fields import FieldCatalog, platform_field_catalog
 from quant_research_platform.contracts.columns import ColumnRole, FieldSpec
 
+_CONTEXT_FLOATS = (
+    "market_type",
+    "trading_status_code",
+    "filling_flag",
+    "open",
+    "high",
+    "low",
+    "close",
+    "adj_open",
+    "adj_close",
+    "prev_close",
+    "volume",
+    "amount",
+    "after_hours_volume",
+    "after_hours_amount",
+    "period_return",
+    "turnover",
+    "limit_status",
+    "total_shares",
+    "a_float_shares",
+    "total_market_cap",
+    "float_market_cap",
+)
+_FINANCIAL_FLOATS = (
+    "total_assets",
+    "total_liabilities",
+    "parent_equity",
+    "cash",
+    "short_term_borrowings",
+    "current_portion_noncurrent_liabilities",
+    "long_term_borrowings",
+    "bonds_payable",
+    "operating_revenue",
+    "operating_cost",
+    "consolidated_net_income",
+    "parent_net_income",
+    "operating_cash_flow",
+    "capex_cash_paid",
+    "previous_total_assets",
+    "previous_parent_equity",
+    "previous_parent_net_income",
+    "previous_operating_revenue",
+    "average_total_assets",
+    "average_parent_equity",
+    "operating_revenue_ttm",
+    "operating_cost_ttm",
+    "consolidated_net_income_ttm",
+    "parent_net_income_ttm",
+    "operating_cash_flow_ttm",
+    "capex_cash_paid_ttm",
+)
+
 FIELD_SPECS: tuple[FieldSpec, ...] = (
     FieldSpec(name="stock_name", role=ColumnRole.CONTEXT, dtype="string"),
-    FieldSpec(name="market_type", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="trading_status_code", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="filling_flag", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="open", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="high", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="low", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="close", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="adj_open", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="adj_close", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="prev_close", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="volume", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="amount", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="turnover", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="period_return", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="limit_status", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="is_limit_up", role=ColumnRole.MASK, dtype="bool"),
-    FieldSpec(name="is_limit_down", role=ColumnRole.MASK, dtype="bool"),
+    FieldSpec(
+        name="industry_standard_id",
+        role=ColumnRole.CONTEXT,
+        dtype="string",
+        nullable=True,
+    ),
+    FieldSpec(
+        name="industry_level1_code",
+        role=ColumnRole.CONTEXT,
+        dtype="string",
+        nullable=True,
+    ),
+    FieldSpec(
+        name="industry_level1_name",
+        role=ColumnRole.CONTEXT,
+        dtype="string",
+        nullable=True,
+    ),
+    *(
+        FieldSpec(name=name, role=ColumnRole.CONTEXT, dtype="float64", nullable=True)
+        for name in _CONTEXT_FLOATS
+    ),
     FieldSpec(name="is_trading", role=ColumnRole.MASK, dtype="bool"),
+    FieldSpec(name="is_a_share_scope", role=ColumnRole.UNIVERSE, dtype="bool"),
     FieldSpec(name="is_st", role=ColumnRole.MASK, dtype="bool"),
     FieldSpec(name="is_pt", role=ColumnRole.MASK, dtype="bool"),
-    FieldSpec(name="is_a_share_scope", role=ColumnRole.UNIVERSE, dtype="bool"),
-    FieldSpec(name="eligible_base", role=ColumnRole.UNIVERSE, dtype="bool"),
-    FieldSpec(name="eligible", role=ColumnRole.UNIVERSE, dtype="bool"),
+    FieldSpec(name="scenario_universe", role=ColumnRole.UNIVERSE, dtype="bool"),
     FieldSpec(name="can_enter", role=ColumnRole.MASK, dtype="bool"),
     FieldSpec(name="can_exit", role=ColumnRole.MASK, dtype="bool"),
-    FieldSpec(name="listing_date", role=ColumnRole.TIMESTAMP, dtype="date"),
-    FieldSpec(name="delisting_date", role=ColumnRole.TIMESTAMP, dtype="date"),
-    FieldSpec(name="company_status", role=ColumnRole.CONTEXT, dtype="string"),
-    FieldSpec(name="status_change_date", role=ColumnRole.TIMESTAMP, dtype="date"),
-    FieldSpec(name="listing_age_days", role=ColumnRole.CONTEXT, dtype="int64"),
+    FieldSpec(
+        name="listing_date", role=ColumnRole.TIMESTAMP, dtype="date", nullable=True
+    ),
+    FieldSpec(
+        name="delisting_date", role=ColumnRole.TIMESTAMP, dtype="date", nullable=True
+    ),
+    FieldSpec(
+        name="share_change_date", role=ColumnRole.TIMESTAMP, dtype="date", nullable=True
+    ),
     FieldSpec(
         name="listing_age_trading_days",
         role=ColumnRole.CONTEXT,
         dtype="int64",
-    ),
-    FieldSpec(
-        name="eligible_after_listing_age",
-        role=ColumnRole.UNIVERSE,
-        dtype="bool",
-    ),
-    FieldSpec(name="eligible_liquidity", role=ColumnRole.UNIVERSE, dtype="bool"),
-    FieldSpec(
-        name="csrc_2012_industry_code",
-        role=ColumnRole.CONTEXT,
-        dtype="string",
         nullable=True,
     ),
-    FieldSpec(
-        name="csrc_2012_industry_name",
-        role=ColumnRole.CONTEXT,
-        dtype="string",
-        nullable=True,
-    ),
-    FieldSpec(name="share_change_date", role=ColumnRole.TIMESTAMP, dtype="date"),
-    FieldSpec(name="total_shares", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="a_float_shares", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="total_market_cap", role=ColumnRole.CONTEXT, dtype="float64"),
-    FieldSpec(name="float_market_cap", role=ColumnRole.CONTEXT, dtype="float64"),
     *(
-        FieldSpec(
-            name=name,
-            role=ColumnRole.CONTEXT,
-            dtype="float64",
-            nullable=True,
-        )
-        for name in (
-            "total_assets",
-            "total_liabilities",
-            "total_equity",
-            "operating_revenue",
-            "net_income",
-            "operating_cash_flow",
-            "previous_total_assets",
-            "market_cap",
-        )
-    ),
-    *(
-        FieldSpec(
-            name=f"fundamental_raw_{name}",
-            role=ColumnRole.FACTOR,
-            dtype="float64",
-            nullable=True,
-        )
-        for name in (
-            "earnings_yield",
-            "book_to_market",
-            "roe",
-            "operating_cash_flow_to_assets",
-            "asset_growth",
-            "leverage",
-        )
-    ),
-    FieldSpec(name="next_bar_is_trading", role=ColumnRole.MASK, dtype="bool"),
-    FieldSpec(
-        name="next_bar_limit_status",
-        role=ColumnRole.CONTEXT,
-        dtype="float64",
+        FieldSpec(name=name, role=ColumnRole.CONTEXT, dtype="float64", nullable=True)
+        for name in _FINANCIAL_FLOATS
     ),
 )
 
 
 def field_catalog() -> FieldCatalog:
-    """Return platform canonical fields plus A-share-only processed fields."""
-
     return FieldCatalog((*platform_field_catalog().list(), *FIELD_SPECS))

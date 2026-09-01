@@ -1,14 +1,10 @@
-"""Portfolio contracts."""
+"""Common portfolio contracts and market-policy bindings."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
-from quant_research_platform.contracts.data import (
-    DataFrequency,
-    data_frequency_slug,
-    normalize_data_frequency,
-)
 from quant_research_platform.contracts.filtering import reject_filter_input_columns
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.signals import (
@@ -20,8 +16,17 @@ from quant_research_platform.contracts.validation import (
     strict_finite_float,
 )
 
+WeightMethod = Literal[
+    "equal_weight_quantile",
+    "float_cap_weighted_quantile",
+    "rank_weighted_quantile",
+    "zscore_weighted_quantile",
+    "signal_abs_weighted_quantile",
+    "inverse_vol_scaled_quantile",
+]
 WEIGHT_METHODS = {
     "equal_weight_quantile",
+    "float_cap_weighted_quantile",
     "rank_weighted_quantile",
     "zscore_weighted_quantile",
     "signal_abs_weighted_quantile",
@@ -30,7 +35,12 @@ WEIGHT_METHODS = {
 PORTFOLIO_MODES = {"long_short", "long_only"}
 BLOCKED_ENTRY_POLICIES = {"hold_cash", "redistribute"}
 BLOCKED_EXIT_POLICIES = {"carry_forward", "force_exit", "error"}
-SUPPORTED_REBALANCE_FREQUENCIES = {data_frequency_slug(DataFrequency.DAILY)}
+REBALANCE_SCHEDULES = {
+    "daily",
+    "weekly-last-trading-day",
+    "monthly-last-trading-day",
+}
+EXECUTION_RETURN_COLUMN = "forward_return_1d"
 PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS = (
     "timestamp",
     "signal",
@@ -67,7 +77,7 @@ PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS = (
 class WeightConfig:
     """Portfolio weighting policy for normalized signal inputs."""
 
-    method: str = "equal_weight_quantile"
+    method: WeightMethod = "equal_weight_quantile"
     portfolio_mode: str = "long_short"
     top_quantile: float = 0.2
     bottom_quantile: float = 0.2
@@ -86,18 +96,14 @@ class WeightConfig:
         _validate_quantile(self.top_quantile, "top_quantile")
         if self.portfolio_mode == "long_short":
             _validate_quantile(self.bottom_quantile, "bottom_quantile")
+            if self.top_quantile + self.bottom_quantile > 1.0:
+                raise ValueError(
+                    "top_quantile + bottom_quantile must be less than or equal to 1."
+                )
         elif isinstance(self.bottom_quantile, bool) or not isinstance(
-            self.bottom_quantile,
-            int | float,
+            self.bottom_quantile, int | float
         ):
             raise TypeError("bottom_quantile must be numeric.")
-        if (
-            self.portfolio_mode == "long_short"
-            and self.top_quantile + self.bottom_quantile > 1.0
-        ):
-            raise ValueError(
-                "top_quantile + bottom_quantile must be less than or equal to 1."
-            )
         if self.method == "inverse_vol_scaled_quantile" and not self.risk_column:
             raise ValueError("risk_column is required for inverse_vol_scaled_quantile.")
         _validate_optional_column_name(self.risk_column, "risk_column")
@@ -105,7 +111,7 @@ class WeightConfig:
 
 @dataclass(frozen=True)
 class TradabilityConfig:
-    """Market-agnostic eligibility and entry/exit constraint metadata."""
+    """Market-agnostic mask names; meaning is supplied by a market binding."""
 
     eligibility_column: str | None = None
     can_enter_column: str | None = None
@@ -135,19 +141,30 @@ class TradabilityConfig:
 
 @dataclass(frozen=True)
 class CostConfig:
-    """Detailed compute cost model metadata."""
+    """Explicit common cost parameters; market fees remain a market binding."""
 
-    buy_cost_bps: float = 0.0
-    sell_cost_bps: float = 0.0
+    commission_bps: float = 0.0
     slippage_bps: float = 0.0
-    spread_bps: float | None = None
+    impact_bps: float = 0.0
+    adv_participation: float = 1.0
+    adv_sensitivities: tuple[float, ...] = (0.01, 0.02, 0.05, 0.10)
 
     def __post_init__(self) -> None:
-        _validate_nonnegative(self.buy_cost_bps, "buy_cost_bps")
-        _validate_nonnegative(self.sell_cost_bps, "sell_cost_bps")
+        _validate_nonnegative(self.commission_bps, "commission_bps")
         _validate_nonnegative(self.slippage_bps, "slippage_bps")
-        if self.spread_bps is not None:
-            _validate_nonnegative(self.spread_bps, "spread_bps")
+        _validate_nonnegative(self.impact_bps, "impact_bps")
+        participation = strict_finite_float(
+            self.adv_participation,
+            error="adv_participation_must_be_positive",
+        )
+        if participation <= 0.0 or participation > 1.0:
+            raise ValueError("adv_participation_must_be_positive")
+        if type(self.adv_sensitivities) is not tuple or not self.adv_sensitivities:
+            raise ValueError("adv_sensitivities_invalid")
+        for value in self.adv_sensitivities:
+            numeric = strict_finite_float(value, error="adv_sensitivities_invalid")
+            if numeric <= 0.0 or numeric > 1.0:
+                raise ValueError("adv_sensitivities_invalid")
 
 
 @dataclass(frozen=True)
@@ -200,9 +217,9 @@ class PortfolioSpec:
     market_id: MarketId
     research_dataset_id: str
     signals: tuple[SignalSpec, ...]
-    return_source_column: str
-    rebalance_frequency: str
-    execution_lag_steps: int
+    rebalance_schedule: str
+    execution_policy_id: str
+    cost_policy_id: str
     weight_config: WeightConfig = field(default_factory=WeightConfig)
     cost_config: CostConfig = field(default_factory=CostConfig)
     tradability_config: TradabilityConfig = field(default_factory=TradabilityConfig)
@@ -220,16 +237,14 @@ class PortfolioSpec:
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         if type(self.research_dataset_id) is not str or not self.research_dataset_id:
             raise ValueError("research_dataset_id_required")
-        if type(self.signals) is not tuple:
-            raise ValueError("portfolio_signals_must_be_tuple")
+        if type(self.signals) is not tuple or not self.signals:
+            raise ValueError("portfolio_signals_required")
         if any(type(signal) is not SignalSpec for signal in self.signals):
             raise ValueError("portfolio_signals_invalid")
-        if not self.signals:
-            raise ValueError("portfolio_signals_required")
         signal_ids = [signal.signal_id for signal in self.signals]
+        signal_columns = [signal.source_column for signal in self.signals]
         if len(set(signal_ids)) != len(signal_ids):
             raise ValueError("portfolio_signal_ids_must_not_contain_duplicates")
-        signal_columns = [signal.source_column for signal in self.signals]
         if len(set(signal_columns)) != len(signal_columns):
             raise ValueError("portfolio_signal_columns_must_not_contain_duplicates")
         overlaps = _cross_signal_id_column_overlaps(self.signals)
@@ -237,32 +252,13 @@ class PortfolioSpec:
             raise ValueError(
                 "portfolio_signal_id_column_overlap: " + ", ".join(overlaps)
             )
-        if type(self.return_source_column) is not str or not self.return_source_column:
-            raise ValueError("portfolio_return_source_column_required")
-        object.__setattr__(
-            self,
-            "rebalance_frequency",
-            normalize_rebalance_frequency(self.rebalance_frequency),
-        )
-        if not isinstance(self.execution_lag_steps, int) or isinstance(
-            self.execution_lag_steps,
-            bool,
-        ):
-            raise TypeError("execution_lag_steps must be an integer")
-        if self.execution_lag_steps < 0:
-            raise ValueError("execution_lag_steps_must_be_nonnegative")
+        if self.rebalance_schedule not in REBALANCE_SCHEDULES:
+            raise ValueError("unsupported_portfolio_rebalance_schedule")
+        _validate_non_empty_identifier(self.execution_policy_id, "execution_policy_id")
+        _validate_non_empty_identifier(self.cost_policy_id, "cost_policy_id")
         if type(self.run_type) is not str or not self.run_type:
             raise ValueError("portfolio_run_type_required")
         reject_filter_input_columns((*signal_ids, *signal_columns))
-        invalid_labels = sorted(
-            set((*signal_ids, *signal_columns)).intersection(
-                {self.return_source_column}
-            )
-        )
-        if invalid_labels:
-            raise ValueError(
-                "portfolio_signal_return_overlap: " + ", ".join(invalid_labels)
-            )
 
 
 def _validate_quantile(value: float, name: str) -> None:
@@ -277,10 +273,9 @@ def _validate_quantile(value: float, name: str) -> None:
 def _validate_nonnegative(value: float, name: str) -> None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"{name} must be numeric.")
-    error = f"{name} must be nonnegative."
-    numeric = strict_finite_float(value, error=error)
+    numeric = strict_finite_float(value, error=f"{name} must be nonnegative.")
     if numeric < 0:
-        raise ValueError(error)
+        raise ValueError(f"{name} must be nonnegative.")
 
 
 def _validate_optional_column_name(value: str | None, name: str) -> None:
@@ -288,13 +283,6 @@ def _validate_optional_column_name(value: str | None, name: str) -> None:
         raise ValueError(f"{name} must be a non-empty string.")
 
 
-def normalize_rebalance_frequency(value: str | DataFrequency) -> str:
-    if isinstance(value, str) and not value:
-        raise ValueError("portfolio_rebalance_frequency_required")
-    try:
-        normalized = data_frequency_slug(normalize_data_frequency(value))
-    except ValueError as exc:
-        raise ValueError("unsupported_portfolio_rebalance_frequency") from exc
-    if normalized not in SUPPORTED_REBALANCE_FREQUENCIES:
-        raise ValueError("unsupported_portfolio_rebalance_frequency")
-    return normalized
+def _validate_non_empty_identifier(value: object, name: str) -> None:
+    if type(value) is not str or not value:
+        raise ValueError(f"{name}_required")

@@ -1,4 +1,4 @@
-"""Immutable common experiment protocol and locked holdout contract."""
+"""Common experiment contracts with explicit label-availability eligibility."""
 
 from __future__ import annotations
 
@@ -9,11 +9,16 @@ from math import isfinite
 from types import MappingProxyType
 from typing import Literal
 
+import pandas as pd
+
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
-from quant_research_platform.contracts.validation import _validate_non_empty_string
+from quant_research_platform.contracts.validation import (
+    _validate_non_empty_string,
+    strict_timestamp_series,
+)
 
 SelectionDirection = Literal["maximize", "minimize"]
 ExperimentRole = Literal["train", "validation", "development_test", "final_holdout"]
@@ -25,14 +30,13 @@ class ExperimentFold:
     train: TimeWindow
     validation: TimeWindow
     development_test: TimeWindow
-    purge_steps: int
-    step_kind: str
-    train_end_step: int
-    validation_start_step: int
-    validation_end_step: int
-    development_test_start_step: int
-    development_test_end_step: int
-    final_holdout_start_step: int
+    step_kind: str = "explicit"
+    train_end_step: int | None = None
+    validation_start_step: int | None = None
+    validation_end_step: int | None = None
+    development_test_start_step: int | None = None
+    development_test_end_step: int | None = None
+    final_holdout_start_step: int | None = None
     embargo_steps: int = 0
     complete: bool = True
 
@@ -47,34 +51,36 @@ class ExperimentFold:
             _strictly_before(self.validation.end, self.development_test.start)
         ):
             raise ValueError("experiment_fold_windows_overlap")
-        for field_name, value in (
-            ("purge", self.purge_steps),
-            ("embargo", self.embargo_steps),
-        ):
-            if type(value) is not int or value < 0:
-                raise ValueError(f"experiment_{field_name}_invalid")
+        if type(self.embargo_steps) is not int or self.embargo_steps < 0:
+            raise ValueError("experiment_embargo_invalid")
         _validate_non_empty_string(self.step_kind, "experiment_step_kind_required")
-        for value in (
+        steps = (
             self.train_end_step,
             self.validation_start_step,
             self.validation_end_step,
             self.development_test_start_step,
             self.development_test_end_step,
             self.final_holdout_start_step,
-        ):
-            if type(value) is not int or value < 0:
+        )
+        if any(step is not None for step in steps):
+            if any(type(step) is not int or step < 0 for step in steps):
                 raise ValueError("experiment_boundary_step_invalid")
-        if self.validation_start_step - self.train_end_step - 1 != self.purge_steps:
-            raise ValueError("experiment_purge_gap_invalid")
-        if (
-            self.development_test_start_step - self.validation_end_step - 1
-            != self.embargo_steps
-        ):
-            raise ValueError("experiment_embargo_gap_invalid")
-        if self.development_test_end_step < self.development_test_start_step:
-            raise ValueError("experiment_development_boundary_step_invalid")
-        if self.final_holdout_start_step <= self.development_test_end_step:
-            raise ValueError("experiment_holdout_boundary_step_invalid")
+            assert all(step is not None for step in steps)
+            if self.validation_start_step <= self.train_end_step:
+                raise ValueError("experiment_boundary_step_invalid")
+            if self.validation_end_step < self.validation_start_step:
+                raise ValueError("experiment_boundary_step_invalid")
+            if self.development_test_start_step <= self.validation_end_step:
+                raise ValueError("experiment_boundary_step_invalid")
+            if self.development_test_end_step < self.development_test_start_step:
+                raise ValueError("experiment_boundary_step_invalid")
+            if self.final_holdout_start_step <= self.development_test_end_step:
+                raise ValueError("experiment_holdout_boundary_step_invalid")
+            if (
+                self.development_test_start_step - self.validation_end_step - 1
+                != self.embargo_steps
+            ):
+                raise ValueError("experiment_embargo_gap_invalid")
         if type(self.complete) is not bool:
             raise ValueError("experiment_fold_complete_invalid")
 
@@ -90,12 +96,12 @@ class ExperimentPlan:
     input_lineage: tuple[str, ...]
     folds: tuple[ExperimentFold, ...]
     final_holdout: TimeWindow
-    max_label_lookahead_steps: int
     selection_metric: str
     selection_direction: SelectionDirection
     candidate_ids: tuple[str, ...]
     trial_budget: int
     random_seed: int
+    tie_break_order: tuple[str, ...] = ()
     backend_versions: Mapping[str, str] = field(default_factory=dict)
     thread_settings: Mapping[str, int] = field(default_factory=dict)
     cost_assumptions: Mapping[str, object] = field(default_factory=dict)
@@ -116,6 +122,10 @@ class ExperimentPlan:
             _validate_non_empty_string(value, error)
         _validate_string_tuple(self.input_lineage, "experiment_input_lineage")
         _validate_string_tuple(self.candidate_ids, "experiment_candidate_ids")
+        if self.tie_break_order:
+            _validate_string_tuple(self.tie_break_order, "experiment_tie_break_order")
+            if set(self.tie_break_order) != set(self.candidate_ids):
+                raise ValueError("experiment_tie_break_order_mismatch")
         if (
             type(self.folds) is not tuple
             or not self.folds
@@ -128,26 +138,11 @@ class ExperimentPlan:
             raise ValueError("experiment_step_kind_mismatch")
         if not isinstance(self.final_holdout, TimeWindow):
             raise TypeError("experiment_final_holdout_window_required")
-        if (
-            type(self.max_label_lookahead_steps) is not int
-            or self.max_label_lookahead_steps < 0
-        ):
-            raise ValueError("experiment_label_lookahead_invalid")
-        if any(
-            fold.purge_steps != self.max_label_lookahead_steps for fold in self.folds
-        ):
-            raise ValueError("experiment_purge_mismatch")
         if any(
             not _strictly_before(fold.development_test.end, self.final_holdout.start)
             for fold in self.folds
         ):
             raise ValueError("experiment_holdout_overlap")
-        if any(
-            fold.final_holdout_start_step - fold.development_test_end_step - 1
-            < self.max_label_lookahead_steps
-            for fold in self.folds
-        ):
-            raise ValueError("experiment_holdout_purge_gap_invalid")
         window_bounds = [self.final_holdout.start, self.final_holdout.end]
         for fold in self.folds:
             for window in (fold.train, fold.validation, fold.development_test):
@@ -160,7 +155,7 @@ class ExperimentPlan:
             raise ValueError("experiment_trial_budget_invalid")
         if self.trial_budget < len(self.candidate_ids) * len(self.folds):
             raise ValueError("experiment_trial_budget_too_small")
-        if type(self.random_seed) is not int:
+        if type(self.random_seed) is not int or self.random_seed < 0:
             raise ValueError("experiment_random_seed_invalid")
         if self.holdout_status != "LOCKED":
             raise ValueError("experiment_holdout_must_be_locked")
@@ -195,10 +190,9 @@ class ExperimentPlan:
             "input_lineage": list(self.input_lineage),
             "folds": [_fold_payload(fold) for fold in self.folds],
             "final_holdout": _window_payload(self.final_holdout),
-            "max_label_lookahead_steps": self.max_label_lookahead_steps,
             "selection_metric": self.selection_metric,
             "selection_direction": self.selection_direction,
-            "tie_break_rule": "candidate_id_ascending",
+            "tie_break_order": list(self.tie_break_order),
             "candidate_ids": list(self.candidate_ids),
             "trial_budget": self.trial_budget,
             "random_seed": self.random_seed,
@@ -218,6 +212,25 @@ class ExperimentPlan:
         if role not in {"train", "validation", "development_test"}:
             raise ValueError("experiment_role_invalid")
         return tuple(getattr(fold, role) for fold in self.folds)
+
+
+def legal_training_rows(
+    frame: pd.DataFrame,
+    *,
+    fitting_cutoff: object,
+    availability_column: str = "label_available_at",
+) -> pd.DataFrame:
+    """Select rows whose label was actually available by the fitting cutoff."""
+
+    if availability_column not in frame.columns:
+        raise ValueError("label_availability_column_required")
+    cutoff = strict_timestamp_series(
+        pd.Series([fitting_cutoff]), error="invalid_fitting_cutoff"
+    ).iloc[0]
+    available = strict_timestamp_series(
+        frame[availability_column], error="invalid_label_available_at", allow_null=True
+    )
+    return frame.loc[available.notna() & available.le(cutoff)].copy()
 
 
 def _strictly_before(left: date | datetime, right: date | datetime) -> bool:
@@ -287,7 +300,6 @@ def _fold_payload(fold: ExperimentFold) -> dict[str, object]:
         "train": _window_payload(fold.train),
         "validation": _window_payload(fold.validation),
         "development_test": _window_payload(fold.development_test),
-        "purge_steps": fold.purge_steps,
         "embargo_steps": fold.embargo_steps,
         "step_kind": fold.step_kind,
         "train_end_step": fold.train_end_step,

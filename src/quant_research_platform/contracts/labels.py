@@ -63,9 +63,14 @@ class LabelDefinition:
             "family": self.family,
             "input_columns": list(self.input_columns),
             "output_column": self.output_column,
+            "available_at_column": f"{self.output_column}_available_at",
             "label_timing": self.label_timing,
             "horizon": self.horizon,
             "lookahead": self.lookahead,
             "entry_rule": self.entry_rule,
             "exit_rule": self.exit_rule,
         }
+
+    @property
+    def available_at_column(self) -> str:
+        return f"{self.output_column}_available_at"

@@ -231,9 +231,11 @@ def _stable_zscore(values: pd.Series) -> pd.Series:
         return pd.Series(output, index=values.index)
     centered = _scaled_centered_values(source[valid])
     if centered is None:
+        output[valid] = 0.0
         return pd.Series(output, index=values.index)
     std = float(np.sqrt(np.dot(centered, centered) / len(centered)))
     if std == 0:
+        output[valid] = 0.0
         return pd.Series(output, index=values.index)
     output[valid] = centered / std
     return pd.Series(output, index=values.index)

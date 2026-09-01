@@ -143,6 +143,7 @@ def select_best_validation_trial(
     maximize: bool,
     validation_metric_columns: Collection[str],
     test_metric_columns: Collection[str],
+    tie_break_order: tuple[str, ...] | None = None,
 ) -> str:
     """Select the best trial using a validation metric."""
 
@@ -177,14 +178,29 @@ def select_best_validation_trial(
     if not bool(defined.any()):
         raise ValueError("all_validation_metrics_undefined")
 
-    ordered = (
-        trials.loc[defined]
-        .assign(_selection_metric=metric_values[defined])
-        .sort_values(
-            ["_selection_metric", trial_id_column],
-            ascending=[not maximize, True],
-            kind="mergesort",
+    selected_trials = trials.loc[defined].copy()
+    ordered_ids = tuple(
+        str(value)
+        for value in (
+            tie_break_order
+            if tie_break_order is not None
+            else selected_trials[trial_id_column].tolist()
         )
+    )
+    if set(ordered_ids) != set(
+        str(value) for value in selected_trials[trial_id_column]
+    ):
+        raise ValueError("trial_tie_break_order_mismatch")
+    order = {value: index for index, value in enumerate(ordered_ids)}
+    ordered = selected_trials.assign(
+        _selection_metric=metric_values[defined],
+        _tie_break=selected_trials[trial_id_column].map(
+            lambda value: order[str(value)]
+        ),
+    ).sort_values(
+        ["_selection_metric", "_tie_break"],
+        ascending=[not maximize, True],
+        kind="mergesort",
     )
     return str(ordered.iloc[0][trial_id_column])
 
@@ -195,7 +211,6 @@ def evaluate_model_trial_metrics_from_chunks(
     model_id: str,
     label_column: str,
     prediction_column: str,
-    purge_gap_steps: int,
 ) -> dict[str, object]:
     """Evaluate model-selection metrics from bounded prediction chunks."""
 
@@ -281,18 +296,6 @@ def evaluate_model_trial_metrics_from_chunks(
                     Path(scratch),
                     row_count=validation_row_count,
                 )
-                if purge_gap_steps > 0:
-                    database.execute(
-                        "DELETE FROM validation_rows "
-                        "WHERE row_id IN ("
-                        "SELECT row_id FROM ("
-                        "SELECT row_id, DENSE_RANK() OVER ("
-                        "PARTITION BY asset_id ORDER BY timestamp_ns DESC"
-                        ") AS trailing_rank FROM validation_rows"
-                        ") WHERE trailing_rank <= ?"
-                        ")",
-                        (purge_gap_steps,),
-                    )
                 if (
                     database.execute("SELECT 1 FROM validation_rows LIMIT 1").fetchone()
                     is None
@@ -636,6 +639,7 @@ def build_model_selection_metadata(
     validation_start: str,
     validation_end: str,
     trial_metrics: pd.DataFrame,
+    tie_break_order: tuple[str, ...] = (),
 ) -> dict[str, object]:
     """Build prediction model selection metadata from validation metrics."""
 
@@ -643,6 +647,9 @@ def build_model_selection_metadata(
         raise ValueError("invalid_model_selection_metric")
     if selected_model_id not in candidate_model_ids:
         raise ValueError("selected_model_not_in_candidates")
+    tie_break_order = tie_break_order or candidate_model_ids
+    if set(tie_break_order) != set(candidate_model_ids):
+        raise ValueError("trial_tie_break_order_mismatch")
     records = trial_metrics.loc[
         :, ("model_id", *VALIDATION_METRIC_COLUMNS, *VALIDATION_METRIC_REASON_COLUMNS)
     ].to_dict("records")
@@ -667,6 +674,7 @@ def build_model_selection_metadata(
         "selected_model_id": selected_model_id,
         "selected_model_input_columns": list(selected_model_input_columns),
         "candidate_model_ids": list(candidate_model_ids),
+        "tie_break_order": list(tie_break_order),
         "selection_metric": selection_metric,
         "selection_direction": MODEL_SELECTION_METRIC_DIRECTIONS[selection_metric],
         "validation_start": validation_start,

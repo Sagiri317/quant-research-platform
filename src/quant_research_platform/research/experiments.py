@@ -17,6 +17,7 @@ from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )
+from quant_research_platform.research.randomness import ROOT_SEED
 from quant_research_platform.storage.atomic import atomic_write_json
 from quant_research_platform.storage.manifests import read_bounded_qrp_json_directory
 
@@ -44,7 +45,7 @@ class TrialRecord:
     model_definition_id: str | None = None
     portfolio_definition_id: str | None = None
     normalized_parameters: Mapping[str, object] = field(default_factory=dict)
-    random_seed: int = 0
+    random_seed: int = ROOT_SEED
     backend_versions: Mapping[str, str] = field(default_factory=dict)
     thread_settings: Mapping[str, int] = field(default_factory=dict)
     status: TrialStatus

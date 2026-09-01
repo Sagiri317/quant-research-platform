@@ -333,7 +333,6 @@ def _select_prediction_model_spec(
             column for spec in candidate_specs for column in spec.input_columns
         )
     )
-    common_purge_gap_steps = max(spec.purge_gap_steps for spec in candidate_specs)
     validation_start = pd.Timestamp(prediction_spec.model_selection_validation_start)
     validation_end = pd.Timestamp(prediction_spec.model_selection_validation_end)
     trial_metric_records: list[dict[str, object]] = []
@@ -363,6 +362,11 @@ def _select_prediction_model_spec(
                     *dataset_spec.primary_key,
                     *common_validation_input_columns,
                     label_column,
+                    *(
+                        ("forward_return_20d_available_at",)
+                        if label_column == "model_target"
+                        else ()
+                    ),
                     *required_filter_columns(prediction_spec.sample_filter_mode),
                 )
             )
@@ -386,7 +390,6 @@ def _select_prediction_model_spec(
                     model_id=candidate_spec.model_id,
                     label_column=label_column,
                     prediction_column=prediction_spec.prediction_column,
-                    purge_gap_steps=common_purge_gap_steps,
                 )
             )
         except BaseException as primary:
@@ -419,6 +422,7 @@ def _select_prediction_model_spec(
         maximize=direction,
         validation_metric_columns=VALIDATION_METRIC_COLUMNS,
         test_metric_columns=TEST_METRIC_COLUMNS,
+        tie_break_order=(prediction_spec.selection_tie_break_order or None),
     )
     metadata = build_model_selection_metadata(
         configured_model_id=prediction_spec.model_id,
@@ -427,6 +431,10 @@ def _select_prediction_model_spec(
         selection_metric=prediction_spec.model_selection_metric,
         validation_start=prediction_spec.model_selection_validation_start,
         validation_end=prediction_spec.model_selection_validation_end,
+        tie_break_order=(
+            prediction_spec.selection_tie_break_order
+            or tuple(spec.model_id for spec in candidate_specs)
+        ),
         selected_model_input_columns=model_catalog.get(selected_model_id).input_columns,
         trial_metrics=trial_metrics,
     )
@@ -440,12 +448,16 @@ def _prediction_train_read_columns(
     label_column: str,
     sample_filter_mode,
 ) -> tuple[str, ...]:
+    availability = (
+        ("forward_return_20d_available_at",) if label_column == "model_target" else ()
+    )
     return tuple(
         dict.fromkeys(
             (
                 *primary_key,
                 *input_columns,
                 label_column,
+                *availability,
                 *required_filter_columns(sample_filter_mode),
             )
         )
@@ -520,6 +532,24 @@ def _iter_validation_prediction_chunks(
                             candidate_spec.label_column,
                         ]
                     )
+                    availability_column = next(
+                        (
+                            column
+                            for column in (
+                                "label_available_at",
+                                "forward_return_20d_available_at",
+                            )
+                            if column in usable
+                        ),
+                        None,
+                    )
+                    if availability_column is not None:
+                        available_at = strict_timestamp_series(
+                            usable[availability_column],
+                            error="invalid_label_available_at",
+                            allow_null=True,
+                        )
+                        usable = usable.loc[available_at.le(validation_end)]
                     if not usable.empty:
                         output = usable.loc[:, list(output_columns)].copy()
                         output[prediction_spec.prediction_column] = predictor(usable)
@@ -607,7 +637,26 @@ def _prediction_train_chunks(
                         working_lease.close()
                     continue
             timestamps = _prediction_timestamps(chunk)
-            train = chunk.loc[timestamps <= train_end]
+            eligibility = timestamps <= train_end
+            availability_column = next(
+                (
+                    column
+                    for column in (
+                        "label_available_at",
+                        "forward_return_20d_available_at",
+                    )
+                    if column in chunk
+                ),
+                None,
+            )
+            if availability_column is not None:
+                available_at = strict_timestamp_series(
+                    chunk[availability_column],
+                    error="invalid_label_available_at",
+                    allow_null=True,
+                )
+                eligibility &= available_at.le(train_end)
+            train = chunk.loc[eligibility]
             if train.empty:
                 train = None
                 timestamps = None

@@ -48,19 +48,6 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto.research_datasets import (
-    build_hft_research_dataset_catalog,
-)
-from quant_research_platform.markets.implementations.crypto.research_scenarios import (
-    HFT_EVALUATION_ID,
-    HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
-    HFT_MODEL_ALGORITHMS,
-    HFT_MULTI_ASSET_SCOPES,
-    HFT_PRICE_MODEL_ALGORITHMS,
-    build_hft_evaluation_catalog,
-    build_hft_model_catalog,
-    build_hft_prediction_catalog,
-)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.reports.crypto_hft import (
     build_crypto_hft_report,
@@ -82,6 +69,17 @@ from quant_research_platform.research.predictions.alignment import (
 )
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
+)
+from quant_research_platform.research.protocols.crypto_hft import (
+    HFT_EVALUATION_ID,
+    HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
+    HFT_MODEL_ALGORITHMS,
+    HFT_MULTI_ASSET_SCOPES,
+    HFT_PRICE_MODEL_ALGORITHMS,
+    build_hft_evaluation_catalog,
+    build_hft_model_catalog,
+    build_hft_prediction_catalog,
+    build_hft_research_dataset_catalog,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,

@@ -10,8 +10,8 @@ import pandas as pd
 
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.rank_ensemble import (
+    EqualWeightRankEnsembleFactory,
     ICWeightedRankEnsembleFactory,
-    RankEnsemblePredictor,
 )
 
 
@@ -29,25 +29,6 @@ class SingleFactorBaseline:
         return frame.loc[:, self.column].to_numpy(dtype="float64", copy=False)
 
 
-@dataclass
-class StandardizedRidge:
-    alpha: float
-    coefficient_count: int = 0
-
-    def fit(self, frame: pd.DataFrame, target: np.ndarray) -> StandardizedRidge:
-        from sklearn.linear_model import Ridge
-        from sklearn.preprocessing import StandardScaler
-
-        self._scaler = StandardScaler().fit(frame)
-        self._model = Ridge(alpha=self.alpha).fit(self._scaler.transform(frame), target)
-        self.coef_ = self._model.coef_
-        self.coefficient_count = len(self.coef_)
-        return self
-
-    def predict(self, frame: pd.DataFrame) -> np.ndarray:
-        return self._model.predict(self._scaler.transform(frame))
-
-
 def linear_regression_estimator(
     spec: ModelSpec,
     params: dict[str, object],
@@ -61,13 +42,6 @@ def ridge_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> ob
     from sklearn.linear_model import Ridge
 
     return Ridge(**params)
-
-
-def standardized_ridge_regression_estimator(
-    spec: ModelSpec, params: dict[str, object]
-) -> object:
-    del spec
-    return StandardizedRidge(alpha=float(params["alpha"]))
 
 
 def lasso_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
@@ -153,7 +127,7 @@ def single_factor_baseline(spec: ModelSpec, params: dict[str, object]) -> object
 
 def equal_weight_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
     del params
-    return RankEnsemblePredictor(spec.input_columns)
+    return EqualWeightRankEnsembleFactory(spec.input_columns, spec.label_column)
 
 
 def ic_weighted_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
@@ -171,7 +145,6 @@ _MODEL_ESTIMATOR_FACTORIES: dict[
 ] = {
     "linear_regression": linear_regression_estimator,
     "ridge_regression": ridge_regression_estimator,
-    "standardized_ridge_regression": standardized_ridge_regression_estimator,
     "lasso_regression": lasso_regression_estimator,
     "elastic_net": elastic_net_estimator,
     "huber_regression": huber_regression_estimator,

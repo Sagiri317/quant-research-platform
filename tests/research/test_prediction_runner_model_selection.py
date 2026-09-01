@@ -462,7 +462,6 @@ def test_model_selection_rejects_candidate_specific_non_finite_predictions(
             model_id="candidate_model",
             label_column="label",
             prediction_column="prediction",
-            purge_gap_steps=0,
         )
 
 
@@ -733,12 +732,10 @@ def _model(
     input_columns: tuple[str, ...],
     *,
     label_column: str = "label",
-    purge_gap_steps: int = 0,
 ) -> ModelSpec:
     return ModelSpec(
         model_id=model_id,
         model_algorithm="linear_regression",
         input_factor_columns=input_columns,
         label_column=label_column,
-        purge_gap_steps=purge_gap_steps,
     )

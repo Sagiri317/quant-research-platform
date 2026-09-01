@@ -31,7 +31,7 @@ def _fold(
         train=TimeWindow(*train),
         validation=TimeWindow(*validation),
         development_test=TimeWindow(*development_test),
-        purge_steps=20,
+        embargo_steps=0,
         step_kind="test_steps",
         train_end_step=0,
         validation_start_step=21,
@@ -66,7 +66,6 @@ def _plan() -> ExperimentPlan:
             ),
         ),
         final_holdout=TimeWindow(date(2023, 2, 1), date(2023, 12, 31)),
-        max_label_lookahead_steps=20,
         selection_metric="validation_rankic",
         selection_direction="maximize",
         candidate_ids=("equal-weight", "ridge"),
@@ -100,22 +99,26 @@ def test_experiment_plan_is_locked_immutable_and_hash_stable() -> None:
         plan.holdout_status = "OPEN"  # type: ignore[misc]
 
 
-def test_experiment_plan_rejects_nonderived_purge_and_holdout_overlap() -> None:
+def test_experiment_plan_rejects_holdout_overlap_and_keeps_no_purge_surface() -> None:
     plan = _plan()
 
-    with pytest.raises(ValueError, match="^experiment_purge_mismatch$"):
-        replace(plan, max_label_lookahead_steps=19)
+    assert not hasattr(plan, "max_label_lookahead_steps")
     with pytest.raises(ValueError, match="^experiment_holdout_overlap$"):
         replace(
             plan,
             final_holdout=TimeWindow(date(2022, 12, 1), date(2023, 12, 31)),
         )
-    unsafe_fold = replace(plan.folds[-1], final_holdout_start_step=44)
-    with pytest.raises(ValueError, match="^experiment_holdout_purge_gap_invalid$"):
-        replace(plan, folds=(*plan.folds[:-1], unsafe_fold))
+    with pytest.raises(ValueError):
+        replace(
+            plan,
+            folds=(
+                *plan.folds[:-1],
+                replace(plan.folds[-1], final_holdout_start_step=24),
+            ),
+        )
 
 
-def test_market_owners_bind_purge_and_embargo_to_real_steps() -> None:
+def test_market_owners_bind_embargo_to_real_steps() -> None:
     sessions = pd.date_range("2020-01-01", periods=10, freq="B")
     calendar = pd.DataFrame(
         {
@@ -131,7 +134,6 @@ def test_market_owners_bind_purge_and_embargo_to_real_steps() -> None:
         validation=TimeWindow(sessions[4].date(), sessions[5].date()),
         development_test=TimeWindow(sessions[7].date(), sessions[8].date()),
         final_holdout=TimeWindow(sessions[9].date(), sessions[9].date()),
-        purge_steps=2,
         embargo_steps=1,
     )
     crypto_grid = pd.date_range("2026-01-01", periods=10, freq="100ms")
@@ -150,13 +152,12 @@ def test_market_owners_bind_purge_and_embargo_to_real_steps() -> None:
         final_holdout=TimeWindow(
             crypto_grid[9].to_pydatetime(), crypto_grid[9].to_pydatetime()
         ),
-        purge_steps=2,
         embargo_steps=1,
     )
 
     assert a_share.step_kind == "a_share_trading_session"
     assert crypto.step_kind == "crypto_100ms_grid"
-    with pytest.raises(ValueError, match="^experiment_purge_gap_invalid$"):
+    with pytest.raises(ValueError, match="^experiment_embargo_gap_invalid$"):
         build_a_share_experiment_fold(
             calendar,
             fold_id="bad-fold",
@@ -164,6 +165,5 @@ def test_market_owners_bind_purge_and_embargo_to_real_steps() -> None:
             validation=TimeWindow(sessions[4].date(), sessions[5].date()),
             development_test=TimeWindow(sessions[7].date(), sessions[8].date()),
             final_holdout=TimeWindow(sessions[9].date(), sessions[9].date()),
-            purge_steps=1,
-            embargo_steps=1,
+            embargo_steps=0,
         )

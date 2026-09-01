@@ -22,6 +22,7 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS,
     PORTFOLIO_CATEGORICAL_EXPOSURE_DIAGNOSTIC_COLUMNS,
     PORTFOLIO_NUMERIC_EXPOSURE_DIAGNOSTIC_COLUMNS,
+    REBALANCE_SCHEDULES,
     CostConfig,
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
@@ -32,6 +33,10 @@ from quant_research_platform.contracts.validation import strict_finite_numeric_s
 
 PORTFOLIO_ARTIFACTS = {
     "positions": "positions.parquet",
+    "target_weights": "target_weights.parquet",
+    "executions": "executions.parquet",
+    "realized_holdings_cash": "realized_holdings_cash.parquet",
+    "nav_returns": "nav_returns.parquet",
     "turnover": "turnover.parquet",
     "cost_breakdown": "cost_breakdown.parquet",
     "portfolio_returns": "portfolio_returns.parquet",
@@ -52,9 +57,9 @@ _PORTFOLIO_OUTPUT_METADATA_KEYS = frozenset(
         "research_dataset_id",
         "run_type",
         "signals",
-        "return_source_column",
-        "rebalance_frequency",
-        "execution_lag_steps",
+        "rebalance_schedule",
+        "execution_policy_id",
+        "cost_policy_id",
         "weight_config",
         "tradability_config",
         "cost_config",
@@ -75,7 +80,13 @@ _TRADABILITY_CONFIG_KEYS = frozenset(
     }
 )
 _COST_CONFIG_KEYS = frozenset(
-    {"buy_cost_bps", "sell_cost_bps", "slippage_bps", "spread_bps"}
+    {
+        "commission_bps",
+        "slippage_bps",
+        "impact_bps",
+        "adv_participation",
+        "adv_sensitivities",
+    }
 )
 _DIAGNOSTICS_CONFIG_KEYS = frozenset(
     {
@@ -86,6 +97,34 @@ _DIAGNOSTICS_CONFIG_KEYS = frozenset(
     }
 )
 _PORTFOLIO_POSITION_COLUMNS = ("timestamp", "asset", "signal", "position")
+_PORTFOLIO_TARGET_WEIGHT_COLUMNS = ("timestamp", "asset", "signal", "target_weight")
+_PORTFOLIO_EXECUTION_COLUMNS = (
+    "timestamp",
+    "asset",
+    "signal",
+    "side",
+    "pre_trade_weight",
+    "target_weight",
+    "realized_weight",
+    "blocked",
+)
+_PORTFOLIO_REALIZED_HOLDINGS_CASH_COLUMNS = (
+    "timestamp",
+    "asset",
+    "signal",
+    "realized_weight",
+    "cash_weight",
+)
+_PORTFOLIO_NAV_RETURN_COLUMNS = (
+    "timestamp",
+    "signal",
+    "gross_portfolio_return",
+    "net_portfolio_return",
+    "cost",
+    "turnover",
+    "nav",
+    "cumulative_cost",
+)
 _PORTFOLIO_TURNOVER_COLUMNS = ("timestamp", "signal", "turnover")
 _PORTFOLIO_COST_BREAKDOWN_COLUMNS = (
     "timestamp",
@@ -104,7 +143,7 @@ _PORTFOLIO_COST_BREAKDOWN_COLUMNS = (
 _PORTFOLIO_RETURN_COLUMNS = (
     "timestamp",
     "signal",
-    "return_source_column",
+    "economic_return_column",
     "portfolio_mode",
     "long_return",
     "short_return",
@@ -237,6 +276,10 @@ _PORTFOLIO_WIN_LOSS_REASON_CODES = frozenset(
 def portfolio_required_columns() -> dict[str, tuple[str, ...]]:
     return {
         "positions": _PORTFOLIO_POSITION_COLUMNS,
+        "target_weights": _PORTFOLIO_TARGET_WEIGHT_COLUMNS,
+        "executions": _PORTFOLIO_EXECUTION_COLUMNS,
+        "realized_holdings_cash": _PORTFOLIO_REALIZED_HOLDINGS_CASH_COLUMNS,
+        "nav_returns": _PORTFOLIO_NAV_RETURN_COLUMNS,
         "turnover": _PORTFOLIO_TURNOVER_COLUMNS,
         "cost_breakdown": _PORTFOLIO_COST_BREAKDOWN_COLUMNS,
         "portfolio_returns": _PORTFOLIO_RETURN_COLUMNS,
@@ -291,15 +334,13 @@ def validate_portfolio_output_metadata_shape(
         "market_id",
         "research_dataset_id",
         "run_type",
-        "return_source_column",
-        "rebalance_frequency",
+        "rebalance_schedule",
+        "execution_policy_id",
+        "cost_policy_id",
     ):
         require_metadata_string(metadata, key, "output_manifest_metadata_invalid")
     signals = require_signal_metadata_list(
         metadata, "signals", "output_manifest_metadata_invalid"
-    )
-    require_non_negative_metadata_int(
-        metadata, "execution_lag_steps", "output_manifest_metadata_invalid"
     )
 
     weight = metadata["weight_config"]
@@ -363,28 +404,28 @@ def validate_portfolio_output_metadata_shape(
     cost = metadata["cost_config"]
     if type(cost) is not dict or set(cost) != _COST_CONFIG_KEYS:
         raise ValueError("output_manifest_metadata_invalid")
-    buy_cost_bps = require_finite_metadata_number(
-        cost, "buy_cost_bps", "output_manifest_metadata_invalid"
-    )
-    sell_cost_bps = require_finite_metadata_number(
-        cost, "sell_cost_bps", "output_manifest_metadata_invalid"
+    commission_bps = require_finite_metadata_number(
+        cost, "commission_bps", "output_manifest_metadata_invalid"
     )
     slippage_bps = require_finite_metadata_number(
         cost, "slippage_bps", "output_manifest_metadata_invalid"
     )
-    spread_bps = (
-        None
-        if cost["spread_bps"] is None
-        else require_finite_metadata_number(
-            cost, "spread_bps", "output_manifest_metadata_invalid"
-        )
+    impact_bps = require_finite_metadata_number(
+        cost, "impact_bps", "output_manifest_metadata_invalid"
     )
+    adv_participation = require_finite_metadata_number(
+        cost, "adv_participation", "output_manifest_metadata_invalid"
+    )
+    sensitivities = cost["adv_sensitivities"]
+    if type(sensitivities) is not list:
+        raise ValueError("output_manifest_metadata_invalid")
     try:
         cost_config = CostConfig(
-            buy_cost_bps=buy_cost_bps,
-            sell_cost_bps=sell_cost_bps,
+            commission_bps=commission_bps,
             slippage_bps=slippage_bps,
-            spread_bps=spread_bps,
+            impact_bps=impact_bps,
+            adv_participation=adv_participation,
+            adv_sensitivities=tuple(sensitivities),
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("output_manifest_metadata_invalid") from exc
@@ -424,17 +465,17 @@ def validate_portfolio_output_metadata_shape(
             market_id=MarketId(metadata["market_id"]),
             research_dataset_id=metadata["research_dataset_id"],
             signals=signals,
-            return_source_column=metadata["return_source_column"],
-            rebalance_frequency=metadata["rebalance_frequency"],
-            execution_lag_steps=metadata["execution_lag_steps"],
+            rebalance_schedule=metadata["rebalance_schedule"],
+            execution_policy_id=metadata["execution_policy_id"],
+            cost_policy_id=metadata["cost_policy_id"],
             weight_config=weight_config,
             tradability_config=tradability_config,
             cost_config=cost_config,
             diagnostics_config=diagnostics_config,
             run_type=metadata["run_type"],
         )
-        if portfolio_spec.rebalance_frequency != metadata["rebalance_frequency"]:
-            raise ValueError("portfolio_rebalance_frequency_not_canonical")
+        if portfolio_spec.rebalance_schedule not in REBALANCE_SCHEDULES:
+            raise ValueError("portfolio_rebalance_schedule_not_canonical")
     except (TypeError, ValueError) as exc:
         raise ValueError("output_manifest_metadata_invalid") from exc
     validate_portfolio_row_counts(metadata["row_counts"])
@@ -489,12 +530,19 @@ def validate_portfolio_artifact_membership_columns(
         signal_ids,
         "portfolio_artifact_signal_mismatch: " + artifact_name,
     )
-    if "return_source_column" in frame.columns:
+    if "economic_return_column" in frame.columns:
         validate_string_membership_column(
             frame,
-            "return_source_column",
-            (spec.return_source_column,),
-            "portfolio_return_source_column_mismatch",
+            "economic_return_column",
+            ("forward_return_1d",),
+            "portfolio_economic_return_column_mismatch",
+        )
+    if "side" in frame.columns:
+        validate_string_membership_column(
+            frame,
+            "side",
+            ("buy", "sell", "none"),
+            "portfolio_execution_side_mismatch: " + artifact_name,
         )
 
 

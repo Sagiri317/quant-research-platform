@@ -9,7 +9,8 @@ import pandas as pd
 
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
-from .columns import price_volume_window_column
+from .columns import FORMAL_PRICE_VOLUME_FACTORS, price_volume_window_column
+from .formal import calculate_formal_price_volume_factors
 from .presets import price_volume_factor_columns
 from .requirements import (
     price_volume_factor_input_columns,
@@ -48,6 +49,11 @@ def calculate_price_volume_factors(
     """Add requested price-volume factors without future data."""
 
     requested = tuple(dict.fromkeys(factor_columns or price_volume_factor_columns()))
+    if requested and set(requested).issubset(FORMAL_PRICE_VOLUME_FACTORS):
+        return calculate_formal_price_volume_factors(
+            panel,
+            factor_columns=requested,
+        )
     unsupported = unsupported_price_volume_factors(requested)
     if unsupported:
         raise ValueError("unsupported_price_volume_factors: " + ", ".join(unsupported))

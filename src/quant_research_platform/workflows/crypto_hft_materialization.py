@@ -25,13 +25,11 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     MARKET_ID,
     canonical_crypto_asset_id,
 )
-from quant_research_platform.markets.implementations.crypto.labels.definitions import (
-    HFT_LABEL_HORIZONS_MS,
-)
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.protocols.crypto_hft import HFT_LABEL_HORIZONS_MS
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,

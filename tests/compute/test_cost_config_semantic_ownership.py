@@ -18,13 +18,12 @@ def test_compute_costs_are_owned_by_cost_config() -> None:
         sell_turnover=2.0,
         turnover=3.0,
         cost_config=CostConfig(
-            buy_cost_bps=10,
-            sell_cost_bps=20,
+            commission_bps=10,
             slippage_bps=1,
-            spread_bps=2,
+            impact_bps=2,
         ),
     )
-    assert zero["cost_model"] == "zero_cost"
+    assert zero["cost_model"] == "commission_slippage_sqrt_impact"
     assert zero["total_cost"] == 0.0
-    assert detailed["cost_model"] == "detailed_bps"
-    assert detailed["total_cost"] == pytest.approx(0.001 + 0.004 + 0.0003 + 0.0006)
+    assert detailed["cost_model"] == "commission_slippage_sqrt_impact"
+    assert detailed["total_cost"] == pytest.approx(0.0033)

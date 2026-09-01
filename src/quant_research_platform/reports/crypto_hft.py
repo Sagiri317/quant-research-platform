@@ -15,7 +15,6 @@ _MODEL_REPORT_KEYS = (
     "label_column",
     "random_seed",
     "max_train_rows",
-    "purge_gap_steps",
     "rows_input",
     "rows_after_filter_mode",
     "rows_after_input_label_dropna",

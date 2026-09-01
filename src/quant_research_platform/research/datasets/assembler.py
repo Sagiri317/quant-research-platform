@@ -23,6 +23,7 @@ from quant_research_platform.research.datasets.validation import (
 from quant_research_platform.research.features.transforms import (
     _feature_transform_working_bytes,
     apply_feature_transforms,
+    canonical_feature_pipeline,
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -753,6 +754,14 @@ def _apply_feature_transforms(
 ) -> pd.DataFrame:
     if not dataset_spec.feature_transforms:
         return frame
+    if {
+        "industry_level1_code",
+        "log_float_market_cap",
+    }.issubset(frame.columns) and dataset_spec.factor_columns:
+        return canonical_feature_pipeline(
+            frame,
+            factor_columns=dataset_spec.factor_columns,
+        )
     return apply_feature_transforms(
         frame,
         dataset_spec.feature_transforms,

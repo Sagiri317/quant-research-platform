@@ -38,6 +38,7 @@ class LabelCatalogItem(_PublicModel):
     family: str
     input_columns: list[str]
     output_column: str
+    available_at_column: str
     label_timing: str
     horizon: int
     lookahead: int

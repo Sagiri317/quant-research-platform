@@ -6,6 +6,42 @@ from collections.abc import Iterable
 
 from quant_research_platform.contracts.data import DataFrequency, horizon_unit_suffix
 
+FORMAL_PRICE_VOLUME_FACTORS: tuple[str, ...] = (
+    "reversal_1d",
+    "reversal_5d",
+    "reversal_20d",
+    "momentum_60_20",
+    "momentum_120_20",
+    "momentum_252_20",
+    "volatility_20d",
+    "volatility_60d",
+    "downside_volatility_20d",
+    "downside_volatility_60d",
+    "max_return_20d",
+    "skewness_60d",
+    "drawdown_60d",
+    "amplitude_20d",
+    "log_avg_amount_20d",
+    "turnover_20d",
+    "turnover_60d",
+    "turnover_volatility_20d",
+    "amihud_20d",
+    "amihud_60d",
+    "amount_shock_20d",
+    "return_amount_corr_20d",
+    "trend_efficiency_60d",
+    "signed_amount_flow_20d",
+    "log_float_market_cap",
+)
+FORMAL_CORE_PRICE_VOLUME_FACTORS: tuple[str, ...] = (
+    "momentum_252_20",
+    "reversal_5d",
+    "volatility_20d",
+    "amihud_20d",
+    "turnover_20d",
+    "log_float_market_cap",
+)
+
 
 def price_volume_window_column(
     prefix: str,

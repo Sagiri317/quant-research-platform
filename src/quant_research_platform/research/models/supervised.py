@@ -10,7 +10,6 @@ from quant_research_platform.contracts.models import (
     _PARALLEL_MODEL_ALGORITHMS,
     ModelSpec,
     _model_algorithm_facts,
-    _model_default_hyperparameters,
     _resolved_model_thread_count,
     _thaw_model_hyperparameters,
 )
@@ -54,14 +53,16 @@ def _build_estimator(spec: ModelSpec) -> object:
 
 
 def resolved_model_hyperparameters(spec: ModelSpec) -> dict[str, object]:
-    params = _model_default_hyperparameters(spec.model_algorithm)
-    params.update(_thaw_model_hyperparameters(spec.hyperparameters))
-    if spec.model_algorithm in _PARALLEL_MODEL_ALGORITHMS:
-        params["n_jobs"] = _resolved_model_thread_count(params.get("n_jobs"))
+    params = _thaw_model_hyperparameters(spec.hyperparameters)
+    if spec.model_algorithm in _PARALLEL_MODEL_ALGORITHMS and "n_jobs" in params:
+        params["n_jobs"] = _resolved_model_thread_count(params["n_jobs"])
     return params
 
 
 def model_thread_count(spec: ModelSpec) -> int:
     if spec.model_algorithm not in _PARALLEL_MODEL_ALGORITHMS:
         return 1
-    return int(resolved_model_hyperparameters(spec)["n_jobs"])
+    params = resolved_model_hyperparameters(spec)
+    if "n_jobs" not in params:
+        return 1
+    return int(params["n_jobs"])

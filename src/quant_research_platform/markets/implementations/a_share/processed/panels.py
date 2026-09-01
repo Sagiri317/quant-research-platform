@@ -1,13 +1,10 @@
-"""Pure A-share market-panel calculations from source-normalized interim frames."""
+"""A-share market-session facts and dense panel construction."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-
+import numpy as np
 import pandas as pd
 
-from quant_research_platform.catalog.fields import canonical_field_names
-from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
@@ -17,383 +14,487 @@ from quant_research_platform.contracts.validation import (
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
     compute_listing_age_trading_days,
+    unified_trading_sessions,
 )
-from quant_research_platform.markets.implementations.a_share.fields import (
-    field_catalog,
-)
-from quant_research_platform.markets.implementations.a_share.ids import (
-    MARKET_ID,
-    require_supported_panel_frequency,
-)
-from quant_research_platform.markets.implementations.a_share.validation import (
-    strict_values,
-)
+from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
 
-_CANONICAL_NAMES = canonical_field_names()
-MARKET_PANEL_KEY_COLUMNS: tuple[str, ...] = (
-    _CANONICAL_NAMES.market_id,
-    _CANONICAL_NAMES.asset_id,
-    _CANONICAL_NAMES.timestamp,
-    _CANONICAL_NAMES.session_date,
-    _CANONICAL_NAMES.available_at,
-)
 ST_STATUS_CODES = {2, 3, 5, 6, 8, 9, 11, 12, 14, 15}
+MARKET_PANEL_KEY_COLUMNS = ("market_id", "asset_id", "timestamp")
 
 
 def compute_market_panel(
     market_bars: pd.DataFrame,
     *,
-    frequency: DataFrequency | str = DataFrequency.DAILY,
     stock_master: pd.DataFrame,
     market_cap: pd.DataFrame,
     trading_calendar: pd.DataFrame,
+    industry_history: pd.DataFrame | None = None,
+    special_treatment_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Compute the A-share processed market panel from source interim frames."""
+    """Build lifecycle × open-session facts with suspension rows retained."""
 
-    require_supported_panel_frequency(frequency, context="market panel")
-    market_bars = _ensure_datetime(
-        _with_time_fields(_with_asset_keys(market_bars)),
-        ["timestamp", "session_date", "available_at"],
-    ).copy()
-    market_bars = _with_market_semantics(market_bars)
-    scope = strict_values.strict_trading_bool_series(
-        market_bars["is_a_share_scope"],
-        error="invalid_is_a_share_scope",
-    )
-    market_bars = market_bars.loc[scope].copy()
-    missing_canonical = [
-        column
-        for column in MARKET_PANEL_KEY_COLUMNS
-        if column not in market_bars.columns
+    bars = _canonical_bars(market_bars)
+    if bars.empty:
+        return bars
+    sessions = unified_trading_sessions(trading_calendar)
+    if sessions.empty:
+        raise ValueError("a_share_trading_calendar_empty")
+    session_window = sessions[
+        (sessions >= bars["timestamp"].min()) & (sessions <= bars["timestamp"].max())
     ]
-    if missing_canonical:
-        raise ValueError(
-            "market_bars_interim_missing_canonical_columns: "
-            + ", ".join(missing_canonical)
-        )
-    stocks = _ensure_datetime(
-        _with_asset_keys(stock_master),
-        ["listing_date", "delisting_date", "status_change_date"],
+    if session_window.empty:
+        return bars.iloc[0:0].copy()
+    stocks = _canonical_stock_master(stock_master)
+    caps = _canonical_market_cap(market_cap)
+    dense = _dense_lifecycle_panel(
+        bars,
+        stocks,
+        session_window,
     )
-    cap = _ensure_datetime(
-        _with_asset_keys(market_cap),
-        ["timestamp", "share_change_date"],
+    dense = _asof_market_cap(dense, caps)
+    dense = _asof_industry(dense, stocks, industry_history)
+    dense = _apply_special_treatment(dense, special_treatment_history)
+    dense = _apply_suspension_semantics(dense)
+    delisting_sentinel = pd.Timestamp.max.normalize()
+    dense["delisting_date"] = dense["delisting_date"].where(
+        dense["delisting_date"] != delisting_sentinel
     )
-    if "timestamp" not in cap or cap["timestamp"].isna().any():
-        raise ValueError("missing_market_cap_panel_timestamp")
-
-    keep_stock_columns = [
-        column
-        for column in (
-            "asset_id",
-            "stock_name",
-            "listing_date",
-            "delisting_date",
-            "company_status",
-            "status_change_date",
-            "csrc_2012_industry_code",
-            "csrc_2012_industry_name",
-        )
-        if column in stocks.columns
-    ]
-    panel = _asof_join_stock_master(market_bars, stocks[keep_stock_columns])
-    panel["listing_age_days"] = (panel["timestamp"] - panel["listing_date"]).dt.days
-
-    cap_columns = [
-        column
-        for column in (
-            "asset_id",
-            "timestamp",
-            "share_change_date",
-            "total_shares",
-            "a_float_shares",
-        )
-        if column in cap.columns
-    ]
-    cap = (
-        _dedupe_exact_key_duplicates_or_raise_conflict(
-            cap[cap_columns],
-            key_columns=("asset_id", "timestamp"),
-            dataset="market_cap",
-        )
-        .sort_values(["asset_id", "timestamp"], kind="mergesort")
-        .reset_index(drop=True)
-    )
-    merged_groups = []
-    for asset_id, stock_frame in panel.groupby("asset_id", sort=False):
-        cap_frame = cap[cap["asset_id"] == asset_id]
-        if cap_frame.empty:
-            stock_result = stock_frame.copy()
-            for column in (
-                "share_change_date",
-                "total_shares",
-                "a_float_shares",
-            ):
-                stock_result[column] = _missing_registered_column(
-                    column,
-                    index=stock_result.index,
-                )
-        else:
-            stock_result = pd.merge_asof(
-                stock_frame.sort_values("timestamp"),
-                cap_frame.sort_values("timestamp"),
-                on="timestamp",
-                direction="backward",
-                suffixes=("", "_capchg"),
-            )
-            if "asset_id_capchg" in stock_result.columns:
-                stock_result = stock_result.drop(columns=["asset_id_capchg"])
-        merged_groups.append(stock_result)
-    if merged_groups:
-        panel = pd.concat(merged_groups, ignore_index=True)
-    else:
-        panel = panel.copy()
-        panel["share_change_date"] = pd.Series(dtype="datetime64[ns]")
-        panel["total_shares"] = pd.Series(dtype="float64")
-        panel["a_float_shares"] = pd.Series(dtype="float64")
-    volume = strict_finite_numeric_series(panel["volume"], error="invalid_volume")
-    a_float_shares = strict_finite_numeric_series(
-        panel["a_float_shares"],
-        error="invalid_a_float_shares",
-        allow_null=True,
-    )
-    panel["turnover"] = volume.div(a_float_shares.where(a_float_shares.gt(0)))
-    panel = panel.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
-        drop=True
-    )
-    market_type_column = "market_type" if "market_type" in panel.columns else None
-    panel["listing_age_trading_days"] = compute_listing_age_trading_days(
-        panel,
+    dense["listing_age_trading_days"] = compute_listing_age_trading_days(
+        dense,
         trading_calendar,
         observation_date_column="timestamp",
         listing_date_column="listing_date",
-        market_type_column=market_type_column,
+        market_type_column="market_type",
     )
-    leading = [
-        "market_id",
-        "asset_id",
+    dense["scenario_universe"] = (
+        dense["is_a_share_scope"]
+        & dense["is_trading"]
+        & ~dense["is_st"]
+        & ~dense["is_pt"]
+        & dense["listing_age_trading_days"].ge(252)
+        & dense["amount"].gt(0.0)
+        & dense["volume"].gt(0.0)
+        & dense["turnover"].notna()
+        & dense["turnover"].ge(0.0)
+    )
+    return dense.sort_values(
+        ["market_id", "asset_id", "timestamp"], kind="mergesort"
+    ).reset_index(drop=True)
+
+
+def _canonical_bars(frame: pd.DataFrame) -> pd.DataFrame:
+    required = {
+        "source_asset_id",
         "timestamp",
-        "session_date",
-        "available_at",
-    ]
-    panel = panel.drop(
-        columns=[
-            column
-            for column in ("source_asset_id", "stock_code", "index_code")
-            if column in panel.columns
-        ]
-    )
-    ordered = [column for column in leading if column in panel.columns]
-    ordered.extend(column for column in panel.columns if column not in ordered)
-    return panel[ordered]
-
-
-def _with_asset_keys(frame: pd.DataFrame) -> pd.DataFrame:
+        "market_type",
+        "trading_status_code",
+        "filling_flag",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "period_return",
+        "adj_close",
+        "adj_open",
+        "float_market_cap",
+        "total_market_cap",
+    }
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError("market_bars_missing_columns: " + ", ".join(missing))
     result = frame.copy()
-    if "asset_id" not in result.columns:
-        if "source_asset_id" not in result.columns:
-            raise ValueError("missing_source_asset_id")
-        result["asset_id"] = strict_string_series(
-            result["source_asset_id"],
-            error="invalid_source_asset_id",
+    result["asset_id"] = strict_string_series(
+        result["source_asset_id"], error="invalid_source_asset_id"
+    )
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"], error="invalid_source_timestamp"
+    ).dt.normalize()
+    for column in (
+        "market_type",
+        "trading_status_code",
+        "filling_flag",
+    ):
+        result[column] = strict_integer_series(
+            result[column], error=f"invalid_{column}", allow_null=True
         )
-    result["market_id"] = MARKET_ID
-    return result
-
-
-def _with_time_fields(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
-    if "timestamp" not in result.columns:
-        raise ValueError("missing_source_timestamp")
-    timestamp = strict_values.strict_timestamp_value_series(
-        result["timestamp"],
-        error="invalid_source_timestamp",
-    )
-    result["timestamp"] = timestamp
-    result["session_date"] = timestamp
-    result["available_at"] = timestamp
-    return result
-
-
-def _with_market_semantics(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame.copy()
-    result["trading_status_code"] = strict_values.strict_market_type_series(
-        result["trading_status_code"],
-        error="invalid_trading_status_code",
-    )
-    result["filling_flag"] = strict_values.strict_market_type_series(
-        result["filling_flag"],
-        error="invalid_filling_flag",
-    )
-    result["market_type"] = strict_values.strict_market_type_series(
-        result["market_type"],
-        error="invalid_source_market_type",
-    )
-    raw_limit_status = result["limit_status"]
-    result["limit_status"] = strict_integer_series(
-        raw_limit_status,
-        error="invalid_limit_status",
-        allow_null=True,
-    )
-    invalid_non_null = result["limit_status"].isna() & raw_limit_status.notna()
-    invalid_value = result["limit_status"].notna() & ~result["limit_status"].isin(
-        [-1, 0, 1]
-    )
-    if invalid_non_null.any() or invalid_value.any():
-        raise ValueError("invalid_limit_status")
-    filled_limit_status = result["limit_status"].fillna(0)
-    result["is_limit_up"] = filled_limit_status.eq(1)
-    result["is_limit_down"] = filled_limit_status.eq(-1)
-    result["is_trading"] = result["filling_flag"].eq(0)
-    result["is_st"] = result["trading_status_code"].isin(ST_STATUS_CODES)
-    result["is_pt"] = result["trading_status_code"].eq(16)
-    result["is_a_share_scope"] = result["market_type"].isin(CURRENT_MARKET_TYPES)
-    return result
-
-
-def _ensure_datetime(frame: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    result = frame.copy()
-    for column in columns:
-        if column in result.columns:
-            result[column] = strict_timestamp_series(
+    for column in (
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume",
+        "amount",
+        "period_return",
+        "adj_close",
+        "adj_open",
+        "float_market_cap",
+        "total_market_cap",
+        "limit_status",
+    ):
+        if column in result:
+            result[column] = strict_finite_numeric_series(
                 result[column],
-                error=f"invalid_timestamp_column: {column}",
+                error=f"invalid_market_bar_value: {column}",
                 allow_null=True,
             )
+        else:
+            result[column] = np.nan
+    result = result.loc[result["market_type"].isin(CURRENT_MARKET_TYPES)]
+    result = result.loc[result["filling_flag"].ne(2)]
+    if result.duplicated(["asset_id", "timestamp"]).any():
+        raise ValueError("duplicate_market_panel_key")
+    result["market_id"] = str(MARKET_ID)
+    result["session_date"] = result["timestamp"]
+    result["available_at"] = result["timestamp"]
     return result
 
 
-def _asof_join_stock_master(
-    market_frame: pd.DataFrame,
+def _canonical_stock_master(frame: pd.DataFrame) -> pd.DataFrame:
+    required = {"source_asset_id", "listing_date"}
+    if not required.issubset(frame.columns):
+        raise ValueError("stock_master_missing_columns")
+    result = frame.copy()
+    result["asset_id"] = strict_string_series(
+        result["source_asset_id"], error="invalid_stock_master_asset_id"
+    )
+    for column in ("listing_date", "delisting_date", "timestamp"):
+        if column in result:
+            result[column] = strict_timestamp_series(
+                result[column], error="invalid_stock_master_date", allow_null=True
+            ).dt.normalize()
+    result["listing_date"] = strict_timestamp_series(
+        result["listing_date"], error="invalid_stock_master_date"
+    ).dt.normalize()
+    if "delisting_date" not in result:
+        result["delisting_date"] = pd.NaT
+    result["delisting_date"] = result["delisting_date"].fillna(
+        pd.Timestamp.max.normalize()
+    )
+    for column in (
+        "stock_name",
+        "market_type",
+        "company_status",
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        if column not in result:
+            result[column] = pd.NA
+    for column in (
+        "stock_name",
+        "company_status",
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        result[column] = result[column].astype("string")
+    result["stock_effective_date"] = result.get(
+        "timestamp", result["listing_date"]
+    ).fillna(result["listing_date"])
+    return result.sort_values(
+        ["asset_id", "stock_effective_date"], kind="mergesort"
+    ).drop_duplicates(["asset_id", "stock_effective_date"], keep="last")
+
+
+def _canonical_market_cap(frame: pd.DataFrame) -> pd.DataFrame:
+    if "source_asset_id" not in frame or "timestamp" not in frame:
+        raise ValueError("market_cap_missing_columns")
+    result = frame.copy()
+    result["asset_id"] = strict_string_series(
+        result["source_asset_id"], error="invalid_market_cap_asset_id"
+    )
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"], error="invalid_market_cap_date"
+    ).dt.normalize()
+    for column in ("share_change_date", "total_shares", "a_float_shares"):
+        if column not in result:
+            result[column] = pd.NaT if column == "share_change_date" else np.nan
+    result["share_change_date"] = strict_timestamp_series(
+        result["share_change_date"], error="invalid_market_cap_date", allow_null=True
+    ).dt.normalize()
+    for column in ("total_shares", "a_float_shares"):
+        result[column] = strict_finite_numeric_series(
+            result[column], error=f"invalid_market_cap_value: {column}", allow_null=True
+        )
+    if result.duplicated(["asset_id", "timestamp"]).any():
+        raise ValueError("duplicate_market_cap_key")
+    return result.sort_values(["asset_id", "timestamp"], kind="mergesort")
+
+
+def _dense_lifecycle_panel(
+    bars: pd.DataFrame,
     stocks: pd.DataFrame,
+    sessions: pd.DatetimeIndex,
 ) -> pd.DataFrame:
-    stock_rows = stocks.copy()
-    stock_rows["stock_effective_date"] = _stock_master_effective_date(stock_rows)
-    if stock_rows["stock_effective_date"].isna().any():
-        raise ValueError("missing_stock_master_panel_effective_timestamp")
-    stock_rows = _dedupe_exact_key_duplicates_or_raise_conflict(
-        stock_rows,
-        key_columns=("asset_id", "stock_effective_date"),
-        dataset="stock_master",
+    assets = tuple(sorted(set(bars["asset_id"])))
+    rows: list[pd.DataFrame] = []
+    for asset_id in assets:
+        stock = stocks.loc[stocks["asset_id"].eq(asset_id)]
+        listing = stock["listing_date"].min() if not stock.empty else sessions[0]
+        delisting = stock["delisting_date"].max() if not stock.empty else sessions[-1]
+        dates = sessions[(sessions >= listing) & (sessions <= delisting)]
+        if dates.empty:
+            continue
+        base = pd.DataFrame({"asset_id": asset_id, "timestamp": dates})
+        raw = bars.loc[bars["asset_id"].eq(asset_id)]
+        base["market_type"] = raw["market_type"].iloc[0]
+        base = base.merge(
+            raw.drop(
+                columns=[
+                    "market_id",
+                    "session_date",
+                    "available_at",
+                    "market_type",
+                ],
+                errors="ignore",
+            ),
+            on=["asset_id", "timestamp"],
+            how="left",
+            validate="one_to_one",
+        )
+        rows.append(base)
+    if not rows:
+        return bars.iloc[0:0].copy()
+    result = pd.concat(rows, ignore_index=True)
+    result["market_id"] = str(MARKET_ID)
+    result["session_date"] = result["timestamp"]
+    result["available_at"] = result["timestamp"]
+    return _asof_join_stock_master(result, stocks)
+
+
+def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
+    output: list[pd.DataFrame] = []
+    columns = (
+        "stock_name",
+        "market_type",
+        "listing_date",
+        "delisting_date",
+        "company_status",
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
     )
-    stock_rows["_stock_master_row_order"] = range(len(stock_rows))
-    static_listing_date = _first_static_stock_value(stock_rows, "listing_date")
-    stock_rows = stock_rows.sort_values(
-        ["asset_id", "stock_effective_date", "_stock_master_row_order"],
-        kind="mergesort",
-    )
-    merged_groups = []
-    stock_output_columns = [
-        column
-        for column in stocks.columns
-        if column not in {"asset_id", "stock_effective_date"}
-    ]
-    for asset_id, market_bar_frame in market_frame.groupby("asset_id", sort=False):
-        stock_frame = stock_rows[stock_rows["asset_id"] == asset_id]
-        if stock_frame.empty:
-            stock_result = market_bar_frame.copy()
-            for column in stock_output_columns:
-                if column not in stock_result.columns:
-                    stock_result[column] = _missing_registered_column(
-                        column,
-                        index=stock_result.index,
-                    )
+    for asset_id, group in panel.groupby("asset_id", sort=False):
+        right = stocks.loc[stocks["asset_id"].eq(asset_id)]
+        if right.empty:
+            current = group.copy()
+            for column in columns:
+                current[column] = (
+                    pd.NA
+                    if column
+                    in {
+                        "stock_name",
+                        "company_status",
+                        "industry_standard_id",
+                        "industry_level1_code",
+                        "industry_level1_name",
+                    }
+                    else pd.NaT
+                )
         else:
-            stock_result = pd.merge_asof(
-                market_bar_frame.sort_values("timestamp"),
-                stock_frame.sort_values("stock_effective_date"),
+            current = pd.merge_asof(
+                group.sort_values("timestamp"),
+                right.loc[
+                    :, ["asset_id", "stock_effective_date", *columns]
+                ].sort_values("stock_effective_date"),
                 left_on="timestamp",
                 right_on="stock_effective_date",
+                by="asset_id",
                 direction="backward",
+                allow_exact_matches=True,
                 suffixes=("", "_stock_master"),
+            ).drop(columns=["stock_effective_date"])
+            for column in columns:
+                joined = f"{column}_stock_master"
+                if joined in current:
+                    current[column] = current[joined].combine_first(
+                        current.get(column, pd.Series(pd.NA, index=current.index))
+                    )
+                    current.drop(columns=joined, inplace=True)
+        output.append(current)
+    result = pd.concat(output, ignore_index=True)
+    for column in (
+        "stock_name",
+        "company_status",
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        result[column] = result[column].astype("string")
+    return result
+
+
+def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
+    outputs: list[pd.DataFrame] = []
+    for asset_id, group in panel.groupby("asset_id", sort=False):
+        right = caps.loc[caps["asset_id"].eq(asset_id)]
+        if right.empty:
+            current = group.copy()
+            current["share_change_date"] = pd.NaT
+            current["total_shares"] = np.nan
+            current["a_float_shares"] = np.nan
+        else:
+            current = pd.merge_asof(
+                group.sort_values("timestamp"),
+                right.loc[
+                    :,
+                    [
+                        "asset_id",
+                        "timestamp",
+                        "share_change_date",
+                        "total_shares",
+                        "a_float_shares",
+                    ],
+                ].sort_values("timestamp"),
+                on="timestamp",
+                by="asset_id",
+                direction="backward",
+                allow_exact_matches=True,
+                suffixes=("", "_cap"),
             )
-            if "asset_id_stock_master" in stock_result.columns:
-                stock_result = stock_result.drop(columns=["asset_id_stock_master"])
-            stock_result = stock_result.drop(
-                columns=[
-                    column
-                    for column in ("stock_effective_date", "_stock_master_row_order")
-                    if column in stock_result.columns
-                ]
-            )
-        if "listing_date" in stock_result.columns and asset_id in static_listing_date:
-            stock_result["listing_date"] = stock_result["listing_date"].fillna(
-                static_listing_date[asset_id]
-            )
-        merged_groups.append(stock_result)
-    if not merged_groups:
-        stock_result = market_frame.copy()
-        for column in stock_output_columns:
-            if column not in stock_result.columns:
-                stock_result[column] = _missing_registered_column(
-                    column,
-                    index=stock_result.index,
-                )
-        return stock_result
-    return pd.concat(merged_groups, ignore_index=True)
-
-
-def _missing_registered_column(
-    column: str,
-    *,
-    index: pd.Index,
-) -> pd.Series:
-    spec = field_catalog().get(column)
-    if spec.dtype == "date" or spec.dtype.startswith("timestamp["):
-        return pd.Series(pd.NaT, index=index, dtype="datetime64[ns]")
-    if spec.dtype.startswith("float"):
-        return pd.Series(float("nan"), index=index, dtype=spec.dtype)
-    return pd.Series(pd.NA, index=index, dtype=spec.dtype)
-
-
-def _stock_master_effective_date(stocks: pd.DataFrame) -> pd.Series:
-    effective = (
-        strict_timestamp_series(
-            stocks["status_change_date"],
-            error="invalid_stock_master_effective_timestamp",
-            allow_null=True,
+        current["float_market_cap"] = current["float_market_cap"].fillna(
+            current["a_float_shares"] * current["close"]
         )
-        if "status_change_date" in stocks
-        else pd.Series(pd.NaT, index=stocks.index)
-    )
-    if "listing_date" in stocks:
-        effective = effective.combine_first(
-            strict_timestamp_series(
-                stocks["listing_date"],
-                error="invalid_stock_master_effective_timestamp",
-                allow_null=True,
-            )
+        current["total_market_cap"] = current["total_market_cap"].fillna(
+            current["total_shares"] * current["close"]
         )
-    return effective
+        outputs.append(current)
+    return pd.concat(outputs, ignore_index=True)
 
 
-def _dedupe_exact_key_duplicates_or_raise_conflict(
-    frame: pd.DataFrame,
-    *,
-    key_columns: Sequence[str],
-    dataset: str,
-) -> pd.DataFrame:
-    missing = [column for column in key_columns if column not in frame.columns]
-    if missing:
-        raise ValueError(
-            f"missing_panel_join_key_columns: {dataset}: {', '.join(missing)}"
-        )
-    exact_deduped = frame.drop_duplicates(keep="first").copy()
-    if exact_deduped.duplicated(list(key_columns)).any():
-        raise ValueError(f"conflicting_panel_join_duplicate_keys: {dataset}")
-    return exact_deduped
-
-
-def _first_static_stock_value(
+def _asof_industry(
+    panel: pd.DataFrame,
     stocks: pd.DataFrame,
-    column: str,
-) -> dict[object, object]:
-    if column not in stocks:
-        return {}
-    values = (
-        stocks.dropna(subset=[column])
-        .sort_values(["asset_id", "_stock_master_row_order"], kind="mergesort")
-        .drop_duplicates(["asset_id"], keep="first")
-        .set_index("asset_id")[column]
+    history: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if history is None or history.empty:
+        return panel
+    history = history.rename(columns={"source_asset_id": "asset_id"})
+    required = {
+        "asset_id",
+        "timestamp",
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    }
+    if not required.issubset(history.columns):
+        raise ValueError("industry_history_columns_invalid")
+    right = history.loc[:, list(required)].sort_values(
+        ["asset_id", "timestamp"], kind="mergesort"
     )
-    return values.to_dict()
+    output: list[pd.DataFrame] = []
+    for asset_id, group in panel.groupby("asset_id", sort=False):
+        current = pd.merge_asof(
+            group.sort_values("timestamp"),
+            right.loc[right["asset_id"].eq(asset_id)].sort_values("timestamp"),
+            on="timestamp",
+            by="asset_id",
+            direction="backward",
+            allow_exact_matches=True,
+            suffixes=("", "_industry"),
+        )
+        for column in (
+            "industry_standard_id",
+            "industry_level1_code",
+            "industry_level1_name",
+        ):
+            current[column] = current[f"{column}_industry"].combine_first(
+                current[column]
+            )
+            current.drop(columns=f"{column}_industry", inplace=True)
+        output.append(current)
+    return pd.concat(output, ignore_index=True)
+
+
+def _apply_special_treatment(
+    panel: pd.DataFrame,
+    history: pd.DataFrame | None,
+) -> pd.DataFrame:
+    result = panel.copy()
+    status = result["trading_status_code"].fillna(-1)
+    result["is_st"] = status.isin(ST_STATUS_CODES)
+    result["is_pt"] = status.eq(16)
+    if history is None or history.empty:
+        return result
+    history = history.rename(columns={"source_asset_id": "asset_id"})
+    if {"asset_id", "timestamp", "change_type"}.issubset(history.columns):
+        right = history.loc[:, ["asset_id", "timestamp", "change_type"]].copy()
+        change_type = right["change_type"].astype("string").str.upper()
+        right["is_pt"] = change_type.eq("C")
+        right["is_st"] = change_type.isin({"B", "D"})
+    elif {"asset_id", "timestamp", "is_st", "is_pt"}.issubset(history.columns):
+        right = history.loc[:, ["asset_id", "timestamp", "is_st", "is_pt"]].copy()
+    else:
+        raise ValueError("special_treatment_history_columns_invalid")
+    right = right.loc[:, ["asset_id", "timestamp", "is_st", "is_pt"]].sort_values(
+        ["asset_id", "timestamp"], kind="mergesort"
+    )
+    merged = pd.merge_asof(
+        result.sort_values("timestamp"),
+        right,
+        on="timestamp",
+        by="asset_id",
+        direction="backward",
+        allow_exact_matches=True,
+        suffixes=("", "_event"),
+    )
+    merged["is_st"] = merged["is_st_event"].combine_first(merged["is_st"])
+    merged["is_pt"] = merged["is_pt_event"].combine_first(merged["is_pt"])
+    return merged.drop(columns=["is_st_event", "is_pt_event"])
+
+
+def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
+    result = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").copy()
+    result["is_trading"] = result["filling_flag"].fillna(1).eq(0)
+    for asset_id, positions in result.groupby("asset_id", sort=False).groups.items():
+        _ = asset_id
+        values = result.loc[positions]
+        last_close = (
+            values["adj_close"].where(result.loc[positions, "is_trading"]).ffill()
+        )
+        missing_price = ~result.loc[positions, "is_trading"]
+        result.loc[positions, "adj_close"] = result.loc[positions, "adj_close"].where(
+            result.loc[positions, "adj_close"].notna(), last_close
+        )
+        result.loc[positions, "close"] = result.loc[positions, "close"].where(
+            result.loc[positions, "close"].notna(), result.loc[positions, "adj_close"]
+        )
+        for column in ("open", "high", "low", "adj_open"):
+            result.loc[positions, column] = result.loc[positions, column].where(
+                result.loc[positions, column].notna(),
+                result.loc[positions, "adj_close"],
+            )
+        result.loc[positions, "period_return"] = result.loc[
+            positions, "period_return"
+        ].where(result.loc[positions, "is_trading"], 0.0)
+        result.loc[positions, "volume"] = result.loc[positions, "volume"].where(
+            result.loc[positions, "is_trading"], 0.0
+        )
+        result.loc[positions, "amount"] = result.loc[positions, "amount"].where(
+            result.loc[positions, "is_trading"], 0.0
+        )
+        for column in ("after_hours_volume", "after_hours_amount"):
+            if column not in result:
+                result[column] = 0.0
+            result.loc[positions, column] = result.loc[positions, column].where(
+                result.loc[positions, "is_trading"], 0.0
+            )
+        free_shares = result.loc[positions, "float_market_cap"].div(
+            result.loc[positions, "close"].where(result.loc[positions, "close"].gt(0.0))
+        )
+        result.loc[positions, "turnover"] = result.loc[positions, "volume"].div(
+            free_shares.where(free_shares.gt(0.0))
+        )
+        previous_trading = result.loc[positions, "is_trading"].shift(1).fillna(False)
+        reopening = result.loc[positions, "is_trading"] & ~previous_trading
+        prior_close = result.loc[positions, "adj_close"].shift(1).ffill()
+        reopening_return = result.loc[positions, "adj_close"].div(prior_close) - 1.0
+        result.loc[positions, "period_return"] = result.loc[
+            positions, "period_return"
+        ].where(~reopening | reopening_return.isna(), reopening_return)
+        _ = missing_price
+    result["is_trading"] = result["is_trading"].astype(bool)
+    result["is_a_share_scope"] = result["market_type"].isin(CURRENT_MARKET_TYPES)
+    return result

@@ -43,6 +43,7 @@ class PredictionSpec:
     is_oos: bool = True
     is_final_oos_window: bool = True
     candidate_model_ids: tuple[str, ...] = ()
+    selection_tie_break_order: tuple[str, ...] = ()
     model_selection_metric: str = "validation_rankic"
     model_selection_validation_start: str | None = None
     model_selection_validation_end: str | None = None
@@ -152,6 +153,13 @@ def _validate_model_selection_contract(spec: PredictionSpec) -> None:
         raise ValueError("candidate_model_ids_must_be_non_empty_strings")
     if len(set(candidate_model_ids)) != len(candidate_model_ids):
         raise ValueError("candidate_model_ids_must_not_contain_duplicates")
+    if spec.selection_tie_break_order:
+        _validate_column_tuple(
+            spec.selection_tie_break_order,
+            "selection_tie_break_order",
+        )
+        if set(spec.selection_tie_break_order) != set(candidate_model_ids):
+            raise ValueError("selection_tie_break_order_mismatch")
     if spec.model_id in candidate_model_ids:
         raise ValueError("candidate_model_ids_must_not_include_model_id")
     if (

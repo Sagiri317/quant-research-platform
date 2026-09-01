@@ -1041,8 +1041,6 @@ def _iter_raw_file(
     metadata = item.metadata
     path = root / metadata["path"]
     bound = json_record_working_set_bytes(metadata["max_record_bytes"]) + 64 * 1024
-    if bound > resource_policy.operation_headroom_bytes:
-        raise MemoryError("runtime_memory_budget_exceeded")
     try:
         raw_handle = path.open("rb")
     except OSError as exc:

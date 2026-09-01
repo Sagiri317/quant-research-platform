@@ -7,13 +7,13 @@ import pandas as pd
 
 from quant_research_platform.compute._portfolio_math import (
     cost_components,
-    require_return_source_column,
     select_signals,
     validate_tradability_columns,
     validate_weight_columns,
 )
 from quant_research_platform.compute.dataframe.constraints import (
     build_tradability_context,
+    tradability_diagnostic_counts,
 )
 from quant_research_platform.compute.dataframe.portfolio_constants import (
     COST_BREAKDOWN_COLUMNS,
@@ -34,11 +34,13 @@ from quant_research_platform.compute.panels import (
     validate_compute_panel,
 )
 from quant_research_platform.contracts.portfolios import (
+    EXECUTION_RETURN_COLUMN,
     CostConfig,
     TradabilityConfig,
     WeightConfig,
 )
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.research.portfolios.schedules import rebalance_dates
 
 
 def _stream_weighted_portfolio_from_validated_panel(
@@ -50,9 +52,13 @@ def _stream_weighted_portfolio_from_validated_panel(
     portfolio_signals: tuple[str, ...] | None = None,
     tradability_config: TradabilityConfig | None = None,
     cost_config: CostConfig | None = None,
-    return_source_column: str | None = None,
+    economic_return_column: str = EXECUTION_RETURN_COLUMN,
     previous_positions: dict[tuple[object, ...], dict[str, dict[str, float]]]
     | None = None,
+    cash_weights: dict[tuple[object, ...], dict[str, float]] | None = None,
+    previous_returns: dict[tuple[object, ...], dict[str, dict[str, float]]]
+    | None = None,
+    rebalance_schedule: str = "daily",
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Stream positions, turnover, costs, and portfolio returns."""
 
@@ -67,18 +73,17 @@ def _stream_weighted_portfolio_from_validated_panel(
     if cost_config is None:
         cost_config = CostConfig()
     validate_tradability_columns(panel, tradability_config)
-    return_source_column = require_return_source_column(return_source_column)
-    if return_source_column != spec.label_column:
-        if return_source_column not in panel:
-            raise ValueError(f"panel is missing columns: ['{return_source_column}'].")
-        if not pd.api.types.is_numeric_dtype(panel[return_source_column]):
+    if economic_return_column != spec.label_column:
+        if economic_return_column not in panel:
+            raise ValueError(f"panel is missing columns: ['{economic_return_column}'].")
+        if not pd.api.types.is_numeric_dtype(panel[economic_return_column]):
             raise TypeError(
-                f"return source column {return_source_column!r} must be numeric."
+                f"economic return column {economic_return_column!r} must be numeric."
             )
-        panel[return_source_column] = strict_finite_numeric_series(
-            panel[return_source_column],
+        panel[economic_return_column] = strict_finite_numeric_series(
+            panel[economic_return_column],
             error=(
-                f"portfolio return source {return_source_column!r} "
+                f"portfolio economic return {economic_return_column!r} "
                 "contains invalid values."
             ),
             allow_null=True,
@@ -98,15 +103,27 @@ def _stream_weighted_portfolio_from_validated_panel(
     cost_data = {column: [] for column in cost_columns}
     if previous_positions is None:
         previous_positions = {}
+    if cash_weights is None:
+        cash_weights = {}
+    if previous_returns is None:
+        previous_returns = {}
+    rebalance_set = set(
+        rebalance_dates(
+            pd.DatetimeIndex(panel[spec.timestamp_column].drop_duplicates()),
+            rebalance_schedule,
+        )
+    )
     for group_key, timestamp_frame in panel.groupby(group_columns, sort=True):
         group_values = normalize_group_key(group_key, group_columns)
         timestamp = group_values[spec.timestamp_column]
         segment_key = tuple(group_values[column] for column in segment_columns)
         signal_previous = previous_positions.setdefault(segment_key, {})
+        signal_cash = cash_weights.setdefault(segment_key, {})
+        signal_returns = previous_returns.setdefault(segment_key, {})
         label_lookup = _timestamp_label_lookup(
             timestamp_frame,
             spec,
-            return_source_column,
+            economic_return_column,
         )
         tradability_context = build_tradability_context(
             timestamp_frame=timestamp_frame,
@@ -120,23 +137,46 @@ def _stream_weighted_portfolio_from_validated_panel(
                 for asset, position in previous.items()
             ):
                 raise ValueError("held_asset_missing_from_portfolio_frame")
-            positions, diagnostic = build_signal_positions(
-                timestamp_frame=timestamp_frame,
-                spec=spec,
-                signal=signal,
-                weight_config=weight_config,
-                tradability_config=tradability_config,
-                tradability_context=tradability_context,
-                previous_positions=previous,
-            )
+            is_rebalance = signal not in signal_returns or timestamp in rebalance_set
+            if is_rebalance:
+                positions, diagnostic = build_signal_positions(
+                    timestamp_frame=timestamp_frame,
+                    spec=spec,
+                    signal=signal,
+                    weight_config=weight_config,
+                    tradability_config=tradability_config,
+                    tradability_context=tradability_context,
+                    previous_positions=previous,
+                )
+            else:
+                positions, drift_cash = _drift_positions(
+                    previous,
+                    cash_weight=signal_cash.get(signal, 1.0 - sum(previous.values())),
+                    previous_returns=signal_returns[signal],
+                )
+                signal_cash[signal] = drift_cash
+                counts = tradability_diagnostic_counts(
+                    timestamp_frame=timestamp_frame,
+                    signal=signal,
+                    tradability_config=tradability_config,
+                )
+                diagnostic = {
+                    **counts,
+                    "signal": signal,
+                    "method": weight_config.method,
+                    "long_count": sum(value > 0.0 for value in positions.values()),
+                    "short_count": sum(value < 0.0 for value in positions.values()),
+                    "fallback_reason": "not_rebalance",
+                }
             current = {
                 asset: float(position)
                 for asset, position in positions.items()
                 if float(position) != 0.0
             }
-            buy_turnover, sell_turnover = position_change_turnover(
-                previous=previous,
-                current=current,
+            buy_turnover, sell_turnover = (
+                position_change_turnover(previous=previous, current=current)
+                if is_rebalance
+                else (0.0, 0.0)
             )
             turnover = buy_turnover + sell_turnover
             costs = cost_components(
@@ -187,7 +227,7 @@ def _stream_weighted_portfolio_from_validated_panel(
             cost = float(costs["total_cost"])
             return_data["timestamp"].append(timestamp)
             return_data["signal"].append(signal)
-            return_data["return_source_column"].append(return_source_column)
+            return_data["economic_return_column"].append(economic_return_column)
             return_data["portfolio_mode"].append(weight_config.portfolio_mode)
             return_data["long_return"].append(long_return)
             return_data["short_return"].append(short_return)
@@ -198,6 +238,16 @@ def _stream_weighted_portfolio_from_validated_panel(
             return_data["long_count"].append(long_count)
             return_data["short_count"].append(short_count)
             signal_previous[signal] = current
+            signal_cash[signal] = (
+                1.0 - sum(current.values()) - float(costs["total_cost"])
+                if is_rebalance
+                else signal_cash.get(signal, 1.0 - sum(current.values()))
+            )
+            signal_returns[signal] = {
+                asset: float(label_lookup[asset])
+                for asset in current
+                if np.isfinite(label_lookup[asset])
+            }
 
     return (
         _frame_from_column_buffers(position_data, position_columns),
@@ -205,6 +255,25 @@ def _stream_weighted_portfolio_from_validated_panel(
         _frame_from_column_buffers(return_data, returns_columns),
         _frame_from_column_buffers(diagnostic_data, diagnostic_columns),
         _frame_from_column_buffers(cost_data, cost_columns),
+    )
+
+
+def _drift_positions(
+    positions: dict[str, float],
+    *,
+    cash_weight: float,
+    previous_returns: dict[str, float],
+) -> tuple[dict[str, float], float]:
+    values = {
+        asset: float(weight) * (1.0 + previous_returns[asset])
+        for asset, weight in positions.items()
+    }
+    nav = float(cash_weight + sum(values.values()))
+    if not np.isfinite(nav) or nav <= 0.0:
+        raise ValueError("portfolio_drift_nav_invalid")
+    return (
+        {asset: value / nav for asset, value in values.items() if value != 0.0},
+        float(cash_weight / nav),
     )
 
 
@@ -220,10 +289,10 @@ def _frame_from_column_buffers(
 def _timestamp_label_lookup(
     timestamp_frame: pd.DataFrame,
     spec: ComputePanelSpec,
-    return_source_column: str,
+    economic_return_column: str,
 ) -> dict[str, float]:
     assets = timestamp_frame[spec.asset_column].to_numpy(copy=False)
-    labels = timestamp_frame[return_source_column].to_numpy(
+    labels = timestamp_frame[economic_return_column].to_numpy(
         dtype="float64",
         copy=False,
     )

@@ -83,44 +83,28 @@ def cost_components(
     sell_turnover: float,
     turnover: float,
     cost_config: CostConfig,
+    trade_notional: float | None = None,
+    average_daily_volume: float | None = None,
 ) -> dict[str, object]:
-    if not _uses_detailed_cost_config(cost_config):
-        return {
-            "buy_cost": 0.0,
-            "sell_cost": 0.0,
-            "slippage_cost": 0.0,
-            "spread_cost": 0.0,
-            "impact_cost": 0.0,
-            "total_cost": 0.0,
-            "cost_model": "zero_cost",
-        }
-
-    buy_cost = buy_turnover * float(cost_config.buy_cost_bps) / 10_000.0
-    sell_cost = sell_turnover * float(cost_config.sell_cost_bps) / 10_000.0
+    buy_cost = buy_turnover * float(cost_config.commission_bps) / 10_000.0
+    sell_cost = sell_turnover * float(cost_config.commission_bps) / 10_000.0
     slippage_cost = turnover * float(cost_config.slippage_bps) / 10_000.0
-    spread_bps = 0.0 if cost_config.spread_bps is None else cost_config.spread_bps
-    spread_cost = turnover * float(spread_bps) / 10_000.0
+    impact_cost = 0.0
+    if trade_notional is not None and average_daily_volume is not None:
+        if average_daily_volume <= 0.0:
+            raise ValueError("average_daily_volume_must_be_positive")
+        impact_rate = (
+            float(cost_config.impact_bps)
+            / 10_000.0
+            * (trade_notional / average_daily_volume) ** 0.5
+        )
+        impact_cost = trade_notional * impact_rate
     return {
         "buy_cost": buy_cost,
         "sell_cost": sell_cost,
         "slippage_cost": slippage_cost,
-        "spread_cost": spread_cost,
-        "impact_cost": 0.0,
-        "total_cost": buy_cost + sell_cost + slippage_cost + spread_cost,
-        "cost_model": "detailed_bps",
+        "spread_cost": 0.0,
+        "impact_cost": impact_cost,
+        "total_cost": buy_cost + sell_cost + slippage_cost + impact_cost,
+        "cost_model": "commission_slippage_sqrt_impact",
     }
-
-
-def require_return_source_column(return_source_column: str | None) -> str:
-    if not isinstance(return_source_column, str) or not return_source_column:
-        raise ValueError("portfolio_return_source_column_required")
-    return return_source_column
-
-
-def _uses_detailed_cost_config(cost_config: CostConfig) -> bool:
-    return (
-        cost_config.buy_cost_bps != 0
-        or cost_config.sell_cost_bps != 0
-        or cost_config.slippage_bps != 0
-        or cost_config.spread_bps not in (None, 0)
-    )

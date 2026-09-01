@@ -1,8 +1,4 @@
-"""Generic forward-return label helpers.
-
-Forward-return horizons use per-asset valid bars. They do not imply
-calendar/session windows and do not fill missing or suspended rows.
-"""
+"""Common forward-return labels on an explicit ordered time axis."""
 
 from __future__ import annotations
 
@@ -11,10 +7,7 @@ from collections.abc import Hashable, Mapping, Sequence
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.data import (
-    DataFrequency,
-    horizon_unit_suffix,
-)
+from quant_research_platform.contracts.data import DataFrequency, horizon_unit_suffix
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
@@ -34,48 +27,92 @@ def add_forward_return_labels(
     asset_column: str = "asset_id",
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",
+    sessions: Sequence[object] | None = None,
+    can_enter_column: str | None = None,
     expected_interval: pd.Timedelta | None = None,
     require_contiguous: bool = False,
 ) -> pd.DataFrame:
-    """Add per-asset valid-bar next-open to horizon-open labels."""
+    """Add entry-open to exit-open returns, using calendar positions when given."""
 
     horizons = _validate_horizons(horizons)
-    frame = _validate_label_input_frame(
+    validated = _validate_label_input_frame(
         frame,
         asset_column=asset_column,
         date_column=date_column,
         execution_price_column=execution_price_column,
     )
-    result = frame.sort_values([asset_column, date_column]).copy()
+    if sessions is None:
+        return _add_valid_row_labels(
+            validated,
+            horizons=horizons,
+            frequency=frequency,
+            asset_column=asset_column,
+            date_column=date_column,
+            execution_price_column=execution_price_column,
+            expected_interval=expected_interval,
+            require_contiguous=require_contiguous,
+        )
+    axis = _session_axis(sessions)
+    result = validated.sort_values([asset_column, date_column], kind="mergesort").copy()
+    result[date_column] = strict_timestamp_series(
+        result[date_column], error="invalid_forward_return_timestamp"
+    )
+    if can_enter_column is not None and can_enter_column not in result.columns:
+        raise ValueError(f"missing_forward_return_columns: {can_enter_column}")
     price = strict_finite_numeric_series(
         result[execution_price_column],
         error="invalid_forward_return_price",
         allow_null=True,
     ).astype("float64")
-    grouped_price = price.groupby(result[asset_column], sort=False)
-    if require_contiguous:
-        if expected_interval is None:
-            raise ValueError("expected_interval_required")
-        segments = contiguous_segment_ids(
-            result,
-            group_columns=(asset_column,),
-            timestamp_column=date_column,
-            expected_interval=expected_interval,
+    row_lookup = {
+        (asset, _timestamp): position
+        for position, (asset, _timestamp) in enumerate(
+            zip(result[asset_column], result[date_column], strict=True)
         )
-        grouped_price = price.groupby([result[asset_column], segments], sort=False)
-
-    entry_price = grouped_price.shift(-1)
-    entry_price = entry_price.where(np.isfinite(entry_price) & entry_price.ne(0.0))
+    }
+    position_by_session = {timestamp: index for index, timestamp in enumerate(axis)}
+    positions = result[date_column].map(position_by_session).to_numpy()
+    prices = price.to_numpy(dtype="float64", copy=False)
+    can_enter = (
+        result[can_enter_column].astype(bool).to_numpy(copy=False)
+        if can_enter_column is not None
+        else None
+    )
     for horizon in horizons:
-        exit_price = grouped_price.shift(-(horizon + 1))
-        exit_price = exit_price.where(np.isfinite(exit_price))
-        label = exit_price / entry_price - 1.0
-        result[forward_return_label_column(horizon, frequency)] = label.replace(
-            [np.inf, -np.inf],
-            np.nan,
-        )
-
-    return result
+        labels = np.full(len(result), np.nan, dtype="float64")
+        available = np.full(len(result), np.datetime64("NaT"), dtype="datetime64[ns]")
+        for position, (asset, _timestamp) in enumerate(
+            zip(result[asset_column], result[date_column], strict=True)
+        ):
+            session_position = positions[position]
+            if pd.isna(session_position):
+                continue
+            entry_position = int(session_position) + 1
+            exit_position = entry_position + horizon
+            if exit_position >= len(axis):
+                continue
+            entry_date = axis[entry_position]
+            exit_date = axis[exit_position]
+            entry_row = row_lookup.get((asset, entry_date))
+            exit_row = row_lookup.get((asset, exit_date))
+            if entry_row is None or exit_row is None:
+                continue
+            if can_enter is not None and not bool(can_enter[entry_row]):
+                continue
+            entry_price = prices[entry_row]
+            exit_price = prices[exit_row]
+            if (
+                not np.isfinite(entry_price)
+                or entry_price == 0.0
+                or not np.isfinite(exit_price)
+            ):
+                continue
+            labels[position] = exit_price / entry_price - 1.0
+            available[position] = exit_date.to_datetime64()
+        label_column = forward_return_label_column(horizon, frequency)
+        result[label_column] = labels
+        result[f"{label_column}_available_at"] = available
+    return result.reset_index(drop=True)
 
 
 def forward_return_label_column(
@@ -84,6 +121,13 @@ def forward_return_label_column(
 ) -> str:
     _validate_horizon(horizon, error="invalid_forward_return_horizon")
     return f"forward_return_{horizon}{horizon_unit_suffix(frequency)}"
+
+
+def forward_return_available_at_column(
+    horizon: int,
+    frequency: DataFrequency | str = DataFrequency.DAILY,
+) -> str:
+    return f"{forward_return_label_column(horizon, frequency)}_available_at"
 
 
 def forward_return_valid_bar_read_window(
@@ -95,6 +139,8 @@ def forward_return_valid_bar_read_window(
     asset_column: str = "asset_id",
     date_column: str = "timestamp",
 ) -> TimeWindow:
+    """Generic read-window helper for sparse non-calendar streams."""
+
     if (
         not isinstance(lookahead_bars, int)
         or isinstance(lookahead_bars, bool)
@@ -115,30 +161,95 @@ def forward_return_valid_bar_read_window(
     read_start = pd.Timestamp(read_window.start)
     core_dates = {session.date() for session in core_sessions}
     ends = [pd.Timestamp(read_window.end)]
-    saw_core = False
     for asset_dates in key_groups:
         asset_rows = asset_dates.loc[asset_dates.dt.normalize().ge(read_start)]
-        if asset_rows.empty:
-            continue
-        asset_core_positions = [
+        core_positions = [
             position
             for position, timestamp in enumerate(asset_rows)
             if timestamp.date() in core_dates
         ]
-        if not asset_core_positions:
+        if not core_positions:
             continue
-        saw_core = True
-        read_position = min(
-            len(asset_rows) - 1,
-            asset_core_positions[-1] + lookahead_bars,
+        ends.append(
+            asset_rows.iloc[
+                min(len(asset_rows) - 1, core_positions[-1] + lookahead_bars)
+            ]
         )
-        ends.append(asset_rows.iloc[read_position].normalize())
-    if not saw_core:
-        return read_window
     end = max(ends).date()
-    if end <= read_window.end:
+    return read_window if end <= read_window.end else TimeWindow(read_window.start, end)
+
+
+def session_read_window(
+    *,
+    read_window: TimeWindow,
+    sessions: Sequence[object],
+    lookahead_sessions: int,
+) -> TimeWindow:
+    """Extend a date window by ordered market-session positions."""
+
+    axis = _session_axis(sessions)
+    if len(axis) == 0 or lookahead_sessions <= 0:
         return read_window
+    start = int(axis.searchsorted(pd.Timestamp(read_window.start), side="left"))
+    stop = int(axis.searchsorted(pd.Timestamp(read_window.end), side="right"))
+    if start >= stop:
+        return read_window
+    end = axis[min(len(axis) - 1, stop - 1 + lookahead_sessions)].date()
     return TimeWindow(read_window.start, end)
+
+
+def _add_valid_row_labels(
+    frame: pd.DataFrame,
+    *,
+    horizons: tuple[int, ...],
+    frequency: DataFrequency | str,
+    asset_column: str,
+    date_column: str,
+    execution_price_column: str,
+    expected_interval: pd.Timedelta | None,
+    require_contiguous: bool,
+) -> pd.DataFrame:
+    result = frame.sort_values([asset_column, date_column], kind="mergesort").copy()
+    price = strict_finite_numeric_series(
+        result[execution_price_column],
+        error="invalid_forward_return_price",
+        allow_null=True,
+    ).astype("float64")
+    grouped = price.groupby(result[asset_column], sort=False)
+    timestamp_grouped = result[date_column].groupby(result[asset_column], sort=False)
+    if require_contiguous:
+        if expected_interval is None:
+            raise ValueError("expected_interval_required")
+        segments = contiguous_segment_ids(
+            result,
+            group_columns=(asset_column,),
+            timestamp_column=date_column,
+            expected_interval=expected_interval,
+        )
+        grouped = price.groupby([result[asset_column], segments], sort=False)
+        timestamp_grouped = result[date_column].groupby(
+            [result[asset_column], segments], sort=False
+        )
+    entry = grouped.shift(-1)
+    entry = entry.where(np.isfinite(entry) & entry.ne(0.0))
+    for horizon in horizons:
+        exit_price = grouped.shift(-(horizon + 1)).where(np.isfinite)
+        column = forward_return_label_column(horizon, frequency)
+        result[column] = (exit_price / entry - 1.0).replace([np.inf, -np.inf], np.nan)
+        result[f"{column}_available_at"] = timestamp_grouped.shift(
+            -(horizon + 1)
+        ).where(result[column].notna())
+    return result
+
+
+def _session_axis(sessions: Sequence[object]) -> pd.DatetimeIndex:
+    values = strict_timestamp_series(
+        pd.Series(tuple(sessions)), error="invalid_forward_return_sessions"
+    ).dt.normalize()
+    axis = pd.DatetimeIndex(values).drop_duplicates()
+    if axis.empty or not axis.is_monotonic_increasing:
+        raise ValueError("invalid_forward_return_sessions")
+    return axis
 
 
 def _validate_horizons(horizons: object) -> tuple[int, ...]:
@@ -174,8 +285,7 @@ def _validate_label_input_frame(
     for value in result[asset_column].tolist():
         _strict_asset_key_value(value)
     result[date_column] = strict_timestamp_series(
-        result[date_column],
-        error="invalid_forward_return_timestamp",
+        result[date_column], error="invalid_forward_return_timestamp"
     )
     if result.duplicated([asset_column, date_column]).any():
         raise ValueError("duplicate_forward_return_asset_timestamp")

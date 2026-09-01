@@ -23,11 +23,11 @@ from quant_research_platform.contracts.validation import (
     strict_finite_float,
     strict_timestamp_series,
 )
-from quant_research_platform.markets.implementations.crypto.labels.definitions import (
+from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.protocols.crypto_hft import (
     HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN,
     HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS,
 )
-from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import OwnedValue
 
 HFT_GRID_MS = 100
@@ -42,7 +42,6 @@ def build_crypto_grid_experiment_fold(
     validation: TimeWindow,
     development_test: TimeWindow,
     final_holdout: TimeWindow,
-    purge_steps: int,
     embargo_steps: int = 0,
     complete: bool = True,
 ) -> ExperimentFold:
@@ -90,7 +89,6 @@ def build_crypto_grid_experiment_fold(
         train=train,
         validation=validation,
         development_test=development_test,
-        purge_steps=purge_steps,
         embargo_steps=embargo_steps,
         step_kind="crypto_100ms_grid",
         train_end_step=int(positions[1]),

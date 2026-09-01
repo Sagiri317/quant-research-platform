@@ -154,7 +154,11 @@ def aligned_candidate_matrix(
         raise ValueError("candidate_matrix_numeric_required")
     policy = current_runtime_resource_policy()
     snapshot_bytes = len(frame) * (8 * frame.shape[1] + 2) + 64 * 1024
-    if policy is not None and snapshot_bytes > policy.operation_headroom_bytes:
+    if (
+        policy is not None
+        and policy.explicit_memory_cap_bytes is not None
+        and policy.used_memory_bytes + snapshot_bytes > policy.explicit_memory_cap_bytes
+    ):
         raise MemoryError("statistical_matrix_exceeds_runtime_headroom")
     numeric = frame.astype("float64")
     complete = numeric.notna().all(axis=1)
@@ -408,7 +412,7 @@ def cscv_pbo(returns: object, *, slice_count: int, max_combinations: int) -> Pbo
         or type(slice_count) is not int
         or slice_count < 4
         or slice_count % 2
-        or shape[0] % slice_count
+        or shape[0] < slice_count
     ):
         raise ValueError("cscv_slice_count_invalid")
     combination_count = comb(slice_count, slice_count // 2)
@@ -423,7 +427,9 @@ def cscv_pbo(returns: object, *, slice_count: int, max_combinations: int) -> Pbo
         return _undefined_pbo(
             matrix, slice_count, combination_count, "duplicate_candidate_series"
         )
-    slices = np.split(np.arange(len(matrix)), slice_count)
+    slices = tuple(np.array_split(np.arange(len(matrix)), slice_count))
+    if max(len(item) for item in slices) - min(len(item) for item in slices) > 1:
+        raise ValueError("cscv_slice_partition_invalid")
     overfit_count = 0
     all_slice_ids = set(range(slice_count))
     for in_sample_ids in combinations(range(slice_count), slice_count // 2):
@@ -588,7 +594,11 @@ def _finite_matrix(
         raise ValueError("finite_matrix_required")
     policy = current_runtime_resource_policy()
     snapshot_bytes = int(shape[0]) * int(shape[1]) * 8 + 64 * 1024
-    if policy is not None and snapshot_bytes > policy.operation_headroom_bytes:
+    if (
+        policy is not None
+        and policy.explicit_memory_cap_bytes is not None
+        and policy.used_memory_bytes + snapshot_bytes > policy.explicit_memory_cap_bytes
+    ):
         raise MemoryError("statistical_matrix_exceeds_runtime_headroom")
     data = np.asarray(values, dtype="float64")
     if (

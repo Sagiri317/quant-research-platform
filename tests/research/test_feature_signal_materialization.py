@@ -83,7 +83,7 @@ def test_zero_variance_zscore_keeps_numeric_output() -> None:
     )
 
     assert result["factor_zscore"].dtype == "float64"
-    assert result["factor_zscore"].isna().all()
+    assert result["factor_zscore"].tolist() == [0.0, 0.0, 0.0]
 
 
 def test_tiny_nonconstant_zscores_remain_valid() -> None:

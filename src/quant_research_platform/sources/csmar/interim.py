@@ -23,7 +23,6 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import (
-    strict_bool_series,
     strict_finite_numeric_series,
     strict_string_series,
     strict_timestamp_series,
@@ -82,6 +81,17 @@ DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
     "financial_balance",
     "financial_income",
     "financial_cashflow",
+    "industry_classification",
+    "industry_classification_annual",
+    "industry_classification_sets",
+    "industry_classification_versions",
+    "listing_status_changes",
+    "stock_info_changes",
+    "stock_info_annual",
+    "trading_no_limit",
+    "special_treatment_changes",
+    "equity_changes",
+    "analyst_forecast",
 )
 TIME_RANGE_FILTER_DATA_IDS = {MARKET_BARS_DATA_ID}
 END_ONLY_FILTER_DATA_IDS = {"market_cap"}
@@ -103,6 +113,8 @@ MARKET_BARS_INTERIM_COLUMNS: tuple[str, ...] = (
     "close",
     "volume",
     "amount",
+    "after_hours_volume",
+    "after_hours_amount",
     "prev_close",
     "limit_status",
     "period_return",
@@ -118,8 +130,8 @@ STOCK_MASTER_INTERIM_COLUMNS: tuple[str, ...] = (
     "listing_date",
     "delisting_date",
     "company_status",
-    "csrc_2012_industry_code",
-    "csrc_2012_industry_name",
+    "industry_level1_code",
+    "industry_level1_name",
     "status_change_date",
 )
 MARKET_CAP_INTERIM_COLUMNS: tuple[str, ...] = (
@@ -201,21 +213,103 @@ FINANCIAL_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
         *FINANCIAL_BASE_COLUMNS,
         "total_assets",
         "total_liabilities",
-        "total_equity",
+        "parent_equity",
+        "cash",
+        "short_term_borrowings",
+        "current_portion_noncurrent_liabilities",
+        "long_term_borrowings",
+        "bonds_payable",
     ),
     "financial_income": (
         *FINANCIAL_BASE_COLUMNS,
         "operating_revenue",
-        "net_income",
+        "operating_cost",
+        "consolidated_net_income",
+        "parent_net_income",
     ),
-    "financial_cashflow": (*FINANCIAL_BASE_COLUMNS, "operating_cash_flow"),
+    "financial_cashflow": (
+        *FINANCIAL_BASE_COLUMNS,
+        "operating_cash_flow",
+        "capex_cash_paid",
+    ),
 }
-FINANCIAL_DISCLOSURE_INTERIM_COLUMNS: tuple[str, ...] = (
+INDUSTRY_CLASSIFICATION_COLUMNS = (
     "source_asset_id",
     "timestamp",
-    "table_id",
+    "industry_standard_id",
+    "implement_date",
+    "industry_level1_code",
+    "industry_level1_name",
+)
+INDUSTRY_CLASSIFICATION_ANNUAL_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "effective_date",
+    "industry_level1_code",
+    "industry_level1_name",
+)
+INDUSTRY_CLASSIFICATION_SETS_COLUMNS = (
+    "industry_code",
+    "industry_standard_id",
+    "industry_name",
+    "parent_industry_code",
+    "industry_id",
+    "industry_level",
+)
+INDUSTRY_CLASSIFICATION_VERSIONS_COLUMNS = (
+    "industry_standard_id",
+    "industry_standard_name",
+    "timestamp",
+    "implement_date",
+    "abandon_date",
+    "institution_name",
+)
+LISTING_STATUS_CHANGE_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "announcement_date",
+    "effective_date",
+    "changed_item",
+    "value_before",
+    "value_after",
+)
+STOCK_INFO_CHANGE_COLUMNS = LISTING_STATUS_CHANGE_COLUMNS
+STOCK_INFO_ANNUAL_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "effective_date",
+    "industry_level1_code",
+    "industry_level1_name",
+    "listing_date",
+    "listing_state",
+)
+TRADING_NO_LIMIT_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "trade_date",
+    "reason",
+)
+SPECIAL_TREATMENT_CHANGE_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "change_type",
+    "announcement_date",
+    "effective_date",
+)
+EQUITY_CHANGE_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
     "report_period",
-    "first_disclosure_date",
+    "report_type",
+)
+ANALYST_FORECAST_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "declare_date",
+    "forecast_end_date",
+    "institution_id",
+    "forecast_eps",
+    "forecast_pe",
 )
 INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     MARKET_BARS_DATA_ID: MARKET_BARS_INTERIM_COLUMNS,
@@ -227,8 +321,18 @@ INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     "trading_calendar": TRADING_CALENDAR_INTERIM_COLUMNS,
     "index_membership": INDEX_MEMBERSHIP_INTERIM_COLUMNS,
     "index_weights": INDEX_WEIGHTS_INTERIM_COLUMNS,
-    "financial_disclosures": FINANCIAL_DISCLOSURE_INTERIM_COLUMNS,
     **FINANCIAL_COLUMNS_BY_DATA_ID,
+    "industry_classification": INDUSTRY_CLASSIFICATION_COLUMNS,
+    "industry_classification_annual": INDUSTRY_CLASSIFICATION_ANNUAL_COLUMNS,
+    "industry_classification_sets": INDUSTRY_CLASSIFICATION_SETS_COLUMNS,
+    "industry_classification_versions": INDUSTRY_CLASSIFICATION_VERSIONS_COLUMNS,
+    "listing_status_changes": LISTING_STATUS_CHANGE_COLUMNS,
+    "stock_info_changes": STOCK_INFO_CHANGE_COLUMNS,
+    "stock_info_annual": STOCK_INFO_ANNUAL_COLUMNS,
+    "trading_no_limit": TRADING_NO_LIMIT_COLUMNS,
+    "special_treatment_changes": SPECIAL_TREATMENT_CHANGE_COLUMNS,
+    "equity_changes": EQUITY_CHANGE_COLUMNS,
+    "analyst_forecast": ANALYST_FORECAST_COLUMNS,
 }
 AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
     MARKET_BARS_DATA_ID: {
@@ -236,6 +340,8 @@ AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
         "comparable_close_with_dividend": "derived as adj_close",
         "float_market_cap_thousand": "converted to float_market_cap",
         "total_market_cap_thousand": "converted to total_market_cap",
+        "after_hours_volume": "included in canonical volume",
+        "after_hours_amount": "included in canonical amount",
     }
 }
 OPTIONAL_COLUMNS: dict[str, dict[str, str]] = {
@@ -473,13 +579,6 @@ def normalize_raw_frame(
     frame: pd.DataFrame,
     data_id: str,
 ) -> pd.DataFrame:
-    if data_id == "financial_disclosures" and set(frame.columns) != {
-        "asset_id",
-        "table_id",
-        "report_period",
-        "first_disclosure_date",
-    }:
-        raise ValueError("financial_disclosures_raw_schema_invalid")
     mapped = map_columns(frame, _raw_dataset_for_interim(data_id))
     if "stock_code" in mapped.columns:
         mapped["stock_code"] = normalize_stock_code(mapped["stock_code"])
@@ -536,9 +635,7 @@ def normalize_raw_frame(
         result["correction_disclosure_date"] = _parse_financial_correction_date(
             result["correction_disclosure_date"]
         )
-        result["is_corrected"] = strict_bool_series(
-            result["is_corrected"], error="invalid_financial_correction_flag"
-        )
+        result["is_corrected"] = _parse_correction_flag(result["is_corrected"])
         result["report_type"] = strict_string_series(
             result["report_type"], error="invalid_financial_report_type"
         )
@@ -556,51 +653,62 @@ def normalize_raw_frame(
             ["source_asset_id", "timestamp", "report_type"], inplace=True
         )
         return result.reset_index(drop=True)
-    if data_id == "financial_disclosures":
-        result = mapped
-        result["source_asset_id"] = strict_string_series(
-            result["asset_id"], error="invalid_financial_disclosure_asset"
-        )
-        result["table_id"] = strict_string_series(
-            result["table_id"], error="invalid_financial_disclosure_table"
-        )
-        if not set(result["table_id"]).issubset(
-            {"FS_Combas", "FS_Comins", "FS_Comscfd"}
-        ):
-            raise ValueError("invalid_financial_disclosure_table")
-        for column in ("report_period", "first_disclosure_date"):
-            result[column] = strict_timestamp_series(
-                result[column], error=f"invalid_financial_disclosure_{column}"
-            ).dt.normalize()
-        result["timestamp"] = result["first_disclosure_date"]
-        key = ["source_asset_id", "table_id", "report_period"]
-        if bool(result.duplicated(key, keep=False).any()):
-            raise ValueError("duplicate_financial_disclosure_key")
-        return (
-            result.loc[:, FINANCIAL_DISCLOSURE_INTERIM_COLUMNS]
-            .sort_values([*key, "timestamp"], kind="mergesort")
-            .reset_index(drop=True)
-        )
     if data_id == MARKET_BARS_DATA_ID:
         result = mapped
-        result["limit_status"] = result["limit_status"].astype("float64")
+        result["limit_status"] = strict_finite_numeric_series(
+            result["limit_status"], error="invalid_csmar_limit_status", allow_null=True
+        )
         result["trade_date"] = strict_timestamp_series(
             result["trade_date"],
             error="invalid_csmar_trade_date",
         )
         result["timestamp"] = result["trade_date"]
         result["source_asset_id"] = result["stock_code"]
-        result["period_return"] = result["return_with_dividend"]
-        result["adj_close"] = result["comparable_close_with_dividend"]
-        result["adj_open"] = result["open"] * result["adj_close"] / result["close"]
+        result["period_return"] = strict_finite_numeric_series(
+            result["return_with_dividend"],
+            error="invalid_csmar_period_return",
+            allow_null=True,
+        )
+        result["adj_close"] = strict_finite_numeric_series(
+            result["comparable_close_with_dividend"],
+            error="invalid_csmar_adj_close",
+            allow_null=True,
+        )
+        close = strict_finite_numeric_series(
+            result["close"], error="invalid_csmar_close", allow_null=True
+        )
+        result["adj_open"] = (result["open"] * result["adj_close"] / close).where(
+            close.ne(0.0)
+        )
         result["float_market_cap"] = result["float_market_cap_thousand"] * 1000.0
         result["total_market_cap"] = result["total_market_cap_thousand"] * 1000.0
-        result["turnover"] = pd.Series(
-            float("nan"),
-            index=result.index,
-            dtype="float64",
+        result["after_hours_volume"] = strict_finite_numeric_series(
+            result["after_hours_volume"],
+            error="invalid_csmar_after_hours_volume",
+            allow_null=True,
+        ).fillna(0.0)
+        result["after_hours_amount"] = strict_finite_numeric_series(
+            result["after_hours_amount"],
+            error="invalid_csmar_after_hours_amount",
+            allow_null=True,
+        ).fillna(0.0)
+        result["volume"] = (
+            strict_finite_numeric_series(
+                result["volume"], error="invalid_csmar_volume", allow_null=True
+            )
+            + result["after_hours_volume"]
         )
-        result.sort_values(["source_asset_id", "timestamp"], inplace=True)
+        result["amount"] = (
+            strict_finite_numeric_series(
+                result["amount"], error="invalid_csmar_amount", allow_null=True
+            )
+            + result["after_hours_amount"]
+        )
+        result["turnover"] = pd.Series(
+            float("nan"), index=result.index, dtype="float64"
+        )
+        result = result.loc[:, MARKET_BARS_INTERIM_COLUMNS]
+        result = result.sort_values(["source_asset_id", "timestamp"], kind="mergesort")
         result.reset_index(drop=True, inplace=True)
         return result
     if data_id == "adjustment":
@@ -634,12 +742,7 @@ def normalize_raw_frame(
                     column,
                     error_code="invalid_stock_master_date",
                 )
-        status_change = (
-            result["status_change_date"]
-            if "status_change_date" in result.columns
-            else pd.Series(pd.NaT, index=result.index)
-        )
-        result["timestamp"] = status_change.combine_first(result["listing_date"])
+        result["timestamp"] = result["listing_date"]
         if result["timestamp"].isna().any():
             raise ValueError("missing_stock_master_effective_timestamp")
         result["source_asset_id"] = result["stock_code"]
@@ -687,7 +790,191 @@ def normalize_raw_frame(
         result["source_asset_id"] = result["index_code"]
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
         return result.reset_index(drop=True)
+    if data_id == "industry_classification":
+        result = mapped
+        result["implement_date"] = strict_timestamp_series(
+            result["implement_date"], error="invalid_industry_implement_date"
+        ).dt.normalize()
+        result["timestamp"] = result["implement_date"]
+        result["source_asset_id"] = result["stock_code"]
+        return (
+            result.loc[:, INDUSTRY_CLASSIFICATION_COLUMNS]
+            .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    if data_id == "industry_classification_annual":
+        result = mapped
+        result["effective_date"] = strict_timestamp_series(
+            result["effective_date"], error="invalid_industry_annual_date"
+        ).dt.normalize()
+        result["timestamp"] = result["effective_date"]
+        result["source_asset_id"] = result["stock_code"]
+        return (
+            result.loc[:, INDUSTRY_CLASSIFICATION_ANNUAL_COLUMNS]
+            .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    if data_id == "industry_classification_sets":
+        result = mapped
+        for column in INDUSTRY_CLASSIFICATION_SETS_COLUMNS:
+            result[column] = strict_string_series(
+                result[column], error="invalid_industry_dictionary_value"
+            )
+        return (
+            result.loc[:, INDUSTRY_CLASSIFICATION_SETS_COLUMNS]
+            .drop_duplicates(keep="first")
+            .reset_index(drop=True)
+        )
+    if data_id == "industry_classification_versions":
+        result = mapped
+        result["implement_date"] = strict_timestamp_series(
+            result["implement_date"], error="invalid_industry_version_date"
+        ).dt.normalize()
+        result["abandon_date"] = _parse_optional_csmar_date(
+            result["abandon_date"],
+            "abandon_date",
+            error_code="invalid_industry_version_date",
+        )
+        result["timestamp"] = result["implement_date"]
+        return (
+            result.loc[:, INDUSTRY_CLASSIFICATION_VERSIONS_COLUMNS]
+            .sort_values(["timestamp", "industry_standard_id"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    if data_id in {
+        "listing_status_changes",
+        "stock_info_changes",
+        "stock_info_annual",
+        "trading_no_limit",
+        "special_treatment_changes",
+        "equity_changes",
+    }:
+        return _normalize_csmar_aux_frame(mapped, data_id)
+    if data_id == "analyst_forecast":
+        result = mapped
+        result["source_asset_id"] = normalize_stock_code(result["stock_code"])
+        result["declare_date"] = strict_timestamp_series(
+            result["declare_date"], error="invalid_analyst_declare_date"
+        ).dt.normalize()
+        result["forecast_end_date"] = strict_timestamp_series(
+            result["forecast_end_date"], error="invalid_analyst_forecast_end_date"
+        ).dt.normalize()
+        result["institution_id"] = strict_string_series(
+            result["institution_id"], error="invalid_analyst_institution_id"
+        )
+        for column in ("forecast_eps", "forecast_pe"):
+            result[column] = strict_finite_numeric_series(
+                result[column],
+                error=f"invalid_analyst_value: {column}",
+                allow_null=True,
+            )
+        result["timestamp"] = result["declare_date"]
+        return (
+            result.loc[:, ANALYST_FORECAST_COLUMNS]
+            .sort_values(
+                ["source_asset_id", "timestamp", "forecast_end_date", "institution_id"],
+                kind="mergesort",
+            )
+            .reset_index(drop=True)
+        )
     raise ValueError(f"unsupported_csmar_data_id: {data_id}")
+
+
+def _normalize_csmar_aux_frame(frame: pd.DataFrame, data_id: str) -> pd.DataFrame:
+    result = frame
+    result["source_asset_id"] = (
+        result["stock_code"].map(
+            lambda value: value if isinstance(value, str) else str(value)
+        )
+        if "stock_code" in result
+        else result.get("source_asset_id")
+    )
+    if "source_asset_id" in result:
+        result["source_asset_id"] = strict_string_series(
+            result["source_asset_id"], error="invalid_csmar_aux_asset_id"
+        )
+    if data_id == "listing_status_changes":
+        result["announcement_date"] = _parse_optional_csmar_date(
+            result["announcement_date"],
+            "announcement_date",
+            error_code="invalid_listing_status_date",
+        )
+        result["effective_date"] = strict_timestamp_series(
+            result["effective_date"], error="invalid_listing_status_date"
+        ).dt.normalize()
+        result["timestamp"] = result["effective_date"]
+        return (
+            result.loc[:, LISTING_STATUS_CHANGE_COLUMNS]
+            .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    if data_id == "stock_info_changes":
+        result["announcement_date"] = _parse_optional_csmar_date(
+            result["announcement_date"],
+            "announcement_date",
+            error_code="invalid_stock_info_change_date",
+        )
+        result["effective_date"] = strict_timestamp_series(
+            result["effective_date"], error="invalid_stock_info_change_date"
+        ).dt.normalize()
+        result["timestamp"] = result["effective_date"]
+        return (
+            result.loc[:, STOCK_INFO_CHANGE_COLUMNS]
+            .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    if data_id == "stock_info_annual":
+        for column in ("effective_date", "listing_date"):
+            result[column] = strict_timestamp_series(
+                result[column], error="invalid_stock_info_annual_date", allow_null=True
+            ).dt.normalize()
+        result["timestamp"] = result["effective_date"]
+        return (
+            result.loc[:, STOCK_INFO_ANNUAL_COLUMNS]
+            .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    if data_id == "trading_no_limit":
+        result["trade_date"] = strict_timestamp_series(
+            result["trade_date"], error="invalid_trading_no_limit_date"
+        ).dt.normalize()
+        result["timestamp"] = result["trade_date"]
+        result["reason"] = strict_string_series(
+            result["reason"], error="invalid_trading_no_limit_reason"
+        )
+        return (
+            result.loc[:, TRADING_NO_LIMIT_COLUMNS]
+            .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    if data_id == "special_treatment_changes":
+        result["announcement_date"] = strict_timestamp_series(
+            result["announcement_date"], error="invalid_special_treatment_date"
+        ).dt.normalize()
+        result["effective_date"] = strict_timestamp_series(
+            result["effective_date"], error="invalid_special_treatment_date"
+        ).dt.normalize()
+        result["timestamp"] = result["effective_date"]
+        result["change_type"] = strict_string_series(
+            result["change_type"], error="invalid_special_treatment_change_type"
+        )
+        return (
+            result.loc[:, SPECIAL_TREATMENT_CHANGE_COLUMNS]
+            .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+    result["report_period"] = strict_timestamp_series(
+        result["report_period"], error="invalid_equity_change_period"
+    ).dt.normalize()
+    result["timestamp"] = result["report_period"]
+    result["report_type"] = strict_string_series(
+        result["report_type"], error="invalid_equity_change_report_type"
+    )
+    return (
+        result.loc[:, EQUITY_CHANGE_COLUMNS]
+        .sort_values(["source_asset_id", "timestamp"], kind="mergesort")
+        .reset_index(drop=True)
+    )
 
 
 def _parse_optional_csmar_date(
@@ -721,6 +1008,13 @@ def _parse_financial_correction_date(series: pd.Series) -> pd.Series:
             raise ValueError("invalid_financial_correction_date")
         latest.append(parsed.iloc[-1])
     return pd.Series(latest, index=series.index, dtype="datetime64[ns]")
+
+
+def _parse_correction_flag(series: pd.Series) -> pd.Series:
+    numeric = pd.to_numeric(series, errors="raise")
+    if not numeric.isin((0, 1)).all():
+        raise ValueError("invalid_financial_correction_flag")
+    return numeric.astype(bool)
 
 
 def filter_by_source_date_range(
@@ -1227,8 +1521,12 @@ def _transform_interim_chunk(
 
 
 def _require_interim_transform_headroom(required_bytes: int, budget_bytes: int) -> None:
-    if required_bytes > budget_bytes:
-        raise _InterimCapacityExceeded(required_bytes, budget_bytes)
+    del budget_bytes
+    policy = current_runtime_resource_policy()
+    explicit = None if policy is None else policy.explicit_memory_cap_bytes
+    if explicit is not None and policy is not None:
+        if policy.used_memory_bytes + required_bytes > explicit:
+            raise _InterimCapacityExceeded(required_bytes, explicit)
 
 
 def _normalization_preallocation_bytes(frame: pd.DataFrame, *, data_id: str) -> int:
@@ -1515,8 +1813,19 @@ def _append_reference_duplicate_summary(
 
 
 def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
-    if data_id in {"index_membership", "index_weights"}:
-        primary_key = ("source_asset_id", "constituent_asset_id", "timestamp")
+    if data_id == "industry_classification_sets":
+        primary_key = ("industry_standard_id", "industry_code")
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE,
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=(),
+        )
+    if data_id == "industry_classification_versions":
+        primary_key = ("industry_standard_id", "timestamp")
         return InterimDataSpec(
             data_id=data_id,
             source_id=SourceId(SOURCE_ID),
@@ -1526,22 +1835,47 @@ def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
             primary_key=primary_key,
             partition_columns=("year",),
         )
-    if data_id == "financial_disclosures":
-        primary_key = (
-            "source_asset_id",
-            "table_id",
-            "report_period",
-            "timestamp",
-        )
+    if data_id in {"listing_status_changes", "stock_info_changes"}:
+        primary_key = ("source_asset_id", "timestamp", "changed_item")
         return InterimDataSpec(
             data_id=data_id,
             source_id=SourceId(SOURCE_ID),
             frequency=DataFrequency.DAILY,
             grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles={
-                **_column_roles(columns, primary_key=primary_key),
-                "first_disclosure_date": ColumnRole.TIMESTAMP,
-            },
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
+    if data_id == "special_treatment_changes":
+        primary_key = ("source_asset_id", "timestamp", "change_type")
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
+    if data_id == "equity_changes":
+        primary_key = ("source_asset_id", "timestamp", "report_type")
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
+    if data_id in {"index_membership", "index_weights"}:
+        primary_key = ("source_asset_id", "constituent_asset_id", "timestamp")
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles=_column_roles(columns, primary_key=primary_key),
             primary_key=primary_key,
             partition_columns=("year",),
         )
@@ -1665,7 +1999,16 @@ def _date_column(data_id: str) -> str:
         "financial_balance",
         "financial_income",
         "financial_cashflow",
-        "financial_disclosures",
+        "industry_classification",
+        "industry_classification_annual",
+        "industry_classification_versions",
+        "listing_status_changes",
+        "stock_info_changes",
+        "stock_info_annual",
+        "trading_no_limit",
+        "special_treatment_changes",
+        "equity_changes",
+        "analyst_forecast",
     }:
         return "timestamp"
     raise ValueError(f"data_id_has_no_filtering_date_column: {data_id}")

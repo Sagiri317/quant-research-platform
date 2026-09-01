@@ -50,9 +50,10 @@ _MODEL_METADATA_BASE_KEYS = frozenset(
         "resolved_hyperparameters",
         "random_seed",
         "max_train_rows",
-        "purge_gap_steps",
         "dependency_status",
         "coefficient_count",
+        "sample_weight_protocol",
+        "scaler",
     }
 )
 _MODEL_METADATA_FEATURE_KEYS = frozenset(
@@ -69,6 +70,7 @@ _MODEL_SELECTION_KEYS = frozenset(
         "selected_model_id",
         "selected_model_input_columns",
         "candidate_model_ids",
+        "tie_break_order",
         "selection_metric",
         "selection_direction",
         "validation_start",
@@ -184,11 +186,21 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
         "coefficient_count",
         "invalid_model_metadata",
     )
-    require_non_negative_metadata_int(
-        metadata,
-        "purge_gap_steps",
-        "invalid_model_metadata",
-    )
+    if metadata["sample_weight_protocol"] != "equal_date_total_equal_sum_n_train":
+        raise ValueError("invalid_model_metadata")
+    scaler = metadata["scaler"]
+    if scaler is not None:
+        if (
+            type(scaler) is not dict
+            or set(scaler) != {"columns", "weighted_mean", "weighted_population_scale"}
+            or type(scaler["columns"]) is not list
+            or type(scaler["weighted_mean"]) is not list
+            or type(scaler["weighted_population_scale"]) is not list
+            or len(scaler["columns"]) != len(scaler["weighted_mean"])
+            or len(scaler["columns"]) != len(scaler["weighted_population_scale"])
+            or tuple(scaler["columns"]) != tuple(metadata["input_columns"])
+        ):
+            raise ValueError("invalid_model_metadata")
     if metadata["max_train_rows"] is not None:
         require_non_negative_metadata_int(
             metadata,
@@ -307,6 +319,13 @@ def validate_model_selection_metadata_shape(metadata: object) -> None:
         "candidate_model_ids",
         "invalid_model_metadata",
     )
+    tie_break_order = require_metadata_string_list(
+        metadata,
+        "tie_break_order",
+        "invalid_model_metadata",
+    )
+    if set(tie_break_order) != set(candidate_model_ids):
+        raise ValueError("invalid_model_metadata")
     require_metadata_string_list(
         metadata,
         "selected_model_input_columns",
@@ -459,7 +478,6 @@ def validate_prediction_output_metadata_shape(
             sample_filter_mode=model_metadata["sample_filter_mode"],
             hyperparameters=model_metadata["hyperparameters"],
             random_seed=model_metadata["random_seed"],
-            purge_gap_steps=model_metadata["purge_gap_steps"],
             max_train_rows=model_metadata["max_train_rows"],
         )
         spec = PredictionSpec(

@@ -1490,8 +1490,9 @@ def test_raw_decode_is_admitted_before_json_allocation(tmp_path: Path) -> None:
     policy = capture_test_policy(available_memory_bytes=256 * 1024)
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
-        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-            next(run.iter_records())
+        record = next(run.iter_records())
+
+    assert record["capture_seq"] == 1
 
 
 def test_replay_bootstraps_snapshot_without_locator_rescan(

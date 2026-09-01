@@ -1,11 +1,39 @@
 """Portfolio dataframe output column contracts."""
 
 POSITION_COLUMNS = ["timestamp", "asset", "signal", "position"]
+TARGET_WEIGHT_COLUMNS = ["timestamp", "asset", "signal", "target_weight"]
+EXECUTION_COLUMNS = [
+    "timestamp",
+    "asset",
+    "signal",
+    "side",
+    "pre_trade_weight",
+    "target_weight",
+    "realized_weight",
+    "blocked",
+]
+REALIZED_HOLDINGS_CASH_COLUMNS = [
+    "timestamp",
+    "asset",
+    "signal",
+    "realized_weight",
+    "cash_weight",
+]
+NAV_RETURN_COLUMNS = [
+    "timestamp",
+    "signal",
+    "gross_portfolio_return",
+    "net_portfolio_return",
+    "cost",
+    "turnover",
+    "nav",
+    "cumulative_cost",
+]
 TURNOVER_COLUMNS = ["timestamp", "signal", "turnover"]
 RETURNS_COLUMNS = [
     "timestamp",
     "signal",
-    "return_source_column",
+    "economic_return_column",
     "portfolio_mode",
     "long_return",
     "short_return",

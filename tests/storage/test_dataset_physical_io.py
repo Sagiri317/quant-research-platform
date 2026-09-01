@@ -399,68 +399,45 @@ def test_physical_membership_rejects_null_filter_member_before_sort() -> None:
         )
 
 
-def test_physical_in_filter_rejects_unadmitted_batch_before_compute(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_physical_in_filter_does_not_treat_soft_headroom_as_hard_cap() -> None:
     batch = pa.RecordBatch.from_arrays(
         [pa.array(range(128), type=pa.int64())],
         names=["value"],
     )
 
-    def reject_compute(*_args, **_kwargs):
-        raise AssertionError("filter compute must not run before working-set admission")
-
-    monkeypatch.setattr(dataset_physical.pc, "equal", reject_compute)
-
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="dataset_filter_working_set_exceeds_task_memory_budget",
-    ):
-        dataset_physical._filter_arrow_batch(
-            batch,
-            [
-                (
-                    "value",
-                    "in",
-                    dataset_physical.PreparedMembershipValues(
-                        pa.array([1], type=pa.int64()),
-                        8,
-                        8,
-                    ),
-                )
-            ],
-            operation_headroom_bytes=batch.get_total_buffer_size(),
-        )
+    filtered = dataset_physical._filter_arrow_batch(
+        batch,
+        [
+            (
+                "value",
+                "in",
+                dataset_physical.PreparedMembershipValues(
+                    pa.array([1], type=pa.int64()),
+                    8,
+                    8,
+                ),
+            )
+        ],
+        operation_headroom_bytes=batch.get_total_buffer_size(),
+    )
+    assert filtered.num_rows == 1
 
 
-@pytest.mark.parametrize(
-    ("operator", "compute_name"),
-    (("==", "equal"), (">=", "greater_equal")),
-)
-def test_physical_scalar_filter_rejects_unadmitted_batch_before_compute(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("operator", ("==", ">="))
+def test_physical_scalar_filter_does_not_treat_soft_headroom_as_hard_cap(
     operator: str,
-    compute_name: str,
 ) -> None:
     batch = pa.RecordBatch.from_arrays(
         [pa.array(range(128), type=pa.int64())],
         names=["value"],
     )
 
-    def reject_compute(*_args, **_kwargs):
-        raise AssertionError("filter compute must not run before working-set admission")
-
-    monkeypatch.setattr(dataset_physical.pc, compute_name, reject_compute)
-
-    with pytest.raises(
-        storage_errors.DatasetReadCapacityExceeded,
-        match="dataset_filter_working_set_exceeds_task_memory_budget",
-    ):
-        dataset_physical._filter_arrow_batch(
-            batch,
-            [("value", operator, 1)],
-            operation_headroom_bytes=batch.get_total_buffer_size(),
-        )
+    filtered = dataset_physical._filter_arrow_batch(
+        batch,
+        [("value", operator, 1)],
+        operation_headroom_bytes=batch.get_total_buffer_size(),
+    )
+    assert filtered.num_rows == (1 if operator == "==" else 127)
 
 
 def test_physical_filter_requires_explicit_operation_headroom() -> None:

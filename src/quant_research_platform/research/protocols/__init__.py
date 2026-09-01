@@ -1,0 +1,1 @@
+"""Frozen research protocol owners."""

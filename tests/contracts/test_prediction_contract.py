@@ -129,7 +129,7 @@ def test_prediction_spec_rejects_invalid_model_selection_window() -> None:
 def test_prediction_spec_binds_paired_train_and_evaluation_asset_scopes() -> None:
     spec = PredictionSpec(
         prediction_id="btc_leave_out",
-        model_id="standardized_ridge",
+        model_id="ridge_regression",
         research_dataset_id="crypto_hft",
         train_end="2024-01-31T00:00:00",
         test_start="2024-02-01T00:00:00",
@@ -142,7 +142,7 @@ def test_prediction_spec_binds_paired_train_and_evaluation_asset_scopes() -> Non
     with pytest.raises(ValueError, match="prediction_asset_scopes_must_be_paired"):
         PredictionSpec(
             prediction_id="bad_scope",
-            model_id="standardized_ridge",
+            model_id="ridge_regression",
             research_dataset_id="crypto_hft",
             train_end="2024-01-31T00:00:00",
             test_start="2024-02-01T00:00:00",

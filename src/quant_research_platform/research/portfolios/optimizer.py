@@ -1,0 +1,328 @@
+"""Deterministic SLSQP benchmark-relative optimizer."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+import pandas as pd
+from scipy.optimize import minimize
+
+
+@dataclass(frozen=True)
+class OptimizerConfig:
+    initial_nav: float = 1_000_000_000.0
+    active_name_limit: float = 0.005
+    tracking_error_limit: float = 0.05
+    target_turnover_limit: float = 0.20
+    industry_active_limit: float = 0.02
+    style_active_limit: float = 0.20
+    adv_participation_limit: float = 0.05
+    commission_bps: float = 3.0
+    slippage_bps: float = 5.0
+    impact_bps: float = 25.0
+    solver_ftol: float = 1e-12
+    solver_maxiter: int = 1000
+
+    def __post_init__(self) -> None:
+        _validate_config(self)
+
+
+@dataclass(frozen=True)
+class OptimizationResult:
+    weights: pd.Series
+    predicted_tracking_error: float
+    factor_variance: float
+    specific_variance: float
+    target_turnover: float
+    expected_transaction_cost: float
+    maximum_adv_participation: float
+
+
+def optimize_portfolio(
+    assets: pd.DataFrame,
+    *,
+    factor_covariance: pd.DataFrame,
+    industry_columns: tuple[str, ...] = (),
+    style_columns: tuple[str, ...] = (),
+    financial_column: str | None = None,
+    config: OptimizerConfig | None = None,
+    eligibility_column: str | None = None,
+) -> OptimizationResult:
+    """Maximize expected active alpha minus expected trade cost under hard limits."""
+
+    required = {
+        "asset_id",
+        "expected_alpha",
+        "current_weight",
+        "benchmark_weight",
+        "specific_variance",
+        "adv",
+        *industry_columns,
+        *style_columns,
+    }
+    if not isinstance(assets, pd.DataFrame) or not required.issubset(assets.columns):
+        raise ValueError("optimizer_columns_invalid")
+    if not industry_columns and not style_columns:
+        raise ValueError("optimizer_exposure_columns_required")
+    config = OptimizerConfig() if config is None else config
+    if eligibility_column is not None and eligibility_column not in assets:
+        raise ValueError("optimizer_eligibility_column_missing")
+    if financial_column is not None and financial_column not in assets:
+        raise ValueError("optimizer_financial_column_missing")
+    columns = tuple(dict.fromkeys((*industry_columns, *style_columns)))
+    if (
+        tuple(factor_covariance.index) != columns
+        or tuple(factor_covariance.columns) != columns
+    ):
+        raise ValueError("optimizer_covariance_columns_invalid")
+    covariance = factor_covariance.to_numpy(dtype="float64")
+    if not np.isfinite(covariance).all() or not np.allclose(covariance, covariance.T):
+        raise ValueError("optimizer_covariance_invalid")
+    if float(np.linalg.eigvalsh(covariance).min(initial=0.0)) < -1e-12:
+        raise ValueError("optimizer_covariance_not_psd")
+    data = assets.copy().reset_index(drop=True)
+    if data["asset_id"].duplicated().any():
+        raise ValueError("optimizer_asset_duplicate")
+    for column in (
+        "expected_alpha",
+        "current_weight",
+        "benchmark_weight",
+        "specific_variance",
+        "adv",
+        *columns,
+    ):
+        data[column] = pd.to_numeric(data[column], errors="raise").astype("float64")
+    for column in (eligibility_column, financial_column):
+        if column is not None and (
+            not pd.api.types.is_bool_dtype(data[column]) or data[column].isna().any()
+        ):
+            raise ValueError("optimizer_boolean_column_invalid")
+    for column in ("current_weight", "benchmark_weight"):
+        if data[column].lt(0.0).any():
+            raise ValueError("optimizer_weight_invalid")
+    current = data["current_weight"].to_numpy()
+    benchmark = data["benchmark_weight"].to_numpy()
+    if not np.isclose(current.sum(), 1.0) or not np.isclose(benchmark.sum(), 1.0):
+        raise ValueError("optimizer_weight_sum_invalid")
+    incomplete = (
+        ~np.isfinite(data["expected_alpha"])
+        | ~np.isfinite(data["specific_variance"])
+        | data["specific_variance"].lt(0.0)
+        | ~np.isfinite(data["adv"])
+        | data["adv"].le(0.0)
+        | ~np.isfinite(data.loc[:, columns]).all(axis=1)
+    )
+    data["expected_alpha"] = data["expected_alpha"].where(~incomplete, 0.0)
+    data["specific_variance"] = data["specific_variance"].where(~incomplete, 0.0)
+    data["adv"] = data["adv"].where(~incomplete, np.inf)
+    exposure = data.loc[:, columns].to_numpy(dtype="float64")
+    expected_alpha = data["expected_alpha"].to_numpy(dtype="float64")
+    specific = data["specific_variance"].to_numpy(dtype="float64")
+    adv = data["adv"].to_numpy(dtype="float64")
+    bounds = _bounds(
+        data,
+        benchmark=benchmark,
+        financial_column=financial_column,
+        eligibility_column=eligibility_column,
+        incomplete=incomplete.to_numpy(dtype=bool),
+        config=config,
+    )
+
+    def risk(weights: np.ndarray) -> float:
+        active = weights - benchmark
+        return float(
+            active @ exposure @ covariance @ exposure.T @ active
+            + np.sum(specific * active**2)
+        )
+
+    def transaction_cost(weights: np.ndarray) -> float:
+        quantity = np.abs(weights - current) * config.initial_nav
+        rates = (config.commission_bps + config.slippage_bps) / 10_000.0
+        impact = config.impact_bps / 10_000.0 * np.sqrt(quantity / adv)
+        return float(np.sum(quantity * (rates + impact)))
+
+    constraints = [
+        {"type": "eq", "fun": lambda weights: float(weights.sum() - 1.0)},
+        {
+            "type": "ineq",
+            "fun": lambda weights: float(
+                config.tracking_error_limit**2 - risk(weights)
+            ),
+        },
+        {
+            "type": "ineq",
+            "fun": lambda weights: float(
+                config.target_turnover_limit - 0.5 * np.abs(weights - current).sum()
+            ),
+        },
+        {
+            "type": "ineq",
+            "fun": lambda weights: (
+                config.industry_active_limit
+                - np.abs(exposure[:, : len(industry_columns)].T @ (weights - benchmark))
+            ),
+        },
+        {
+            "type": "ineq",
+            "fun": lambda weights: (
+                config.style_active_limit
+                - np.abs(exposure[:, len(industry_columns) :].T @ (weights - benchmark))
+            ),
+        },
+        {
+            "type": "ineq",
+            "fun": lambda weights: (
+                config.adv_participation_limit
+                - np.abs(weights - current) * config.initial_nav / adv
+            ),
+        },
+    ]
+    result = minimize(
+        lambda weights: float(
+            -(expected_alpha @ (weights - benchmark))
+            + transaction_cost(weights) / config.initial_nav
+        ),
+        current.copy(),
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"ftol": config.solver_ftol, "maxiter": config.solver_maxiter},
+    )
+    if not result.success:
+        raise ValueError("optimizer_failed_closed")
+    weights = np.asarray(result.x, dtype="float64")
+    _verify_solution(
+        weights,
+        bounds=bounds,
+        current=current,
+        benchmark=benchmark,
+        exposure=exposure,
+        covariance=covariance,
+        specific=specific,
+        adv=adv,
+        config=config,
+        industry_count=len(industry_columns),
+    )
+    active = weights - benchmark
+    factor_variance = float(active @ exposure @ covariance @ exposure.T @ active)
+    specific_variance = float(np.sum(specific * active**2))
+    participation = np.abs(weights - current) * config.initial_nav / adv
+    return OptimizationResult(
+        weights=pd.Series(weights, index=data["asset_id"], name="weight"),
+        predicted_tracking_error=float(np.sqrt(factor_variance + specific_variance)),
+        factor_variance=factor_variance,
+        specific_variance=specific_variance,
+        target_turnover=float(0.5 * np.abs(weights - current).sum()),
+        expected_transaction_cost=transaction_cost(weights),
+        maximum_adv_participation=float(participation.max(initial=0.0)),
+    )
+
+
+def _bounds(
+    data: pd.DataFrame,
+    *,
+    benchmark: np.ndarray,
+    financial_column: str | None,
+    eligibility_column: str | None,
+    incomplete: np.ndarray,
+    config: OptimizerConfig,
+) -> tuple[tuple[float, float], ...]:
+    bounds: list[tuple[float, float]] = []
+    for position, row in data.iterrows():
+        fixed = (
+            (financial_column is not None and bool(row[financial_column]))
+            or float(benchmark[position]) == 0.0
+            or (eligibility_column is not None and not bool(row[eligibility_column]))
+            or incomplete[position]
+        )
+        if fixed:
+            bounds.append((float(benchmark[position]), float(benchmark[position])))
+            continue
+        bounds.append(
+            (
+                max(0.0, float(benchmark[position]) - config.active_name_limit),
+                min(1.0, float(benchmark[position]) + config.active_name_limit),
+            )
+        )
+    return tuple(bounds)
+
+
+def _verify_solution(
+    weights: np.ndarray,
+    *,
+    bounds: tuple[tuple[float, float], ...],
+    current: np.ndarray,
+    benchmark: np.ndarray,
+    exposure: np.ndarray,
+    covariance: np.ndarray,
+    specific: np.ndarray,
+    adv: np.ndarray,
+    config: OptimizerConfig,
+    industry_count: int,
+) -> None:
+    tolerance = 1e-8
+    active = weights - benchmark
+    risk = float(
+        active @ exposure @ covariance @ exposure.T @ active
+        + np.sum(specific * active**2)
+    )
+    if not np.isfinite(weights).all() or not np.isclose(
+        weights.sum(), 1.0, atol=tolerance
+    ):
+        raise ValueError("optimizer_solution_invalid")
+    if any(
+        value < lower - tolerance or value > upper + tolerance
+        for value, (lower, upper) in zip(weights, bounds, strict=True)
+    ):
+        raise ValueError("optimizer_solution_invalid")
+    if risk > config.tracking_error_limit**2 + tolerance:
+        raise ValueError("optimizer_solution_invalid")
+    if 0.5 * np.abs(weights - current).sum() > config.target_turnover_limit + tolerance:
+        raise ValueError("optimizer_solution_invalid")
+    if np.any(
+        np.abs(exposure[:, :industry_count].T @ active)
+        > config.industry_active_limit + tolerance
+    ):
+        raise ValueError("optimizer_solution_invalid")
+    if np.any(
+        np.abs(exposure[:, industry_count:].T @ active)
+        > config.style_active_limit + tolerance
+    ):
+        raise ValueError("optimizer_solution_invalid")
+    if np.any(
+        np.abs(weights - current) * config.initial_nav / adv
+        > config.adv_participation_limit + tolerance
+    ):
+        raise ValueError("optimizer_solution_invalid")
+
+
+def _validate_config(config: OptimizerConfig) -> None:
+    values = (
+        config.initial_nav,
+        config.active_name_limit,
+        config.tracking_error_limit,
+        config.target_turnover_limit,
+        config.industry_active_limit,
+        config.style_active_limit,
+        config.adv_participation_limit,
+        config.commission_bps,
+        config.slippage_bps,
+        config.impact_bps,
+        config.solver_ftol,
+    )
+    if any(
+        type(value) is not float or not np.isfinite(value) or value < 0.0
+        for value in values
+    ):
+        raise ValueError("optimizer_config_invalid")
+    if (
+        config.initial_nav <= 0.0
+        or config.active_name_limit <= 0.0
+        or config.tracking_error_limit <= 0.0
+        or config.target_turnover_limit <= 0.0
+        or config.adv_participation_limit <= 0.0
+    ):
+        raise ValueError("optimizer_config_invalid")
+    if type(config.solver_maxiter) is not int or config.solver_maxiter <= 0:
+        raise ValueError("optimizer_config_invalid")

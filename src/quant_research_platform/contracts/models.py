@@ -1,4 +1,4 @@
-"""Model contracts for non-DL local research."""
+"""Explicit model capability and fitting contracts."""
 
 from __future__ import annotations
 
@@ -23,91 +23,32 @@ from quant_research_platform.contracts.validation import (
 
 @dataclass(frozen=True)
 class _ModelAlgorithmFacts:
+    """Capability facts only; research parameters belong to a protocol."""
+
     dependency_package: str | None = None
-    default_hyperparameters: Mapping[str, object] = field(default_factory=dict)
-    smoke_hyperparameters: Mapping[str, object] = field(default_factory=dict)
     input_kind: str = "feature_inputs"
     parallel: bool = False
 
 
 _MODEL_ALGORITHM_FACTS = {
     "linear_regression": _ModelAlgorithmFacts(),
-    "ridge_regression": _ModelAlgorithmFacts(
-        "sklearn",
-        default_hyperparameters={"alpha": 1.0},
-    ),
-    "standardized_ridge_regression": _ModelAlgorithmFacts(
-        "sklearn",
-        default_hyperparameters={"alpha": 1.0},
-    ),
-    "lasso_regression": _ModelAlgorithmFacts(
-        "sklearn",
-        default_hyperparameters={"alpha": 0.001, "max_iter": 10_000},
-    ),
-    "elastic_net": _ModelAlgorithmFacts(
-        "sklearn",
-        default_hyperparameters={
-            "alpha": 0.001,
-            "l1_ratio": 0.5,
-            "max_iter": 10_000,
-        },
-    ),
-    "huber_regression": _ModelAlgorithmFacts(
-        "sklearn",
-        default_hyperparameters={"max_iter": 1_000},
-    ),
-    "decision_tree_regressor": _ModelAlgorithmFacts(
-        "sklearn",
-    ),
+    "ridge_regression": _ModelAlgorithmFacts("sklearn"),
+    "lasso_regression": _ModelAlgorithmFacts("sklearn"),
+    "elastic_net": _ModelAlgorithmFacts("sklearn"),
+    "huber_regression": _ModelAlgorithmFacts("sklearn"),
+    "decision_tree_regressor": _ModelAlgorithmFacts("sklearn"),
     "random_forest_regressor": _ModelAlgorithmFacts(
         "sklearn",
-        default_hyperparameters={"n_estimators": 20, "n_jobs": -1},
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": -1},
         parallel=True,
     ),
     "extra_trees_regressor": _ModelAlgorithmFacts(
         "sklearn",
-        default_hyperparameters={"n_estimators": 20, "n_jobs": -1},
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 3, "n_jobs": -1},
         parallel=True,
     ),
-    "gradient_boosting_regressor": _ModelAlgorithmFacts(
-        "sklearn",
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2},
-    ),
-    "hist_gradient_boosting_regressor": _ModelAlgorithmFacts(
-        "sklearn",
-        smoke_hyperparameters={"max_iter": 5, "max_leaf_nodes": 7},
-    ),
-    "xgboost_regressor": _ModelAlgorithmFacts(
-        "xgboost",
-        default_hyperparameters={
-            "n_estimators": 20,
-            "max_depth": 3,
-            "learning_rate": 0.1,
-            "objective": "reg:squarederror",
-            "device": "cpu",
-            "n_jobs": -1,
-        },
-        smoke_hyperparameters={"n_estimators": 5, "max_depth": 2, "n_jobs": -1},
-        parallel=True,
-    ),
-    "lightgbm_regressor": _ModelAlgorithmFacts(
-        "lightgbm",
-        default_hyperparameters={
-            "n_estimators": 20,
-            "learning_rate": 0.1,
-            "verbosity": -1,
-            "n_jobs": -1,
-        },
-        smoke_hyperparameters={
-            "n_estimators": 5,
-            "num_leaves": 7,
-            "n_jobs": -1,
-            "verbosity": -1,
-        },
-        parallel=True,
-    ),
+    "gradient_boosting_regressor": _ModelAlgorithmFacts("sklearn"),
+    "hist_gradient_boosting_regressor": _ModelAlgorithmFacts("sklearn"),
+    "xgboost_regressor": _ModelAlgorithmFacts("xgboost", parallel=True),
+    "lightgbm_regressor": _ModelAlgorithmFacts("lightgbm", parallel=True),
     "single_factor_baseline": _ModelAlgorithmFacts(
         input_kind="single_factor_input",
     ),
@@ -134,14 +75,6 @@ def _model_algorithm_facts(algorithm: str) -> _ModelAlgorithmFacts:
 
 def _model_algorithm_ids() -> tuple[str, ...]:
     return tuple(sorted(_MODEL_ALGORITHM_FACTS))
-
-
-def _model_default_hyperparameters(algorithm: str) -> dict[str, object]:
-    return dict(_model_algorithm_facts(algorithm).default_hyperparameters)
-
-
-def _model_smoke_hyperparameters(algorithm: str) -> dict[str, object]:
-    return dict(_model_algorithm_facts(algorithm).smoke_hyperparameters)
 
 
 def _freeze_model_value(value: object) -> object:
@@ -200,22 +133,23 @@ def _resolved_model_hyperparameters_match(
     hyperparameters: dict[str, object],
     resolved_hyperparameters: dict[str, object],
 ) -> bool:
+    """Check an artifact against the explicit protocol parameters."""
+
     try:
-        expected = _model_default_hyperparameters(algorithm)
-        expected.update(hyperparameters)
-        if algorithm in _PARALLEL_MODEL_ALGORITHMS:
-            requested_threads = expected.get("n_jobs")
-            actual_threads = resolved_hyperparameters.get("n_jobs")
+        expected = dict(hyperparameters)
+        if algorithm in _PARALLEL_MODEL_ALGORITHMS and "n_jobs" in expected:
+            requested = expected["n_jobs"]
+            actual = resolved_hyperparameters.get("n_jobs")
             if (
-                type(requested_threads) is not int
-                or requested_threads == 0
-                or type(actual_threads) is not int
-                or actual_threads <= 0
-                or (requested_threads > 0 and actual_threads > requested_threads)
+                type(requested) is not int
+                or requested == 0
+                or type(actual) is not int
+                or actual <= 0
+                or (requested > 0 and actual > requested)
             ):
                 return False
-            expected["n_jobs"] = actual_threads
-    except ValueError:
+            expected["n_jobs"] = actual
+    except (TypeError, ValueError):
         return False
     return resolved_hyperparameters == expected
 
@@ -236,6 +170,8 @@ def _resolved_model_thread_count(value: object) -> int:
 
 @dataclass(frozen=True, kw_only=True)
 class ModelSpec:
+    """A model request with no hidden research defaults."""
+
     model_id: str
     model_algorithm: str
     input_factor_columns: tuple[str, ...] = ()
@@ -244,7 +180,6 @@ class ModelSpec:
     sample_filter_mode: SampleFilterMode = "eligible"
     hyperparameters: Mapping[str, object] = field(default_factory=dict)
     random_seed: int | None = None
-    purge_gap_steps: int = 0
     max_train_rows: int | None = None
     contract_version: str = "0.1"
 
@@ -282,9 +217,9 @@ class ModelSpec:
         reject_filter_input_columns(self.input_feature_columns)
         if self.label_column in self.input_columns:
             raise ValueError("model_label_column_in_inputs")
-        if self.random_seed is not None and isinstance(self.random_seed, bool):
-            raise TypeError("random_seed must be an integer or None")
-        if self.random_seed is not None and not isinstance(self.random_seed, int):
+        if self.random_seed is not None and (
+            type(self.random_seed) is not int or isinstance(self.random_seed, bool)
+        ):
             raise TypeError("random_seed must be an integer or None")
         if (
             self.random_seed is not None
@@ -292,14 +227,8 @@ class ModelSpec:
             and hyperparameters["random_state"] != self.random_seed
         ):
             raise ValueError("model_random_seed_conflicts_with_random_state")
-        if not isinstance(self.purge_gap_steps, int) or isinstance(
-            self.purge_gap_steps, bool
-        ):
-            raise TypeError("purge_gap_steps must be an integer")
-        if self.purge_gap_steps < 0:
-            raise ValueError("purge_gap_steps_must_be_nonnegative")
         if self.max_train_rows is not None and (
-            not isinstance(self.max_train_rows, int)
+            type(self.max_train_rows) is not int
             or isinstance(self.max_train_rows, bool)
         ):
             raise TypeError("max_train_rows must be an integer or None")

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency, ProcessedDataKind
-from quant_research_platform.markets.implementations.crypto.hft import HFT_GRID_MS
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_DATA_ID,
     HFT_LABEL_DATA_ID,
@@ -12,13 +11,10 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
 )
-from quant_research_platform.markets.implementations.crypto.research_datasets import (
-    build_hft_research_dataset_catalog,
-)
-from quant_research_platform.markets.implementations.crypto.research_scenarios import (
+from quant_research_platform.research.protocols.crypto_hft import (
     HFT_MODEL_ALGORITHMS,
-    HFT_MODEL_LABEL_HORIZON_MS,
     build_hft_model_catalog,
+    build_hft_research_dataset_catalog,
 )
 
 
@@ -48,8 +44,5 @@ def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> N
 
     assert {model.model_algorithm for model in models} == set(HFT_MODEL_ALGORITHMS)
     assert all(model.max_train_rows == 100 for model in models)
-    assert all(
-        model.purge_gap_steps == HFT_MODEL_LABEL_HORIZON_MS // HFT_GRID_MS
-        for model in models
-    )
+    assert all(not hasattr(model, "purge_gap_steps") for model in models)
     assert all(not model.model_id.startswith("hft_model_framework") for model in models)

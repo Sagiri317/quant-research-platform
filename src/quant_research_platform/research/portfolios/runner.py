@@ -31,7 +31,10 @@ from quant_research_platform.compute.dataframe.portfolio_constants import (
 )
 from quant_research_platform.compute.dataframe.position_math import validate_positions
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.portfolios import PortfolioSpec
+from quant_research_platform.contracts.portfolios import (
+    EXECUTION_RETURN_COLUMN,
+    PortfolioSpec,
+)
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
@@ -377,7 +380,7 @@ def _portfolio_read_columns(
                     for signal in spec.signals
                     if signal.source_kind != "prediction"
                 ),
-                spec.return_source_column,
+                EXECUTION_RETURN_COLUMN,
                 *prediction_input_columns,
                 *prediction_filter_columns,
                 *(column for column in optional_columns if column is not None),
@@ -562,11 +565,7 @@ def _iter_portfolio_output_chunks(
             validated_panel_bytes = input_bytes
             sorted_panel_bytes = input_bytes
             row_output_bytes = row_count * signal_count * _PORTFOLIO_ROW_WORKING_BYTES
-            period_output_bytes = (
-                (int(spec.execution_lag_steps) + 2)
-                * signal_count
-                * _PORTFOLIO_PERIOD_WORKING_BYTES
-            )
+            period_output_bytes = 2 * signal_count * _PORTFOLIO_PERIOD_WORKING_BYTES
             state_bytes = _portfolio_temporal_state_bytes(temporal_state)
             state_growth_bytes = (
                 row_count * (signal_count + 1) * _PORTFOLIO_ROW_WORKING_BYTES
@@ -599,6 +598,10 @@ def _iter_portfolio_output_chunks(
             )
             output = {
                 "positions": result.positions,
+                "target_weights": result.target_weights,
+                "executions": result.executions,
+                "realized_holdings_cash": result.realized_holdings_cash,
+                "nav_returns": result.nav_returns,
                 "turnover": result.turnover,
                 "cost_breakdown": result.cost_breakdown,
                 "portfolio_returns": result.portfolio_returns,
@@ -1518,8 +1521,13 @@ def _portfolio_temporal_state_bytes(state: _PortfolioTemporalState) -> int:
         for positions in signals.values()
     )
     return (
-        pandas_frame_payload_bytes(state.lag_history)
-        + position_count * _PORTFOLIO_ROW_WORKING_BYTES
+        position_count * _PORTFOLIO_ROW_WORKING_BYTES
+        + sum(
+            len(returns)
+            for signals in state.previous_returns.values()
+            for returns in signals.values()
+        )
+        * 16
     )
 
 

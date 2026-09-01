@@ -25,8 +25,7 @@ from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
     iter_label_frames,
 )
-from quant_research_platform.markets.implementations.crypto.research_scenarios import (
-    HFT_MODEL_LABEL_HORIZON_MS,
+from quant_research_platform.research.protocols.crypto_hft import (
     build_hft_model_catalog,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
@@ -574,10 +573,7 @@ def test_maker_quote_schedule_has_no_prediction_surface() -> None:
 def test_hft_grid_is_the_only_model_and_label_step_owner() -> None:
     assert HFT_GRID_MS == 100
     models = build_hft_model_catalog(training_row_bound=1).list()
-    assert all(
-        model.purge_gap_steps == HFT_MODEL_LABEL_HORIZON_MS // HFT_GRID_MS
-        for model in models
-    )
+    assert all(not hasattr(model, "purge_gap_steps") for model in models)
     rows = [
         {
             "timestamp_ms": index * HFT_GRID_MS,

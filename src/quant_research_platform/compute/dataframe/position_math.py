@@ -101,12 +101,23 @@ def build_signal_positions(
             long_count = len(long_leg)
             short_count = len(short_leg)
             risk_array = risk_values(timestamp_frame, weight_config)
+            capital_array = None
+            if weight_config.method == "float_cap_weighted_quantile":
+                if "float_market_cap" not in timestamp_frame:
+                    raise ValueError("float_market_cap_column_required")
+                capital_array = strict_finite_numeric_series(
+                    timestamp_frame["float_market_cap"],
+                    error="float_market_cap_invalid",
+                ).to_numpy(dtype="float64", copy=False)
             long_weights, long_fallback = _leg_weights(
                 asset_values=asset_values[long_leg],
                 signal_values=signal_values[long_leg],
                 risk_values=None if risk_array is None else risk_array[long_leg],
                 weight_config=weight_config,
                 sign=1.0,
+                capital_values=None
+                if capital_array is None
+                else capital_array[long_leg],
             )
             short_weights, short_fallback = (
                 ({}, "")
@@ -117,6 +128,9 @@ def build_signal_positions(
                     risk_values=(None if risk_array is None else risk_array[short_leg]),
                     weight_config=weight_config,
                     sign=-1.0,
+                    capital_values=(
+                        None if capital_array is None else capital_array[short_leg]
+                    ),
                 )
             )
             fallback_reason = ";".join(
@@ -159,6 +173,7 @@ def _leg_weights(
     risk_values: np.ndarray | None,
     weight_config: WeightConfig,
     sign: float,
+    capital_values: np.ndarray | None = None,
 ) -> tuple[dict[str, float], str]:
     fallback_reason = ""
     if weight_config.method == "equal_weight_quantile":
@@ -178,6 +193,10 @@ def _leg_weights(
         raw = np.abs(centered)
     elif weight_config.method == "signal_abs_weighted_quantile":
         raw = np.abs(signal_values)
+    elif weight_config.method == "float_cap_weighted_quantile":
+        if capital_values is None:
+            raise ValueError("float_market_cap_column_required")
+        raw = np.asarray(capital_values, dtype="float64")
     else:
         raw = np.abs(signal_values) / risk_values
 

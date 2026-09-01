@@ -237,7 +237,8 @@ def _price_volume_model_metadata() -> dict[str, object]:
         "resolved_hyperparameters": {},
         "random_seed": None,
         "max_train_rows": None,
-        "purge_gap_steps": 0,
+        "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
+        "scaler": None,
         "dependency_status": {
             "status": "available",
             "package": "internal",
@@ -294,7 +295,8 @@ def _artifacts_model_metadata() -> dict[str, object]:
         "resolved_hyperparameters": {},
         "random_seed": None,
         "max_train_rows": None,
-        "purge_gap_steps": 0,
+        "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
+        "scaler": None,
         "dependency_status": {
             "status": "available",
             "package": "internal",

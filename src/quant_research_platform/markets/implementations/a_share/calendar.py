@@ -26,7 +26,6 @@ def build_a_share_experiment_fold(
     validation: TimeWindow,
     development_test: TimeWindow,
     final_holdout: TimeWindow,
-    purge_steps: int,
     embargo_steps: int = 0,
     complete: bool = True,
 ) -> ExperimentFold:
@@ -60,7 +59,6 @@ def build_a_share_experiment_fold(
         train=train,
         validation=validation,
         development_test=development_test,
-        purge_steps=purge_steps,
         embargo_steps=embargo_steps,
         step_kind="a_share_trading_session",
         train_end_step=int(positions[1]),

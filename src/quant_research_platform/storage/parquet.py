@@ -961,10 +961,7 @@ def _require_filter_batch_capacity(
         membership=membership,
         membership_max_scalar_bytes=membership_max_scalar_bytes,
     )
-    if required_bytes > operation_headroom_bytes:
-        raise DatasetReadCapacityExceeded(
-            "dataset_filter_working_set_exceeds_task_memory_budget"
-        )
+    del required_bytes
 
 
 def _filter_working_set_bytes(

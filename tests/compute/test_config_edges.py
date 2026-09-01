@@ -76,13 +76,12 @@ def test_blocked_entry_policy_names_have_distinct_contracts() -> None:
 @pytest.mark.parametrize(
     ("kwargs", "error"),
     [
-        ({"buy_cost_bps": -1}, "buy_cost_bps must be nonnegative"),
-        ({"sell_cost_bps": -1}, "sell_cost_bps must be nonnegative"),
+        ({"commission_bps": -1}, "commission_bps must be nonnegative"),
         ({"slippage_bps": -1}, "slippage_bps must be nonnegative"),
-        ({"spread_bps": -1}, "spread_bps must be nonnegative"),
-        ({"buy_cost_bps": float("nan")}, "buy_cost_bps must be nonnegative"),
-        ({"sell_cost_bps": float("inf")}, "sell_cost_bps must be nonnegative"),
-        ({"slippage_bps": float("-inf")}, "slippage_bps must be nonnegative"),
+        ({"impact_bps": -1}, "impact_bps must be nonnegative"),
+        ({"commission_bps": float("nan")}, "commission_bps must be nonnegative"),
+        ({"slippage_bps": float("inf")}, "slippage_bps must be nonnegative"),
+        ({"impact_bps": float("-inf")}, "impact_bps must be nonnegative"),
     ],
 )
 def test_cost_config_validation_errors(kwargs: dict[str, object], error: str) -> None:

@@ -104,6 +104,10 @@ def _write_portfolio_output_chunks(
     required_columns = portfolio_required_columns()
     row_artifacts = (
         "positions",
+        "target_weights",
+        "executions",
+        "realized_holdings_cash",
+        "nav_returns",
         "turnover",
         "cost_breakdown",
         "portfolio_returns",

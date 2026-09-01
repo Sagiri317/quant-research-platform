@@ -13,22 +13,18 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
 )
-from quant_research_platform.markets.implementations.crypto.factors.definitions import (
-    HFT_FACTOR_COLUMNS,
-)
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_DATA_ID,
     HFT_LABEL_DATA_ID,
     HFT_PANEL_DATA_ID,
     HFT_RESEARCH_DATASET_ID,
 )
-from quant_research_platform.markets.implementations.crypto.labels.definitions import (
+from quant_research_platform.research.predictions import alignment
+from quant_research_platform.research.protocols.crypto_hft import (
+    HFT_FACTOR_COLUMNS,
     HFT_LABEL_COLUMNS,
-)
-from quant_research_platform.markets.implementations.crypto.research_scenarios import (
     HFT_MULTI_ASSET_SCOPES,
 )
-from quant_research_platform.research.predictions import alignment
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.replay import ReconstructionStats
 from quant_research_platform.storage.layout import StorageLayout

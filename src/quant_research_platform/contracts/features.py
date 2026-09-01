@@ -14,6 +14,11 @@ FEATURE_TRANSFORMS = {
     "winsorized_rank",
     "fillna_zero",
     "fillna_median",
+    "mad_winsorize",
+    "mad_winsorized_zscore",
+    "mad_winsorized_rank",
+    "missing_indicator",
+    "observed_indicator",
 }
 FILLNA_POLICIES = {"none", "zero", "median"}
 
