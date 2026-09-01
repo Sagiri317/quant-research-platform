@@ -37,7 +37,7 @@ artifacts 只验证并写入内容，不反向定义 report 语义。允许 `art
 
 可移植的模型算法 ID、default/smoke 参数、dependency package、input kind 与 parallel classification facts 由 contracts 持有；fitting、prediction、feature importance、rank ensemble 与 validation behavior 由 research owners 持有。单个算法字段使用 `model_algorithm`，算法 ID 集合使用 `model_algorithm_ids`。
 
-公共 package surface 由 current contract 管理；内部 helper 只在真实 caller 需要时保留，不以名称、可见性或 re-export 形状作为 gate。
+公共 package surface 由唯一 active contract 管理；内部 helper 只在真实 caller 需要时保留，不以名称、可见性或 re-export 形状作为 gate。
 
 model selection 的 metric、direction 和无警告行为必须由合同与 owner-layer tests 保护，runner 不维护平行事实源。
 
