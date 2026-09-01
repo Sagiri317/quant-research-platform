@@ -18,6 +18,9 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
 from quant_research_platform.markets.implementations.a_share.fundamentals import (
+    FINANCIAL_VALUE_COLUMNS,
+    FLOW_METRIC_IDS,
+    construct_ttm_events,
     financial_events_from_interim,
     materialize_pit_fundamentals,
 )
@@ -30,9 +33,6 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
 from quant_research_platform.research.factors import engine as factor_engine
 from quant_research_platform.research.factors.expectations.calculations import (
     build_expectations_features,
-)
-from quant_research_platform.research.factors.fundamental.calculations import (
-    construct_ttm_events,
 )
 from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.protocols import a_share
@@ -47,9 +47,6 @@ _REFERENCE_SOURCE_IDS = frozenset(
         "industry_classification",
         "industry_classification_sets",
         "industry_classification_versions",
-        "listing_status_changes",
-        "stock_info_changes",
-        "stock_info_annual",
         "trading_no_limit",
         "special_treatment_changes",
     }
@@ -178,10 +175,26 @@ def produce_a_share_processed_frame(
                 how="left",
                 validate="one_to_one",
             )
-        return factor_engine.calculate_factors_for_panel(
+        calculated = factor_engine.calculate_factors_for_panel(
             input_frame,
             definitions=definitions,
-        ).loc[:, list(spec.required_columns)]
+        )
+        if "has_legal_fundamental_pit" in spec.required_columns:
+            calculated = calculated.merge(
+                input_frame.loc[
+                    :,
+                    [
+                        "market_id",
+                        "asset_id",
+                        "timestamp",
+                        "has_legal_fundamental_pit",
+                    ],
+                ],
+                on=["market_id", "asset_id", "timestamp"],
+                how="left",
+                validate="one_to_one",
+            )
+        return calculated.loc[:, list(spec.required_columns)]
     if spec.kind is ProcessedDataKind.LABEL:
         panel = dependencies["market_panel_1d"].merge(
             dependencies["execution_mask"],
@@ -234,17 +247,9 @@ def _fundamental_pit_frame(
         trading_sessions=sessions,
     )
     ttm_events = construct_ttm_events(events)
-    flow_metrics = {
-        "operating_revenue",
-        "operating_cost",
-        "consolidated_net_income",
-        "parent_net_income",
-        "operating_cash_flow",
-        "capex_cash_paid",
-    }
-    events = events.copy()
+    events = ttm_events
     events["value"] = events["value"].where(
-        ~events["metric_id"].isin(flow_metrics), ttm_events["ttm_value"]
+        ~events["metric_id"].isin(FLOW_METRIC_IDS), events["ttm_value"]
     )
     pit = materialize_pit_fundamentals(
         panel.loc[:, ["asset_id", "timestamp"]],
@@ -287,7 +292,7 @@ def _fundamental_pit_frame(
         columns={
             column: (
                 f"prior_year_{column}_ttm"
-                if column in flow_metrics
+                if column in FLOW_METRIC_IDS
                 else f"prior_year_{column}"
             )
             for column in prior_year.columns
@@ -342,8 +347,14 @@ def _fundamental_pit_frame(
     output["average_parent_equity"] = (
         output["parent_equity"] + output["beginning_parent_equity"]
     ) / 2.0
-    for column in flow_metrics:
+    for column in FLOW_METRIC_IDS:
         output[f"{column}_ttm"] = output[column]
+    pit_value_columns = tuple(
+        column for columns in FINANCIAL_VALUE_COLUMNS.values() for column in columns
+    )
+    output["has_legal_fundamental_pit"] = (
+        output.loc[:, list(pit_value_columns)].notna().any(axis=1)
+    )
     for column in spec.required_columns:
         if column not in output:
             output[column] = np.nan

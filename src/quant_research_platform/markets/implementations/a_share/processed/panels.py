@@ -24,6 +24,7 @@ INDUSTRY_STANDARD_BY_PROVIDER_ID = {
     "P0207": "CSRC2012",
     "P0221": "CAPCO",
 }
+FINANCIAL_INDUSTRY_LEVEL1_CODES = frozenset({"J"})
 
 
 def compute_market_panel(
@@ -343,6 +344,14 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
         if column not in result:
             result[column] = pd.NA
         result[column] = result[column].astype("string")
+    if "is_nonfinancial_industry" not in result:
+        result["is_nonfinancial_industry"] = pd.Series(
+            pd.NA, index=result.index, dtype="boolean"
+        )
+    else:
+        result["is_nonfinancial_industry"] = result["is_nonfinancial_industry"].astype(
+            "boolean"
+        )
     return result
 
 
@@ -432,6 +441,9 @@ def _asof_industry(
         error="invalid_industry_name",
         allow_null=True,
     )
+    history["is_nonfinancial_industry"] = pd.Series(
+        pd.NA, index=history.index, dtype="boolean"
+    )
     expected_standard = history["timestamp"].map(
         lambda value: "CSRC2012" if value < pd.Timestamp("2023-01-01") else "CAPCO"
     )
@@ -446,7 +458,7 @@ def _asof_industry(
             return panel
     if industry_sets is not None:
         history = _resolve_industry_hierarchy(history, industry_sets)
-    right = history.loc[:, list(required)].sort_values(
+    right = history.loc[:, [*required, "is_nonfinancial_industry"]].sort_values(
         ["asset_id", "timestamp"], kind="mergesort"
     )
     if right.duplicated(["asset_id", "timestamp"], keep=False).any():
@@ -462,17 +474,29 @@ def _asof_industry(
             allow_exact_matches=True,
             suffixes=("", "_industry"),
         )
+        expected = current["timestamp"].map(
+            lambda value: "CSRC2012" if value < pd.Timestamp("2023-01-01") else "CAPCO"
+        )
+        valid_standard = (
+            current["industry_standard_id_industry"].eq(expected).fillna(False)
+        )
         for column in (
             "industry_standard_id",
             "industry_level1_code",
             "industry_level1_name",
+            "is_nonfinancial_industry",
         ):
             current[column] = current[f"{column}_industry"].combine_first(
                 current[column]
             )
+            current.loc[~valid_standard, column] = pd.NA
             current.drop(columns=f"{column}_industry", inplace=True)
         output.append(current)
-    return pd.concat(output, ignore_index=True)
+    result = pd.concat(output, ignore_index=True)
+    result["is_nonfinancial_industry"] = result["is_nonfinancial_industry"].astype(
+        "boolean"
+    )
+    return result
 
 
 def _canonical_industry_standard(values: pd.Series) -> pd.Series:
@@ -589,6 +613,9 @@ def _resolve_industry_hierarchy(
     )
     result["industry_level1_name"] = pd.Series(
         resolved_names, index=result.index, dtype="string"
+    )
+    result["is_nonfinancial_industry"] = ~result["industry_level1_code"].isin(
+        FINANCIAL_INDUSTRY_LEVEL1_CODES
     )
     return result
 

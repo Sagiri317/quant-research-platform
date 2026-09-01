@@ -15,6 +15,9 @@ from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.features.transforms import (
+    canonical_feature_pipeline,
+)
 from quant_research_platform.research.protocols.a_share import research_dataset_specs
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -60,6 +63,19 @@ def test_a_share_assembler_owns_eligibility_and_population_model_target() -> Non
     assert "can_exit" not in result
     assert "scenario_universe" not in result
 
+    fusion = frame.assign(
+        industry_standard_id="CSRC2012",
+        industry_level1_code="A01",
+        industry_level1_name="industry",
+        is_nonfinancial_industry=True,
+        has_legal_fundamental_pit=[False, True, True],
+    )
+    fusion_result = _add_a_share_semantic_columns(fusion, research_dataset_specs()[1])
+    assert fusion_result["eligible"].tolist() == [False, True, False]
+    assert not _add_a_share_semantic_columns(
+        fusion.assign(is_nonfinancial_industry=False), research_dataset_specs()[1]
+    )["eligible"].any()
+
 
 def test_a_share_model_target_zero_variance_does_not_invalidate_other_date() -> None:
     spec = research_dataset_specs()[0]
@@ -88,6 +104,24 @@ def test_a_share_model_target_zero_variance_does_not_invalidate_other_date() -> 
     assert result.loc[
         result["timestamp"].eq("2024-01-03"), "model_target"
     ].tolist() == pytest.approx([-1.0, 1.0])
+
+
+def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "eligible": True,
+            "industry_level1_code": "A",
+            "log_float_market_cap": [1.0, 2.0],
+            "factor": [1.0, 2.0],
+        }
+    )
+
+    result = canonical_feature_pipeline(frame, factor_columns=("factor",))
+
+    assert result["feature_factor"].tolist() == [0.0, 0.0]
+    assert result["feature_missing_factor"].tolist() == [1, 1]
+    assert result["feature_observed_factor"].tolist() == [0, 0]
 
 
 def test_a_share_assembler_persists_only_eligible_sample_truth(
@@ -137,6 +171,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         "industry_standard_id": "CSRC2012",
         "industry_level1_code": "A",
         "industry_level1_name": "industry",
+        "is_nonfinancial_industry": True,
         "share_change_date": pd.Timestamp("2020-01-01"),
         "total_shares": 1_000.0,
         "a_float_shares": 1_000.0,

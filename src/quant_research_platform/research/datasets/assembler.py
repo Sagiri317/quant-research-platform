@@ -69,6 +69,10 @@ _A_SHARE_ELIGIBILITY_FACTS = (
     "amount",
     "turnover",
 )
+_A_SHARE_FUSION_ELIGIBILITY_FACTS = (
+    "is_nonfinancial_industry",
+    "has_legal_fundamental_pit",
+)
 
 
 def assemble_research_dataset(
@@ -851,9 +855,18 @@ def _a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
         & numeric_facts["adj_close"].gt(0.0)
         & numeric_facts["volume"].gt(0.0)
         & numeric_facts["amount"].gt(0.0)
-        & numeric_facts["turnover"].ge(0.0)
+        & numeric_facts["turnover"].gt(0.0)
     ).fillna(False)
     if dataset_id in {"fusion_nf_core", "fusion_nf_expectations"}:
+        for column in _A_SHARE_FUSION_ELIGIBILITY_FACTS:
+            if column not in frame:
+                raise ValueError(f"a_share_eligibility_facts_missing: {column}")
+            bool_facts[column] = strict_bool_series(
+                frame[column],
+                error=f"invalid_a_share_eligibility_fact: {column}",
+                allow_null=True,
+            ).fillna(False)
+            eligible &= bool_facts[column]
         for column in (
             "industry_standard_id",
             "industry_level1_code",

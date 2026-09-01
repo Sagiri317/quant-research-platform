@@ -12,7 +12,11 @@ import quant_research_platform.research.models.fitting as fitting
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
-from quant_research_platform.contracts.experiments import legal_training_rows
+from quant_research_platform.contracts.experiments import (
+    legal_training_rows,
+    resolve_training_availability_column,
+    training_availability_columns,
+)
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
@@ -262,6 +266,7 @@ def _build_prediction_result_from_research_dataset(
             ),
             model_spec,
             estimator=build_estimator_from_model_spec(model_spec),
+            fitting_cutoff=train_end,
         )
         model_result = (
             owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
@@ -356,6 +361,7 @@ def _select_prediction_model_spec(
             ),
             candidate_spec,
             estimator=build_estimator_from_model_spec(candidate_spec),
+            fitting_cutoff=pd.Timestamp(prediction_spec.train_end),
         )
         model_result = (
             owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
@@ -367,11 +373,7 @@ def _select_prediction_model_spec(
                     *dataset_spec.primary_key,
                     *common_validation_input_columns,
                     label_column,
-                    *(
-                        ("forward_return_20d_available_at",)
-                        if label_column == "model_target"
-                        else ()
-                    ),
+                    *training_availability_columns(label_column),
                     *required_filter_columns(prediction_spec.sample_filter_mode),
                 )
             )
@@ -453,9 +455,7 @@ def _prediction_train_read_columns(
     label_column: str,
     sample_filter_mode,
 ) -> tuple[str, ...]:
-    availability = (
-        ("forward_return_20d_available_at",) if label_column == "model_target" else ()
-    )
+    availability = training_availability_columns(label_column)
     return tuple(
         dict.fromkeys(
             (
@@ -528,22 +528,10 @@ def _iter_validation_prediction_chunks(
                         mode=prediction_spec.sample_filter_mode,
                         metadata_key="sample_filter_mode",
                     )
-                    availability_column = next(
-                        (
-                            column
-                            for column in (
-                                "label_available_at",
-                                "forward_return_20d_available_at",
-                            )
-                            if column in filtered
-                        ),
-                        None,
+                    availability_column = resolve_training_availability_column(
+                        filtered,
+                        label_column=candidate_spec.label_column,
                     )
-                    if (
-                        availability_column is None
-                        and candidate_spec.label_column == "model_target"
-                    ):
-                        raise ValueError("label_availability_column_required")
                     usable = legal_training_rows(
                         filtered,
                         fitting_cutoff=validation_end,
@@ -642,19 +630,10 @@ def _prediction_train_chunks(
                     if working_lease is not None:
                         working_lease.close()
                     continue
-            availability_column = next(
-                (
-                    column
-                    for column in (
-                        "label_available_at",
-                        "forward_return_20d_available_at",
-                    )
-                    if column in chunk
-                ),
-                None,
+            availability_column = resolve_training_availability_column(
+                chunk,
+                label_column=label_column,
             )
-            if availability_column is None and label_column == "model_target":
-                raise ValueError("label_availability_column_required")
             train = legal_training_rows(
                 chunk,
                 fitting_cutoff=train_end,

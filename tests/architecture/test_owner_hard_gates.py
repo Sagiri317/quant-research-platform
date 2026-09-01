@@ -98,6 +98,54 @@ def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
     ]
 
 
+def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction() -> None:
+    factor_path = (
+        SOURCE_ROOT / "research" / "factors" / "fundamental" / "calculations.py"
+    )
+    factor_modules = _imported_modules(
+        ast.parse(factor_path.read_text(encoding="utf-8"))
+    )
+    assert all(
+        not module.startswith("quant_research_platform.markets")
+        for module in factor_modules
+    )
+
+    producer_path = (
+        SOURCE_ROOT
+        / "markets"
+        / "implementations"
+        / "a_share"
+        / "processed"
+        / "producer.py"
+    )
+    producer_tree = ast.parse(producer_path.read_text(encoding="utf-8"))
+    assert any(
+        isinstance(node, ast.ImportFrom)
+        and node.module
+        == "quant_research_platform.markets.implementations.a_share.fundamentals"
+        and any(alias.name == "construct_ttm_events" for alias in node.names)
+        for node in ast.walk(producer_tree)
+    )
+
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog,
+    )
+    from quant_research_platform.sources.choice.interim import first_disclosure_spec
+
+    assert {
+        "listing_status_changes",
+        "stock_info_changes",
+        "stock_info_annual",
+    }.isdisjoint(
+        catalog.processed_catalog().get("market_panel_1d").source_input_data_ids
+    )
+    assert first_disclosure_spec().primary_key == (
+        "asset_id",
+        "report_period",
+        "first_disclosure_date",
+    )
+
+
 def test_workflow_production_statuses_have_no_readiness_aliases() -> None:
     literals: set[str] = set()
     for path in SOURCE_ROOT.rglob("*.py"):

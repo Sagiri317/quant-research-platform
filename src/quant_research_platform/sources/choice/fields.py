@@ -13,5 +13,5 @@ def field_roles() -> dict[str, ColumnRole]:
     return {
         "asset_id": ColumnRole.KEY,
         "report_period": ColumnRole.TIMESTAMP,
-        "first_disclosure_date": ColumnRole.TIMESTAMP,
+        "first_disclosure_date": ColumnRole.KEY,
     }

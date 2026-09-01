@@ -234,11 +234,50 @@ def test_supervised_models_persist_a_training_only_scaler() -> None:
             [frame],
             spec,
             estimator=build_estimator_from_model_spec(spec),
+            fitting_cutoff="2024-01-02",
         )
         fitted = result.value if hasattr(result, "value") else result
         assert fitted.metadata["scaler"]["columns"] == ["feature"]
         if hasattr(result, "release"):
             result.release(owner="test.scaler")
+
+
+def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
+    spec = ModelSpec(
+        model_id="cutoff",
+        model_algorithm="ridge_regression",
+        input_feature_columns=("feature",),
+        label_column="model_target",
+        hyperparameters={"alpha": 1.0},
+    )
+    preflight_model_specs((spec,))
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-02"]
+            ),
+            "asset_id": ["a", "b", "a", "b"],
+            "feature": [1.0, 2.0, 3.0, 4.0],
+            "model_target": [0.1, 0.2, 0.3, 0.4],
+            "forward_return_20d_available_at": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
+            ),
+            "eligible": True,
+        }
+    )
+
+    with runtime_resource_policy_scope(None):
+        result = _fit_model_result_owned_from_frames(
+            [frame],
+            spec,
+            estimator=build_estimator_from_model_spec(spec),
+            fitting_cutoff="2024-01-02",
+        )
+        fitted = result.value if hasattr(result, "value") else result
+        assert fitted.metadata["rows_after_input_label_dropna"] == 2
+        assert fitted.metadata["train_end"] == "2024-01-01"
+        if hasattr(result, "release"):
+            result.release(owner="test.cutoff")
 
 
 def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
@@ -267,6 +306,7 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
             [frame],
             spec,
             estimator=build_estimator_from_model_spec(spec),
+            fitting_cutoff="2024-01-02",
         )
         fitted = result.value if hasattr(result, "value") else result
         predictions = fitted.prediction_model.predict(

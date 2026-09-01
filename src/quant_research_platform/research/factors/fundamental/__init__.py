@@ -1,6 +1,6 @@
 """Common fundamental factor definitions and calculations."""
 
-from .calculations import calculate_fundamental_factors, ttm_from_ytd
+from .calculations import calculate_fundamental_factors
 from .definitions import (
     CORE_FUNDAMENTAL_FACTORS,
     FUNDAMENTAL_FACTORS,
@@ -14,5 +14,4 @@ __all__ = [
     "FUNDAMENTAL_INPUT_COLUMNS",
     "calculate_fundamental_factors",
     "fundamental_factor_definitions",
-    "ttm_from_ytd",
 ]

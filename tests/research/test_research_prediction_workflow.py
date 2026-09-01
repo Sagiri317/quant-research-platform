@@ -75,6 +75,7 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
             (frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],),
             model_spec,
             estimator=estimator,
+            fitting_cutoff=prediction_spec.train_end,
         )
         try:
             model_result = model_result_owned.value
@@ -121,6 +122,7 @@ def test_prediction_builder_binds_backend_package_to_actual_model_owner(
             (frame,),
             model_spec,
             estimator=estimator,
+            fitting_cutoff="2014-01-02",
         )
         try:
             model_result = model_result_owned.value
@@ -353,13 +355,14 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
             read_chunk_rows.append(len(chunk))
             yield chunk
 
-    def wrapped_fit(frames, spec, *, estimator):
+    def wrapped_fit(frames, spec, *, estimator, fitting_cutoff):
         chunks = list(frames)
         fit_chunk_rows.extend(len(chunk) for chunk in chunks)
         return original_fit(
             iter(chunks),
             spec,
             estimator=estimator,
+            fitting_cutoff=fitting_cutoff,
         )
 
     def wrapped_write(frames, spec, coefficients, input_columns, **kwargs):

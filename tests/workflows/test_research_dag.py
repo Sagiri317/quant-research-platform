@@ -158,9 +158,6 @@ def test_declared_processed_dependencies_are_not_removed_from_the_plan(
         "industry_classification",
         "industry_classification_sets",
         "industry_classification_versions",
-        "listing_status_changes",
-        "stock_info_changes",
-        "stock_info_annual",
         "trading_no_limit",
         "special_treatment_changes",
     }.issubset(panel["upstream_target_ids"])

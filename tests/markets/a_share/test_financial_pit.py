@@ -6,11 +6,14 @@ import pytest
 
 from quant_research_platform.markets.implementations.a_share.fundamentals import (
     FINANCIAL_VALUE_COLUMNS,
+    construct_ttm_events,
     financial_events_from_interim,
     materialize_pit_fundamentals,
 )
-from quant_research_platform.research.factors.fundamental.calculations import (
-    construct_ttm_events,
+from quant_research_platform.sources.choice.fields import FIRST_DISCLOSURE_COLUMNS
+from quant_research_platform.sources.choice.interim import (
+    first_disclosure_spec,
+    normalize_first_disclosure_frame,
 )
 
 
@@ -132,6 +135,53 @@ def test_correction_after_observation_calendar_does_not_rewrite_past() -> None:
     assert set(events["version_identity"]) == {"original"}
 
 
+def test_disclosure_on_last_calendar_session_fails_with_availability_reason() -> None:
+    records = (
+        {
+            "asset": "asset",
+            "period": "2019-12-31",
+            "corrected": False,
+            "correction_date": pd.NaT,
+            "version": "original",
+            "value": 100.0,
+        },
+    )
+    interim = {
+        data_id: _financial_frame(data_id, records)
+        for data_id in FINANCIAL_VALUE_COLUMNS
+    }
+    disclosures = pd.DataFrame(
+        {
+            "asset_id": ["asset"],
+            "report_period": [pd.Timestamp("2019-12-31")],
+            "first_disclosure_date": [pd.Timestamp("2020-02-03")],
+        }
+    )
+
+    with pytest.raises(ValueError, match="financial_availability_next_session_missing"):
+        financial_events_from_interim(
+            interim,
+            disclosures,
+            trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-02-03")]),
+        )
+
+
+def test_choice_disclosure_owner_keeps_the_canonical_three_field_key() -> None:
+    assert first_disclosure_spec().primary_key == FIRST_DISCLOSURE_COLUMNS
+    with pytest.raises(ValueError, match="duplicate_choice_first_disclosure_key"):
+        normalize_first_disclosure_frame(
+            pd.DataFrame(
+                {
+                    "asset_id": ["asset", "asset"],
+                    "report_period": pd.to_datetime(["2019-12-31", "2019-12-31"]),
+                    "first_disclosure_date": pd.to_datetime(
+                        ["2020-01-31", "2020-02-01"]
+                    ),
+                }
+            )
+        )
+
+
 def test_pit_exposes_beginning_quarter_and_prior_year_same_period() -> None:
     report_periods = pd.to_datetime(
         [
@@ -167,10 +217,12 @@ def test_pit_exposes_beginning_quarter_and_prior_year_same_period() -> None:
 
     row = result.iloc[0]
     assert row["value"] == 60.0
-    assert row["beginning_report_period"] == pd.Timestamp("2020-03-31")
-    assert row["beginning_value"] == 50.0
+    assert row["beginning_report_period"] == pd.Timestamp("2019-06-30")
+    assert row["beginning_value"] == 20.0
     assert row["prior_year_report_period"] == pd.Timestamp("2019-06-30")
     assert row["prior_year_value"] == 20.0
+    assert row["prior_fy_report_period"] == pd.Timestamp("2019-12-31")
+    assert row["prior_fy_value"] == 40.0
 
 
 def test_financial_versions_fail_without_legal_disclosure_or_unique_identity() -> None:
@@ -222,6 +274,34 @@ def test_financial_versions_fail_without_legal_disclosure_or_unique_identity() -
             trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-02-03")]),
         )
 
+    corrected_with_first_date = {
+        **records[0],
+        "corrected": True,
+        "correction_date": pd.Timestamp("2020-02-15"),
+        "version": "correction@2020-02-15",
+    }
+    corrected_with_first_interim = {
+        data_id: _financial_frame(data_id, (corrected_with_first_date,))
+        for data_id in FINANCIAL_VALUE_COLUMNS
+    }
+    with pytest.raises(ValueError, match="financial_first_disclosure_missing"):
+        financial_events_from_interim(
+            corrected_with_first_interim,
+            missing_disclosure,
+            trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-02-03")]),
+        )
+
+    with pytest.raises(
+        ValueError, match="financial_correction_before_first_disclosure"
+    ):
+        financial_events_from_interim(
+            corrected_with_first_interim,
+            disclosure.assign(first_disclosure_date=pd.Timestamp("2020-03-01")),
+            trading_sessions=pd.DatetimeIndex(
+                pd.to_datetime(["2020-02-03", "2020-03-02"])
+            ),
+        )
+
     duplicate = {
         data_id: _financial_frame(data_id, (*records, records[0]))
         for data_id in FINANCIAL_VALUE_COLUMNS
@@ -243,7 +323,7 @@ def test_ttm_uses_same_period_and_legal_correction_cutoff() -> None:
                 [
                     "2019-06-30",
                     "2019-12-31",
-                    "2019-06-30",
+                    "2019-12-31",
                     "2020-06-30",
                     "2020-06-30",
                 ]
@@ -264,21 +344,17 @@ def test_ttm_uses_same_period_and_legal_correction_cutoff() -> None:
                 "original",
                 "correction@2020-10-01",
             ],
-            "value": [50.0, 120.0, 70.0, 80.0, 90.0],
+            "value": [50.0, 120.0, 140.0, 80.0, 90.0],
         }
     )
 
     result = construct_ttm_events(events)
     current = result.loc[result["report_period"].eq(pd.Timestamp("2020-06-30"))]
 
-    assert current["ttm_value"].tolist() == [150.0, 140.0]
+    assert current["ttm_value"].tolist() == [150.0, 180.0, 170.0, 180.0]
 
     without_same_period = events.loc[
         ~events["report_period"].eq(pd.Timestamp("2019-06-30"))
-        | events["version_identity"].eq("correction@2020-09-01")
-    ]
-    without_same_period = without_same_period.loc[
-        ~without_same_period["version_identity"].eq("correction@2020-09-01")
     ]
     assert pd.isna(
         construct_ttm_events(without_same_period)

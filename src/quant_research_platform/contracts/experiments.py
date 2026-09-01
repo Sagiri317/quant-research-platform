@@ -259,6 +259,27 @@ def legal_training_rows(
     return frame.loc[keep].copy()
 
 
+def training_availability_columns(label_column: str) -> tuple[str, ...]:
+    if label_column == "model_target":
+        return ("forward_return_20d_available_at",)
+    return ()
+
+
+def resolve_training_availability_column(
+    frame: pd.DataFrame,
+    *,
+    label_column: str,
+) -> str | None:
+    if label_column == "model_target":
+        column = training_availability_columns(label_column)[0]
+        if column not in frame.columns:
+            raise ValueError("label_availability_column_required")
+        return column
+    if "label_available_at" in frame.columns:
+        return "label_available_at"
+    return None
+
+
 def _strictly_before(left: date | datetime, right: date | datetime) -> bool:
     left_value = (
         left if isinstance(left, datetime) else datetime.combine(left, time.min)

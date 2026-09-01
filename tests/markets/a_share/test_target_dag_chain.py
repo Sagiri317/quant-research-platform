@@ -170,6 +170,7 @@ def test_fundamental_pit_and_factors_reach_the_same_target_dag(
 
 
 def _synthetic_financial_frames() -> dict[str, pd.DataFrame]:
+    assets = ("000001", "000002", "000003")
     periods = pd.to_datetime(
         [
             "2019-03-31",
@@ -184,29 +185,34 @@ def _synthetic_financial_frames() -> dict[str, pd.DataFrame]:
     )
     frames: dict[str, pd.DataFrame] = {}
     for data_id, columns in FINANCIAL_VALUE_COLUMNS.items():
+        rows = [(asset, period) for asset in assets for period in periods]
         frames[data_id] = pd.DataFrame(
             {
-                "source_asset_id": ["000001"] * len(periods),
-                "timestamp": periods,
+                "source_asset_id": [asset for asset, _period in rows],
+                "timestamp": [period for _asset, period in rows],
                 "stock_name": "synthetic",
-                "report_period": periods,
+                "report_period": [period for _asset, period in rows],
                 "report_type": "A",
-                "is_corrected": False,
+                "is_corrected": [False] * len(rows),
                 "correction_disclosure_date": pd.Series(
-                    pd.NaT, index=range(len(periods)), dtype="datetime64[ns]"
+                    pd.NaT, index=range(len(rows)), dtype="datetime64[ns]"
                 ),
                 "version_identity": "original",
                 **{
-                    column: [float(index + 1) for index in range(len(periods))]
+                    column: [float(index + 1) for index in range(len(rows))]
                     for column in columns
                 },
             }
         )
     frames["financial_first_disclosure"] = pd.DataFrame(
         {
-            "asset_id": ["000001"] * len(periods),
-            "report_period": periods,
-            "first_disclosure_date": periods + pd.Timedelta(days=20),
+            "asset_id": [asset for asset in assets for _period in periods],
+            "report_period": [period for _asset in assets for period in periods],
+            "first_disclosure_date": [
+                period + pd.Timedelta(days=20)
+                for _asset in assets
+                for period in periods
+            ],
         }
     )
     return frames

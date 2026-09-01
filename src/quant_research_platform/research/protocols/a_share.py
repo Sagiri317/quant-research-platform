@@ -700,6 +700,8 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
             "float_market_cap",
             "total_market_cap",
         )
+        if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
+            context += ("is_nonfinancial_industry", "has_legal_fundamental_pit")
         all_columns = (
             "market_id",
             "asset_id",

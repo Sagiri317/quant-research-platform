@@ -361,3 +361,20 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy() -> None:
         "CAPCO industry",
         "CAPCO industry",
     ]
+    missing_transition = compute_market_panel(
+        bars,
+        stock_master=stock_master,
+        market_cap=market_cap,
+        trading_calendar=calendar,
+        industry_history=history.iloc[[0]],
+        industry_sets=industry_sets.iloc[[0]],
+        industry_versions=industry_versions.iloc[[0]],
+    )
+    assert (
+        missing_transition.loc[
+            missing_transition["timestamp"].ge(pd.Timestamp("2023-01-01")),
+            "industry_standard_id",
+        ]
+        .isna()
+        .all()
+    )

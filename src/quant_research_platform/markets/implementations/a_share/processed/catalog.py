@@ -67,6 +67,7 @@ PANEL_COLUMNS = (
     "industry_standard_id",
     "industry_level1_code",
     "industry_level1_name",
+    "is_nonfinancial_industry",
     "share_change_date",
     "total_shares",
     "a_float_shares",
@@ -104,6 +105,7 @@ FINANCIAL_PIT_COLUMNS = (
     "parent_net_income_ttm",
     "operating_cash_flow_ttm",
     "capex_cash_paid_ttm",
+    "has_legal_fundamental_pit",
 )
 LABEL_COLUMNS = tuple(
     column
@@ -131,9 +133,6 @@ def processed_catalog() -> ProcessedDataCatalog:
                     "industry_classification",
                     "industry_classification_sets",
                     "industry_classification_versions",
-                    "listing_status_changes",
-                    "stock_info_changes",
-                    "stock_info_annual",
                     "trading_no_limit",
                     "special_treatment_changes",
                 ),
@@ -167,7 +166,11 @@ def processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 FUNDAMENTAL_DATA_ID,
                 ProcessedDataKind.FACTOR,
-                (*platform_entity_time_key(), *FUNDAMENTAL_FACTORS),
+                (
+                    *platform_entity_time_key(),
+                    *FUNDAMENTAL_FACTORS,
+                    "has_legal_fundamental_pit",
+                ),
                 processed_input_data_ids=(FUNDAMENTAL_PIT_ID, MARKET_PANEL_ID),
                 factor_columns=FUNDAMENTAL_FACTORS,
             ),

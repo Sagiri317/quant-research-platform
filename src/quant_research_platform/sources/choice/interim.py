@@ -7,7 +7,6 @@ from dataclasses import dataclass
 import pandas as pd
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
-from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
@@ -17,7 +16,10 @@ from quant_research_platform.contracts.validation import (
     strict_string_series,
     strict_timestamp_series,
 )
-from quant_research_platform.sources.choice.fields import FIRST_DISCLOSURE_COLUMNS
+from quant_research_platform.sources.choice.fields import (
+    FIRST_DISCLOSURE_COLUMNS,
+    field_roles,
+)
 from quant_research_platform.sources.choice.ids import (
     FIRST_DISCLOSURE_DATA_ID,
     SOURCE_ID,
@@ -36,12 +38,8 @@ def first_disclosure_spec() -> InterimDataSpec:
         source_id=SOURCE_ID,
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-        column_roles={
-            "asset_id": ColumnRole.KEY,
-            "report_period": ColumnRole.TIMESTAMP,
-            "first_disclosure_date": ColumnRole.TIMESTAMP,
-        },
-        primary_key=("asset_id", "report_period"),
+        column_roles=field_roles(),
+        primary_key=FIRST_DISCLOSURE_COLUMNS,
         partition_columns=("year",),
     )
 

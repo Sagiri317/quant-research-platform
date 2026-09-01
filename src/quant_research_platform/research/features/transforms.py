@@ -376,17 +376,16 @@ def canonical_feature_pipeline(
     for factor in factor_columns:
         values = residualized[factor]
         raw_missing = scoped[factor].isna()
-        scoped_feature = (
-            values.groupby(scoped["timestamp"], sort=False)
-            .transform(_stable_zscore)
-            .fillna(0.0)
+        scoped_feature = values.groupby(scoped["timestamp"], sort=False).transform(
+            _stable_zscore
         )
+        final_missing = raw_missing | scoped_feature.isna()
         feature = pd.Series(np.nan, index=result.index, dtype="float64")
-        feature.loc[scoped.index] = scoped_feature
+        feature.loc[scoped.index] = scoped_feature.fillna(0.0)
         missing = pd.Series(0, index=result.index, dtype="int8")
         observed = pd.Series(0, index=result.index, dtype="int8")
-        missing.loc[scoped.index] = raw_missing.astype("int8")
-        observed.loc[scoped.index] = raw_missing.eq(False).astype("int8")
+        missing.loc[scoped.index] = final_missing.astype("int8")
+        observed.loc[scoped.index] = final_missing.eq(False).astype("int8")
         feature_values[f"feature_{factor}"] = feature
         feature_values[f"feature_missing_{factor}"] = missing
         feature_values[f"feature_observed_{factor}"] = observed

@@ -16,7 +16,11 @@ import quant_research_platform.research.models.dependencies as dependencies
 import quant_research_platform.research.models.feature_importance as feature_importance
 import quant_research_platform.research.models.supervised as supervised
 import quant_research_platform.research.models.validation_split as validation_split
-from quant_research_platform.contracts.experiments import legal_training_rows
+from quant_research_platform.contracts.experiments import (
+    legal_training_rows,
+    resolve_training_availability_column,
+    training_availability_columns,
+)
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import (
     ModelSpec,
@@ -63,19 +67,25 @@ def _fit_model_result_owned_from_frames(
     spec: ModelSpec,
     *,
     estimator: object,
+    fitting_cutoff: object,
 ) -> ModelFitResult | _OwnedModelFitResult:
     if spec.model_algorithm == "linear_regression":
-        return _fit_linear_model_result_owned_from_frames(frames, spec)
+        return _fit_linear_model_result_owned_from_frames(
+            frames, spec, fitting_cutoff=fitting_cutoff
+        )
     return _fit_estimator_model_result_owned_from_frames(
         frames,
         spec,
         estimator=estimator,
+        fitting_cutoff=fitting_cutoff,
     )
 
 
 def _fit_linear_model_result_owned_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
+    *,
+    fitting_cutoff: object,
 ) -> ModelFitResult | _OwnedModelFitResult:
     policy = current_runtime_resource_policy()
     model_lease = (
@@ -91,6 +101,7 @@ def _fit_linear_model_result_owned_from_frames(
             frames,
             spec,
             model_lease=model_lease,
+            fitting_cutoff=fitting_cutoff,
         )
     except BaseException as primary:
         if model_lease is not None:
@@ -108,28 +119,28 @@ def _fit_linear_model_result_with_lease(
     spec: ModelSpec,
     *,
     model_lease: MemoryLease | None,
+    fitting_cutoff: object,
 ) -> ModelFitResult | _OwnedModelFitResult:
     if spec.max_train_rows is None:
         return _fit_unbounded_linear_model_result(
             frames,
             spec,
             model_lease=model_lease,
+            fitting_cutoff=fitting_cutoff,
         )
     if spec.max_train_rows is not None:
         return _fit_controlled_linear_model_result_owned_from_frames(
             frames,
             spec,
             model_lease=model_lease,
+            fitting_cutoff=fitting_cutoff,
         )
     input_columns = spec.input_columns
     required = set(input_columns)
     required.add(spec.label_column)
     required.add("timestamp")
     required.add("eligible")
-    availability_columns = (
-        "label_available_at",
-        "forward_return_20d_available_at",
-    )
+    availability_columns = training_availability_columns(spec.label_column)
     work_columns = tuple(
         dict.fromkeys(
             (
@@ -157,6 +168,7 @@ def _fit_linear_model_result_with_lease(
             active_frames,
             spec=spec,
             fit_columns=fit_columns,
+            fitting_cutoff=fitting_cutoff,
         )
     if row_counts["rows_after_input_label_dropna"] == 0:
         raise ValueError("model_training_sample_empty")
@@ -182,8 +194,11 @@ def _fit_unbounded_linear_model_result(
     spec: ModelSpec,
     *,
     model_lease: MemoryLease | None,
+    fitting_cutoff: object,
 ) -> ModelFitResult | _OwnedModelFitResult:
-    owned_training = _collect_training_frame_owned(frames, spec)
+    owned_training = _collect_training_frame_owned(
+        frames, spec, fitting_cutoff=fitting_cutoff
+    )
     collected = (
         owned_training.value
         if isinstance(owned_training, OwnedValue)
@@ -309,8 +324,11 @@ def _fit_controlled_linear_model_result_owned_from_frames(
     spec: ModelSpec,
     *,
     model_lease: MemoryLease | None = None,
+    fitting_cutoff: object,
 ) -> ModelFitResult | _OwnedModelFitResult:
-    owned_training = _collect_training_frame_owned(frames, spec)
+    owned_training = _collect_training_frame_owned(
+        frames, spec, fitting_cutoff=fitting_cutoff
+    )
     training, row_counts, filter_metadata = (
         owned_training.value
         if isinstance(owned_training, OwnedValue)
@@ -396,6 +414,7 @@ def fit_linear_coefficients(
     *,
     spec: ModelSpec,
     fit_columns: tuple[str, ...],
+    fitting_cutoff: object,
 ) -> tuple[np.ndarray, dict[str, object], dict[str, object]]:
     input_count = len(spec.input_columns)
     chunk_count = 0
@@ -422,10 +441,6 @@ def fit_linear_coefficients(
     train_start: str | None = None
     train_end: str | None = None
     factor_lease: MemoryLease | None = None
-    availability_columns = (
-        "label_available_at",
-        "forward_return_20d_available_at",
-    )
     first_usable_reservation = ExitStack()
     try:
         for chunk in frames:
@@ -458,22 +473,13 @@ def fit_linear_coefficients(
                                 usable_bound,
                             )
                         )
-                    availability_column = next(
-                        (
-                            column
-                            for column in availability_columns
-                            if column in filtered
-                        ),
-                        None,
+                    availability_column = resolve_training_availability_column(
+                        filtered,
+                        label_column=spec.label_column,
                     )
-                    if (
-                        availability_column is None
-                        and spec.label_column == "model_target"
-                    ):
-                        raise ValueError("label_availability_column_required")
                     usable = legal_training_rows(
                         filtered,
-                        fitting_cutoff=pd.Timestamp.max,
+                        fitting_cutoff=fitting_cutoff,
                         availability_column=availability_column,
                         feature_columns=spec.input_columns,
                         target_column=spec.label_column,
@@ -699,8 +705,11 @@ def _fit_estimator_model_result_owned_from_frames(
     spec: ModelSpec,
     *,
     estimator: object,
+    fitting_cutoff: object,
 ) -> ModelFitResult | _OwnedModelFitResult:
-    owned_training = _collect_training_frame_owned(frames, spec)
+    owned_training = _collect_training_frame_owned(
+        frames, spec, fitting_cutoff=fitting_cutoff
+    )
     training, row_counts, filter_metadata = (
         owned_training.value
         if isinstance(owned_training, OwnedValue)
@@ -858,6 +867,8 @@ def _fit_estimator_model_result_owned_from_frames(
 def _collect_training_frame_owned(
     frames: Iterable[pd.DataFrame],
     spec: ModelSpec,
+    *,
+    fitting_cutoff: object,
 ) -> (
     tuple[pd.DataFrame, dict[str, object], dict[str, object]]
     | OwnedValue[tuple[pd.DataFrame, dict[str, object], dict[str, object]]]
@@ -866,10 +877,7 @@ def _collect_training_frame_owned(
     required.add(spec.label_column)
     required.add("timestamp")
     required.add("eligible")
-    availability_columns = (
-        "label_available_at",
-        "forward_return_20d_available_at",
-    )
+    availability_columns = training_availability_columns(spec.label_column)
     work_columns = tuple(
         dict.fromkeys(
             (
@@ -934,15 +942,13 @@ def _collect_training_frame_owned(
                             len(filtered),
                         ),
                     )
-                availability_column = next(
-                    (column for column in availability_columns if column in filtered),
-                    None,
+                availability_column = resolve_training_availability_column(
+                    filtered,
+                    label_column=spec.label_column,
                 )
-                if availability_column is None and spec.label_column == "model_target":
-                    raise ValueError("label_availability_column_required")
                 usable = legal_training_rows(
                     filtered,
-                    fitting_cutoff=pd.Timestamp.max,
+                    fitting_cutoff=fitting_cutoff,
                     availability_column=availability_column,
                     feature_columns=spec.input_columns,
                     target_column=spec.label_column,

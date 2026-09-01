@@ -33,11 +33,16 @@ FINANCIAL_VALUE_COLUMNS = {
     ),
     "financial_cashflow": ("operating_cash_flow", "capex_cash_paid"),
 }
-FINANCIAL_TABLE_CODE_BY_DATA_ID = {
-    "financial_balance": "FS_Combas",
-    "financial_income": "FS_Comins",
-    "financial_cashflow": "FS_Comscfd",
-}
+FLOW_METRIC_IDS = frozenset(
+    {
+        "operating_revenue",
+        "operating_cost",
+        "consolidated_net_income",
+        "parent_net_income",
+        "operating_cash_flow",
+        "capex_cash_paid",
+    }
+)
 DISCLOSURE_COLUMNS = ("asset_id", "report_period", "first_disclosure_date")
 
 
@@ -133,14 +138,24 @@ def financial_events_from_interim(
             how="left",
             validate="many_to_one",
         )
-        if bool(
-            frame.loc[~frame["is_corrected"], "first_disclosure_date"].isna().any()
-        ):
+        if bool(frame["first_disclosure_date"].isna().any()):
             raise ValueError("financial_first_disclosure_missing")
         if bool(
             frame.loc[frame["is_corrected"], "correction_disclosure_date"].isna().any()
         ):
             raise ValueError("financial_correction_disclosure_missing")
+        invalid_original_correction_date = frame.loc[
+            ~frame["is_corrected"], "correction_disclosure_date"
+        ].notna()
+        if bool(invalid_original_correction_date.any()):
+            raise ValueError("financial_correction_date_invalid")
+        if bool(
+            (
+                frame.loc[frame["is_corrected"], "correction_disclosure_date"]
+                < frame.loc[frame["is_corrected"], "first_disclosure_date"]
+            ).any()
+        ):
+            raise ValueError("financial_correction_before_first_disclosure")
         frame["disclosure_date"] = frame["first_disclosure_date"].where(
             ~frame["is_corrected"], frame["correction_disclosure_date"]
         )
@@ -151,6 +166,8 @@ def financial_events_from_interim(
             frame["disclosure_date"].to_numpy(dtype="datetime64[ns]"),
             side="right",
         )
+        if bool((positions >= len(sessions)).any()):
+            raise ValueError("financial_availability_next_session_missing")
         frame["available_at"] = sessions.take(positions)
         melted = frame.melt(
             id_vars=(
@@ -188,6 +205,166 @@ def financial_events_from_interim(
     if result.duplicated(key, keep=False).any():
         raise ValueError("financial_event_key_duplicate")
     return result.sort_values(key, kind="mergesort").reset_index(drop=True)
+
+
+def construct_ttm_events(
+    events: pd.DataFrame,
+    *,
+    value_column: str = "value",
+) -> pd.DataFrame:
+    """Compute PIT TTM facts and append correction-triggered derived events."""
+
+    required = {
+        "asset_id",
+        "metric_id",
+        "report_period",
+        "available_at",
+        "version_identity",
+        value_column,
+    }
+    if not required.issubset(events.columns):
+        raise ValueError("ttm_event_columns_invalid")
+    result = events.reset_index(drop=True).copy()
+    for column in ("report_period", "available_at"):
+        result[column] = strict_timestamp_series(
+            result[column], error="ttm_event_date_invalid"
+        ).dt.normalize()
+    result["version_identity"] = strict_string_series(
+        result["version_identity"], error="ttm_version_identity_invalid"
+    )
+    result[value_column] = strict_finite_numeric_series(
+        result[value_column], error="invalid_ttm_value", allow_null=True
+    )
+    event_key = [
+        "asset_id",
+        "metric_id",
+        "report_period",
+        "available_at",
+        "version_identity",
+    ]
+    if result.duplicated(event_key, keep=False).any():
+        raise ValueError("ttm_event_key_duplicate")
+    result["ttm_value"] = np.nan
+    derived_records: list[dict[str, object]] = []
+    for (_asset_id, metric_id), positions in result.groupby(
+        ["asset_id", "metric_id"], sort=False
+    ).groups.items():
+        group = result.loc[positions].sort_values(
+            ["available_at", "report_period", "version_identity"],
+            kind="mergesort",
+        )
+        for position, row in group.iterrows():
+            period = pd.Timestamp(row["report_period"])
+            result.loc[position, "ttm_value"] = _ttm_value_at_cutoff(
+                group,
+                report_period=period,
+                cutoff=pd.Timestamp(row["available_at"]),
+                value_column=value_column,
+            )
+        if metric_id not in FLOW_METRIC_IDS:
+            continue
+        correction_rows = group.loc[
+            group["version_identity"].astype("string").str.startswith("correction@")
+        ]
+        for _, row in group.iterrows():
+            period = pd.Timestamp(row["report_period"])
+            if period.month == 12:
+                continue
+            prior_fy = _prior_fy_report_period(period)
+            prior_ytd = _prior_year_report_period(period)
+            dependencies = {period, prior_fy, prior_ytd}
+            if None in dependencies:
+                dependencies.discard(None)
+            cutoffs = correction_rows.loc[
+                correction_rows["report_period"].isin(dependencies)
+                & correction_rows["available_at"].gt(row["available_at"]),
+                "available_at",
+            ].drop_duplicates()
+            for cutoff in sorted(pd.Timestamp(value) for value in cutoffs):
+                derived_records.append(
+                    {
+                        "asset_id": row["asset_id"],
+                        "metric_id": metric_id,
+                        "report_period": period,
+                        "available_at": cutoff,
+                        "version_identity": f"derived@{cutoff:%Y-%m-%d}",
+                        "is_corrected": True,
+                        value_column: _latest_legal_event_value(
+                            group,
+                            report_period=period,
+                            cutoff=cutoff,
+                            value_column=value_column,
+                        ),
+                        "ttm_value": _ttm_value_at_cutoff(
+                            group,
+                            report_period=period,
+                            cutoff=cutoff,
+                            value_column=value_column,
+                        ),
+                    }
+                )
+    if derived_records:
+        result = pd.concat(
+            (result, pd.DataFrame.from_records(derived_records)),
+            ignore_index=True,
+        )
+    if result.duplicated(event_key, keep=False).any():
+        raise ValueError("ttm_event_key_duplicate")
+    return result
+
+
+def _ttm_value_at_cutoff(
+    events: pd.DataFrame,
+    *,
+    report_period: pd.Timestamp,
+    cutoff: pd.Timestamp,
+    value_column: str,
+) -> float | None:
+    current = _latest_legal_event_value(
+        events,
+        report_period=report_period,
+        cutoff=cutoff,
+        value_column=value_column,
+    )
+    if current is None:
+        return None
+    if report_period.month == 12:
+        return current
+    prior_fy = _latest_legal_event_value(
+        events,
+        report_period=_prior_fy_report_period(report_period),
+        cutoff=cutoff,
+        value_column=value_column,
+    )
+    prior_ytd = _latest_legal_event_value(
+        events,
+        report_period=_prior_year_report_period(report_period),
+        cutoff=cutoff,
+        value_column=value_column,
+    )
+    if prior_fy is None or prior_ytd is None:
+        return None
+    return current + prior_fy - prior_ytd
+
+
+def _latest_legal_event_value(
+    events: pd.DataFrame,
+    *,
+    report_period: pd.Timestamp | None,
+    cutoff: pd.Timestamp,
+    value_column: str,
+) -> float | None:
+    if report_period is None:
+        return None
+    candidates = events.loc[
+        events["report_period"].eq(report_period) & events["available_at"].le(cutoff)
+    ]
+    if candidates.empty:
+        return None
+    row = candidates.sort_values(
+        ["available_at", "version_identity"], kind="mergesort"
+    ).iloc[-1]
+    return None if pd.isna(row[value_column]) else float(row[value_column])
 
 
 def materialize_pit_fundamentals(
@@ -259,7 +436,7 @@ def materialize_pit_fundamentals(
         for observation in asset_observations.itertuples(index=False):
             legal = stream.loc[stream["available_at"].le(observation.timestamp)]
             if legal.empty:
-                current = beginning = prior_year = None
+                current = beginning = prior_year = prior_fy = None
             else:
                 latest_period = legal["report_period"].max()
                 current = _latest_legal_event_row(
@@ -281,6 +458,14 @@ def materialize_pit_fundamentals(
                     ).iloc[-1]
                     if prior_year_period is not None
                     and bool(legal["report_period"].eq(prior_year_period).any())
+                    else None
+                )
+                prior_fy_period = _prior_fy_report_period(latest_period)
+                prior_fy = (
+                    _latest_legal_event_row(legal, report_period=prior_fy_period).iloc[
+                        -1
+                    ]
+                    if bool(legal["report_period"].eq(prior_fy_period).any())
                     else None
                 )
             records.append(
@@ -313,6 +498,12 @@ def materialize_pit_fundamentals(
                     "prior_year_value": (
                         np.nan if prior_year is None else prior_year["value"]
                     ),
+                    "prior_fy_report_period": pd.NaT
+                    if prior_fy is None
+                    else prior_fy["report_period"],
+                    "prior_fy_value": (
+                        np.nan if prior_fy is None else prior_fy["value"]
+                    ),
                 }
             )
     return (
@@ -333,14 +524,7 @@ def _latest_legal_event_row(
 
 
 def _beginning_report_period(report_period: pd.Timestamp) -> pd.Timestamp | None:
-    quarter_ends = {
-        3: (report_period.year - 1, 12, 31),
-        6: (report_period.year, 3, 31),
-        9: (report_period.year, 6, 30),
-        12: (report_period.year - 1, 12, 31),
-    }
-    value = quarter_ends.get(report_period.month)
-    return None if value is None else pd.Timestamp(*value)
+    return _prior_year_report_period(report_period)
 
 
 def _prior_year_report_period(report_period: pd.Timestamp) -> pd.Timestamp | None:
@@ -348,3 +532,7 @@ def _prior_year_report_period(report_period: pd.Timestamp) -> pd.Timestamp | Non
         return report_period.replace(year=report_period.year - 1)
     except ValueError:
         return None
+
+
+def _prior_fy_report_period(report_period: pd.Timestamp) -> pd.Timestamp:
+    return pd.Timestamp(year=report_period.year - 1, month=12, day=31)
