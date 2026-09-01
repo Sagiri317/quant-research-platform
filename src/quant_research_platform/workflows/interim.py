@@ -1,4 +1,4 @@
-"""Market source routing for the public staged interim-data operation."""
+"""Market source routing for the public research interim-data operation."""
 
 from __future__ import annotations
 

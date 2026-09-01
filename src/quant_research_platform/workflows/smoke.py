@@ -1,4 +1,4 @@
-"""Thin installed-package consumer for the staged synthetic chain."""
+"""Thin installed-package consumer for the synthetic research chain."""
 
 from __future__ import annotations
 
@@ -16,11 +16,11 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import staged
+from quant_research_platform.workflows import research
 
 
-def run_staged_synthetic_smoke(project_root: Path) -> dict[str, object]:
-    """Exercise public staged APIs with an explicit local synthetic fixture."""
+def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
+    """Exercise public research APIs with an explicit local synthetic fixture."""
 
     project_root = Path(project_root)
     layout = StorageLayout(project_root=project_root)
@@ -57,7 +57,7 @@ def run_staged_synthetic_smoke(project_root: Path) -> dict[str, object]:
     end = source_frames["trading_calendar"]["timestamp"].max().date()
     time_window = (start.isoformat(), end.isoformat())
     with runtime_resource_policy_scope(None):
-        staged.data_materialize(
+        research.data_materialize(
             profile=profile,
             layout=layout,
             raw_root=project_root / "synthetic-raw",
@@ -65,26 +65,24 @@ def run_staged_synthetic_smoke(project_root: Path) -> dict[str, object]:
             end_date=time_window[1],
             data_ids=tuple(source_frames),
         )
-        dataset_root = staged.dataset_build(
+        dataset_root = research.dataset_build(
             profile=profile,
             layout=layout,
             dataset_id="pv_all",
             start_date=time_window[0],
             end_date=time_window[1],
         )
-        research = staged.research_run(
+        research_result = research.research_run(
             profile=profile,
             layout=layout,
             scenario_id="pv_all",
-            phase="development",
             start_date=time_window[0],
             end_date=time_window[1],
         )
-        report = staged.report_build(
+        report = research.report_build(
             profile=profile,
             layout=layout,
             scenario_id="pv_all",
-            phase="development",
         )
     return {
         "status": "SYNTHETIC_SMOKE_PASS",
@@ -96,7 +94,7 @@ def run_staged_synthetic_smoke(project_root: Path) -> dict[str, object]:
         ],
         "dataset_id": "pv_all",
         "dataset_exists": Path(dataset_root).is_dir(),
-        "research_status": research["status"],
+        "research_status": research_result["status"],
         "report_status": report["status"],
     }
 

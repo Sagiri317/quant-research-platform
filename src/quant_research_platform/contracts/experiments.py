@@ -107,7 +107,6 @@ class ExperimentPlan:
     cost_assumptions: Mapping[str, object] = field(default_factory=dict)
     risk_assumptions: Mapping[str, object] = field(default_factory=dict)
     holdout_status: Literal["LOCKED"] = "LOCKED"
-    protocol_version: str = "1.0"
 
     def __post_init__(self) -> None:
         validate_run_id(self.experiment_id)
@@ -159,8 +158,6 @@ class ExperimentPlan:
             raise ValueError("experiment_random_seed_invalid")
         if self.holdout_status != "LOCKED":
             raise ValueError("experiment_holdout_must_be_locked")
-        if self.protocol_version != "1.0":
-            raise ValueError("experiment_protocol_version_invalid")
         object.__setattr__(
             self, "backend_versions", _freeze_string_mapping(self.backend_versions)
         )
@@ -180,7 +177,6 @@ class ExperimentPlan:
 
     def protocol_payload(self) -> dict[str, object]:
         return {
-            "protocol_version": self.protocol_version,
             "experiment_id": self.experiment_id,
             "market_id": str(self.market_id),
             "research_dataset_id": self.research_dataset_id,

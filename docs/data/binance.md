@@ -2,9 +2,9 @@
 
 本文描述 Binance 公开市场数据在 QRP 中的当前数据合同。本文只记录结构和层边界，不记录真实 payload、行级样本、运行结果或本地路径。
 
-## Legacy 本地 Envelope
+## Canonical 本地 Envelope
 
-Legacy local-envelope 导入器只接受 JSONL。每行必须是 canonical envelope，所有
+Canonical local-envelope 导入器只接受 JSONL。每行必须是 canonical envelope，所有
 `data_kind` 共同必需的顶层字段为：
 
 ```text
@@ -58,7 +58,7 @@ data/raw/binance/spot/agg_trades/<symbol>/*.jsonl
 data/raw/binance/spot/depth/<symbol>/*.jsonl
 ```
 
-这些路径仅是 legacy local-envelope 的输入布局。它们不定义 public API、public CLI 或持久化研究输出。该 importer 路径不进行网络采集。下面独立的 recorder-run 合同只使用未认证的 Binance public market-data endpoints，且从不读取 API keys 或 secrets。
+这些路径仅是 canonical local-envelope 的输入布局。它们不定义 public API、public CLI 或持久化研究输出。该 importer 路径不进行网络采集。下面独立的 recorder-run 合同只使用未认证的 Binance public market-data endpoints，且从不读取 API keys 或 secrets。
 
 ## Recorder Run 合同
 
@@ -75,7 +75,7 @@ spot-l2:
   -> independent long-lived L2 capture for future spot/perpetual research
 ```
 
-两个 scope 使用独立的 root、manifest 和 aggregate status。Spot 中断不能降级或拒绝完整的 Futures HFT run。现有 Spot replay、legacy local-envelope 输入和 minute Crypto research 仍是相互独立的能力。每条命令都是一个托管的数据规模操作，并在其生命周期内持有 host-local QRP lock，因此同一主机上不会并发记录 `futures-hft` 和 `spot-l2`。请顺序运行，或使用不同主机。提供的 output root 必须不存在；recorder 成功时以原子方式发布。
+两个 scope 使用独立的 root、manifest 和 aggregate status。Spot 中断不能降级或拒绝完整的 Futures HFT run。现有 Spot replay、canonical local-envelope 输入和 minute Crypto research 仍是相互独立的能力。每条命令都是一个托管的数据规模操作，并在其生命周期内持有 host-local QRP lock，因此同一主机上不会并发记录 `futures-hft` 和 `spot-l2`。请顺序运行，或使用不同主机。提供的 output root 必须不存在；recorder 成功时以原子方式发布。
 
 ```text
 python -m quant_research_platform.sources.binance.recorder --scope futures-hft --output-root <run-root> --duration-seconds <seconds>

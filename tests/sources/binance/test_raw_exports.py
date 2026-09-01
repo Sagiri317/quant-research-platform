@@ -344,12 +344,12 @@ def test_binance_raw_rows_reject_missing_empty_and_malformed_files(
         b'{"payload":' + b"[" * 65 + b"0" + b"]" * 65 + b"}",
     ),
 )
-def test_legacy_binance_json_uses_strict_qrp_boundary(raw: bytes) -> None:
+def test_canonical_binance_json_uses_strict_qrp_boundary(raw: bytes) -> None:
     with pytest.raises(
         ValueError,
-        match=r"malformed_binance_raw_row: legacy\.jsonl:7",
+        match=r"malformed_binance_raw_row: canonical\.jsonl:7",
     ):
-        raw_exports._loads_json(raw, Path("legacy.jsonl"), line_number=7)
+        raw_exports._loads_json(raw, Path("canonical.jsonl"), line_number=7)
 
 
 @pytest.mark.parametrize(
@@ -463,7 +463,7 @@ def test_binance_raw_exports_admits_valid_large_depth_record(tmp_path: Path) -> 
     assert len(rows[0]["payload"]["asks"]) == 500
 
 
-def test_large_legacy_file_with_small_records_starts_from_scan_bound(
+def test_large_canonical_file_with_small_records_starts_from_scan_bound(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "large.jsonl"
@@ -486,7 +486,7 @@ def test_large_legacy_file_with_small_records_starts_from_scan_bound(
     assert policy.used_memory_bytes == 0
 
 
-def test_invalid_legacy_envelope_releases_decode_inside_owner_lease(
+def test_invalid_canonical_envelope_releases_decode_inside_owner_lease(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

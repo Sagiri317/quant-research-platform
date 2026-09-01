@@ -89,7 +89,7 @@ def test_openapi_has_closed_current_response_models() -> None:
     }
 
 
-def test_cli_exposes_only_current_staged_surface() -> None:
+def test_cli_exposes_only_current_research_surface() -> None:
     command = get_command(app)
     assert set(command.commands) == {
         "catalog",
@@ -131,6 +131,33 @@ def test_cli_exposes_only_current_staged_surface() -> None:
         result = runner.invoke(app, list(args))
         assert result.exit_code == 0, result.output
         _assert_public_text_is_sanitized(result.output)
+
+    research_help = runner.invoke(app, ["research", "run", "--help"])
+    assert research_help.exit_code == 0, research_help.output
+    assert "--holdout" in research_help.output
+    assert "--phase" not in research_help.output
+    assert "--protocol-frozen" not in research_help.output
+
+    report_help = runner.invoke(app, ["report", "build", "--help"])
+    assert report_help.exit_code == 0, report_help.output
+    assert "--phase" not in report_help.output
+    assert "--protocol-frozen" not in report_help.output
+
+    holdout = runner.invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--holdout",
+            "--start-date",
+            "2019-01-01",
+            "--end-date",
+            "2019-12-31",
+        ],
+    )
+    assert holdout.exit_code != 0
+    assert "holdout_frozen_development_identity_unavailable" in holdout.output
+    assert '"status": "READY"' not in holdout.output
 
 
 def _assert_public_text_is_sanitized(text: str) -> None:

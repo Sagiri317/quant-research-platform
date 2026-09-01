@@ -28,7 +28,7 @@ data/        本地数据占位；不提交 private data
 
 Dataset identity 由 persisted schema、dtype、PK、logical window 与 exact content 定义。Fingerprint 只用于 quick reject；只有 exact compare 可以产生 `MATCH`。输出在 transaction-local disk preflight 后写入同父目录 UUID staging，再通过平台 native no-replace 或 owner-qualified replace 发布；成功才 atomic publish，失败保留 old-good，并只清理本次 operation 能证明创建的资源。存在 primary `BaseException` 时，释放或验证失败不得覆盖它。
 
-QRP 采用 current-contract-only：替换旧实现时删除旧入口，不保留 alias、compat reader 或平行实现。
+QRP 采用 current-contract-only：替换旧实现时删除旧入口，不保留 alias、parallel reader 或平行实现。
 
 ## 公共接口面
 
@@ -40,7 +40,10 @@ GET  /api/0.1/research-datasets/{dataset_id}/requirements
 qrp catalog factors
 qrp catalog labels
 qrp research-datasets requirements <dataset_id>
+qrp research run --start-date <date> --end-date <date> [--holdout]
 ```
+
+Research runs default to development; `--holdout` fails closed until a frozen development identity is available.
 
 新增 public API/CLI、依赖、framework、connector 或 deployment 需要明确批准。
 

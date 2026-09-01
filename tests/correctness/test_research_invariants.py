@@ -55,7 +55,9 @@ from quant_research_platform.research.portfolios.optimizer import (
     optimize_portfolio,
 )
 from quant_research_platform.research.protocols.a_share import (
+    PROTOCOL_ID,
     SCENARIO_IDS,
+    protocol,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.choice.interim import readiness
@@ -66,10 +68,14 @@ from quant_research_platform.workflows.materialization import materialize_proces
 from tests.helpers.runtime_resources import capture_test_policy
 
 
-def test_frozen_phase1_surfaces_are_explicit() -> None:
+def test_research_protocol_identity_and_surfaces_are_explicit() -> None:
     assert len(FORMAL_PRICE_VOLUME_FACTORS) == 25
     assert len(FORMAL_CORE_PRICE_VOLUME_FACTORS) == 6
     assert SCENARIO_IDS == ("pv_all", "fusion_nf_core", "fusion_nf_expectations")
+    research_protocol = protocol("pv_all")
+    assert research_protocol.protocol_id == PROTOCOL_ID == "a_share_low_frequency"
+    assert research_protocol.manifest()["protocol_id"] == PROTOCOL_ID
+    assert "protocol_version" not in research_protocol.manifest()
     assert not hasattr(ModelSpec, "purge_gap_steps")
     assert not hasattr(PortfolioSpec, "execution_lag_steps")
 

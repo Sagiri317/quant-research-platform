@@ -88,6 +88,7 @@ def test_experiment_plan_is_locked_immutable_and_hash_stable() -> None:
     assert plan.holdout_status == "LOCKED"
     assert plan.protocol_hash == reordered.protocol_hash
     assert len(plan.protocol_hash) == 64
+    assert "protocol_version" not in plan.protocol_payload()
     assert plan.development_windows() == tuple(
         fold.development_test for fold in plan.folds
     )

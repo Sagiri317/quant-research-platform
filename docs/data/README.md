@@ -17,7 +17,7 @@
 
 `sources/` 负责摄取与 raw/interim 转换；A 股与 Crypto 的对应 `markets/implementations/` 分别负责本市场 processed data 和市场语义；`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data layout。共享安全检测规则由 `policy/share_safety.py` 提供，storage 不维护平行正则。
 
-Binance raw 合同见 `docs/data/binance.md`。Legacy local-envelope 导入器只接受 canonical JSONL envelope；正式 HFT recorder-run 则只接受其 manifest 精确声明的 gzip JSONL members。两者都不接受裸 connector payload 作为独立输入。
+Binance raw 合同见 `docs/data/binance.md`。Canonical local-envelope 导入器只接受 canonical JSONL envelope；正式 HFT recorder-run 则只接受其 manifest 精确声明的 gzip JSONL members。两者都不接受裸 connector payload 作为独立输入。
 
 每个 QRP dataset 保留：
 

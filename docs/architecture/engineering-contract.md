@@ -1,10 +1,10 @@
 # 工程合同
 
-本文只保存长期工程不变量；当前 branch、phase 和验证结果来自当前 Git 状态与本轮任务。
+本文只保存长期工程不变量；当前 branch 和验证结果来自当前 Git 状态与本轮任务。
 
 ## 当前合同
 
-QRP 使用 current-contract-only。Public machine contract、owner behavior、持久化 grammar 与 dependency direction 定义当前事实；被替换入口直接删除，不保留 alias、shim、compat reader、parallel implementation 或仅用于证明的 framework。
+QRP 使用 current-contract-only。Public machine contract、owner behavior、持久化 grammar 与 dependency direction 定义当前事实；被替换入口直接删除，不保留 alias、shim、parallel reader、parallel implementation 或仅用于证明的 framework。
 
 `pyproject.toml` 定义 runtime/dev/build dependency 与 Python 版本，`environment.yml` 提供同等或更严格的 conda 环境。新增依赖、public API/CLI 或 framework 需要明确批准。
 

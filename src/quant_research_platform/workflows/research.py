@@ -1,4 +1,4 @@
-"""Public staged workflow API used by both CLI and installed-package smoke."""
+"""Public research workflow API used by CLI and installed-package smoke."""
 
 from __future__ import annotations
 
@@ -98,16 +98,14 @@ def research_run(
     profile: ResearchProfile,
     layout: StorageLayout,
     scenario_id: str,
-    phase: str,
     start_date: str,
     end_date: str,
+    holdout: bool = False,
     plan: bool = False,
     rebuild: bool = False,
-    protocol_frozen: bool = False,
 ) -> object:
-    from quant_research_platform.research.protocols.freeze import require_phase_access
-
-    require_phase_access(phase=phase, protocol_frozen=protocol_frozen)
+    if holdout:
+        raise PermissionError("holdout_frozen_development_identity_unavailable")
     if plan:
         from quant_research_platform.research.protocols.a_share import protocol
 
@@ -115,9 +113,9 @@ def research_run(
             "stage": "research run",
             "plan": True,
             "scenario_id": scenario_id,
-            "phase": phase,
+            "access_window": "development",
             "rebuild": rebuild,
-            "protocol": protocol(scenario_id, phase).manifest(),
+            "protocol": protocol(scenario_id).manifest(),
         }
     dataset = profile.research_datasets.get(scenario_id)
     root = layout.research_dataset_root(dataset.market_id, dataset.data_id)
@@ -127,14 +125,14 @@ def research_run(
 
     report = build_a_share_report(
         scenario_id=scenario_id,
-        phase=phase,
+        access_window="development",
         data={"readiness/blockers": "derived from current artifact status"},
     )
     return {
         "stage": "research run",
         "status": "READY",
         "scenario_id": scenario_id,
-        "phase": phase,
+        "access_window": "development",
         "rebuild": rebuild,
         "window": {"start": start_date, "end": end_date},
         "dataset_root": str(root),
@@ -147,20 +145,15 @@ def report_build(
     profile: ResearchProfile,
     layout: StorageLayout,
     scenario_id: str,
-    phase: str,
     plan: bool = False,
     rebuild: bool = False,
-    protocol_frozen: bool = False,
 ) -> object:
-    from quant_research_platform.research.protocols.freeze import require_phase_access
-
-    require_phase_access(phase=phase, protocol_frozen=protocol_frozen)
     if plan:
         return {
             "stage": "report build",
             "plan": True,
             "scenario_id": scenario_id,
-            "phase": phase,
+            "access_window": "development",
             "rebuild": rebuild,
             "inputs": [scenario_id],
         }
@@ -172,14 +165,14 @@ def report_build(
 
     report = build_a_share_report(
         scenario_id=scenario_id,
-        phase=phase,
+        access_window="development",
         data={"readiness/blockers": "derived from current artifact status"},
     )
     return {
         "stage": "report build",
         "status": "READY",
         "scenario_id": scenario_id,
-        "phase": phase,
+        "access_window": "development",
         "rebuild": rebuild,
         "report_source": str(root),
         "report": report,

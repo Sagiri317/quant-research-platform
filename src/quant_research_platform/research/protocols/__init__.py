@@ -1,1 +1,1 @@
-"""Frozen research protocol owners."""
+"""Formal research protocol owners."""

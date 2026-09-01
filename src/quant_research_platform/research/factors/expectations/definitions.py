@@ -1,4 +1,4 @@
-"""The frozen Phase 1 four-factor expectations block."""
+"""The formal four-factor expectations block."""
 
 from __future__ import annotations
 

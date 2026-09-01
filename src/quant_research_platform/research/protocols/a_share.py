@@ -1,4 +1,4 @@
-"""Frozen Phase 1 A-share low-frequency research protocol."""
+"""A-share low-frequency research protocol."""
 
 from __future__ import annotations
 
@@ -56,6 +56,7 @@ from quant_research_platform.research.labels.forward_returns import (
 from quant_research_platform.research.randomness import ROOT_SEED
 
 MARKET_ID = MarketId("a_share")
+PROTOCOL_ID = "a_share_low_frequency"
 MARKET_PANEL_ID = "market_panel_1d"
 EXECUTION_MASK_ID = "execution_mask"
 PRICE_VOLUME_DATA_ID = "price_volume_facts"
@@ -65,7 +66,7 @@ RESEARCH_DATASET_IDS = {
     "fusion_nf_expectations": "fusion_nf_expectations",
 }
 SCENARIO_IDS = tuple(RESEARCH_DATASET_IDS)
-PHASES = ("development", "holdout")
+ACCESS_WINDOWS = ("development", "holdout")
 FORMAL_START = date(2014, 1, 1)
 FORMAL_END = date(2025, 12, 31)
 DEVELOPMENT_START = date(2019, 1, 1)
@@ -157,16 +158,15 @@ PORTFOLIO_CANDIDATES = (
 @dataclass(frozen=True)
 class AShareProtocol:
     scenario_id: str
-    phase: str
+    access_window: str = "development"
     factor_scope: str = "core"
-    protocol_version: str = "phase1"
     root_seed: int = ROOT_SEED
 
     def __post_init__(self) -> None:
         if self.scenario_id not in SCENARIO_IDS:
             raise ValueError("unknown_a_share_scenario")
-        if self.phase not in PHASES:
-            raise ValueError("unknown_a_share_phase")
+        if self.access_window not in ACCESS_WINDOWS:
+            raise ValueError("unknown_a_share_access_window")
         if self.factor_scope not in {"core", "full"}:
             raise ValueError("unknown_a_share_factor_scope")
         if self.root_seed != ROOT_SEED:
@@ -175,9 +175,13 @@ class AShareProtocol:
     @property
     def time_window(self) -> TimeWindow:
         return TimeWindow(
-            DEVELOPMENT_START if self.phase == "development" else HOLDOUT_START,
-            DEVELOPMENT_END if self.phase == "development" else HOLDOUT_END,
+            DEVELOPMENT_START if self.access_window == "development" else HOLDOUT_START,
+            DEVELOPMENT_END if self.access_window == "development" else HOLDOUT_END,
         )
+
+    @property
+    def protocol_id(self) -> str:
+        return PROTOCOL_ID
 
     @property
     def factor_columns(self) -> tuple[str, ...]:
@@ -197,9 +201,9 @@ class AShareProtocol:
 
     def manifest(self) -> dict[str, object]:
         return {
-            "protocol_version": self.protocol_version,
+            "protocol_id": self.protocol_id,
             "scenario_id": self.scenario_id,
-            "phase": self.phase,
+            "access_window": self.access_window,
             "factor_scope": self.factor_scope,
             "formal_window": {
                 "start": FORMAL_START.isoformat(),
@@ -271,9 +275,12 @@ class AShareProtocol:
 
 
 def protocol(
-    scenario_id: str, phase: str = "development", *, factor_scope: str = "core"
+    scenario_id: str,
+    access_window: str = "development",
+    *,
+    factor_scope: str = "core",
 ) -> AShareProtocol:
-    return AShareProtocol(scenario_id, phase, factor_scope=factor_scope)
+    return AShareProtocol(scenario_id, access_window, factor_scope=factor_scope)
 
 
 def factor_catalog() -> FactorCatalog:

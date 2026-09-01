@@ -1,4 +1,4 @@
-"""Public staged command line interface."""
+"""Public command line interface."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ import typer
 from quant_research_platform.interfaces import queries
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import staged
+from quant_research_platform.workflows import research
 
 app = typer.Typer(add_completion=False)
 catalog_app = typer.Typer(add_completion=False, help="Catalog query commands.")
@@ -71,7 +71,7 @@ def data_materialize(
     data_id: list[str] | None = typer.Option(None, "--data-id"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
 ) -> None:
-    result = staged.data_materialize(
+    result = research.data_materialize(
         profile=research_profile(),
         layout=StorageLayout(project_root=project_root),
         raw_root=raw_root,
@@ -92,7 +92,7 @@ def dataset_build(
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
-    result = staged.dataset_build(
+    result = research.dataset_build(
         profile=research_profile(),
         layout=StorageLayout(project_root=project_root),
         dataset_id=dataset_id,
@@ -107,45 +107,43 @@ def dataset_build(
 @research_app.command("run")
 def research_run(
     scenario_id: str = typer.Option("pv_all", "--scenario-id"),  # noqa: B008
-    phase: str = typer.Option("development", "--phase"),  # noqa: B008
     start_date: str = typer.Option(..., "--start-date"),  # noqa: B008
     end_date: str = typer.Option(..., "--end-date"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
+    holdout: bool = typer.Option(False, "--holdout"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
-    protocol_frozen: bool = typer.Option(False, "--protocol-frozen"),  # noqa: B008
 ) -> None:
-    result = staged.research_run(
-        profile=research_profile(),
-        layout=StorageLayout(project_root=project_root),
-        scenario_id=scenario_id,
-        phase=phase,
-        start_date=start_date,
-        end_date=end_date,
-        plan=plan,
-        rebuild=rebuild,
-        protocol_frozen=protocol_frozen,
-    )
+    try:
+        result = research.research_run(
+            profile=research_profile(),
+            layout=StorageLayout(project_root=project_root),
+            scenario_id=scenario_id,
+            start_date=start_date,
+            end_date=end_date,
+            holdout=holdout,
+            plan=plan,
+            rebuild=rebuild,
+        )
+    except PermissionError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
     _echo_result(result)
 
 
 @report_app.command("build")
 def report_build(
     scenario_id: str = typer.Option("pv_all", "--scenario-id"),  # noqa: B008
-    phase: str = typer.Option("development", "--phase"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
-    protocol_frozen: bool = typer.Option(False, "--protocol-frozen"),  # noqa: B008
 ) -> None:
-    result = staged.report_build(
+    result = research.report_build(
         profile=research_profile(),
         layout=StorageLayout(project_root=project_root),
         scenario_id=scenario_id,
-        phase=phase,
         plan=plan,
         rebuild=rebuild,
-        protocol_frozen=protocol_frozen,
     )
     _echo_result(result)
 
@@ -155,7 +153,7 @@ def status(
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
 ) -> None:
     _echo_result(
-        staged.status(
+        research.status(
             profile=research_profile(),
             layout=StorageLayout(project_root=project_root),
         )
@@ -168,7 +166,7 @@ def inspect(
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
 ) -> None:
     _echo_result(
-        staged.inspect(
+        research.inspect(
             profile=research_profile(),
             layout=StorageLayout(project_root=project_root),
             dataset_id=dataset_id,
