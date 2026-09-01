@@ -43,10 +43,14 @@ from .raw_schemas import (
     MAX_LOGICAL_RECORD_BYTES,
     BoundedCsvRecord,
     RawExportInspection,
+    _infer_dataset_from_header,
+    infer_dataset_from_native_export,
     inspect_raw_export_file,
     iter_export_csv_records,
     materialize_header_record,
+    parse_raw_filename,
     raw_export_file_identity,
+    read_export_header,
     require_raw_resource_policy,
 )
 
@@ -1073,11 +1077,13 @@ def dataset_files_with_identity_by_id(
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
     identity_index: ExactPrimaryKeyIndex | None = None,
+    requested_datasets: Iterable[str] | None = None,
 ) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
     """Yield inspected files with the identity bound during inspection."""
 
     bound_policy = resource_policy
     root = Path(raw_root)
+    requested = _requested_raw_datasets(requested_datasets)
 
     def iter_files() -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
         policy = bound_policy or current_runtime_resource_policy()
@@ -1104,6 +1110,8 @@ def dataset_files_with_identity_by_id(
                         paths=paths,
                         index=index,
                         namespace="csmar-dataset-physical-exports",
+                        resource_policy=policy,
+                        requested_datasets=requested,
                     )
                     for path, identity in files:
                         result = _inspect_raw_export_with_identity(
@@ -1165,10 +1173,20 @@ def _iter_indexed_raw_export_files(
     paths: Iterator[Path],
     index: ExactPrimaryKeyIndex,
     namespace: str,
+    resource_policy: RuntimeResourcePolicy,
+    requested_datasets: frozenset[str] | None,
 ) -> Iterator[tuple[Path, DatasetFileIdentity]]:
     path_namespace = f"{namespace}-paths"
     for path in paths:
         identity = raw_export_file_identity(path)
+        if requested_datasets is not None:
+            candidate = _raw_dataset_candidate(
+                path,
+                resource_policy=resource_policy,
+                expected_identity=identity,
+            )
+            if candidate not in requested_datasets:
+                continue
         relative = path.relative_to(root).as_posix().encode("utf-8")
         payload = relative + b"\0" + _file_identity_bytes(identity)
         inserted = index.add_identity_payloads(
@@ -1198,11 +1216,97 @@ def _iter_indexed_raw_export_files(
         yield path, identity
 
 
+def _requested_raw_datasets(
+    requested_datasets: Iterable[str] | None,
+) -> frozenset[str] | None:
+    if requested_datasets is None:
+        return None
+    requested = frozenset(requested_datasets)
+    if not requested.issubset(RAW_TABLE_CONTRACTS):
+        raise ValueError("csmar_requested_dataset_invalid")
+    return requested
+
+
+def _raw_dataset_candidate(
+    path: Path,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+    expected_identity: DatasetFileIdentity,
+) -> str | None:
+    try:
+        return parse_raw_filename(path).dataset
+    except ValueError:
+        pass
+    try:
+        return infer_dataset_from_native_export(path)
+    except ValueError:
+        pass
+    try:
+        columns = read_export_header(
+            path,
+            resource_policy=resource_policy,
+            expected_identity=expected_identity,
+        )
+        return _infer_dataset_from_header(columns)
+    except OSError:
+        return None
+    except ValueError as exc:
+        if str(exc) == "csmar_raw_export_identity_changed":
+            raise
+        return None
+
+
 def _verify_csmar_member_set(
     root: Path,
     index: ExactPrimaryKeyIndex,
     *,
     namespace: str = "csmar-dataset-physical-exports-paths",
+    requested_datasets: Iterable[str] | None = None,
+) -> None:
+    requested = _requested_raw_datasets(requested_datasets)
+    if requested is None:
+        _verify_all_csmar_members(root, index, namespace=namespace)
+        return
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
+    expected_paths = {
+        payload.split(b"\0", 1)[0]
+        for payload in index.identity_payload_values(namespace=namespace)
+    }
+    current_paths: set[bytes] = set()
+    with _raw_export_path_session(root) as (paths, _verify_root):
+        for path in paths:
+            identity = raw_export_file_identity(path)
+            candidate = _raw_dataset_candidate(
+                path,
+                resource_policy=policy,
+                expected_identity=identity,
+            )
+            if candidate not in requested:
+                continue
+            relative = path.relative_to(root).as_posix().encode("utf-8")
+            if relative not in expected_paths:
+                raise ValueError("csmar_raw_export_identity_changed")
+            current_paths.add(relative)
+            expected = index.identity_payload_value(
+                namespace=namespace,
+                payload=relative,
+            )
+            actual = (
+                relative + b"\0" + _file_identity_bytes(raw_export_file_identity(path))
+            )
+            if expected != actual:
+                raise ValueError("csmar_raw_export_identity_changed")
+    if current_paths != expected_paths:
+        raise ValueError("csmar_raw_export_identity_changed")
+
+
+def _verify_all_csmar_members(
+    root: Path,
+    index: ExactPrimaryKeyIndex,
+    *,
+    namespace: str,
 ) -> None:
     with _raw_export_path_session(root) as (paths, _verify_root):
         current_count = 0

@@ -123,7 +123,7 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
     with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
         interim.source_content_identity(tmp_path, "market_bars_1d")
 
-    with runtime_resource_policy_scope(None):
+    with runtime_resource_policy_scope(None) as policy:
         first = interim.source_content_identity(tmp_path, "market_bars_1d")
         assert first is not None
 
@@ -168,6 +168,7 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         assert third != second
         shard.unlink()
         assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
+        assert policy.used_memory_bytes == 0
 
 
 def test_csmar_source_root_resolver_uses_one_observed_sibling(tmp_path: Path) -> None:
@@ -181,7 +182,7 @@ def test_csmar_source_root_resolver_uses_one_observed_sibling(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    with runtime_resource_policy_scope(None):
+    with runtime_resource_policy_scope(None) as policy:
         assert interim.resolve_source_root(primary, "trading_calendar") == auxiliary
 
         (primary / "native-calendar.csv").write_text(
@@ -190,6 +191,46 @@ def test_csmar_source_root_resolver_uses_one_observed_sibling(tmp_path: Path) ->
         )
         with pytest.raises(ValueError, match="csmar_source_root_ambiguous"):
             interim.resolve_source_root(primary, "trading_calendar")
+        assert policy.used_memory_bytes == 0
+    assert not tuple(tmp_path.glob(".k-*/k.db"))
+
+
+def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
+    tmp_path: Path,
+) -> None:
+    calendar = tmp_path / (
+        "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
+    )
+    calendar.write_text(
+        "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n",
+        encoding="utf-8",
+    )
+    unrelated = tmp_path / (
+        "csmar__special_treatment_changes__all_market_types__full__export-20260605.csv"
+    )
+    unrelated.write_text("bad,header\n", encoding="utf-8")
+
+    with runtime_resource_policy_scope(None) as policy:
+        assert interim.resolve_source_root(tmp_path, "trading_calendar") == tmp_path
+        identity = interim.source_content_identity(tmp_path, "trading_calendar")
+        assert identity is not None
+        assert policy.used_memory_bytes == 0
+    assert not tuple(tmp_path.parent.glob(".k-*/k.db"))
+
+
+def test_csmar_identity_rejects_requested_bad_schema_and_cleans_scratch(
+    tmp_path: Path,
+) -> None:
+    requested = tmp_path / (
+        "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
+    )
+    requested.write_text("bad,header\n", encoding="utf-8")
+
+    with runtime_resource_policy_scope(None) as policy:
+        with pytest.raises(ValueError, match="csmar_raw_export_"):
+            interim.source_content_identity(tmp_path, "trading_calendar")
+        assert policy.used_memory_bytes == 0
+    assert not tuple(tmp_path.parent.glob(".k-*/k.db"))
 
 
 def test_dirty_index_info_csv_audit_counts_and_semantics(tmp_path: Path) -> None:

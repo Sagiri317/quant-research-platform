@@ -399,6 +399,13 @@ def test_csmar_dataset_action_resolves_a_valid_auxiliary_root(
         "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n",
         encoding="utf-8",
     )
+    (
+        auxiliary_root / "csmar__special_treatment_changes__all_market_types__full__"
+        "export-20260605.csv"
+    ).write_text(
+        "bad,header\n",
+        encoding="utf-8",
+    )
 
     result = research.data_materialize(
         profile=profile,

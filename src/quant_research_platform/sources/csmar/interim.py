@@ -600,14 +600,19 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
         ),
         index,
     ):
-        records = tuple(
-            dataset_files_with_identity_by_id(
-                root,
-                resource_policy=policy,
-                identity_index=index,
-            )
+        records_iterator = dataset_files_with_identity_by_id(
+            root,
+            resource_policy=policy,
+            identity_index=index,
+            requested_datasets=(_raw_dataset_for_interim(data_id),),
         )
-        _verify_csmar_member_set(root, index)
+        with closing_iterator(records_iterator):
+            records = tuple(records_iterator)
+        _verify_csmar_member_set(
+            root,
+            index,
+            requested_datasets=(_raw_dataset_for_interim(data_id),),
+        )
         selected = [
             (dataset, path, identity)
             for dataset, path, identity in records
@@ -620,7 +625,11 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
             error="csmar_raw_export_identity_changed",
             resource_policy=policy,
         )
-        _verify_csmar_member_set(root, index)
+        _verify_csmar_member_set(
+            root,
+            index,
+            requested_datasets=(_raw_dataset_for_interim(data_id),),
+        )
         return identity
 
 
@@ -660,14 +669,19 @@ def resolve_source_root(raw_root: Path, data_id: str) -> Path | None:
             ),
             index,
         ):
-            records = tuple(
-                dataset_files_with_identity_by_id(
-                    candidate,
-                    resource_policy=policy,
-                    identity_index=index,
-                )
+            records_iterator = dataset_files_with_identity_by_id(
+                candidate,
+                resource_policy=policy,
+                identity_index=index,
+                requested_datasets=(raw_dataset,),
             )
-            _verify_csmar_member_set(candidate, index)
+            with closing_iterator(records_iterator):
+                records = tuple(records_iterator)
+            _verify_csmar_member_set(
+                candidate,
+                index,
+                requested_datasets=(raw_dataset,),
+            )
         if any(dataset == raw_dataset for dataset, _, _ in records):
             matches.append(candidate)
     if len(matches) > 1:
@@ -1279,6 +1293,7 @@ def _materialize_interim_data(
     requested_by_raw: dict[str, str] = {}
     for data_id in data_ids:
         requested_by_raw[_raw_dataset_for_interim(data_id)] = data_id
+    requested_raw_datasets = tuple(requested_by_raw)
     pending = set(data_ids)
     require_unaliased_path(
         source_raw_root,
@@ -1300,10 +1315,15 @@ def _materialize_interim_data(
             source_raw_root,
             resource_policy=resource_policy,
             identity_index=identity_index,
+            requested_datasets=requested_raw_datasets,
         )
 
         def verify_members() -> None:
-            _verify_csmar_member_set(source_raw_root, identity_index)
+            _verify_csmar_member_set(
+                source_raw_root,
+                identity_index,
+                requested_datasets=requested_raw_datasets,
+            )
 
         with closing_iterator(indexed_files):
             for raw_dataset, group in groupby(indexed_files, key=lambda item: item[0]):
