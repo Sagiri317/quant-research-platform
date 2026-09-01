@@ -36,17 +36,11 @@ class ProducerKind(StrEnum):
 class ProducerBinding:
     kind: ProducerKind
     producer: Callable[..., object]
-    source_root_selector: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", ProducerKind(self.kind))
         if not callable(self.producer):
             raise ValueError("producer_callable_required")
-        if self.source_root_selector is not None:
-            _require_identifier(
-                self.source_root_selector,
-                "producer_source_root_selector_invalid",
-            )
 
 
 @dataclass(frozen=True, slots=True)
