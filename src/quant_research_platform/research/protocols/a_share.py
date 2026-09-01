@@ -32,6 +32,7 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.targets import TargetSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.factors.expectations.definitions import (
     EXPECTATIONS_FACTORS,
@@ -271,7 +272,66 @@ class AShareProtocol:
             },
             "portfolio_candidates": list(PORTFOLIO_CANDIDATES),
             "risk_styles": list(RISK_STYLE_COLUMNS),
+            "required_terminals": list(self.terminal_targets("research run")),
         }
+
+    def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
+        if action not in {"research run", "report build"}:
+            return ()
+        dataset = self.scenario_id
+        evaluation = f"{dataset}_evaluation"
+        model_selection = f"{dataset}_model_selection_refit"
+        predictions = f"{dataset}_persisted_predictions"
+        statistics = f"{dataset}_statistics"
+        portfolios = tuple(
+            TargetSpec(
+                f"{dataset}_{candidate}_ledger",
+                dependencies=(predictions,),
+            )
+            for candidate in PORTFOLIO_CANDIDATES
+        )
+        return (
+            TargetSpec(evaluation, dependencies=(dataset,)),
+            TargetSpec(model_selection, dependencies=(evaluation,)),
+            TargetSpec(predictions, dependencies=(model_selection,)),
+            TargetSpec(statistics, dependencies=(predictions,)),
+            *portfolios,
+            TargetSpec(
+                self._research_terminal_target,
+                dependencies=(statistics, *(target.target_id for target in portfolios)),
+            ),
+            TargetSpec(
+                self._report_artifact_target,
+                dependencies=(self._research_terminal_target,),
+            ),
+            TargetSpec(
+                self._report_terminal_target,
+                dependencies=(self._report_artifact_target,),
+            ),
+        )
+
+    def terminal_targets(self, action: str) -> tuple[str, ...]:
+        if action == "dataset build":
+            return (self.scenario_id,)
+        if action == "research run":
+            return (self._research_terminal_target,)
+        if action == "report build":
+            return (self._report_terminal_target,)
+        if action == "data materialize":
+            return ()
+        raise ValueError("unknown_a_share_action")
+
+    @property
+    def _research_terminal_target(self) -> str:
+        return f"{self.scenario_id}_research"
+
+    @property
+    def _report_artifact_target(self) -> str:
+        return f"{self.scenario_id}_report_artifact"
+
+    @property
+    def _report_terminal_target(self) -> str:
+        return f"{self.scenario_id}_report"
 
 
 def protocol(

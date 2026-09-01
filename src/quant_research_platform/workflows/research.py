@@ -8,6 +8,7 @@ from typing import Any
 
 from quant_research_platform.contracts.targets import (
     PlanDecision,
+    ProducerKind,
     RunStatus,
     TargetPlan,
     TargetResult,
@@ -20,19 +21,6 @@ from quant_research_platform.runtime.resources import runtime_resource_policy_sc
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-
-_OPTIONAL_SOURCE_IDS = frozenset(
-    {
-        "industry_classification",
-        "industry_classification_sets",
-        "industry_classification_versions",
-        "listing_status_changes",
-        "stock_info_changes",
-        "stock_info_annual",
-        "trading_no_limit",
-        "special_treatment_changes",
-    }
-)
 
 
 def resolve_target_graph(
@@ -78,39 +66,50 @@ def plan_targets(
     action: str,
     terminal_targets: Iterable[str],
     layout: StorageLayout,
+    scenario_id: str | None = None,
     rebuild: bool = False,
 ) -> dict[str, object]:
     terminals = tuple(sorted(set(terminal_targets)))
-    specs = _target_specs(profile, action=action, terminal_targets=terminals)
+    scenario = scenario_id or (
+        terminals[0]
+        if action == "dataset build" and terminals
+        else _default_scenario_id(profile)
+    )
+    protocol = _protocol(profile, scenario)
+    protocol_terminals = tuple(protocol.terminal_targets(action))
+    if action != "data materialize" and terminals != protocol_terminals:
+        raise ValueError("protocol_terminal_targets_invalid")
+    specs = _target_specs(
+        profile,
+        action=action,
+        protocol=protocol,
+    )
     ordered = resolve_target_graph(specs, terminals)
     requested = set(terminals)
     plans: list[TargetPlan] = []
     by_id: dict[str, TargetPlan] = {}
     for spec in ordered:
+        root = _physical_target_root(profile, layout, spec.target_id)
         blocker: str | None = None
-        blocked_dependency = next(
-            (
-                dependency
-                for dependency in spec.dependencies
-                if by_id[dependency].decision is PlanDecision.BLOCKED
-            ),
-            None,
-        )
-        if blocked_dependency is not None:
-            blocker = f"dependency_blocked: {blocked_dependency}"
+        if root is not None and root.exists():
+            blocker = "semantic_identity_not_available"
         elif rebuild:
             blocker = "semantic_identity_not_available"
-        elif spec.producer_id is None:
-            blocker = "capability_not_implemented"
-        elif spec.producer_id not in profile.producer_bindings:
-            blocker = "producer_binding_missing"
         else:
-            root = _physical_target_root(profile, layout, spec.target_id)
-            if root is not None and root.exists():
-                if spec.target_id in requested:
-                    blocker = "semantic_identity_not_available"
-                elif not _valid_persisted_root(root):
-                    blocker = "persisted_manifest_invalid"
+            blocked_dependency = next(
+                (
+                    dependency
+                    for dependency in spec.dependencies
+                    if by_id[dependency].decision is PlanDecision.BLOCKED
+                ),
+                None,
+            )
+            if blocked_dependency is not None:
+                blocker = f"dependency_blocked: {blocked_dependency}"
+            elif spec.producer_id is None:
+                blocker = "capability_not_implemented"
+            elif spec.producer_id not in profile.producer_bindings:
+                blocker = "producer_binding_missing"
         decision = PlanDecision.BLOCKED if blocker else PlanDecision.BUILD
         plan = TargetPlan(
             target_id=spec.target_id,
@@ -136,7 +135,7 @@ def plan_targets(
         "blockers": [
             {"target_id": plan.target_id, "reason": plan.blocker} for plan in blocked
         ],
-        "protocol": _protocol_manifest(profile),
+        "protocol": protocol.manifest(),
     }
 
 
@@ -186,6 +185,7 @@ def dataset_build(
             action="dataset build",
             terminal_targets=(dataset_id,),
             layout=layout,
+            scenario_id=dataset_id,
             rebuild=rebuild,
         )
     return _execute_action(
@@ -214,13 +214,14 @@ def research_run(
 ) -> dict[str, object]:
     if holdout:
         raise PermissionError("holdout_frozen_development_identity_unavailable")
-    terminal = _research_terminal_id(scenario_id)
+    terminal = _protocol_terminal_target(profile, scenario_id, "research run")
     if plan:
         return plan_targets(
             profile=profile,
             action="research run",
             terminal_targets=(terminal,),
             layout=layout,
+            scenario_id=scenario_id,
             rebuild=rebuild,
         )
     return _execute_action(
@@ -244,13 +245,14 @@ def report_build(
     plan: bool = False,
     rebuild: bool = False,
 ) -> dict[str, object]:
-    terminal = _report_terminal_id(scenario_id)
+    terminal = _protocol_terminal_target(profile, scenario_id, "report build")
     if plan:
         return plan_targets(
             profile=profile,
             action="report build",
             terminal_targets=(terminal,),
             layout=layout,
+            scenario_id=scenario_id,
             rebuild=rebuild,
         )
     return _execute_action(
@@ -267,12 +269,25 @@ def report_build(
 
 
 def status(*, profile: ResearchProfile, layout: StorageLayout) -> dict[str, object]:
-    del layout
+    scenario_id = _default_scenario_id(profile)
+    terminal = _protocol_terminal_target(profile, scenario_id, "research run")
+    plan = plan_targets(
+        profile=profile,
+        action="research run",
+        terminal_targets=(terminal,),
+        layout=layout,
+        scenario_id=scenario_id,
+    )
+    blockers = list(plan["blockers"])
+    blockers.append(
+        {"target_id": terminal, "reason": "semantic_identity_not_available"}
+    )
     return {
         "profile_id": profile.profile_id,
         "status": RunStatus.BLOCKED.value,
-        "blocker": "semantic_identity_not_available",
-        "targets": [],
+        "terminal_targets": [terminal],
+        "targets": plan["targets"],
+        "blockers": blockers,
     }
 
 
@@ -307,8 +322,9 @@ def inspect(
         )
     else:
         result.update(
-            status=RunStatus.COMPLETE.value,
-            manifest_valid=True,
+            status=RunStatus.BLOCKED.value,
+            physical_manifest_valid=True,
+            blocker="semantic_identity_not_available",
             row_count=manifest["row_count"],
         )
     return result
@@ -331,9 +347,17 @@ def _execute_action(
         action=action,
         terminal_targets=terminal_targets,
         layout=layout,
+        scenario_id=_scenario_from_terminal(profile, action, terminal_targets),
         rebuild=rebuild,
     )
-    specs = _target_specs(profile, action=action, terminal_targets=terminal_targets)
+    specs = _target_specs(
+        profile,
+        action=action,
+        protocol=_protocol(
+            profile,
+            _scenario_from_terminal(profile, action, terminal_targets),
+        ),
+    )
     ordered = resolve_target_graph(specs, terminal_targets)
     plans = {item["target_id"]: item for item in plan["targets"]}  # type: ignore[index]
     results: dict[str, TargetResult] = {}
@@ -364,13 +388,6 @@ def _execute_action(
                     blocker=f"dependency_blocked: {blocked_dependency}",
                 )
                 continue
-            root = _physical_target_root(profile, layout, spec.target_id)
-            if root is not None and root.exists():
-                results[spec.target_id] = TargetResult(
-                    target_id=spec.target_id,
-                    status=TargetStatus.BUILT,
-                )
-                continue
             results[spec.target_id] = _build_target(
                 profile=profile,
                 layout=layout,
@@ -382,12 +399,29 @@ def _execute_action(
                 end_date=end_date,
             )
     status_value = _run_status(results.values())
+    top_level_blockers = [
+        {"target_id": result.target_id, "reason": result.blocker}
+        for result in results.values()
+        if result.blocker is not None
+    ]
+    if any(
+        result.status in {TargetStatus.BUILT, TargetStatus.REUSED}
+        for result in results.values()
+    ):
+        status_value = RunStatus.BLOCKED
+        top_level_blockers.append(
+            {
+                "target_id": terminal_targets[0],
+                "reason": "semantic_identity_not_available",
+            }
+        )
     return {
         "stage": action,
         "profile_id": profile.profile_id,
         "status": status_value.value,
         "terminal_targets": list(sorted(terminal_targets)),
         "target_results": [result.payload() for result in results.values()],
+        "blockers": top_level_blockers,
     }
 
 
@@ -402,8 +436,15 @@ def _build_target(
     start_date: str | None,
     end_date: str | None,
 ) -> TargetResult:
-    producer = profile.producer_bindings[spec.producer_id]  # type: ignore[index]
-    if _is_interim_target(profile, spec.target_id):
+    if spec.producer_id is None:
+        return TargetResult(
+            target_id=spec.target_id,
+            status=TargetStatus.BLOCKED,
+            blocker="producer_binding_missing",
+        )
+    binding = profile.producer_bindings[spec.producer_id]
+    producer = binding.producer
+    if binding.kind is ProducerKind.INTERIM:
         try:
             result = producer(
                 layout=layout,
@@ -433,8 +474,15 @@ def _build_target(
                 blocker="external_data_unavailable",
             )
         return TargetResult(target_id=spec.target_id, status=TargetStatus.BUILT)
-    if _is_processed_target(profile, spec.target_id):
-        processed_spec = profile.processed.get(spec.target_id)
+    if binding.kind is ProducerKind.PROCESSED:
+        try:
+            processed_spec = profile.processed.get(spec.target_id)
+        except KeyError:
+            return TargetResult(
+                target_id=spec.target_id,
+                status=TargetStatus.BLOCKED,
+                blocker="producer_binding_kind_mismatch",
+            )
         frame = producer(
             processed_spec,
             layout=layout,
@@ -455,7 +503,15 @@ def _build_target(
             borrowed_input=True,
         )
         return TargetResult(target_id=spec.target_id, status=TargetStatus.BUILT)
-    if _is_dataset_target(profile, spec.target_id):
+    if binding.kind is ProducerKind.DATASET:
+        try:
+            profile.research_datasets.get(spec.target_id)
+        except KeyError:
+            return TargetResult(
+                target_id=spec.target_id,
+                status=TargetStatus.BLOCKED,
+                blocker="producer_binding_kind_mismatch",
+            )
         producer(
             layout=layout,
             dataset_catalog=profile.research_datasets,
@@ -476,7 +532,7 @@ def _target_specs(
     profile: ResearchProfile,
     *,
     action: str,
-    terminal_targets: tuple[str, ...],
+    protocol: Any,
 ) -> tuple[TargetSpec, ...]:
     specs: list[TargetSpec] = [
         TargetSpec(
@@ -488,12 +544,7 @@ def _target_specs(
     processed_specs = tuple(
         TargetSpec(
             target_id=spec.data_id,
-            dependencies=tuple(
-                source_id
-                for source_id in spec.source_input_data_ids
-                if source_id not in _OPTIONAL_SOURCE_IDS
-            )
-            + spec.processed_input_data_ids,
+            dependencies=spec.source_input_data_ids + spec.processed_input_data_ids,
             producer_id=spec.data_id,
         )
         for spec in profile.processed.list()
@@ -523,24 +574,7 @@ def _target_specs(
         )
         for spec in profile.research_datasets.list()
     )
-    if action == "research run":
-        scenario_id = terminal_targets[0].removeprefix("research_run_")
-        specs.append(
-            TargetSpec(
-                target_id=terminal_targets[0],
-                dependencies=(scenario_id,),
-                terminal=True,
-            )
-        )
-    elif action == "report build":
-        scenario_id = terminal_targets[0].removeprefix("report_")
-        specs.append(
-            TargetSpec(
-                target_id=terminal_targets[0],
-                dependencies=(scenario_id,),
-                terminal=True,
-            )
-        )
+    specs.extend(protocol.target_specs(action))
     return tuple(specs)
 
 
@@ -568,45 +602,47 @@ def _physical_target_root(
     return layout.research_dataset_root(spec.market_id, spec.data_id)
 
 
-def _valid_persisted_root(root: Path) -> bool:
-    try:
-        read_dataset_manifest_evidence(root)
-    except (FileNotFoundError, OSError, ValueError):
-        return False
-    return True
-
-
-def _is_interim_target(profile: ResearchProfile, target_id: str) -> bool:
-    return any(spec.data_id == target_id for spec in profile.interim.list())
-
-
-def _is_processed_target(profile: ResearchProfile, target_id: str) -> bool:
-    return any(spec.data_id == target_id for spec in profile.processed.list())
-
-
-def _is_dataset_target(profile: ResearchProfile, target_id: str) -> bool:
-    return any(spec.data_id == target_id for spec in profile.research_datasets.list())
-
-
 def _default_raw_root(profile: ResearchProfile, layout: StorageLayout) -> Path:
     return layout.raw_source_root(profile.interim.list()[0].source_id)
 
 
-def _protocol_manifest(profile: ResearchProfile) -> dict[str, object]:
-    scenario_id = profile.research_datasets.list()[0].data_id
-    protocol = profile.protocol(scenario_id=scenario_id, access_window="development")
-    manifest = protocol.manifest()
-    if type(manifest) is not dict:
-        raise ValueError("protocol_manifest_invalid")
-    return manifest
+def _protocol(profile: ResearchProfile, scenario_id: str) -> Any:
+    return profile.protocol(scenario_id=scenario_id, access_window="development")
 
 
-def _research_terminal_id(scenario_id: str) -> str:
-    return f"research_run_{scenario_id}"
+def _protocol_terminal_target(
+    profile: ResearchProfile,
+    scenario_id: str,
+    action: str,
+) -> str:
+    terminals = _protocol(profile, scenario_id).terminal_targets(action)
+    if len(terminals) != 1:
+        raise ValueError("protocol_terminal_target_invalid")
+    return terminals[0]
 
 
-def _report_terminal_id(scenario_id: str) -> str:
-    return f"report_{scenario_id}"
+def _scenario_from_terminal(
+    profile: ResearchProfile,
+    action: str,
+    terminal_targets: tuple[str, ...],
+) -> str:
+    if action == "data materialize":
+        return _default_scenario_id(profile)
+    if action == "dataset build":
+        return terminal_targets[0]
+    datasets = tuple(spec.data_id for spec in profile.research_datasets.list())
+    for scenario_id in datasets:
+        if terminal_targets[0] == _protocol_terminal_target(
+            profile,
+            scenario_id,
+            action,
+        ):
+            return scenario_id
+    raise ValueError("protocol_terminal_target_invalid")
+
+
+def _default_scenario_id(profile: ResearchProfile) -> str:
+    return profile.research_datasets.list()[0].data_id
 
 
 def _run_status(results: Iterable[TargetResult]) -> RunStatus:

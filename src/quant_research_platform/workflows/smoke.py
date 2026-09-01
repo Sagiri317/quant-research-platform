@@ -8,6 +8,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.data import InterimDataSpec
+from quant_research_platform.contracts.targets import ProducerBinding, ProducerKind
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
@@ -26,13 +29,21 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
     layout = StorageLayout(project_root=project_root)
     base_profile = research_profile()
     source_frames = _synthetic_source_frames()
+    for spec in base_profile.interim.list():
+        source_frames.setdefault(spec.data_id, _empty_source_frame(spec))
 
-    def materialize_fixture(**_kwargs: object) -> InterimImportResult:
+    def materialize_fixture(**kwargs: object) -> InterimImportResult:
         policy = current_runtime_resource_policy()
         if policy is None:
             raise RuntimeError("runtime_resource_policy_not_active")
+        requested = kwargs.get("data_ids")
+        if type(requested) is not tuple or not requested:
+            raise ValueError("synthetic_data_ids_required")
         roots: dict[str, Path] = {}
-        for data_id, frame in source_frames.items():
+        for data_id in requested:
+            if type(data_id) is not str:
+                raise ValueError("synthetic_data_id_invalid")
+            frame = source_frames[data_id]
             spec = base_profile.interim.get(data_id)
             root = layout.interim_data_root(spec.source_id, spec.data_id)
             write_dataset(
@@ -53,21 +64,16 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
         base_profile,
         producer_bindings={
             **base_profile.producer_bindings,
-            **{data_id: materialize_fixture for data_id in source_frames},
+            **{
+                data_id: ProducerBinding(ProducerKind.INTERIM, materialize_fixture)
+                for data_id in source_frames
+            },
         },
     )
     start = source_frames["trading_calendar"]["timestamp"].min().date()
     end = source_frames["trading_calendar"]["timestamp"].max().date()
     time_window = (start.isoformat(), end.isoformat())
     with runtime_resource_policy_scope(None):
-        research.data_materialize(
-            profile=profile,
-            layout=layout,
-            raw_root=project_root / "synthetic-raw",
-            start_date=time_window[0],
-            end_date=time_window[1],
-            data_ids=tuple(source_frames),
-        )
         dataset_result = research.dataset_build(
             profile=profile,
             layout=layout,
@@ -88,9 +94,8 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
             scenario_id="pv_all",
         )
     return {
-        "status": "SYNTHETIC_SMOKE_PASS",
+        "status": "BLOCKED",
         "stages": [
-            "data_materialize",
             "dataset_build",
             "research_run",
             "report_build",
@@ -100,7 +105,19 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
         "dataset_status": dataset_result["status"],
         "research_status": research_result["status"],
         "report_status": report["status"],
+        "blocker": "semantic_identity_not_available",
     }
+
+
+def _empty_source_frame(spec: InterimDataSpec) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            column: pd.Series(
+                dtype="datetime64[ns]" if role is ColumnRole.TIMESTAMP else "string"
+            )
+            for column, role in spec.column_roles.items()
+        }
+    )
 
 
 def _synthetic_source_frames() -> dict[str, pd.DataFrame]:

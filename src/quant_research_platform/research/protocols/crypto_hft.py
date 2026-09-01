@@ -16,6 +16,7 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.targets import TargetSpec
 from quant_research_platform.research.factors.microstructure.columns import (
     MICROSTRUCTURE_FACTOR_COLUMNS,
 )
@@ -108,7 +109,62 @@ class CryptoProtocol:
             "protocol_id": self.protocol_id,
             "scenario_id": self.scenario_id,
             "access_window": self.access_window,
+            "required_terminals": list(self.terminal_targets("research run")),
         }
+
+    def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
+        if action not in {"research run", "report build"}:
+            return ()
+        dataset = self.scenario_id
+        evaluation = f"{dataset}_evaluation"
+        models = f"{dataset}_models"
+        predictions = f"{dataset}_predictions"
+        maker_execution = f"{dataset}_maker_execution_diagnostics"
+        taker_execution = f"{dataset}_taker_execution_diagnostics"
+        artifact = f"{dataset}_artifact"
+        return (
+            TargetSpec(evaluation, dependencies=(dataset,)),
+            TargetSpec(models, dependencies=(evaluation,)),
+            TargetSpec(predictions, dependencies=(models,)),
+            TargetSpec(maker_execution, dependencies=(predictions,)),
+            TargetSpec(taker_execution, dependencies=(predictions,)),
+            TargetSpec(artifact, dependencies=(maker_execution, taker_execution)),
+            TargetSpec(
+                self._research_terminal_target,
+                dependencies=(artifact,),
+            ),
+            TargetSpec(
+                self._report_artifact_target,
+                dependencies=(self._research_terminal_target,),
+            ),
+            TargetSpec(
+                self._report_terminal_target,
+                dependencies=(self._report_artifact_target,),
+            ),
+        )
+
+    def terminal_targets(self, action: str) -> tuple[str, ...]:
+        if action == "dataset build":
+            return (self.scenario_id,)
+        if action == "research run":
+            return (self._research_terminal_target,)
+        if action == "report build":
+            return (self._report_terminal_target,)
+        if action == "data materialize":
+            return ()
+        raise ValueError("unknown_crypto_action")
+
+    @property
+    def _research_terminal_target(self) -> str:
+        return f"{self.scenario_id}_research"
+
+    @property
+    def _report_artifact_target(self) -> str:
+        return f"{self.scenario_id}_report_artifact"
+
+    @property
+    def _report_terminal_target(self) -> str:
+        return f"{self.scenario_id}_report"
 
 
 def protocol(

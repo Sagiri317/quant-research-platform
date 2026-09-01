@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -25,6 +26,29 @@ class PlanDecision(StrEnum):
     BLOCKED = "BLOCKED"
 
 
+class ProducerKind(StrEnum):
+    INTERIM = "INTERIM"
+    PROCESSED = "PROCESSED"
+    DATASET = "DATASET"
+
+
+@dataclass(frozen=True, slots=True)
+class ProducerBinding:
+    kind: ProducerKind
+    producer: Callable[..., object]
+    source_root_selector: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "kind", ProducerKind(self.kind))
+        if not callable(self.producer):
+            raise ValueError("producer_callable_required")
+        if self.source_root_selector is not None:
+            _require_identifier(
+                self.source_root_selector,
+                "producer_source_root_selector_invalid",
+            )
+
+
 @dataclass(frozen=True, slots=True)
 class TargetSpec:
     """One DAG node with ordered semantic dependencies."""
@@ -32,7 +56,6 @@ class TargetSpec:
     target_id: str
     dependencies: tuple[str, ...] = ()
     producer_id: str | None = None
-    terminal: bool = False
 
     def __post_init__(self) -> None:
         _require_identifier(self.target_id, "target_id_required")
@@ -41,8 +64,6 @@ class TargetSpec:
             raise ValueError("target_self_dependency")
         if self.producer_id is not None:
             _require_identifier(self.producer_id, "target_producer_id_invalid")
-        if type(self.terminal) is not bool:
-            raise ValueError("target_terminal_invalid")
 
 
 @dataclass(frozen=True, slots=True)

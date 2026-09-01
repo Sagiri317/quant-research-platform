@@ -520,7 +520,7 @@ def test_fundamental_value_factors_use_panel_total_cap() -> None:
     assert result["book_to_market"].tolist() == pytest.approx([0.3, 72 / 220])
 
 
-def test_common_materialization_builds_panel_then_pv_facts(tmp_path) -> None:
+def test_existing_interim_outputs_block_dataset_without_identity(tmp_path) -> None:
     sessions = pd.bdate_range("2020-01-01", periods=260)
     prices = pd.Series(np.arange(10.0, 270.0), index=sessions)
     bars = pd.DataFrame(
@@ -611,4 +611,8 @@ def test_common_materialization_builds_panel_then_pv_facts(tmp_path) -> None:
             start_date=sessions[0].date().isoformat(),
             end_date=sessions[-1].date().isoformat(),
         )
-        assert result["status"] == "COMPLETE"
+        assert result["status"] == "BLOCKED"
+        assert any(
+            item["reason"] == "semantic_identity_not_available"
+            for item in result["blockers"]
+        )

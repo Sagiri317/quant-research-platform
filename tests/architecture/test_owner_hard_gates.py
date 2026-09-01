@@ -36,7 +36,6 @@ def test_public_workflow_actions_have_one_owner_and_direct_callers() -> None:
     assert _imports_research_workflow(smoke_path)
     assert _direct_workflow_calls(cli_path) == set(WORKFLOW_ACTIONS)
     assert _direct_workflow_calls(smoke_path) == {
-        "data_materialize",
         "dataset_build",
         "research_run",
         "report_build",
@@ -97,7 +96,6 @@ def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
         ("resolve_target_graph", resolver_owner),
         ("plan_targets", resolver_owner),
     ]
-    assert not (SOURCE_ROOT / "workflows" / "materialization.py").exists()
 
 
 def test_workflow_production_statuses_have_no_readiness_aliases() -> None:

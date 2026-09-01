@@ -4,6 +4,7 @@ from types import MappingProxyType
 
 import pytest
 
+from quant_research_platform.contracts.targets import ProducerBinding
 from quant_research_platform.profiles.research import (
     A_SHARE_PROFILE_ID,
     CRYPTO_PROFILE_ID,
@@ -23,6 +24,14 @@ def test_profiles_use_stable_ids_and_immutable_producer_bindings() -> None:
     assert crypto.protocol().manifest()["protocol_id"] == "crypto_hft"
     assert isinstance(a_share.producer_bindings, MappingProxyType)
     assert isinstance(crypto.producer_bindings, MappingProxyType)
+    assert all(
+        isinstance(value, ProducerBinding)
+        for value in a_share.producer_bindings.values()
+    )
+    assert all(
+        isinstance(value, ProducerBinding)
+        for value in crypto.producer_bindings.values()
+    )
 
 
 def test_profile_selector_rejects_derived_identity() -> None:

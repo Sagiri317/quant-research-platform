@@ -20,8 +20,8 @@ from quant_research_platform.catalog.processed import (
 )
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.targets import ProducerBinding, ProducerKind
 from quant_research_platform.research.protocols import a_share, crypto_hft
-from quant_research_platform.sources.a_share import materialize_a_share_interim
 from quant_research_platform.sources.binance.interim import (
     materialize_interim_data as binance_interim_producer,
 )
@@ -30,6 +30,9 @@ from quant_research_platform.sources.choice.interim import (
 )
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog as csmar_interim_catalog,
+)
+from quant_research_platform.sources.csmar.interim import (
+    materialize_interim_data as csmar_interim_producer,
 )
 
 
@@ -48,7 +51,7 @@ class ResearchProfile:
     models: ModelCatalog
     build_prediction_catalog: object
     build_portfolio_catalog: object
-    producer_bindings: Mapping[str, object]
+    producer_bindings: Mapping[str, ProducerBinding]
     schema_inventory_important_columns: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -59,7 +62,7 @@ class ResearchProfile:
         if not isinstance(self.producer_bindings, Mapping):
             raise ValueError("profile_producer_bindings_invalid")
         if any(
-            type(key) is not str or not key or not callable(value)
+            type(key) is not str or not key or not isinstance(value, ProducerBinding)
             for key, value in self.producer_bindings.items()
         ):
             raise ValueError("profile_producer_bindings_invalid")
@@ -115,13 +118,25 @@ def _a_share_profile() -> ResearchProfile:
         build_prediction_catalog=a_share.prediction_catalog,
         build_portfolio_catalog=a_share.portfolio_catalog,
         producer_bindings={
-            **{spec.data_id: materialize_a_share_interim for spec in interim.list()},
             **{
-                spec.data_id: a_share_producer.produce_a_share_processed_frame
+                spec.data_id: ProducerBinding(
+                    ProducerKind.INTERIM, csmar_interim_producer
+                )
+                for spec in interim.list()
+                if str(spec.source_id) == "csmar"
+            },
+            **{
+                spec.data_id: ProducerBinding(
+                    ProducerKind.PROCESSED,
+                    a_share_producer.produce_a_share_processed_frame,
+                )
                 for spec in processed.list()
             },
             **{
-                spec.data_id: assemble_research_dataset
+                spec.data_id: ProducerBinding(
+                    ProducerKind.DATASET,
+                    assemble_research_dataset,
+                )
                 for spec in research_datasets.list()
             },
         },
@@ -165,7 +180,10 @@ def _crypto_profile() -> ResearchProfile:
         build_prediction_catalog=lambda **_: PredictionCatalog(),
         build_portfolio_catalog=lambda **_: PortfolioCatalog(),
         producer_bindings={
-            spec.data_id: binance_interim_producer for spec in interim.list()
+            spec.data_id: ProducerBinding(
+                ProducerKind.INTERIM, binance_interim_producer
+            )
+            for spec in interim.list()
         },
         schema_inventory_important_columns=("close", "eligible"),
     )
