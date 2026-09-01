@@ -1224,20 +1224,20 @@ def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
     assert tuple((tmp_path / ".run").glob(".r-*"))
 
 
-def test_csmar_dataset_action_resolves_a_valid_auxiliary_root(
+def test_csmar_dataset_action_discovers_nested_single_root(
     tmp_path: Path,
 ) -> None:
     profile = research_profile()
     layout = StorageLayout(project_root=tmp_path)
     raw_root = layout.raw_source_root("csmar")
-    auxiliary_root = raw_root.with_name("csmar_aux")
-    auxiliary_root.mkdir(parents=True)
-    (auxiliary_root / "native-calendar.csv").write_text(
+    nested_root = raw_root / "calendar" / "history"
+    nested_root.mkdir(parents=True)
+    (nested_root / "native-calendar.csv").write_text(
         "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n",
         encoding="utf-8",
     )
     (
-        auxiliary_root / "csmar__special_treatment_changes__all_market_types__full__"
+        nested_root / "csmar__special_treatment_changes__all_market_types__full__"
         "export-20260605.csv"
     ).write_text(
         "bad,header\n",
@@ -1255,6 +1255,29 @@ def test_csmar_dataset_action_resolves_a_valid_auxiliary_root(
 
     assert result["status"] == "COMPLETE"
     assert result["target_results"][0]["status"] == "BUILT"
+
+
+def test_csmar_dataset_action_missing_target_is_blocked(tmp_path: Path) -> None:
+    profile = research_profile()
+    layout = StorageLayout(project_root=tmp_path)
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=layout.raw_source_root("csmar"),
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=("trading_calendar",),
+    )
+
+    assert result["status"] == "BLOCKED"
+    assert result["target_results"] == [
+        {
+            "target_id": "trading_calendar",
+            "status": "BLOCKED",
+            "reason": "raw_content_identity_unavailable",
+            "instance_identity": None,
+        }
+    ]
 
 
 def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> None:

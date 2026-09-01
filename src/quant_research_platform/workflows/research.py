@@ -130,7 +130,6 @@ def _plan_targets(
     raw_root: Path | None = None,
     research_window: Mapping[str, object] | None = None,
     software_identity: ProductionSoftwareIdentity | None = None,
-    resolved_source_roots: dict[str, Path] | None = None,
 ) -> dict[str, object]:
     terminals = tuple(sorted(set(terminal_targets)))
     scenario = scenario_id or (
@@ -187,44 +186,17 @@ def _plan_targets(
                 isinstance(data_spec, InterimDataSpec)
                 and binding.source_identity is None
             ):
-                blocker = "source_identity_resolver_missing"
+                blocker = "source_identity_provider_missing"
             else:
                 raw_identity = None
-                resolved_source_root = source_root
                 if isinstance(data_spec, InterimDataSpec):
-                    if binding.source_root_resolver is not None:
-                        try:
-                            resolved = binding.source_root_resolver(
-                                source_root,
-                                spec.target_id,
-                            )
-                        except ValueError as exc:
-                            blocker = (
-                                str(exc)
-                                if str(exc)
-                                in {
-                                    "csmar_source_root_ambiguous",
-                                    "csmar_raw_export_identity_changed",
-                                }
-                                else "source_root_invalid"
-                            )
-                        else:
-                            if resolved is None:
-                                blocker = "source_root_unavailable"
-                            elif not isinstance(resolved, Path):
-                                blocker = "source_root_invalid"
-                            else:
-                                resolved_source_root = resolved
-                    if blocker is None:
-                        try:
-                            raw_identity = binding.source_identity(
-                                resolved_source_root,
-                                spec.target_id,
-                            )
-                        except ValueError:
-                            blocker = "source_identity_invalid"
-                    if blocker is None and resolved_source_roots is not None:
-                        resolved_source_roots[spec.target_id] = resolved_source_root
+                    try:
+                        raw_identity = binding.source_identity(
+                            source_root,
+                            spec.target_id,
+                        )
+                    except ValueError:
+                        blocker = "source_identity_invalid"
                 if (
                     blocker is None
                     and isinstance(data_spec, InterimDataSpec)
@@ -628,7 +600,6 @@ def _execute_action_with_policy(
         start_date=start_date,
         end_date=end_date,
     )
-    resolved_source_roots: dict[str, Path] = {}
     plan = _plan_targets(
         profile=profile,
         action=action,
@@ -639,7 +610,6 @@ def _execute_action_with_policy(
         raw_root=source_root,
         research_window=window,
         software_identity=software,
-        resolved_source_roots=resolved_source_roots,
     )
     specs = _target_specs(
         profile,
@@ -685,7 +655,7 @@ def _execute_action_with_policy(
                     spec=spec,
                     planned=planned,
                     policy=policy,
-                    raw_root=resolved_source_roots.get(spec.target_id, source_root),
+                    raw_root=source_root,
                 )
                 continue
             is_candidate = rebuild and planned["matching_instance_identity"] is not None
@@ -723,7 +693,7 @@ def _execute_action_with_policy(
                 target_layout=target_layout,
                 policy=policy,
                 time_window=time_window,
-                raw_root=resolved_source_roots.get(spec.target_id, source_root),
+                raw_root=source_root,
                 start_date=start_date,
                 end_date=end_date,
             )
@@ -836,7 +806,7 @@ def _build_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                reason="source_identity_resolver_missing",
+                reason="source_identity_provider_missing",
             )
         try:
             raw_identity = binding.source_identity(raw_root, spec.target_id)
@@ -1010,7 +980,7 @@ def _reuse_target(
             return TargetResult(
                 target_id=spec.target_id,
                 status=TargetStatus.BLOCKED,
-                reason="source_identity_resolver_missing",
+                reason="source_identity_provider_missing",
             )
         try:
             raw_identity = binding.source_identity(raw_root, spec.target_id)

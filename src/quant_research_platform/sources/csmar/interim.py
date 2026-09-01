@@ -633,62 +633,6 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
         return identity
 
 
-def resolve_source_root(raw_root: Path, data_id: str) -> Path | None:
-    """Resolve one CSMAR target to its uniquely observed raw root."""
-
-    root = require_unaliased_path(
-        Path(raw_root),
-        error="csmar_raw_export_identity_changed",
-    )
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
-    candidates = [root]
-    if root.name.casefold() == "csmar":
-        candidates.append(root.with_name("csmar_aux"))
-    elif root.name.casefold() == "csmar_aux":
-        candidates.append(root.with_name("csmar"))
-    matches: list[Path] = []
-    raw_dataset = _raw_dataset_for_interim(data_id)
-    for candidate in candidates:
-        candidate = require_unaliased_path(
-            candidate,
-            error="csmar_raw_export_identity_changed",
-        )
-        if not candidate.exists():
-            continue
-        index = ExactPrimaryKeyIndex(
-            primary_key=("dataset_path",),
-            timestamp_columns=(),
-            scratch_parent=candidate.parent,
-        )
-        with (
-            policy.lease(
-                "source.csmar.raw.identity.index",
-                index.retained_memory_bytes,
-            ),
-            index,
-        ):
-            records_iterator = dataset_files_with_identity_by_id(
-                candidate,
-                resource_policy=policy,
-                identity_index=index,
-                requested_datasets=(raw_dataset,),
-            )
-            with closing_iterator(records_iterator):
-                records = tuple(records_iterator)
-            _verify_csmar_member_set(
-                candidate,
-                index,
-                requested_datasets=(raw_dataset,),
-            )
-        if any(dataset == raw_dataset for dataset, _, _ in records):
-            matches.append(candidate)
-    if len(matches) > 1:
-        raise ValueError("csmar_source_root_ambiguous")
-    return matches[0] if matches else None
-
-
 def normalize_raw_frame(
     frame: pd.DataFrame,
     data_id: str,
@@ -963,7 +907,7 @@ def normalize_raw_frame(
         "special_treatment_changes",
         "equity_changes",
     }:
-        return _normalize_csmar_aux_frame(mapped, data_id)
+        return _normalize_state_change_frame(mapped, data_id)
     if data_id == "analyst_forecast":
         result = mapped
         result["source_asset_id"] = normalize_stock_code(result["stock_code"])
@@ -994,7 +938,7 @@ def normalize_raw_frame(
     raise ValueError(f"unsupported_csmar_data_id: {data_id}")
 
 
-def _normalize_csmar_aux_frame(frame: pd.DataFrame, data_id: str) -> pd.DataFrame:
+def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataFrame:
     result = frame
     result["source_asset_id"] = (
         result["stock_code"].map(
@@ -1005,7 +949,7 @@ def _normalize_csmar_aux_frame(frame: pd.DataFrame, data_id: str) -> pd.DataFram
     )
     if "source_asset_id" in result:
         result["source_asset_id"] = strict_string_series(
-            result["source_asset_id"], error="invalid_csmar_aux_asset_id"
+            result["source_asset_id"], error="invalid_state_change_asset_id"
         )
     if data_id == "listing_status_changes":
         result["announcement_date"] = _parse_optional_csmar_date(

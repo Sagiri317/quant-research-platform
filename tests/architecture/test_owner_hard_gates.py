@@ -134,6 +134,34 @@ def test_retired_contract_separator_variants_are_detected() -> None:
         assert _contains_retired_token("current" + separator + "contract")
 
 
+def test_csmar_source_surface_has_one_root_without_retired_sibling_api() -> None:
+    retired_surface_tokens = (
+        "csmar" + "_" + "aux",
+        "source_root" + "_" + "resolver",
+        "resolve" + "_" + "source_root",
+    )
+    repository_root = Path(__file__).resolve().parents[2]
+    paths = set(_tracked_surface_paths())
+    paths.update(
+        relative
+        for relative in (
+            Path("CONTEXT.md"),
+            Path("docs/adr/0001-single-csmar-raw-root.md"),
+        )
+        if (repository_root / relative).exists()
+    )
+    violations = []
+    for relative_path in sorted(paths):
+        text = (repository_root / relative_path).read_text(encoding="utf-8")
+        for token in retired_surface_tokens:
+            if (
+                token.casefold() in text.casefold()
+                or token.casefold() in relative_path.as_posix().casefold()
+            ):
+                violations.append(f"{relative_path}:{token}")
+    assert violations == []
+
+
 _RETIRED_TEXT = re.compile(
     r"(?i)(?<![a-z0-9])(?:phase\s*[_-]?\s*[12]|"
     "current" + r"[_ -]" + "contract|"

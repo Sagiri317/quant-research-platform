@@ -17,6 +17,10 @@
 
 `sources/` 负责摄取与 raw/interim 转换；A 股与 Crypto 的对应 `markets/implementations/` 分别负责本市场 processed data 和市场语义；`storage/` 只负责 dataset IO、manifest、fingerprint、compare 和 data layout。共享安全检测规则由 `policy/share_safety.py` 提供，storage 不维护平行正则。
 
+CSMAR raw exports 的 active root 是 `data/raw/csmar`，source owner 在该根下递归发现并校验请求的 provider/table 文件。未能由现有 owner 合同证明的文件保留为 raw-only，不通过同级目录 fallback 进入生产链。每个保留 CSV 只有一个 canonical `.metadata.json` sidecar；sidecar 记录 hash、schema、计数、覆盖和 provenance，不构成第二份 raw truth。
+
+A 股历史费率使用独立的 standalone CSV reference source。当前 sidecar 将其标记为 provisional/unverified；在 execution semantic batch 提供真实消费者和完整证据前，不得把它称作正式法律费率或用于 formal net NAV。
+
 Binance raw 合同见 `docs/data/binance.md`。Canonical local-envelope 导入器只接受 canonical JSONL envelope；正式 HFT recorder-run 则只接受其 manifest 精确声明的 gzip JSONL members。两者都不接受裸 connector payload 作为独立输入。
 
 每个 QRP dataset 保留：

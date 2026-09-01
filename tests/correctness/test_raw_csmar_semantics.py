@@ -171,26 +171,26 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         assert policy.used_memory_bytes == 0
 
 
-def test_csmar_source_root_resolver_uses_one_observed_sibling(tmp_path: Path) -> None:
-    primary = tmp_path / "csmar"
-    auxiliary = tmp_path / "csmar_aux"
-    primary.mkdir()
-    auxiliary.mkdir()
+def test_csmar_source_identity_uses_only_one_recursive_root(tmp_path: Path) -> None:
+    primary = tmp_path / "raw"
+    nested = primary / "calendar" / "history"
+    sibling = tmp_path / "sibling-root"
+    nested.mkdir(parents=True)
+    sibling.mkdir()
     columns = raw_exports.RAW_TABLE_CONTRACTS["trading_calendar"].required_columns
-    (auxiliary / "native-calendar.csv").write_text(
+    (nested / "native-calendar.csv").write_text(
+        ",".join(columns) + "\n",
+        encoding="utf-8",
+    )
+    (sibling / "native-calendar.csv").write_text(
         ",".join(columns) + "\n",
         encoding="utf-8",
     )
 
     with runtime_resource_policy_scope(None) as policy:
-        assert interim.resolve_source_root(primary, "trading_calendar") == auxiliary
-
-        (primary / "native-calendar.csv").write_text(
-            ",".join(columns) + "\n",
-            encoding="utf-8",
-        )
-        with pytest.raises(ValueError, match="csmar_source_root_ambiguous"):
-            interim.resolve_source_root(primary, "trading_calendar")
+        assert interim.source_content_identity(primary, "trading_calendar") is not None
+        assert interim.source_content_identity(sibling, "trading_calendar") is not None
+        assert interim.source_content_identity(primary, "stock_master") is None
         assert policy.used_memory_bytes == 0
     assert not tuple(tmp_path.glob(".k-*/k.db"))
 
@@ -211,7 +211,6 @@ def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
     unrelated.write_text("bad,header\n", encoding="utf-8")
 
     with runtime_resource_policy_scope(None) as policy:
-        assert interim.resolve_source_root(tmp_path, "trading_calendar") == tmp_path
         identity = interim.source_content_identity(tmp_path, "trading_calendar")
         assert identity is not None
         assert policy.used_memory_bytes == 0

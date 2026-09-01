@@ -116,12 +116,6 @@ def test_producer_binding_is_typed_and_frozen() -> None:
     assert binding.kind is ProducerKind.DATASET
     with pytest.raises(ValueError, match="producer_callable_required"):
         ProducerBinding(ProducerKind.DATASET, object())  # type: ignore[arg-type]
-    with pytest.raises(ValueError, match="source_root_resolver_callable_required"):
-        ProducerBinding(
-            ProducerKind.INTERIM,
-            lambda: None,
-            source_root_resolver=object(),  # type: ignore[arg-type]
-        )
 
 
 def test_status_vocabulary_has_no_readiness_or_persisted_stale_state() -> None:

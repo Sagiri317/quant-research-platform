@@ -33,7 +33,6 @@ def test_profiles_use_stable_ids_and_immutable_producer_bindings() -> None:
         for value in crypto.producer_bindings.values()
     )
     assert a_share.producer_bindings["market_bars_1d"].source_identity is not None
-    assert a_share.producer_bindings["market_bars_1d"].source_root_resolver is not None
     assert crypto.producer_bindings["market_bars_1m"].source_identity is None
 
 

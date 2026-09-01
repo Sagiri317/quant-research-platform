@@ -39,16 +39,11 @@ class ProducerBinding:
     kind: ProducerKind
     producer: Callable[..., object]
     source_identity: Callable[[Path, str], str | None] | None = None
-    source_root_resolver: Callable[[Path, str], Path | None] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", ProducerKind(self.kind))
         if not callable(self.producer):
             raise ValueError("producer_callable_required")
-        if self.source_root_resolver is not None and not callable(
-            self.source_root_resolver
-        ):
-            raise ValueError("source_root_resolver_callable_required")
         if self.source_identity is not None and not callable(self.source_identity):
             raise ValueError("source_identity_callable_required")
 
