@@ -7,6 +7,7 @@ from pathlib import Path
 
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.storage.identity import validate_instance_identity
 
 
 @dataclass(frozen=True)
@@ -35,3 +36,10 @@ class StorageLayout:
 
     def research_dataset_root(self, market_id: MarketId, data_id: str) -> Path:
         return self.project_root / "data/research" / str(market_id) / data_id
+
+    def instance_root(self, logical_root: Path, instance_identity: str) -> Path:
+        return (
+            Path(logical_root)
+            / "instances"
+            / validate_instance_identity(instance_identity)
+        )

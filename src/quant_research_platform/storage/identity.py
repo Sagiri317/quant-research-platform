@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
+
+_INSTANCE_IDENTITY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -14,6 +17,12 @@ class DatasetFileIdentity:
     inode: int
     size: int
     modified_ns: int
+
+
+def validate_instance_identity(value: object) -> str:
+    if type(value) is not str or _INSTANCE_IDENTITY_RE.fullmatch(value) is None:
+        raise ValueError("invalid_instance_identity")
+    return value
 
 
 def dataset_file_identity_from_stat(value: os.stat_result) -> DatasetFileIdentity:

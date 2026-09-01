@@ -19,6 +19,7 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.share_safety import is_local_only_path
+from quant_research_platform.storage.identity import validate_instance_identity
 
 _YEAR_PARTITION_PATTERN = re.compile(r"^year=([0-9]{4})$")
 
@@ -159,10 +160,10 @@ def _starts_storage_layout(parts: tuple[str, ...]) -> bool:
 
 
 def _is_interim_output_suffix(parts: tuple[str, ...], spec: InterimDataSpec) -> bool:
-    return (
-        len(parts) == 4
-        and parts[:3] == ("data", "interim", str(spec.source_id))
-        and _matches_artifact_segment(parts[3], spec.data_id)
+    return _matches_artifact_path(
+        parts,
+        ("data", "interim", str(spec.source_id)),
+        spec.data_id,
     )
 
 
@@ -176,13 +177,10 @@ def _is_processed_output_suffix(
         str(spec.market_id),
         spec.kind.value,
     )
-    return (
-        len(parts) == len(expected_prefix) + 1
-        and parts[: len(expected_prefix)] == expected_prefix
-        and _matches_artifact_segment(
-            parts[len(expected_prefix)],
-            spec.data_id,
-        )
+    return _matches_artifact_path(
+        parts,
+        expected_prefix,
+        spec.data_id,
     )
 
 
@@ -190,15 +188,37 @@ def _is_research_dataset_output_suffix(
     parts: tuple[str, ...],
     spec: ResearchDatasetSpec,
 ) -> bool:
-    return (
-        len(parts) == 4
-        and parts[:3] == ("data", "research", str(spec.market_id))
-        and _matches_artifact_segment(parts[3], spec.data_id)
+    return _matches_artifact_path(
+        parts,
+        ("data", "research", str(spec.market_id)),
+        spec.data_id,
     )
 
 
-def _matches_artifact_segment(segment: str, expected: str) -> bool:
-    return segment == expected
+def _matches_artifact_path(
+    parts: tuple[str, ...],
+    prefix: tuple[str, ...],
+    expected: str,
+) -> bool:
+    if parts[: len(prefix)] != prefix:
+        return False
+    suffix = parts[len(prefix) :]
+    if len(suffix) == 1:
+        return suffix[0] == expected
+    return (
+        len(suffix) == 3
+        and suffix[0] == expected
+        and suffix[1] == "instances"
+        and _valid_instance_segment(suffix[2])
+    )
+
+
+def _valid_instance_segment(value: str) -> bool:
+    try:
+        validate_instance_identity(value)
+    except ValueError:
+        return False
+    return True
 
 
 def timestamp_primary_key_column_from_spec(spec: DataSpec) -> str | None:

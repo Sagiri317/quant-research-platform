@@ -13,6 +13,9 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from quant_research_platform.contracts.business_manifest import (
+    validate_business_manifest_envelope,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -43,8 +46,13 @@ from quant_research_platform.storage.datasets.paths import (
     timestamp_column_from_spec_payload,
 )
 
+COMMON_MANIFEST_METADATA_KEY = "common_manifest"
 _DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset(
-    {"input_dataset_identities", "source_artifact_identity"}
+    {
+        "input_dataset_identities",
+        "source_artifact_identity",
+        COMMON_MANIFEST_METADATA_KEY,
+    }
 )
 _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
     {
@@ -180,6 +188,8 @@ def merge_dataset_instance_metadata(
             metadata[key] = _validate_input_dataset_identities_metadata(value)
         elif key == "source_artifact_identity":
             metadata[key] = _validate_source_artifact_identity(value)
+        elif key == COMMON_MANIFEST_METADATA_KEY:
+            metadata[key] = validate_business_manifest_envelope(value)
     result.update(metadata)
     return result
 
@@ -283,6 +293,8 @@ def validate_dataset_manifest_instance_metadata(
         )
     if "source_artifact_identity" in manifest:
         _validate_source_artifact_identity(manifest["source_artifact_identity"])
+    if COMMON_MANIFEST_METADATA_KEY in manifest:
+        validate_business_manifest_envelope(manifest[COMMON_MANIFEST_METADATA_KEY])
 
 
 def validate_dataset_spec(spec: DataSpec) -> str | None:
