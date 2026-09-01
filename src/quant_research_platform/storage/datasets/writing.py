@@ -548,6 +548,7 @@ def _write_dataset_body(
                         "schema_id": "qrp-dataset-manifest",
                     },
                     instance_metadata,
+                    spec=data_spec_payload(spec),
                 )
                 write_internal_artifact_manifest(
                     temp_root / "_manifest" / "manifest.json",

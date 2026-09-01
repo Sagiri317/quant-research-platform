@@ -170,6 +170,8 @@ _LOWER_HEX = frozenset("0123456789abcdef")
 def merge_dataset_instance_metadata(
     payload: Mapping[str, Any],
     instance_metadata: Mapping[str, Any] | None,
+    *,
+    spec: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     result = dict(payload)
     if instance_metadata is None:
@@ -191,6 +193,8 @@ def merge_dataset_instance_metadata(
         elif key == COMMON_MANIFEST_METADATA_KEY:
             metadata[key] = validate_business_manifest_envelope(value)
     result.update(metadata)
+    if spec is not None and COMMON_MANIFEST_METADATA_KEY in result:
+        _validate_common_manifest_binding(result[COMMON_MANIFEST_METADATA_KEY], spec)
     return result
 
 
@@ -277,6 +281,8 @@ def dataset_identity_payload(
 
 def validate_dataset_manifest_instance_metadata(
     manifest: Mapping[str, Any],
+    *,
+    spec: Mapping[str, Any] | None = None,
 ) -> None:
     unknown = set(manifest).difference(
         _DATASET_MANIFEST_RESERVED_KEYS,
@@ -294,7 +300,21 @@ def validate_dataset_manifest_instance_metadata(
     if "source_artifact_identity" in manifest:
         _validate_source_artifact_identity(manifest["source_artifact_identity"])
     if COMMON_MANIFEST_METADATA_KEY in manifest:
-        validate_business_manifest_envelope(manifest[COMMON_MANIFEST_METADATA_KEY])
+        envelope = validate_business_manifest_envelope(
+            manifest[COMMON_MANIFEST_METADATA_KEY]
+        )
+        if spec is not None:
+            _validate_common_manifest_binding(envelope, spec)
+
+
+def _validate_common_manifest_binding(
+    envelope: Mapping[str, Any],
+    spec: Mapping[str, Any],
+) -> None:
+    if envelope["logical_artifact_id"] != spec["data_id"]:
+        raise ValueError("dataset_manifest_common_logical_id_mismatch")
+    if envelope["schema_identity"] != canonical_json_hash(spec):
+        raise ValueError("dataset_manifest_common_schema_identity_mismatch")
 
 
 def validate_dataset_spec(spec: DataSpec) -> str | None:
@@ -1452,7 +1472,7 @@ def validate_dataset_manifest_payload(
     status = manifest.get("validation_status")
     if not isinstance(status, str) or status not in VALID_STATUS_TOKENS:
         raise ValueError("manifest_validation_status_invalid")
-    validate_dataset_manifest_instance_metadata(manifest)
+    validate_dataset_manifest_instance_metadata(manifest, spec=spec)
 
 
 def validate_dataset_primary_key_null_summary(manifest: Mapping[str, Any]) -> None:
