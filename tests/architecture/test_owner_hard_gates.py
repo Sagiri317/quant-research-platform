@@ -76,9 +76,14 @@ def test_tracked_surfaces_have_no_retired_naming() -> None:
     assert violations == []
 
 
+def test_retired_contract_separator_variants_are_detected() -> None:
+    for separator in ("_", "-", " "):
+        assert _contains_retired_token("current" + separator + "contract")
+
+
 _RETIRED_TEXT = re.compile(
     r"(?i)(?<![a-z0-9])(?:phase\s*[_-]?\s*[12]|"
-    "current" + r"[_-]" + "contract|"
+    "current" + r"[_ -]" + "contract|"
     "unified" + r"[_-]" + "research|"
     "leg" + "acy|"
     "com" + r"pat(?:ibility)?|"
