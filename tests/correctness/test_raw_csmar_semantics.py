@@ -62,6 +62,31 @@ def _collect_raw_chunks(
             producer.close()
 
 
+def _financial_fixture_row(
+    columns: tuple[str, ...],
+    *,
+    invalid_numeric_column: str | None = None,
+) -> list[str]:
+    return [
+        (
+            "000001"
+            if column == "Stkcd"
+            else "测试"
+            if column == "ShortName"
+            else "0"
+            if column == "IfCorrect"
+            else "2020-01-02"
+            if column in {"DeclareDate", "Accper"}
+            else "A"
+            if column == "Typrep"
+            else "bad"
+            if column == invalid_numeric_column
+            else "1"
+        )
+        for column in columns
+    ]
+
+
 def test_raw_export_discovery_contract_keeps_csv_only(
     tmp_path: Path,
 ) -> None:
@@ -186,16 +211,24 @@ def test_csmar_source_identity_uses_only_one_recursive_root(tmp_path: Path) -> N
         ",".join(columns) + "\n",
         encoding="utf-8",
     )
-    raw_only = primary / "raw_only"
-    raw_only.mkdir()
-    (raw_only / "native-calendar.csv").write_text(
-        ",".join(columns) + "\n",
-        encoding="utf-8",
-    )
 
     with runtime_resource_policy_scope(None) as policy:
         identity = interim.source_content_identity(primary, "trading_calendar")
         assert identity is not None
+        raw_only = primary / "raw_only"
+        raw_only.mkdir()
+        raw_only_file = raw_only / "native-calendar.csv"
+        raw_only_file.write_text(
+            ",".join(columns) + "\n4,2020-01-03,5,C\n",
+            encoding="utf-8",
+        )
+        assert interim.source_content_identity(primary, "trading_calendar") == identity
+        raw_only_file.write_text(
+            ",".join(columns) + "\n4,2020-01-04,6,O\n",
+            encoding="utf-8",
+        )
+        assert interim.source_content_identity(primary, "trading_calendar") == identity
+        raw_only_file.unlink()
         assert interim.source_content_identity(primary, "trading_calendar") == identity
         assert interim.source_content_identity(sibling, "trading_calendar") is not None
         assert interim.source_content_identity(primary, "stock_master") is None
@@ -223,6 +256,85 @@ def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
         assert identity is not None
         assert policy.used_memory_bytes == 0
     assert not tuple(tmp_path.parent.glob(".k-*/k.db"))
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    ("financial_balance", "financial_income", "financial_cashflow"),
+)
+def test_financial_raw_decoder_preserves_text_and_normalizes_values(
+    tmp_path: Path,
+    dataset: str,
+) -> None:
+    path = tmp_path / f"{dataset}.csv"
+    columns = raw_exports.RAW_TABLE_CONTRACTS[dataset].required_columns
+    row = _financial_fixture_row(columns)
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(columns)
+        writer.writerow(row)
+
+    decoded = _collect_raw_export(path, dataset, chunksize=1)
+    normalized = interim.normalize_raw_frame(decoded, dataset)
+
+    assert normalized.loc[0, "stock_name"] == "测试"
+    assert normalized.loc[0, "report_type"] == "A"
+    assert normalized.loc[0, "report_period"] == pd.Timestamp("2020-01-02")
+
+
+@pytest.mark.parametrize(
+    "dataset",
+    ("financial_balance", "financial_income", "financial_cashflow"),
+)
+def test_financial_raw_decoder_rejects_invalid_numeric_fact(
+    tmp_path: Path,
+    dataset: str,
+) -> None:
+    path = tmp_path / f"{dataset}.csv"
+    columns = raw_exports.RAW_TABLE_CONTRACTS[dataset].required_columns
+    numeric_column = next(
+        column
+        for column in columns
+        if column
+        not in {
+            "Stkcd",
+            "ShortName",
+            "IfCorrect",
+            "DeclareDate",
+            "Accper",
+            "Typrep",
+        }
+    )
+    row = _financial_fixture_row(
+        columns,
+        invalid_numeric_column=numeric_column,
+    )
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(handle, lineterminator="\n")
+        writer.writerow(columns)
+        writer.writerow(row)
+
+    with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
+        _collect_raw_export(path, dataset, chunksize=1)
+
+
+def test_provider_header_bound_accepts_160_and_rejects_161_fields(
+    tmp_path: Path,
+) -> None:
+    required = raw_exports.RAW_TABLE_CONTRACTS["trading_calendar"].required_columns
+    for width in (160, 161):
+        columns = (
+            *required,
+            *(f"Optional{index}" for index in range(width - len(required))),
+        )
+        path = tmp_path / f"provider-{width}.csv"
+        path.write_text(",".join(columns) + "\n", encoding="utf-8")
+        if width == 160:
+            inspection = raw_schemas.inspect_raw_export_file(path)
+            assert inspection.columns == columns
+        else:
+            with pytest.raises(ValueError, match="csmar_raw_export_schema_invalid"):
+                raw_schemas.inspect_raw_export_file(path)
 
 
 def test_csmar_identity_rejects_requested_bad_schema_and_cleans_scratch(
