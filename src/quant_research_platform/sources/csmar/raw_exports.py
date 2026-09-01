@@ -388,7 +388,9 @@ def _raw_export_path_session(
                     parent / name,
                     error="csmar_raw_export_identity_changed",
                 )
-            dirnames.sort()
+            dirnames[:] = sorted(
+                name for name in dirnames if name.casefold() != "raw_only"
+            )
             for name in sorted(filenames):
                 path = parent / name
                 if path.suffix.lower() not in SUPPORTED_RAW_EXPORT_SUFFIXES:

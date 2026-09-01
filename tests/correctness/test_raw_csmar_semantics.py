@@ -186,9 +186,17 @@ def test_csmar_source_identity_uses_only_one_recursive_root(tmp_path: Path) -> N
         ",".join(columns) + "\n",
         encoding="utf-8",
     )
+    raw_only = primary / "raw_only"
+    raw_only.mkdir()
+    (raw_only / "native-calendar.csv").write_text(
+        ",".join(columns) + "\n",
+        encoding="utf-8",
+    )
 
     with runtime_resource_policy_scope(None) as policy:
-        assert interim.source_content_identity(primary, "trading_calendar") is not None
+        identity = interim.source_content_identity(primary, "trading_calendar")
+        assert identity is not None
+        assert interim.source_content_identity(primary, "trading_calendar") == identity
         assert interim.source_content_identity(sibling, "trading_calendar") is not None
         assert interim.source_content_identity(primary, "stock_master") is None
         assert policy.used_memory_bytes == 0

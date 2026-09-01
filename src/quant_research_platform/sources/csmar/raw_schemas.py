@@ -34,7 +34,10 @@ from quant_research_platform.storage.identity import (
 )
 
 MAX_LOGICAL_RECORD_BYTES = MIB
-_MAX_PROVIDER_HEADER_FIELDS = 64
+# Provider financial exports include optional columns beyond the normalized owner
+# mapping; keep a bounded header limit without rejecting the observed 154-column
+# balance export.
+_MAX_PROVIDER_HEADER_FIELDS = 160
 LOGICAL_RECORD_LIMIT_ERROR = "csmar_logical_record_exceeds_source_limit"
 _CSV_RECORD_LEASE_BOUND_BYTES = 5 * MAX_LOGICAL_RECORD_BYTES
 _CSV_PARSER_WORKSPACE_BOUND_BYTES = 128 * 1024
