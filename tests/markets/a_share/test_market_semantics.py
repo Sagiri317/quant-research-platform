@@ -66,7 +66,7 @@ def test_market_panel_keeps_suspension_and_excludes_holiday_fill() -> None:
         {
             "calendar_date": sessions,
             "source_market_type": [1] * 4,
-            "is_trading_day": [True] * 4,
+            "is_trading_day": [True, False, True, True],
         }
     )
 
@@ -87,6 +87,65 @@ def test_market_panel_keeps_suspension_and_excludes_holiday_fill() -> None:
     assert reopening["period_return"] == pytest.approx(0.2)
     assert result["industry_level1_code"].isna().all()
     assert "scenario_universe" not in result
+
+
+def test_holiday_fill_on_open_session_fails_without_cross_asset_deletion() -> None:
+    sessions = pd.DatetimeIndex(pd.to_datetime(["2024-01-02", "2024-01-03"]))
+    bars = pd.DataFrame(
+        {
+            "source_asset_id": ["A", "A", "B", "B"],
+            "timestamp": [sessions[0], sessions[1], sessions[0], sessions[1]],
+            "market_type": [1] * 4,
+            "trading_status_code": [0] * 4,
+            "filling_flag": [0, 0, 2, 0],
+            "open": [10.0, 11.0, 20.0, 21.0],
+            "high": [10.0, 11.0, 20.0, 21.0],
+            "low": [10.0, 11.0, 20.0, 21.0],
+            "close": [10.0, 11.0, 20.0, 21.0],
+            "volume": [100.0] * 4,
+            "amount": [1_000.0, 1_100.0, 2_000.0, 2_100.0],
+            "period_return": [0.0] * 4,
+            "adj_close": [10.0, 11.0, 20.0, 21.0],
+            "adj_open": [10.0, 11.0, 20.0, 21.0],
+            "float_market_cap": [1_000.0] * 4,
+            "total_market_cap": [1_000.0] * 4,
+            "limit_status": [0.0] * 4,
+        }
+    )
+    stock_master = pd.DataFrame(
+        {
+            "source_asset_id": ["A", "B"],
+            "timestamp": [sessions[0], sessions[0]],
+            "stock_name": ["A", "B"],
+            "listing_date": [sessions[0] - pd.Timedelta(days=500)] * 2,
+            "delisting_date": [pd.NaT] * 2,
+            "company_status": ["normal"] * 2,
+        }
+    )
+    market_cap = pd.DataFrame(
+        {
+            "source_asset_id": ["A", "B"],
+            "timestamp": [sessions[0] - pd.Timedelta(days=500)] * 2,
+            "share_change_date": [sessions[0] - pd.Timedelta(days=500)] * 2,
+            "total_shares": [100.0] * 2,
+            "a_float_shares": [100.0] * 2,
+        }
+    )
+    calendar = pd.DataFrame(
+        {
+            "calendar_date": sessions,
+            "source_market_type": [1, 1],
+            "is_trading_day": [True, True],
+        }
+    )
+
+    with pytest.raises(ValueError, match="holiday_fill_conflicts_with_open_session"):
+        compute_market_panel(
+            bars,
+            stock_master=stock_master,
+            market_cap=market_cap,
+            trading_calendar=calendar,
+        )
 
 
 def test_execution_mask_is_independent_and_uses_signal_row_legality() -> None:
@@ -376,5 +435,30 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy() -> None:
             "industry_standard_id",
         ]
         .isna()
+        .all()
+    )
+
+    abandoned = compute_market_panel(
+        bars,
+        stock_master=stock_master,
+        market_cap=market_cap,
+        trading_calendar=calendar,
+        industry_history=history,
+        industry_sets=industry_sets,
+        industry_versions=industry_versions.assign(
+            abandon_date=[pd.Timestamp("2023-01-04"), pd.Timestamp("2023-01-04")]
+        ),
+    )
+    assert (
+        abandoned.loc[
+            abandoned["timestamp"].eq(pd.Timestamp("2023-01-04")),
+            [
+                "industry_standard_id",
+                "industry_level1_code",
+                "is_nonfinancial_industry",
+            ],
+        ]
+        .isna()
+        .all()
         .all()
     )

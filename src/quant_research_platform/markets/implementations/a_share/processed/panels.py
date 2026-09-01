@@ -42,19 +42,20 @@ def compute_market_panel(
     """Build lifecycle × open-session facts with suspension rows retained."""
 
     bars = _canonical_bars(market_bars)
-    holiday_fill_dates = pd.DatetimeIndex(
-        bars.loc[bars["filling_flag"].eq(2), "timestamp"]
-    ).drop_duplicates()
-    bars = bars.loc[bars["filling_flag"].ne(2)].copy()
     if bars.empty:
         return bars
     sessions = unified_trading_sessions(trading_calendar)
     if sessions.empty:
         raise ValueError("a_share_trading_calendar_empty")
+    holiday_fill_dates = bars.loc[bars["filling_flag"].eq(2), "timestamp"]
+    if bool(holiday_fill_dates.isin(sessions).any()):
+        raise ValueError("holiday_fill_conflicts_with_open_session")
+    bars = bars.loc[bars["filling_flag"].ne(2)].copy()
+    if bars.empty:
+        return bars
     session_window = sessions[
         (sessions >= bars["timestamp"].min()) & (sessions <= bars["timestamp"].max())
     ]
-    session_window = session_window[~session_window.isin(holiday_fill_dates)]
     if session_window.empty:
         return bars.iloc[0:0].copy()
     stocks = _canonical_stock_master(stock_master)
@@ -458,9 +459,10 @@ def _asof_industry(
             return panel
     if industry_sets is not None:
         history = _resolve_industry_hierarchy(history, industry_sets)
-    right = history.loc[:, [*required, "is_nonfinancial_industry"]].sort_values(
-        ["asset_id", "timestamp"], kind="mergesort"
-    )
+    history["_industry_event_timestamp"] = history["timestamp"]
+    right = history.loc[
+        :, [*required, "is_nonfinancial_industry", "_industry_event_timestamp"]
+    ].sort_values(["asset_id", "timestamp"], kind="mergesort")
     if right.duplicated(["asset_id", "timestamp"], keep=False).any():
         raise ValueError("industry_history_key_duplicate")
     output: list[pd.DataFrame] = []
@@ -480,6 +482,13 @@ def _asof_industry(
         valid_standard = (
             current["industry_standard_id_industry"].eq(expected).fillna(False)
         )
+        if industry_versions is not None:
+            valid_standard &= _industry_version_active_mask(
+                current["industry_standard_id_industry"],
+                current["timestamp"],
+                industry_versions,
+                event_timestamps=current["_industry_event_timestamp"],
+            )
         for column in (
             "industry_standard_id",
             "industry_level1_code",
@@ -491,6 +500,7 @@ def _asof_industry(
             )
             current.loc[~valid_standard, column] = pd.NA
             current.drop(columns=f"{column}_industry", inplace=True)
+        current.drop(columns="_industry_event_timestamp", inplace=True)
         output.append(current)
     result = pd.concat(output, ignore_index=True)
     result["is_nonfinancial_industry"] = result["is_nonfinancial_industry"].astype(
@@ -508,6 +518,29 @@ def _valid_industry_history_rows(
     history: pd.DataFrame,
     versions: pd.DataFrame,
 ) -> pd.Series:
+    right = _canonical_industry_versions(
+        versions, set(history["industry_standard_id"].dropna())
+    )
+    if right.empty:
+        return pd.Series(False, index=history.index, dtype=bool)
+    valid = pd.Series(False, index=history.index, dtype=bool)
+    for index, row in history.loc[:, ["industry_standard_id", "timestamp"]].iterrows():
+        active = right.loc[
+            right["industry_standard_id"].eq(row["industry_standard_id"])
+            & right["implement_date"].le(row["timestamp"])
+            & (
+                right["abandon_date"].isna()
+                | right["abandon_date"].gt(row["timestamp"])
+            )
+        ]
+        valid.loc[index] = len(active) == 1
+    return valid
+
+
+def _canonical_industry_versions(
+    versions: pd.DataFrame,
+    standards: set[str],
+) -> pd.DataFrame:
     required = {
         "industry_standard_id",
         "implement_date",
@@ -519,13 +552,9 @@ def _valid_industry_history_rows(
     right["industry_standard_id"] = _canonical_industry_standard(
         right["industry_standard_id"]
     )
-    right = right.loc[
-        right["industry_standard_id"].isin(
-            set(history["industry_standard_id"].dropna())
-        )
-    ].copy()
+    right = right.loc[right["industry_standard_id"].isin(standards)].copy()
     if right.empty:
-        return pd.Series(False, index=history.index, dtype=bool)
+        return right
     right["implement_date"] = strict_timestamp_series(
         right["implement_date"], error="invalid_industry_version_date"
     ).dt.normalize()
@@ -534,17 +563,56 @@ def _valid_industry_history_rows(
     ).dt.normalize()
     if right.duplicated(["industry_standard_id", "implement_date"], keep=False).any():
         raise ValueError("industry_version_key_duplicate")
-    valid = pd.Series(False, index=history.index, dtype=bool)
-    for index, row in history.loc[:, ["industry_standard_id", "timestamp"]].iterrows():
-        active = right.loc[
-            right["industry_standard_id"].eq(row["industry_standard_id"])
-            & right["implement_date"].le(row["timestamp"])
-            & (
-                right["abandon_date"].isna()
-                | right["abandon_date"].gt(row["timestamp"])
-            )
+    return right
+
+
+def _industry_version_active_mask(
+    standards: pd.Series,
+    timestamps: pd.Series,
+    versions: pd.DataFrame,
+    *,
+    event_timestamps: pd.Series | None = None,
+) -> pd.Series:
+    canonical_standards = strict_string_series(
+        standards,
+        error="invalid_industry_standard_id",
+        allow_null=True,
+    ).replace(INDUSTRY_STANDARD_BY_PROVIDER_ID)
+    right = _canonical_industry_versions(versions, set(canonical_standards.dropna()))
+    valid = pd.Series(False, index=standards.index, dtype=bool)
+    event_values = timestamps if event_timestamps is None else event_timestamps
+    for index, standard, timestamp, event_timestamp in zip(
+        standards.index,
+        canonical_standards,
+        timestamps,
+        event_values,
+        strict=True,
+    ):
+        if pd.isna(standard) or pd.isna(timestamp) or pd.isna(event_timestamp):
+            continue
+        active_at_observation = right.loc[
+            right["industry_standard_id"].eq(standard)
+            & right["implement_date"].le(timestamp)
+            & (right["abandon_date"].isna() | right["abandon_date"].gt(timestamp))
         ]
-        valid.loc[index] = not active.empty
+        active_at_event = right.loc[
+            right["industry_standard_id"].eq(standard)
+            & right["implement_date"].le(event_timestamp)
+            & (right["abandon_date"].isna() | right["abandon_date"].gt(event_timestamp))
+        ]
+        if len(active_at_event) != 1 or len(active_at_observation) != 1:
+            continue
+        event_version = active_at_event.iloc[0]
+        observation_version = active_at_observation.iloc[0]
+        valid.loc[index] = event_version["implement_date"] == observation_version[
+            "implement_date"
+        ] and (
+            (
+                pd.isna(event_version["abandon_date"])
+                and pd.isna(observation_version["abandon_date"])
+            )
+            or event_version["abandon_date"] == observation_version["abandon_date"]
+        )
     return valid
 
 

@@ -152,7 +152,7 @@ def financial_events_from_interim(
         if bool(
             (
                 frame.loc[frame["is_corrected"], "correction_disclosure_date"]
-                < frame.loc[frame["is_corrected"], "first_disclosure_date"]
+                <= frame.loc[frame["is_corrected"], "first_disclosure_date"]
             ).any()
         ):
             raise ValueError("financial_correction_before_first_disclosure")
@@ -219,6 +219,7 @@ def construct_ttm_events(
         "metric_id",
         "report_period",
         "available_at",
+        "is_corrected",
         "version_identity",
         value_column,
     }
@@ -229,6 +230,9 @@ def construct_ttm_events(
         result[column] = strict_timestamp_series(
             result[column], error="ttm_event_date_invalid"
         ).dt.normalize()
+    result["is_corrected"] = strict_bool_series(
+        result["is_corrected"], error="ttm_correction_flag_invalid"
+    )
     result["version_identity"] = strict_string_series(
         result["version_identity"], error="ttm_version_identity_invalid"
     )
@@ -244,6 +248,14 @@ def construct_ttm_events(
     ]
     if result.duplicated(event_key, keep=False).any():
         raise ValueError("ttm_event_key_duplicate")
+    revision_key = [
+        "asset_id",
+        "metric_id",
+        "report_period",
+        "available_at",
+    ]
+    if result.duplicated(revision_key, keep=False).any():
+        raise ValueError("ttm_revision_order_ambiguous")
     result["ttm_value"] = np.nan
     derived_records: list[dict[str, object]] = []
     for (_asset_id, metric_id), positions in result.groupby(
@@ -263,27 +275,30 @@ def construct_ttm_events(
             )
         if metric_id not in FLOW_METRIC_IDS:
             continue
-        correction_rows = group.loc[
-            group["version_identity"].astype("string").str.startswith("correction@")
-        ]
-        for _, row in group.iterrows():
-            period = pd.Timestamp(row["report_period"])
+        correction_rows = group.loc[group["is_corrected"]]
+        for period in sorted(
+            pd.Timestamp(value) for value in group["report_period"].drop_duplicates()
+        ):
             if period.month == 12:
                 continue
             prior_fy = _prior_fy_report_period(period)
             prior_ytd = _prior_year_report_period(period)
-            dependencies = {period, prior_fy, prior_ytd}
+            dependencies = {prior_fy, prior_ytd}
             if None in dependencies:
                 dependencies.discard(None)
+            target_rows = group.loc[group["report_period"].eq(period)]
+            target_first_available = target_rows["available_at"].min()
             cutoffs = correction_rows.loc[
                 correction_rows["report_period"].isin(dependencies)
-                & correction_rows["available_at"].gt(row["available_at"]),
+                & correction_rows["available_at"].gt(target_first_available),
                 "available_at",
             ].drop_duplicates()
             for cutoff in sorted(pd.Timestamp(value) for value in cutoffs):
+                if bool(target_rows["available_at"].eq(cutoff).any()):
+                    continue
                 derived_records.append(
                     {
-                        "asset_id": row["asset_id"],
+                        "asset_id": target_rows["asset_id"].iloc[0],
                         "metric_id": metric_id,
                         "report_period": period,
                         "available_at": cutoff,
@@ -422,6 +437,10 @@ def materialize_pit_fundamentals(
         keep=False,
     ).any():
         raise ValueError("pit_event_key_duplicate")
+    if right.duplicated(
+        ["asset_id", "metric_id", "report_period", "available_at"], keep=False
+    ).any():
+        raise ValueError("pit_revision_order_ambiguous")
     records: list[dict[str, object]] = []
     for (asset_id, metric_id), stream in right.groupby(
         ["asset_id", "metric_id"], sort=False

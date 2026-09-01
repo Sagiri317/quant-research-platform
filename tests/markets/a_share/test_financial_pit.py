@@ -302,6 +302,17 @@ def test_financial_versions_fail_without_legal_disclosure_or_unique_identity() -
             ),
         )
 
+    with pytest.raises(
+        ValueError, match="financial_correction_before_first_disclosure"
+    ):
+        financial_events_from_interim(
+            corrected_with_first_interim,
+            disclosure.assign(first_disclosure_date=pd.Timestamp("2020-02-15")),
+            trading_sessions=pd.DatetimeIndex(
+                pd.to_datetime(["2020-02-03", "2020-03-02"])
+            ),
+        )
+
     duplicate = {
         data_id: _financial_frame(data_id, (*records, records[0]))
         for data_id in FINANCIAL_VALUE_COLUMNS
@@ -337,6 +348,7 @@ def test_ttm_uses_same_period_and_legal_correction_cutoff() -> None:
                     "2020-10-01",
                 ]
             ),
+            "is_corrected": [False, False, True, False, True],
             "version_identity": [
                 "original",
                 "original",
@@ -349,9 +361,16 @@ def test_ttm_uses_same_period_and_legal_correction_cutoff() -> None:
     )
 
     result = construct_ttm_events(events)
-    current = result.loc[result["report_period"].eq(pd.Timestamp("2020-06-30"))]
+    current = result.loc[
+        result["report_period"].eq(pd.Timestamp("2020-06-30"))
+    ].sort_values("available_at")
 
-    assert current["ttm_value"].tolist() == [150.0, 180.0, 170.0, 180.0]
+    assert current["version_identity"].tolist() == [
+        "original",
+        "derived@2020-09-01",
+        "correction@2020-10-01",
+    ]
+    assert current["ttm_value"].tolist() == [150.0, 170.0, 180.0]
 
     without_same_period = events.loc[
         ~events["report_period"].eq(pd.Timestamp("2019-06-30"))
@@ -389,6 +408,7 @@ def test_latest_null_correction_does_not_fallback_to_an_older_value() -> None:
                     "2020-09-01",
                 ]
             ),
+            "is_corrected": [False, False, False, True, True],
             "version_identity": [
                 "original",
                 "original",
@@ -405,6 +425,78 @@ def test_latest_null_correction_does_not_fallback_to_an_older_value() -> None:
 
     assert current["ttm_value"].iloc[0] == 150.0
     assert pd.isna(current["ttm_value"].iloc[1])
+
+
+def test_ttm_merges_dependency_corrections_at_one_cutoff() -> None:
+    events = pd.DataFrame(
+        {
+            "asset_id": ["asset"] * 6,
+            "metric_id": ["operating_revenue"] * 6,
+            "report_period": pd.to_datetime(
+                [
+                    "2019-06-30",
+                    "2019-12-31",
+                    "2020-06-30",
+                    "2020-06-30",
+                    "2019-06-30",
+                    "2019-12-31",
+                ]
+            ),
+            "available_at": pd.to_datetime(
+                [
+                    "2020-01-02",
+                    "2020-01-02",
+                    "2020-08-01",
+                    "2020-09-01",
+                    "2020-10-01",
+                    "2020-10-01",
+                ]
+            ),
+            "is_corrected": [False, False, False, True, True, True],
+            "version_identity": [
+                "original",
+                "original",
+                "original",
+                "correction@2020-09-01",
+                "correction@2020-10-01",
+                "correction@2020-10-01",
+            ],
+            "value": [50.0, 120.0, 80.0, 90.0, 60.0, 140.0],
+        }
+    )
+
+    current = construct_ttm_events(events).loc[
+        lambda frame: frame["report_period"].eq(pd.Timestamp("2020-06-30"))
+    ]
+
+    assert current["version_identity"].tolist() == [
+        "original",
+        "correction@2020-09-01",
+        "derived@2020-10-01",
+    ]
+    assert current["ttm_value"].tolist() == [150.0, 160.0, 170.0]
+
+
+def test_pit_rejects_same_availability_cross_version_ties() -> None:
+    events = pd.DataFrame(
+        {
+            "asset_id": ["asset", "asset"],
+            "metric_id": ["total_assets", "total_assets"],
+            "report_period": pd.to_datetime(["2020-06-30", "2020-06-30"]),
+            "available_at": pd.to_datetime(["2020-08-03", "2020-08-03"]),
+            "is_corrected": [False, True],
+            "version_identity": ["original", "correction@2020-08-03"],
+            "value": [1.0, 2.0],
+        }
+    )
+
+    with pytest.raises(ValueError, match="pit_revision_order_ambiguous"):
+        materialize_pit_fundamentals(
+            pd.DataFrame(
+                {"asset_id": ["asset"], "timestamp": [pd.Timestamp("2020-08-04")]}
+            ),
+            events,
+        )
 
 
 def _financial_frame(
