@@ -75,8 +75,10 @@ def _financial_fixture_row(
             if column == "ShortName"
             else "0"
             if column == "IfCorrect"
+            else ""
+            if column == "DeclareDate"
             else "2020-01-02"
-            if column in {"DeclareDate", "Accper"}
+            if column == "Accper"
             else "A"
             if column == "Typrep"
             else "bad"
@@ -335,6 +337,22 @@ def test_provider_header_bound_accepts_160_and_rejects_161_fields(
         else:
             with pytest.raises(ValueError, match="csmar_raw_export_schema_invalid"):
                 raw_schemas.inspect_raw_export_file(path)
+
+
+def test_financial_correction_date_order_is_validated() -> None:
+    result = interim._parse_financial_correction_date(
+        pd.Series(["2020-02-01,2020-01-02", "2020-01-03", ""])
+    )
+
+    assert result.tolist() == [
+        pd.Timestamp("2020-02-01"),
+        pd.Timestamp("2020-01-03"),
+        pd.NaT,
+    ]
+    with pytest.raises(ValueError, match="invalid_financial_correction_date"):
+        interim._parse_financial_correction_date(
+            pd.Series(["2020-01-01,2020-02-01,2020-01-15"])
+        )
 
 
 def test_csmar_identity_rejects_requested_bad_schema_and_cleans_scratch(

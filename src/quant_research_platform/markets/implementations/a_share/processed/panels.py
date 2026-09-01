@@ -20,6 +20,10 @@ from quant_research_platform.markets.implementations.a_share.ids import MARKET_I
 
 ST_STATUS_CODES = {2, 3, 5, 6, 8, 9, 11, 12, 14, 15}
 MARKET_PANEL_KEY_COLUMNS = ("market_id", "asset_id", "timestamp")
+INDUSTRY_STANDARD_BY_PROVIDER_ID = {
+    "P0207": "CSRC2012",
+    "P0221": "CAPCO",
+}
 
 
 def compute_market_panel(
@@ -29,11 +33,18 @@ def compute_market_panel(
     market_cap: pd.DataFrame,
     trading_calendar: pd.DataFrame,
     industry_history: pd.DataFrame | None = None,
+    industry_sets: pd.DataFrame | None = None,
+    industry_versions: pd.DataFrame | None = None,
+    no_limit_history: pd.DataFrame | None = None,
     special_treatment_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build lifecycle × open-session facts with suspension rows retained."""
 
     bars = _canonical_bars(market_bars)
+    holiday_fill_dates = pd.DatetimeIndex(
+        bars.loc[bars["filling_flag"].eq(2), "timestamp"]
+    ).drop_duplicates()
+    bars = bars.loc[bars["filling_flag"].ne(2)].copy()
     if bars.empty:
         return bars
     sessions = unified_trading_sessions(trading_calendar)
@@ -42,6 +53,7 @@ def compute_market_panel(
     session_window = sessions[
         (sessions >= bars["timestamp"].min()) & (sessions <= bars["timestamp"].max())
     ]
+    session_window = session_window[~session_window.isin(holiday_fill_dates)]
     if session_window.empty:
         return bars.iloc[0:0].copy()
     stocks = _canonical_stock_master(stock_master)
@@ -51,8 +63,16 @@ def compute_market_panel(
         stocks,
         session_window,
     )
+    if dense.empty:
+        return dense
     dense = _asof_market_cap(dense, caps)
-    dense = _asof_industry(dense, stocks, industry_history)
+    dense = _asof_industry(
+        dense,
+        industry_history,
+        industry_sets=industry_sets,
+        industry_versions=industry_versions,
+    )
+    dense = _apply_no_limit_exceptions(dense, no_limit_history)
     dense = _apply_special_treatment(dense, special_treatment_history)
     dense = _apply_suspension_semantics(dense)
     delisting_sentinel = pd.Timestamp.max.normalize()
@@ -65,17 +85,6 @@ def compute_market_panel(
         observation_date_column="timestamp",
         listing_date_column="listing_date",
         market_type_column="market_type",
-    )
-    dense["scenario_universe"] = (
-        dense["is_a_share_scope"]
-        & dense["is_trading"]
-        & ~dense["is_st"]
-        & ~dense["is_pt"]
-        & dense["listing_age_trading_days"].ge(252)
-        & dense["amount"].gt(0.0)
-        & dense["volume"].gt(0.0)
-        & dense["turnover"].notna()
-        & dense["turnover"].ge(0.0)
     )
     return dense.sort_values(
         ["market_id", "asset_id", "timestamp"], kind="mergesort"
@@ -142,7 +151,6 @@ def _canonical_bars(frame: pd.DataFrame) -> pd.DataFrame:
         else:
             result[column] = np.nan
     result = result.loc[result["market_type"].isin(CURRENT_MARKET_TYPES)]
-    result = result.loc[result["filling_flag"].ne(2)]
     if result.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("duplicate_market_panel_key")
     result["market_id"] = str(MARKET_ID)
@@ -193,9 +201,13 @@ def _canonical_stock_master(frame: pd.DataFrame) -> pd.DataFrame:
     result["stock_effective_date"] = result.get(
         "timestamp", result["listing_date"]
     ).fillna(result["listing_date"])
-    return result.sort_values(
-        ["asset_id", "stock_effective_date"], kind="mergesort"
-    ).drop_duplicates(["asset_id", "stock_effective_date"], keep="last")
+    key = ["asset_id", "stock_effective_date"]
+    if result.duplicated(key, keep=False).any():
+        duplicates = result.loc[result.duplicated(key, keep=False)]
+        if duplicates.drop_duplicates().duplicated(key, keep=False).any():
+            raise ValueError("duplicate_stock_master_key")
+        result = result.drop_duplicates(key, keep="last")
+    return result.sort_values(key, kind="mergesort")
 
 
 def _canonical_market_cap(frame: pd.DataFrame) -> pd.DataFrame:
@@ -232,8 +244,17 @@ def _dense_lifecycle_panel(
     rows: list[pd.DataFrame] = []
     for asset_id in assets:
         stock = stocks.loc[stocks["asset_id"].eq(asset_id)]
-        listing = stock["listing_date"].min() if not stock.empty else sessions[0]
-        delisting = stock["delisting_date"].max() if not stock.empty else sessions[-1]
+        if stock.empty:
+            continue
+        listing = stock["listing_date"].min()
+        finite_delistings = stock.loc[
+            stock["delisting_date"] < pd.Timestamp.max.normalize(), "delisting_date"
+        ]
+        delisting = (
+            finite_delistings.min()
+            if not finite_delistings.empty
+            else pd.Timestamp.max.normalize()
+        )
         dates = sessions[(sessions >= listing) & (sessions <= delisting)]
         if dates.empty:
             continue
@@ -272,9 +293,6 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
         "listing_date",
         "delisting_date",
         "company_status",
-        "industry_standard_id",
-        "industry_level1_code",
-        "industry_level1_name",
     )
     for asset_id, group in panel.groupby("asset_id", sort=False):
         right = stocks.loc[stocks["asset_id"].eq(asset_id)]
@@ -322,11 +340,21 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
         "industry_level1_code",
         "industry_level1_name",
     ):
+        if column not in result:
+            result[column] = pd.NA
         result[column] = result[column].astype("string")
     return result
 
 
 def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
+    panel = panel.copy()
+    panel["asset_id"] = strict_string_series(
+        panel["asset_id"], error="invalid_market_cap_asset_id"
+    )
+    caps = caps.copy()
+    caps["asset_id"] = strict_string_series(
+        caps["asset_id"], error="invalid_market_cap_asset_id"
+    )
     outputs: list[pd.DataFrame] = []
     for asset_id, group in panel.groupby("asset_id", sort=False):
         right = caps.loc[caps["asset_id"].eq(asset_id)]
@@ -366,12 +394,18 @@ def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
 
 def _asof_industry(
     panel: pd.DataFrame,
-    stocks: pd.DataFrame,
     history: pd.DataFrame | None,
+    *,
+    industry_sets: pd.DataFrame | None,
+    industry_versions: pd.DataFrame | None,
 ) -> pd.DataFrame:
     if history is None or history.empty:
         return panel
-    history = history.rename(columns={"source_asset_id": "asset_id"})
+    panel = panel.copy()
+    panel["asset_id"] = strict_string_series(
+        panel["asset_id"], error="invalid_industry_asset_id"
+    )
+    history = history.rename(columns={"source_asset_id": "asset_id"}).copy()
     required = {
         "asset_id",
         "timestamp",
@@ -381,9 +415,42 @@ def _asof_industry(
     }
     if not required.issubset(history.columns):
         raise ValueError("industry_history_columns_invalid")
+    history["asset_id"] = strict_string_series(
+        history["asset_id"], error="invalid_industry_asset_id"
+    )
+    history["industry_standard_id"] = _canonical_industry_standard(
+        history["industry_standard_id"]
+    )
+    history["timestamp"] = strict_timestamp_series(
+        history["timestamp"], error="invalid_industry_timestamp"
+    ).dt.normalize()
+    history["industry_level1_code"] = strict_string_series(
+        history["industry_level1_code"], error="invalid_industry_code"
+    )
+    history["industry_level1_name"] = strict_string_series(
+        history["industry_level1_name"],
+        error="invalid_industry_name",
+        allow_null=True,
+    )
+    expected_standard = history["timestamp"].map(
+        lambda value: "CSRC2012" if value < pd.Timestamp("2023-01-01") else "CAPCO"
+    )
+    history = history.loc[history["industry_standard_id"].eq(expected_standard)].copy()
+    if history.empty:
+        return panel
+    if industry_versions is not None:
+        history = history.loc[
+            _valid_industry_history_rows(history, industry_versions)
+        ].copy()
+        if history.empty:
+            return panel
+    if industry_sets is not None:
+        history = _resolve_industry_hierarchy(history, industry_sets)
     right = history.loc[:, list(required)].sort_values(
         ["asset_id", "timestamp"], kind="mergesort"
     )
+    if right.duplicated(["asset_id", "timestamp"], keep=False).any():
+        raise ValueError("industry_history_key_duplicate")
     output: list[pd.DataFrame] = []
     for asset_id, group in panel.groupby("asset_id", sort=False):
         current = pd.merge_asof(
@@ -408,17 +475,166 @@ def _asof_industry(
     return pd.concat(output, ignore_index=True)
 
 
+def _canonical_industry_standard(values: pd.Series) -> pd.Series:
+    result = strict_string_series(values, error="invalid_industry_standard_id")
+    return result.replace(INDUSTRY_STANDARD_BY_PROVIDER_ID)
+
+
+def _valid_industry_history_rows(
+    history: pd.DataFrame,
+    versions: pd.DataFrame,
+) -> pd.Series:
+    required = {
+        "industry_standard_id",
+        "implement_date",
+        "abandon_date",
+    }
+    if not required.issubset(versions.columns):
+        raise ValueError("industry_versions_columns_invalid")
+    right = versions.loc[:, list(required)].copy()
+    right["industry_standard_id"] = _canonical_industry_standard(
+        right["industry_standard_id"]
+    )
+    right = right.loc[
+        right["industry_standard_id"].isin(
+            set(history["industry_standard_id"].dropna())
+        )
+    ].copy()
+    if right.empty:
+        return pd.Series(False, index=history.index, dtype=bool)
+    right["implement_date"] = strict_timestamp_series(
+        right["implement_date"], error="invalid_industry_version_date"
+    ).dt.normalize()
+    right["abandon_date"] = strict_timestamp_series(
+        right["abandon_date"], error="invalid_industry_version_date", allow_null=True
+    ).dt.normalize()
+    if right.duplicated(["industry_standard_id", "implement_date"], keep=False).any():
+        raise ValueError("industry_version_key_duplicate")
+    valid = pd.Series(False, index=history.index, dtype=bool)
+    for index, row in history.loc[:, ["industry_standard_id", "timestamp"]].iterrows():
+        active = right.loc[
+            right["industry_standard_id"].eq(row["industry_standard_id"])
+            & right["implement_date"].le(row["timestamp"])
+            & (
+                right["abandon_date"].isna()
+                | right["abandon_date"].gt(row["timestamp"])
+            )
+        ]
+        valid.loc[index] = not active.empty
+    return valid
+
+
+def _resolve_industry_hierarchy(
+    history: pd.DataFrame,
+    sets: pd.DataFrame,
+) -> pd.DataFrame:
+    required = {
+        "industry_code",
+        "industry_standard_id",
+        "industry_name",
+        "parent_industry_code",
+        "industry_level",
+    }
+    if not required.issubset(sets.columns):
+        raise ValueError("industry_sets_columns_invalid")
+    dictionary = sets.loc[:, list(required)].copy()
+    dictionary["industry_standard_id"] = _canonical_industry_standard(
+        dictionary["industry_standard_id"]
+    )
+    for column in required.difference({"industry_standard_id"}):
+        dictionary[column] = strict_string_series(
+            dictionary[column],
+            error="invalid_industry_dictionary_value",
+            allow_empty=column == "parent_industry_code",
+            allow_null=True,
+        )
+    key = ["industry_standard_id", "industry_code"]
+    if dictionary.duplicated(key, keep=False).any():
+        duplicate = dictionary.loc[dictionary.duplicated(key, keep=False)]
+        if duplicate.drop_duplicates().duplicated(key, keep=False).any():
+            raise ValueError("industry_dictionary_key_duplicate")
+        dictionary = dictionary.drop_duplicates(key, keep="first")
+    lookup = {
+        (row.industry_standard_id, row.industry_code): row
+        for row in dictionary.itertuples(index=False)
+    }
+    result = history.copy()
+    resolved_codes: list[str | None] = []
+    resolved_names: list[str | None] = []
+    for row in result.loc[
+        :, ["industry_standard_id", "industry_level1_code"]
+    ].itertuples(index=False):
+        standard = str(row.industry_standard_id)
+        code = str(row.industry_level1_code)
+        seen: set[str] = set()
+        while True:
+            if code in seen:
+                raise ValueError("industry_hierarchy_cycle")
+            seen.add(code)
+            entry = lookup.get((standard, code))
+            if entry is None:
+                raise ValueError("industry_history_code_missing")
+            if str(entry.industry_level) == "1":
+                resolved_codes.append(code)
+                resolved_names.append(
+                    None if pd.isna(entry.industry_name) else str(entry.industry_name)
+                )
+                break
+            parent = entry.parent_industry_code
+            if pd.isna(parent) or not str(parent).strip():
+                raise ValueError("industry_hierarchy_parent_missing")
+            code = str(parent).strip()
+    result["industry_level1_code"] = pd.Series(
+        resolved_codes, index=result.index, dtype="string"
+    )
+    result["industry_level1_name"] = pd.Series(
+        resolved_names, index=result.index, dtype="string"
+    )
+    return result
+
+
+def _apply_no_limit_exceptions(
+    panel: pd.DataFrame,
+    history: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if history is None or history.empty:
+        return panel
+    result = panel.copy()
+    right = history.rename(columns={"source_asset_id": "asset_id"}).copy()
+    required = {"asset_id", "timestamp"}
+    if not required.issubset(right.columns):
+        raise ValueError("no_limit_history_columns_invalid")
+    right["asset_id"] = strict_string_series(
+        right["asset_id"], error="invalid_no_limit_asset_id"
+    )
+    right["timestamp"] = strict_timestamp_series(
+        right["timestamp"], error="invalid_no_limit_date"
+    ).dt.normalize()
+    if right.duplicated(["asset_id", "timestamp"], keep=False).any():
+        raise ValueError("no_limit_history_key_duplicate")
+    event_keys = pd.MultiIndex.from_frame(right.loc[:, ["asset_id", "timestamp"]])
+    panel_keys = pd.MultiIndex.from_frame(result.loc[:, ["asset_id", "timestamp"]])
+    result.loc[panel_keys.isin(event_keys), "limit_status"] = 0.0
+    return result
+
+
 def _apply_special_treatment(
     panel: pd.DataFrame,
     history: pd.DataFrame | None,
 ) -> pd.DataFrame:
     result = panel.copy()
+    result["asset_id"] = strict_string_series(
+        result["asset_id"], error="invalid_special_treatment_asset_id"
+    )
     status = result["trading_status_code"].fillna(-1)
     result["is_st"] = status.isin(ST_STATUS_CODES)
     result["is_pt"] = status.eq(16)
     if history is None or history.empty:
         return result
     history = history.rename(columns={"source_asset_id": "asset_id"})
+    history["asset_id"] = strict_string_series(
+        history["asset_id"], error="invalid_special_treatment_asset_id"
+    )
     if {"asset_id", "timestamp", "change_type"}.issubset(history.columns):
         right = history.loc[:, ["asset_id", "timestamp", "change_type"]].copy()
         change_type = right["change_type"].astype("string").str.upper()
@@ -429,10 +645,10 @@ def _apply_special_treatment(
     else:
         raise ValueError("special_treatment_history_columns_invalid")
     right = right.loc[:, ["asset_id", "timestamp", "is_st", "is_pt"]].sort_values(
-        ["asset_id", "timestamp"], kind="mergesort"
+        ["timestamp", "asset_id"], kind="mergesort"
     )
     merged = pd.merge_asof(
-        result.sort_values("timestamp"),
+        result.sort_values(["timestamp", "asset_id"], kind="mergesort"),
         right,
         on="timestamp",
         by="asset_id",
@@ -486,6 +702,9 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
         )
         result.loc[positions, "turnover"] = result.loc[positions, "volume"].div(
             free_shares.where(free_shares.gt(0.0))
+        )
+        result.loc[positions, "turnover"] = result.loc[positions, "turnover"].where(
+            result.loc[positions, "is_trading"], 0.0
         )
         previous_trading = result.loc[positions, "is_trading"].shift(1).fillna(False)
         reopening = result.loc[positions, "is_trading"] & ~previous_trading

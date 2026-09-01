@@ -61,7 +61,7 @@ def financial_events_from_interim(
         disclosure[column] = strict_timestamp_series(
             disclosure[column], error="financial_disclosure_date_invalid"
         ).dt.normalize()
-    if disclosure.duplicated(list(DISCLOSURE_COLUMNS)).any():
+    if disclosure.duplicated(["asset_id", "report_period"], keep=False).any():
         raise ValueError("financial_disclosure_key_duplicate")
     sessions = pd.DatetimeIndex(trading_sessions).normalize().drop_duplicates()
     if sessions.empty or not sessions.is_monotonic_increasing:
@@ -76,6 +76,7 @@ def financial_events_from_interim(
             "report_type",
             "is_corrected",
             "correction_disclosure_date",
+            "version_identity",
             *value_columns,
         }
         if not required.issubset(frame.columns):
@@ -97,12 +98,34 @@ def financial_events_from_interim(
             error="financial_correction_date_invalid",
             allow_null=True,
         ).dt.normalize()
+        if bool(
+            (frame["is_corrected"] & frame["correction_disclosure_date"].isna()).any()
+        ):
+            raise ValueError("financial_correction_disclosure_missing")
+        frame["version_identity"] = strict_string_series(
+            frame["version_identity"], error="financial_version_identity_invalid"
+        )
+        expected_versions = pd.Series("original", index=frame.index, dtype="string")
+        corrected = frame["is_corrected"]
+        expected_versions.loc[corrected] = "correction@" + frame.loc[
+            corrected, "correction_disclosure_date"
+        ].dt.strftime("%Y-%m-%d").astype("string")
+        if bool(frame["version_identity"].ne(expected_versions).any()):
+            raise ValueError("financial_version_identity_invalid")
         for column in value_columns:
             frame[column] = strict_finite_numeric_series(
                 frame[column],
                 error=f"financial_value_invalid: {column}",
                 allow_null=True,
             )
+        version_key = [
+            "asset_id",
+            "report_period",
+            "report_type",
+            "version_identity",
+        ]
+        if bool(frame.duplicated(version_key, keep=False).any()):
+            raise ValueError("financial_version_key_duplicate")
         frame = frame.loc[frame["report_type"].eq("A")]
         frame = frame.merge(
             disclosure,
@@ -121,22 +144,47 @@ def financial_events_from_interim(
         frame["disclosure_date"] = frame["first_disclosure_date"].where(
             ~frame["is_corrected"], frame["correction_disclosure_date"]
         )
+        frame = frame.loc[frame["disclosure_date"].le(sessions[-1])].copy()
+        if frame.empty:
+            continue
         positions = sessions.searchsorted(
             frame["disclosure_date"].to_numpy(dtype="datetime64[ns]"),
             side="right",
         )
-        if bool((positions >= len(sessions)).any()):
-            raise ValueError("financial_availability_outside_calendar")
         frame["available_at"] = sessions.take(positions)
         melted = frame.melt(
-            id_vars=("asset_id", "report_period", "available_at", "is_corrected"),
+            id_vars=(
+                "asset_id",
+                "report_period",
+                "available_at",
+                "is_corrected",
+                "version_identity",
+            ),
             value_vars=value_columns,
             var_name="metric_id",
             value_name="value",
         )
         records.append(melted)
+    if not records:
+        return pd.DataFrame(
+            columns=[
+                "asset_id",
+                "report_period",
+                "available_at",
+                "is_corrected",
+                "version_identity",
+                "metric_id",
+                "value",
+            ]
+        )
     result = pd.concat(records, ignore_index=True)
-    key = ["asset_id", "metric_id", "report_period", "available_at"]
+    key = [
+        "asset_id",
+        "metric_id",
+        "report_period",
+        "available_at",
+        "version_identity",
+    ]
     if result.duplicated(key, keep=False).any():
         raise ValueError("financial_event_key_duplicate")
     return result.sort_values(key, kind="mergesort").reset_index(drop=True)
@@ -155,6 +203,7 @@ def materialize_pit_fundamentals(
         "report_period",
         "available_at",
         "is_corrected",
+        "version_identity",
         "value",
     }
     if not required_observations.issubset(
@@ -182,36 +231,58 @@ def materialize_pit_fundamentals(
     right["value"] = strict_finite_numeric_series(
         right["value"], error="pit_value_invalid", allow_null=True
     )
+    right["version_identity"] = strict_string_series(
+        right["version_identity"], error="pit_version_identity_invalid"
+    )
     if right.duplicated(
-        ["asset_id", "metric_id", "report_period", "available_at"], keep=False
+        [
+            "asset_id",
+            "metric_id",
+            "report_period",
+            "available_at",
+            "version_identity",
+        ],
+        keep=False,
     ).any():
         raise ValueError("pit_event_key_duplicate")
     records: list[dict[str, object]] = []
     for (asset_id, metric_id), stream in right.groupby(
         ["asset_id", "metric_id"], sort=False
     ):
-        stream = stream.sort_values(["available_at", "report_period"], kind="mergesort")
+        stream = stream.sort_values(
+            ["available_at", "report_period", "version_identity"],
+            kind="mergesort",
+        )
         asset_observations = left.loc[left["asset_id"].eq(asset_id)].sort_values(
             "timestamp", kind="mergesort"
         )
         for observation in asset_observations.itertuples(index=False):
             legal = stream.loc[stream["available_at"].le(observation.timestamp)]
             if legal.empty:
-                current = previous = None
+                current = beginning = prior_year = None
             else:
                 latest_period = legal["report_period"].max()
-                current_rows = legal.loc[legal["report_period"].eq(latest_period)]
-                current = current_rows.iloc[-1]
-                prior_periods = legal.loc[
-                    legal["report_period"].lt(latest_period), "report_period"
-                ]
-                if prior_periods.empty:
-                    previous = None
-                else:
-                    prior_period = prior_periods.max()
-                    previous = legal.loc[legal["report_period"].eq(prior_period)].iloc[
+                current = _latest_legal_event_row(
+                    legal, report_period=latest_period
+                ).iloc[-1]
+                beginning_period = _beginning_report_period(latest_period)
+                beginning = (
+                    _latest_legal_event_row(legal, report_period=beginning_period).iloc[
                         -1
                     ]
+                    if beginning_period is not None
+                    and bool(legal["report_period"].eq(beginning_period).any())
+                    else None
+                )
+                prior_year_period = _prior_year_report_period(latest_period)
+                prior_year = (
+                    _latest_legal_event_row(
+                        legal, report_period=prior_year_period
+                    ).iloc[-1]
+                    if prior_year_period is not None
+                    and bool(legal["report_period"].eq(prior_year_period).any())
+                    else None
+                )
             records.append(
                 {
                     "asset_id": asset_id,
@@ -223,14 +294,25 @@ def materialize_pit_fundamentals(
                     "available_at": pd.NaT
                     if current is None
                     else current["available_at"],
+                    "version_identity": pd.NA
+                    if current is None
+                    else current["version_identity"],
                     "is_corrected": pd.NA
                     if current is None
                     else current["is_corrected"],
                     "value": np.nan if current is None else current["value"],
-                    "previous_report_period": pd.NaT
-                    if previous is None
-                    else previous["report_period"],
-                    "previous_value": np.nan if previous is None else previous["value"],
+                    "beginning_report_period": pd.NaT
+                    if beginning is None
+                    else beginning["report_period"],
+                    "beginning_value": (
+                        np.nan if beginning is None else beginning["value"]
+                    ),
+                    "prior_year_report_period": pd.NaT
+                    if prior_year is None
+                    else prior_year["report_period"],
+                    "prior_year_value": (
+                        np.nan if prior_year is None else prior_year["value"]
+                    ),
                 }
             )
     return (
@@ -238,3 +320,31 @@ def materialize_pit_fundamentals(
         .sort_values(["asset_id", "timestamp", "metric_id"], kind="mergesort")
         .reset_index(drop=True)
     )
+
+
+def _latest_legal_event_row(
+    events: pd.DataFrame,
+    *,
+    report_period: pd.Timestamp,
+) -> pd.DataFrame:
+    return events.loc[events["report_period"].eq(report_period)].sort_values(
+        ["available_at", "version_identity"], kind="mergesort"
+    )
+
+
+def _beginning_report_period(report_period: pd.Timestamp) -> pd.Timestamp | None:
+    quarter_ends = {
+        3: (report_period.year - 1, 12, 31),
+        6: (report_period.year, 3, 31),
+        9: (report_period.year, 6, 30),
+        12: (report_period.year - 1, 12, 31),
+    }
+    value = quarter_ends.get(report_period.month)
+    return None if value is None else pd.Timestamp(*value)
+
+
+def _prior_year_report_period(report_period: pd.Timestamp) -> pd.Timestamp | None:
+    try:
+        return report_period.replace(year=report_period.year - 1)
+    except ValueError:
+        return None

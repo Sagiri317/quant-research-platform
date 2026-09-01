@@ -41,7 +41,7 @@ def first_disclosure_spec() -> InterimDataSpec:
             "report_period": ColumnRole.TIMESTAMP,
             "first_disclosure_date": ColumnRole.TIMESTAMP,
         },
-        primary_key=FIRST_DISCLOSURE_COLUMNS,
+        primary_key=("asset_id", "report_period"),
         partition_columns=("year",),
     )
 
@@ -63,7 +63,7 @@ def normalize_first_disclosure_frame(frame: pd.DataFrame) -> pd.DataFrame:
         result[column] = strict_timestamp_series(
             result[column], error="invalid_choice_disclosure_date"
         ).dt.normalize()
-    if result.duplicated(list(FIRST_DISCLOSURE_COLUMNS)).any():
+    if result.duplicated(["asset_id", "report_period"], keep=False).any():
         raise ValueError("duplicate_choice_first_disclosure_key")
     return result.sort_values(
         list(FIRST_DISCLOSURE_COLUMNS), kind="mergesort"

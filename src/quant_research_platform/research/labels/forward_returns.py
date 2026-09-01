@@ -10,6 +10,7 @@ import pandas as pd
 from quant_research_platform.contracts.data import DataFrequency, horizon_unit_suffix
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
+    strict_bool_series,
     strict_finite_numeric_series,
     strict_timestamp_series,
 )
@@ -41,6 +42,8 @@ def add_forward_return_labels(
         date_column=date_column,
         execution_price_column=execution_price_column,
     )
+    if can_enter_column is not None and can_enter_column not in validated.columns:
+        raise ValueError(f"missing_forward_return_columns: {can_enter_column}")
     if sessions is None:
         return _add_valid_row_labels(
             validated,
@@ -49,6 +52,7 @@ def add_forward_return_labels(
             asset_column=asset_column,
             date_column=date_column,
             execution_price_column=execution_price_column,
+            can_enter_column=can_enter_column,
             expected_interval=expected_interval,
             require_contiguous=require_contiguous,
         )
@@ -57,8 +61,6 @@ def add_forward_return_labels(
     result[date_column] = strict_timestamp_series(
         result[date_column], error="invalid_forward_return_timestamp"
     )
-    if can_enter_column is not None and can_enter_column not in result.columns:
-        raise ValueError(f"missing_forward_return_columns: {can_enter_column}")
     price = strict_finite_numeric_series(
         result[execution_price_column],
         error="invalid_forward_return_price",
@@ -74,7 +76,9 @@ def add_forward_return_labels(
     positions = result[date_column].map(position_by_session).to_numpy()
     prices = price.to_numpy(dtype="float64", copy=False)
     can_enter = (
-        result[can_enter_column].astype(bool).to_numpy(copy=False)
+        strict_bool_series(
+            result[can_enter_column], error="invalid_forward_return_can_enter"
+        ).to_numpy(copy=False)
         if can_enter_column is not None
         else None
     )
@@ -97,7 +101,7 @@ def add_forward_return_labels(
             exit_row = row_lookup.get((asset, exit_date))
             if entry_row is None or exit_row is None:
                 continue
-            if can_enter is not None and not bool(can_enter[entry_row]):
+            if can_enter is not None and not bool(can_enter[position]):
                 continue
             entry_price = prices[entry_row]
             exit_price = prices[exit_row]
@@ -206,6 +210,7 @@ def _add_valid_row_labels(
     asset_column: str,
     date_column: str,
     execution_price_column: str,
+    can_enter_column: str | None,
     expected_interval: pd.Timedelta | None,
     require_contiguous: bool,
 ) -> pd.DataFrame:
@@ -232,10 +237,19 @@ def _add_valid_row_labels(
         )
     entry = grouped.shift(-1)
     entry = entry.where(np.isfinite(entry) & entry.ne(0.0))
+    can_enter = (
+        strict_bool_series(
+            result[can_enter_column], error="invalid_forward_return_can_enter"
+        )
+        if can_enter_column is not None
+        else None
+    )
     for horizon in horizons:
         exit_price = grouped.shift(-(horizon + 1)).where(np.isfinite)
         column = forward_return_label_column(horizon, frequency)
         result[column] = (exit_price / entry - 1.0).replace([np.inf, -np.inf], np.nan)
+        if can_enter is not None:
+            result[column] = result[column].where(can_enter)
         result[f"{column}_available_at"] = timestamp_grouped.shift(
             -(horizon + 1)
         ).where(result[column].notna())

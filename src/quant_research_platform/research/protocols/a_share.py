@@ -59,7 +59,6 @@ from quant_research_platform.research.randomness import ROOT_SEED
 MARKET_ID = MarketId("a_share")
 PROTOCOL_ID = "a_share_low_frequency"
 MARKET_PANEL_ID = "market_panel_1d"
-EXECUTION_MASK_ID = "execution_mask"
 PRICE_VOLUME_DATA_ID = "price_volume_facts"
 RESEARCH_DATASET_IDS = {
     "pv_all": "pv_all",
@@ -235,7 +234,7 @@ class AShareProtocol:
             "primary_time_decay": None,
             "robustness_time_decay_half_life": ROBUSTNESS_TIME_DECAY_HALF_LIFE,
             "transform_order": [
-                "scenario_universe",
+                "eligible",
                 "mad_winsor",
                 "neutralize",
                 "zscore",
@@ -602,7 +601,7 @@ def portfolio_catalog(
         categorical_exposure_columns=("industry_level1_code",),
     )
     tradability = TradabilityConfig(
-        eligibility_column="scenario_universe",
+        eligibility_column="eligible",
         can_enter_column="can_enter",
         can_exit_column="can_exit",
     )
@@ -685,21 +684,27 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
             MODEL_TARGET_COLUMN,
         )
         context = (
-            "scenario_universe",
-            "can_enter",
-            "can_exit",
+            "is_a_share_scope",
+            "is_trading",
+            "is_st",
+            "is_pt",
+            "listing_age_trading_days",
+            "close",
+            "adj_close",
+            "volume",
+            "amount",
+            "turnover",
             "industry_standard_id",
             "industry_level1_code",
             "industry_level1_name",
             "float_market_cap",
             "total_market_cap",
-            "amount",
-            "turnover",
         )
         all_columns = (
             "market_id",
             "asset_id",
             "timestamp",
+            "eligible",
             *factor_columns,
             *feature_columns,
             *labels,
@@ -711,7 +716,7 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
                 factor_columns,
                 feature_columns,
                 labels,
-                ("scenario_universe", "can_enter", "can_exit"),
+                ("eligible",),
             )
             for column in all_columns
         }
@@ -739,12 +744,7 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
                 ),
             )
         )
-        input_data_ids = [
-            MARKET_PANEL_ID,
-            EXECUTION_MASK_ID,
-            PRICE_VOLUME_DATA_ID,
-            "forward_returns",
-        ]
+        input_data_ids = [MARKET_PANEL_ID, PRICE_VOLUME_DATA_ID, "forward_returns"]
         if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
             input_data_ids.insert(3, "fundamental_factors")
         if scenario_id == "fusion_nf_expectations":
@@ -759,8 +759,8 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
                 feature_columns=feature_columns,
                 feature_transforms=transforms,
                 label_columns=labels,
-                filter_columns=("scenario_universe", "can_enter", "can_exit"),
-                context_columns=context[3:],
+                filter_columns=("eligible",),
+                context_columns=context,
                 frequency=DataFrequency.DAILY,
                 grain="research_row",
                 column_roles=roles,
@@ -792,7 +792,7 @@ def _dataset_role(
     if column in labels:
         return ColumnRole.LABEL
     if column in filters:
-        return ColumnRole.MASK if column != "scenario_universe" else ColumnRole.UNIVERSE
+        return ColumnRole.UNIVERSE
     if column == "timestamp":
         return ColumnRole.TIMESTAMP
     if column in {"market_id", "asset_id"}:

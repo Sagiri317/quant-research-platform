@@ -256,9 +256,42 @@ def _synthetic_source_frames() -> dict[str, pd.DataFrame]:
             "source_state": "O",
         }
     )
+    industry = pd.DataFrame(
+        {
+            "source_asset_id": ["000001"],
+            "timestamp": [sessions[0]],
+            "industry_standard_id": ["CSRC2012"],
+            "implement_date": [sessions[0]],
+            "industry_level1_code": ["A01"],
+            "industry_level1_name": ["synthetic industry"],
+        }
+    )
+    industry_sets = pd.DataFrame(
+        {
+            "industry_code": ["A01"],
+            "industry_standard_id": ["CSRC2012"],
+            "industry_name": ["synthetic industry"],
+            "parent_industry_code": [""],
+            "industry_id": ["1"],
+            "industry_level": ["1"],
+        }
+    )
+    industry_versions = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012"],
+            "industry_standard_name": ["synthetic CSRC"],
+            "timestamp": [sessions[0]],
+            "implement_date": [sessions[0]],
+            "abandon_date": [pd.NaT],
+            "institution_name": ["synthetic provider"],
+        }
+    )
     return {
         "market_bars_1d": bars,
         "stock_master": stock,
         "market_cap": market_cap,
         "trading_calendar": calendar,
+        "industry_classification": industry,
+        "industry_classification_sets": industry_sets,
+        "industry_classification_versions": industry_versions,
     }

@@ -7,7 +7,10 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_string_series,
+)
 
 from .definitions import FUNDAMENTAL_FACTORS
 
@@ -33,21 +36,42 @@ def construct_ttm_events(
 ) -> pd.DataFrame:
     """Add event-level TTM values before any daily as-of join."""
 
-    required = {"asset_id", "metric_id", "report_period", value_column}
+    required = {
+        "asset_id",
+        "metric_id",
+        "report_period",
+        "available_at",
+        "version_identity",
+        value_column,
+    }
     if not required.issubset(events.columns):
         raise ValueError("ttm_event_columns_invalid")
     result = events.copy()
-    result["report_period"] = pd.to_datetime(
-        result["report_period"], errors="raise"
-    ).dt.normalize()
+    for column in ("report_period", "available_at"):
+        result[column] = pd.to_datetime(result[column], errors="raise").dt.normalize()
+    result["version_identity"] = strict_string_series(
+        result["version_identity"], error="ttm_version_identity_invalid"
+    )
     result[value_column] = strict_finite_numeric_series(
         result[value_column], error="invalid_ttm_value", allow_null=True
     )
+    event_key = [
+        "asset_id",
+        "metric_id",
+        "report_period",
+        "available_at",
+        "version_identity",
+    ]
+    if result.duplicated(event_key, keep=False).any():
+        raise ValueError("ttm_event_key_duplicate")
     result["ttm_value"] = np.nan
     for (_asset_id, _metric_id), positions in result.groupby(
         ["asset_id", "metric_id"], sort=False
     ).groups.items():
-        group = result.loc[positions].sort_values("report_period", kind="mergesort")
+        group = result.loc[positions].sort_values(
+            ["available_at", "report_period", "version_identity"],
+            kind="mergesort",
+        )
         for position, row in group.iterrows():
             period = pd.Timestamp(row["report_period"])
             value = row[value_column]
@@ -56,27 +80,44 @@ def construct_ttm_events(
             if period.month == 12:
                 ttm = value
             else:
-                prior_fy = group.loc[
-                    group["report_period"].eq(
-                        pd.Timestamp(year=period.year - 1, month=12, day=31)
+                cutoff = pd.Timestamp(row["available_at"])
+                prior_fy = _latest_legal_event_value(
+                    group,
+                    report_period=pd.Timestamp(year=period.year - 1, month=12, day=31),
+                    cutoff=cutoff,
+                    value_column=value_column,
+                )
+                prior_ytd = _latest_legal_event_value(
+                    group,
+                    report_period=pd.Timestamp(
+                        year=period.year - 1, month=period.month, day=period.day
                     ),
-                    value_column,
-                ]
-                prior_ytd = group.loc[
-                    (group["report_period"].dt.year == period.year - 1)
-                    & (group["report_period"].dt.month == period.month),
-                    value_column,
-                ]
-                if (
-                    prior_fy.empty
-                    or prior_ytd.empty
-                    or pd.isna(prior_fy.iloc[-1])
-                    or pd.isna(prior_ytd.iloc[-1])
-                ):
+                    cutoff=cutoff,
+                    value_column=value_column,
+                )
+                if prior_fy is None or prior_ytd is None:
                     continue
-                ttm = value + prior_fy.iloc[-1] - prior_ytd.iloc[-1]
+                ttm = value + prior_fy - prior_ytd
             result.loc[position, "ttm_value"] = ttm
     return result
+
+
+def _latest_legal_event_value(
+    events: pd.DataFrame,
+    *,
+    report_period: pd.Timestamp,
+    cutoff: pd.Timestamp,
+    value_column: str,
+) -> float | None:
+    candidates = events.loc[
+        events["report_period"].eq(report_period) & events["available_at"].le(cutoff)
+    ]
+    if candidates.empty:
+        return None
+    row = candidates.sort_values(
+        ["available_at", "version_identity"], kind="mergesort"
+    ).iloc[-1]
+    return None if pd.isna(row[value_column]) else float(row[value_column])
 
 
 def calculate_fundamental_factors(
@@ -97,22 +138,18 @@ def calculate_fundamental_factors(
     values = {column: _series(panel, column) for column in _required_columns(panel)}
 
     assets = values.get("total_assets")
-    prior_assets = _pick(values, panel, "previous_total_assets", "prior_total_assets")
+    prior_assets = _first(values, "prior_year_total_assets")
     avg_assets = _pick(values, panel, "average_total_assets", "avg_total_assets")
     parent_equity = values.get("parent_equity")
-    prior_equity = _pick(values, panel, "previous_parent_equity", "prior_parent_equity")
+    prior_equity = _first(values, "prior_year_parent_equity")
     avg_equity = _pick(values, panel, "average_parent_equity", "avg_parent_equity")
     market_cap = _first(values, "total_market_cap", "market_cap")
     revenue = _ttm(values, panel, "operating_revenue")
-    prior_revenue = _pick(
-        values, panel, "prior_operating_revenue_ttm", "previous_operating_revenue"
-    )
+    prior_revenue = _pick(values, panel, "prior_year_operating_revenue_ttm")
     operating_cost = _ttm(values, panel, "operating_cost")
     consolidated_income = _ttm(values, panel, "consolidated_net_income")
     parent_income = _ttm(values, panel, "parent_net_income")
-    prior_parent_income = _pick(
-        values, panel, "prior_parent_net_income_ttm", "previous_parent_net_income"
-    )
+    prior_parent_income = _pick(values, panel, "prior_year_parent_net_income_ttm")
     cfo = _ttm(values, panel, "operating_cash_flow")
     capex = _ttm(values, panel, "capex_cash_paid")
 
@@ -178,18 +215,16 @@ def _required_columns(panel: pd.DataFrame) -> tuple[str, ...]:
             "capex_cash_paid",
             "total_market_cap",
             "market_cap",
-            "previous_total_assets",
-            "prior_total_assets",
+            "beginning_total_assets",
+            "prior_year_total_assets",
             "average_total_assets",
             "avg_total_assets",
-            "previous_parent_equity",
-            "prior_parent_equity",
+            "beginning_parent_equity",
+            "prior_year_parent_equity",
             "average_parent_equity",
             "avg_parent_equity",
-            "prior_operating_revenue_ttm",
-            "previous_operating_revenue",
-            "prior_parent_net_income_ttm",
-            "previous_parent_net_income",
+            "prior_year_operating_revenue_ttm",
+            "prior_year_parent_net_income_ttm",
             "operating_revenue_ttm",
             "operating_cost_ttm",
             "consolidated_net_income_ttm",

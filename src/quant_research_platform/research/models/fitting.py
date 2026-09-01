@@ -16,6 +16,7 @@ import quant_research_platform.research.models.dependencies as dependencies
 import quant_research_platform.research.models.feature_importance as feature_importance
 import quant_research_platform.research.models.supervised as supervised
 import quant_research_platform.research.models.validation_split as validation_split
+from quant_research_platform.contracts.experiments import legal_training_rows
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import (
     ModelSpec,
@@ -124,12 +125,19 @@ def _fit_linear_model_result_with_lease(
     required = set(input_columns)
     required.add(spec.label_column)
     required.add("timestamp")
+    required.add("eligible")
+    availability_columns = (
+        "label_available_at",
+        "forward_return_20d_available_at",
+    )
     work_columns = tuple(
         dict.fromkeys(
             (
                 "timestamp",
                 *input_columns,
                 spec.label_column,
+                "eligible",
+                *availability_columns,
                 *required_filter_columns(spec.sample_filter_mode),
             )
         )
@@ -414,6 +422,10 @@ def fit_linear_coefficients(
     train_start: str | None = None
     train_end: str | None = None
     factor_lease: MemoryLease | None = None
+    availability_columns = (
+        "label_available_at",
+        "forward_return_20d_available_at",
+    )
     first_usable_reservation = ExitStack()
     try:
         for chunk in frames:
@@ -446,8 +458,25 @@ def fit_linear_coefficients(
                                 usable_bound,
                             )
                         )
-                    usable = filtered.dropna(
-                        subset=[*spec.input_columns, spec.label_column]
+                    availability_column = next(
+                        (
+                            column
+                            for column in availability_columns
+                            if column in filtered
+                        ),
+                        None,
+                    )
+                    if (
+                        availability_column is None
+                        and spec.label_column == "model_target"
+                    ):
+                        raise ValueError("label_availability_column_required")
+                    usable = legal_training_rows(
+                        filtered,
+                        fitting_cutoff=pd.Timestamp.max,
+                        availability_column=availability_column,
+                        feature_columns=spec.input_columns,
+                        target_column=spec.label_column,
                     ).loc[:, list(fit_columns)]
                     if pandas_frame_payload_bytes(usable) > usable_bound:
                         raise ValueError(
@@ -836,6 +865,11 @@ def _collect_training_frame_owned(
     required = set(spec.input_columns)
     required.add(spec.label_column)
     required.add("timestamp")
+    required.add("eligible")
+    availability_columns = (
+        "label_available_at",
+        "forward_return_20d_available_at",
+    )
     work_columns = tuple(
         dict.fromkeys(
             (
@@ -843,6 +877,8 @@ def _collect_training_frame_owned(
                 "asset_id",
                 *spec.input_columns,
                 spec.label_column,
+                "eligible",
+                *availability_columns,
                 *required_filter_columns(spec.sample_filter_mode),
             )
         )
@@ -898,13 +934,19 @@ def _collect_training_frame_owned(
                             len(filtered),
                         ),
                     )
-                drop_columns = (
-                    [spec.label_column]
-                    if spec.model_algorithm
-                    in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"}
-                    else [*spec.input_columns, spec.label_column]
+                availability_column = next(
+                    (column for column in availability_columns if column in filtered),
+                    None,
                 )
-                usable = filtered.dropna(subset=drop_columns).loc[:, selected_columns]
+                if availability_column is None and spec.label_column == "model_target":
+                    raise ValueError("label_availability_column_required")
+                usable = legal_training_rows(
+                    filtered,
+                    fitting_cutoff=pd.Timestamp.max,
+                    availability_column=availability_column,
+                    feature_columns=spec.input_columns,
+                    target_column=spec.label_column,
+                ).loc[:, selected_columns]
                 usable_payload_bytes = pandas_frame_payload_bytes(usable)
                 if usable_payload_bytes > usable_bound:
                     raise ValueError(

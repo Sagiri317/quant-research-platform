@@ -339,13 +339,13 @@ def canonical_feature_pipeline(
     size_column: str = "log_float_market_cap",
     industry_column: str = "industry_level1_code",
 ) -> pd.DataFrame:
-    """Apply scenario-universe -> MAD winsor -> neutralize -> population zscore."""
+    """Apply eligible -> MAD winsor -> neutralize -> population zscore."""
 
-    if "scenario_universe" not in frame:
-        raise ValueError("feature_scenario_universe_required")
-    universe = frame["scenario_universe"]
+    if "eligible" not in frame:
+        raise ValueError("feature_eligibility_required")
+    universe = frame["eligible"]
     if not pd.api.types.is_bool_dtype(universe) or universe.isna().any():
-        raise ValueError("feature_scenario_universe_invalid")
+        raise ValueError("feature_eligibility_invalid")
     scoped = frame.loc[universe].copy()
     if industry_column not in scoped:
         raise ValueError("feature_industry_context_missing")

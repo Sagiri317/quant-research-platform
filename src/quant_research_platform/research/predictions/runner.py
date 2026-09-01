@@ -12,6 +12,7 @@ import quant_research_platform.research.models.fitting as fitting
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
+from quant_research_platform.contracts.experiments import legal_training_rows
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
@@ -256,6 +257,8 @@ def _build_prediction_result_from_research_dataset(
                 _chunks(train_read_columns, input_columns=model_spec.input_columns),
                 train_end=train_end,
                 asset_ids=prediction_spec.training_asset_ids,
+                label_column=model_spec.label_column,
+                input_columns=model_spec.input_columns,
             ),
             model_spec,
             estimator=build_estimator_from_model_spec(model_spec),
@@ -348,6 +351,8 @@ def _select_prediction_model_spec(
                 chunks(train_read_columns, input_columns=candidate_spec.input_columns),
                 train_end=pd.Timestamp(prediction_spec.train_end),
                 asset_ids=prediction_spec.training_asset_ids,
+                label_column=candidate_spec.label_column,
+                input_columns=candidate_spec.input_columns,
             ),
             candidate_spec,
             estimator=build_estimator_from_model_spec(candidate_spec),
@@ -457,6 +462,7 @@ def _prediction_train_read_columns(
                 *primary_key,
                 *input_columns,
                 label_column,
+                "eligible",
                 *availability,
                 *required_filter_columns(sample_filter_mode),
             )
@@ -522,16 +528,6 @@ def _iter_validation_prediction_chunks(
                         mode=prediction_spec.sample_filter_mode,
                         metadata_key="sample_filter_mode",
                     )
-                    usable = filtered.dropna(
-                        subset=[
-                            *(
-                                usable_input_columns
-                                if usable_input_columns is not None
-                                else candidate_spec.input_columns
-                            ),
-                            candidate_spec.label_column,
-                        ]
-                    )
                     availability_column = next(
                         (
                             column
@@ -539,17 +535,26 @@ def _iter_validation_prediction_chunks(
                                 "label_available_at",
                                 "forward_return_20d_available_at",
                             )
-                            if column in usable
+                            if column in filtered
                         ),
                         None,
                     )
-                    if availability_column is not None:
-                        available_at = strict_timestamp_series(
-                            usable[availability_column],
-                            error="invalid_label_available_at",
-                            allow_null=True,
-                        )
-                        usable = usable.loc[available_at.le(validation_end)]
+                    if (
+                        availability_column is None
+                        and candidate_spec.label_column == "model_target"
+                    ):
+                        raise ValueError("label_availability_column_required")
+                    usable = legal_training_rows(
+                        filtered,
+                        fitting_cutoff=validation_end,
+                        availability_column=availability_column,
+                        feature_columns=(
+                            usable_input_columns
+                            if usable_input_columns is not None
+                            else candidate_spec.input_columns
+                        ),
+                        target_column=candidate_spec.label_column,
+                    )
                     if not usable.empty:
                         output = usable.loc[:, list(output_columns)].copy()
                         output[prediction_spec.prediction_column] = predictor(usable)
@@ -598,6 +603,8 @@ def _prediction_train_chunks(
     *,
     train_end: pd.Timestamp,
     asset_ids: tuple[str, ...] = (),
+    label_column: str,
+    input_columns: tuple[str, ...],
 ) -> Iterable[pd.DataFrame]:
     for chunk in chunks:
         if asset_ids:
@@ -627,7 +634,6 @@ def _prediction_train_chunks(
                 "research.prediction.training",
                 working_bytes,
             )
-        timestamps = None
         train = None
         try:
             if asset_ids:
@@ -636,8 +642,6 @@ def _prediction_train_chunks(
                     if working_lease is not None:
                         working_lease.close()
                     continue
-            timestamps = _prediction_timestamps(chunk)
-            eligibility = timestamps <= train_end
             availability_column = next(
                 (
                     column
@@ -649,17 +653,17 @@ def _prediction_train_chunks(
                 ),
                 None,
             )
-            if availability_column is not None:
-                available_at = strict_timestamp_series(
-                    chunk[availability_column],
-                    error="invalid_label_available_at",
-                    allow_null=True,
-                )
-                eligibility &= available_at.le(train_end)
-            train = chunk.loc[eligibility]
+            if availability_column is None and label_column == "model_target":
+                raise ValueError("label_availability_column_required")
+            train = legal_training_rows(
+                chunk,
+                fitting_cutoff=train_end,
+                availability_column=availability_column,
+                feature_columns=input_columns,
+                target_column=label_column,
+            )
             if train.empty:
                 train = None
-                timestamps = None
                 if working_lease is not None:
                     working_lease.close()
                 continue
@@ -667,7 +671,6 @@ def _prediction_train_chunks(
             if working_lease is not None:
                 working_lease.shrink_to(retained_bytes)
                 working_lease.transfer("research.prediction.train")
-            timestamps = None
             try:
                 yield train
             except BaseException as primary:
@@ -687,7 +690,6 @@ def _prediction_train_chunks(
                     working_lease.close()
         except BaseException as primary:
             train = None
-            timestamps = None
             if working_lease is not None and working_lease.active:
                 try:
                     working_lease.close()

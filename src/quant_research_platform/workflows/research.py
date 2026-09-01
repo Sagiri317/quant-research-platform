@@ -908,6 +908,12 @@ def _build_target(
             source_catalog=profile.interim,
             resource_policy=policy,
         )
+        if getattr(frame, "empty", False):
+            return TargetResult(
+                target_id=spec.target_id,
+                status=TargetStatus.BLOCKED,
+                reason="processed_target_empty",
+            )
         write_dataset(
             output_root,
             frame,

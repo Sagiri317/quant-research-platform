@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
-import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
-    forward_return_label_column,
     session_read_window,
 )
 
@@ -43,7 +41,6 @@ def calculate_labels_for_panel(
         sessions=axis,
         can_enter_column="can_enter" if "can_enter" in panel_frame else None,
     )
-    result["model_target"] = _model_target(result, forward_return_label_column(20))
     return result
 
 
@@ -83,19 +80,6 @@ def label_read_window_for_panel(
         sessions=core_sessions,
         lookahead_sessions=label_lookahead_bars(definitions),
     )
-
-
-def _model_target(frame: pd.DataFrame, label_column: str) -> pd.Series:
-    values = pd.to_numeric(frame[label_column], errors="raise").astype("float64")
-    grouped = values.groupby(frame["timestamp"], sort=False)
-    mean = grouped.transform("mean")
-    centered = values - mean
-    scale = centered.groupby(frame["timestamp"], sort=False).transform(
-        lambda item: float(np.sqrt(np.mean(item.to_numpy() ** 2)))
-    )
-    target = centered.div(scale.where(scale.ne(0.0)))
-    target = target.where(values.notna())
-    return target.replace([np.inf, -np.inf], np.nan)
 
 
 def _require_label_input_columns(

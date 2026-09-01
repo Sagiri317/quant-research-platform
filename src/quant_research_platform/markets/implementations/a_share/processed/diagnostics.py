@@ -10,7 +10,6 @@ from quant_research_platform.research.labels.forward_returns import (
 )
 
 _MASK_DIAGNOSTIC_COLUMNS: tuple[str, ...] = (
-    "scenario_universe",
     "can_enter",
     "can_exit",
     "is_st",

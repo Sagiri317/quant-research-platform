@@ -52,10 +52,12 @@ FUNDAMENTAL_INPUT_COLUMNS = (
     "operating_cash_flow",
     "capex_cash_paid",
     "total_market_cap",
-    "previous_total_assets",
-    "previous_parent_equity",
-    "previous_parent_net_income",
-    "previous_operating_revenue",
+    "beginning_total_assets",
+    "beginning_parent_equity",
+    "prior_year_total_assets",
+    "prior_year_parent_equity",
+    "prior_year_parent_net_income_ttm",
+    "prior_year_operating_revenue_ttm",
 )
 
 

@@ -8,6 +8,8 @@ from datetime import date
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.validation import strict_bool_series
+
 
 @dataclass(frozen=True)
 class FeeSchedule:
@@ -41,7 +43,6 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
         "asset_id",
         "timestamp",
         "is_trading",
-        "scenario_universe",
         "limit_status",
         "open",
         "high",
@@ -51,6 +52,9 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
     if not required.issubset(panel.columns):
         raise ValueError("execution_mask_columns_invalid")
     result = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").copy()
+    result["is_trading"] = strict_bool_series(
+        result["is_trading"], error="execution_trading_status_invalid"
+    )
     status = pd.to_numeric(result["limit_status"], errors="raise")
     if bool((status.dropna().isin((-1, 0, 1)) == False).any()):  # noqa: E712
         raise ValueError("execution_limit_status_invalid")

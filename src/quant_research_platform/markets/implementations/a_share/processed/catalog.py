@@ -61,7 +61,6 @@ PANEL_COLUMNS = (
     "is_a_share_scope",
     "is_st",
     "is_pt",
-    "scenario_universe",
     "listing_date",
     "delisting_date",
     "listing_age_trading_days",
@@ -91,10 +90,12 @@ FINANCIAL_PIT_COLUMNS = (
     "parent_net_income",
     "operating_cash_flow",
     "capex_cash_paid",
-    "previous_total_assets",
-    "previous_parent_equity",
-    "previous_parent_net_income",
-    "previous_operating_revenue",
+    "beginning_total_assets",
+    "beginning_parent_equity",
+    "prior_year_total_assets",
+    "prior_year_parent_equity",
+    "prior_year_parent_net_income_ttm",
+    "prior_year_operating_revenue_ttm",
     "average_total_assets",
     "average_parent_equity",
     "operating_revenue_ttm",
@@ -112,7 +113,6 @@ LABEL_COLUMNS = tuple(
         forward_return_available_at_column(horizon),
     )
 )
-LABEL_COLUMNS = (*LABEL_COLUMNS, "model_target")
 FACTOR_COLUMNS = tuple(FORMAL_PRICE_VOLUME_FACTORS)
 
 
@@ -231,14 +231,8 @@ def _role(
     if column in {
         "can_enter",
         "can_exit",
-        "is_trading",
-        "is_st",
-        "is_pt",
-        "is_a_share_scope",
     }:
         return ColumnRole.MASK
-    if column == "scenario_universe":
-        return ColumnRole.UNIVERSE
     if column in {
         "industry_standard_id",
         "industry_level1_code",

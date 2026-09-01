@@ -17,6 +17,7 @@ from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.contracts.validation import (
     _validate_non_empty_string,
+    strict_finite_numeric_series,
     strict_timestamp_series,
 )
 
@@ -214,19 +215,48 @@ def legal_training_rows(
     frame: pd.DataFrame,
     *,
     fitting_cutoff: object,
-    availability_column: str = "label_available_at",
+    availability_column: str | None = "label_available_at",
+    feature_columns: tuple[str, ...] = (),
+    target_column: str | None = None,
 ) -> pd.DataFrame:
-    """Select rows whose label was actually available by the fitting cutoff."""
+    """Select eligible finite rows whose labels were available by the cutoff."""
 
-    if availability_column not in frame.columns:
-        raise ValueError("label_availability_column_required")
+    required = {"eligible", "timestamp", *feature_columns}
+    if availability_column is not None:
+        required.add(availability_column)
+    if target_column is not None:
+        required.add(target_column)
+    missing = sorted(required.difference(frame.columns))
+    if missing:
+        raise ValueError("legal_training_columns_missing: " + ", ".join(missing))
     cutoff = strict_timestamp_series(
         pd.Series([fitting_cutoff]), error="invalid_fitting_cutoff"
     ).iloc[0]
-    available = strict_timestamp_series(
-        frame[availability_column], error="invalid_label_available_at", allow_null=True
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="invalid_training_timestamp"
     )
-    return frame.loc[available.notna() & available.le(cutoff)].copy()
+    eligible = frame["eligible"]
+    if not pd.api.types.is_bool_dtype(eligible) or bool(eligible.isna().any()):
+        raise ValueError("invalid_training_eligibility")
+    keep = eligible & timestamps.le(cutoff)
+    if availability_column is not None:
+        available = strict_timestamp_series(
+            frame[availability_column],
+            error="invalid_label_available_at",
+            allow_null=True,
+        )
+        keep &= available.notna() & available.le(cutoff)
+    value_columns = (
+        (*feature_columns, target_column)
+        if target_column is not None
+        else feature_columns
+    )
+    for column in value_columns:
+        values = strict_finite_numeric_series(
+            frame[column], error=f"invalid_training_value: {column}", allow_null=True
+        )
+        keep &= values.notna()
+    return frame.loc[keep].copy()
 
 
 def _strictly_before(left: date | datetime, right: date | datetime) -> bool:

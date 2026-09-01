@@ -16,6 +16,10 @@ from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.time import TimeWindow, is_intraday_time_window
+from quant_research_platform.contracts.validation import (
+    strict_bool_series,
+    strict_finite_numeric_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
@@ -49,6 +53,22 @@ from quant_research_platform.storage.datasets.writing import (
 )
 from quant_research_platform.storage.identity import require_artifact_root
 from quant_research_platform.storage.layout import StorageLayout
+
+_A_SHARE_SCENARIO_IDS = frozenset(
+    {"pv_all", "fusion_nf_core", "fusion_nf_expectations"}
+)
+_A_SHARE_ELIGIBILITY_FACTS = (
+    "is_a_share_scope",
+    "is_trading",
+    "is_st",
+    "is_pt",
+    "listing_age_trading_days",
+    "close",
+    "adj_close",
+    "volume",
+    "amount",
+    "turnover",
+)
 
 
 def assemble_research_dataset(
@@ -356,6 +376,7 @@ def _join_processed_inputs(
             raise ValueError("empty_research_dataset_inputs")
         base_key_state.close()
         base_keys = None
+        assembled = _add_a_share_semantic_columns(assembled, dataset_spec)
         if dataset_spec.feature_transforms:
             transformed_state = ExitStack()
             try:
@@ -649,7 +670,11 @@ def _validate_research_input_specs(
         error_name="invalid_research_feature_columns",
     )
     _require_columns_from_roles_or_kinds(
-        dataset_spec.label_columns,
+        tuple(
+            column
+            for column in dataset_spec.label_columns
+            if column not in _generated_semantic_columns(dataset_spec)
+        ),
         role_by_column=role_by_column,
         kind_by_column=kind_by_column,
         allowed_roles={ColumnRole.LABEL},
@@ -657,7 +682,11 @@ def _validate_research_input_specs(
         error_name="invalid_research_label_columns",
     )
     _require_columns_from_roles_or_kinds(
-        dataset_spec.filter_columns,
+        tuple(
+            column
+            for column in dataset_spec.filter_columns
+            if column not in _generated_semantic_columns(dataset_spec)
+        ),
         role_by_column=role_by_column,
         kind_by_column=kind_by_column,
         allowed_roles={ColumnRole.MASK, ColumnRole.UNIVERSE},
@@ -727,7 +756,10 @@ def _require_research_required_columns_available(
     missing = sorted(
         set(_ordered_output_columns(dataset_spec))
         .difference(available)
-        .difference(_generated_feature_columns(dataset_spec))
+        .difference(
+            _generated_feature_columns(dataset_spec)
+            + _generated_semantic_columns(dataset_spec)
+        )
     )
     if missing:
         raise ValueError("missing_research_required_columns: " + ", ".join(missing))
@@ -754,6 +786,108 @@ def _generated_feature_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, 
         for transform in dataset_spec.feature_transforms
         for column in transform.output_columns
     )
+
+
+def _generated_semantic_columns(
+    dataset_spec: ResearchDatasetSpec,
+) -> tuple[str, ...]:
+    if dataset_spec.data_id not in _A_SHARE_SCENARIO_IDS:
+        return ()
+    return tuple(
+        column
+        for column in ("eligible", "model_target")
+        if column in _ordered_output_columns(dataset_spec)
+    )
+
+
+def _add_a_share_semantic_columns(
+    frame: pd.DataFrame,
+    dataset_spec: ResearchDatasetSpec,
+) -> pd.DataFrame:
+    if dataset_spec.data_id not in _A_SHARE_SCENARIO_IDS:
+        return frame
+    missing = sorted(set(_A_SHARE_ELIGIBILITY_FACTS).difference(frame.columns))
+    if missing:
+        raise ValueError("a_share_eligibility_facts_missing: " + ", ".join(missing))
+    result = frame.copy()
+    result["eligible"] = _a_share_eligibility(result, dataset_spec.data_id)
+    if "model_target" in dataset_spec.label_columns:
+        if "forward_return_20d" not in result.columns:
+            raise ValueError("a_share_model_target_label_missing")
+        result["model_target"] = _a_share_model_target(result)
+    return result
+
+
+def _a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
+    bool_facts = {
+        column: strict_bool_series(
+            frame[column],
+            error=f"invalid_a_share_eligibility_fact: {column}",
+        )
+        for column in ("is_a_share_scope", "is_trading", "is_st", "is_pt")
+    }
+    numeric_facts = {
+        column: strict_finite_numeric_series(
+            frame[column],
+            error=f"invalid_a_share_eligibility_fact: {column}",
+            allow_null=True,
+        )
+        for column in (
+            "listing_age_trading_days",
+            "close",
+            "adj_close",
+            "volume",
+            "amount",
+            "turnover",
+        )
+    }
+    eligible = (
+        bool_facts["is_a_share_scope"]
+        & bool_facts["is_trading"]
+        & ~bool_facts["is_st"]
+        & ~bool_facts["is_pt"]
+        & numeric_facts["listing_age_trading_days"].ge(252)
+        & numeric_facts["close"].gt(0.0)
+        & numeric_facts["adj_close"].gt(0.0)
+        & numeric_facts["volume"].gt(0.0)
+        & numeric_facts["amount"].gt(0.0)
+        & numeric_facts["turnover"].ge(0.0)
+    ).fillna(False)
+    if dataset_id in {"fusion_nf_core", "fusion_nf_expectations"}:
+        for column in (
+            "industry_standard_id",
+            "industry_level1_code",
+            "industry_level1_name",
+        ):
+            if column not in frame:
+                raise ValueError(f"a_share_eligibility_facts_missing: {column}")
+            values = frame[column].astype("string").str.strip()
+            eligible &= values.notna() & values.ne("")
+    return eligible.astype(bool)
+
+
+def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
+    values = strict_finite_numeric_series(
+        frame["forward_return_20d"],
+        error="invalid_a_share_model_target_label",
+        allow_null=True,
+    ).astype("float64")
+    eligible = strict_bool_series(
+        frame["eligible"],
+        error="invalid_a_share_eligibility",
+    )
+    target = pd.Series(np.nan, index=frame.index, dtype="float64")
+    for _timestamp, positions in frame.groupby("timestamp", sort=False).groups.items():
+        valid = positions[eligible.loc[positions] & values.loc[positions].notna()]
+        if len(valid) < 2:
+            continue
+        valid_values = values.loc[valid].to_numpy(dtype="float64", copy=False)
+        centered = valid_values - float(valid_values.mean())
+        scale = float(np.sqrt(np.mean(centered**2)))
+        if scale == 0.0 or not np.isfinite(scale):
+            continue
+        target.loc[valid] = centered / scale
+    return target
 
 
 def _apply_feature_transforms(

@@ -208,6 +208,7 @@ FINANCIAL_BASE_COLUMNS: tuple[str, ...] = (
     "report_type",
     "is_corrected",
     "correction_disclosure_date",
+    "version_identity",
 )
 FINANCIAL_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     "financial_balance": (
@@ -694,9 +695,24 @@ def normalize_raw_frame(
             result["correction_disclosure_date"]
         )
         result["is_corrected"] = _parse_correction_flag(result["is_corrected"])
+        if bool(
+            (result["is_corrected"] & result["correction_disclosure_date"].isna()).any()
+        ):
+            raise ValueError("financial_correction_disclosure_missing")
+        if bool(
+            (
+                ~result["is_corrected"] & result["correction_disclosure_date"].notna()
+            ).any()
+        ):
+            raise ValueError("invalid_financial_correction_date")
         result["report_type"] = strict_string_series(
             result["report_type"], error="invalid_financial_report_type"
         )
+        result["version_identity"] = "original"
+        corrected = result["is_corrected"]
+        result.loc[corrected, "version_identity"] = "correction@" + result.loc[
+            corrected, "correction_disclosure_date"
+        ].dt.strftime("%Y-%m-%d").astype("string")
         for column in set(FINANCIAL_COLUMNS_BY_DATA_ID[data_id]).difference(
             FINANCIAL_BASE_COLUMNS
         ):
@@ -708,7 +724,13 @@ def normalize_raw_frame(
         result["timestamp"] = result["report_period"]
         result["source_asset_id"] = result["stock_code"]
         result.sort_values(
-            ["source_asset_id", "timestamp", "report_type"], inplace=True
+            [
+                "source_asset_id",
+                "timestamp",
+                "report_type",
+                "version_identity",
+            ],
+            inplace=True,
         )
         return result.reset_index(drop=True)
     if data_id == MARKET_BARS_DATA_ID:
@@ -876,17 +898,26 @@ def normalize_raw_frame(
         result = mapped
         for column in INDUSTRY_CLASSIFICATION_SETS_COLUMNS:
             result[column] = strict_string_series(
-                result[column], error="invalid_industry_dictionary_value"
-            )
-        return (
-            result.loc[:, INDUSTRY_CLASSIFICATION_SETS_COLUMNS]
-            .drop_duplicates(keep="first")
-            .reset_index(drop=True)
-        )
+                result[column],
+                error="invalid_industry_dictionary_value",
+                allow_empty=column == "parent_industry_code",
+                allow_null=column
+                not in {"industry_code", "industry_standard_id", "industry_level"},
+            ).astype("string")
+        result = result.loc[:, INDUSTRY_CLASSIFICATION_SETS_COLUMNS]
+        key = ["industry_standard_id", "industry_code"]
+        if result.duplicated(key, keep=False).any():
+            duplicates = result.loc[result.duplicated(key, keep=False)]
+            if duplicates.drop_duplicates().duplicated(key, keep=False).any():
+                raise ValueError("industry_dictionary_key_duplicate")
+            result = result.drop_duplicates(key, keep="first")
+        return result.reset_index(drop=True)
     if data_id == "industry_classification_versions":
         result = mapped
         result["implement_date"] = strict_timestamp_series(
-            result["implement_date"], error="invalid_industry_version_date"
+            result["implement_date"],
+            error="invalid_industry_version_date",
+            allow_null=True,
         ).dt.normalize()
         result["abandon_date"] = _parse_optional_csmar_date(
             result["abandon_date"],
@@ -894,6 +925,7 @@ def normalize_raw_frame(
             error_code="invalid_industry_version_date",
         )
         result["timestamp"] = result["implement_date"]
+        result = result.loc[result["timestamp"].notna()].copy()
         return (
             result.loc[:, INDUSTRY_CLASSIFICATION_VERSIONS_COLUMNS]
             .sort_values(["timestamp", "industry_standard_id"], kind="mergesort")
@@ -1051,6 +1083,8 @@ def _parse_optional_csmar_date(
 
 
 def _parse_financial_correction_date(series: pd.Series) -> pd.Series:
+    """Normalize the provider's comma-separated correction disclosure dates."""
+
     latest: list[object] = []
     for value in series:
         if pd.isna(value) or (isinstance(value, str) and not value.strip()):
@@ -1062,9 +1096,11 @@ def _parse_financial_correction_date(series: pd.Series) -> pd.Series:
         parsed = strict_timestamp_series(
             pd.Series(tokens), error="invalid_financial_correction_date"
         ).dt.normalize()
-        if bool(parsed.duplicated().any()) or not parsed.is_monotonic_increasing:
+        if bool(parsed.duplicated().any()) or not (
+            parsed.is_monotonic_increasing or parsed.is_monotonic_decreasing
+        ):
             raise ValueError("invalid_financial_correction_date")
-        latest.append(parsed.iloc[-1])
+        latest.append(parsed.max())
     return pd.Series(latest, index=series.index, dtype="datetime64[ns]")
 
 
@@ -1334,6 +1370,11 @@ def _iter_pruned_interim_frames(
         raise RuntimeError("runtime_resource_policy_not_active")
     local_reports: list[dict[str, object]] = []
     primary_key = tuple(interim_catalog().get(data_id).primary_key)
+    ordering_key = (
+        ("source_asset_id", "timestamp")
+        if data_id == "industry_classification"
+        else primary_key
+    )
     previous_key: tuple[object, ...] | None = None
     lease: MemoryLease | None = None
     for input in input_files:
@@ -1430,10 +1471,10 @@ def _iter_pruned_interim_frames(
                             start = stop
                             continue
                         _merge_pruning_report(local_reports, report)
-                        first_key = tuple(pruned.iloc[0].loc[list(primary_key)])
+                        first_key = tuple(pruned.iloc[0].loc[list(ordering_key)])
                         if previous_key is not None and first_key < previous_key:
                             raise ValueError("csmar_source_order_regression")
-                        previous_key = tuple(pruned.iloc[-1].loc[list(primary_key)])
+                        previous_key = tuple(pruned.iloc[-1].loc[list(ordering_key)])
                         pruned_bytes = pandas_frame_payload_bytes(pruned)
                         next_pending_frame: pd.DataFrame | None = None
                         next_pending_lease: MemoryLease | None = None
@@ -1884,6 +1925,17 @@ def _append_reference_duplicate_summary(
 
 
 def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
+    if data_id == "industry_classification":
+        primary_key = ("source_asset_id", "timestamp", "industry_standard_id")
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
     if data_id == "industry_classification_sets":
         primary_key = ("industry_standard_id", "industry_code")
         return InterimDataSpec(
@@ -1951,7 +2003,12 @@ def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
             partition_columns=("year",),
         )
     if data_id in FINANCIAL_COLUMNS_BY_DATA_ID:
-        primary_key = ("source_asset_id", "timestamp", "report_type")
+        primary_key = (
+            "source_asset_id",
+            "timestamp",
+            "report_type",
+            "version_identity",
+        )
         return InterimDataSpec(
             data_id=data_id,
             source_id=SourceId(SOURCE_ID),

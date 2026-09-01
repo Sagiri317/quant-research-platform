@@ -146,7 +146,7 @@ def _a_share_profile() -> ResearchProfile:
             },
         },
         schema_inventory_important_columns=(
-            "scenario_universe",
+            "eligible",
             "can_enter",
             "can_exit",
             "industry_level1_code",

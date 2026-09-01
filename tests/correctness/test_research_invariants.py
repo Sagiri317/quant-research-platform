@@ -114,7 +114,7 @@ def test_session_label_uses_next_open_and_persists_availability() -> None:
             "asset_id": "asset",
             "timestamp": sessions,
             "adj_open": [10.0, 11.0, 12.0, 13.0, 14.0],
-            "can_enter": [True, True, False, True, True],
+            "can_enter": [False, True, True, True, True],
         }
     )
     result = add_forward_return_labels(
@@ -123,9 +123,9 @@ def test_session_label_uses_next_open_and_persists_availability() -> None:
         sessions=sessions,
         can_enter_column="can_enter",
     )
-    assert result.loc[0, "forward_return_1d"] == pytest.approx(12.0 / 11.0 - 1.0)
-    assert pd.isna(result.loc[1, "forward_return_1d"])
-    assert result.loc[0, "forward_return_1d_available_at"] == sessions[2]
+    assert pd.isna(result.loc[0, "forward_return_1d"])
+    assert result.loc[1, "forward_return_1d"] == pytest.approx(13.0 / 12.0 - 1.0)
+    assert result.loc[1, "forward_return_1d_available_at"] == sessions[3]
 
 
 def test_model_scaler_uses_equal_date_weights_and_zero_variance_zero() -> None:
@@ -149,9 +149,33 @@ def test_training_eligibility_is_label_availability_not_a_fixed_gap() -> None:
         {
             "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02"]),
             "label_available_at": pd.to_datetime(["2024-01-02", "2024-01-03"]),
+            "eligible": [True, True],
         }
     )
     result = legal_training_rows(frame, fitting_cutoff="2024-01-02")
+    assert result.index.tolist() == [0]
+
+
+def test_training_selector_requires_eligible_finite_features_and_target() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02"]),
+            "eligible": [True, False, True],
+            "feature": [1.0, 2.0, np.nan],
+            "model_target": [0.1, 0.2, 0.3],
+            "label_available_at": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-02"]
+            ),
+        }
+    )
+
+    result = legal_training_rows(
+        frame,
+        fitting_cutoff="2024-01-02",
+        feature_columns=("feature",),
+        target_column="model_target",
+    )
+
     assert result.index.tolist() == [0]
 
 
@@ -199,6 +223,9 @@ def test_supervised_models_persist_a_training_only_scaler() -> None:
             "asset_id": ["a", "b", "a", "b"],
             "feature": [1.0, 2.0, 3.0, 4.0],
             "model_target": [0.1, 0.2, 0.3, 0.4],
+            "forward_return_20d_available_at": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
+            ),
             "eligible": True,
         }
     )
@@ -229,6 +256,9 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
             "factor_a": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
             "factor_b": [3.0, 2.0, 1.0, 3.0, 2.0, np.nan],
             "model_target": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+            "forward_return_20d_available_at": pd.to_datetime(
+                ["2024-01-02"] * 3 + ["2024-01-03"] * 3
+            ),
             "eligible": True,
         }
     )
@@ -422,6 +452,7 @@ def test_future_execution_and_disclosure_facts_do_not_rewrite_past_facts() -> No
             "report_period": [sessions[0]],
             "available_at": [sessions[2]],
             "is_corrected": [False],
+            "version_identity": ["original"],
             "value": [100.0],
         }
     )
@@ -504,10 +535,10 @@ def test_fundamental_value_factors_use_panel_total_cap() -> None:
             "parent_net_income_ttm": [7.0, 8.0],
             "operating_cash_flow_ttm": [9.0, 10.0],
             "capex_cash_paid_ttm": [4.0, 5.0],
-            "previous_total_assets": [80.0, 100.0],
-            "previous_parent_equity": [50.0, 60.0],
-            "previous_parent_net_income": [6.0, 7.0],
-            "previous_operating_revenue": [25.0, 30.0],
+            "prior_year_total_assets": [80.0, 100.0],
+            "prior_year_parent_equity": [50.0, 60.0],
+            "prior_year_parent_net_income_ttm": [6.0, 7.0],
+            "prior_year_operating_revenue_ttm": [25.0, 30.0],
             "average_total_assets": [90.0, 110.0],
             "average_parent_equity": [55.0, 66.0],
             "total_market_cap": [200.0, 220.0],
@@ -520,7 +551,7 @@ def test_fundamental_value_factors_use_panel_total_cap() -> None:
     assert result["book_to_market"].tolist() == pytest.approx([0.3, 72 / 220])
 
 
-def test_existing_interim_outputs_block_dataset_without_identity(tmp_path) -> None:
+def test_missing_raw_identity_blocks_dataset_build(tmp_path) -> None:
     sessions = pd.bdate_range("2020-01-01", periods=260)
     prices = pd.Series(np.arange(10.0, 270.0), index=sessions)
     bars = pd.DataFrame(
@@ -613,6 +644,6 @@ def test_existing_interim_outputs_block_dataset_without_identity(tmp_path) -> No
         )
         assert result["status"] == "BLOCKED"
         assert any(
-            item["reason"] == "semantic_identity_not_available"
+            item["reason"] == "raw_content_identity_unavailable"
             for item in result["blockers"]
         )

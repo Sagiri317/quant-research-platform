@@ -13,6 +13,7 @@ from quant_research_platform.catalog.processed import (
 )
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.validation import strict_finite_numeric_series
 from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
@@ -66,6 +67,24 @@ def produce_a_share_processed_frame(
 ) -> pd.DataFrame:
     processed = processed_catalog or a_share_processed_catalog()
     sources = source_catalog
+    if spec.data_id == "market_panel_1d":
+        required_panel_sources = (
+            "market_bars_1d",
+            "stock_master",
+            "market_cap",
+            "trading_calendar",
+            "trading_no_limit",
+            "special_treatment_changes",
+        )
+        missing_panel_sources = tuple(
+            data_id
+            for data_id in required_panel_sources
+            if not _source_available(layout, sources.get(data_id))
+        )
+        if missing_panel_sources:
+            raise ValueError(
+                "a_share_panel_source_data_missing: " + ", ".join(missing_panel_sources)
+            )
     source = {
         data_id: _read_source(
             layout,
@@ -88,7 +107,14 @@ def produce_a_share_processed_frame(
         for data_id in spec.processed_input_data_ids
     }
     if spec.data_id == "market_panel_1d":
-        required = {"market_bars_1d", "stock_master", "market_cap", "trading_calendar"}
+        required = {
+            "market_bars_1d",
+            "stock_master",
+            "market_cap",
+            "trading_calendar",
+            "trading_no_limit",
+            "special_treatment_changes",
+        }
         if not required.issubset(source):
             raise ValueError("a_share_panel_source_data_missing")
         return compute_market_panel(
@@ -97,6 +123,9 @@ def produce_a_share_processed_frame(
             market_cap=source["market_cap"],
             trading_calendar=source["trading_calendar"],
             industry_history=source.get("industry_classification"),
+            industry_sets=source.get("industry_classification_sets"),
+            industry_versions=source.get("industry_classification_versions"),
+            no_limit_history=source.get("trading_no_limit"),
             special_treatment_history=source.get("special_treatment_changes"),
         ).loc[:, list(spec.required_columns)]
     if spec.data_id == "execution_mask":
@@ -227,20 +256,41 @@ def _fundamental_pit_frame(
         values="value",
         aggfunc="first",
     ).reset_index()
-    previous = (
-        pit.loc[:, ["asset_id", "timestamp", "metric_id", "previous_value"]]
+    beginning = (
+        pit.loc[:, ["asset_id", "timestamp", "metric_id", "beginning_value"]]
         .pivot_table(
             index=["asset_id", "timestamp"],
             columns="metric_id",
-            values="previous_value",
+            values="beginning_value",
             aggfunc="first",
         )
         .reset_index()
     )
-    previous = previous.rename(
+    beginning = beginning.rename(
         columns={
-            column: f"previous_{column}"
-            for column in previous.columns
+            column: f"beginning_{column}"
+            for column in beginning.columns
+            if column not in {"asset_id", "timestamp"}
+        }
+    )
+    prior_year = (
+        pit.loc[:, ["asset_id", "timestamp", "metric_id", "prior_year_value"]]
+        .pivot_table(
+            index=["asset_id", "timestamp"],
+            columns="metric_id",
+            values="prior_year_value",
+            aggfunc="first",
+        )
+        .reset_index()
+    )
+    prior_year = prior_year.rename(
+        columns={
+            column: (
+                f"prior_year_{column}_ttm"
+                if column in flow_metrics
+                else f"prior_year_{column}"
+            )
+            for column in prior_year.columns
             if column not in {"asset_id", "timestamp"}
         }
     )
@@ -248,26 +298,51 @@ def _fundamental_pit_frame(
         panel.loc[:, ["market_id", "asset_id", "timestamp"]]
         .merge(values, on=["asset_id", "timestamp"], how="left", validate="one_to_one")
         .merge(
-            previous,
+            beginning,
+            on=["asset_id", "timestamp"],
+            how="left",
+            validate="one_to_one",
+        )
+        .merge(
+            prior_year,
             on=["asset_id", "timestamp"],
             how="left",
             validate="one_to_one",
         )
     )
-    output["average_total_assets"] = (
-        output["total_assets"] + output["previous_total_assets"]
-    ) / 2.0
-    output["average_parent_equity"] = (
-        output["parent_equity"] + output["previous_parent_equity"]
-    ) / 2.0
     for column in (
+        "total_assets",
         "operating_revenue",
         "operating_cost",
         "consolidated_net_income",
         "parent_net_income",
         "operating_cash_flow",
         "capex_cash_paid",
+        "parent_equity",
+        "beginning_total_assets",
+        "beginning_parent_equity",
     ):
+        if column not in output:
+            output[column] = np.nan
+    numeric_columns = {
+        column
+        for column in spec.required_columns
+        if column not in {"market_id", "asset_id", "timestamp"}
+    }
+    for column in numeric_columns:
+        if column in output:
+            output[column] = strict_finite_numeric_series(
+                output[column],
+                error=f"invalid_fundamental_pit_value: {column}",
+                allow_null=True,
+            ).astype("float64")
+    output["average_total_assets"] = (
+        output["total_assets"] + output["beginning_total_assets"]
+    ) / 2.0
+    output["average_parent_equity"] = (
+        output["parent_equity"] + output["beginning_parent_equity"]
+    ) / 2.0
+    for column in flow_metrics:
         output[f"{column}_ttm"] = output[column]
     for column in spec.required_columns:
         if column not in output:
