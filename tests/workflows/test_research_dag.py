@@ -16,10 +16,12 @@ from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
     research_profile,
 )
+from quant_research_platform.research.protocols import a_share
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import content_hash_for_files
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from quant_research_platform.workflows import research
 from quant_research_platform.workflows.smoke import run_research_synthetic_smoke
 
@@ -227,6 +229,7 @@ def test_interim_binding_receives_one_requested_target(tmp_path: Path) -> None:
 
 def test_source_identity_mutation_builds_a_new_immutable_instance(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     data_id = "market_bars_1d"
     raw_root = tmp_path / "raw"
@@ -268,7 +271,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
 
     def source_identity(raw: Path, _data_id: str) -> str:
         return content_hash_for_files(
-            ((marker.name, raw / marker.name),),
+            (("market_bars_1d", raw / marker.name),),
             error="source_identity_invalid",
         )
 
@@ -306,10 +309,108 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
     assert first["status"] == second["status"] == "COMPLETE"
     assert first_identity != second_identity
     assert calls == 2
+
     instances = tuple(
         (layout.interim_data_root("csmar", data_id) / "instances").iterdir()
     )
     assert {path.name for path in instances} == {first_identity, second_identity}
+
+    plan = research._plan_targets
+
+    def mutate_after_plan(**kwargs: object) -> dict[str, object]:
+        result = plan(**kwargs)
+        marker.write_bytes(b"between-plan-and-reuse")
+        return result
+
+    monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
+    third = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    assert third["status"] == "BLOCKED"
+    assert third["target_results"] == [
+        {
+            "target_id": data_id,
+            "status": "BLOCKED",
+            "blocker": "source_identity_changed",
+            "instance_identity": None,
+        }
+    ]
+    assert calls == 2
+
+
+def test_data_target_identity_ignores_unrelated_protocol_factor_scope(
+    tmp_path: Path,
+) -> None:
+    data_id = "market_bars_1d"
+
+    def source_identity(_raw_root: Path, _data_id: str) -> str:
+        return "a" * 64
+
+    binding = ProducerBinding(
+        ProducerKind.INTERIM,
+        lambda **_: None,
+        source_identity=source_identity,
+    )
+    base = research_profile()
+    full_profile = replace(
+        base,
+        protocol=lambda *, scenario_id, access_window: a_share.protocol(
+            scenario_id,
+            access_window,
+            factor_scope="full",
+        ),
+        producer_bindings={data_id: binding},
+    )
+    core_profile = replace(base, producer_bindings={data_id: binding})
+
+    core_plan = research.plan_targets(
+        profile=core_profile,
+        action="data materialize",
+        terminal_targets=(data_id,),
+        layout=StorageLayout(project_root=tmp_path / "core"),
+        raw_root=tmp_path / "raw",
+    )
+    full_plan = research.plan_targets(
+        profile=full_profile,
+        action="data materialize",
+        terminal_targets=(data_id,),
+        layout=StorageLayout(project_root=tmp_path / "full"),
+        raw_root=tmp_path / "raw",
+    )
+    core_target = core_plan["targets"][0]
+    full_target = full_plan["targets"][0]
+    assert core_target["requested_identity"] == full_target["requested_identity"]
+
+
+def test_csmar_dataset_action_resolves_a_valid_auxiliary_root(
+    tmp_path: Path,
+) -> None:
+    profile = research_profile()
+    layout = StorageLayout(project_root=tmp_path)
+    raw_root = layout.raw_source_root("csmar")
+    auxiliary_root = raw_root.with_name("csmar_aux")
+    auxiliary_root.mkdir(parents=True)
+    (auxiliary_root / "native-calendar.csv").write_text(
+        "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n",
+        encoding="utf-8",
+    )
+
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=("trading_calendar",),
+    )
+
+    assert result["status"] == "COMPLETE"
+    assert result["target_results"][0]["status"] == "BUILT"
 
 
 def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> None:
@@ -386,7 +487,7 @@ def test_inspect_and_status_never_treat_a_directory_as_a_complete_target(
     status = research.status(profile=profile, layout=layout)
 
     assert inspected["status"] == "BLOCKED"
-    assert inspected["blocker"] == "dataset_manifest_missing"
+    assert inspected["blocker"] == "dataset_instances_missing"
     assert status["status"] == "BLOCKED"
     assert not (root / "spec.json").exists()
     assert not (root / "_manifest").exists()
@@ -412,3 +513,13 @@ def test_a_share_synthetic_chain_uses_the_single_resolver(tmp_path: Path) -> Non
     assert inspection["instances"]
     assert inspection["status"] == "BLOCKED"
     assert inspection["blocker"] == "request_identity_required"
+
+    instance_root = next(
+        StorageLayout(project_root=tmp_path)
+        .research_dataset_root("a_share", "pv_all")
+        .glob("instances/*")
+    )
+    manifest = read_dataset_manifest_evidence(instance_root)
+    envelope = manifest["common_manifest"]
+    assert envelope["research_window"]["access"] == "not_applicable"
+    assert envelope["semantic_metadata"] == {}

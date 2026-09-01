@@ -11,7 +11,12 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
     validate_business_manifest_envelope,
 )
-from quant_research_platform.contracts.data import DataSpec, InterimDataSpec
+from quant_research_platform.contracts.data import (
+    DataSpec,
+    InterimDataSpec,
+    ProcessedDataSpec,
+)
+from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.targets import (
     PlanDecision,
@@ -31,7 +36,10 @@ from quant_research_platform.storage.datasets.inspection import (
 from quant_research_platform.storage.datasets.instances import (
     discover_dataset_instances,
 )
-from quant_research_platform.storage.datasets.schema import data_spec_payload
+from quant_research_platform.storage.datasets.schema import (
+    COMMON_MANIFEST_METADATA_KEY,
+    data_spec_payload,
+)
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import validate_instance_identity
 from quant_research_platform.storage.layout import StorageLayout
@@ -91,6 +99,33 @@ def plan_targets(
     research_window: Mapping[str, object] | None = None,
     software_identity: ProductionSoftwareIdentity | None = None,
 ) -> dict[str, object]:
+    with runtime_resource_policy_scope(None):
+        return _plan_targets(
+            profile=profile,
+            action=action,
+            terminal_targets=terminal_targets,
+            layout=layout,
+            scenario_id=scenario_id,
+            rebuild=rebuild,
+            raw_root=raw_root,
+            research_window=research_window,
+            software_identity=software_identity,
+        )
+
+
+def _plan_targets(
+    *,
+    profile: ResearchProfile,
+    action: str,
+    terminal_targets: Iterable[str],
+    layout: StorageLayout,
+    scenario_id: str | None = None,
+    rebuild: bool = False,
+    raw_root: Path | None = None,
+    research_window: Mapping[str, object] | None = None,
+    software_identity: ProductionSoftwareIdentity | None = None,
+    resolved_source_roots: dict[str, Path] | None = None,
+) -> dict[str, object]:
     terminals = tuple(sorted(set(terminal_targets)))
     scenario = scenario_id or (
         terminals[0]
@@ -143,6 +178,8 @@ def plan_targets(
                 binding = profile.producer_bindings.get(spec.producer_id)
                 if binding is None:
                     blocker = "producer_binding_missing"
+                elif binding.kind is not _producer_kind(data_spec):
+                    blocker = "producer_binding_kind_mismatch"
                 elif (
                     isinstance(data_spec, InterimDataSpec)
                     and binding.source_identity is None
@@ -150,14 +187,41 @@ def plan_targets(
                     blocker = "source_identity_resolver_missing"
                 else:
                     raw_identity = None
+                    resolved_source_root = source_root
                     if isinstance(data_spec, InterimDataSpec):
-                        try:
-                            raw_identity = binding.source_identity(
-                                source_root,
-                                spec.target_id,
-                            )
-                        except ValueError:
-                            blocker = "source_identity_invalid"
+                        if binding.source_root_resolver is not None:
+                            try:
+                                resolved = binding.source_root_resolver(
+                                    source_root,
+                                    spec.target_id,
+                                )
+                            except ValueError as exc:
+                                blocker = (
+                                    str(exc)
+                                    if str(exc)
+                                    in {
+                                        "csmar_source_root_ambiguous",
+                                        "csmar_raw_export_identity_changed",
+                                    }
+                                    else "source_root_invalid"
+                                )
+                            else:
+                                if resolved is None:
+                                    blocker = "source_root_unavailable"
+                                elif not isinstance(resolved, Path):
+                                    blocker = "source_root_invalid"
+                                else:
+                                    resolved_source_root = resolved
+                        if blocker is None:
+                            try:
+                                raw_identity = binding.source_identity(
+                                    resolved_source_root,
+                                    spec.target_id,
+                                )
+                            except ValueError:
+                                blocker = "source_identity_invalid"
+                        if blocker is None and resolved_source_roots is not None:
+                            resolved_source_roots[spec.target_id] = resolved_source_root
                     if (
                         blocker is None
                         and isinstance(data_spec, InterimDataSpec)
@@ -177,7 +241,6 @@ def plan_targets(
                     if blocker is None:
                         envelope = _target_envelope(
                             profile=profile,
-                            protocol=protocol,
                             data_spec=data_spec,
                             research_window=window,
                             upstream_identities=upstream_identities,
@@ -446,7 +509,7 @@ def inspect(
     if not root.exists():
         result.update(
             status=RunStatus.BLOCKED.value,
-            blocker="dataset_manifest_missing",
+            blocker="dataset_instances_missing",
         )
         return result
     try:
@@ -457,11 +520,19 @@ def inspect(
             blocker="dataset_instance_invalid",
         )
         return result
-    if instances:
-        instance_summaries = []
+    if not instances:
+        result.update(
+            status=RunStatus.BLOCKED.value,
+            blocker="dataset_instances_missing",
+        )
+        return result
+    instance_summaries = []
+    try:
         for instance in instances:
             manifest = read_dataset_manifest_evidence(instance)
-            envelope = validate_business_manifest_envelope(manifest["common_manifest"])
+            envelope = validate_business_manifest_envelope(
+                manifest[COMMON_MANIFEST_METADATA_KEY]
+            )
             instance_summaries.append(
                 {
                     "instance_identity": instance.name,
@@ -470,31 +541,17 @@ def inspect(
                     "row_count": manifest["row_count"],
                 }
             )
-        result.update(
-            status=RunStatus.BLOCKED.value,
-            blocker="request_identity_required",
-            instances=instance_summaries,
-        )
-        return result
-    try:
-        manifest = read_dataset_manifest_evidence(root)
-    except FileNotFoundError:
-        result.update(
-            status=RunStatus.BLOCKED.value,
-            blocker="dataset_manifest_missing",
-        )
-    except (OSError, ValueError):
+    except (FileNotFoundError, OSError, ValueError):
         result.update(
             status=RunStatus.FAILED.value,
-            blocker="dataset_manifest_invalid",
+            blocker="dataset_instance_invalid",
         )
-    else:
-        result.update(
-            status=RunStatus.BLOCKED.value,
-            physical_manifest_valid=True,
-            blocker="semantic_identity_not_available",
-            row_count=manifest["row_count"],
-        )
+        return result
+    result.update(
+        status=RunStatus.BLOCKED.value,
+        blocker="request_identity_required",
+        instances=instance_summaries,
+    )
     return result
 
 
@@ -511,6 +568,36 @@ def _execute_action(
     rebuild: bool = False,
     research_window: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
+    with runtime_resource_policy_scope(None) as policy:
+        return _execute_action_with_policy(
+            profile=profile,
+            action=action,
+            terminal_targets=terminal_targets,
+            layout=layout,
+            time_window=time_window,
+            raw_root=raw_root,
+            start_date=start_date,
+            end_date=end_date,
+            rebuild=rebuild,
+            research_window=research_window,
+            policy=policy,
+        )
+
+
+def _execute_action_with_policy(
+    *,
+    profile: ResearchProfile,
+    action: str,
+    terminal_targets: tuple[str, ...],
+    layout: StorageLayout,
+    time_window: TimeWindow | None,
+    raw_root: Path | None,
+    start_date: str | None,
+    end_date: str | None,
+    rebuild: bool = False,
+    research_window: Mapping[str, object] | None = None,
+    policy: Any,
+) -> dict[str, object]:
     source_root = raw_root or _default_raw_root(profile, layout)
     scenario_id = _scenario_from_terminal(profile, action, terminal_targets)
     protocol = _protocol(profile, scenario_id)
@@ -522,7 +609,8 @@ def _execute_action(
         start_date=start_date,
         end_date=end_date,
     )
-    plan = plan_targets(
+    resolved_source_roots: dict[str, Path] = {}
+    plan = _plan_targets(
         profile=profile,
         action=action,
         terminal_targets=terminal_targets,
@@ -532,6 +620,7 @@ def _execute_action(
         raw_root=source_root,
         research_window=window,
         software_identity=software,
+        resolved_source_roots=resolved_source_roots,
     )
     specs = _target_specs(
         profile,
@@ -541,61 +630,60 @@ def _execute_action(
     ordered = resolve_target_graph(specs, terminal_targets)
     plans = {item["target_id"]: item for item in plan["targets"]}  # type: ignore[index]
     results: dict[str, TargetResult] = {}
-    with runtime_resource_policy_scope(None) as policy:
-        for spec in ordered:
-            planned = plans[spec.target_id]
-            if planned["decision"] == PlanDecision.BLOCKED.value:
-                results[spec.target_id] = TargetResult(
-                    target_id=spec.target_id,
-                    status=TargetStatus.BLOCKED,
-                    blocker=str(planned["blocker"]),
-                )
-                continue
-            blocked_dependency = next(
-                (
-                    dependency
-                    for dependency in spec.dependencies
-                    if results[dependency].status
-                    in {TargetStatus.BLOCKED, TargetStatus.FAILED}
-                ),
-                None,
+    for spec in ordered:
+        planned = plans[spec.target_id]
+        if planned["decision"] == PlanDecision.BLOCKED.value:
+            results[spec.target_id] = TargetResult(
+                target_id=spec.target_id,
+                status=TargetStatus.BLOCKED,
+                blocker=str(planned["blocker"]),
             )
-            if blocked_dependency is not None:
-                results[spec.target_id] = TargetResult(
-                    target_id=spec.target_id,
-                    status=TargetStatus.BLOCKED,
-                    blocker=f"dependency_blocked: {blocked_dependency}",
-                )
-                continue
-            if planned["decision"] == PlanDecision.REUSE.value:
-                results[spec.target_id] = _reuse_target(
-                    profile=profile,
-                    layout=layout,
-                    spec=spec,
-                    planned=planned,
-                    policy=policy,
-                )
-                continue
-            results[spec.target_id] = _build_target(
+            continue
+        blocked_dependency = next(
+            (
+                dependency
+                for dependency in spec.dependencies
+                if results[dependency].status
+                in {TargetStatus.BLOCKED, TargetStatus.FAILED}
+            ),
+            None,
+        )
+        if blocked_dependency is not None:
+            results[spec.target_id] = TargetResult(
+                target_id=spec.target_id,
+                status=TargetStatus.BLOCKED,
+                blocker=f"dependency_blocked: {blocked_dependency}",
+            )
+            continue
+        if planned["decision"] == PlanDecision.REUSE.value:
+            results[spec.target_id] = _reuse_target(
                 profile=profile,
                 layout=layout,
                 spec=spec,
                 planned=planned,
-                protocol=protocol,
-                research_window=window,
-                software_identity=software,
-                target_layout=_target_layout(
-                    profile=profile,
-                    layout=layout,
-                    spec=spec,
-                    plans=plans,
-                ),
                 policy=policy,
-                time_window=time_window,
-                raw_root=source_root,
-                start_date=start_date,
-                end_date=end_date,
+                raw_root=resolved_source_roots.get(spec.target_id, source_root),
             )
+            continue
+        results[spec.target_id] = _build_target(
+            profile=profile,
+            layout=layout,
+            spec=spec,
+            planned=planned,
+            research_window=window,
+            software_identity=software,
+            target_layout=_target_layout(
+                profile=profile,
+                layout=layout,
+                spec=spec,
+                plans=plans,
+            ),
+            policy=policy,
+            time_window=time_window,
+            raw_root=resolved_source_roots.get(spec.target_id, source_root),
+            start_date=start_date,
+            end_date=end_date,
+        )
     status_value = _run_status(results.values())
     top_level_blockers = [
         {"target_id": result.target_id, "reason": result.blocker}
@@ -618,7 +706,6 @@ def _build_target(
     layout: StorageLayout,
     spec: TargetSpec,
     planned: dict[str, object],
-    protocol: Any,
     research_window: Mapping[str, object],
     software_identity: ProductionSoftwareIdentity,
     target_layout: StorageLayout,
@@ -649,6 +736,12 @@ def _build_target(
             blocker="capability_not_implemented",
         )
     binding = profile.producer_bindings[spec.producer_id]
+    if binding.kind is not _producer_kind(data_spec):
+        return TargetResult(
+            target_id=spec.target_id,
+            status=TargetStatus.BLOCKED,
+            blocker="producer_binding_kind_mismatch",
+        )
     producer = binding.producer
     raw_identity: str | None = None
     if isinstance(data_spec, InterimDataSpec):
@@ -682,7 +775,6 @@ def _build_target(
             )
     envelope = _target_envelope(
         profile=profile,
-        protocol=protocol,
         data_spec=data_spec,
         research_window=research_window,
         upstream_identities=planned["upstream_identities"],
@@ -702,7 +794,7 @@ def _build_target(
         requested_identity,
     )
     instance_metadata = {
-        "common_manifest": envelope.payload(),
+        COMMON_MANIFEST_METADATA_KEY: envelope.payload(),
     }
     if binding.kind is ProducerKind.INTERIM:
         try:
@@ -811,6 +903,7 @@ def _reuse_target(
     spec: TargetSpec,
     planned: dict[str, object],
     policy: Any,
+    raw_root: Path,
 ) -> TargetResult:
     requested_identity = planned["requested_identity"]
     matching_identity = planned["matching_instance_identity"]
@@ -822,7 +915,46 @@ def _reuse_target(
         spec.target_id,
         requested_identity,
     )
-    _validate_published_target(root, requested_identity)
+    envelope = _validate_published_target(root, requested_identity)
+    data_spec = _catalog_data_spec(profile, spec.target_id)
+    if isinstance(data_spec, InterimDataSpec):
+        binding = profile.producer_bindings.get(spec.producer_id or "")
+        if binding is None or binding.source_identity is None:
+            return TargetResult(
+                target_id=spec.target_id,
+                status=TargetStatus.BLOCKED,
+                blocker="source_identity_resolver_missing",
+            )
+        try:
+            raw_identity = binding.source_identity(raw_root, spec.target_id)
+            if raw_identity is None:
+                return TargetResult(
+                    target_id=spec.target_id,
+                    status=TargetStatus.BLOCKED,
+                    blocker="raw_content_identity_unavailable",
+                )
+            validate_instance_identity(raw_identity)
+            metadata = envelope["semantic_metadata"]
+            expected_raw_identity = (
+                metadata.get("raw_content_identity")
+                if isinstance(metadata, Mapping)
+                else None
+            )
+            if (
+                type(expected_raw_identity) is not str
+                or raw_identity != expected_raw_identity
+            ):
+                return TargetResult(
+                    target_id=spec.target_id,
+                    status=TargetStatus.BLOCKED,
+                    blocker="source_identity_changed",
+                )
+        except ValueError:
+            return TargetResult(
+                target_id=spec.target_id,
+                status=TargetStatus.BLOCKED,
+                blocker="source_identity_invalid",
+            )
     inspect_physical_dataset(
         root,
         time_window=None,
@@ -835,14 +967,20 @@ def _reuse_target(
     )
 
 
-def _validate_published_target(root: Path, expected_identity: str) -> None:
+def _validate_published_target(
+    root: Path,
+    expected_identity: str,
+) -> dict[str, object]:
     manifest = read_dataset_manifest_evidence(root)
-    envelope = validate_business_manifest_envelope(manifest["common_manifest"])
+    envelope = validate_business_manifest_envelope(
+        manifest[COMMON_MANIFEST_METADATA_KEY]
+    )
     if (
         envelope["instance_identity"] != expected_identity
         or root.name != expected_identity
     ):
         raise ValueError("published_instance_identity_mismatch")
+    return envelope
 
 
 def _target_specs(
@@ -907,10 +1045,19 @@ def _catalog_data_spec(
     return None
 
 
+def _producer_kind(data_spec: DataSpec) -> ProducerKind:
+    if isinstance(data_spec, InterimDataSpec):
+        return ProducerKind.INTERIM
+    if isinstance(data_spec, ProcessedDataSpec):
+        return ProducerKind.PROCESSED
+    if isinstance(data_spec, ResearchDatasetSpec):
+        return ProducerKind.DATASET
+    raise ValueError("unsupported_data_spec_type")
+
+
 def _target_envelope(
     *,
     profile: ResearchProfile,
-    protocol: Any,
     data_spec: DataSpec,
     research_window: Mapping[str, object],
     upstream_identities: Mapping[str, str],
@@ -921,23 +1068,17 @@ def _target_envelope(
     if binding is None:
         raise ValueError("producer_binding_missing")
     spec_payload = data_spec_payload(data_spec)
-    semantic_metadata: dict[str, object] = {
-        "producer_kind": binding.kind.value,
-        "root_seed": getattr(protocol, "root_seed", None),
-    }
+    semantic_metadata: dict[str, object] = {}
     if raw_content_identity is not None:
         semantic_metadata["raw_content_identity"] = raw_content_identity
+    artifact_window = dict(research_window)
+    artifact_window["access"] = "not_applicable"
     return build_business_manifest_envelope(
         logical_artifact_id=data_spec.data_id,
         schema_identity=canonical_json_hash(spec_payload),
-        protocol_or_spec_identity=canonical_json_hash(
-            {
-                "protocol": protocol.manifest(),
-                "spec": spec_payload,
-            }
-        ),
+        protocol_or_spec_identity=canonical_json_hash(spec_payload),
         software_identity=software_identity.identity_hash,
-        research_window=research_window,
+        research_window=artifact_window,
         upstream_identities=upstream_identities,
         semantic_metadata=semantic_metadata,
     )

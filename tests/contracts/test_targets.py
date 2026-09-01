@@ -25,12 +25,13 @@ def test_target_spec_and_plan_are_immutable_control_contracts() -> None:
         upstream_target_ids=spec.dependencies,
         producer_id=spec.producer_id,
         decision=PlanDecision.BUILD,
+        requested_identity="a" * 64,
     )
 
     assert plan.payload() == {
         "target_id": "dataset",
         "upstream_target_ids": ["panel"],
-        "requested_identity": None,
+        "requested_identity": "a" * 64,
         "matching_instance_identity": None,
         "upstream_identities": {},
         "producer_binding": "a_share_dataset",
@@ -40,10 +41,33 @@ def test_target_spec_and_plan_are_immutable_control_contracts() -> None:
 
 
 def test_target_result_allows_only_declared_states_and_reasons() -> None:
-    result = TargetResult(target_id="dataset", status=TargetStatus.BUILT)
+    result = TargetResult(
+        target_id="dataset",
+        status=TargetStatus.BUILT,
+        instance_identity="a" * 64,
+    )
     assert result.payload()["status"] == "BUILT"
+    with pytest.raises(ValueError, match="target_instance_identity_required"):
+        TargetResult(target_id="dataset", status=TargetStatus.BUILT)
+    with pytest.raises(ValueError, match="blocked_target_identity_not_allowed"):
+        TargetResult(
+            target_id="dataset",
+            status=TargetStatus.BLOCKED,
+            blocker="blocked",
+            instance_identity="a" * 64,
+        )
     with pytest.raises(ValueError, match="blocked_target_reason_required"):
         TargetResult(target_id="dataset", status=TargetStatus.BLOCKED)
+
+
+def test_build_plan_requires_requested_identity() -> None:
+    with pytest.raises(ValueError, match="target_identity_required"):
+        TargetPlan(
+            target_id="dataset",
+            upstream_target_ids=(),
+            producer_id="producer",
+            decision=PlanDecision.BUILD,
+        )
 
 
 def test_producer_binding_is_typed_and_frozen() -> None:
@@ -51,6 +75,12 @@ def test_producer_binding_is_typed_and_frozen() -> None:
     assert binding.kind is ProducerKind.DATASET
     with pytest.raises(ValueError, match="producer_callable_required"):
         ProducerBinding(ProducerKind.DATASET, object())  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="source_root_resolver_callable_required"):
+        ProducerBinding(
+            ProducerKind.INTERIM,
+            lambda: None,
+            source_root_resolver=object(),  # type: ignore[arg-type]
+        )
 
 
 def test_status_vocabulary_has_no_readiness_or_persisted_stale_state() -> None:

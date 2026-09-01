@@ -39,7 +39,10 @@ from quant_research_platform.storage.datasets.reading import (
     materialize_dataset_session_owned,
     open_dataset_session,
 )
-from quant_research_platform.storage.datasets.schema import dataset_identity_payload
+from quant_research_platform.storage.datasets.schema import (
+    COMMON_MANIFEST_METADATA_KEY,
+    dataset_identity_payload,
+)
 from quant_research_platform.storage.datasets.writing import (
     DatasetWriteReceipt,
     write_dataset,
@@ -132,7 +135,7 @@ def _assemble_research_dataset_from_sessions(
             session.verify()
 
     metadata = dict(instance_metadata or {})
-    if "common_manifest" not in metadata:
+    if COMMON_MANIFEST_METADATA_KEY not in metadata:
         metadata["input_dataset_identities"] = _input_dataset_identities(
             dataset_spec=spec,
             sessions=input_sessions,

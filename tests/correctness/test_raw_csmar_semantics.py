@@ -109,19 +109,87 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
     unrelated = tmp_path / (
         "csmar__stock_master__all_market_types__full__export-20260605.csv"
     )
-    bars.write_bytes(b"bars-before")
-    unrelated.write_bytes(b"stock-before")
+    bars.write_text(
+        ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
+        + "\n",
+        encoding="utf-8",
+    )
+    unrelated.write_text(
+        ",".join(raw_exports.RAW_TABLE_CONTRACTS["stock_master"].required_columns)
+        + "\n",
+        encoding="utf-8",
+    )
 
-    first = interim.source_content_identity(tmp_path, "market_bars_1d")
-    assert first is not None
+    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
+        interim.source_content_identity(tmp_path, "market_bars_1d")
 
-    unrelated.write_bytes(b"stock-after")
-    assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+    with runtime_resource_policy_scope(None):
+        first = interim.source_content_identity(tmp_path, "market_bars_1d")
+        assert first is not None
 
-    bars.write_bytes(b"bars-after")
-    second = interim.source_content_identity(tmp_path, "market_bars_1d")
-    assert second is not None
-    assert second != first
+        sidecar = bars.with_suffix(".metadata.json")
+        sidecar.write_text("{}", encoding="utf-8")
+        assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+        sidecar.write_text('{"row_count": 1}', encoding="utf-8")
+        assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+
+        unrelated.write_text(
+            ",".join(raw_exports.RAW_TABLE_CONTRACTS["stock_master"].required_columns)
+            + "\n# unrelated\n",
+            encoding="utf-8",
+        )
+        assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+
+        bars.write_text(
+            ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
+            + "\n# changed\n",
+            encoding="utf-8",
+        )
+        second = interim.source_content_identity(tmp_path, "market_bars_1d")
+        assert second is not None
+        assert second != first
+
+        renamed = tmp_path / "renamed-market-file.csv"
+        bars.rename(renamed)
+        assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
+        bars = renamed
+
+        shard = tmp_path / (
+            "csmar__market_bars_1d__all_market_types__full__"
+            "part-01__export-20260605.csv"
+        )
+        shard.write_text(
+            ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
+            + "\n",
+            encoding="utf-8",
+        )
+        third = interim.source_content_identity(tmp_path, "market_bars_1d")
+        assert third is not None
+        assert third != second
+        shard.unlink()
+        assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
+
+
+def test_csmar_source_root_resolver_uses_one_observed_sibling(tmp_path: Path) -> None:
+    primary = tmp_path / "csmar"
+    auxiliary = tmp_path / "csmar_aux"
+    primary.mkdir()
+    auxiliary.mkdir()
+    columns = raw_exports.RAW_TABLE_CONTRACTS["trading_calendar"].required_columns
+    (auxiliary / "native-calendar.csv").write_text(
+        ",".join(columns) + "\n",
+        encoding="utf-8",
+    )
+
+    with runtime_resource_policy_scope(None):
+        assert interim.resolve_source_root(primary, "trading_calendar") == auxiliary
+
+        (primary / "native-calendar.csv").write_text(
+            ",".join(columns) + "\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="csmar_source_root_ambiguous"):
+            interim.resolve_source_root(primary, "trading_calendar")
 
 
 def test_dirty_index_info_csv_audit_counts_and_semantics(tmp_path: Path) -> None:

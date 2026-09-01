@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import stat
 import sys
 from array import array
@@ -48,11 +47,6 @@ from quant_research_platform.sources.csmar.raw_exports import (
     _verify_csmar_member_set,
     dataset_files_with_identity_by_id,
     iter_private_export_chunks_with_policy,
-)
-from quant_research_platform.sources.csmar.raw_schemas import (
-    expected_metadata_sidecar_path,
-    infer_dataset_from_native_export,
-    parse_raw_filename,
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
@@ -583,87 +577,102 @@ def interim_catalog() -> InterimDataCatalog:
 
 
 def source_content_identity(raw_root: Path, data_id: str) -> str | None:
-    """Return one raw content identity for a CSMAR interim target."""
+    """Return the provider-validated raw content identity for one target."""
 
     root = require_unaliased_path(
         Path(raw_root),
         error="csmar_raw_export_identity_changed",
     )
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
     if not root.exists():
         return None
-    if not root.is_dir():
-        raise ValueError("csmar_raw_export_identity_changed")
-    root_identity = _source_directory_identity(root)
-    target = data_id.casefold()
-    selected: list[tuple[str, Path]] = []
-    try:
-        pending = [root]
-        while pending:
-            directory = pending.pop()
-            with os.scandir(directory) as entries:
-                children = sorted(entries, key=lambda entry: entry.name)
-            for entry in children:
-                path = Path(entry.path)
-                require_unaliased_path(
-                    path,
-                    error="csmar_raw_export_identity_changed",
-                )
-                if entry.is_symlink():
-                    raise ValueError("csmar_raw_export_identity_changed")
-                if entry.is_dir(follow_symlinks=False):
-                    pending.append(path)
-                    continue
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-                if path.suffix.lower() != ".csv":
-                    continue
-                if (
-                    "[DES]" in path.name
-                    or "__description__" in path.name
-                    or ".metadata." in path.name
-                ):
-                    continue
-                try:
-                    dataset = parse_raw_filename(path).dataset
-                except ValueError:
-                    try:
-                        dataset = infer_dataset_from_native_export(path)
-                    except ValueError:
-                        dataset = None
-                matches = dataset is not None and dataset.casefold() == target
-                if not matches:
-                    matches = path.stem.casefold() == target
-                if not matches:
-                    matches = target in {
-                        part.casefold() for part in path.relative_to(root).parts
-                    }
-                if not matches:
-                    continue
-                selected.append((path.relative_to(root).as_posix(), path))
-                sidecar = expected_metadata_sidecar_path(path)
-                if sidecar.exists():
-                    selected.append((sidecar.relative_to(root).as_posix(), sidecar))
-    except OSError as exc:
-        raise ValueError("csmar_raw_export_identity_changed") from exc
-    if not selected:
-        return None
-    identity = content_hash_for_files(
-        selected,
+    index = ExactPrimaryKeyIndex(
+        primary_key=("dataset_path",),
+        timestamp_columns=(),
+        scratch_parent=root.parent,
+    )
+    with (
+        policy.lease(
+            "source.csmar.raw.identity.index",
+            index.retained_memory_bytes,
+        ),
+        index,
+    ):
+        records = tuple(
+            dataset_files_with_identity_by_id(
+                root,
+                resource_policy=policy,
+                identity_index=index,
+            )
+        )
+        _verify_csmar_member_set(root, index)
+        selected = [
+            (dataset, path, identity)
+            for dataset, path, identity in records
+            if dataset == _raw_dataset_for_interim(data_id)
+        ]
+        if not selected:
+            return None
+        identity = content_hash_for_files(
+            selected,
+            error="csmar_raw_export_identity_changed",
+            resource_policy=policy,
+        )
+        _verify_csmar_member_set(root, index)
+        return identity
+
+
+def resolve_source_root(raw_root: Path, data_id: str) -> Path | None:
+    """Resolve one CSMAR target to its uniquely observed raw root."""
+
+    root = require_unaliased_path(
+        Path(raw_root),
         error="csmar_raw_export_identity_changed",
     )
-    if _source_directory_identity(root) != root_identity:
-        raise ValueError("csmar_raw_export_identity_changed")
-    return identity
-
-
-def _source_directory_identity(path: Path) -> tuple[int, int, int, int]:
-    try:
-        value = path.lstat()
-    except OSError as exc:
-        raise ValueError("csmar_raw_export_identity_changed") from exc
-    if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
-        raise ValueError("csmar_raw_export_identity_changed")
-    return (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns)
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
+    candidates = [root]
+    if root.name.casefold() == "csmar":
+        candidates.append(root.with_name("csmar_aux"))
+    elif root.name.casefold() == "csmar_aux":
+        candidates.append(root.with_name("csmar"))
+    matches: list[Path] = []
+    raw_dataset = _raw_dataset_for_interim(data_id)
+    for candidate in candidates:
+        candidate = require_unaliased_path(
+            candidate,
+            error="csmar_raw_export_identity_changed",
+        )
+        if not candidate.exists():
+            continue
+        index = ExactPrimaryKeyIndex(
+            primary_key=("dataset_path",),
+            timestamp_columns=(),
+            scratch_parent=candidate.parent,
+        )
+        with (
+            policy.lease(
+                "source.csmar.raw.identity.index",
+                index.retained_memory_bytes,
+            ),
+            index,
+        ):
+            records = tuple(
+                dataset_files_with_identity_by_id(
+                    candidate,
+                    resource_policy=policy,
+                    identity_index=index,
+                )
+            )
+            _verify_csmar_member_set(candidate, index)
+        if any(dataset == raw_dataset for dataset, _, _ in records):
+            matches.append(candidate)
+    if len(matches) > 1:
+        raise ValueError("csmar_source_root_ambiguous")
+    return matches[0] if matches else None
 
 
 def normalize_raw_frame(

@@ -63,31 +63,91 @@ def dataset_file_identity(path: Path) -> DatasetFileIdentity:
 
 
 def content_hash_for_files(
-    files: Iterable[tuple[str, Path]],
+    files: Iterable[tuple[str, Path] | tuple[str, Path, DatasetFileIdentity]],
     *,
     error: str,
+    resource_policy: object | None = None,
 ) -> str:
-    ordered = sorted(tuple(files), key=lambda item: item[0])
-    if not ordered or len({logical_id for logical_id, _ in ordered}) != len(ordered):
+    """Hash logical member ids and bytes without using paths as identity."""
+
+    entries: list[tuple[str, Path, DatasetFileIdentity | None]] = []
+    for item in files:
+        if isinstance(item, tuple):
+            if len(item) == 2:
+                logical_id, path = item
+                expected = None
+            elif len(item) == 3:
+                logical_id, path, expected = item
+            else:
+                raise ValueError(error)
+            if (
+                type(logical_id) is not str
+                or not logical_id
+                or not isinstance(path, Path)
+                or expected is not None
+                and not isinstance(expected, DatasetFileIdentity)
+            ):
+                raise ValueError(error)
+        else:
+            raise ValueError(error)
+        entries.append((logical_id, path, expected))
+    if not entries:
+        raise ValueError(error)
+    member_hashes: list[tuple[str, str]] = []
+    for logical_id, path, expected in entries:
+        try:
+            before = dataset_file_identity(path)
+            if expected is not None and before != expected:
+                raise ValueError(error)
+            if resource_policy is None:
+                member_hash = _hash_file_content(path, before, error)
+            else:
+                headroom = int(getattr(resource_policy, "operation_headroom_bytes", 0))
+                if headroom <= 0:
+                    raise ValueError(error)
+                with resource_policy.lease(
+                    "storage.content.identity",
+                    min(1024 * 1024, headroom),
+                ) as lease:
+                    member_hash = _hash_file_content(
+                        path,
+                        before,
+                        error,
+                        chunk_size=min(1024 * 1024, lease.reserved_bytes),
+                    )
+            member_hashes.append((logical_id, member_hash))
+        except (MemoryError, OSError, ValueError) as exc:
+            raise ValueError(error) from exc
+    digest = hashlib.sha256()
+    for logical_id, member_hash in sorted(member_hashes):
+        for value in (logical_id, member_hash):
+            encoded = value.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+    return digest.hexdigest()
+
+
+def _hash_file_content(
+    path: Path,
+    expected: DatasetFileIdentity,
+    error: str,
+    *,
+    chunk_size: int = 1024 * 1024,
+) -> str:
+    if chunk_size <= 0:
         raise ValueError(error)
     digest = hashlib.sha256()
-    for logical_id, path in ordered:
-        if type(logical_id) is not str or not logical_id:
+    with Path(path).open("rb") as handle:
+        handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+        if handle_identity != expected:
             raise ValueError(error)
-        logical_bytes = logical_id.encode("utf-8")
-        try:
-            identity = dataset_file_identity(path)
-            digest.update(len(logical_bytes).to_bytes(8, "big"))
-            digest.update(logical_bytes)
-            digest.update(identity.size.to_bytes(8, "big"))
-            with Path(path).open("rb") as handle:
-                while chunk := handle.read(1024 * 1024):
-                    digest.update(chunk)
-                after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-        except (OSError, ValueError) as exc:
-            raise ValueError(error) from exc
-        if after != identity:
-            raise ValueError(error)
+        while chunk := handle.read(chunk_size):
+            digest.update(chunk)
+        final_handle_identity = dataset_file_identity_from_stat(
+            os.fstat(handle.fileno())
+        )
+    if final_handle_identity != expected or dataset_file_identity(path) != expected:
+        raise ValueError(error)
     return digest.hexdigest()
 
 

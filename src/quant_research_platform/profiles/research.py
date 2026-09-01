@@ -35,6 +35,9 @@ from quant_research_platform.sources.csmar.interim import (
     materialize_interim_data as csmar_interim_producer,
 )
 from quant_research_platform.sources.csmar.interim import (
+    resolve_source_root as csmar_source_root,
+)
+from quant_research_platform.sources.csmar.interim import (
     source_content_identity as csmar_source_identity,
 )
 
@@ -125,6 +128,7 @@ def _a_share_profile() -> ResearchProfile:
                 spec.data_id: ProducerBinding(
                     ProducerKind.INTERIM,
                     csmar_interim_producer,
+                    source_root_resolver=csmar_source_root,
                     source_identity=csmar_source_identity,
                 )
                 for spec in interim.list()

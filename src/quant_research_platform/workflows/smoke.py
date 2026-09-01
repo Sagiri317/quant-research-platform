@@ -170,8 +170,9 @@ def _synthetic_source_identity(raw_root: Path, data_id: str) -> str | None:
     if not path.is_file():
         return None
     return content_hash_for_files(
-        ((path.name, path),),
+        ((data_id, path),),
         error="synthetic_source_identity_invalid",
+        resource_policy=current_runtime_resource_policy(),
     )
 
 
