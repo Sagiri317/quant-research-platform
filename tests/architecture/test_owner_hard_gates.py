@@ -208,7 +208,7 @@ def test_csmar_source_surface_has_one_root_without_retired_sibling_api() -> None
         relative
         for relative in (
             Path("CONTEXT.md"),
-            Path("docs/adr/0001-single-csmar-raw-root.md"),
+            Path("docs/adr/0001-common-raw-root.md"),
         )
         if (repository_root / relative).exists()
     )

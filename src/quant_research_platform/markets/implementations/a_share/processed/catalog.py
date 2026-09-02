@@ -116,6 +116,14 @@ LABEL_COLUMNS = tuple(
     )
 )
 FACTOR_COLUMNS = tuple(FORMAL_PRICE_VOLUME_FACTORS)
+BENCHMARK_WEIGHTS_ID = "benchmark_weights"
+BENCHMARK_WEIGHTS_COLUMNS = (
+    "market_id",
+    "benchmark_id",
+    "asset_id",
+    "timestamp",
+    "weight",
+)
 
 
 def processed_catalog() -> ProcessedDataCatalog:
@@ -189,6 +197,18 @@ def processed_catalog() -> ProcessedDataCatalog:
                 processed_input_data_ids=(MARKET_PANEL_ID, EXECUTION_MASK_ID),
                 label_columns=LABEL_COLUMNS,
             ),
+            _spec(
+                BENCHMARK_WEIGHTS_ID,
+                ProcessedDataKind.ANNOTATION,
+                BENCHMARK_WEIGHTS_COLUMNS,
+                source_input_data_ids=("index_info", "index_weights"),
+                primary_key=(
+                    "market_id",
+                    "benchmark_id",
+                    "asset_id",
+                    "timestamp",
+                ),
+            ),
         )
     )
 
@@ -202,8 +222,13 @@ def _spec(
     processed_input_data_ids: tuple[str, ...] = (),
     factor_columns: tuple[str, ...] = (),
     label_columns: tuple[str, ...] = (),
+    primary_key: tuple[str, ...] | None = None,
 ) -> ProcessedDataSpec:
     roles = {column: _role(column, factor_columns, label_columns) for column in columns}
+    selected_primary_key = primary_key or platform_entity_time_key()
+    for column in selected_primary_key:
+        if column != "timestamp":
+            roles[column] = ColumnRole.KEY
     return ProcessedDataSpec(
         data_id=data_id,
         market_id=MARKET_ID,
@@ -211,7 +236,7 @@ def _spec(
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles=roles,
-        primary_key=platform_entity_time_key(),
+        primary_key=selected_primary_key,
         partition_columns=("year",),
         source_input_data_ids=source_input_data_ids,
         processed_input_data_ids=processed_input_data_ids,

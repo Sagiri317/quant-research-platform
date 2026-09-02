@@ -1,158 +1,165 @@
-"""CSI500/CSI1000 effective-date benchmark and independent industry history."""
+"""A-share benchmark-weight facts and independent industry history."""
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
 
-APPROVED_BENCHMARK_IDS = frozenset({"csi500", "csi1000"})
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_string_series,
+    strict_timestamp_series,
+)
 
-
-def normalize_benchmark_history(
-    *,
-    membership_interim: pd.DataFrame,
-    weight_interim: pd.DataFrame,
-    return_interim: pd.DataFrame,
-    index_id_mapping: Mapping[str, str],
-) -> dict[str, pd.DataFrame]:
-    """Validate exact interim tables and bind provider index codes once."""
-
-    mapping = dict(index_id_mapping)
-    if set(mapping.values()) != APPROVED_BENCHMARK_IDS:
-        raise ValueError("a_share_benchmark_mapping_invalid")
-    membership = membership_interim.copy()
-    weights = weight_interim.copy()
-    returns = return_interim.copy()
-    for frame, required in (
-        (
-            membership,
-            {
-                "source_asset_id",
-                "constituent_asset_id",
-                "effective_date",
-                "announcement_date",
-                "change_type",
-            },
-        ),
-        (
-            weights,
-            {
-                "source_asset_id",
-                "constituent_asset_id",
-                "effective_date",
-                "weight",
-            },
-        ),
-        (returns, {"source_asset_id", "timestamp", "period_return"}),
-    ):
-        if not required.issubset(frame.columns):
-            raise ValueError("a_share_benchmark_interim_schema_invalid")
-        frame["benchmark_id"] = frame["source_asset_id"].map(mapping)
-        if bool(frame["benchmark_id"].isna().any()):
-            raise ValueError("a_share_benchmark_unmapped_index")
-        if set(frame["benchmark_id"]) != APPROVED_BENCHMARK_IDS:
-            raise ValueError("a_share_benchmark_coverage_incomplete")
-    membership["is_member"] = (
-        membership["change_type"].astype("string").map({"1": True, "2": False})
-    )
-    if bool(membership["is_member"].isna().any()):
-        raise ValueError("a_share_benchmark_change_type_invalid")
-    membership_key = ["benchmark_id", "constituent_asset_id", "effective_date"]
-    weight_key = ["benchmark_id", "constituent_asset_id", "effective_date"]
-    return_key = ["benchmark_id", "timestamp"]
-    if bool(membership.duplicated(membership_key, keep=False).any()):
-        raise ValueError("a_share_benchmark_membership_key_duplicate")
-    if bool(weights.duplicated(weight_key, keep=False).any()):
-        raise ValueError("a_share_benchmark_weight_key_duplicate")
-    if bool(returns.duplicated(return_key, keep=False).any()):
-        raise ValueError("a_share_benchmark_return_key_duplicate")
-    if bool((weights["weight"] < 0.0).any()):
-        raise ValueError("a_share_benchmark_weight_invalid")
-    totals = weights.groupby(["benchmark_id", "effective_date"])["weight"].sum()
-    if not bool(np.isclose(totals.to_numpy(), 1.0, atol=1e-6).all()):
-        raise ValueError("a_share_benchmark_weight_sum_invalid")
-    membership_state = pd.merge(
-        weights,
-        membership.loc[
-            :,
-            (
-                "benchmark_id",
-                "constituent_asset_id",
-                "effective_date",
-                "is_member",
-            ),
-        ],
-        on=["benchmark_id", "constituent_asset_id", "effective_date"],
-        how="left",
-        validate="many_to_one",
-    )
-    if bool(membership_state["is_member"].ne(True).any()):
-        raise ValueError("a_share_benchmark_weight_membership_invalid")
-    return {
-        "membership": membership.sort_values(membership_key).reset_index(drop=True),
-        "weights": weights.sort_values(weight_key).reset_index(drop=True),
-        "returns": returns.sort_values(return_key).reset_index(drop=True),
+FORMAL_BENCHMARKS = MappingProxyType(
+    {
+        "000905": ("csi500", "中证小盘500指数"),
+        "000852": ("csi1000", "中证1000指数"),
     }
+)
+APPROVED_BENCHMARK_IDS = frozenset(
+    benchmark_id for benchmark_id, _name in FORMAL_BENCHMARKS.values()
+)
+_WEIGHT_COLUMNS = (
+    "market_id",
+    "benchmark_id",
+    "asset_id",
+    "timestamp",
+    "weight",
+)
+
+
+def normalize_benchmark_weight_snapshots(
+    index_info_interim: pd.DataFrame,
+    weight_interim: pd.DataFrame,
+) -> pd.DataFrame:
+    """Normalize the two formal benchmark codes into exact snapshots."""
+
+    if (
+        type(index_info_interim) is not pd.DataFrame
+        or type(weight_interim) is not pd.DataFrame
+    ):
+        raise ValueError("a_share_benchmark_interim_schema_invalid")
+    if not {"source_asset_id", "index_name"}.issubset(index_info_interim.columns):
+        raise ValueError("a_share_benchmark_index_info_schema_invalid")
+    required_weights = {
+        "source_asset_id",
+        "constituent_asset_id",
+        "effective_date",
+        "weight",
+    }
+    if not required_weights.issubset(weight_interim.columns):
+        raise ValueError("a_share_benchmark_weight_schema_invalid")
+    index_info = index_info_interim.loc[
+        index_info_interim["source_asset_id"].isin(FORMAL_BENCHMARKS)
+    ].copy()
+    index_info["source_asset_id"] = strict_string_series(
+        index_info["source_asset_id"],
+        error="a_share_benchmark_source_index_invalid",
+    )
+    index_info["index_name"] = strict_string_series(
+        index_info["index_name"],
+        error="a_share_benchmark_index_name_invalid",
+    )
+    for source_id, (_benchmark_id, expected_name) in FORMAL_BENCHMARKS.items():
+        names = set(
+            index_info.loc[index_info["source_asset_id"].eq(source_id), "index_name"]
+        )
+        if names != {expected_name}:
+            raise ValueError("a_share_benchmark_index_identity_invalid")
+
+    weights = weight_interim.loc[
+        weight_interim["source_asset_id"].isin(FORMAL_BENCHMARKS)
+    ].copy()
+    weights["source_asset_id"] = strict_string_series(
+        weights["source_asset_id"],
+        error="a_share_benchmark_source_index_invalid",
+    )
+    weights["benchmark_id"] = weights["source_asset_id"].map(
+        {source_id: values[0] for source_id, values in FORMAL_BENCHMARKS.items()}
+    )
+    weights["asset_id"] = strict_string_series(
+        weights["constituent_asset_id"],
+        error="a_share_benchmark_asset_id_invalid",
+    )
+    weights["timestamp"] = strict_timestamp_series(
+        weights["effective_date"],
+        error="a_share_benchmark_weight_date_invalid",
+    ).dt.normalize()
+    weights["weight"] = strict_finite_numeric_series(
+        weights["weight"],
+        error="a_share_benchmark_weight_invalid",
+    ).astype("float64")
+    if bool(weights["weight"].le(0.0).any()):
+        raise ValueError("a_share_benchmark_weight_invalid")
+    key = ["benchmark_id", "asset_id", "timestamp"]
+    if bool(weights.duplicated(key, keep=False).any()):
+        raise ValueError("a_share_benchmark_weight_key_duplicate")
+    if set(weights["benchmark_id"]) != APPROVED_BENCHMARK_IDS:
+        raise ValueError("a_share_benchmark_coverage_incomplete")
+    totals = weights.groupby(["benchmark_id", "timestamp"])["weight"].sum()
+    if not bool(np.isclose(totals.to_numpy(), 1.0, atol=1e-6, rtol=0.0).all()):
+        raise ValueError("a_share_benchmark_weight_sum_invalid")
+    return (
+        weights.assign(market_id="a_share")
+        .loc[:, list(_WEIGHT_COLUMNS)]
+        .sort_values(["benchmark_id", "asset_id", "timestamp"], kind="mergesort")
+        .reset_index(drop=True)
+    )
 
 
 def materialize_benchmark_weights(
     observations: pd.DataFrame,
-    weights: pd.DataFrame,
-    membership: pd.DataFrame,
+    normalized_weights: pd.DataFrame,
 ) -> pd.DataFrame:
-    """As-of materialize historical constituent weights by effective date."""
+    """Join observations to exact snapshots; never carry weights forward."""
 
-    required = {"benchmark_id", "constituent_asset_id", "timestamp"}
-    if not required.issubset(observations.columns):
+    required_observations = {"benchmark_id", "asset_id", "timestamp"}
+    if type(observations) is not pd.DataFrame or not required_observations.issubset(
+        observations.columns
+    ):
         raise ValueError("a_share_benchmark_observation_schema_invalid")
-    left = observations.loc[
-        :, ("benchmark_id", "constituent_asset_id", "timestamp")
-    ].copy()
-    right = weights.loc[
-        :,
-        ("benchmark_id", "constituent_asset_id", "effective_date", "weight"),
-    ].copy()
-    for column in ("benchmark_id", "constituent_asset_id"):
-        left[column] = left[column].astype("string")
-        right[column] = right[column].astype("string")
-    left["timestamp"] = pd.Series(
-        pd.to_datetime(left["timestamp"]), index=left.index, dtype="datetime64[ns]"
+    if (
+        type(normalized_weights) is not pd.DataFrame
+        or tuple(normalized_weights.columns) != _WEIGHT_COLUMNS
+    ):
+        raise ValueError("a_share_benchmark_weight_schema_invalid")
+    weights = normalized_weights.copy()
+    key = ["benchmark_id", "asset_id", "timestamp"]
+    if bool(weights.duplicated(key, keep=False).any()):
+        raise ValueError("a_share_benchmark_weight_key_duplicate")
+    market_ids = strict_string_series(
+        weights["market_id"],
+        error="a_share_benchmark_market_id_invalid",
     )
-    right["effective_date"] = pd.Series(
-        pd.to_datetime(right["effective_date"]),
-        index=right.index,
-        dtype="datetime64[ns]",
+    if bool(market_ids.ne("a_share").any()):
+        raise ValueError("a_share_benchmark_market_id_invalid")
+    left = observations.loc[:, ("benchmark_id", "asset_id", "timestamp")].copy()
+    left["benchmark_id"] = strict_string_series(
+        left["benchmark_id"],
+        error="a_share_benchmark_id_invalid",
     )
-    membership_right = membership.loc[
-        :, ("benchmark_id", "constituent_asset_id", "effective_date", "is_member")
-    ].copy()
-    for column in ("benchmark_id", "constituent_asset_id"):
-        membership_right[column] = membership_right[column].astype("string")
-    membership_right["effective_date"] = pd.to_datetime(
-        membership_right["effective_date"]
-    ).astype("datetime64[ns]")
-    state = pd.merge_asof(
-        left.sort_values("timestamp"),
-        membership_right.sort_values("effective_date"),
-        left_on="timestamp",
-        right_on="effective_date",
-        by=["benchmark_id", "constituent_asset_id"],
-        direction="backward",
-        allow_exact_matches=True,
+    left["asset_id"] = strict_string_series(
+        left["asset_id"],
+        error="a_share_benchmark_asset_id_invalid",
     )
-    exact_weights = right.rename(columns={"effective_date": "timestamp"})
-    result = state.merge(
-        exact_weights,
-        on=["benchmark_id", "constituent_asset_id", "timestamp"],
+    left["timestamp"] = strict_timestamp_series(
+        left["timestamp"],
+        error="a_share_benchmark_timestamp_invalid",
+    ).dt.normalize()
+    weights["timestamp"] = strict_timestamp_series(
+        weights["timestamp"],
+        error="a_share_benchmark_timestamp_invalid",
+    ).dt.normalize()
+    result = left.merge(
+        weights.loc[:, key + ["weight"]],
+        on=key,
         how="left",
-        validate="one_to_one",
+        validate="many_to_one",
     )
-    result["weight"] = result["weight"].where(result["is_member"].eq(True))
-    return result.sort_values(
-        ["benchmark_id", "constituent_asset_id", "timestamp"], kind="mergesort"
-    ).reset_index(drop=True)
+    return result.sort_values(key, kind="mergesort").reset_index(drop=True)
 
 
 def materialize_industry_history(

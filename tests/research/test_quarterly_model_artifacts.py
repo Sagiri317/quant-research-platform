@@ -17,7 +17,6 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.models import (
     ModelSpec,
     validate_model_selection_metadata,
@@ -28,7 +27,6 @@ from quant_research_platform.contracts.targets import (
     ProducerKind,
     TargetSpec,
 )
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.fitting import (
@@ -41,7 +39,6 @@ from quant_research_platform.research.models.persisted import (
     write_quarterly_model_artifact,
 )
 from quant_research_platform.research.models.production import (
-    QuarterlyModelResult,
     _a_share_trial_specs,
     _fit_selected_model_result,
 )
@@ -69,125 +66,12 @@ from quant_research_platform.workflows import research as research_workflow
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.prediction_output_helpers import write_prediction_result
-
-
-class _ColumnPredictor:
-    def __init__(self, column: str, offset: float = 0.0) -> None:
-        self.column = column
-        self.offset = offset
-
-    def predict(self, frame: pd.DataFrame) -> np.ndarray:
-        return frame[self.column].to_numpy(dtype="float64") + self.offset
-
-
-class _UnpicklablePredictor(_ColumnPredictor):
-    def __getstate__(self) -> object:
-        raise RuntimeError("predictor_serialization_failed")
-
-
-def _metadata(
-    columns: tuple[str, ...],
-    *,
-    algorithm: str = "linear_regression",
-    model_id: str = "champion",
-    rank_parameters: dict[str, object] | None = None,
-) -> dict[str, object]:
-    result: dict[str, object] = {
-        "model_algorithm": algorithm,
-        "sample_filter_mode": "eligible",
-        "filter_columns_used": ["eligible"],
-        "filter_definition": "eligible == True",
-        "rows_input": 2,
-        "rows_after_filter_mode": 2,
-        "rows_after_input_label_dropna": 2,
-        "train_start": "2014-01-01",
-        "train_end": "2018-12-31",
-        "input_factor_columns": list(columns),
-        "input_feature_columns": [],
-        "input_columns": list(columns),
-        "input_count": len(columns),
-        "label_column": "label",
-        "hyperparameters": {},
-        "resolved_hyperparameters": {},
-        "random_seed": 11,
-        "max_train_rows": None,
-        "dependency_status": {
-            "status": "available",
-            "package": "internal",
-            "version": "test",
-        },
-        "coefficient_count": len(columns) + 1,
-        "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
-        "scaler": None,
-        "feature_importance": {column: 1.0 for column in columns},
-        "fit_cutoff": "2018-12-31",
-        "model_selection": _selection_metadata(
-            family_id=algorithm,
-            model_id=model_id,
-            columns=columns,
-        ),
-    }
-    if rank_parameters is not None:
-        result["rank_parameters"] = rank_parameters
-    return result
-
-
-def _selection_metadata(
-    *,
-    family_id: str,
-    model_id: str,
-    columns: tuple[str, ...],
-) -> dict[str, object]:
-    trial = {
-        "model_id": model_id,
-        "validation_rows": 2,
-        "validation_ic": 0.1,
-        "validation_rankic": 0.2,
-        "validation_ic_reason": None,
-        "validation_rankic_reason": None,
-        "validation_mse": 1.0,
-        "resolved_hyperparameters": {},
-        "random_seed": 11,
-        "n_train": 2,
-        "dependency_status": {
-            "status": "available",
-            "package": "internal",
-            "version": "test",
-        },
-    }
-    return {
-        "status": "selected",
-        "selection_metric": "validation_rankic",
-        "selection_direction": "maximize",
-        "validation_start": "2018-01-01",
-        "validation_end": "2018-12-31",
-        "candidate_family_ids": [family_id],
-        "tie_break_order": [family_id],
-        "selected_family_id": family_id,
-        "selected_model_id": model_id,
-        "families": [
-            {
-                "family_id": family_id,
-                "config_tie_break_order": [model_id],
-                "selected_config_id": model_id,
-                "trials": [trial],
-                "validation_rows": 2,
-                "selection_metric_value": 0.2,
-                "selection_metric_reason": None,
-            }
-        ],
-    }
-
-
-def _fold(quarter: int) -> ExperimentFold:
-    start = f"2019-{1 + (quarter - 1) * 3:02d}-01"
-    end = (pd.Timestamp(start) + pd.offsets.QuarterEnd()).date().isoformat()
-    return ExperimentFold(
-        fold_id=f"2019-q{quarter}",
-        train=TimeWindow("2014-01-01", "2017-12-31"),
-        validation=TimeWindow("2018-01-01", "2018-12-31"),
-        development_test=TimeWindow(start, end),
-    )
+from tests.research.workflow_test_support import (
+    _ColumnPredictor,
+    _metadata,
+    _quarterly_result,
+    _UnpicklablePredictor,
+)
 
 
 def _envelope() -> object:
@@ -203,32 +87,6 @@ def _envelope() -> object:
         },
         upstream_identities={},
         semantic_metadata={},
-    )
-
-
-def _quarterly_result(
-    quarter: int,
-    *,
-    model_id: str,
-    columns: tuple[str, ...],
-    predictor: object | None = None,
-) -> QuarterlyModelResult:
-    model = predictor or _ColumnPredictor(columns[0])
-    algorithm = (
-        "ic_weighted_rank_ensemble"
-        if isinstance(model, ICWeightedRankEnsemble)
-        else "equal_weight_rank_ensemble"
-        if isinstance(model, RankEnsemblePredictor)
-        else "linear_regression"
-    )
-    return QuarterlyModelResult(
-        quarter=_fold(quarter),
-        model_id=model_id,
-        model_result=ModelFitResult(
-            coefficients=np.zeros(len(columns) + 1),
-            metadata=_metadata(columns, algorithm=algorithm, model_id=model_id),
-            prediction_model=model,
-        ),
     )
 
 
@@ -618,7 +476,7 @@ def test_a_share_model_folds_require_formal_history_start_year() -> None:
         a_share.model_folds(
             sessions,
             chronology=manifest["model_chronology"],
-            formal_window=manifest["formal_window"],
+            formal_dataset_window=manifest["formal_dataset_window"],
             development_window=manifest["development_window"],
         )
 
@@ -866,6 +724,7 @@ def test_model_selection_rejects_protocol_family_mismatch(
     protocol = SimpleNamespace(
         scenario_id="scenario",
         manifest=lambda: {"selection_tie_break": ["linear_regression"]},
+        model_ids_for_target=lambda _target_id: (expected_model_id,),
     )
     target = TargetSpec(model_target, producer_id=model_target)
     selection = {

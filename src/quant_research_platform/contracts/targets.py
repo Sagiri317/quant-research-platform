@@ -35,6 +35,7 @@ class ProducerKind(StrEnum):
     EVALUATION = "EVALUATION"
     MODEL = "MODEL"
     PREDICTION = "PREDICTION"
+    PORTFOLIO = "PORTFOLIO"
 
 
 @dataclass(frozen=True, slots=True)

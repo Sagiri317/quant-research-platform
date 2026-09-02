@@ -37,6 +37,8 @@ metadata, not a second dataset truth.
 ## Formal readiness
 
 Formal readiness requires an owner, a real production consumer, persisted output,
-and the applicable semantic and evidence checks. A readable standalone fee
-candidate is provisional and remains unverified until its execution semantic batch
-provides the formal consumer and evidence.
+and the applicable semantic and evidence checks. The standalone fee input is a
+user-designated accepted R0 input for the current QRP research purpose, and
+formal execution/net NAV may consume it. Independent external verification of
+the ChatGPT-compiled source remains incomplete, but that is not an
+implementation or execution blocker.

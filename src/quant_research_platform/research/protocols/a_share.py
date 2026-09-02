@@ -27,6 +27,8 @@ from quant_research_platform.contracts.models import (
 )
 from quant_research_platform.contracts.portfolios import (
     CostConfig,
+    ExecutionAssumptions,
+    PortfolioCandidateSpec,
     PortfolioDiagnosticsConfig,
     PortfolioSpec,
     TradabilityConfig,
@@ -68,8 +70,10 @@ RESEARCH_DATASET_IDS = {
 }
 SCENARIO_IDS = tuple(RESEARCH_DATASET_IDS)
 ACCESS_WINDOWS = ("development", "holdout")
-FORMAL_START = date(2014, 1, 1)
-FORMAL_END = date(2025, 12, 31)
+DATA_START = date(2011, 1, 1)
+DATA_END = date(2025, 12, 31)
+FORMAL_DATASET_START = date(2014, 1, 1)
+FORMAL_DATASET_END = date(2025, 12, 31)
 DEVELOPMENT_START = date(2019, 1, 1)
 DEVELOPMENT_END = date(2023, 12, 31)
 HOLDOUT_START = date(2024, 1, 1)
@@ -147,6 +151,13 @@ PARTICIPATION_SENSITIVITIES = (0.01, 0.02, 0.05, 0.10)
 FIXED_SLIPPAGE_BPS = 5.0
 IMPACT_BPS = 25.0
 COMMISSION_BPS = 3.0
+EXECUTION_ASSUMPTIONS = ExecutionAssumptions(
+    initial_nav=INITIAL_NAV,
+    slippage_bps=FIXED_SLIPPAGE_BPS,
+    impact_bps=IMPACT_BPS,
+    adv_participation=PRIMARY_PARTICIPATION,
+    adv_sensitivities=PARTICIPATION_SENSITIVITIES,
+)
 ANNUALIZATION = 252
 STATISTICS_BLOCK = 20
 STATISTICS_REPETITIONS = 10_000
@@ -194,6 +205,14 @@ class AShareProtocol:
         )
 
     @property
+    def data_window(self) -> TimeWindow:
+        return TimeWindow(DATA_START, DATA_END)
+
+    @property
+    def formal_dataset_window(self) -> TimeWindow:
+        return TimeWindow(FORMAL_DATASET_START, FORMAL_DATASET_END)
+
+    @property
     def protocol_id(self) -> str:
         return PROTOCOL_ID
 
@@ -219,9 +238,13 @@ class AShareProtocol:
             "scenario_id": self.scenario_id,
             "access_window": self.access_window,
             "factor_scope": self.factor_scope,
-            "formal_window": {
-                "start": FORMAL_START.isoformat(),
-                "end": FORMAL_END.isoformat(),
+            "data_window": {
+                "start": DATA_START.isoformat(),
+                "end": DATA_END.isoformat(),
+            },
+            "formal_dataset_window": {
+                "start": FORMAL_DATASET_START.isoformat(),
+                "end": FORMAL_DATASET_END.isoformat(),
             },
             "development_window": {
                 "start": DEVELOPMENT_START.isoformat(),
@@ -255,11 +278,12 @@ class AShareProtocol:
                 "zscore",
             ],
             "root_seed": self.root_seed,
-            "cost": {
-                "commission_bps": COMMISSION_BPS,
-                "slippage_bps": FIXED_SLIPPAGE_BPS,
-                "impact_bps": IMPACT_BPS,
-                "adv_participation": PRIMARY_PARTICIPATION,
+            "execution_assumptions": {
+                "initial_nav": EXECUTION_ASSUMPTIONS.initial_nav,
+                "slippage_bps": EXECUTION_ASSUMPTIONS.slippage_bps,
+                "impact_bps": EXECUTION_ASSUMPTIONS.impact_bps,
+                "adv_participation": EXECUTION_ASSUMPTIONS.adv_participation,
+                "adv_sensitivities": list(EXECUTION_ASSUMPTIONS.adv_sensitivities),
             },
             "risk": {
                 "annualization": ANNUALIZATION,
@@ -294,15 +318,35 @@ class AShareProtocol:
             return ()
         dataset = self.scenario_id
         evaluation = f"{dataset}_evaluation"
-        model_selection = f"{dataset}_model_selection_refit"
-        predictions = f"{dataset}_persisted_predictions"
+        model_selection = self.model_selection_target_id
+        ew_model = self.ew_rank_model_target_id
+        predictions = self.persisted_prediction_target_id
+        ew_predictions = self.ew_rank_prediction_target_id
         statistics = f"{dataset}_statistics"
+        portfolio_candidates = self.portfolio_candidates()
         portfolios = tuple(
             TargetSpec(
-                f"{dataset}_{candidate}_ledger",
-                dependencies=(predictions,),
+                f"{dataset}_{candidate.candidate_id}_ledger",
+                dependencies=(
+                    candidate.prediction_target_id,
+                    candidate.research_dataset_id,
+                    candidate.execution_mask_target_id,
+                    candidate.trading_calendar_target_id,
+                    candidate.fee_schedule_target_id,
+                    candidate.market_panel_target_id,
+                    *(
+                        (candidate.benchmark_weights_target_id,)
+                        if candidate.benchmark_weights_target_id
+                        else ()
+                    ),
+                ),
+                producer_id=(
+                    f"{dataset}_{candidate.candidate_id}_ledger"
+                    if candidate.benchmark_id is None
+                    else None
+                ),
             )
-            for candidate in PORTFOLIO_CANDIDATES
+            for candidate in portfolio_candidates
         )
         return (
             TargetSpec(
@@ -316,9 +360,19 @@ class AShareProtocol:
                 producer_id=model_selection,
             ),
             TargetSpec(
+                ew_model,
+                dependencies=(dataset,),
+                producer_id=ew_model,
+            ),
+            TargetSpec(
                 predictions,
                 dependencies=(dataset, model_selection),
                 producer_id=predictions,
+            ),
+            TargetSpec(
+                ew_predictions,
+                dependencies=(dataset, ew_model),
+                producer_id=ew_predictions,
             ),
             TargetSpec(statistics, dependencies=(predictions,)),
             *portfolios,
@@ -339,6 +393,121 @@ class AShareProtocol:
                 dependencies=(self._report_artifact_target,),
             ),
         )
+
+    @property
+    def model_selection_target_id(self) -> str:
+        return f"{self.scenario_id}_model_selection_refit"
+
+    @property
+    def ew_rank_model_target_id(self) -> str:
+        return f"{self.scenario_id}_ew_rank_model"
+
+    @property
+    def persisted_prediction_target_id(self) -> str:
+        return f"{self.scenario_id}_persisted_predictions"
+
+    @property
+    def ew_rank_prediction_target_id(self) -> str:
+        return f"{self.scenario_id}_ew_rank_predictions"
+
+    def model_ids_for_target(self, target_id: str) -> tuple[str, ...]:
+        if target_id == self.model_selection_target_id:
+            model_ids = tuple(
+                f"{self.scenario_id}_{algorithm}" for algorithm in MODEL_FAMILY_ORDER
+            )
+        elif target_id == self.ew_rank_model_target_id:
+            model_ids = (f"{self.scenario_id}_equal_weight_rank_ensemble",)
+        else:
+            raise ValueError("unknown_a_share_model_target")
+        return model_ids
+
+    @property
+    def execution_assumptions(self) -> ExecutionAssumptions:
+        return EXECUTION_ASSUMPTIONS
+
+    def portfolio_candidates(self) -> tuple[PortfolioCandidateSpec, ...]:
+        prediction = self.persisted_prediction_target_id
+        return (
+            PortfolioCandidateSpec(
+                candidate_id="ew_rank_top20_equal_weight",
+                construction="top20_equal_weight",
+                prediction_target_id=self.ew_rank_prediction_target_id,
+                top_quantile=0.2,
+                rebalance_schedule="weekly-last-trading-day",
+                benchmark_id=None,
+                benchmark_weights_target_id=None,
+                research_dataset_id=self.scenario_id,
+                market_panel_target_id=MARKET_PANEL_ID,
+                execution_mask_target_id="execution_mask",
+                trading_calendar_target_id="trading_calendar",
+                fee_schedule_target_id="a_share_fee_schedule",
+            ),
+            PortfolioCandidateSpec(
+                candidate_id="champion_top20_equal_weight",
+                construction="top20_equal_weight",
+                prediction_target_id=prediction,
+                top_quantile=0.2,
+                rebalance_schedule="weekly-last-trading-day",
+                benchmark_id=None,
+                benchmark_weights_target_id=None,
+                research_dataset_id=self.scenario_id,
+                market_panel_target_id=MARKET_PANEL_ID,
+                execution_mask_target_id="execution_mask",
+                trading_calendar_target_id="trading_calendar",
+                fee_schedule_target_id="a_share_fee_schedule",
+            ),
+            PortfolioCandidateSpec(
+                candidate_id="champion_top20_float_cap",
+                construction="top20_float_cap",
+                prediction_target_id=prediction,
+                top_quantile=0.2,
+                rebalance_schedule="weekly-last-trading-day",
+                benchmark_id=None,
+                benchmark_weights_target_id=None,
+                research_dataset_id=self.scenario_id,
+                market_panel_target_id=MARKET_PANEL_ID,
+                execution_mask_target_id="execution_mask",
+                trading_calendar_target_id="trading_calendar",
+                fee_schedule_target_id="a_share_fee_schedule",
+            ),
+            PortfolioCandidateSpec(
+                candidate_id="champion_csi500_enhanced",
+                construction="benchmark_enhanced",
+                prediction_target_id=prediction,
+                top_quantile=None,
+                rebalance_schedule="weekly-last-trading-day",
+                benchmark_id="csi500",
+                benchmark_weights_target_id="benchmark_weights",
+                research_dataset_id=self.scenario_id,
+                market_panel_target_id=MARKET_PANEL_ID,
+                execution_mask_target_id="execution_mask",
+                trading_calendar_target_id="trading_calendar",
+                fee_schedule_target_id="a_share_fee_schedule",
+            ),
+            PortfolioCandidateSpec(
+                candidate_id="champion_csi1000_enhanced",
+                construction="benchmark_enhanced",
+                prediction_target_id=prediction,
+                top_quantile=None,
+                rebalance_schedule="weekly-last-trading-day",
+                benchmark_id="csi1000",
+                benchmark_weights_target_id="benchmark_weights",
+                research_dataset_id=self.scenario_id,
+                market_panel_target_id=MARKET_PANEL_ID,
+                execution_mask_target_id="execution_mask",
+                trading_calendar_target_id="trading_calendar",
+                fee_schedule_target_id="a_share_fee_schedule",
+            ),
+        )
+
+    def portfolio_candidate_for_target(
+        self,
+        target_id: str,
+    ) -> PortfolioCandidateSpec:
+        for candidate in self.portfolio_candidates():
+            if target_id == f"{self.scenario_id}_{candidate.candidate_id}_ledger":
+                return candidate
+        raise ValueError("unknown_a_share_portfolio_target")
 
     def terminal_targets(self, action: str) -> tuple[str, ...]:
         if action == "dataset build":
@@ -368,12 +537,12 @@ def model_folds(
     sessions: pd.DatetimeIndex,
     *,
     chronology: Mapping[str, object],
-    formal_window: Mapping[str, object],
+    formal_dataset_window: Mapping[str, object],
     development_window: Mapping[str, object],
 ) -> tuple[ExperimentFold, ...]:
     if type(chronology) is not dict or set(chronology) != {"validation_months"}:
         raise ValueError("model_chronology_missing")
-    history_start = pd.Timestamp(formal_window["start"])
+    history_start = pd.Timestamp(formal_dataset_window["start"])
     development_start = pd.Timestamp(development_window["start"])
     development_end = pd.Timestamp(development_window["end"])
     validation_months = chronology["validation_months"]

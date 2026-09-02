@@ -69,12 +69,12 @@ def build_model_selection_result(
     if protocol_manifest.get("protocol_id") != "a_share_low_frequency":
         raise ValueError("a_share_protocol_required")
     chronology = protocol_manifest.get("model_chronology")
-    formal_window = protocol_manifest.get("formal_window")
+    formal_dataset_window = protocol_manifest.get("formal_dataset_window")
     development_window = protocol_manifest.get("development_window")
     if (
         type(chronology) is not dict
         or set(chronology) != {"validation_months"}
-        or type(formal_window) is not dict
+        or type(formal_dataset_window) is not dict
         or type(development_window) is not dict
     ):
         raise ValueError("model_chronology_missing")
@@ -82,7 +82,7 @@ def build_model_selection_result(
     if type(root_seed) is not int or root_seed < 0:
         raise ValueError("model_root_seed_missing")
     dataset_read_window = TimeWindow(
-        formal_window["start"],
+        formal_dataset_window["start"],
         development_window["end"],
     )
 
@@ -113,7 +113,7 @@ def build_model_selection_result(
         time_window=time_window,
         chunks=chunks,
         chronology=chronology,
-        formal_window=formal_window,
+        formal_dataset_window=formal_dataset_window,
         development_window=development_window,
         root_seed=root_seed,
     )
@@ -130,7 +130,7 @@ def _build_a_share_quarterly_models(
     time_window: TimeWindow,
     chunks,
     chronology: Mapping[str, object],
-    formal_window: Mapping[str, object],
+    formal_dataset_window: Mapping[str, object],
     development_window: Mapping[str, object],
     root_seed: int,
 ) -> Iterable[QuarterlyModelResult | OwnedValue[QuarterlyModelResult]]:
@@ -138,14 +138,14 @@ def _build_a_share_quarterly_models(
         layout,
         dataset_spec=dataset_spec,
         time_window=TimeWindow(
-            formal_window["start"],
+            formal_dataset_window["start"],
             development_window["end"],
         ),
     )
     quarters = model_folds(
         sessions,
         chronology=chronology,
-        formal_window=formal_window,
+        formal_dataset_window=formal_dataset_window,
         development_window=development_window,
     )
     requested_start = pd.Timestamp(time_window.start)

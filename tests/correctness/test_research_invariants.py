@@ -41,10 +41,7 @@ from quant_research_platform.research.models.supervised import (
     preflight_model_specs,
 )
 from quant_research_platform.research.portfolios.accounting import (
-    alpha_score,
     calibrate_expected_alpha,
-    execute_continuous_target,
-    one_way_turnover,
 )
 from quant_research_platform.research.portfolios.engine import (
     _construct_portfolio_positions,
@@ -377,28 +374,6 @@ def test_weekly_portfolio_rebalances_then_naturally_drifts() -> None:
     middle = result.positions.loc[result.positions["timestamp"].eq(sessions[1])]
     assert first.loc[first["asset"].eq("a"), "position"].iloc[0] == pytest.approx(0.5)
     assert middle.loc[middle["asset"].eq("a"), "position"].iloc[0] != pytest.approx(0.5)
-
-
-def test_continuous_accounting_is_sell_first_and_adv_bounded() -> None:
-    current = pd.Series({"a": 1.0, "b": 0.0})
-    target = pd.Series({"a": 0.0, "b": 1.0})
-    result = execute_continuous_target(
-        current,
-        target,
-        nav=1_000_000.0,
-        average_daily_volume=pd.Series({"a": 1_000_000.0, "b": 1_000_000.0}),
-        can_enter=pd.Series({"a": True, "b": True}),
-        can_exit=pd.Series({"a": True, "b": True}),
-        participation=0.05,
-    )
-    assert result.executions.loc[0, "side"] == "sell"
-    assert result.realized_weights["a"] == pytest.approx(0.95)
-    assert 0.049 < result.realized_weights["b"] <= 0.05
-    assert result.realized_turnover == pytest.approx(0.05)
-    assert one_way_turnover(target, current) == pytest.approx(1.0)
-    assert alpha_score(pd.Series([10.0, 20.0, 30.0])).tolist() == pytest.approx(
-        [-1 / 3, 0.0, 1 / 3]
-    )
 
 
 def test_future_price_does_not_change_a_past_price_volume_factor() -> None:

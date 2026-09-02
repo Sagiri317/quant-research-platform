@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+from pathlib import Path
+
+import pytest
 from fastapi.testclient import TestClient
 from typer.main import get_command
 from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.api.app import create_app
+from quant_research_platform.interfaces.cli import commands as cli_commands
 from quant_research_platform.interfaces.cli.commands import app
 from quant_research_platform.interfaces.queries import list_factors
 from quant_research_platform.profiles.research import research_profile
@@ -174,3 +178,30 @@ def test_cli_exposes_only_current_research_surface() -> None:
 def _assert_public_text_is_sanitized(text: str) -> None:
     lowered = text.lower()
     assert all(marker.lower() not in lowered for marker in FORBIDDEN_PUBLIC_MARKERS)
+
+
+def test_cli_materialize_leaves_raw_root_resolution_to_project_layout(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, object] = {}
+
+    def materialize(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"status": "BLOCKED"}
+
+    monkeypatch.setattr(cli_commands.research, "data_materialize", materialize)
+    result = CliRunner().invoke(
+        app,
+        [
+            "data",
+            "materialize",
+            "--project-root",
+            str(tmp_path),
+            "--plan",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["raw_root"] is None
+    assert captured["layout"].project_root == tmp_path

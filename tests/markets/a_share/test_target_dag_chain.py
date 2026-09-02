@@ -103,9 +103,10 @@ def test_fundamental_pit_and_factors_reach_the_same_target_dag(
     frames.update(_synthetic_financial_frames())
     base = research_profile()
     raw_root = tmp_path / "synthetic-raw"
-    raw_root.mkdir()
+    source_root = raw_root / "csmar"
+    source_root.mkdir(parents=True)
     for data_id in frames:
-        (raw_root / f"{data_id}.raw").write_bytes(data_id.encode())
+        (source_root / f"{data_id}.raw").write_bytes(data_id.encode())
 
     def source_identity(_raw_root: Path, data_id: str) -> str:
         return hashlib.sha256(data_id.encode()).hexdigest()

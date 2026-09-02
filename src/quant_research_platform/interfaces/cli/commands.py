@@ -69,7 +69,7 @@ def research_dataset_requirements(
 def data_materialize(
     profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
-    raw_root: Path = typer.Option(Path("data/raw/csmar"), "--raw-root"),  # noqa: B008
+    raw_root: Path | None = typer.Option(None, "--raw-root"),  # noqa: B008
     start_date: str | None = typer.Option(None, "--start-date"),  # noqa: B008
     end_date: str | None = typer.Option(None, "--end-date"),  # noqa: B008
     data_id: list[str] | None = typer.Option(None, "--data-id"),  # noqa: B008

@@ -12,7 +12,6 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
-    ProcessedDataCatalog,
 )
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -51,7 +50,24 @@ from tests.helpers.research_specs import make_demo_research_dataset_spec
 
 def test_a_share_formal_quarterly_model_and_prediction_chain(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from quant_research_platform.research.models import production as model_production
+
+    model_read_windows: list[TimeWindow] = []
+    real_iter_research_dataset_chunks = model_production.iter_research_dataset_chunks
+
+    def observed_iter_research_dataset_chunks(*args: object, **kwargs: object):
+        window = kwargs.get("time_window")
+        if isinstance(window, TimeWindow):
+            model_read_windows.append(window)
+        return real_iter_research_dataset_chunks(*args, **kwargs)
+
+    monkeypatch.setattr(
+        model_production,
+        "iter_research_dataset_chunks",
+        observed_iter_research_dataset_chunks,
+    )
     base = research_profile()
     source_id = "formal_source"
     dataset_spec = make_demo_research_dataset_spec(
@@ -188,12 +204,13 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
     profile = replace(
         base,
         protocol=a_share.protocol,
-        interim=InterimDataCatalog((source_spec,)),
-        processed=ProcessedDataCatalog(()),
+        interim=InterimDataCatalog((*base.interim.list(), source_spec)),
+        processed=base.processed,
         research_datasets=ResearchDatasetCatalog((dataset_spec,)),
         evaluations=EvaluationCatalog((evaluation_spec,)),
         models=model_catalog,
         producer_bindings={
+            **base.producer_bindings,
             source_id: ProducerBinding(
                 ProducerKind.INTERIM,
                 source_producer,
@@ -203,13 +220,6 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
                 ),
             ),
             "pv_all": ProducerBinding(ProducerKind.DATASET, dataset_producer),
-            "pv_all_evaluation": base.producer_bindings["pv_all_evaluation"],
-            "pv_all_model_selection_refit": base.producer_bindings[
-                "pv_all_model_selection_refit"
-            ],
-            "pv_all_persisted_predictions": base.producer_bindings[
-                "pv_all_persisted_predictions"
-            ],
         },
     )
     result = research.research_run(
@@ -223,7 +233,9 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
     assert result["status"] == "BLOCKED"
     assert targets["pv_all_evaluation"]["status"] == "BUILT"
     assert targets["pv_all_model_selection_refit"]["status"] == "BUILT"
+    assert targets["pv_all_ew_rank_model"]["status"] == "BUILT"
     assert targets["pv_all_persisted_predictions"]["status"] == "BUILT"
+    assert targets["pv_all_ew_rank_predictions"]["status"] == "BUILT"
     model_root = (
         StorageLayout(project_root=tmp_path).semantic_artifact_root(
             "a_share", "pv_all_model_selection_refit"
@@ -244,6 +256,29 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
         assert not {"test_start", "test_end", "oos_start", "oos_end"}.intersection(
             metadata
         )
+    ew_model_root = (
+        StorageLayout(project_root=tmp_path).semantic_artifact_root(
+            "a_share", "pv_all_ew_rank_model"
+        )
+        / "instances"
+        / targets["pv_all_ew_rank_model"]["instance_identity"]
+    )
+    ew_model_payload = json.loads(
+        (ew_model_root / "model.json").read_text(encoding="utf-8")
+    )
+    assert all(
+        item["model_metadata"]["model_selection"]["candidate_family_ids"]
+        == ["pv_all_equal_weight_rank_ensemble"]
+        and item["model_metadata"]["model_selection"]["tie_break_order"]
+        == ["pv_all_equal_weight_rank_ensemble"]
+        and len(item["model_metadata"]["rank_parameters"]["directions"]) == 1
+        for item in ew_model_payload["quarterly_models"]
+    )
+    assert model_read_windows
+    assert all(
+        pd.Timestamp(window.start) == pd.Timestamp("2014-01-01")
+        for window in model_read_windows
+    )
     prediction_root = (
         StorageLayout(project_root=tmp_path).semantic_artifact_root(
             "a_share", "pv_all_persisted_predictions"
@@ -256,6 +291,20 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
     prediction_manifest = read_manifest(prediction_root / "manifest.json")
     assert prediction_manifest["metadata"]["prediction_mode"] == "a_share_oos"
     assert prediction_manifest["metadata"]["prediction_column"] == "raw_prediction"
+    ew_prediction_root = (
+        StorageLayout(project_root=tmp_path).semantic_artifact_root(
+            "a_share", "pv_all_ew_rank_predictions"
+        )
+        / "instances"
+        / targets["pv_all_ew_rank_predictions"]["instance_identity"]
+        / "outputs"
+        / "pv_all_ew_rank_predictions"
+    )
+    ew_prediction_manifest = read_manifest(ew_prediction_root / "manifest.json")
+    assert (
+        ew_prediction_manifest["metadata"]["model_metadata"]["model_artifact_id"]
+        == "pv_all_ew_rank_model"
+    )
 
 
 def test_model_failure_blocks_real_semantic_descendant(
@@ -274,9 +323,10 @@ def test_model_failure_blocks_real_semantic_descendant(
             "model": ProducerBinding(ProducerKind.MODEL, fail_model),
         },
     )
+    model_target = "pv_all_ew_rank_model"
     target_specs = (
-        TargetSpec("model", producer_id="model"),
-        TargetSpec("terminal", dependencies=("model",)),
+        TargetSpec(model_target, producer_id="model"),
+        TargetSpec("terminal", dependencies=(model_target,)),
     )
     plans = {
         "targets": [
@@ -287,7 +337,7 @@ def test_model_failure_blocks_real_semantic_descendant(
                 "matching_instance_identity": None,
                 "upstream_identities": {},
             }
-            for target_id in ("model", "terminal")
+            for target_id in (model_target, "terminal")
         ]
     }
     monkeypatch.setattr(
@@ -312,7 +362,7 @@ def test_model_failure_blocks_real_semantic_descendant(
         terminal_targets=("terminal",),
         layout=StorageLayout(project_root=tmp_path),
         time_window=TimeWindow("2019-01-01", "2019-03-31"),
-        raw_root=StorageLayout(project_root=tmp_path).raw_source_root("csmar"),
+        raw_root=tmp_path / "raw",
         start_date="2019-01-01",
         end_date="2019-03-31",
         research_window={
@@ -322,12 +372,12 @@ def test_model_failure_blocks_real_semantic_descendant(
         },
     )
     results = {item["target_id"]: item for item in result["target_results"]}
-    assert results["model"]["status"] == "FAILED"
-    assert "mandatory_trial_failed" in results["model"]["reason"]
+    assert results[model_target]["status"] == "FAILED"
+    assert "mandatory_trial_failed" in results[model_target]["reason"]
     assert results["terminal"] == {
         "target_id": "terminal",
         "status": "BLOCKED",
-        "reason": "dependency_blocked: model",
+        "reason": f"dependency_blocked: {model_target}",
         "instance_identity": None,
     }
     assert result["status"] == "FAILED"
@@ -418,6 +468,23 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
         a_share_specs["pv_all_persisted_predictions"].producer_id
         == "pv_all_persisted_predictions"
     )
+    assert a_share_specs["pv_all_ew_rank_model"].dependencies == ("pv_all",)
+    assert a_share_specs["pv_all_ew_rank_predictions"].dependencies == (
+        "pv_all",
+        "pv_all_ew_rank_model",
+    )
+    assert a_share_specs["pv_all_ew_rank_top20_equal_weight_ledger"].dependencies == (
+        "pv_all_ew_rank_predictions",
+        "pv_all",
+        "execution_mask",
+        "trading_calendar",
+        "a_share_fee_schedule",
+        "market_panel_1d",
+    )
+    assert (
+        "benchmark_weights"
+        in a_share_specs["pv_all_champion_csi500_enhanced_ledger"].dependencies
+    )
     assert research_profile().evaluations.get("pv_all_evaluation").evaluation_id == (
         "pv_all_evaluation"
     )
@@ -446,6 +513,25 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
         *ledger_ids,
     }
     assert a_share_specs["pv_all_report"].dependencies == ("pv_all_report_artifact",)
+
+    candidates = a_share.portfolio_candidates()
+    assert [candidate.construction for candidate in candidates] == [
+        "top20_equal_weight",
+        "top20_equal_weight",
+        "top20_float_cap",
+        "benchmark_enhanced",
+        "benchmark_enhanced",
+    ]
+    assert [
+        a_share_specs[f"pv_all_{candidate.candidate_id}_ledger"].producer_id
+        for candidate in candidates
+    ] == [
+        "pv_all_ew_rank_top20_equal_weight_ledger",
+        "pv_all_champion_top20_equal_weight_ledger",
+        "pv_all_champion_top20_float_cap_ledger",
+        None,
+        None,
+    ]
 
     crypto_profile = research_profile(CRYPTO_PROFILE_ID)
     crypto = crypto_profile.protocol(crypto_profile.research_datasets.list()[0].data_id)
@@ -561,8 +647,9 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
 ) -> None:
     data_id = "market_bars_1d"
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"before")
     calls = 0
 
@@ -721,8 +808,9 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
 ) -> None:
     data_id = "market_bars_1d"
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     calls = 0
 
@@ -980,8 +1068,9 @@ def test_rebuild_comparison_mismatch_families_preserve_old_good(
     comparison_status: str,
 ) -> None:
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(variant, marker=marker)
     layout = StorageLayout(project_root=tmp_path)
@@ -1045,8 +1134,9 @@ def test_rebuild_corrupt_old_good_returns_inspection_failed(
     tmp_path: Path,
 ) -> None:
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
@@ -1089,8 +1179,9 @@ def test_rebuild_compare_primary_is_preserved_with_candidate_evidence(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
@@ -1163,8 +1254,9 @@ def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
 
     primary = PrimaryError("producer failure")
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(
         "value",
@@ -1207,8 +1299,9 @@ def test_rebuild_producer_validation_failure_preserves_candidate(
 ) -> None:
     primary = ValueError("producer validation failure")
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(
         "value",
@@ -1253,8 +1346,9 @@ def test_rebuild_producer_control_base_exception_preserves_candidate(
 ) -> None:
     primary = exception_type("producer control failure")
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(
         "value",
@@ -1297,8 +1391,9 @@ def test_rebuild_raw_mutation_before_candidate_build_blocks_without_empty_scratc
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
@@ -1349,8 +1444,9 @@ def test_rebuild_without_old_good_is_a_normal_immutable_build(
     tmp_path: Path,
 ) -> None:
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
 
@@ -1375,8 +1471,9 @@ def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
     tmp_path: Path,
 ) -> None:
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
@@ -1438,8 +1535,9 @@ def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     raw_root = tmp_path / "raw"
-    raw_root.mkdir()
-    marker = raw_root / "source.raw"
+    marker_root = raw_root / "csmar"
+    marker_root.mkdir(parents=True)
+    marker = marker_root / "source.raw"
     marker.write_bytes(b"stable")
     profile, source_id, source_calls = _calendar_rebuild_profile(
         "value",
@@ -1556,8 +1654,8 @@ def test_csmar_dataset_action_discovers_nested_single_root(
 ) -> None:
     profile = research_profile()
     layout = StorageLayout(project_root=tmp_path)
-    raw_root = layout.raw_source_root("csmar")
-    nested_root = raw_root / "calendar" / "history"
+    raw_root = tmp_path / "data" / "raw"
+    nested_root = raw_root / "csmar" / "calendar" / "history"
     nested_root.mkdir(parents=True)
     (nested_root / "native-calendar.csv").write_text(
         "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n",
@@ -1587,10 +1685,11 @@ def test_csmar_dataset_action_discovers_nested_single_root(
 def test_csmar_dataset_action_missing_target_is_blocked(tmp_path: Path) -> None:
     profile = research_profile()
     layout = StorageLayout(project_root=tmp_path)
+    raw_root = tmp_path / "data" / "raw"
     result = research.data_materialize(
         profile=profile,
         layout=layout,
-        raw_root=layout.raw_source_root("csmar"),
+        raw_root=raw_root,
         start_date="2020-01-01",
         end_date="2020-12-31",
         data_ids=("trading_calendar",),

@@ -14,6 +14,9 @@ from quant_research_platform.catalog.processed import (
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.markets.implementations.a_share.benchmark import (
+    normalize_benchmark_weight_snapshots,
+)
 from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
@@ -40,7 +43,7 @@ from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets.reading import read_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
-_REFERENCE_SOURCE_IDS = frozenset(
+_OPTIONAL_SOURCE_IDS = frozenset(
     {
         "stock_master",
         "market_cap",
@@ -51,6 +54,7 @@ _REFERENCE_SOURCE_IDS = frozenset(
         "special_treatment_changes",
     }
 )
+_FULL_HISTORY_SOURCE_IDS = _OPTIONAL_SOURCE_IDS | {"index_info"}
 
 
 def produce_a_share_processed_frame(
@@ -88,12 +92,21 @@ def produce_a_share_processed_frame(
             sources.get(data_id),
             time_window=time_window,
             policy=resource_policy,
-            optional=data_id in _REFERENCE_SOURCE_IDS,
+            optional=data_id in _OPTIONAL_SOURCE_IDS,
+            full_history=data_id in _FULL_HISTORY_SOURCE_IDS,
         )
         for data_id in spec.source_input_data_ids
         if _source_available(layout, sources.get(data_id))
-        or data_id in _REFERENCE_SOURCE_IDS
+        or data_id in _OPTIONAL_SOURCE_IDS
     }
+    if spec.data_id == "benchmark_weights":
+        required = {"index_info", "index_weights"}
+        if not required.issubset(source):
+            raise ValueError("a_share_benchmark_source_data_missing")
+        return normalize_benchmark_weight_snapshots(
+            source["index_info"],
+            source["index_weights"],
+        ).loc[:, list(spec.required_columns)]
     dependencies = {
         data_id: _read_processed(
             layout,
@@ -373,6 +386,7 @@ def _read_source(
     time_window: TimeWindow,
     policy: RuntimeResourcePolicy,
     optional: bool,
+    full_history: bool,
 ) -> pd.DataFrame:
     root = layout.target_root(
         spec.data_id,
@@ -382,7 +396,7 @@ def _read_source(
         return pd.DataFrame(columns=spec.required_columns)
     if not root.exists():
         raise ValueError(f"missing_interim_data: {spec.data_id}")
-    read_window = None if spec.data_id in _REFERENCE_SOURCE_IDS else time_window
+    read_window = None if full_history else time_window
     return read_dataset(root, time_window=read_window, resource_policy=policy)
 
 

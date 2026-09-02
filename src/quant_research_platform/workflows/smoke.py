@@ -34,8 +34,10 @@ def run_research_synthetic_smoke(project_root: Path) -> dict[str, object]:
         source_frames.setdefault(spec.data_id, _empty_source_frame(spec))
     raw_root = project_root / "synthetic-raw"
     raw_root.mkdir(parents=True, exist_ok=True)
-    for data_id in source_frames:
-        (raw_root / f"{data_id}.raw").write_bytes(data_id.encode("utf-8"))
+    for spec in base_profile.interim.list():
+        source_root = raw_root / str(spec.source_id)
+        source_root.mkdir(parents=True, exist_ok=True)
+        (source_root / f"{spec.data_id}.raw").write_bytes(spec.data_id.encode("utf-8"))
     producer_calls: list[str] = []
 
     def materialize_fixture(**kwargs: object) -> InterimImportResult:

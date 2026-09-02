@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass
-from functools import cache
+from functools import cache, partial
 from types import MappingProxyType
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
@@ -35,6 +35,15 @@ from quant_research_platform.sources.csmar.interim import (
 )
 from quant_research_platform.sources.csmar.interim import (
     source_content_identity as csmar_source_identity,
+)
+from quant_research_platform.sources.reference.interim import (
+    interim_catalog as reference_interim_catalog,
+)
+from quant_research_platform.sources.reference.interim import (
+    materialize_interim_data as reference_interim_producer,
+)
+from quant_research_platform.sources.reference.interim import (
+    source_content_identity as reference_source_identity,
 )
 
 
@@ -89,6 +98,15 @@ def research_profile(profile_id: str | None = None) -> ResearchProfile:
 
 @cache
 def _a_share_profile() -> ResearchProfile:
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        unified_trading_sessions,
+    )
+    from quant_research_platform.markets.implementations.a_share.execution import (
+        fee_schedule_from_frame,
+        market_name_for_type,
+        require_fee_coverage,
+        trade_cost,
+    )
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog as a_share_catalog,
     )
@@ -104,12 +122,28 @@ def _a_share_profile() -> ResearchProfile:
     from quant_research_platform.research.models.production import (
         build_model_selection_result,
     )
+    from quant_research_platform.research.portfolios.production import (
+        build_portfolio_ledger,
+    )
     from quant_research_platform.research.predictions.runner import (
         build_prediction_result_from_persisted_model,
     )
 
+    portfolio_producer = partial(
+        build_portfolio_ledger,
+        fee_schedule_from_frame=fee_schedule_from_frame,
+        require_fee_coverage=require_fee_coverage,
+        trade_cost=trade_cost,
+        market_name_for_type=market_name_for_type,
+        unified_trading_sessions=unified_trading_sessions,
+    )
+
     interim = InterimDataCatalog(
-        (*csmar_interim_catalog().list(), *choice_interim_catalog().list())
+        (
+            *csmar_interim_catalog().list(),
+            *choice_interim_catalog().list(),
+            *reference_interim_catalog().list(),
+        )
     )
     processed = a_share_catalog.processed_catalog()
     research_datasets = a_share.research_dataset_catalog()
@@ -135,6 +169,15 @@ def _a_share_profile() -> ResearchProfile:
                 )
                 for spec in interim.list()
                 if str(spec.source_id) == "csmar"
+            },
+            **{
+                spec.data_id: ProducerBinding(
+                    ProducerKind.INTERIM,
+                    reference_interim_producer,
+                    source_identity=reference_source_identity,
+                )
+                for spec in interim.list()
+                if str(spec.source_id) == "reference"
             },
             **{
                 spec.data_id: ProducerBinding(
@@ -165,11 +208,34 @@ def _a_share_profile() -> ResearchProfile:
                 for scenario_id in a_share.SCENARIO_IDS
             },
             **{
+                f"{scenario_id}_ew_rank_model": ProducerBinding(
+                    ProducerKind.MODEL,
+                    build_model_selection_result,
+                )
+                for scenario_id in a_share.SCENARIO_IDS
+            },
+            **{
                 f"{scenario_id}_persisted_predictions": ProducerBinding(
                     ProducerKind.PREDICTION,
                     build_prediction_result_from_persisted_model,
                 )
                 for scenario_id in a_share.SCENARIO_IDS
+            },
+            **{
+                f"{scenario_id}_ew_rank_predictions": ProducerBinding(
+                    ProducerKind.PREDICTION,
+                    build_prediction_result_from_persisted_model,
+                )
+                for scenario_id in a_share.SCENARIO_IDS
+            },
+            **{
+                f"{scenario_id}_{candidate.candidate_id}_ledger": ProducerBinding(
+                    ProducerKind.PORTFOLIO,
+                    portfolio_producer,
+                )
+                for scenario_id in a_share.SCENARIO_IDS
+                for candidate in a_share.protocol(scenario_id).portfolio_candidates()
+                if candidate.benchmark_id is None
             },
         },
         schema_inventory_important_columns=(
