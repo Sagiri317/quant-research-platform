@@ -19,10 +19,14 @@ from quant_research_platform.artifacts.outputs.common_validation import (
     validate_output_frame,
 )
 from quant_research_platform.contracts.predictions import (
+    RAW_PREDICTION_COLUMN,
     _validate_prediction_output_values,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -363,10 +367,24 @@ def _prediction_output_chunk_frame(
         _validate_prediction_output_values(
             selected,
             primary_key=key_columns,
-            prediction_column=next(
-                column for column in required if column not in key_columns
+            prediction_column=(
+                RAW_PREDICTION_COLUMN
+                if RAW_PREDICTION_COLUMN in required
+                else next(column for column in required if column not in key_columns)
             ),
         )
+        if RAW_PREDICTION_COLUMN in required:
+            if any(
+                type(value) is not str or not value for value in selected["model_id"]
+            ):
+                raise ValueError("invalid_prediction_model_id")
+            alpha = strict_finite_numeric_series(
+                selected["alpha_score"],
+                error="invalid_prediction_alpha_scores",
+            )
+            alpha_mean = alpha.groupby(selected["timestamp"], sort=False).mean()
+            if bool(alpha_mean.abs().gt(1e-12).any()):
+                raise ValueError("invalid_prediction_alpha_scores")
     return selected
 
 

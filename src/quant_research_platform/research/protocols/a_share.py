@@ -30,7 +30,10 @@ from quant_research_platform.contracts.portfolios import (
     TradabilityConfig,
     WeightConfig,
 )
-from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.predictions import (
+    RAW_PREDICTION_COLUMN,
+    PredictionSpec,
+)
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import TargetSpec
 from quant_research_platform.contracts.time import TimeWindow
@@ -290,14 +293,30 @@ class AShareProtocol:
             for candidate in PORTFOLIO_CANDIDATES
         )
         return (
-            TargetSpec(evaluation, dependencies=(dataset,)),
-            TargetSpec(model_selection, dependencies=(evaluation,)),
-            TargetSpec(predictions, dependencies=(model_selection,)),
+            TargetSpec(
+                evaluation,
+                dependencies=(dataset,),
+                producer_id=evaluation,
+            ),
+            TargetSpec(
+                model_selection,
+                dependencies=(dataset,),
+                producer_id=model_selection,
+            ),
+            TargetSpec(
+                predictions,
+                dependencies=(dataset, model_selection),
+                producer_id=predictions,
+            ),
             TargetSpec(statistics, dependencies=(predictions,)),
             *portfolios,
             TargetSpec(
                 self._research_terminal_target,
-                dependencies=(statistics, *(target.target_id for target in portfolios)),
+                dependencies=(
+                    evaluation,
+                    statistics,
+                    *(target.target_id for target in portfolios),
+                ),
             ),
             TargetSpec(
                 self._report_artifact_target,
@@ -555,6 +574,8 @@ def prediction_catalog(
                 train_end=train_end,
                 test_start=test_start,
                 test_end=test_end,
+                prediction_mode="a_share_oos",
+                prediction_column=RAW_PREDICTION_COLUMN,
                 candidate_model_ids=(),
             )
             for model in model_specs(scenario_id, factor_scope=factor_scope)
@@ -576,7 +597,7 @@ def evaluation_catalog(
     return EvaluationCatalog(
         (
             EvaluationSpec(
-                evaluation_id=f"{scenario_id}_factor_evaluation",
+                evaluation_id=f"{scenario_id}_evaluation",
                 market_id=MARKET_ID,
                 research_dataset_id=RESEARCH_DATASET_IDS[scenario_id],
                 signals=signals,

@@ -17,8 +17,11 @@ from quant_research_platform.contracts.models import (
     _resolved_model_hyperparameters_match,
 )
 from quant_research_platform.contracts.predictions import (
+    ALPHA_SCORE_COLUMN,
+    RAW_PREDICTION_COLUMN,
     PredictionSpec,
     _validate_prediction_output_values,
+    prediction_output_columns,
 )
 from quant_research_platform.contracts.time import (
     is_intraday_time_value,
@@ -33,6 +36,7 @@ from quant_research_platform.research._memory import (
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
 )
+from quant_research_platform.research.models.persisted import QuarterlyPredictionModel
 from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
     RankEnsemblePredictor,
@@ -91,6 +95,7 @@ def build_prediction_result_from_frames(
     model_metadata: dict[str, object],
     model_lease: MemoryLease | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
+    required_input_columns: tuple[str, ...] | None = None,
 ) -> PredictionResult:
     bound_policy = resource_policy or current_runtime_resource_policy()
     if type(model_metadata) is not dict:
@@ -122,13 +127,15 @@ def build_prediction_result_from_frames(
     ):
         raise ValueError("invalid_model_metadata")
     reject_filter_input_columns(input_columns)
-    required = set((*spec.primary_key, *input_columns))
+    prediction_input_columns = required_input_columns or input_columns
+    reject_filter_input_columns(prediction_input_columns)
+    required = set((*spec.primary_key, *prediction_input_columns))
     _validate_oos_split(spec)
     work_columns = tuple(
         dict.fromkeys(
             (
                 *spec.primary_key,
-                *input_columns,
+                *prediction_input_columns,
                 *required_filter_columns(spec.sample_filter_mode),
             )
         )
@@ -141,8 +148,12 @@ def build_prediction_result_from_frames(
             work_columns=work_columns,
         ),
         spec=spec,
-        input_columns=input_columns,
-        predictor=prediction_callable(coefficients, input_columns, prediction_model),
+        input_columns=prediction_input_columns,
+        predictor=prediction_callable(
+            coefficients,
+            prediction_input_columns,
+            prediction_model,
+        ),
         build_state=build_state,
     )
     scoped_output_frames = _scoped_prediction_output_frames(
@@ -295,6 +306,8 @@ def _iter_prediction_output_frames(
                     filtered,
                     spec.primary_key,
                 ) + (8 * row_count)
+                if spec.prediction_mode == "a_share_oos":
+                    output_bytes += row_count * (64 + 16)
                 model_matrix_bytes = 8 * row_count * (len(input_columns) + 1)
                 working_bytes = (
                     mask_bytes + test_frame_bytes + output_bytes + model_matrix_bytes
@@ -343,12 +356,53 @@ def _iter_prediction_output_frames(
                             working_lease.close()
                         continue
                     output = test_frame.loc[:, list(spec.primary_key)].copy()
-                    output[spec.prediction_column] = predictor(test_frame)
+                    raw_prediction = predictor(test_frame)
+                    if spec.prediction_mode == "a_share_oos":
+                        output["model_id"] = spec.model_id
+                        output[RAW_PREDICTION_COLUMN] = raw_prediction
+                        timestamps = strict_timestamp_series(
+                            output["timestamp"],
+                            error="invalid_prediction_timestamp_values",
+                        )
+                        ranks = (
+                            pd.Series(
+                                raw_prediction,
+                                index=output.index,
+                                dtype="float64",
+                            )
+                            .groupby(timestamps, sort=False)
+                            .rank(method="average")
+                        )
+                        counts = timestamps.groupby(timestamps, sort=False).transform(
+                            "size"
+                        )
+                        output[ALPHA_SCORE_COLUMN] = (
+                            ranks - (counts + 1.0) / 2.0
+                        ) / counts
+                    else:
+                        output[spec.prediction_column] = raw_prediction
+                    if tuple(output.columns) != prediction_output_columns(
+                        spec.prediction_mode,
+                        spec.prediction_column,
+                        spec.primary_key,
+                    ):
+                        raise ValueError("prediction_output_columns_invalid")
                     _validate_prediction_output_values(
                         output,
                         primary_key=spec.primary_key,
-                        prediction_column=spec.prediction_column,
+                        prediction_column=(
+                            RAW_PREDICTION_COLUMN
+                            if spec.prediction_mode == "a_share_oos"
+                            else spec.prediction_column
+                        ),
                     )
+                    if spec.prediction_mode == "a_share_oos":
+                        if output["model_id"].ne(spec.model_id).any():
+                            raise ValueError("prediction_model_id_invalid")
+                        if not np.isfinite(
+                            output[ALPHA_SCORE_COLUMN].to_numpy(dtype="float64")
+                        ).all():
+                            raise ValueError("invalid_prediction_alpha_scores")
                     build_state.record_prediction_output(output, spec=spec)
                     retained_bytes = pandas_frame_payload_bytes(output)
                     if working_lease is not None:
@@ -399,7 +453,12 @@ def prediction_callable(
         def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
             columns = input_columns
             if isinstance(
-                prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
+                prediction_model,
+                (
+                    RankEnsemblePredictor,
+                    ICWeightedRankEnsemble,
+                    QuarterlyPredictionModel,
+                ),
             ):
                 columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
             predicted = prediction_model.predict(frame.loc[:, list(columns)])

@@ -8,6 +8,9 @@ import pytest
 
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.predictions.runner as prediction_runner_module
+from quant_research_platform.artifacts.outputs.bundle_validation import (
+    validate_output_bundle,
+)
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -15,6 +18,7 @@ from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import (
     PREDICTION_PRIMARY_KEY,
     PREDICTION_SCORE_COLUMN,
+    RAW_PREDICTION_COLUMN,
     PredictionSpec,
 )
 from quant_research_platform.contracts.time import TimeWindow
@@ -23,10 +27,13 @@ from quant_research_platform.research.datasets.assembler import (
 )
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
+    preflight_model_specs,
 )
+from quant_research_platform.research.predictions.outputs import prediction_callable
 from quant_research_platform.research.predictions.runner import (
     build_prediction_result_from_research_dataset,
 )
+from quant_research_platform.research.protocols.a_share import model_specs
 from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
@@ -94,6 +101,134 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
             assert output_bundle.as_posix().endswith("outputs/pred_demo")
         finally:
             model_result_owned.lease.close()
+
+
+def test_a_share_prediction_artifact_persists_raw_and_centered_alpha_scores(
+    tmp_path: Path,
+) -> None:
+    frame = _research_rows_for_dates(
+        ["2014-01-01", "2014-01-02", "2014-01-03", "2014-01-04"]
+    )
+    model_spec = ModelSpec(
+        model_id="linear_a_share",
+        model_algorithm="linear_regression",
+        input_factor_columns=("mom_20d",),
+        label_column="forward_return_20d",
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id="a_share_prediction",
+        model_id=model_spec.model_id,
+        research_dataset_id="demo",
+        train_end="2014-01-02",
+        test_start="2014-01-03",
+        test_end="2014-01-04",
+        prediction_mode="a_share_oos",
+        prediction_column=RAW_PREDICTION_COLUMN,
+    )
+    with runtime_resource_policy_scope() as policy:
+        owned_model = model_fitting._fit_model_result_owned_from_frames(
+            (frame.loc[frame["timestamp"] <= pd.Timestamp("2014-01-02")],),
+            model_spec,
+            estimator=build_estimator_from_model_spec(model_spec),
+            fitting_cutoff=prediction_spec.train_end,
+        )
+        try:
+            model_result = owned_model.value
+            prediction, _bundle, _manifest = write_prediction_output_and_read(
+                tmp_path,
+                (frame,),
+                prediction_spec,
+                model_result.coefficients,
+                model_spec.input_columns,
+                prediction_model=model_result.prediction_model,
+                model_metadata=model_result.metadata,
+                resource_policy=policy,
+            )
+            validate_output_bundle(
+                _bundle,
+                expected_output_id=prediction_spec.prediction_id,
+                expected_run_id="test_run",
+            )
+            permuted, _permuted_bundle, _ = write_prediction_output_and_read(
+                tmp_path / "permuted",
+                (frame.sample(frac=1.0, random_state=7),),
+                prediction_spec,
+                model_result.coefficients,
+                model_spec.input_columns,
+                prediction_model=model_result.prediction_model,
+                model_metadata=model_result.metadata,
+                resource_policy=policy,
+            )
+        finally:
+            owned_model.lease.close()
+
+    assert tuple(prediction.columns) == (
+        *PREDICTION_PRIMARY_KEY,
+        "model_id",
+        RAW_PREDICTION_COLUMN,
+        "alpha_score",
+    )
+    assert prediction["model_id"].eq(model_spec.model_id).all()
+    pd.testing.assert_frame_equal(
+        prediction.sort_values(list(PREDICTION_PRIMARY_KEY)).reset_index(drop=True),
+        permuted.sort_values(list(PREDICTION_PRIMARY_KEY)).reset_index(drop=True),
+        check_dtype=False,
+    )
+    assert prediction.groupby("timestamp", sort=False)[
+        "alpha_score"
+    ].mean().tolist() == [
+        0.0,
+        0.0,
+    ]
+
+
+def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> None:
+    specs = model_specs("pv_all")
+    dates = pd.date_range("2020-01-01", periods=12, freq="D")
+    frame = pd.DataFrame(
+        {
+            "timestamp": [date for date in dates for _ in range(3)],
+            "asset_id": [asset for _ in dates for asset in ("a", "b", "c")],
+            "eligible": True,
+            "model_target": [
+                float(date_index + asset_index) / 10.0
+                for date_index in range(1, len(dates) + 1)
+                for asset_index in range(1, 4)
+            ],
+            "forward_return_20d_available_at": [
+                date for date in dates for _ in range(3)
+            ],
+        }
+    )
+    for spec in specs:
+        for column in spec.input_columns:
+            frame[column] = [
+                float((date_index + asset_index) % 7 + 1)
+                for date_index in range(len(dates))
+                for asset_index in range(3)
+            ]
+    preflight_model_specs(specs)
+
+    with runtime_resource_policy_scope():
+        for spec in specs:
+            owned = model_fitting._fit_model_result_owned_from_frames(
+                (frame,),
+                spec,
+                estimator=build_estimator_from_model_spec(spec),
+                fitting_cutoff="2020-01-12",
+            )
+            try:
+                result = owned.value
+                columns = tuple(dict.fromkeys((*spec.input_columns, "timestamp")))
+                prediction = prediction_callable(
+                    result.coefficients,
+                    spec.input_columns,
+                    result.prediction_model,
+                )(frame.loc[:, list(columns)])
+                assert len(prediction) == len(frame)
+                assert pd.Series(prediction).notna().all()
+            finally:
+                owned.lease.close()
 
 
 @pytest.mark.parametrize(

@@ -32,6 +32,7 @@ from quant_research_platform.research.filtering import (
     _filter_working_set_bound,
     apply_filter_mode,
 )
+from quant_research_platform.research.models.persisted import QuarterlyPredictionModel
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
     preflight_model_specs,
@@ -180,6 +181,66 @@ def build_prediction_result_from_research_dataset(
         _close=close_result,
     )
     return owned_result
+
+
+def build_prediction_result_from_persisted_model(
+    *,
+    layout: StorageLayout,
+    dataset_catalog: ResearchDatasetCatalog,
+    prediction_spec,
+    model_result: fitting.ModelFitResult,
+    model_metadata: dict[str, object],
+    resource_policy: RuntimeResourcePolicy,
+) -> PredictionResult:
+    """Build predictions from one validated persisted model instance."""
+
+    dataset_spec = dataset_catalog.get(prediction_spec.research_dataset_id)
+    model_input_columns = tuple(model_metadata.get("input_columns", ()))
+    input_columns = model_input_columns
+    if isinstance(model_result.prediction_model, QuarterlyPredictionModel):
+        input_columns = tuple(
+            dict.fromkeys(
+                (*input_columns, *model_result.prediction_model.input_columns)
+            )
+        )
+    if not input_columns:
+        raise ValueError("persisted_model_input_columns_missing")
+    read_columns = tuple(
+        dict.fromkeys(
+            (
+                *dataset_spec.primary_key,
+                *input_columns,
+                *required_filter_columns(prediction_spec.sample_filter_mode),
+            )
+        )
+    )
+    test_end = prediction_spec.test_end or prediction_spec.test_start
+
+    def chunks() -> Iterable[pd.DataFrame]:
+        yield from _validated_prediction_chunks(
+            iter_research_dataset_chunks(
+                layout,
+                market_id=dataset_spec.market_id,
+                dataset_id=dataset_spec.data_id,
+                time_window=TimeWindow(prediction_spec.test_start, test_end),
+                columns=read_columns,
+            ),
+            dataset_spec=dataset_spec,
+            input_columns=input_columns,
+        )
+
+    effective_model_metadata = dict(model_metadata)
+    effective_model_metadata.pop("model_selection", None)
+    return build_prediction_result_from_frames(
+        chunks(),
+        prediction_spec,
+        model_result.coefficients,
+        model_input_columns,
+        prediction_model=model_result.prediction_model,
+        model_metadata=effective_model_metadata,
+        resource_policy=resource_policy,
+        required_input_columns=input_columns,
+    )
 
 
 def _build_prediction_result_from_research_dataset(

@@ -32,6 +32,9 @@ class ProducerKind(StrEnum):
     INTERIM = "INTERIM"
     PROCESSED = "PROCESSED"
     DATASET = "DATASET"
+    EVALUATION = "EVALUATION"
+    MODEL = "MODEL"
+    PREDICTION = "PREDICTION"
 
 
 @dataclass(frozen=True, slots=True)

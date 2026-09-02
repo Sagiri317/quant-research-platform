@@ -17,6 +17,21 @@ def test_prediction_mode_rejects_unimplemented_smoke_alias() -> None:
         )
 
 
+def test_prediction_spec_accepts_a_share_persisted_row_contract() -> None:
+    spec = PredictionSpec(
+        prediction_id="a_share_prediction",
+        model_id="linear_model",
+        research_dataset_id="research_demo",
+        train_end="2024-01-31",
+        test_start="2024-03-01",
+        prediction_mode="a_share_oos",
+        prediction_column="raw_prediction",
+    )
+
+    assert spec.prediction_mode == "a_share_oos"
+    assert spec.prediction_column == "raw_prediction"
+
+
 def test_prediction_spec_accepts_model_selection_contract_fields() -> None:
     spec = PredictionSpec(
         prediction_id="prediction_demo",

@@ -158,6 +158,21 @@ def test_workflow_production_statuses_have_no_readiness_aliases() -> None:
     assert {"READY", "STALE"}.isdisjoint(literals)
 
 
+def test_model_algorithm_surface_matches_a_share_and_crypto_protocols() -> None:
+    from quant_research_platform.contracts.models import _model_algorithm_ids
+    from quant_research_platform.research.protocols.a_share import MODEL_FAMILY_ORDER
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_MODEL_ALGORITHMS,
+    )
+
+    expected = {
+        "single_factor_baseline",
+        *MODEL_FAMILY_ORDER,
+        *HFT_MODEL_ALGORITHMS,
+    }
+    assert set(_model_algorithm_ids()) == expected
+
+
 def test_tracked_surfaces_have_no_retired_naming() -> None:
     violations: list[str] = []
     repository_root = Path(__file__).resolve().parents[2]

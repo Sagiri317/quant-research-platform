@@ -27,7 +27,10 @@ from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_metadata_shape,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
-from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.predictions import (
+    PredictionSpec,
+    prediction_output_columns,
+)
 from quant_research_platform.contracts.time import is_intraday_time_value
 from quant_research_platform.runtime.resources import OwnedValue
 from quant_research_platform.storage.atomic import atomic_write_directory
@@ -70,7 +73,11 @@ def _write_prediction_output_chunks(
         layout=layout,
         expected_definition_id="prediction_outputs",
     )
-    required = (*spec.primary_key, spec.prediction_column)
+    required = prediction_output_columns(
+        spec.prediction_mode,
+        spec.prediction_column,
+        spec.primary_key,
+    )
     model_metadata_payload = validate_model_metadata_shape(dict(model_metadata))
     validate_model_metadata_consistency(model_metadata_payload, spec=spec)
 

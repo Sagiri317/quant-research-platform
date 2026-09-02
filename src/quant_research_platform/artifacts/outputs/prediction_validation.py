@@ -23,6 +23,9 @@ from quant_research_platform.contracts.models import (
 )
 from quant_research_platform.contracts.predictions import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
+    PREDICTION_MODES,
+    PREDICTION_SCORE_COLUMN,
+    RAW_PREDICTION_COLUMN,
     PredictionSpec,
 )
 
@@ -411,6 +414,18 @@ def validate_prediction_output_metadata_shape(
         metadata, "test_end", "output_manifest_metadata_invalid"
     )
     if (
+        metadata["prediction_mode"] not in PREDICTION_MODES
+        or (
+            metadata["prediction_mode"] == "a_share_oos"
+            and metadata["prediction_column"] != RAW_PREDICTION_COLUMN
+        )
+        or (
+            metadata["prediction_mode"] == "minimal_oos"
+            and metadata["prediction_column"] != PREDICTION_SCORE_COLUMN
+        )
+    ):
+        raise ValueError("output_manifest_metadata_invalid")
+    if (
         type(metadata["is_oos"]) is not bool
         or type(metadata["is_final_oos_window"]) is not bool
     ):
@@ -588,6 +603,18 @@ def validate_prediction_metadata_shape(
         "prediction_column",
         "invalid_prediction_metadata",
     )
+    if (
+        metadata["prediction_mode"] not in PREDICTION_MODES
+        or (
+            metadata["prediction_mode"] == "a_share_oos"
+            and metadata["prediction_column"] != RAW_PREDICTION_COLUMN
+        )
+        or (
+            metadata["prediction_mode"] == "minimal_oos"
+            and metadata["prediction_column"] != PREDICTION_SCORE_COLUMN
+        )
+    ):
+        raise ValueError("invalid_prediction_metadata")
     require_metadata_string_list(
         metadata,
         "filter_columns_used",

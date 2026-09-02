@@ -19,7 +19,22 @@ from quant_research_platform.contracts.validation import (
 )
 
 PREDICTION_SCORE_COLUMN = "prediction_score"
+RAW_PREDICTION_COLUMN = "raw_prediction"
+ALPHA_SCORE_COLUMN = "alpha_score"
 PREDICTION_PRIMARY_KEY = ("timestamp", "asset_id")
+PREDICTION_MODES = frozenset({"minimal_oos", "a_share_oos"})
+
+
+def prediction_output_columns(
+    prediction_mode: str,
+    prediction_column: str,
+    primary_key: tuple[str, ...] = PREDICTION_PRIMARY_KEY,
+) -> tuple[str, ...]:
+    if prediction_mode == "a_share_oos":
+        return (*primary_key, "model_id", RAW_PREDICTION_COLUMN, ALPHA_SCORE_COLUMN)
+    return (*primary_key, prediction_column)
+
+
 MODEL_SELECTION_METRIC_DIRECTIONS = {
     "validation_ic": "maximize",
     "validation_rankic": "maximize",
@@ -87,21 +102,25 @@ class PredictionSpec:
             raise ValueError("prediction_train_end_must_precede_test_start")
         _validate_non_empty_string(self.prediction_column, "prediction_column_required")
         _validate_column_tuple(self.primary_key, "prediction_primary_key")
-        if (
-            self.prediction_column != PREDICTION_SCORE_COLUMN
-            or self.primary_key != PREDICTION_PRIMARY_KEY
-        ):
+        if self.primary_key != PREDICTION_PRIMARY_KEY:
             raise ValueError("prediction_output_columns_must_be_fixed")
         if (
             type(self.prediction_mode) is not str
-            or self.prediction_mode != "minimal_oos"
+            or self.prediction_mode not in PREDICTION_MODES
         ):
             raise ValueError("unsupported_prediction_mode")
+        expected_prediction_column = (
+            RAW_PREDICTION_COLUMN
+            if self.prediction_mode == "a_share_oos"
+            else PREDICTION_SCORE_COLUMN
+        )
         validate_sample_filter_mode(self.sample_filter_mode, owner="prediction")
         if type(self.is_oos) is not bool or type(self.is_final_oos_window) is not bool:
             raise TypeError("prediction_window_flags_must_be_boolean")
         if not self.is_oos:
             raise ValueError("prediction_must_be_oos")
+        if self.prediction_column != expected_prediction_column:
+            raise ValueError("prediction_output_columns_must_be_fixed")
         if self.test_end is None and not self.is_final_oos_window:
             raise ValueError("prediction_open_ended_window_must_be_final")
         if self.test_end is not None and self.is_final_oos_window:

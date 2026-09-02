@@ -51,13 +51,6 @@ def lasso_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> ob
     return Lasso(**params)
 
 
-def elastic_net_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
-    from sklearn.linear_model import ElasticNet
-
-    _set_random_state(params, spec)
-    return ElasticNet(**params)
-
-
 def huber_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
     del spec
     from sklearn.linear_model import HuberRegressor
@@ -65,25 +58,11 @@ def huber_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> ob
     return HuberRegressor(**params)
 
 
-def decision_tree_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
-    from sklearn.tree import DecisionTreeRegressor
-
-    _set_random_state(params, spec)
-    return DecisionTreeRegressor(**params)
-
-
 def random_forest_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
     from sklearn.ensemble import RandomForestRegressor
 
     _set_random_state(params, spec)
     return RandomForestRegressor(**params)
-
-
-def extra_trees_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
-    from sklearn.ensemble import ExtraTreesRegressor
-
-    _set_random_state(params, spec)
-    return ExtraTreesRegressor(**params)
 
 
 def gradient_boosting_regressor(
@@ -94,16 +73,6 @@ def gradient_boosting_regressor(
 
     _set_random_state(params, spec)
     return GradientBoostingRegressor(**params)
-
-
-def hist_gradient_boosting_regressor(
-    spec: ModelSpec,
-    params: dict[str, object],
-) -> object:
-    from sklearn.ensemble import HistGradientBoostingRegressor
-
-    _set_random_state(params, spec)
-    return HistGradientBoostingRegressor(**params)
 
 
 def xgboost_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
@@ -146,13 +115,9 @@ _MODEL_ESTIMATOR_FACTORIES: dict[
     "linear_regression": linear_regression_estimator,
     "ridge_regression": ridge_regression_estimator,
     "lasso_regression": lasso_regression_estimator,
-    "elastic_net": elastic_net_estimator,
     "huber_regression": huber_regression_estimator,
-    "decision_tree_regressor": decision_tree_regressor,
     "random_forest_regressor": random_forest_regressor,
-    "extra_trees_regressor": extra_trees_regressor,
     "gradient_boosting_regressor": gradient_boosting_regressor,
-    "hist_gradient_boosting_regressor": hist_gradient_boosting_regressor,
     "xgboost_regressor": xgboost_regressor,
     "lightgbm_regressor": lightgbm_regressor,
     "single_factor_baseline": single_factor_baseline,

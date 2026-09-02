@@ -34,19 +34,12 @@ _MODEL_ALGORITHM_FACTS = {
     "linear_regression": _ModelAlgorithmFacts(),
     "ridge_regression": _ModelAlgorithmFacts("sklearn"),
     "lasso_regression": _ModelAlgorithmFacts("sklearn"),
-    "elastic_net": _ModelAlgorithmFacts("sklearn"),
     "huber_regression": _ModelAlgorithmFacts("sklearn"),
-    "decision_tree_regressor": _ModelAlgorithmFacts("sklearn"),
     "random_forest_regressor": _ModelAlgorithmFacts(
         "sklearn",
         parallel=True,
     ),
-    "extra_trees_regressor": _ModelAlgorithmFacts(
-        "sklearn",
-        parallel=True,
-    ),
     "gradient_boosting_regressor": _ModelAlgorithmFacts("sklearn"),
-    "hist_gradient_boosting_regressor": _ModelAlgorithmFacts("sklearn"),
     "xgboost_regressor": _ModelAlgorithmFacts("xgboost", parallel=True),
     "lightgbm_regressor": _ModelAlgorithmFacts("lightgbm", parallel=True),
     "single_factor_baseline": _ModelAlgorithmFacts(

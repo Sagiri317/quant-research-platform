@@ -7,6 +7,12 @@ from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
+
+from quant_research_platform.artifacts.outputs import (
+    write_evaluation_outputs_from_chunks,
+    write_prediction_outputs,
+)
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
     build_business_manifest_envelope,
@@ -19,6 +25,11 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+from quant_research_platform.contracts.predictions import (
+    RAW_PREDICTION_COLUMN,
+    PredictionSpec,
+)
 from quant_research_platform.contracts.targets import (
     PlanDecision,
     ProducerKind,
@@ -30,6 +41,14 @@ from quant_research_platform.contracts.targets import (
 )
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.profiles.research import ResearchProfile
+from quant_research_platform.research.models.persisted import (
+    read_model_artifact,
+    write_model_artifact,
+)
+from quant_research_platform.research.models.production import (
+    ModelSelectionResult,
+)
+from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.datasets.comparison import compare_datasets
 from quant_research_platform.storage.datasets.inspection import (
@@ -49,6 +68,12 @@ from quant_research_platform.storage.manifests import read_dataset_manifest_evid
 from quant_research_platform.storage.rebuild import (
     RebuildCandidateWorkspace,
     rebuild_candidate_workspace,
+)
+from quant_research_platform.storage.semantic_artifacts import (
+    compare_semantic_artifacts,
+    discover_semantic_artifact_instances,
+    read_semantic_artifact,
+    write_semantic_artifact,
 )
 from quant_research_platform.storage.software_identity import (
     ProductionSoftwareIdentity,
@@ -174,13 +199,19 @@ def _plan_targets(
         )
         if blocked_dependency is not None:
             blocker = f"dependency_blocked: {blocked_dependency}"
-        elif data_spec is None or spec.producer_id is None:
+        elif spec.producer_id is None:
             blocker = "capability_not_implemented"
         else:
             binding = profile.producer_bindings.get(spec.producer_id)
             if binding is None:
-                blocker = "producer_binding_missing"
-            elif binding.kind is not _producer_kind(data_spec):
+                blocker = (
+                    "capability_not_implemented"
+                    if data_spec is None
+                    else "producer_binding_missing"
+                )
+            elif data_spec is not None and binding.kind is not _producer_kind(
+                data_spec
+            ):
                 blocker = "producer_binding_kind_mismatch"
             elif (
                 isinstance(data_spec, InterimDataSpec)
@@ -214,8 +245,10 @@ def _plan_targets(
                 ):
                     blocker = "upstream_identity_unavailable"
                 if blocker is None:
-                    envelope = _target_envelope(
+                    envelope = _target_envelope_for_spec(
                         profile=profile,
+                        protocol=protocol,
+                        target_spec=spec,
                         data_spec=data_spec,
                         research_window=window,
                         upstream_identities=upstream_identities,
@@ -388,6 +421,8 @@ def research_run(
 ) -> dict[str, object]:
     if holdout:
         raise PermissionError("holdout_frozen_development_identity_unavailable")
+    protocol = _protocol(profile, scenario_id)
+    _require_development_window(protocol, start_date, end_date)
     terminal = _protocol_terminal_target(profile, scenario_id, "research run")
     if plan:
         return plan_targets(
@@ -422,6 +457,21 @@ def research_run(
             end_date=end_date,
         ),
     )
+
+
+def _require_development_window(protocol: Any, start_date: str, end_date: str) -> None:
+    development = protocol.manifest().get("development_window")
+    if type(development) is not dict:
+        return
+    start = development.get("start")
+    end = development.get("end")
+    if (
+        type(start) is not str
+        or type(end) is not str
+        or pd.Timestamp(start) > pd.Timestamp(start_date)
+        or pd.Timestamp(end) < pd.Timestamp(end_date)
+    ):
+        raise PermissionError("holdout_frozen_development_identity_unavailable")
 
 
 def report_build(
@@ -559,6 +609,14 @@ def _execute_action(
     rebuild: bool = False,
     research_window: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
+    if action == "research run":
+        scenario_id = _scenario_from_terminal(profile, action, terminal_targets)
+        protocol = _protocol(profile, scenario_id)
+        model_ids = tuple(
+            f"{scenario_id}_{algorithm}"
+            for algorithm in protocol.manifest().get("selection_tie_break", ())
+        )
+        preflight_model_specs(profile.models.get(model_id) for model_id in model_ids)
     with runtime_resource_policy_scope(None) as policy:
         return _execute_action_with_policy(
             profile=profile,
@@ -685,6 +743,7 @@ def _execute_action_with_policy(
                 )
             result = _build_target(
                 profile=profile,
+                protocol=protocol,
                 layout=output_layout,
                 spec=spec,
                 planned=planned,
@@ -706,10 +765,14 @@ def _execute_action_with_policy(
                         spec.target_id,
                         planned["requested_identity"],
                     )
-                    comparison = compare_datasets(
-                        old_good_root,
-                        output_root,
-                        resource_policy=policy,
+                    comparison = (
+                        compare_semantic_artifacts(old_good_root, output_root)
+                        if _catalog_data_spec(profile, spec.target_id) is None
+                        else compare_datasets(
+                            old_good_root,
+                            output_root,
+                            resource_policy=policy,
+                        )
                     )
                     rebuild_evidence.append(
                         {
@@ -760,6 +823,7 @@ def _execute_action_with_policy(
 def _build_target(
     *,
     profile: ResearchProfile,
+    protocol: Any,
     layout: StorageLayout,
     spec: TargetSpec,
     planned: dict[str, object],
@@ -787,10 +851,19 @@ def _build_target(
         )
     data_spec = _catalog_data_spec(profile, spec.target_id)
     if data_spec is None:
-        return TargetResult(
-            target_id=spec.target_id,
-            status=TargetStatus.BLOCKED,
-            reason="capability_not_implemented",
+        return _build_semantic_target(
+            profile=profile,
+            protocol=protocol,
+            layout=layout,
+            spec=spec,
+            planned=planned,
+            target_layout=target_layout,
+            policy=policy,
+            time_window=time_window,
+            research_window=research_window,
+            software_identity=software_identity,
+            start_date=start_date,
+            end_date=end_date,
         )
     binding = profile.producer_bindings[spec.producer_id]
     if binding.kind is not _producer_kind(data_spec):
@@ -959,6 +1032,243 @@ def _build_target(
     )
 
 
+def _build_semantic_target(
+    *,
+    profile: ResearchProfile,
+    protocol: Any,
+    layout: StorageLayout,
+    spec: TargetSpec,
+    planned: Mapping[str, object],
+    target_layout: StorageLayout,
+    policy: Any,
+    time_window: TimeWindow | None,
+    research_window: Mapping[str, object],
+    software_identity: ProductionSoftwareIdentity,
+    start_date: str | None,
+    end_date: str | None,
+) -> TargetResult:
+    del start_date, end_date
+    binding = profile.producer_bindings.get(spec.producer_id or "")
+    if binding is None:
+        return TargetResult(
+            target_id=spec.target_id,
+            status=TargetStatus.BLOCKED,
+            reason="producer_binding_missing",
+        )
+    if binding.kind not in {
+        ProducerKind.EVALUATION,
+        ProducerKind.MODEL,
+        ProducerKind.PREDICTION,
+    }:
+        return TargetResult(
+            target_id=spec.target_id,
+            status=TargetStatus.BLOCKED,
+            reason="producer_binding_kind_mismatch",
+        )
+    if time_window is None:
+        return TargetResult(
+            target_id=spec.target_id,
+            status=TargetStatus.BLOCKED,
+            reason="research_window_required",
+        )
+    try:
+        envelope = _target_envelope_for_spec(
+            profile=profile,
+            protocol=protocol,
+            target_spec=spec,
+            data_spec=None,
+            research_window=research_window,
+            upstream_identities=planned["upstream_identities"],
+            software_identity=software_identity,
+            raw_content_identity=None,
+        )
+        logical_root = _target_logical_root(profile, layout, spec.target_id)
+        if logical_root is None:
+            raise ValueError("target_logical_root_missing")
+        if binding.kind is ProducerKind.EVALUATION:
+            evaluation_spec = profile.evaluations.get(spec.target_id)
+            evaluation_result = binding.producer(
+                layout=target_layout,
+                dataset_catalog=profile.research_datasets,
+                evaluation_catalog=profile.evaluations,
+                evaluation_id=spec.target_id,
+                time_window=time_window,
+                resource_policy=policy,
+            )
+
+            def write(staging: Path) -> None:
+                with evaluation_result as result:
+                    write_evaluation_outputs_from_chunks(
+                        result.output_chunks,
+                        summary_factory=result.summaries,
+                        spec=evaluation_spec,
+                        output_spec=_output_spec_for_target(
+                            spec.target_id,
+                            evaluation_spec.market_id,
+                            "evaluation",
+                        ),
+                        layout=StorageLayout(staging),
+                        n_groups=evaluation_spec.n_groups,
+                        resource_policy=policy,
+                    )
+
+            write_semantic_artifact(logical_root, envelope, write)
+        elif binding.kind is ProducerKind.MODEL:
+            timeline = _walk_forward_windows(time_window)
+            scenario_id = protocol.scenario_id
+            model_ids = tuple(
+                f"{scenario_id}_{algorithm}"
+                for algorithm in protocol.manifest()["selection_tie_break"]
+            )
+            model_result = binding.producer(
+                layout=target_layout,
+                dataset_catalog=profile.research_datasets,
+                model_catalog=profile.models,
+                dataset_id=scenario_id,
+                model_ids=model_ids,
+                tie_break_order=model_ids,
+                time_window=time_window,
+                resource_policy=policy,
+                protocol_manifest=protocol.manifest(),
+                **timeline,
+            )
+            if not isinstance(model_result, ModelSelectionResult):
+                raise ValueError("model_selection_result_invalid")
+            write_model_artifact(
+                logical_root,
+                model_id=model_result.model_id,
+                envelope=envelope,
+                result=model_result.model_result,
+                quarterly_results=model_result.quarterly_results,
+            )
+        else:
+            model_target = spec.dependencies[-1]
+            model_identity = planned["upstream_identities"].get(model_target)
+            if type(model_identity) is not str:
+                raise ValueError("model_identity_missing")
+            persisted = read_model_artifact(
+                _target_instance_root(profile, layout, model_target, model_identity),
+                expected_identity=model_identity,
+            )
+            timeline = _walk_forward_windows(time_window)
+            prediction_timeline = (
+                {
+                    "refit_train_end": "2018-12-31",
+                    "prediction_start": _date_text(time_window.start),
+                }
+                if protocol.manifest().get("protocol_id") == "a_share_low_frequency"
+                else timeline
+            )
+            prediction_spec = PredictionSpec(
+                prediction_id=spec.target_id,
+                model_id=persisted.model_id,
+                research_dataset_id=protocol.scenario_id,
+                train_end=prediction_timeline["refit_train_end"],
+                test_start=prediction_timeline["prediction_start"],
+                test_end=_date_text(time_window.end),
+                prediction_mode="a_share_oos",
+                prediction_column=RAW_PREDICTION_COLUMN,
+            )
+            prediction_result = binding.producer(
+                layout=target_layout,
+                dataset_catalog=profile.research_datasets,
+                prediction_spec=prediction_spec,
+                model_result=persisted.result,
+                model_metadata=persisted.result.metadata,
+                resource_policy=policy,
+            )
+
+            def write(staging: Path) -> None:
+                with prediction_result as result:
+                    write_prediction_outputs(
+                        spec=prediction_spec,
+                        output_spec=_output_spec_for_target(
+                            spec.target_id,
+                            profile.market_id,
+                            "prediction",
+                        ),
+                        layout=StorageLayout(staging),
+                        output_chunks=result.output_chunks,
+                        model_metadata=result.model_metadata,
+                        prediction_metadata_factory=result.prediction_metadata_factory,
+                        resource_policy=policy,
+                    )
+
+            write_semantic_artifact(logical_root, envelope, write)
+        output_root = _target_instance_root(
+            profile,
+            layout,
+            spec.target_id,
+            envelope.instance_identity,
+        )
+        _validate_semantic_target_root(
+            profile,
+            spec,
+            output_root,
+            envelope.instance_identity,
+        )
+    except (ImportError, KeyError, TypeError, ValueError) as exc:
+        reason = {
+            ProducerKind.EVALUATION: "evaluation_build_failed",
+            ProducerKind.MODEL: "model_selection_failed",
+            ProducerKind.PREDICTION: "prediction_build_failed",
+        }[binding.kind]
+        return TargetResult(
+            target_id=spec.target_id,
+            status=TargetStatus.FAILED,
+            reason=f"{reason}:{type(exc).__name__}",
+        )
+    return TargetResult(
+        target_id=spec.target_id,
+        status=TargetStatus.BUILT,
+        instance_identity=envelope.instance_identity,
+    )
+
+
+def _output_spec_for_target(
+    target_id: str,
+    market_id: object,
+    run_type: str,
+) -> OutputSpec:
+    return OutputSpec(
+        output_id=target_id,
+        output_definition_id=f"{run_type}_outputs",
+        run_id=f"run_{target_id}",
+        market_id=market_id,
+        run_type=run_type,
+        scope=OutputScope.LOCAL_ONLY,
+    )
+
+
+def _walk_forward_windows(time_window: TimeWindow) -> dict[str, str]:
+    dates = pd.date_range(
+        pd.Timestamp(time_window.start).normalize(),
+        pd.Timestamp(time_window.end).normalize(),
+        freq="D",
+    )
+    if len(dates) < 4:
+        raise ValueError("model_selection_window_too_short")
+    train_end_index = max(0, len(dates) // 3 - 1)
+    validation_start_index = train_end_index + 1
+    validation_end_index = max(
+        validation_start_index,
+        (2 * len(dates)) // 3 - 1,
+    )
+    validation_end_index = min(validation_end_index, len(dates) - 2)
+    prediction_start_index = validation_end_index + 1
+    return {
+        "selection_train_end": _date_text(dates[train_end_index]),
+        "validation_start": _date_text(dates[validation_start_index]),
+        "validation_end": _date_text(dates[validation_end_index]),
+        "refit_train_end": _date_text(dates[validation_end_index]),
+        "prediction_start": _date_text(dates[prediction_start_index]),
+    }
+
+
+def _date_text(value: object) -> str:
+    return pd.Timestamp(value).date().isoformat()
+
+
 def _reuse_target(
     *,
     profile: ResearchProfile,
@@ -978,8 +1288,15 @@ def _reuse_target(
         spec.target_id,
         requested_identity,
     )
-    envelope = _validate_published_target(root, requested_identity)
     data_spec = _catalog_data_spec(profile, spec.target_id)
+    if data_spec is None:
+        _validate_semantic_target_root(profile, spec, root, requested_identity)
+        return TargetResult(
+            target_id=spec.target_id,
+            status=TargetStatus.REUSED,
+            instance_identity=requested_identity,
+        )
+    envelope = _validate_published_target(root, requested_identity)
     if isinstance(data_spec, InterimDataSpec):
         binding = profile.producer_bindings.get(spec.producer_id or "")
         if binding is None or binding.source_identity is None:
@@ -1044,6 +1361,25 @@ def _validate_published_target(
     ):
         raise ValueError("published_instance_identity_mismatch")
     return envelope
+
+
+def _validate_semantic_target_root(
+    profile: ResearchProfile,
+    spec: TargetSpec,
+    root: Path,
+    expected_identity: str,
+) -> None:
+    binding = profile.producer_bindings.get(spec.producer_id or "")
+    if binding is None:
+        raise ValueError("producer_binding_missing")
+    envelope = read_semantic_artifact(root, expected_identity=expected_identity)
+    if envelope["logical_artifact_id"] != spec.target_id:
+        raise ValueError("semantic_artifact_logical_id_mismatch")
+    if binding.kind is ProducerKind.MODEL:
+        read_model_artifact(root, expected_identity=expected_identity)
+        return
+    if binding.kind not in {ProducerKind.EVALUATION, ProducerKind.PREDICTION}:
+        raise ValueError("semantic_artifact_kind_invalid")
 
 
 def _target_specs(
@@ -1147,6 +1483,49 @@ def _target_envelope(
     )
 
 
+def _target_envelope_for_spec(
+    *,
+    profile: ResearchProfile,
+    protocol: Any,
+    target_spec: TargetSpec,
+    data_spec: DataSpec | None,
+    research_window: Mapping[str, object],
+    upstream_identities: Mapping[str, str],
+    software_identity: ProductionSoftwareIdentity,
+    raw_content_identity: str | None,
+) -> BusinessManifestEnvelope:
+    if data_spec is not None:
+        return _target_envelope(
+            profile=profile,
+            data_spec=data_spec,
+            research_window=research_window,
+            upstream_identities=upstream_identities,
+            software_identity=software_identity,
+            raw_content_identity=raw_content_identity,
+        )
+    if target_spec.producer_id is None:
+        raise ValueError("producer_binding_missing")
+    binding = profile.producer_bindings.get(target_spec.producer_id)
+    if binding is None:
+        raise ValueError("producer_binding_missing")
+    semantic_payload = {
+        "target_id": target_spec.target_id,
+        "dependencies": list(target_spec.dependencies),
+        "producer_kind": binding.kind.value,
+        "protocol": protocol.manifest(),
+    }
+    spec_identity = canonical_json_hash(semantic_payload)
+    return build_business_manifest_envelope(
+        logical_artifact_id=target_spec.target_id,
+        schema_identity=spec_identity,
+        protocol_or_spec_identity=spec_identity,
+        software_identity=software_identity.identity_hash,
+        research_window=research_window,
+        upstream_identities=upstream_identities,
+        semantic_metadata={"target_contract": semantic_payload},
+    )
+
+
 def _research_window(
     protocol: Any,
     requested: Mapping[str, object] | None,
@@ -1188,7 +1567,10 @@ def _matching_instance(
     if logical_root is None:
         return None, "target_logical_root_missing"
     try:
-        instances = discover_dataset_instances(logical_root)
+        if _catalog_data_spec(profile, target_id) is None:
+            instances = discover_semantic_artifact_instances(logical_root)
+        else:
+            instances = discover_dataset_instances(logical_root)
     except ValueError:
         return None, "persisted_instance_invalid"
     matching = tuple(
@@ -1274,7 +1656,14 @@ def _target_logical_root(
     try:
         spec = profile.research_datasets.get(target_id)
     except KeyError:
-        return None
+        binding = profile.producer_bindings.get(target_id)
+        if binding is None or binding.kind in {
+            ProducerKind.INTERIM,
+            ProducerKind.PROCESSED,
+            ProducerKind.DATASET,
+        }:
+            return None
+        return layout.semantic_artifact_root(profile.market_id, target_id)
     return layout.research_dataset_root(spec.market_id, spec.data_id)
 
 

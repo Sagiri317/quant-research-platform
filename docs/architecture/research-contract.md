@@ -40,6 +40,7 @@ artifacts 只验证并写入内容，不反向定义 report 语义。允许 `art
 公共 package surface 由唯一 active contract 管理；内部 helper 只在真实 caller 需要时保留，不以名称、可见性或 re-export 形状作为 gate。
 
 model selection 的 metric、direction 和无警告行为必须由合同与 owner-layer tests 保护，runner 不维护平行事实源。
+A 股 production chain 由同一 target-DAG 顺序持久化 research dataset、factor evaluation、quarterly model selection/refit 和 OOS prediction；prediction 只读取已发布 model artifact。
 
 未接入当前 production path 的 deferred 实现、脚手架和测试不保留；仍有产品价值时只记录 open issue。
 

@@ -24,7 +24,10 @@ def iter_research_dataset_chunks(
     time_window: TimeWindow | None = None,
     columns: tuple[str, ...] | list[str] | None = None,
 ) -> Iterator[pd.DataFrame]:
-    artifact_root = layout.research_dataset_root(market_id, dataset_id)
+    artifact_root = layout.target_root(
+        dataset_id,
+        layout.research_dataset_root(market_id, dataset_id),
+    )
     chunks = read_dataset(
         artifact_root,
         time_window=time_window,

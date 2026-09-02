@@ -1374,7 +1374,7 @@ def _parallel_estimator_workspace_bytes(
     thread_count = supervised.model_thread_count(spec) if threads is None else threads
     integer = np.dtype(np.intp).itemsize
     floating = np.dtype(np.float64).itemsize
-    if algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
+    if algorithm == "random_forest_regressor":
         return thread_count * (rows * (integer + floating) + inputs * floating)
     if algorithm == "xgboost_regressor":
         params = supervised.resolved_model_hyperparameters(spec)
@@ -1493,7 +1493,6 @@ def _model_state_upper_bound_bytes(
         "linear_regression",
         "ridge_regression",
         "lasso_regression",
-        "elastic_net",
         "huber_regression",
         "single_factor_baseline",
         "equal_weight_rank_ensemble",
@@ -1503,11 +1502,8 @@ def _model_state_upper_bound_bytes(
 
     tree_count = 1
     leaves = 2 * rows - 1
-    if algorithm in {"random_forest_regressor", "extra_trees_regressor"}:
+    if algorithm == "random_forest_regressor":
         tree_count = _positive_model_int(params.get("n_estimators"), default=100)
-        depth = _positive_model_int(params.get("max_depth"), default=0)
-        leaves = _bounded_tree_nodes(rows, depth=depth)
-    elif algorithm == "decision_tree_regressor":
         depth = _positive_model_int(params.get("max_depth"), default=0)
         leaves = _bounded_tree_nodes(rows, depth=depth)
     elif algorithm == "gradient_boosting_regressor":
@@ -1520,17 +1516,6 @@ def _model_state_upper_bound_bytes(
                 if depth_value is None
                 else _positive_model_int(depth_value, default=3)
             ),
-        )
-    elif algorithm == "hist_gradient_boosting_regressor":
-        tree_count = _positive_model_int(params.get("max_iter"), default=100)
-        max_leaf_nodes = params.get("max_leaf_nodes")
-        leaves = (
-            2 * rows - 1
-            if max_leaf_nodes is None
-            else min(
-                2 * rows - 1,
-                2 * _positive_model_int(max_leaf_nodes, default=31),
-            )
         )
     elif algorithm == "xgboost_regressor":
         tree_count = _positive_model_int(params.get("n_estimators"), default=100)

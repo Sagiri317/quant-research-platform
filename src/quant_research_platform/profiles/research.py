@@ -100,6 +100,15 @@ def _a_share_profile() -> ResearchProfile:
     from quant_research_platform.research.datasets.assembler import (
         assemble_research_dataset,
     )
+    from quant_research_platform.research.evaluations.runner import (
+        build_evaluation_result_from_research_dataset,
+    )
+    from quant_research_platform.research.models.production import (
+        build_model_selection_result,
+    )
+    from quant_research_platform.research.predictions.runner import (
+        build_prediction_result_from_persisted_model,
+    )
 
     interim = InterimDataCatalog(
         (*csmar_interim_catalog().list(), *choice_interim_catalog().list())
@@ -143,6 +152,27 @@ def _a_share_profile() -> ResearchProfile:
                     assemble_research_dataset,
                 )
                 for spec in research_datasets.list()
+            },
+            **{
+                f"{scenario_id}_evaluation": ProducerBinding(
+                    ProducerKind.EVALUATION,
+                    build_evaluation_result_from_research_dataset,
+                )
+                for scenario_id in a_share.SCENARIO_IDS
+            },
+            **{
+                f"{scenario_id}_model_selection_refit": ProducerBinding(
+                    ProducerKind.MODEL,
+                    build_model_selection_result,
+                )
+                for scenario_id in a_share.SCENARIO_IDS
+            },
+            **{
+                f"{scenario_id}_persisted_predictions": ProducerBinding(
+                    ProducerKind.PREDICTION,
+                    build_prediction_result_from_persisted_model,
+                )
+                for scenario_id in a_share.SCENARIO_IDS
             },
         },
         schema_inventory_important_columns=(

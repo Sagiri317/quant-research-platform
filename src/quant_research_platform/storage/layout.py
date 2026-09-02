@@ -66,6 +66,9 @@ class StorageLayout:
     def research_dataset_root(self, market_id: MarketId, data_id: str) -> Path:
         return self.project_root / "data/research" / str(market_id) / data_id
 
+    def semantic_artifact_root(self, market_id: MarketId, artifact_id: str) -> Path:
+        return self.project_root / "data/artifacts" / str(market_id) / artifact_id
+
     def instance_root(self, logical_root: Path, instance_identity: str) -> Path:
         return (
             Path(logical_root)

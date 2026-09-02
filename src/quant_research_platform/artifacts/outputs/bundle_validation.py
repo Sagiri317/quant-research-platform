@@ -16,6 +16,7 @@ import pyarrow.compute as pc
 from quant_research_platform.artifacts.outputs.manifest import (
     validate_output_manifest_business_envelope,
 )
+from quant_research_platform.contracts.predictions import prediction_output_columns
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -261,7 +262,11 @@ def read_prediction_output_bundle(
                 prediction_path,
                 expected_identity=prediction_identity,
             ) as (parquet, _identity):
-                expected_columns = (*primary_key, prediction_column)
+                expected_columns = prediction_output_columns(
+                    str(metadata["prediction_mode"]),
+                    prediction_column,
+                    primary_key,
+                )
                 if tuple(parquet.schema_arrow.names) != expected_columns:
                     raise ValueError("persisted_prediction_columns_mismatch")
                 test_start = metadata.get("test_start")
