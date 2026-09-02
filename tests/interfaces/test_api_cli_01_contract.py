@@ -53,10 +53,10 @@ def test_api_catalog_and_requirements_use_current_a_share_protocol() -> None:
     }
     requirements = responses[2].json()
     assert requirements["dataset_id"] == "pv_all"
-    assert requirements["input_data_ids"][:3] == [
+    assert requirements["input_data_ids"] == [
         "market_panel_1d",
-        "execution_mask",
         "price_volume_facts",
+        "forward_returns",
     ]
     _assert_public_text_is_sanitized(
         "\n".join(str(response.json()) for response in responses)
