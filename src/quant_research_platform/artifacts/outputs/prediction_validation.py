@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from math import isfinite
+
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs.common_validation import (
@@ -28,6 +31,7 @@ from quant_research_platform.contracts.predictions import (
     RAW_PREDICTION_COLUMN,
     PredictionSpec,
 )
+from quant_research_platform.contracts.run_id import validate_run_id
 
 _MODEL_METADATA_BASE_KEYS = frozenset(
     {
@@ -140,6 +144,8 @@ _PREDICTION_OUTPUT_METADATA_KEYS = frozenset(
 def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, object]:
     if type(metadata) is not dict:
         raise ValueError("invalid_model_metadata")
+    if metadata.get("model_algorithm") == "quarterly_route":
+        return _validate_quarterly_route_metadata(metadata)
     metadata_keys = set(metadata)
     feature_keys = metadata_keys.intersection(_MODEL_METADATA_FEATURE_KEYS)
     extra_keys = (
@@ -484,17 +490,18 @@ def validate_prediction_output_metadata_shape(
             if type(model_selection) is dict
             else metadata["model_id"]
         )
-        ModelSpec(
-            model_id=persisted_model_id,
-            model_algorithm=model_metadata["model_algorithm"],
-            input_factor_columns=tuple(model_metadata["input_factor_columns"]),
-            input_feature_columns=tuple(model_metadata["input_feature_columns"]),
-            label_column=model_metadata["label_column"],
-            sample_filter_mode=model_metadata["sample_filter_mode"],
-            hyperparameters=model_metadata["hyperparameters"],
-            random_seed=model_metadata["random_seed"],
-            max_train_rows=model_metadata["max_train_rows"],
-        )
+        if model_metadata["model_algorithm"] != "quarterly_route":
+            ModelSpec(
+                model_id=persisted_model_id,
+                model_algorithm=model_metadata["model_algorithm"],
+                input_factor_columns=tuple(model_metadata["input_factor_columns"]),
+                input_feature_columns=tuple(model_metadata["input_feature_columns"]),
+                label_column=model_metadata["label_column"],
+                sample_filter_mode=model_metadata["sample_filter_mode"],
+                hyperparameters=model_metadata["hyperparameters"],
+                random_seed=model_metadata["random_seed"],
+                max_train_rows=model_metadata["max_train_rows"],
+            )
         spec = PredictionSpec(
             prediction_id=metadata["prediction_id"],
             model_id=metadata["model_id"],
@@ -634,6 +641,9 @@ def validate_model_metadata_consistency(
     *,
     spec: PredictionSpec,
 ) -> None:
+    if metadata.get("model_algorithm") == "quarterly_route":
+        _validate_quarterly_route_window(metadata, spec=spec)
+        return
     input_count = require_non_negative_metadata_int(
         metadata,
         "input_count",
@@ -774,6 +784,212 @@ def validate_model_prediction_metadata_consistency(
         raise ValueError("prediction_metadata_inconsistent")
     if model_metadata["oos_end"] != prediction_metadata["effective_test_end"]:
         raise ValueError("prediction_metadata_inconsistent")
+
+
+_QUARTER_ID_RE = re.compile(r"^[0-9]{4}Q[1-4]$")
+_QUARTERLY_ROUTE_KEYS = frozenset(
+    {
+        "quarter_id",
+        "model_id",
+        "training_window",
+        "validation_window",
+        "prediction_window",
+        "fit_cutoff",
+        "n_train",
+        "features",
+        "directions",
+        "weights",
+        "scaler",
+        "resolved_params",
+        "random_seed",
+        "backend",
+        "model_metadata",
+    }
+)
+
+
+def _validate_quarterly_route_metadata(
+    metadata: dict[str, object],
+) -> dict[str, object]:
+    required = _MODEL_METADATA_BASE_KEYS | {
+        "quarterly_route",
+        "feature_importance_status",
+    }
+    if set(metadata) != required:
+        raise ValueError("invalid_model_metadata")
+    if (
+        metadata["sample_weight_protocol"] != "equal_date_total_equal_sum_n_train"
+        or metadata["scaler"] is not None
+        or metadata["hyperparameters"] != {}
+        or metadata["resolved_hyperparameters"] != {}
+        or metadata["random_seed"] is not None
+        or metadata["max_train_rows"] is not None
+        or metadata["coefficient_count"] != 1
+    ):
+        raise ValueError("invalid_model_metadata")
+    route = metadata["quarterly_route"]
+    if type(route) is not list or not route:
+        raise ValueError("invalid_model_metadata")
+    previous_prediction_end: pd.Timestamp | None = None
+    previous_quarter: str | None = None
+    route_factor_columns: list[str] = []
+    route_feature_columns: list[str] = []
+    route_label: str | None = None
+    totals = {
+        "rows_input": 0,
+        "rows_after_filter_mode": 0,
+        "rows_after_input_label_dropna": 0,
+    }
+    for entry in route:
+        if type(entry) is not dict or set(entry) != _QUARTERLY_ROUTE_KEYS:
+            raise ValueError("invalid_model_metadata")
+        quarter_id = entry["quarter_id"]
+        model_id = entry["model_id"]
+        if (
+            type(quarter_id) is not str
+            or _QUARTER_ID_RE.fullmatch(quarter_id) is None
+            or type(model_id) is not str
+            or not model_id
+        ):
+            raise ValueError("invalid_model_metadata")
+        training = _validate_route_window(entry["training_window"])
+        validation = _validate_route_window(entry["validation_window"])
+        prediction = _validate_route_window(entry["prediction_window"])
+        if (
+            training[1] >= validation[0]
+            or validation[1] >= prediction[0]
+            or training[0].year < 2014
+            or prediction[1].year > 2023
+            or (
+                previous_prediction_end is not None
+                and prediction[0] <= previous_prediction_end
+            )
+            or (
+                previous_quarter is not None
+                and quarter_id != _next_quarter_id(previous_quarter)
+            )
+        ):
+            raise ValueError("invalid_model_metadata")
+        try:
+            validate_run_id(model_id)
+        except ValueError as exc:
+            raise ValueError("invalid_model_metadata") from exc
+        previous_prediction_end = prediction[1]
+        fit_cutoff = entry["fit_cutoff"]
+        if type(fit_cutoff) is not str or pd.Timestamp(fit_cutoff) != validation[1]:
+            raise ValueError("invalid_model_metadata")
+        n_train = entry["n_train"]
+        if type(n_train) is not int or n_train <= 0:
+            raise ValueError("invalid_model_metadata")
+        features = entry["features"]
+        if type(features) is not list or any(
+            type(column) is not str or not column for column in features
+        ):
+            raise ValueError("invalid_model_metadata")
+        directions = entry["directions"]
+        weights = entry["weights"]
+        if (
+            type(directions) is not list
+            or type(weights) is not list
+            or any(
+                type(value) not in {int, float} or not isfinite(float(value))
+                for values in (directions, weights)
+                for value in values
+            )
+        ):
+            raise ValueError("invalid_model_metadata")
+        nested = entry["model_metadata"]
+        if type(nested) is not dict:
+            raise ValueError("invalid_model_metadata")
+        if entry["scaler"] != nested.get("scaler"):
+            raise ValueError("invalid_model_metadata")
+        if entry["resolved_params"] != nested.get("resolved_hyperparameters"):
+            raise ValueError("invalid_model_metadata")
+        if entry["random_seed"] != nested.get("random_seed"):
+            raise ValueError("invalid_model_metadata")
+        if entry["backend"] != nested.get("dependency_status"):
+            raise ValueError("invalid_model_metadata")
+        nested_for_validation = dict(nested)
+        nested_for_validation.pop("model_selection", None)
+        nested_valid = validate_model_metadata_shape(nested_for_validation)
+        if nested_valid["input_columns"] != features:
+            raise ValueError("invalid_model_metadata")
+        if nested_valid["rows_after_input_label_dropna"] != n_train:
+            raise ValueError("invalid_model_metadata")
+        for key in totals:
+            totals[key] += nested_valid[key]
+        for source, target in (
+            (nested_valid["input_factor_columns"], route_factor_columns),
+            (nested_valid["input_feature_columns"], route_feature_columns),
+        ):
+            for column in source:
+                if column not in target:
+                    target.append(column)
+        label = nested_valid["label_column"]
+        if route_label is None:
+            route_label = label
+        elif route_label != label:
+            raise ValueError("invalid_model_metadata")
+        previous_quarter = quarter_id
+    if (
+        metadata["input_factor_columns"] != route_factor_columns
+        or metadata["input_feature_columns"] != route_feature_columns
+        or metadata["input_columns"] != [*route_factor_columns, *route_feature_columns]
+        or metadata["input_count"]
+        != len(route_factor_columns) + len(route_feature_columns)
+        or metadata["label_column"] != route_label
+        or any(metadata[key] != value for key, value in totals.items())
+        or metadata["train_start"]
+        != min(entry["model_metadata"]["train_start"] for entry in route)
+        or metadata["train_end"]
+        != max(entry["model_metadata"]["train_end"] for entry in route)
+        or metadata["test_start"] != route[0]["prediction_window"]["start"]
+        or pd.Timestamp(metadata["test_end"])
+        < pd.Timestamp(route[-1]["prediction_window"]["end"])
+        or metadata["oos_start"] != route[0]["prediction_window"]["start"]
+        or metadata["oos_end"] != route[-1]["prediction_window"]["end"]
+        or type(metadata["feature_importance_status"]) is not str
+        or not metadata["feature_importance_status"]
+    ):
+        raise ValueError("invalid_model_metadata")
+    return metadata
+
+
+def _validate_route_window(value: object) -> tuple[pd.Timestamp, pd.Timestamp]:
+    if (
+        type(value) is not dict
+        or set(value) != {"start", "end"}
+        or type(value["start"]) is not str
+        or type(value["end"]) is not str
+    ):
+        raise ValueError("invalid_model_metadata")
+    start = pd.Timestamp(value["start"])
+    end = pd.Timestamp(value["end"])
+    if start > end:
+        raise ValueError("invalid_model_metadata")
+    return start, end
+
+
+def _validate_quarterly_route_window(
+    metadata: dict[str, object],
+    *,
+    spec: PredictionSpec,
+) -> None:
+    route = metadata["quarterly_route"]
+    if pd.Timestamp(route[0]["prediction_window"]["start"]) < pd.Timestamp(
+        spec.test_start
+    ) or pd.Timestamp(route[-1]["prediction_window"]["end"]) > pd.Timestamp(
+        spec.test_end
+    ):
+        raise ValueError("model_metadata_inconsistent")
+
+
+def _next_quarter_id(value: str) -> str:
+    year = int(value[:4])
+    quarter = int(value[-1])
+    if quarter == 4:
+        return f"{year + 1:04d}Q1"
+    return f"{year:04d}Q{quarter + 1}"
 
 
 def model_metadata_with_effective_prediction_end(

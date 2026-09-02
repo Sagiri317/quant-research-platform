@@ -54,7 +54,7 @@ def dataset_file_identity(path: Path) -> DatasetFileIdentity:
         error="invalid_dataset_part_files",
     )
     try:
-        before = candidate.lstat()
+        before = os.stat(native_filesystem_path(candidate), follow_symlinks=False)
     except OSError as exc:
         raise ValueError("invalid_dataset_part_files") from exc
     if not stat.S_ISREG(before.st_mode) or int(before.st_ino) <= 0:
@@ -137,7 +137,7 @@ def _hash_file_content(
     if chunk_size <= 0:
         raise ValueError(error)
     digest = hashlib.sha256()
-    with Path(path).open("rb") as handle:
+    with open_filesystem_file(Path(path)) as handle:
         handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
         if handle_identity != expected:
             raise ValueError(error)
@@ -149,6 +149,28 @@ def _hash_file_content(
     if final_handle_identity != expected or dataset_file_identity(path) != expected:
         raise ValueError(error)
     return digest.hexdigest()
+
+
+def native_filesystem_path(path: Path) -> str | Path:
+    """Return a Windows extended path when native APIs need long-path support."""
+
+    if os.name != "nt":
+        return Path(path)
+    absolute = os.path.abspath(path)
+    if absolute.startswith("\\\\?\\"):
+        return absolute
+    if absolute.startswith("\\\\"):
+        return f"\\\\?\\UNC\\{absolute[2:]}"
+    return f"\\\\?\\{absolute}"
+
+
+def open_filesystem_file(path: Path, mode: str = "rb"):
+    """Open a local file while retaining normal Path seams below MAX_PATH."""
+
+    candidate = Path(path)
+    if os.name == "nt" and len(os.path.abspath(candidate)) >= 240:
+        return open(native_filesystem_path(candidate), mode)
+    return candidate.open(mode)
 
 
 def require_artifact_root(root: Path) -> Path:

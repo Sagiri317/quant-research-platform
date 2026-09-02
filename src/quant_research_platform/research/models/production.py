@@ -10,7 +10,7 @@ import pandas as pd
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.supervised import (
@@ -34,8 +34,7 @@ from quant_research_platform.storage.layout import StorageLayout
 @dataclass(frozen=True)
 class ModelSelectionResult:
     model_id: str
-    model_result: fitting.ModelFitResult
-    quarterly_results: tuple[QuarterlyModelResult, ...] = ()
+    quarterly_results: tuple[QuarterlyModelResult, ...]
 
 
 @dataclass(frozen=True)
@@ -51,25 +50,19 @@ def build_model_selection_result(
     dataset_catalog: ResearchDatasetCatalog,
     model_catalog: ModelCatalog,
     dataset_id: str,
+    artifact_id: str,
     model_ids: tuple[str, ...],
     tie_break_order: tuple[str, ...],
     time_window: TimeWindow,
-    selection_train_end: str,
-    validation_start: str,
-    validation_end: str,
-    refit_train_end: str,
-    prediction_start: str,
     resource_policy: RuntimeResourcePolicy,
-    protocol_manifest: Mapping[str, object] | None = None,
+    protocol_manifest: Mapping[str, object],
 ) -> ModelSelectionResult:
     if not model_ids or set(model_ids) != set(tie_break_order):
         raise ValueError("model_selection_model_ids_invalid")
     dataset_spec = dataset_catalog.get(dataset_id)
-    formal_a_share = (
-        protocol_manifest is not None
-        and protocol_manifest.get("protocol_id") == "a_share_low_frequency"
-    )
-    dataset_read_window = None if formal_a_share else time_window
+    if protocol_manifest.get("protocol_id") != "a_share_low_frequency":
+        raise ValueError("a_share_protocol_required")
+    dataset_read_window = TimeWindow("2014-01-01", "2023-12-31")
 
     def chunks(
         read_columns: tuple[str, ...],
@@ -88,48 +81,16 @@ def build_model_selection_result(
             input_columns=input_columns,
         )
 
-    if formal_a_share:
-        return _build_a_share_quarterly_models(
-            layout=layout,
-            dataset_spec=dataset_spec,
-            model_catalog=model_catalog,
-            dataset_id=dataset_id,
-            model_ids=model_ids,
-            tie_break_order=tie_break_order,
-            time_window=time_window,
-            chunks=chunks,
-        )
-
-    selection_spec = PredictionSpec(
-        prediction_id=f"{dataset_id}_model_selection",
-        model_id=model_ids[0],
-        research_dataset_id=dataset_id,
-        train_end=selection_train_end,
-        test_start=prediction_start,
-        test_end=time_value_isoformat(time_window.end, preserve_datetime=True),
-        candidate_model_ids=model_ids[1:],
-        model_selection_validation_start=validation_start,
-        model_selection_validation_end=validation_end,
-    )
-    selected_spec, selection_metadata = _select_model_family_winners(
-        selection_spec=selection_spec,
+    return _build_a_share_quarterly_models(
+        layout=layout,
         dataset_spec=dataset_spec,
         model_catalog=model_catalog,
-        chunks=chunks,
+        dataset_id=dataset_id,
+        artifact_id=artifact_id,
         model_ids=model_ids,
         tie_break_order=tie_break_order,
-        formal_a_share=formal_a_share,
-    )
-    model_result = _fit_selected_model_result(
-        dataset_spec=dataset_spec,
-        selected_spec=selected_spec,
+        time_window=time_window,
         chunks=chunks,
-        fitting_cutoff=refit_train_end,
-        selection_metadata=selection_metadata,
-    )
-    return ModelSelectionResult(
-        model_id=selected_spec.model_id,
-        model_result=model_result,
     )
 
 
@@ -139,12 +100,17 @@ def _build_a_share_quarterly_models(
     dataset_spec,
     model_catalog: ModelCatalog,
     dataset_id: str,
+    artifact_id: str,
     model_ids: tuple[str, ...],
     tie_break_order: tuple[str, ...],
     time_window: TimeWindow,
     chunks,
 ) -> ModelSelectionResult:
-    sessions = _dataset_sessions(layout, dataset_spec=dataset_spec)
+    sessions = _dataset_sessions(
+        layout,
+        dataset_spec=dataset_spec,
+        time_window=TimeWindow("2014-01-01", "2023-12-31"),
+    )
     quarters = a_share_walk_forward_quarters(sessions)
     requested_start = pd.Timestamp(time_window.start)
     requested_end = pd.Timestamp(time_window.end)
@@ -178,7 +144,6 @@ def _build_a_share_quarterly_models(
             chunks=chunks,
             model_ids=model_ids,
             tie_break_order=tie_break_order,
-            formal_a_share=True,
         )
         model_result = _fit_selected_model_result(
             dataset_spec=dataset_spec,
@@ -200,10 +165,8 @@ def _build_a_share_quarterly_models(
                 model_result=model_result,
             )
         )
-    first = results[0]
     return ModelSelectionResult(
-        model_id=first.model_id,
-        model_result=first.model_result,
+        model_id=artifact_id,
         quarterly_results=tuple(results),
     )
 
@@ -212,12 +175,14 @@ def _dataset_sessions(
     layout: StorageLayout,
     *,
     dataset_spec,
+    time_window: TimeWindow,
 ) -> pd.DatetimeIndex:
     values: set[pd.Timestamp] = set()
     for frame in iter_research_dataset_chunks(
         layout,
         market_id=dataset_spec.market_id,
         dataset_id=dataset_spec.data_id,
+        time_window=time_window,
         columns=("timestamp",),
     ):
         timestamps = pd.to_datetime(frame["timestamp"], errors="raise")
@@ -286,16 +251,7 @@ def _select_model_family_winners(
     chunks,
     model_ids: tuple[str, ...],
     tie_break_order: tuple[str, ...],
-    formal_a_share: bool,
 ):
-    if not formal_a_share:
-        return runner._select_prediction_model_spec(  # noqa: SLF001
-            prediction_spec=selection_spec,
-            dataset_spec=dataset_spec,
-            model_catalog=model_catalog,
-            chunks=chunks,
-        )
-
     from quant_research_platform.research.protocols.a_share import (
         resolve_trial_parameters,
     )

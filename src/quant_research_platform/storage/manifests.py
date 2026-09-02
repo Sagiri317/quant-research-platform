@@ -33,6 +33,7 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    open_filesystem_file,
     require_artifact_root,
     require_unaliased_path,
 )
@@ -58,7 +59,7 @@ def read_bounded_qrp_json(
     if identity.size > _MAX_QRP_JSON_BYTES:
         raise ValueError("dataset_metadata_file_too_large")
     try:
-        handle = candidate.open("rb")
+        handle = open_filesystem_file(candidate)
         with scratch_owner.handle_preserving_primary(handle):
             before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
             if before != identity:

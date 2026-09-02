@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
@@ -10,8 +11,16 @@ from typing import Any
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs import (
+    read_prediction_output_bundle,
+    validate_output_bundle,
     write_evaluation_outputs_from_chunks,
     write_prediction_outputs,
+)
+from quant_research_platform.artifacts.outputs.evaluation_validation import (
+    validate_evaluation_output_metadata_shape,
+)
+from quant_research_platform.artifacts.outputs.prediction_validation import (
+    validate_prediction_output_metadata_shape,
 )
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
@@ -1112,9 +1121,13 @@ def _build_semantic_target(
                         resource_policy=policy,
                     )
 
-            write_semantic_artifact(logical_root, envelope, write)
+            try:
+                write_semantic_artifact(logical_root, envelope, write)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"evaluation_write_failed:{_semantic_failure_code(exc)}"
+                ) from exc
         elif binding.kind is ProducerKind.MODEL:
-            timeline = _walk_forward_windows(time_window)
             scenario_id = protocol.scenario_id
             model_ids = tuple(
                 f"{scenario_id}_{algorithm}"
@@ -1125,12 +1138,12 @@ def _build_semantic_target(
                 dataset_catalog=profile.research_datasets,
                 model_catalog=profile.models,
                 dataset_id=scenario_id,
+                artifact_id=spec.target_id,
                 model_ids=model_ids,
                 tie_break_order=model_ids,
                 time_window=time_window,
                 resource_policy=policy,
                 protocol_manifest=protocol.manifest(),
-                **timeline,
             )
             if not isinstance(model_result, ModelSelectionResult):
                 raise ValueError("model_selection_result_invalid")
@@ -1138,11 +1151,20 @@ def _build_semantic_target(
                 logical_root,
                 model_id=model_result.model_id,
                 envelope=envelope,
-                result=model_result.model_result,
                 quarterly_results=model_result.quarterly_results,
             )
         else:
-            model_target = spec.dependencies[-1]
+            model_dependencies = tuple(
+                dependency
+                for dependency in spec.dependencies
+                if (
+                    profile.producer_bindings.get(dependency) is not None
+                    and profile.producer_bindings[dependency].kind is ProducerKind.MODEL
+                )
+            )
+            if len(model_dependencies) != 1:
+                raise ValueError("prediction_model_dependency_invalid")
+            model_target = model_dependencies[0]
             model_identity = planned["upstream_identities"].get(model_target)
             if type(model_identity) is not str:
                 raise ValueError("model_identity_missing")
@@ -1150,21 +1172,12 @@ def _build_semantic_target(
                 _target_instance_root(profile, layout, model_target, model_identity),
                 expected_identity=model_identity,
             )
-            timeline = _walk_forward_windows(time_window)
-            prediction_timeline = (
-                {
-                    "refit_train_end": "2018-12-31",
-                    "prediction_start": _date_text(time_window.start),
-                }
-                if protocol.manifest().get("protocol_id") == "a_share_low_frequency"
-                else timeline
-            )
             prediction_spec = PredictionSpec(
                 prediction_id=spec.target_id,
                 model_id=persisted.model_id,
                 research_dataset_id=protocol.scenario_id,
-                train_end=prediction_timeline["refit_train_end"],
-                test_start=prediction_timeline["prediction_start"],
+                train_end="2018-12-31",
+                test_start=_date_text(time_window.start),
                 test_end=_date_text(time_window.end),
                 prediction_mode="a_share_oos",
                 prediction_column=RAW_PREDICTION_COLUMN,
@@ -1194,7 +1207,12 @@ def _build_semantic_target(
                         resource_policy=policy,
                     )
 
-            write_semantic_artifact(logical_root, envelope, write)
+            try:
+                write_semantic_artifact(logical_root, envelope, write)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ValueError(
+                    f"prediction_write_failed:{_semantic_failure_code(exc)}"
+                ) from exc
         output_root = _target_instance_root(
             profile,
             layout,
@@ -1216,7 +1234,7 @@ def _build_semantic_target(
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.FAILED,
-            reason=f"{reason}:{type(exc).__name__}",
+            reason=f"{reason}:{_semantic_failure_code(exc)}",
         )
     return TargetResult(
         target_id=spec.target_id,
@@ -1240,29 +1258,15 @@ def _output_spec_for_target(
     )
 
 
-def _walk_forward_windows(time_window: TimeWindow) -> dict[str, str]:
-    dates = pd.date_range(
-        pd.Timestamp(time_window.start).normalize(),
-        pd.Timestamp(time_window.end).normalize(),
-        freq="D",
-    )
-    if len(dates) < 4:
-        raise ValueError("model_selection_window_too_short")
-    train_end_index = max(0, len(dates) // 3 - 1)
-    validation_start_index = train_end_index + 1
-    validation_end_index = max(
-        validation_start_index,
-        (2 * len(dates)) // 3 - 1,
-    )
-    validation_end_index = min(validation_end_index, len(dates) - 2)
-    prediction_start_index = validation_end_index + 1
-    return {
-        "selection_train_end": _date_text(dates[train_end_index]),
-        "validation_start": _date_text(dates[validation_start_index]),
-        "validation_end": _date_text(dates[validation_end_index]),
-        "refit_train_end": _date_text(dates[validation_end_index]),
-        "prediction_start": _date_text(dates[prediction_start_index]),
-    }
+def _semantic_failure_code(exc: BaseException) -> str:
+    value = str(exc)
+    if (
+        value
+        and len(value) <= 96
+        and re.fullmatch(r"[a-zA-Z0-9_.-]+(?::[a-zA-Z0-9_.-]+)*", value)
+    ):
+        return value
+    return type(exc).__name__.lower()
 
 
 def _date_text(value: object) -> str:
@@ -1378,8 +1382,32 @@ def _validate_semantic_target_root(
     if binding.kind is ProducerKind.MODEL:
         read_model_artifact(root, expected_identity=expected_identity)
         return
-    if binding.kind not in {ProducerKind.EVALUATION, ProducerKind.PREDICTION}:
-        raise ValueError("semantic_artifact_kind_invalid")
+    if binding.kind is ProducerKind.EVALUATION:
+        try:
+            manifest, _members = validate_output_bundle(
+                root / "outputs" / spec.target_id,
+                expected_output_id=spec.target_id,
+                expected_run_id=f"run_{spec.target_id}",
+            )
+            validate_evaluation_output_metadata_shape(manifest["metadata"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"evaluation_inner_artifact_invalid:{_semantic_failure_code(exc)}"
+            ) from exc
+        return
+    if binding.kind is ProducerKind.PREDICTION:
+        try:
+            with read_prediction_output_bundle(
+                root / "outputs" / spec.target_id,
+                expected_output_id=spec.target_id,
+                expected_run_id=f"run_{spec.target_id}",
+            ) as (manifest, _lookup):
+                validate_prediction_output_metadata_shape(manifest["metadata"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"prediction_inner_artifact_invalid:{_semantic_failure_code(exc)}"
+            ) from exc
+        return
 
 
 def _target_specs(
@@ -1508,12 +1536,12 @@ def _target_envelope_for_spec(
     binding = profile.producer_bindings.get(target_spec.producer_id)
     if binding is None:
         raise ValueError("producer_binding_missing")
-    semantic_payload = {
-        "target_id": target_spec.target_id,
-        "dependencies": list(target_spec.dependencies),
-        "producer_kind": binding.kind.value,
-        "protocol": protocol.manifest(),
-    }
+    semantic_payload = _semantic_target_payload(
+        profile=profile,
+        protocol=protocol,
+        target_spec=target_spec,
+        binding=binding,
+    )
     spec_identity = canonical_json_hash(semantic_payload)
     return build_business_manifest_envelope(
         logical_artifact_id=target_spec.target_id,
@@ -1524,6 +1552,98 @@ def _target_envelope_for_spec(
         upstream_identities=upstream_identities,
         semantic_metadata={"target_contract": semantic_payload},
     )
+
+
+def _semantic_target_payload(
+    *,
+    profile: ResearchProfile,
+    protocol: Any,
+    target_spec: TargetSpec,
+    binding,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "target_id": target_spec.target_id,
+        "dependencies": list(target_spec.dependencies),
+        "producer_kind": binding.kind.value,
+        "protocol": protocol.manifest(),
+    }
+    if binding.kind is ProducerKind.EVALUATION:
+        spec = profile.evaluations.get(target_spec.target_id)
+        payload["evaluation_spec"] = {
+            "evaluation_id": spec.evaluation_id,
+            "market_id": str(spec.market_id),
+            "research_dataset_id": spec.research_dataset_id,
+            "signals": [
+                {
+                    "signal_id": signal.signal_id,
+                    "source_kind": signal.source_kind,
+                    "source_column": signal.source_column,
+                    "direction": signal.direction,
+                    "transform": signal.transform,
+                }
+                for signal in spec.signals
+            ],
+            "label_columns": list(spec.label_columns),
+            "evaluation_axis": spec.evaluation_axis,
+            "filter_mode": spec.filter_mode,
+            "n_groups": spec.n_groups,
+            "run_type": spec.run_type,
+        }
+        payload["output_files"] = [
+            "metrics.parquet",
+            "grouped_label_values.parquet",
+            "ic_summary.parquet",
+            "group_spread_summary.parquet",
+            "summary.md",
+        ]
+    elif binding.kind is ProducerKind.MODEL:
+        model_ids = tuple(
+            f"{protocol.scenario_id}_{algorithm}"
+            for algorithm in protocol.manifest().get("selection_tie_break", ())
+        )
+        payload["model_specs"] = [
+            _model_spec_payload(profile.models.get(model_id)) for model_id in model_ids
+        ]
+        payload["model_artifact_schema"] = "quarterly_route"
+    elif binding.kind is ProducerKind.PREDICTION:
+        model_dependencies = tuple(
+            dependency
+            for dependency in target_spec.dependencies
+            if (
+                profile.producer_bindings.get(dependency) is not None
+                and profile.producer_bindings[dependency].kind is ProducerKind.MODEL
+            )
+        )
+        if len(model_dependencies) != 1:
+            raise ValueError("prediction_model_dependency_invalid")
+        payload["prediction_schema"] = {
+            "prediction_id": target_spec.target_id,
+            "research_dataset_id": protocol.scenario_id,
+            "model_target_id": model_dependencies[0],
+            "prediction_mode": "a_share_oos",
+            "columns": [
+                "timestamp",
+                "asset_id",
+                "model_id",
+                "raw_prediction",
+                "alpha_score",
+            ],
+        }
+    return payload
+
+
+def _model_spec_payload(spec: object) -> dict[str, object]:
+    return {
+        "model_id": spec.model_id,
+        "model_algorithm": spec.model_algorithm,
+        "input_factor_columns": list(spec.input_factor_columns),
+        "input_feature_columns": list(spec.input_feature_columns),
+        "label_column": spec.label_column,
+        "sample_filter_mode": spec.sample_filter_mode,
+        "hyperparameters": dict(spec.hyperparameters),
+        "random_seed": spec.random_seed,
+        "max_train_rows": spec.max_train_rows,
+    }
 
 
 def _research_window(

@@ -9,6 +9,7 @@ import pytest
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.predictions.runner as prediction_runner_module
 from quant_research_platform.artifacts.outputs.bundle_validation import (
+    read_prediction_output_bundle,
     validate_output_bundle,
 )
 from quant_research_platform.catalog.models import ModelCatalog
@@ -149,6 +150,12 @@ def test_a_share_prediction_artifact_persists_raw_and_centered_alpha_scores(
                 expected_output_id=prediction_spec.prediction_id,
                 expected_run_id="test_run",
             )
+            with read_prediction_output_bundle(
+                _bundle,
+                expected_output_id=prediction_spec.prediction_id,
+                expected_run_id="test_run",
+            ) as (_reader_manifest, lookup):
+                assert lookup.prediction_column == "alpha_score"
             permuted, _permuted_bundle, _ = write_prediction_output_and_read(
                 tmp_path / "permuted",
                 (frame.sample(frac=1.0, random_state=7),),

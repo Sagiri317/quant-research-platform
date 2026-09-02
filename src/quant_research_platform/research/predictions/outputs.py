@@ -112,20 +112,21 @@ def build_prediction_result_from_frames(
         or type(dependency_status) is not dict
     ):
         raise ValueError("invalid_model_metadata")
-    try:
-        facts = _model_algorithm_facts(model_algorithm)
-    except ValueError as exc:
-        raise ValueError("invalid_model_metadata") from exc
-    expected_package = facts.dependency_package or "internal"
-    if (
-        not _resolved_model_hyperparameters_match(
-            model_algorithm,
-            hyperparameters,
-            resolved_hyperparameters,
-        )
-        or dependency_status.get("package") != expected_package
-    ):
-        raise ValueError("invalid_model_metadata")
+    if model_algorithm != "quarterly_route":
+        try:
+            facts = _model_algorithm_facts(model_algorithm)
+        except ValueError as exc:
+            raise ValueError("invalid_model_metadata") from exc
+        expected_package = facts.dependency_package or "internal"
+        if (
+            not _resolved_model_hyperparameters_match(
+                model_algorithm,
+                hyperparameters,
+                resolved_hyperparameters,
+            )
+            or dependency_status.get("package") != expected_package
+        ):
+            raise ValueError("invalid_model_metadata")
     reject_filter_input_columns(input_columns)
     prediction_input_columns = required_input_columns or input_columns
     reject_filter_input_columns(prediction_input_columns)
@@ -154,6 +155,7 @@ def build_prediction_result_from_frames(
             prediction_input_columns,
             prediction_model,
         ),
+        prediction_model=prediction_model,
         build_state=build_state,
     )
     scoped_output_frames = _scoped_prediction_output_frames(
@@ -284,6 +286,7 @@ def _iter_prediction_output_frames(
     input_columns: tuple[str, ...],
     predictor: Callable[[pd.DataFrame], np.ndarray],
     build_state: _PredictionBuildState,
+    prediction_model: object | None = None,
 ) -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
     usable_columns = tuple(dict.fromkeys((*spec.primary_key, *input_columns)))
     with closing_iterator(iter(frames)) as active_frames:
@@ -358,7 +361,10 @@ def _iter_prediction_output_frames(
                     output = test_frame.loc[:, list(spec.primary_key)].copy()
                     raw_prediction = predictor(test_frame)
                     if spec.prediction_mode == "a_share_oos":
-                        output["model_id"] = spec.model_id
+                        if isinstance(prediction_model, QuarterlyPredictionModel):
+                            output["model_id"] = prediction_model.model_ids(test_frame)
+                        else:
+                            output["model_id"] = spec.model_id
                         output[RAW_PREDICTION_COLUMN] = raw_prediction
                         timestamps = strict_timestamp_series(
                             output["timestamp"],
@@ -397,7 +403,10 @@ def _iter_prediction_output_frames(
                         ),
                     )
                     if spec.prediction_mode == "a_share_oos":
-                        if output["model_id"].ne(spec.model_id).any():
+                        if any(
+                            type(value) is not str or not value
+                            for value in output["model_id"]
+                        ):
                             raise ValueError("prediction_model_id_invalid")
                         if not np.isfinite(
                             output[ALPHA_SCORE_COLUMN].to_numpy(dtype="float64")

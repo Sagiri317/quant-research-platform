@@ -30,8 +30,14 @@ def prediction_output_columns(
     prediction_column: str,
     primary_key: tuple[str, ...] = PREDICTION_PRIMARY_KEY,
 ) -> tuple[str, ...]:
+    if primary_key != PREDICTION_PRIMARY_KEY:
+        raise ValueError("prediction_output_columns_must_be_fixed")
     if prediction_mode == "a_share_oos":
+        if prediction_column != RAW_PREDICTION_COLUMN:
+            raise ValueError("prediction_output_columns_must_be_fixed")
         return (*primary_key, "model_id", RAW_PREDICTION_COLUMN, ALPHA_SCORE_COLUMN)
+    if prediction_mode != "minimal_oos" or prediction_column != PREDICTION_SCORE_COLUMN:
+        raise ValueError("prediction_output_columns_must_be_fixed")
     return (*primary_key, prediction_column)
 
 

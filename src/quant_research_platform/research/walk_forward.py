@@ -21,8 +21,7 @@ def a_share_walk_forward_quarters(
 ) -> tuple[WalkForwardQuarter, ...]:
     axis = pd.DatetimeIndex(sessions).normalize().drop_duplicates().sort_values()
     development = axis[(axis.year >= 2014) & (axis.year <= 2023)]
-    holdout = axis[axis.year >= 2024]
-    if development.empty or holdout.empty:
+    if development.empty or len(development) != len(axis):
         raise ValueError("a_share_walk_forward_sessions_incomplete")
     quarters: list[WalkForwardQuarter] = []
     for period in pd.PeriodIndex(development.to_period("Q")).unique():
@@ -49,6 +48,4 @@ def a_share_walk_forward_quarters(
                 phase="development",
             )
         )
-    if holdout.empty:
-        raise ValueError("a_share_holdout_sessions_missing")
     return tuple(quarters)

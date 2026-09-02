@@ -16,7 +16,10 @@ import pyarrow.compute as pc
 from quant_research_platform.artifacts.outputs.manifest import (
     validate_output_manifest_business_envelope,
 )
-from quant_research_platform.contracts.predictions import prediction_output_columns
+from quant_research_platform.contracts.predictions import (
+    ALPHA_SCORE_COLUMN,
+    prediction_output_columns,
+)
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -24,7 +27,10 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    native_filesystem_path,
+    require_unaliased_path,
+)
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
 from quant_research_platform.storage.parquet import (
     DatasetFileIdentity,
@@ -221,6 +227,7 @@ def read_prediction_output_bundle(
             raise ValueError("persisted_prediction_metadata_mismatch")
         primary_key_value = metadata.get("primary_key")
         prediction_column = metadata.get("prediction_column")
+        prediction_mode = metadata.get("prediction_mode")
         if (
             type(primary_key_value) is not list
             or not primary_key_value
@@ -229,8 +236,15 @@ def read_prediction_output_bundle(
             )
             or type(prediction_column) is not str
             or not prediction_column
+            or type(prediction_mode) is not str
+            or prediction_mode not in {"minimal_oos", "a_share_oos"}
         ):
             raise ValueError("persisted_prediction_metadata_mismatch")
+        lookup_column = (
+            ALPHA_SCORE_COLUMN
+            if prediction_mode == "a_share_oos"
+            else prediction_column
+        )
         primary_key = tuple(primary_key_value)
         prediction_path, prediction_identity = next(
             (path, identity)
@@ -255,7 +269,7 @@ def read_prediction_output_bundle(
             lookup = _PredictionLookup(
                 index=key_index,
                 primary_key=primary_key,
-                prediction_column=prediction_column,
+                prediction_column=lookup_column,
                 resource_policy=policy,
             )
             with _opened_parquet(
@@ -263,7 +277,7 @@ def read_prediction_output_bundle(
                 expected_identity=prediction_identity,
             ) as (parquet, _identity):
                 expected_columns = prediction_output_columns(
-                    str(metadata["prediction_mode"]),
+                    prediction_mode,
                     prediction_column,
                     primary_key,
                 )
@@ -384,7 +398,11 @@ def read_prediction_output_bundle(
 
 
 def _require_exact_member_set(root: Path, expected_names: tuple[str, ...]) -> None:
-    observed_names = tuple(entry.name for entry in root.iterdir())
+    try:
+        with os.scandir(native_filesystem_path(root)) as entries:
+            observed_names = tuple(entry.name for entry in entries)
+    except OSError as exc:
+        raise ValueError("output_member_set_mismatch") from exc
     if (
         len({name.casefold() for name in observed_names}) != len(observed_names)
         or len(observed_names) != len(expected_names)
@@ -395,14 +413,16 @@ def _require_exact_member_set(root: Path, expected_names: tuple[str, ...]) -> No
 
 def _validated_bundle_root(root: Path) -> tuple[Path, os.stat_result]:
     try:
-        identity = root.lstat()
+        identity = os.stat(native_filesystem_path(root), follow_symlinks=False)
         require_unaliased_path(root, error="output_bundle_root_invalid")
         if not stat.S_ISDIR(identity.st_mode):
             raise ValueError("output_bundle_root_invalid")
-        resolved = root.resolve(strict=True)
-        if not os.path.samestat(identity, root.lstat()):
+        if not os.path.samestat(
+            identity,
+            os.stat(native_filesystem_path(root), follow_symlinks=False),
+        ):
             raise ValueError("output_bundle_root_invalid")
-        return resolved, identity
+        return root, identity
     except OSError as exc:
         raise ValueError("output_bundle_root_invalid") from exc
 
@@ -415,9 +435,8 @@ def _validated_regular_member(
 ) -> DatasetFileIdentity:
     try:
         identity = dataset_file_identity(path)
-        resolved_path = path.resolve(strict=True)
     except (OSError, ValueError) as exc:
         raise ValueError(error) from exc
-    if resolved_path.parent != resolved_root:
+    if path.parent != resolved_root:
         raise ValueError(error)
     return identity

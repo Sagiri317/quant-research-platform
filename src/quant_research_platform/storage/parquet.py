@@ -27,6 +27,7 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    open_filesystem_file,
 )
 
 _DECODED_ROW_BOUNDS_KEY = b"qrp.decoded-row-bounds"
@@ -263,7 +264,7 @@ def _opened_parquet(
     path_identity = dataset_file_identity(resolved)
     if expected_identity is not None and path_identity != expected_identity:
         raise ValueError("dataset_file_identity_changed")
-    handle = resolved.open("rb")
+    handle = open_filesystem_file(resolved)
     try:
         before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
         if before != path_identity:
