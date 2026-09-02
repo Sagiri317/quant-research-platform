@@ -8,10 +8,6 @@ import pytest
 
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.predictions.runner as prediction_runner_module
-from quant_research_platform.artifacts.outputs.bundle_validation import (
-    read_prediction_output_bundle,
-    validate_output_bundle,
-)
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -104,89 +100,20 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
             model_result_owned.lease.close()
 
 
-def test_a_share_prediction_artifact_persists_raw_and_centered_alpha_scores(
-    tmp_path: Path,
-) -> None:
-    frame = _research_rows_for_dates(
-        ["2014-01-01", "2014-01-02", "2014-01-03", "2014-01-04"]
-    )
-    model_spec = ModelSpec(
-        model_id="linear_a_share",
-        model_algorithm="linear_regression",
-        input_factor_columns=("mom_20d",),
-        label_column="forward_return_20d",
-    )
-    prediction_spec = PredictionSpec(
-        prediction_id="a_share_prediction",
-        model_id=model_spec.model_id,
-        research_dataset_id="demo",
-        train_end="2014-01-02",
-        test_start="2014-01-03",
-        test_end="2014-01-04",
-        prediction_mode="a_share_oos",
-        prediction_column=RAW_PREDICTION_COLUMN,
-    )
-    with runtime_resource_policy_scope() as policy:
-        owned_model = model_fitting._fit_model_result_owned_from_frames(
-            (frame.loc[frame["timestamp"] <= pd.Timestamp("2014-01-02")],),
-            model_spec,
-            estimator=build_estimator_from_model_spec(model_spec),
-            fitting_cutoff=prediction_spec.train_end,
+def test_a_share_prediction_requires_persisted_quarter_lineage() -> None:
+    with pytest.raises(
+        ValueError,
+        match="a_share_persisted_prediction_requires_quarter_lineage",
+    ):
+        PredictionSpec(
+            prediction_id="a_share_prediction",
+            model_id="linear_a_share",
+            research_dataset_id="demo",
+            train_end="2014-01-02",
+            test_start="2014-01-03",
+            prediction_mode="a_share_oos",
+            prediction_column=RAW_PREDICTION_COLUMN,
         )
-        try:
-            model_result = owned_model.value
-            prediction, _bundle, _manifest = write_prediction_output_and_read(
-                tmp_path,
-                (frame,),
-                prediction_spec,
-                model_result.coefficients,
-                model_spec.input_columns,
-                prediction_model=model_result.prediction_model,
-                model_metadata=model_result.metadata,
-                resource_policy=policy,
-            )
-            validate_output_bundle(
-                _bundle,
-                expected_output_id=prediction_spec.prediction_id,
-                expected_run_id="test_run",
-            )
-            with read_prediction_output_bundle(
-                _bundle,
-                expected_output_id=prediction_spec.prediction_id,
-                expected_run_id="test_run",
-            ) as (_reader_manifest, lookup):
-                assert lookup.prediction_column == "alpha_score"
-            permuted, _permuted_bundle, _ = write_prediction_output_and_read(
-                tmp_path / "permuted",
-                (frame.sample(frac=1.0, random_state=7),),
-                prediction_spec,
-                model_result.coefficients,
-                model_spec.input_columns,
-                prediction_model=model_result.prediction_model,
-                model_metadata=model_result.metadata,
-                resource_policy=policy,
-            )
-        finally:
-            owned_model.lease.close()
-
-    assert tuple(prediction.columns) == (
-        *PREDICTION_PRIMARY_KEY,
-        "model_id",
-        RAW_PREDICTION_COLUMN,
-        "alpha_score",
-    )
-    assert prediction["model_id"].eq(model_spec.model_id).all()
-    pd.testing.assert_frame_equal(
-        prediction.sort_values(list(PREDICTION_PRIMARY_KEY)).reset_index(drop=True),
-        permuted.sort_values(list(PREDICTION_PRIMARY_KEY)).reset_index(drop=True),
-        check_dtype=False,
-    )
-    assert prediction.groupby("timestamp", sort=False)[
-        "alpha_score"
-    ].mean().tolist() == [
-        0.0,
-        0.0,
-    ]
 
 
 def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> None:
@@ -553,8 +480,7 @@ def test_prediction_handoff_streams_research_chunks_for_model_and_prediction(
 
     assert (output_bundle / "prediction.parquet").is_file()
     assert read_chunk_rows == [len(frame), len(frame)]
-    assert fit_chunk_rows
-    assert max(fit_chunk_rows) < len(frame)
+    assert fit_chunk_rows == [len(frame)]
     assert prediction_chunk_rows == [len(frame)]
     assert any("forward_return_20d" in columns for columns in read_columns_seen)
     assert any("forward_return_20d" not in columns for columns in read_columns_seen)

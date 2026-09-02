@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from contextlib import nullcontext
 
 import pandas as pd
 
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets._contracts import (
     RESEARCH_DATASET_PRIMARY_KEY_COLUMNS,
 )
@@ -94,7 +96,7 @@ def validate_evaluation_input(
     )
 
 
-def validate_prediction_input(
+def validate_research_input(
     frame: pd.DataFrame,
     spec: ResearchDatasetSpec,
     *,
@@ -107,6 +109,24 @@ def validate_prediction_input(
         frame=frame,
         error_name="invalid_prediction_input_columns",
     )
+
+
+def iter_validated_research_input_chunks(
+    chunks: Iterable[pd.DataFrame],
+    *,
+    dataset_spec: ResearchDatasetSpec,
+    input_columns: tuple[str, ...],
+) -> Iterable[pd.DataFrame]:
+    """Validate dataset chunks at the dataset owner boundary."""
+
+    with closing_iterator(iter(chunks)) as active_chunks:
+        for chunk in active_chunks:
+            validate_research_input(
+                chunk,
+                dataset_spec,
+                input_columns=input_columns,
+            )
+            yield chunk
 
 
 def _require_declared_columns(

@@ -7,7 +7,7 @@ from tempfile import TemporaryDirectory
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.prediction import (
+from quant_research_platform.artifacts.outputs import (
     write_prediction_outputs as write_prediction_outputs_in_workflow,
 )
 from quant_research_platform.contracts.filtering import (
@@ -22,6 +22,7 @@ from quant_research_platform.research.predictions.outputs import (
 )
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -123,6 +124,7 @@ def write_prediction_result(layout: StorageLayout, result) -> Path:
             output_chunks=result.output_chunks,
             model_metadata=result.model_metadata,
             prediction_metadata_factory=result.prediction_metadata_factory,
+            resource_policy=current_runtime_resource_policy(),
         )
 
 

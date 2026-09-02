@@ -34,6 +34,9 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.models import (
+    A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+)
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import (
     RAW_PREDICTION_COLUMN,
@@ -51,11 +54,8 @@ from quant_research_platform.contracts.targets import (
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.research.models.persisted import (
-    read_model_artifact,
-    write_model_artifact,
-)
-from quant_research_platform.research.models.production import (
-    ModelSelectionResult,
+    read_quarterly_model_artifact,
+    write_quarterly_model_artifact,
 )
 from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
@@ -718,6 +718,7 @@ def _execute_action_with_policy(
             if planned["decision"] == PlanDecision.REUSE.value:
                 results[spec.target_id] = _reuse_target(
                     profile=profile,
+                    protocol=protocol,
                     layout=layout,
                     spec=spec,
                     planned=planned,
@@ -1138,20 +1139,17 @@ def _build_semantic_target(
                 dataset_catalog=profile.research_datasets,
                 model_catalog=profile.models,
                 dataset_id=scenario_id,
-                artifact_id=spec.target_id,
                 model_ids=model_ids,
                 tie_break_order=model_ids,
                 time_window=time_window,
                 resource_policy=policy,
                 protocol_manifest=protocol.manifest(),
             )
-            if not isinstance(model_result, ModelSelectionResult):
-                raise ValueError("model_selection_result_invalid")
-            write_model_artifact(
+            write_quarterly_model_artifact(
                 logical_root,
-                model_id=model_result.model_id,
+                model_id=spec.target_id,
                 envelope=envelope,
-                quarterly_results=model_result.quarterly_results,
+                quarterly_results=model_result,
             )
         else:
             model_dependencies = tuple(
@@ -1168,7 +1166,7 @@ def _build_semantic_target(
             model_identity = planned["upstream_identities"].get(model_target)
             if type(model_identity) is not str:
                 raise ValueError("model_identity_missing")
-            persisted = read_model_artifact(
+            persisted = read_quarterly_model_artifact(
                 _target_instance_root(profile, layout, model_target, model_identity),
                 expected_identity=model_identity,
             )
@@ -1176,7 +1174,7 @@ def _build_semantic_target(
                 prediction_id=spec.target_id,
                 model_id=persisted.model_id,
                 research_dataset_id=protocol.scenario_id,
-                train_end="2018-12-31",
+                train_end=None,
                 test_start=_date_text(time_window.start),
                 test_end=_date_text(time_window.end),
                 prediction_mode="a_share_oos",
@@ -1186,8 +1184,7 @@ def _build_semantic_target(
                 layout=target_layout,
                 dataset_catalog=profile.research_datasets,
                 prediction_spec=prediction_spec,
-                model_result=persisted.result,
-                model_metadata=persisted.result.metadata,
+                persisted_model=persisted,
                 resource_policy=policy,
             )
 
@@ -1221,6 +1218,7 @@ def _build_semantic_target(
         )
         _validate_semantic_target_root(
             profile,
+            protocol,
             spec,
             output_root,
             envelope.instance_identity,
@@ -1276,6 +1274,7 @@ def _date_text(value: object) -> str:
 def _reuse_target(
     *,
     profile: ResearchProfile,
+    protocol: Any,
     layout: StorageLayout,
     spec: TargetSpec,
     planned: dict[str, object],
@@ -1294,7 +1293,13 @@ def _reuse_target(
     )
     data_spec = _catalog_data_spec(profile, spec.target_id)
     if data_spec is None:
-        _validate_semantic_target_root(profile, spec, root, requested_identity)
+        _validate_semantic_target_root(
+            profile,
+            protocol,
+            spec,
+            root,
+            requested_identity,
+        )
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.REUSED,
@@ -1369,6 +1374,7 @@ def _validate_published_target(
 
 def _validate_semantic_target_root(
     profile: ResearchProfile,
+    protocol: Any,
     spec: TargetSpec,
     root: Path,
     expected_identity: str,
@@ -1380,7 +1386,32 @@ def _validate_semantic_target_root(
     if envelope["logical_artifact_id"] != spec.target_id:
         raise ValueError("semantic_artifact_logical_id_mismatch")
     if binding.kind is ProducerKind.MODEL:
-        read_model_artifact(root, expected_identity=expected_identity)
+        persisted = read_quarterly_model_artifact(
+            root,
+            expected_identity=expected_identity,
+        )
+        expected_model_ids = tuple(
+            f"{protocol.scenario_id}_{algorithm}"
+            for algorithm in protocol.manifest().get("selection_tie_break", ())
+        )
+        for quarter in persisted.quarterly_models:
+            metadata = quarter["model_metadata"]
+            selection = metadata.get("model_selection")
+            if type(selection) is not dict:
+                raise ValueError("model_selection_metadata_missing")
+            if tuple(selection["candidate_family_ids"]) != expected_model_ids:
+                raise ValueError("model_selection_protocol_mismatch")
+            if tuple(selection["tie_break_order"]) != expected_model_ids:
+                raise ValueError("model_selection_protocol_mismatch")
+            selected_algorithm = metadata["model_algorithm"]
+            expected_spec_id = f"{protocol.scenario_id}_{selected_algorithm}"
+            if expected_spec_id not in expected_model_ids:
+                raise ValueError("model_selection_algorithm_mismatch")
+            if selection["selected_family_id"] != expected_spec_id:
+                raise ValueError("model_selection_family_mismatch")
+            expected_spec = profile.models.get(expected_spec_id)
+            if list(expected_spec.input_columns) != metadata["input_columns"]:
+                raise ValueError("model_selection_input_columns_mismatch")
         return
     if binding.kind is ProducerKind.EVALUATION:
         try:
@@ -1403,6 +1434,28 @@ def _validate_semantic_target_root(
                 expected_run_id=f"run_{spec.target_id}",
             ) as (manifest, _lookup):
                 validate_prediction_output_metadata_shape(manifest["metadata"])
+                prediction_metadata = manifest["metadata"]
+                lineage = prediction_metadata["model_metadata"]
+                model_dependencies = tuple(
+                    dependency
+                    for dependency in spec.dependencies
+                    if (
+                        profile.producer_bindings.get(dependency) is not None
+                        and profile.producer_bindings[dependency].kind
+                        is ProducerKind.MODEL
+                    )
+                )
+                if len(model_dependencies) != 1:
+                    raise ValueError("prediction_model_dependency_invalid")
+                model_target = model_dependencies[0]
+                if (
+                    lineage["model_artifact_id"] != model_target
+                    or lineage["model_artifact_identity"]
+                    != envelope["upstream_identities"].get(model_target)
+                    or lineage["model_artifact_schema"]
+                    != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
+                ):
+                    raise ValueError("prediction_model_lineage_mismatch")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 f"prediction_inner_artifact_invalid:{_semantic_failure_code(exc)}"
@@ -1604,7 +1657,7 @@ def _semantic_target_payload(
         payload["model_specs"] = [
             _model_spec_payload(profile.models.get(model_id)) for model_id in model_ids
         ]
-        payload["model_artifact_schema"] = "quarterly_route"
+        payload["model_artifact_schema"] = A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
     elif binding.kind is ProducerKind.PREDICTION:
         model_dependencies = tuple(
             dependency

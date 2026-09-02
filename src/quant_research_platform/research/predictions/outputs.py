@@ -36,11 +36,7 @@ from quant_research_platform.research._memory import (
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
 )
-from quant_research_platform.research.models.persisted import QuarterlyPredictionModel
-from quant_research_platform.research.models.rank_ensemble import (
-    ICWeightedRankEnsemble,
-    RankEnsemblePredictor,
-)
+from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     OwnedValue,
@@ -95,7 +91,6 @@ def build_prediction_result_from_frames(
     model_metadata: dict[str, object],
     model_lease: MemoryLease | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
-    required_input_columns: tuple[str, ...] | None = None,
 ) -> PredictionResult:
     bound_policy = resource_policy or current_runtime_resource_policy()
     if type(model_metadata) is not dict:
@@ -112,31 +107,29 @@ def build_prediction_result_from_frames(
         or type(dependency_status) is not dict
     ):
         raise ValueError("invalid_model_metadata")
-    if model_algorithm != "quarterly_route":
-        try:
-            facts = _model_algorithm_facts(model_algorithm)
-        except ValueError as exc:
-            raise ValueError("invalid_model_metadata") from exc
-        expected_package = facts.dependency_package or "internal"
-        if (
-            not _resolved_model_hyperparameters_match(
-                model_algorithm,
-                hyperparameters,
-                resolved_hyperparameters,
-            )
-            or dependency_status.get("package") != expected_package
-        ):
-            raise ValueError("invalid_model_metadata")
+    try:
+        facts = _model_algorithm_facts(model_algorithm)
+    except ValueError as exc:
+        raise ValueError("invalid_model_metadata") from exc
+    expected_package = facts.dependency_package or "internal"
+    if (
+        not _resolved_model_hyperparameters_match(
+            model_algorithm,
+            hyperparameters,
+            resolved_hyperparameters,
+        )
+        or dependency_status.get("package") != expected_package
+    ):
+        raise ValueError("invalid_model_metadata")
+    rank_inputs_allow_missing = facts.input_kind == "rank_ensemble_inputs"
     reject_filter_input_columns(input_columns)
-    prediction_input_columns = required_input_columns or input_columns
-    reject_filter_input_columns(prediction_input_columns)
-    required = set((*spec.primary_key, *prediction_input_columns))
+    required = set((*spec.primary_key, *input_columns))
     _validate_oos_split(spec)
     work_columns = tuple(
         dict.fromkeys(
             (
                 *spec.primary_key,
-                *prediction_input_columns,
+                *input_columns,
                 *required_filter_columns(spec.sample_filter_mode),
             )
         )
@@ -149,14 +142,14 @@ def build_prediction_result_from_frames(
             work_columns=work_columns,
         ),
         spec=spec,
-        input_columns=prediction_input_columns,
+        input_columns=input_columns,
         predictor=prediction_callable(
             coefficients,
-            prediction_input_columns,
+            input_columns,
             prediction_model,
         ),
-        prediction_model=prediction_model,
         build_state=build_state,
+        rank_inputs_allow_missing=rank_inputs_allow_missing,
     )
     scoped_output_frames = _scoped_prediction_output_frames(
         output_frames,
@@ -190,6 +183,7 @@ def build_prediction_result_from_frames(
             "test_start": spec.test_start,
             "test_end": spec.test_end,
             "oos_start": spec.test_start,
+            "oos_end": None,
         },
         prediction_metadata_factory=lambda: build_state.prediction_metadata(
             spec=spec,
@@ -286,7 +280,7 @@ def _iter_prediction_output_frames(
     input_columns: tuple[str, ...],
     predictor: Callable[[pd.DataFrame], np.ndarray],
     build_state: _PredictionBuildState,
-    prediction_model: object | None = None,
+    rank_inputs_allow_missing: bool = False,
 ) -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
     usable_columns = tuple(dict.fromkeys((*spec.primary_key, *input_columns)))
     with closing_iterator(iter(frames)) as active_frames:
@@ -336,7 +330,9 @@ def _iter_prediction_output_frames(
                 owned_output: OwnedValue[pd.DataFrame] | None = None
                 try:
                     usable_mask = (
-                        filtered.loc[:, list(input_columns)].notna().all(axis=1)
+                        pd.Series(True, index=filtered.index, dtype="bool")
+                        if rank_inputs_allow_missing
+                        else filtered.loc[:, list(input_columns)].notna().all(axis=1)
                     )
                     build_state.record_input_dropna_rows(int(usable_mask.sum()))
                     usable_mask &= filtered["timestamp"] >= pd.Timestamp(
@@ -361,10 +357,7 @@ def _iter_prediction_output_frames(
                     output = test_frame.loc[:, list(spec.primary_key)].copy()
                     raw_prediction = predictor(test_frame)
                     if spec.prediction_mode == "a_share_oos":
-                        if isinstance(prediction_model, QuarterlyPredictionModel):
-                            output["model_id"] = prediction_model.model_ids(test_frame)
-                        else:
-                            output["model_id"] = spec.model_id
+                        output["model_id"] = spec.model_id
                         output[RAW_PREDICTION_COLUMN] = raw_prediction
                         timestamps = strict_timestamp_series(
                             output["timestamp"],
@@ -452,38 +445,10 @@ def _iter_prediction_output_frames(
                     raise
 
 
-def prediction_callable(
-    coefficients: np.ndarray,
-    input_columns: tuple[str, ...],
-    prediction_model: object | None,
-) -> Callable[[pd.DataFrame], np.ndarray]:
-    if prediction_model is not None:
-
-        def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
-            columns = input_columns
-            if isinstance(
-                prediction_model,
-                (
-                    RankEnsemblePredictor,
-                    ICWeightedRankEnsemble,
-                    QuarterlyPredictionModel,
-                ),
-            ):
-                columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
-            predicted = prediction_model.predict(frame.loc[:, list(columns)])
-            return np.asarray(predicted, dtype="float64")
-
-        return predict_from_model
-
-    def predict_from_coefficients(frame: pd.DataFrame) -> np.ndarray:
-        x = frame.loc[:, input_columns].to_numpy(dtype=float, copy=False)
-        return np.asarray(float(coefficients[0]) + x @ coefficients[1:])
-
-    return predict_from_coefficients
-
-
 def _validate_oos_split(spec: PredictionSpec) -> None:
-    if pd.Timestamp(spec.train_end) >= pd.Timestamp(spec.test_start):
+    if spec.train_end is not None and pd.Timestamp(spec.train_end) >= pd.Timestamp(
+        spec.test_start
+    ):
         raise ValueError("prediction_train_end_must_precede_test_start")
     if spec.test_end is not None and pd.Timestamp(spec.test_end) < pd.Timestamp(
         spec.test_start

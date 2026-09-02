@@ -10,6 +10,7 @@ from quant_research_platform.contracts.filtering import (
     SampleFilterMode,
     validate_sample_filter_mode,
 )
+from quant_research_platform.contracts.models import MODEL_SELECTION_METRIC_DIRECTIONS
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.contracts.validation import (
@@ -41,19 +42,12 @@ def prediction_output_columns(
     return (*primary_key, prediction_column)
 
 
-MODEL_SELECTION_METRIC_DIRECTIONS = {
-    "validation_ic": "maximize",
-    "validation_rankic": "maximize",
-    "validation_mse": "minimize",
-}
-
-
 @dataclass(frozen=True)
 class PredictionSpec:
     prediction_id: str
     model_id: str
     research_dataset_id: str
-    train_end: str
+    train_end: str | None
     test_start: str
     test_end: str | None = None
     prediction_column: str = PREDICTION_SCORE_COLUMN
@@ -81,14 +75,18 @@ class PredictionSpec:
             self.research_dataset_id,
             "research_dataset_id_required",
         )
-        train_end = _time_bound(self.train_end, "train_end")
         test_start = _time_bound(self.test_start, "test_start")
-        _require_same_bound_kind(train_end, test_start)
-        object.__setattr__(
-            self,
-            "train_end",
-            time_value_isoformat(train_end, preserve_datetime=True),
-        )
+        if self.train_end is None:
+            if self.prediction_mode != "a_share_oos" or self.candidate_model_ids:
+                raise ValueError("prediction_train_end_required")
+        else:
+            train_end = _time_bound(self.train_end, "train_end")
+            _require_same_bound_kind(train_end, test_start)
+            object.__setattr__(
+                self,
+                "train_end",
+                time_value_isoformat(train_end, preserve_datetime=True),
+            )
         object.__setattr__(
             self,
             "test_start",
@@ -104,7 +102,7 @@ class PredictionSpec:
                 "test_end",
                 time_value_isoformat(test_end, preserve_datetime=True),
             )
-        if train_end >= test_start:
+        if self.train_end is not None and train_end >= test_start:
             raise ValueError("prediction_train_end_must_precede_test_start")
         _validate_non_empty_string(self.prediction_column, "prediction_column_required")
         _validate_column_tuple(self.primary_key, "prediction_primary_key")
@@ -115,6 +113,12 @@ class PredictionSpec:
             or self.prediction_mode not in PREDICTION_MODES
         ):
             raise ValueError("unsupported_prediction_mode")
+        if self.prediction_mode == "a_share_oos" and (
+            self.train_end is not None or self.candidate_model_ids
+        ):
+            raise ValueError("a_share_persisted_prediction_requires_quarter_lineage")
+        if self.prediction_mode == "minimal_oos" and self.train_end is None:
+            raise ValueError("prediction_train_end_required")
         expected_prediction_column = (
             RAW_PREDICTION_COLUMN
             if self.prediction_mode == "a_share_oos"
@@ -199,6 +203,8 @@ def _validate_model_selection_contract(spec: PredictionSpec) -> None:
         or spec.model_selection_validation_end is None
     ):
         raise ValueError("model_selection_validation_window_required")
+    if spec.train_end is None:
+        raise ValueError("prediction_train_end_required")
     train_end = _time_bound(spec.train_end, "train_end")
     test_start = _time_bound(spec.test_start, "test_start")
     validation_start = _time_bound(

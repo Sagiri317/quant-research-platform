@@ -22,7 +22,7 @@ def test_prediction_spec_accepts_a_share_persisted_row_contract() -> None:
         prediction_id="a_share_prediction",
         model_id="linear_model",
         research_dataset_id="research_demo",
-        train_end="2024-01-31",
+        train_end=None,
         test_start="2024-03-01",
         prediction_mode="a_share_oos",
         prediction_column="raw_prediction",

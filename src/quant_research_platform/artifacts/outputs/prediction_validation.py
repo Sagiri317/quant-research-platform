@@ -2,13 +2,9 @@
 
 from __future__ import annotations
 
-import re
-from math import isfinite
-
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs.common_validation import (
-    require_finite_metadata_number,
     require_metadata_string,
     require_metadata_string_list,
     require_non_negative_metadata_int,
@@ -16,16 +12,12 @@ from quant_research_platform.artifacts.outputs.common_validation import (
     validate_filter_metadata,
     validate_metadata_row_count_chain,
 )
-from quant_research_platform.contracts.evaluations import (
-    CORRELATION_SUMMARY_REASON_CODES,
-)
-from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.models import (
+    A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
     ModelSpec,
-    _resolved_model_hyperparameters_match,
+    validate_model_metadata_core,
 )
 from quant_research_platform.contracts.predictions import (
-    MODEL_SELECTION_METRIC_DIRECTIONS,
     PREDICTION_MODES,
     PREDICTION_SCORE_COLUMN,
     RAW_PREDICTION_COLUMN,
@@ -33,71 +25,13 @@ from quant_research_platform.contracts.predictions import (
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 
-_MODEL_METADATA_BASE_KEYS = frozenset(
+_MODEL_ARTIFACT_LINEAGE_KEYS = frozenset(
     {
-        "model_algorithm",
-        "sample_filter_mode",
-        "filter_columns_used",
-        "filter_definition",
-        "rows_input",
-        "rows_after_filter_mode",
-        "rows_after_input_label_dropna",
-        "train_start",
-        "train_end",
-        "test_start",
-        "test_end",
-        "oos_start",
-        "oos_end",
-        "input_factor_columns",
-        "input_feature_columns",
-        "input_columns",
-        "input_count",
-        "label_column",
-        "hyperparameters",
-        "resolved_hyperparameters",
-        "random_seed",
-        "max_train_rows",
-        "dependency_status",
-        "coefficient_count",
-        "sample_weight_protocol",
-        "scaler",
+        "model_artifact_id",
+        "model_artifact_identity",
+        "model_artifact_schema",
     }
 )
-_MODEL_METADATA_FEATURE_KEYS = frozenset(
-    {
-        "feature_importance",
-        "feature_importance_status",
-    }
-)
-_MODEL_METADATA_OPTIONAL_KEYS = frozenset({"model_selection"})
-_MODEL_SELECTION_KEYS = frozenset(
-    {
-        "status",
-        "configured_model_id",
-        "selected_model_id",
-        "selected_model_input_columns",
-        "candidate_model_ids",
-        "tie_break_order",
-        "selection_metric",
-        "selection_direction",
-        "validation_start",
-        "validation_end",
-        "candidate_count",
-        "trial_metrics",
-    }
-)
-_MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
-    {
-        "model_id",
-        "validation_rows",
-        "validation_ic",
-        "validation_rankic",
-        "validation_ic_reason",
-        "validation_rankic_reason",
-        "validation_mse",
-    }
-)
-_MODEL_SELECTION_REASON_CODES = CORRELATION_SUMMARY_REASON_CODES
 _PREDICTION_METADATA_KEYS = frozenset(
     {
         "prediction_mode",
@@ -144,260 +78,42 @@ _PREDICTION_OUTPUT_METADATA_KEYS = frozenset(
 def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, object]:
     if type(metadata) is not dict:
         raise ValueError("invalid_model_metadata")
-    if metadata.get("model_algorithm") == "quarterly_route":
-        return _validate_quarterly_route_metadata(metadata)
-    metadata_keys = set(metadata)
-    feature_keys = metadata_keys.intersection(_MODEL_METADATA_FEATURE_KEYS)
-    extra_keys = (
-        metadata_keys.difference(_MODEL_METADATA_BASE_KEYS)
-        .difference(_MODEL_METADATA_FEATURE_KEYS)
-        .difference(_MODEL_METADATA_OPTIONAL_KEYS)
-    )
-    if not _MODEL_METADATA_BASE_KEYS.issubset(metadata_keys) or len(feature_keys) != 1:
+    if "model_artifact_id" in metadata:
+        return _validate_model_artifact_lineage(metadata)
+    extension_keys = {"test_start", "test_end", "oos_start", "oos_end"}
+    if not extension_keys.issubset(metadata):
         raise ValueError("invalid_model_metadata")
-    if extra_keys:
-        raise ValueError("invalid_model_metadata")
-    require_non_negative_metadata_int(metadata, "rows_input", "invalid_model_metadata")
-    require_non_negative_metadata_int(
-        metadata,
-        "rows_after_filter_mode",
-        "invalid_model_metadata",
-    )
-    require_non_negative_metadata_int(
-        metadata,
-        "rows_after_input_label_dropna",
-        "invalid_model_metadata",
-    )
-    input_factor_columns = require_metadata_string_list(
-        metadata,
-        "input_factor_columns",
-        "invalid_model_metadata",
-        allow_empty=True,
-    )
-    input_feature_columns = require_metadata_string_list(
-        metadata,
-        "input_feature_columns",
-        "invalid_model_metadata",
-        allow_empty=True,
-    )
-    input_columns = require_metadata_string_list(
-        metadata,
-        "input_columns",
-        "invalid_model_metadata",
-    )
-    input_count = require_non_negative_metadata_int(
-        metadata,
-        "input_count",
-        "invalid_model_metadata",
-    )
-    coefficient_count = require_non_negative_metadata_int(
-        metadata,
-        "coefficient_count",
-        "invalid_model_metadata",
-    )
-    if metadata["sample_weight_protocol"] != "equal_date_total_equal_sum_n_train":
-        raise ValueError("invalid_model_metadata")
-    scaler = metadata["scaler"]
-    if scaler is not None:
-        if (
-            type(scaler) is not dict
-            or set(scaler) != {"columns", "weighted_mean", "weighted_population_scale"}
-            or type(scaler["columns"]) is not list
-            or type(scaler["weighted_mean"]) is not list
-            or type(scaler["weighted_population_scale"]) is not list
-            or len(scaler["columns"]) != len(scaler["weighted_mean"])
-            or len(scaler["columns"]) != len(scaler["weighted_population_scale"])
-            or tuple(scaler["columns"]) != tuple(metadata["input_columns"])
-        ):
-            raise ValueError("invalid_model_metadata")
-    if metadata["max_train_rows"] is not None:
-        require_non_negative_metadata_int(
-            metadata,
-            "max_train_rows",
-            "invalid_model_metadata",
-        )
-    if metadata["random_seed"] is not None and type(metadata["random_seed"]) is not int:
-        raise ValueError("invalid_model_metadata")
-    if (
-        type(metadata["hyperparameters"]) is not dict
-        or type(metadata["resolved_hyperparameters"]) is not dict
-    ):
-        raise ValueError("invalid_model_metadata")
-    try:
-        render_qrp_json_object(
-            {
-                "hyperparameters": metadata["hyperparameters"],
-                "resolved_hyperparameters": metadata["resolved_hyperparameters"],
-            }
-        )
-    except ValueError as exc:
-        raise ValueError("invalid_model_metadata") from exc
-    model_algorithm = require_metadata_string(
-        metadata,
-        "model_algorithm",
-        "invalid_model_metadata",
-    )
-    if not _resolved_model_hyperparameters_match(
-        model_algorithm,
-        metadata["hyperparameters"],
-        metadata["resolved_hyperparameters"],
-    ):
-        raise ValueError("invalid_model_metadata")
-    dependency_status = metadata["dependency_status"]
-    if (
-        type(dependency_status) is not dict
-        or set(dependency_status) != {"status", "package", "version"}
-        or dependency_status["status"] != "available"
-        or type(dependency_status["package"]) is not str
-        or not dependency_status["package"]
-        or type(dependency_status["version"]) is not str
-        or not dependency_status["version"]
-    ):
-        raise ValueError("invalid_model_metadata")
-    if "feature_importance" in metadata:
-        feature_importance = metadata["feature_importance"]
-        if type(feature_importance) is not dict or not feature_importance:
-            raise ValueError("invalid_model_metadata")
-        for column, value in feature_importance.items():
-            if type(column) is not str or not column:
-                raise ValueError("invalid_model_metadata")
-            require_finite_metadata_number(
-                {"value": value}, "value", "invalid_model_metadata"
-            )
-        if set(feature_importance) != set(input_columns):
-            raise ValueError("invalid_model_metadata")
-    if "feature_importance_status" in metadata:
-        require_metadata_string(
-            metadata,
-            "feature_importance_status",
-            "invalid_model_metadata",
-        )
-    if "model_selection" in metadata:
-        validate_model_selection_metadata_shape(metadata["model_selection"])
-    if (
-        input_columns != [*input_factor_columns, *input_feature_columns]
-        or input_count != len(input_columns)
-        or coefficient_count < 1
-    ):
-        raise ValueError("invalid_model_metadata")
-    require_metadata_string(metadata, "sample_filter_mode", "invalid_model_metadata")
-    require_metadata_string(metadata, "filter_definition", "invalid_model_metadata")
-    require_metadata_string(metadata, "label_column", "invalid_model_metadata")
-    require_metadata_string(metadata, "train_start", "invalid_model_metadata")
-    require_metadata_string(metadata, "train_end", "invalid_model_metadata")
-    require_optional_metadata_string(
-        metadata,
-        "test_start",
-        "invalid_model_metadata",
-    )
-    require_optional_metadata_string(metadata, "test_end", "invalid_model_metadata")
-    require_optional_metadata_string(metadata, "oos_start", "invalid_model_metadata")
-    require_optional_metadata_string(metadata, "oos_end", "invalid_model_metadata")
-    require_metadata_string_list(
-        metadata,
-        "filter_columns_used",
-        "invalid_model_metadata",
-        allow_empty=True,
-    )
+    core_metadata = {
+        key: value for key, value in metadata.items() if key not in extension_keys
+    }
+    validate_model_metadata_core(core_metadata)
+    for key in extension_keys:
+        require_optional_metadata_string(metadata, key, "invalid_model_metadata")
     return metadata
 
 
-def validate_model_selection_metadata_shape(metadata: object) -> None:
-    if type(metadata) is not dict or set(metadata) != _MODEL_SELECTION_KEYS:
+def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, object]:
+    if set(metadata) != _MODEL_ARTIFACT_LINEAGE_KEYS:
         raise ValueError("invalid_model_metadata")
-    if metadata["status"] != "selected":
-        raise ValueError("invalid_model_metadata")
-    for key in (
-        "configured_model_id",
-        "selected_model_id",
-        "selection_metric",
-        "selection_direction",
-        "validation_start",
-        "validation_end",
-    ):
-        require_metadata_string(metadata, key, "invalid_model_metadata")
-    if metadata["selection_direction"] not in {"maximize", "minimize"}:
-        raise ValueError("invalid_model_metadata")
+    model_artifact_id = require_metadata_string(
+        metadata,
+        "model_artifact_id",
+        "invalid_model_metadata",
+    )
+    try:
+        validate_run_id(model_artifact_id)
+    except ValueError as exc:
+        raise ValueError("invalid_model_metadata") from exc
+    identity = metadata["model_artifact_identity"]
     if (
-        MODEL_SELECTION_METRIC_DIRECTIONS.get(metadata["selection_metric"])
-        != metadata["selection_direction"]
+        type(identity) is not str
+        or len(identity) != 64
+        or any(char not in "0123456789abcdef" for char in identity)
     ):
         raise ValueError("invalid_model_metadata")
-    candidate_model_ids = require_metadata_string_list(
-        metadata,
-        "candidate_model_ids",
-        "invalid_model_metadata",
-    )
-    tie_break_order = require_metadata_string_list(
-        metadata,
-        "tie_break_order",
-        "invalid_model_metadata",
-    )
-    if set(tie_break_order) != set(candidate_model_ids):
+    if metadata["model_artifact_schema"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID:
         raise ValueError("invalid_model_metadata")
-    require_metadata_string_list(
-        metadata,
-        "selected_model_input_columns",
-        "invalid_model_metadata",
-    )
-    candidate_count = require_non_negative_metadata_int(
-        metadata,
-        "candidate_count",
-        "invalid_model_metadata",
-    )
-    if candidate_count < 1 or metadata["selected_model_id"] not in candidate_model_ids:
-        raise ValueError("invalid_model_metadata")
-    if candidate_count != len(candidate_model_ids):
-        raise ValueError("invalid_model_metadata")
-    trial_metrics = metadata["trial_metrics"]
-    if type(trial_metrics) is not list or len(trial_metrics) != candidate_count:
-        raise ValueError("invalid_model_metadata")
-    trial_model_ids: list[str] = []
-    for trial in trial_metrics:
-        if type(trial) is not dict or set(trial) != _MODEL_SELECTION_TRIAL_METRIC_KEYS:
-            raise ValueError("invalid_model_metadata")
-        trial_model_ids.append(
-            require_metadata_string(trial, "model_id", "invalid_model_metadata")
-        )
-        validation_rows = require_non_negative_metadata_int(
-            trial,
-            "validation_rows",
-            "invalid_model_metadata",
-        )
-        if validation_rows < 1:
-            raise ValueError("invalid_model_metadata")
-        for key, reason_key in (
-            ("validation_ic", "validation_ic_reason"),
-            ("validation_rankic", "validation_rankic_reason"),
-        ):
-            value = trial[key]
-            reason = require_optional_metadata_string(
-                trial, reason_key, "invalid_model_metadata"
-            )
-            if reason is not None and reason not in _MODEL_SELECTION_REASON_CODES:
-                raise ValueError("invalid_model_metadata")
-            if validation_rows < 2:
-                if value is not None or reason != "no_valid_observations":
-                    raise ValueError("invalid_model_metadata")
-                continue
-            if value is None:
-                if reason is None:
-                    raise ValueError("invalid_model_metadata")
-            else:
-                numeric_value = require_finite_metadata_number(
-                    trial,
-                    key,
-                    "invalid_model_metadata",
-                )
-                if abs(numeric_value) > 1.0:
-                    raise ValueError("invalid_model_metadata")
-                if reason is not None:
-                    raise ValueError("invalid_model_metadata")
-        require_finite_metadata_number(
-            trial, "validation_mse", "invalid_model_metadata"
-        )
-    if trial_model_ids != candidate_model_ids:
-        raise ValueError("invalid_model_metadata")
+    return metadata
 
 
 def validate_prediction_output_metadata_shape(
@@ -410,7 +126,6 @@ def validate_prediction_output_metadata_shape(
         "model_id",
         "research_dataset_id",
         "prediction_mode",
-        "train_end",
         "test_start",
         "prediction_column",
         "sample_filter_mode",
@@ -419,6 +134,12 @@ def validate_prediction_output_metadata_shape(
     require_optional_metadata_string(
         metadata, "test_end", "output_manifest_metadata_invalid"
     )
+    if metadata["train_end"] is not None:
+        require_metadata_string(
+            metadata, "train_end", "output_manifest_metadata_invalid"
+        )
+    elif metadata["prediction_mode"] != "a_share_oos":
+        raise ValueError("output_manifest_metadata_invalid")
     if (
         metadata["prediction_mode"] not in PREDICTION_MODES
         or (
@@ -461,7 +182,10 @@ def validate_prediction_output_metadata_shape(
     except (TypeError, ValueError) as exc:
         raise ValueError("output_manifest_metadata_invalid") from exc
     if (
-        model_metadata["sample_filter_mode"] != metadata["sample_filter_mode"]
+        (
+            "sample_filter_mode" in model_metadata
+            and model_metadata["sample_filter_mode"] != metadata["sample_filter_mode"]
+        )
         or prediction_metadata["sample_filter_mode"] != metadata["sample_filter_mode"]
         or prediction_metadata["prediction_mode"] != metadata["prediction_mode"]
         or prediction_metadata["prediction_column"] != metadata["prediction_column"]
@@ -490,7 +214,7 @@ def validate_prediction_output_metadata_shape(
             if type(model_selection) is dict
             else metadata["model_id"]
         )
-        if model_metadata["model_algorithm"] != "quarterly_route":
+        if "model_artifact_id" not in model_metadata:
             ModelSpec(
                 model_id=persisted_model_id,
                 model_algorithm=model_metadata["model_algorithm"],
@@ -502,6 +226,8 @@ def validate_prediction_output_metadata_shape(
                 random_seed=model_metadata["random_seed"],
                 max_train_rows=model_metadata["max_train_rows"],
             )
+        elif model_metadata["model_artifact_id"] != metadata["model_id"]:
+            raise ValueError("model_metadata_inconsistent")
         spec = PredictionSpec(
             prediction_id=metadata["prediction_id"],
             model_id=metadata["model_id"],
@@ -593,7 +319,10 @@ def validate_prediction_metadata_shape(
         "invalid_prediction_metadata",
     )
     require_metadata_string(metadata, "test_start", "invalid_prediction_metadata")
-    require_metadata_string(metadata, "train_end", "invalid_prediction_metadata")
+    if metadata["train_end"] is not None:
+        require_metadata_string(metadata, "train_end", "invalid_prediction_metadata")
+    elif metadata["prediction_mode"] != "a_share_oos":
+        raise ValueError("invalid_prediction_metadata")
     if metadata["requested_test_end"] is not None:
         require_metadata_string(
             metadata,
@@ -641,8 +370,9 @@ def validate_model_metadata_consistency(
     *,
     spec: PredictionSpec,
 ) -> None:
-    if metadata.get("model_algorithm") == "quarterly_route":
-        _validate_quarterly_route_window(metadata, spec=spec)
+    if "model_artifact_id" in metadata:
+        if metadata["model_artifact_id"] != spec.model_id:
+            raise ValueError("model_metadata_inconsistent")
         return
     input_count = require_non_negative_metadata_int(
         metadata,
@@ -665,7 +395,9 @@ def validate_model_metadata_consistency(
     )
     train_start = pd.Timestamp(metadata["train_start"])
     train_end = pd.Timestamp(metadata["train_end"])
-    if train_start > train_end or train_end > pd.Timestamp(spec.train_end):
+    if train_start > train_end or train_end >= pd.Timestamp(spec.test_start):
+        raise ValueError("model_metadata_inconsistent")
+    if spec.train_end is not None and train_end > pd.Timestamp(spec.train_end):
         raise ValueError("model_metadata_inconsistent")
     if (
         metadata["test_start"] != spec.test_start
@@ -778,6 +510,10 @@ def validate_model_prediction_metadata_consistency(
     model_metadata: dict[str, object],
     prediction_metadata: dict[str, object],
 ) -> None:
+    if "model_artifact_id" in model_metadata:
+        if prediction_metadata["prediction_mode"] != "a_share_oos":
+            raise ValueError("prediction_metadata_inconsistent")
+        return
     if model_metadata["input_columns"] != prediction_metadata["input_columns"]:
         raise ValueError("prediction_metadata_inconsistent")
     if model_metadata["input_count"] != prediction_metadata["input_count"]:
@@ -786,216 +522,12 @@ def validate_model_prediction_metadata_consistency(
         raise ValueError("prediction_metadata_inconsistent")
 
 
-_QUARTER_ID_RE = re.compile(r"^[0-9]{4}Q[1-4]$")
-_QUARTERLY_ROUTE_KEYS = frozenset(
-    {
-        "quarter_id",
-        "model_id",
-        "training_window",
-        "validation_window",
-        "prediction_window",
-        "fit_cutoff",
-        "n_train",
-        "features",
-        "directions",
-        "weights",
-        "scaler",
-        "resolved_params",
-        "random_seed",
-        "backend",
-        "model_metadata",
-    }
-)
-
-
-def _validate_quarterly_route_metadata(
-    metadata: dict[str, object],
-) -> dict[str, object]:
-    required = _MODEL_METADATA_BASE_KEYS | {
-        "quarterly_route",
-        "feature_importance_status",
-    }
-    if set(metadata) != required:
-        raise ValueError("invalid_model_metadata")
-    if (
-        metadata["sample_weight_protocol"] != "equal_date_total_equal_sum_n_train"
-        or metadata["scaler"] is not None
-        or metadata["hyperparameters"] != {}
-        or metadata["resolved_hyperparameters"] != {}
-        or metadata["random_seed"] is not None
-        or metadata["max_train_rows"] is not None
-        or metadata["coefficient_count"] != 1
-    ):
-        raise ValueError("invalid_model_metadata")
-    route = metadata["quarterly_route"]
-    if type(route) is not list or not route:
-        raise ValueError("invalid_model_metadata")
-    previous_prediction_end: pd.Timestamp | None = None
-    previous_quarter: str | None = None
-    route_factor_columns: list[str] = []
-    route_feature_columns: list[str] = []
-    route_label: str | None = None
-    totals = {
-        "rows_input": 0,
-        "rows_after_filter_mode": 0,
-        "rows_after_input_label_dropna": 0,
-    }
-    for entry in route:
-        if type(entry) is not dict or set(entry) != _QUARTERLY_ROUTE_KEYS:
-            raise ValueError("invalid_model_metadata")
-        quarter_id = entry["quarter_id"]
-        model_id = entry["model_id"]
-        if (
-            type(quarter_id) is not str
-            or _QUARTER_ID_RE.fullmatch(quarter_id) is None
-            or type(model_id) is not str
-            or not model_id
-        ):
-            raise ValueError("invalid_model_metadata")
-        training = _validate_route_window(entry["training_window"])
-        validation = _validate_route_window(entry["validation_window"])
-        prediction = _validate_route_window(entry["prediction_window"])
-        if (
-            training[1] >= validation[0]
-            or validation[1] >= prediction[0]
-            or training[0].year < 2014
-            or prediction[1].year > 2023
-            or (
-                previous_prediction_end is not None
-                and prediction[0] <= previous_prediction_end
-            )
-            or (
-                previous_quarter is not None
-                and quarter_id != _next_quarter_id(previous_quarter)
-            )
-        ):
-            raise ValueError("invalid_model_metadata")
-        try:
-            validate_run_id(model_id)
-        except ValueError as exc:
-            raise ValueError("invalid_model_metadata") from exc
-        previous_prediction_end = prediction[1]
-        fit_cutoff = entry["fit_cutoff"]
-        if type(fit_cutoff) is not str or pd.Timestamp(fit_cutoff) != validation[1]:
-            raise ValueError("invalid_model_metadata")
-        n_train = entry["n_train"]
-        if type(n_train) is not int or n_train <= 0:
-            raise ValueError("invalid_model_metadata")
-        features = entry["features"]
-        if type(features) is not list or any(
-            type(column) is not str or not column for column in features
-        ):
-            raise ValueError("invalid_model_metadata")
-        directions = entry["directions"]
-        weights = entry["weights"]
-        if (
-            type(directions) is not list
-            or type(weights) is not list
-            or any(
-                type(value) not in {int, float} or not isfinite(float(value))
-                for values in (directions, weights)
-                for value in values
-            )
-        ):
-            raise ValueError("invalid_model_metadata")
-        nested = entry["model_metadata"]
-        if type(nested) is not dict:
-            raise ValueError("invalid_model_metadata")
-        if entry["scaler"] != nested.get("scaler"):
-            raise ValueError("invalid_model_metadata")
-        if entry["resolved_params"] != nested.get("resolved_hyperparameters"):
-            raise ValueError("invalid_model_metadata")
-        if entry["random_seed"] != nested.get("random_seed"):
-            raise ValueError("invalid_model_metadata")
-        if entry["backend"] != nested.get("dependency_status"):
-            raise ValueError("invalid_model_metadata")
-        nested_for_validation = dict(nested)
-        nested_for_validation.pop("model_selection", None)
-        nested_valid = validate_model_metadata_shape(nested_for_validation)
-        if nested_valid["input_columns"] != features:
-            raise ValueError("invalid_model_metadata")
-        if nested_valid["rows_after_input_label_dropna"] != n_train:
-            raise ValueError("invalid_model_metadata")
-        for key in totals:
-            totals[key] += nested_valid[key]
-        for source, target in (
-            (nested_valid["input_factor_columns"], route_factor_columns),
-            (nested_valid["input_feature_columns"], route_feature_columns),
-        ):
-            for column in source:
-                if column not in target:
-                    target.append(column)
-        label = nested_valid["label_column"]
-        if route_label is None:
-            route_label = label
-        elif route_label != label:
-            raise ValueError("invalid_model_metadata")
-        previous_quarter = quarter_id
-    if (
-        metadata["input_factor_columns"] != route_factor_columns
-        or metadata["input_feature_columns"] != route_feature_columns
-        or metadata["input_columns"] != [*route_factor_columns, *route_feature_columns]
-        or metadata["input_count"]
-        != len(route_factor_columns) + len(route_feature_columns)
-        or metadata["label_column"] != route_label
-        or any(metadata[key] != value for key, value in totals.items())
-        or metadata["train_start"]
-        != min(entry["model_metadata"]["train_start"] for entry in route)
-        or metadata["train_end"]
-        != max(entry["model_metadata"]["train_end"] for entry in route)
-        or metadata["test_start"] != route[0]["prediction_window"]["start"]
-        or pd.Timestamp(metadata["test_end"])
-        < pd.Timestamp(route[-1]["prediction_window"]["end"])
-        or metadata["oos_start"] != route[0]["prediction_window"]["start"]
-        or metadata["oos_end"] != route[-1]["prediction_window"]["end"]
-        or type(metadata["feature_importance_status"]) is not str
-        or not metadata["feature_importance_status"]
-    ):
-        raise ValueError("invalid_model_metadata")
-    return metadata
-
-
-def _validate_route_window(value: object) -> tuple[pd.Timestamp, pd.Timestamp]:
-    if (
-        type(value) is not dict
-        or set(value) != {"start", "end"}
-        or type(value["start"]) is not str
-        or type(value["end"]) is not str
-    ):
-        raise ValueError("invalid_model_metadata")
-    start = pd.Timestamp(value["start"])
-    end = pd.Timestamp(value["end"])
-    if start > end:
-        raise ValueError("invalid_model_metadata")
-    return start, end
-
-
-def _validate_quarterly_route_window(
-    metadata: dict[str, object],
-    *,
-    spec: PredictionSpec,
-) -> None:
-    route = metadata["quarterly_route"]
-    if pd.Timestamp(route[0]["prediction_window"]["start"]) < pd.Timestamp(
-        spec.test_start
-    ) or pd.Timestamp(route[-1]["prediction_window"]["end"]) > pd.Timestamp(
-        spec.test_end
-    ):
-        raise ValueError("model_metadata_inconsistent")
-
-
-def _next_quarter_id(value: str) -> str:
-    year = int(value[:4])
-    quarter = int(value[-1])
-    if quarter == 4:
-        return f"{year + 1:04d}Q1"
-    return f"{year:04d}Q{quarter + 1}"
-
-
 def model_metadata_with_effective_prediction_end(
     model_metadata: dict[str, object],
     prediction_metadata: dict[str, object],
 ) -> dict[str, object]:
+    if "model_artifact_id" in model_metadata:
+        return dict(model_metadata)
     return {
         **model_metadata,
         "oos_end": prediction_metadata["effective_test_end"],

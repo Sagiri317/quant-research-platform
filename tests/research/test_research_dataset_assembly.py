@@ -29,7 +29,7 @@ from quant_research_platform.research.datasets.assembler import (
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.datasets.validation import (
     validate_evaluation_input,
-    validate_prediction_input,
+    validate_research_input,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -107,7 +107,7 @@ def test_research_dataset_assembles_from_processed_inputs(
         signal_columns=("mom_20d",),
         label_columns=("forward_return_20d",),
     )
-    validate_prediction_input(
+    validate_research_input(
         result,
         dataset_catalog.get("demo"),
         input_columns=("mom_20d",),
@@ -715,7 +715,7 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
         "market_type",
     ]
     assert result["mom_20d_zscore"].tolist() == pytest.approx([-1.0, 1.0, 1.0, -1.0])
-    validate_prediction_input(
+    validate_research_input(
         result,
         dataset_catalog.get("demo"),
         input_columns=("mom_20d", "mom_20d_zscore"),

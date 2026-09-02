@@ -86,11 +86,53 @@ def read_semantic_artifact(
     *,
     expected_identity: str | None = None,
 ) -> dict[str, object]:
-    envelope, _members = _read_semantic_record(
+    envelope, _members = read_semantic_artifact_record(
+        instance_root, expected_identity=expected_identity
+    )
+    return envelope
+
+
+def read_semantic_artifact_record(
+    instance_root: Path,
+    *,
+    expected_identity: str | None = None,
+) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    """Read one validated semantic envelope and its member inventory."""
+
+    envelope, members = _read_semantic_record(
         instance_root,
         expected_identity=expected_identity,
     )
-    return envelope
+    return envelope, members
+
+
+def verify_semantic_artifact_member(
+    instance_root: Path,
+    *,
+    relative_path: str,
+    expected: dict[str, object],
+) -> None:
+    """Verify one already-published member without rescanning its siblings."""
+
+    root = require_unaliased_path(
+        Path(instance_root),
+        error="semantic_artifact_root_invalid",
+    )
+    candidate = Path(relative_path)
+    if (
+        not relative_path
+        or candidate.is_absolute()
+        or candidate.as_posix() != relative_path
+        or any(part in {"", ".", ".."} for part in candidate.parts)
+    ):
+        raise ValueError("semantic_artifact_member_invalid")
+    if _validate_member_payload([expected]) != (expected,):
+        raise ValueError("semantic_artifact_member_manifest_invalid")
+    member = root / Path(*candidate.parts)
+    if member.is_symlink() or not member.is_file():
+        raise ValueError("semantic_artifact_member_invalid")
+    if _member_record(relative_path, member) != expected:
+        raise ValueError("semantic_artifact_member_integrity_invalid")
 
 
 def _read_semantic_record(

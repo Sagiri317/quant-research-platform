@@ -111,11 +111,17 @@ def validate_output_manifest_business_envelope(
     evidence_payload: dict[str, object] = {}
     if output_definition_id == "prediction_outputs":
         model_metadata = metadata["model_metadata"]
-        evidence_payload = {
-            "hyperparameters": model_metadata["hyperparameters"],
-            "resolved_hyperparameters": model_metadata["resolved_hyperparameters"],
-            "dependency_version": model_metadata["dependency_status"]["version"],
-        }
+        if "model_artifact_id" in model_metadata:
+            evidence_payload = {
+                "model_artifact_id": model_metadata["model_artifact_id"],
+                "model_artifact_identity": model_metadata["model_artifact_identity"],
+            }
+        else:
+            evidence_payload = {
+                "hyperparameters": model_metadata["hyperparameters"],
+                "resolved_hyperparameters": model_metadata["resolved_hyperparameters"],
+                "dependency_version": model_metadata["dependency_status"]["version"],
+            }
     if evidence_json_value_unsafe_reason(evidence_payload) is not None:
         raise ValueError("output_manifest_metadata_invalid")
 

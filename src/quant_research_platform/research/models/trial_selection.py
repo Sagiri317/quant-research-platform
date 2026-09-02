@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
-from collections.abc import Collection, Iterable, Iterator
+from collections.abc import Callable, Collection, Iterable, Iterator
 from contextlib import ExitStack, closing, contextmanager
 from math import log
 from pathlib import Path
@@ -17,14 +17,31 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _pearson_correlation_from_moments,
     _summarize_correlation_aggregates,
 )
-from quant_research_platform.contracts.predictions import (
+from quant_research_platform.contracts.experiments import (
+    legal_training_rows,
+    resolve_training_availability_column,
+    training_availability_columns,
+)
+from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.models import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
+    _model_algorithm_facts,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.filtering import (
+    _filter_working_set_bound,
+    apply_filter_mode,
+)
+from quant_research_platform.research.models import fitting
+from quant_research_platform.research.models.fitting import prediction_callable
+from quant_research_platform.research.models.supervised import (
+    build_estimator_from_model_spec,
+)
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
     require_free_disk_headroom,
 )
 
@@ -175,10 +192,7 @@ def select_best_validation_trial(
     if bool((~metric_values.isna() & ~np.isfinite(metric_values)).any()):
         raise ValueError("invalid_trial_selection_metric")
     defined = metric_values.notna()
-    if not bool(defined.any()):
-        raise ValueError("all_validation_metrics_undefined")
-
-    selected_trials = trials.loc[defined].copy()
+    selected_trials = trials.copy()
     ordered_ids = tuple(
         str(value)
         for value in (
@@ -193,13 +207,14 @@ def select_best_validation_trial(
         raise ValueError("trial_tie_break_order_mismatch")
     order = {value: index for index, value in enumerate(ordered_ids)}
     ordered = selected_trials.assign(
-        _selection_metric=metric_values[defined],
+        _undefined=~defined,
+        _selection_metric=metric_values.fillna(-np.inf if maximize else np.inf),
         _tie_break=selected_trials[trial_id_column].map(
             lambda value: order[str(value)]
         ),
     ).sort_values(
-        ["_selection_metric", "_tie_break"],
-        ascending=[not maximize, True],
+        ["_undefined", "_selection_metric", "_tie_break"],
+        ascending=[True, not maximize, True],
         kind="mergesort",
     )
     return str(ordered.iloc[0][trial_id_column])
@@ -650,6 +665,18 @@ def build_model_selection_metadata(
     tie_break_order = tie_break_order or candidate_model_ids
     if set(tie_break_order) != set(candidate_model_ids):
         raise ValueError("trial_tie_break_order_mismatch")
+    missing_fact_columns = sorted(
+        {
+            "resolved_hyperparameters",
+            "random_seed",
+            "n_train",
+            "dependency_status",
+        }.difference(trial_metrics.columns)
+    )
+    if missing_fact_columns:
+        raise ValueError(
+            "model_selection_trial_facts_missing: " + ", ".join(missing_fact_columns)
+        )
     records = trial_metrics.loc[
         :, ("model_id", *VALIDATION_METRIC_COLUMNS, *VALIDATION_METRIC_REASON_COLUMNS)
     ].to_dict("records")
@@ -668,6 +695,23 @@ def build_model_selection_metadata(
                 "validation_rows",
             ].iloc[0]
         )
+        source = trial_metrics.loc[
+            trial_metrics["model_id"] == record["model_id"]
+        ].iloc[0]
+        for key in (
+            "resolved_hyperparameters",
+            "random_seed",
+            "n_train",
+            "dependency_status",
+        ):
+            value = source[key]
+            if hasattr(value, "item"):
+                value = value.item()
+            if key == "random_seed" and pd.isna(value):
+                value = None
+            if key == "dependency_status" and type(value) is dict:
+                value = dict(value)
+            record[key] = value
     return {
         "status": "selected",
         "configured_model_id": configured_model_id,
@@ -682,3 +726,275 @@ def build_model_selection_metadata(
         "candidate_count": len(candidate_model_ids),
         "trial_metrics": records,
     }
+
+
+def select_prediction_model_spec(
+    *,
+    prediction_spec,
+    dataset_spec,
+    model_catalog,
+    chunks,
+    validation_input_columns: tuple[str, ...] | None = None,
+):
+    """Select one model spec from validation trials for model-owned callers."""
+
+    candidate_specs = tuple(
+        model_catalog.get(model_id)
+        for model_id in (prediction_spec.model_id, *prediction_spec.candidate_model_ids)
+    )
+    label_columns = {spec.label_column for spec in candidate_specs}
+    if len(label_columns) != 1:
+        raise ValueError("model_selection_label_column_mismatch")
+    label_column = candidate_specs[0].label_column
+    common_validation_input_columns = (
+        tuple(
+            dict.fromkeys(
+                column
+                for spec in candidate_specs
+                if _model_algorithm_facts(spec.model_algorithm).input_kind
+                != "rank_ensemble_inputs"
+                for column in spec.input_columns
+            )
+        )
+        if validation_input_columns is None
+        else validation_input_columns
+    )
+    validation_start = pd.Timestamp(prediction_spec.model_selection_validation_start)
+    validation_end = pd.Timestamp(prediction_spec.model_selection_validation_end)
+    trial_metric_records: list[dict[str, object]] = []
+    for candidate_spec in candidate_specs:
+        train_read_columns = fitting.model_training_read_columns(
+            dataset_spec.primary_key,
+            candidate_spec.input_columns,
+            label_column=label_column,
+            sample_filter_mode=candidate_spec.sample_filter_mode,
+        )
+        owned_model = fitting._fit_model_result_owned_from_frames(  # noqa: SLF001
+            fitting.training_scope_chunks(
+                chunks(train_read_columns, input_columns=candidate_spec.input_columns),
+                asset_ids=prediction_spec.training_asset_ids,
+            ),
+            candidate_spec,
+            estimator=build_estimator_from_model_spec(candidate_spec),
+            fitting_cutoff=pd.Timestamp(prediction_spec.train_end),
+        )
+        model_result = (
+            owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
+        )
+        model_lease = owned_model.lease if isinstance(owned_model, OwnedValue) else None
+        validation_read_columns = tuple(
+            dict.fromkeys(
+                (
+                    *dataset_spec.primary_key,
+                    *common_validation_input_columns,
+                    *candidate_spec.input_columns,
+                    label_column,
+                    *training_availability_columns(label_column),
+                    *required_filter_columns(prediction_spec.sample_filter_mode),
+                )
+            )
+        )
+        validation_chunks = None
+        cleanup_owner = None
+        cleanup_lease = None
+        primary_error: BaseException | None = None
+        try:
+
+            def validation_source(
+                validation_columns: tuple[str, ...] = validation_read_columns,
+                candidate_input_columns: tuple[str, ...] = candidate_spec.input_columns,
+            ):
+                return chunks(
+                    validation_columns,
+                    input_columns=tuple(
+                        dict.fromkeys(
+                            (*common_validation_input_columns, *candidate_input_columns)
+                        )
+                    ),
+                )
+
+            validation_chunks = iter_validation_prediction_chunks(
+                validation_source,
+                prediction_spec=prediction_spec,
+                candidate_spec=candidate_spec,
+                model_result=model_result,
+                validation_start=validation_start,
+                validation_end=validation_end,
+                usable_input_columns=common_validation_input_columns,
+            )
+            trial_metrics = evaluate_model_trial_metrics_from_chunks(
+                validation_chunks,
+                model_id=candidate_spec.model_id,
+                label_column=label_column,
+                prediction_column=prediction_spec.prediction_column,
+            )
+            trial_metrics.update(
+                {
+                    "resolved_hyperparameters": dict(
+                        model_result.metadata["resolved_hyperparameters"]
+                    ),
+                    "random_seed": model_result.metadata["random_seed"],
+                    "n_train": model_result.metadata["rows_after_input_label_dropna"],
+                    "dependency_status": dict(
+                        model_result.metadata["dependency_status"]
+                    ),
+                }
+            )
+            trial_metric_records.append(trial_metrics)
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            cleanup_owner = owned_model if isinstance(owned_model, OwnedValue) else None
+            cleanup_lease = model_lease
+            validation_chunks = None
+            model_result = None
+            owned_model = None
+            model_lease = None
+            try:
+                if cleanup_owner is not None and cleanup_owner.lease.active:
+                    cleanup_owner.release(owner="research.model.selection")
+                elif cleanup_lease is not None and cleanup_lease.active:
+                    cleanup_lease.close()
+            except BaseException as cleanup_error:
+                if primary_error is not None:
+                    primary_error.add_note(
+                        "candidate model lease release also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                else:
+                    raise
+            finally:
+                cleanup_owner = None
+                cleanup_lease = None
+    trial_metrics = pd.DataFrame.from_records(trial_metric_records)
+    direction = (
+        MODEL_SELECTION_METRIC_DIRECTIONS[prediction_spec.model_selection_metric]
+        == "maximize"
+    )
+    selected_model_id = select_best_validation_trial(
+        trial_metrics,
+        trial_id_column="model_id",
+        selection_metric=prediction_spec.model_selection_metric,
+        maximize=direction,
+        validation_metric_columns=VALIDATION_METRIC_COLUMNS,
+        test_metric_columns=TEST_METRIC_COLUMNS,
+        tie_break_order=(prediction_spec.selection_tie_break_order or None),
+    )
+    metadata = build_model_selection_metadata(
+        configured_model_id=prediction_spec.model_id,
+        selected_model_id=selected_model_id,
+        candidate_model_ids=tuple(spec.model_id for spec in candidate_specs),
+        selection_metric=prediction_spec.model_selection_metric,
+        validation_start=prediction_spec.model_selection_validation_start,
+        validation_end=prediction_spec.model_selection_validation_end,
+        tie_break_order=(
+            prediction_spec.selection_tie_break_order
+            or tuple(spec.model_id for spec in candidate_specs)
+        ),
+        selected_model_input_columns=model_catalog.get(selected_model_id).input_columns,
+        trial_metrics=trial_metrics,
+    )
+    return model_catalog.get(selected_model_id), metadata
+
+
+def iter_validation_prediction_chunks(
+    chunks: Callable[[], Iterable[pd.DataFrame]],
+    *,
+    prediction_spec,
+    candidate_spec,
+    model_result: fitting.ModelFitResult,
+    validation_start: pd.Timestamp,
+    validation_end: pd.Timestamp,
+    usable_input_columns: tuple[str, ...] | None = None,
+) -> Iterable[object]:
+    predictor = prediction_callable(
+        model_result.coefficients,
+        candidate_spec.input_columns,
+        model_result.prediction_model,
+    )
+    output_columns = ("timestamp", "asset_id", candidate_spec.label_column)
+    policy = current_runtime_resource_policy()
+    with closing_iterator(iter(chunks())) as source:
+        for chunk in source:
+            full_chunk_payload = pandas_frame_payload_bytes(chunk)
+            index_bytes = int(chunk.index.memory_usage(deep=True))
+            chunk_bound = max(
+                3 * full_chunk_payload
+                + index_bytes
+                + len(chunk)
+                * 8
+                * (len(usable_input_columns or candidate_spec.input_columns) + 6),
+                _filter_working_set_bound(
+                    chunk,
+                    mode=prediction_spec.sample_filter_mode,
+                ),
+            )
+            chunk_lease = (
+                policy.lease(
+                    "research.model.selection.validation.chunk",
+                    max(1, chunk_bound),
+                )
+                if policy is not None
+                else None
+            )
+            try:
+                timestamps = strict_timestamp_series(
+                    chunk["timestamp"],
+                    error="invalid_prediction_timestamp_values",
+                )
+                validation = chunk.loc[
+                    (timestamps >= validation_start) & (timestamps <= validation_end)
+                ]
+                if not validation.empty:
+                    filtered, _filter_metadata = apply_filter_mode(
+                        validation,
+                        mode=prediction_spec.sample_filter_mode,
+                        metadata_key="sample_filter_mode",
+                    )
+                    availability_column = resolve_training_availability_column(
+                        filtered,
+                        label_column=candidate_spec.label_column,
+                    )
+                    usable = legal_training_rows(
+                        filtered,
+                        fitting_cutoff=validation_end,
+                        availability_column=availability_column,
+                        feature_columns=(
+                            usable_input_columns
+                            if usable_input_columns is not None
+                            else candidate_spec.input_columns
+                        ),
+                        target_column=candidate_spec.label_column,
+                    )
+                    if not usable.empty:
+                        output = usable.loc[:, list(output_columns)].copy()
+                        output[prediction_spec.prediction_column] = predictor(usable)
+                        if chunk_lease is not None:
+                            output_bytes = pandas_frame_payload_bytes(output)
+                            if output_bytes > chunk_lease.reserved_bytes:
+                                raise ValueError(
+                                    "prediction_validation_working_set_exceeds_task_memory_budget"
+                                )
+                            chunk_lease.shrink_to(output_bytes)
+                            chunk_lease.transfer(
+                                "research.model.selection.metric.chunk"
+                            )
+                            item = OwnedValue(output, chunk_lease)
+                        else:
+                            item = output
+                        del chunk, timestamps, validation, filtered, usable, output
+                        yield item
+            except BaseException as primary:
+                if chunk_lease is not None and chunk_lease.active:
+                    try:
+                        chunk_lease.close()
+                    except BaseException as cleanup_error:
+                        primary.add_note(
+                            "validation chunk lease release also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                raise
+            else:
+                if chunk_lease is not None and chunk_lease.active:
+                    chunk_lease.close()

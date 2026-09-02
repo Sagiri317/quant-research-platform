@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import warnings
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -24,6 +25,7 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import (
     ModelSpec,
+    _model_algorithm_facts,
     _thaw_model_hyperparameters,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
@@ -33,7 +35,13 @@ from quant_research_platform.research._memory import (
     _selected_frame_payload_bytes,
     iter_complete_time_sized_frames,
 )
-from quant_research_platform.research.filtering import _filter_mode_scope
+from quant_research_platform.research.filtering import (
+    _filter_mode_scope,
+)
+from quant_research_platform.research.models.rank_ensemble import (
+    ICWeightedRankEnsemble,
+    RankEnsemblePredictor,
+)
 from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
     ModelMatrixScaler,
@@ -60,6 +68,34 @@ class ModelFitResult:
 
 
 type _OwnedModelFitResult = OwnedValue[ModelFitResult]
+
+
+def prediction_callable(
+    coefficients: np.ndarray,
+    input_columns: tuple[str, ...],
+    prediction_model: object | None,
+):
+    """Build the model-owned prediction callable used by selection and output."""
+
+    if prediction_model is not None:
+
+        def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
+            columns = input_columns
+            if isinstance(
+                prediction_model,
+                (RankEnsemblePredictor, ICWeightedRankEnsemble),
+            ):
+                columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
+            predicted = prediction_model.predict(frame.loc[:, list(columns)])
+            return np.asarray(predicted, dtype="float64")
+
+        return predict_from_model
+
+    def predict_from_coefficients(frame: pd.DataFrame) -> np.ndarray:
+        x = frame.loc[:, input_columns].to_numpy(dtype=float, copy=False)
+        return np.asarray(float(coefficients[0]) + x @ coefficients[1:])
+
+    return predict_from_coefficients
 
 
 def _fit_model_result_owned_from_frames(
@@ -286,10 +322,6 @@ def model_metadata(
         ),
         "train_start": row_counts["train_start"],
         "train_end": row_counts["train_end"],
-        "test_start": None,
-        "test_end": None,
-        "oos_start": None,
-        "oos_end": None,
         "input_factor_columns": list(spec.input_factor_columns),
         "input_feature_columns": list(spec.input_feature_columns),
         "input_columns": list(spec.input_columns),
@@ -950,7 +982,12 @@ def _collect_training_frame_owned(
                     filtered,
                     fitting_cutoff=fitting_cutoff,
                     availability_column=availability_column,
-                    feature_columns=spec.input_columns,
+                    feature_columns=(
+                        ()
+                        if _model_algorithm_facts(spec.model_algorithm).input_kind
+                        == "rank_ensemble_inputs"
+                        else spec.input_columns
+                    ),
                     target_column=spec.label_column,
                 ).loc[:, selected_columns]
                 usable_payload_bytes = pandas_frame_payload_bytes(usable)
@@ -1215,6 +1252,8 @@ def _fit_predictor(
         return fit_training_frame(training)
     if not hasattr(estimator, "fit"):
         return estimator
+    from sklearn.exceptions import ConvergenceWarning
+
     if spec.model_algorithm in supervised._PARALLEL_MODEL_ALGORITHMS:  # noqa: SLF001
         set_params = getattr(estimator, "set_params", None)
         if not callable(set_params):
@@ -1226,7 +1265,6 @@ def _fit_predictor(
         else 1
     )
     if spec.model_algorithm not in {
-        "single_factor_baseline",
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",
     }:
@@ -1234,23 +1272,33 @@ def _fit_predictor(
         weights = equal_date_sample_weights(training["timestamp"])
         scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
         scaled_matrix = scaler.transform(matrix)
-        with (
-            threadpool_limits(limits=1, user_api="blas"),
-            threadpool_limits(
-                limits=openmp_threads,
-                user_api="openmp",
-            ),
-        ):
-            estimator.fit(scaled_matrix, y, sample_weight=weights)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", ConvergenceWarning)
+                with (
+                    threadpool_limits(limits=1, user_api="blas"),
+                    threadpool_limits(
+                        limits=openmp_threads,
+                        user_api="openmp",
+                    ),
+                ):
+                    estimator.fit(scaled_matrix, y, sample_weight=weights)
+        except ConvergenceWarning:
+            raise ValueError("model_fit_non_converged") from None
         return ScaledPredictor(estimator, scaler)
-    with (
-        threadpool_limits(limits=1, user_api="blas"),
-        threadpool_limits(
-            limits=openmp_threads,
-            user_api="openmp",
-        ),
-    ):
-        estimator.fit(training.loc[:, spec.input_columns], y)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", ConvergenceWarning)
+            with (
+                threadpool_limits(limits=1, user_api="blas"),
+                threadpool_limits(
+                    limits=openmp_threads,
+                    user_api="openmp",
+                ),
+            ):
+                estimator.fit(training.loc[:, spec.input_columns], y)
+    except ConvergenceWarning:
+        raise ValueError("model_fit_non_converged") from None
     return estimator
 
 
@@ -1494,7 +1542,6 @@ def _model_state_upper_bound_bytes(
         "ridge_regression",
         "lasso_regression",
         "huber_regression",
-        "single_factor_baseline",
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",
     }:
@@ -1554,6 +1601,159 @@ def _bounded_tree_nodes(rows: int, *, depth: int) -> int:
     if depth <= 0 or depth >= row_bound.bit_length():
         return row_bound
     return min(row_bound, (1 << (depth + 1)) - 1)
+
+
+def model_training_read_columns(
+    primary_key: tuple[str, ...],
+    input_columns: tuple[str, ...],
+    *,
+    label_column: str,
+    sample_filter_mode,
+) -> tuple[str, ...]:
+    return tuple(
+        dict.fromkeys(
+            (
+                *primary_key,
+                *input_columns,
+                label_column,
+                "eligible",
+                *training_availability_columns(label_column),
+                *required_filter_columns(sample_filter_mode),
+            )
+        )
+    )
+
+
+def iter_legal_training_chunks(
+    chunks: Iterable[pd.DataFrame],
+    *,
+    train_end: pd.Timestamp,
+    label_column: str,
+    input_columns: tuple[str, ...],
+) -> Iterable[pd.DataFrame]:
+    for chunk in chunks:
+        policy = current_runtime_resource_policy()
+        index_bytes = int(chunk.index.memory_usage(deep=True))
+        timestamp_bytes = index_bytes + 8 * len(chunk)
+        mask_bytes = index_bytes + len(chunk)
+        payload_bytes = pandas_frame_payload_bytes(chunk)
+        working_bytes = timestamp_bytes + mask_bytes + payload_bytes
+        if (
+            policy is not None
+            and policy.explicit_memory_cap_bytes is not None
+            and policy.used_memory_bytes + working_bytes
+            > policy.explicit_memory_cap_bytes
+        ):
+            raise ValueError(
+                "prediction_training_working_set_exceeds_task_memory_budget"
+            )
+        working_lease = (
+            policy.lease("research.model.training.chunk", working_bytes)
+            if policy is not None
+            else None
+        )
+        train = None
+        try:
+            availability_column = resolve_training_availability_column(
+                chunk,
+                label_column=label_column,
+            )
+            train = legal_training_rows(
+                chunk,
+                fitting_cutoff=train_end,
+                availability_column=availability_column,
+                feature_columns=input_columns,
+                target_column=label_column,
+            )
+            if train.empty:
+                train = None
+                if working_lease is not None:
+                    working_lease.close()
+                continue
+            retained_bytes = pandas_frame_payload_bytes(train)
+            if working_lease is not None:
+                working_lease.shrink_to(retained_bytes)
+                working_lease.transfer("research.model.training")
+            try:
+                yield train
+            except BaseException as primary:
+                train = None
+                if working_lease is not None:
+                    try:
+                        working_lease.close()
+                    except BaseException as cleanup_error:
+                        primary.add_note(
+                            "model training lease release also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                raise
+            else:
+                train = None
+                if working_lease is not None:
+                    working_lease.close()
+        except BaseException as primary:
+            train = None
+            if working_lease is not None and working_lease.active:
+                try:
+                    working_lease.close()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "model training lease release also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+            raise
+
+
+def training_scope_chunks(
+    chunks: Iterable[pd.DataFrame],
+    *,
+    asset_ids: tuple[str, ...] = (),
+) -> Iterable[pd.DataFrame]:
+    """Apply only the caller's asset scope; fitting owns semantic filtering."""
+
+    with closing_iterator(iter(chunks)) as active_chunks:
+        for chunk in active_chunks:
+            if not asset_ids:
+                yield chunk
+                continue
+            if "asset_id" not in chunk.columns:
+                raise ValueError("model_training_asset_id_missing")
+            policy = current_runtime_resource_policy()
+            scope_lease = None
+            if policy is not None:
+                source_bytes = pandas_frame_payload_bytes(chunk)
+                mask_bytes = int(chunk.index.memory_usage(deep=True)) + len(chunk)
+                scope_lease = policy.lease(
+                    "research.model.training.asset_scope",
+                    max(1, source_bytes + mask_bytes),
+                )
+            scoped = None
+            primary_error: BaseException | None = None
+            try:
+                scoped = chunk.loc[chunk["asset_id"].isin(asset_ids)]
+                if scoped.empty:
+                    scoped = None
+                    continue
+                if scope_lease is not None:
+                    scope_lease.shrink_to(max(1, pandas_frame_payload_bytes(scoped)))
+                    scope_lease.transfer("research.model.training.asset_scope")
+                yield scoped
+            except BaseException as exc:
+                primary_error = exc
+                raise
+            finally:
+                scoped = None
+                if scope_lease is not None and scope_lease.active:
+                    try:
+                        scope_lease.close()
+                    except BaseException as cleanup_error:
+                        if primary_error is not None:
+                            primary_error.add_note(
+                                "asset scope lease release also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        else:
+                            raise
 
 
 def _positive_model_int(value: object, *, default: int) -> int:

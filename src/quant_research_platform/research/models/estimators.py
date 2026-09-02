@@ -5,9 +5,6 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 
-import numpy as np
-import pandas as pd
-
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.rank_ensemble import (
     EqualWeightRankEnsembleFactory,
@@ -18,15 +15,6 @@ from quant_research_platform.research.models.rank_ensemble import (
 @dataclass(frozen=True)
 class _LinearRegressionEstimator:
     coefficient_count: int = 0
-
-
-@dataclass(frozen=True)
-class SingleFactorBaseline:
-    column: str
-    coefficient_count: int = 1
-
-    def predict(self, frame: pd.DataFrame) -> np.ndarray:
-        return frame.loc[:, self.column].to_numpy(dtype="float64", copy=False)
 
 
 def linear_regression_estimator(
@@ -89,11 +77,6 @@ def lightgbm_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
     return LGBMRegressor(**params)
 
 
-def single_factor_baseline(spec: ModelSpec, params: dict[str, object]) -> object:
-    del params
-    return SingleFactorBaseline(spec.input_columns[0])
-
-
 def equal_weight_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
     del params
     return EqualWeightRankEnsembleFactory(spec.input_columns, spec.label_column)
@@ -120,7 +103,6 @@ _MODEL_ESTIMATOR_FACTORIES: dict[
     "gradient_boosting_regressor": gradient_boosting_regressor,
     "xgboost_regressor": xgboost_regressor,
     "lightgbm_regressor": lightgbm_regressor,
-    "single_factor_baseline": single_factor_baseline,
     "equal_weight_rank_ensemble": equal_weight_rank_ensemble,
     "ic_weighted_rank_ensemble": ic_weighted_rank_ensemble,
 }

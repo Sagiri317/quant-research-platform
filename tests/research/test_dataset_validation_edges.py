@@ -5,8 +5,8 @@ import pytest
 
 from quant_research_platform.research.datasets.validation import (
     validate_evaluation_input,
-    validate_prediction_input,
     validate_research_dataset,
+    validate_research_input,
 )
 from tests.helpers.research_specs import make_dummy_research_dataset_spec
 
@@ -48,7 +48,7 @@ def test_evaluation_and_prediction_inputs_require_declared_columns() -> None:
         signal_columns=("factor_1",),
         label_columns=("label_1",),
     )
-    validate_prediction_input(frame, spec, input_columns=("factor_1",))
+    validate_research_input(frame, spec, input_columns=("factor_1",))
 
     with pytest.raises(ValueError, match="invalid_evaluation_signal_columns"):
         validate_evaluation_input(
@@ -65,7 +65,7 @@ def test_evaluation_and_prediction_inputs_require_declared_columns() -> None:
             label_columns=("label_1",),
         )
     with pytest.raises(ValueError, match="invalid_prediction_input_columns"):
-        validate_prediction_input(frame, spec, input_columns=("factor_2",))
+        validate_research_input(frame, spec, input_columns=("factor_2",))
 
 
 def _research_frame() -> pd.DataFrame:

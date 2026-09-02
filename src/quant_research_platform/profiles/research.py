@@ -13,7 +13,6 @@ from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
-from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
@@ -52,7 +51,6 @@ class ResearchProfile:
     research_datasets: ResearchDatasetCatalog
     evaluations: EvaluationCatalog
     models: ModelCatalog
-    build_prediction_catalog: object
     build_portfolio_catalog: object
     producer_bindings: Mapping[str, ProducerBinding]
     schema_inventory_important_columns: tuple[str, ...]
@@ -127,7 +125,6 @@ def _a_share_profile() -> ResearchProfile:
         research_datasets=research_datasets,
         evaluations=a_share.evaluation_catalog(),
         models=a_share.all_model_catalog(),
-        build_prediction_catalog=a_share.prediction_catalog,
         build_portfolio_catalog=a_share.portfolio_catalog,
         producer_bindings={
             **{
@@ -212,7 +209,6 @@ def _crypto_profile() -> ResearchProfile:
         research_datasets=research_datasets,
         evaluations=build_evaluation_catalog(),
         models=ModelCatalog(),
-        build_prediction_catalog=lambda **_: PredictionCatalog(),
         build_portfolio_catalog=lambda **_: PortfolioCatalog(),
         producer_bindings={
             spec.data_id: ProducerBinding(

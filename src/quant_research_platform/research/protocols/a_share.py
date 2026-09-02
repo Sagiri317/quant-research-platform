@@ -2,20 +2,22 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
+
+import pandas as pd
 
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.portfolios import PortfolioCatalog
-from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
+from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
@@ -29,10 +31,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioSpec,
     TradabilityConfig,
     WeightConfig,
-)
-from quant_research_platform.contracts.predictions import (
-    RAW_PREDICTION_COLUMN,
-    PredictionSpec,
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import TargetSpec
@@ -79,6 +77,19 @@ HOLDOUT_END = date(2025, 12, 31)
 LABEL_HORIZONS = (1, 5, 10, 20, 60, 120)
 PRIMARY_LABEL_COLUMN = forward_return_label_column(20)
 MODEL_TARGET_COLUMN = "model_target"
+
+
+def quarter_id_for_fold(fold: ExperimentFold) -> str:
+    """Return the A-share persisted quarter identity for one protocol fold."""
+
+    if not isinstance(fold, ExperimentFold):
+        raise TypeError("a_share_experiment_fold_required")
+    year, separator, quarter = fold.fold_id.partition("-q")
+    if len(year) != 4 or separator != "-q" or quarter not in {"1", "2", "3", "4"}:
+        raise ValueError("a_share_experiment_fold_id_invalid")
+    return f"{year}Q{quarter}"
+
+
 PV_CORE = FORMAL_CORE_PRICE_VOLUME_FACTORS
 PV_FULL = FORMAL_PRICE_VOLUME_FACTORS
 FUND_CORE = CORE_FUNDAMENTAL_FACTORS
@@ -95,7 +106,7 @@ MODEL_FAMILY_ORDER = (
     "xgboost_regressor",
 )
 SELECTION_TIE_BREAK = MODEL_FAMILY_ORDER
-MODEL_LADDER = ("single_factor_baseline", *MODEL_FAMILY_ORDER)
+MODEL_LADDER = ("single_factor_diagnostic", *MODEL_FAMILY_ORDER)
 RIDGE_LAMBDAS = (0.01, 0.1, 1.0, 10.0)
 HUBER_LAMBDAS = RIDGE_LAMBDAS
 LASSO_ALPHAS = (0.001, 0.003, 0.01, 0.03)
@@ -220,6 +231,7 @@ class AShareProtocol:
                 "start": HOLDOUT_START.isoformat(),
                 "end": HOLDOUT_END.isoformat(),
             },
+            "model_chronology": {"validation_months": 12},
             "factor_columns": list(self.factor_columns),
             "label_horizons": list(LABEL_HORIZONS),
             "primary_label": PRIMARY_LABEL_COLUMN,
@@ -352,6 +364,53 @@ class AShareProtocol:
         return f"{self.scenario_id}_report"
 
 
+def model_folds(
+    sessions: pd.DatetimeIndex,
+    *,
+    chronology: Mapping[str, object],
+    formal_window: Mapping[str, object],
+    development_window: Mapping[str, object],
+) -> tuple[ExperimentFold, ...]:
+    if type(chronology) is not dict or set(chronology) != {"validation_months"}:
+        raise ValueError("model_chronology_missing")
+    history_start = pd.Timestamp(formal_window["start"])
+    development_start = pd.Timestamp(development_window["start"])
+    development_end = pd.Timestamp(development_window["end"])
+    validation_months = chronology["validation_months"]
+    if type(validation_months) is not int or validation_months <= 0:
+        raise ValueError("model_chronology_validation_months_invalid")
+    axis = pd.DatetimeIndex(sessions).normalize().drop_duplicates().sort_values()
+    if axis.empty or axis.min() < history_start or axis.max() > development_end:
+        raise ValueError("model_chronology_sessions_outside_development")
+    if axis.min().year != history_start.year:
+        raise ValueError("model_chronology_formal_history_missing")
+    folds: list[ExperimentFold] = []
+    for period in pd.PeriodIndex(axis.to_period("Q")).unique():
+        if period < pd.Period(development_start, freq="Q"):
+            continue
+        test = axis[axis.to_period("Q") == period]
+        validation = axis[
+            (axis >= period.start_time - pd.DateOffset(months=validation_months))
+            & (axis < period.start_time)
+        ]
+        training = (
+            axis[axis < validation.min()]
+            if not validation.empty
+            else axis[axis < test.min()]
+        )
+        if training.empty or validation.empty or test.empty:
+            raise ValueError("a_share_walk_forward_window_incomplete")
+        folds.append(
+            ExperimentFold(
+                fold_id=f"{period.year:04d}-q{period.quarter}",
+                train=TimeWindow(training[0], training[-1]),
+                validation=TimeWindow(validation[0], validation[-1]),
+                development_test=TimeWindow(test[0], test[-1]),
+            )
+        )
+    return tuple(folds)
+
+
 def protocol(
     scenario_id: str,
     access_window: str = "development",
@@ -419,10 +478,7 @@ def model_specs(
             for factor in selected.factor_columns
             for column in (f"feature_{factor}", f"feature_missing_{factor}")
         )
-        if facts.input_kind == "single_factor_input":
-            input_factors = (selected.factor_columns[0],)
-            input_features = ()
-        elif facts.input_kind == "rank_ensemble_inputs":
+        if facts.input_kind == "rank_ensemble_inputs":
             input_factors = selected.factor_columns
             input_features = ()
         else:
@@ -557,54 +613,24 @@ def resolve_trial_parameters(
     raise ValueError("unsupported_a_share_trial_algorithm")
 
 
-def prediction_catalog(
-    *,
-    scenario_id: str = "pv_all",
-    train_end: str,
-    test_start: str,
-    test_end: str | None = None,
-    factor_scope: str = "core",
-) -> PredictionCatalog:
-    return PredictionCatalog(
-        tuple(
-            PredictionSpec(
-                prediction_id=f"{model.model_id}_{_token(train_end)}_{_token(test_start)}",
-                model_id=model.model_id,
-                research_dataset_id=RESEARCH_DATASET_IDS[scenario_id],
-                train_end=train_end,
-                test_start=test_start,
-                test_end=test_end,
-                prediction_mode="a_share_oos",
-                prediction_column=RAW_PREDICTION_COLUMN,
-                candidate_model_ids=(),
-            )
-            for model in model_specs(scenario_id, factor_scope=factor_scope)
-        )
-    )
-
-
-def evaluation_catalog(
-    *, scenario_id: str = "pv_all", factor_scope: str = "core"
-) -> EvaluationCatalog:
-    signals = tuple(
-        SignalSpec(
-            signal_id=column,
-            source_kind="factor",
-            source_column=column,
-        )
-        for column in protocol(scenario_id, factor_scope=factor_scope).factor_columns
-    )
+def evaluation_catalog() -> EvaluationCatalog:
     return EvaluationCatalog(
-        (
-            EvaluationSpec(
-                evaluation_id=f"{scenario_id}_evaluation",
-                market_id=MARKET_ID,
-                research_dataset_id=RESEARCH_DATASET_IDS[scenario_id],
-                signals=signals,
-                label_columns=(PRIMARY_LABEL_COLUMN,),
-                n_groups=5,
+        EvaluationSpec(
+            evaluation_id=f"{selected}_evaluation",
+            market_id=MARKET_ID,
+            research_dataset_id=RESEARCH_DATASET_IDS[selected],
+            signals=tuple(
+                SignalSpec(
+                    signal_id=column,
+                    source_kind="factor",
+                    source_column=column,
+                )
+                for column in protocol(selected).factor_columns
             ),
+            label_columns=(PRIMARY_LABEL_COLUMN,),
+            n_groups=5,
         )
+        for selected in SCENARIO_IDS
     )
 
 
@@ -831,7 +857,3 @@ def forward_label_available_columns() -> tuple[str, ...]:
     return tuple(
         forward_return_available_at_column(horizon) for horizon in LABEL_HORIZONS
     )
-
-
-def _token(value: str) -> str:
-    return value.replace(":", "").replace("-", "")

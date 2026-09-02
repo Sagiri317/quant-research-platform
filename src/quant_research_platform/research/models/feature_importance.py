@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import numpy as np
 
-import quant_research_platform.research.models.estimators as estimators
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
@@ -27,8 +26,6 @@ def estimator_feature_importance(
     spec: ModelSpec,
     predictor: object,
 ) -> dict[str, float] | None:
-    if isinstance(predictor, estimators.SingleFactorBaseline):
-        return {predictor.column: 1.0}
     if isinstance(predictor, RankEnsemblePredictor):
         weight = 1.0 / len(predictor.columns)
         return {column: weight for column in predictor.columns}

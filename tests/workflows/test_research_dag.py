@@ -29,6 +29,7 @@ from quant_research_platform.contracts.targets import (
     ProducerKind,
     TargetSpec,
 )
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
     research_profile,
@@ -101,7 +102,7 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
             for algorithm in a_share.MODEL_FAMILY_ORDER
         )
     )
-    sessions = pd.date_range("2014-01-01", "2019-03-31", freq="B")
+    sessions = pd.date_range("2014-01-01", "2019-06-30", freq="B")
     dataset_frame = pd.DataFrame(
         {
             "market_id": "a_share",
@@ -216,7 +217,7 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
         layout=StorageLayout(project_root=tmp_path),
         scenario_id="pv_all",
         start_date="2019-01-01",
-        end_date="2019-03-31",
+        end_date="2019-06-30",
     )
     targets = {item["target_id"]: item for item in result["target_results"]}
     assert result["status"] == "BLOCKED"
@@ -232,8 +233,17 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
     )
     model_payload = json.loads((model_root / "model.json").read_text(encoding="utf-8"))
     assert set(model_payload) == {"schema_id", "model_id", "quarterly_models"}
-    assert len(model_payload["quarterly_models"]) == 1
-    assert model_payload["quarterly_models"][0]["quarter_id"] == "2019Q1"
+    assert len(model_payload["quarterly_models"]) == 2
+    assert [item["quarter_id"] for item in model_payload["quarterly_models"]] == [
+        "2019Q1",
+        "2019Q2",
+    ]
+    for item in model_payload["quarterly_models"]:
+        metadata = item["model_metadata"]
+        assert type(metadata["random_seed"]) is int
+        assert not {"test_start", "test_end", "oos_start", "oos_end"}.intersection(
+            metadata
+        )
     prediction_root = (
         StorageLayout(project_root=tmp_path).semantic_artifact_root(
             "a_share", "pv_all_persisted_predictions"
@@ -246,6 +256,81 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
     prediction_manifest = read_manifest(prediction_root / "manifest.json")
     assert prediction_manifest["metadata"]["prediction_mode"] == "a_share_oos"
     assert prediction_manifest["metadata"]["prediction_column"] == "raw_prediction"
+
+
+def test_model_failure_blocks_real_semantic_descendant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    base = research_profile()
+
+    def fail_model(**_kwargs: object) -> object:
+        raise ValueError("mandatory_trial_failed")
+
+    profile = replace(
+        base,
+        producer_bindings={
+            **base.producer_bindings,
+            "model": ProducerBinding(ProducerKind.MODEL, fail_model),
+        },
+    )
+    target_specs = (
+        TargetSpec("model", producer_id="model"),
+        TargetSpec("terminal", dependencies=("model",)),
+    )
+    plans = {
+        "targets": [
+            {
+                "target_id": target_id,
+                "decision": "BUILD",
+                "requested_identity": "a" * 64,
+                "matching_instance_identity": None,
+                "upstream_identities": {},
+            }
+            for target_id in ("model", "terminal")
+        ]
+    }
+    monkeypatch.setattr(
+        research,
+        "_target_specs",
+        lambda *_args, **_kwargs: target_specs,
+    )
+    monkeypatch.setattr(
+        research,
+        "_plan_targets",
+        lambda **_kwargs: plans,
+    )
+    monkeypatch.setattr(
+        research,
+        "_scenario_from_terminal",
+        lambda *_args, **_kwargs: "pv_all",
+    )
+
+    result = research._execute_action(  # noqa: SLF001
+        profile=profile,
+        action="research run",
+        terminal_targets=("terminal",),
+        layout=StorageLayout(project_root=tmp_path),
+        time_window=TimeWindow("2019-01-01", "2019-03-31"),
+        raw_root=StorageLayout(project_root=tmp_path).raw_source_root("csmar"),
+        start_date="2019-01-01",
+        end_date="2019-03-31",
+        research_window={
+            "start": "2019-01-01",
+            "end": "2019-03-31",
+            "access": "development",
+        },
+    )
+    results = {item["target_id"]: item for item in result["target_results"]}
+    assert results["model"]["status"] == "FAILED"
+    assert "mandatory_trial_failed" in results["model"]["reason"]
+    assert results["terminal"] == {
+        "target_id": "terminal",
+        "status": "BLOCKED",
+        "reason": "dependency_blocked: model",
+        "instance_identity": None,
+    }
+    assert result["status"] == "FAILED"
 
 
 def test_target_graph_is_permutation_stable() -> None:

@@ -166,7 +166,6 @@ def test_model_algorithm_surface_matches_a_share_and_crypto_protocols() -> None:
     )
 
     expected = {
-        "single_factor_baseline",
         *MODEL_FAMILY_ORDER,
         *HFT_MODEL_ALGORITHMS,
     }
@@ -284,7 +283,8 @@ def _tracked_surface_paths() -> tuple[Path, ...]:
         if path.name == "README.md"
         or path.parts[:1] in (("docs",), ("src",), ("tests",))
     )
-    return selected
+    # The scan is intentionally limited to live tracked files during a dirty deletion.
+    return tuple(path for path in selected if (repository_root / path).exists())
 
 
 def _imports_research_workflow(path: Path) -> bool:

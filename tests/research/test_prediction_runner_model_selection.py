@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import quant_research_platform.research.models.trial_selection as model_selection_owner
 import quant_research_platform.research.predictions.runner as prediction_runner
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
@@ -20,6 +21,7 @@ from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.research.models.trial_selection import (
     evaluate_model_trial_metrics_from_chunks,
 )
@@ -192,7 +194,7 @@ def test_model_selection_compares_common_validation_primary_keys(
         model_selection_validation_end="2024-01-06",
     )
     validation_keys: list[tuple[tuple[pd.Timestamp, str], ...]] = []
-    original_metrics = prediction_runner.evaluate_model_trial_metrics_from_chunks
+    original_metrics = model_selection_owner.evaluate_model_trial_metrics_from_chunks
 
     def chunks(columns, *, input_columns):  # noqa: ANN001
         del input_columns
@@ -221,7 +223,7 @@ def test_model_selection_compares_common_validation_primary_keys(
         return result
 
     monkeypatch.setattr(
-        prediction_runner,
+        model_selection_owner,
         "evaluate_model_trial_metrics_from_chunks",
         record_validation_keys,
     )
@@ -231,7 +233,7 @@ def test_model_selection_compares_common_validation_primary_keys(
         explicit_cap_bytes=64 * 1024**2,
     )
     with prediction_runner.runtime_resource_policy_scope(policy):
-        prediction_runner._select_prediction_model_spec(
+        model_selection_owner.select_prediction_model_spec(
             prediction_spec=prediction_spec,
             dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
             model_catalog=model_catalog,
@@ -270,7 +272,7 @@ def test_empty_validation_chunk_releases_its_lease() -> None:
 
     with prediction_runner.runtime_resource_policy_scope(policy):
         result = list(
-            prediction_runner._iter_validation_prediction_chunks(  # noqa: SLF001
+            model_selection_owner.iter_validation_prediction_chunks(
                 lambda: iter((frame,)),
                 prediction_spec=prediction_spec,
                 candidate_spec=candidate_spec,
@@ -320,7 +322,16 @@ def test_model_selection_drops_candidate_model_alias_before_lease_close(
         return prediction_runner.OwnedValue(  # noqa: SLF001
             prediction_runner.fitting.ModelFitResult(
                 coefficients=np.array([0.0, 1.0]),
-                metadata={},
+                metadata={
+                    "resolved_hyperparameters": {},
+                    "random_seed": None,
+                    "rows_after_input_label_dropna": 1,
+                    "dependency_status": {
+                        "status": "available",
+                        "package": "internal",
+                        "version": "test",
+                    },
+                },
                 prediction_model=predictor,
             ),
             lease,
@@ -341,7 +352,7 @@ def test_model_selection_drops_candidate_model_alias_before_lease_close(
         explicit_cap_bytes=64 * 1024**2,
     )
     with runtime_resource_policy_scope(policy):
-        prediction_runner._select_prediction_model_spec(
+        model_selection_owner.select_prediction_model_spec(
             prediction_spec=prediction_spec,
             dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
             model_catalog=model_catalog,
@@ -605,7 +616,10 @@ def test_prediction_runner_accepts_equivalent_timezone_representations() -> None
 
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        timestamps = prediction_runner._prediction_timestamps(chunk)
+        timestamps = strict_timestamp_series(
+            chunk["timestamp"],
+            error="invalid_prediction_timestamp_values",
+        )
 
     assert timestamps.tolist() == [
         pd.Timestamp("2024-01-15T17:00:00"),
