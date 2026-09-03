@@ -42,6 +42,9 @@ REBALANCE_SCHEDULES = {
 }
 PORTFOLIO_CASH_ASSET_ID = "__cash__"
 PORTFOLIO_DECISION_REASON_SIMPLE = "simple_rule"
+PORTFOLIO_DECISION_REASON_ENHANCED = "enhanced_optimizer"
+PORTFOLIO_DECISION_REASON_BENCHMARK = "enhanced_benchmark_only"
+PORTFOLIO_DECISION_REASON_MAINTENANCE = "benchmark_maintenance"
 PORTFOLIO_BLOCK_REASONS = frozenset(
     {
         "market_blocked",
@@ -50,7 +53,14 @@ PORTFOLIO_BLOCK_REASONS = frozenset(
         "adv_capacity+cash_pro_rata",
     }
 )
-PORTFOLIO_DECISION_REASONS = frozenset({PORTFOLIO_DECISION_REASON_SIMPLE})
+PORTFOLIO_DECISION_REASONS = frozenset(
+    {
+        PORTFOLIO_DECISION_REASON_SIMPLE,
+        PORTFOLIO_DECISION_REASON_ENHANCED,
+        PORTFOLIO_DECISION_REASON_BENCHMARK,
+        PORTFOLIO_DECISION_REASON_MAINTENANCE,
+    }
+)
 EXECUTION_RETURN_COLUMN = "forward_return_1d"
 PORTFOLIO_CAPACITY_DIAGNOSTIC_COLUMNS = (
     "timestamp",
@@ -149,6 +159,7 @@ class PortfolioCandidateSpec:
     execution_mask_target_id: str
     trading_calendar_target_id: str
     fee_schedule_target_id: str
+    risk_style_columns: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for value in (
@@ -187,9 +198,20 @@ class PortfolioCandidateSpec:
         if self.construction == "benchmark_enhanced":
             if self.top_quantile is not None or self.benchmark_id is None:
                 raise ValueError("portfolio_candidate_construction_invalid")
+            if (
+                type(self.risk_style_columns) is not tuple
+                or not self.risk_style_columns
+                or not all(
+                    type(column) is str and column for column in self.risk_style_columns
+                )
+                or len(set(self.risk_style_columns)) != len(self.risk_style_columns)
+            ):
+                raise ValueError("portfolio_candidate_risk_styles_invalid")
         else:
             if self.top_quantile is None or self.benchmark_id is not None:
                 raise ValueError("portfolio_candidate_construction_invalid")
+            if self.risk_style_columns:
+                raise ValueError("portfolio_candidate_risk_styles_invalid")
             if isinstance(self.top_quantile, bool) or not isinstance(
                 self.top_quantile, int | float
             ):

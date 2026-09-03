@@ -30,6 +30,11 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     trade_cost,
 )
 from quant_research_platform.research.portfolios import production
+from quant_research_platform.research.portfolios.risk import (
+    FactorRiskEstimate,
+    MarketModelRiskStyles,
+)
+from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -65,7 +70,7 @@ class _PredictionLookup:
 
 
 def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
-    dates = pd.bdate_range("2022-12-01", "2023-01-10")
+    dates = pd.bdate_range("2022-11-14", "2023-01-10")
     assets = ("a", "b")
     panel = pd.DataFrame(
         [
@@ -168,10 +173,34 @@ def _build_producer(
     input_window: TimeWindow | None = None,
     formal_dataset_window: TimeWindow | None = None,
     resource_policy=None,
+    candidate: PortfolioCandidateSpec | None = None,
 ):
+    enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
+    if candidate is None:
+        candidate = PortfolioCandidateSpec(
+            candidate_id="synthetic_top20_equal_weight",
+            construction="top20_equal_weight",
+            prediction_target_id="prediction",
+            rebalance_schedule="daily",
+            top_quantile=0.5,
+            benchmark_id=None,
+            benchmark_weights_target_id=None,
+            research_dataset_id="dataset",
+            market_panel_target_id="panel",
+            execution_mask_target_id="execution",
+            trading_calendar_target_id="calendar",
+            fee_schedule_target_id="fee",
+        )
     identities = {
         target_id: ("a" if target_id not in {"fee", "calendar"} else "f") * 64
-        for target_id in ("dataset", "panel", "execution", "fee", "calendar")
+        for target_id in (
+            "dataset",
+            "panel",
+            "execution",
+            "fee",
+            "calendar",
+            "benchmark",
+        )
     }
     roots = {}
     for target_id, identity in identities.items():
@@ -209,11 +238,44 @@ def _build_producer(
             )
             assert time_window is None
             return frames["calendar"].copy()
+        if target_id == "benchmark":
+            assert columns == ("benchmark_id", "asset_id", "timestamp", "weight")
+            assert isinstance(time_window, TimeWindow)
+            selected = frames[target_id].loc[
+                pd.to_datetime(frames[target_id]["timestamp"]).dt.normalize()
+                == pd.Timestamp(time_window.start).normalize()
+            ]
+            return selected.loc[:, list(columns)].copy()
         expected = {
-            "dataset": ("asset_id", "timestamp", "eligible", "float_market_cap"),
-            "panel": ("asset_id", "timestamp", "adj_open", "amount", "market_type"),
+            "dataset": (
+                (
+                    "asset_id",
+                    "timestamp",
+                    "eligible",
+                    "float_market_cap",
+                    *(
+                        column
+                        for column in RISK_STYLE_COLUMNS
+                        if enhanced
+                        and column in frames["dataset"].columns
+                        and column not in {"beta_252d", "residual_volatility_60d"}
+                    ),
+                )
+            ),
+            "panel": (
+                production._ENHANCED_PANEL_COLUMNS
+                if enhanced
+                else ("asset_id", "timestamp", "adj_open", "amount", "market_type")
+            ),
             "execution": ("asset_id", "timestamp", "can_enter", "can_exit"),
         }[target_id]
+        if columns is None:
+            assert target_id == "dataset"
+            selected = frames[target_id].loc[
+                pd.to_datetime(frames[target_id]["timestamp"]).dt.normalize()
+                == pd.Timestamp(time_window.start).normalize()
+            ]
+            return selected.copy()
         assert columns == expected
         assert isinstance(time_window, TimeWindow)
         assert time_window.start == time_window.end
@@ -225,20 +287,6 @@ def _build_producer(
 
     expected_policy = resource_policy
     monkeypatch.setattr(production, "read_dataset", fake_read_dataset)
-    candidate = PortfolioCandidateSpec(
-        candidate_id="synthetic_top20_equal_weight",
-        construction="top20_equal_weight",
-        prediction_target_id="prediction",
-        rebalance_schedule="daily",
-        top_quantile=0.5,
-        benchmark_id=None,
-        benchmark_weights_target_id=None,
-        research_dataset_id="dataset",
-        market_panel_target_id="panel",
-        execution_mask_target_id="execution",
-        trading_calendar_target_id="calendar",
-        fee_schedule_target_id="fee",
-    )
     assumptions = ExecutionAssumptions(
         initial_nav=100.0,
         slippage_bps=0.0,
@@ -307,6 +355,197 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
     )
     assert len(list(artifact.iter_chunks())) == len(frames_out)
     assert np.isclose(frames_out[0]["post_trade_notional"].sum(), 100.0 - 0.04)
+
+
+def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frames, fee_frame, output_window = _inputs()
+    frames["panel"]["period_return"] = 0.001
+    frames["panel"]["float_market_cap"] = frames["panel"]["asset_id"].map(
+        {"a": 1_000.0, "b": 2_000.0}
+    )
+    frames["panel"]["industry_level1_code"] = "A01"
+    frames["panel"]["is_nonfinancial_industry"] = True
+    dates = pd.DatetimeIndex(frames["calendar"]["calendar_date"]).normalize()
+    snapshots = dates[
+        (dates >= pd.Timestamp(output_window.start))
+        & (dates <= pd.Timestamp(output_window.end))
+    ]
+    frames["benchmark"] = pd.DataFrame(
+        [
+            {
+                "benchmark_id": "csi500",
+                "asset_id": asset,
+                "timestamp": timestamp,
+                "weight": 0.5,
+            }
+            for timestamp in snapshots
+            for asset in ("a", "b")
+        ]
+    )
+    candidate = PortfolioCandidateSpec(
+        candidate_id="synthetic_csi500_enhanced",
+        construction="benchmark_enhanced",
+        prediction_target_id="prediction",
+        rebalance_schedule="weekly-last-trading-day",
+        top_quantile=None,
+        benchmark_id="csi500",
+        benchmark_weights_target_id="benchmark",
+        risk_style_columns=RISK_STYLE_COLUMNS,
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+    )
+    chunks, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+        candidate=candidate,
+    )
+    result = list(chunks)
+    assert result
+    first = result[0]
+    assert first["asset_id"].tolist() == ["a", "b", "__cash__"]
+    assert first["benchmark_weight"].iloc[:2].tolist() == pytest.approx([0.5, 0.5])
+    assert (
+        first.loc[first["asset_id"].eq("__cash__"), "decision_reason"]
+        .eq("enhanced_benchmark_only")
+        .all()
+    )
+    assert first["pre_trade_notional"].iloc[:2].tolist() == pytest.approx([50.0, 50.0])
+    assert first["target_notional"].iloc[:2].tolist() == pytest.approx([50.0, 50.0])
+    assert first.loc[first["asset_id"].eq("__cash__"), "post_trade_notional"].iloc[
+        0
+    ] == pytest.approx(0.0)
+
+
+def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    frames, fee_frame, output_window = _inputs()
+    output_window = TimeWindow("2023-01-03", "2023-01-10")
+    frames["panel"]["period_return"] = 0.001
+    dates = pd.DatetimeIndex(frames["calendar"]["calendar_date"]).normalize()
+    date_positions = {
+        timestamp: position
+        for position, timestamp in enumerate(dates.drop_duplicates())
+    }
+    frames["panel"]["adj_open"] = [
+        100.0 * (1.001 ** date_positions[timestamp])
+        if asset == "a"
+        else 100.0 * (1.003 ** date_positions[timestamp])
+        for timestamp, asset in zip(
+            frames["panel"]["timestamp"],
+            frames["panel"]["asset_id"],
+            strict=True,
+        )
+    ]
+    frames["panel"]["float_market_cap"] = frames["panel"]["asset_id"].map(
+        {"a": 1_000.0, "b": 2_000.0}
+    )
+    frames["panel"]["industry_level1_code"] = "A01"
+    frames["panel"]["is_nonfinancial_industry"] = True
+    style_values = {"a": -0.2, "b": 0.2}
+    for column in RISK_STYLE_COLUMNS:
+        frames["dataset"][column] = frames["dataset"]["asset_id"].map(style_values)
+    snapshots = dates[
+        (dates >= pd.Timestamp(output_window.start))
+        & (dates <= pd.Timestamp(output_window.end))
+    ]
+    frames["benchmark"] = pd.DataFrame(
+        [
+            {
+                "benchmark_id": "csi500",
+                "asset_id": asset,
+                "timestamp": timestamp,
+                "weight": 0.5,
+            }
+            for timestamp in snapshots
+            for asset in ("a", "b")
+        ]
+    )
+    exposure_columns = ("industry_A01", *RISK_STYLE_COLUMNS)
+    covariance = pd.DataFrame(
+        np.eye(len(exposure_columns)) * 0.01,
+        index=exposure_columns,
+        columns=exposure_columns,
+    )
+    risk = FactorRiskEstimate(
+        factor_returns=pd.DataFrame(),
+        factor_covariance=covariance,
+        specific_variance=pd.Series({"a": 0.01, "b": 0.01}),
+        factor_half_life=126.0,
+        specific_half_life=63.0,
+        diagonal_shrinkage=0.20,
+        annualization_factor=252.0,
+    )
+
+    def fixed_market_styles(self, panel):
+        del self, panel
+        return MarketModelRiskStyles(
+            beta=pd.Series({"a": 1.0, "b": 1.0}),
+            residual_volatility=pd.Series({"a": 0.1, "b": 0.1}),
+        )
+
+    monkeypatch.setattr(
+        production.MarketModelRiskState,
+        "observe",
+        fixed_market_styles,
+    )
+    monkeypatch.setattr(
+        production.FactorRiskState,
+        "estimate",
+        lambda self: risk,
+    )
+    candidate = PortfolioCandidateSpec(
+        candidate_id="synthetic_csi500_enhanced",
+        construction="benchmark_enhanced",
+        prediction_target_id="prediction",
+        rebalance_schedule="weekly-last-trading-day",
+        top_quantile=None,
+        benchmark_id="csi500",
+        benchmark_weights_target_id="benchmark",
+        risk_style_columns=RISK_STYLE_COLUMNS,
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+    )
+    chunks, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+        input_window=TimeWindow("2022-11-14", "2023-01-10"),
+        candidate=candidate,
+    )
+    result = list(chunks)
+    optimized = [
+        frame
+        for frame in result
+        if frame["decision_reason"].eq("enhanced_optimizer").any()
+    ]
+    assert optimized
+    session = optimized[-1]
+    assert session["expected_alpha"].iloc[:2].notna().all()
+    assert session["asset_specific_variance"].iloc[:2].tolist() == pytest.approx(
+        [0.01, 0.01]
+    )
+    assert (
+        session.loc[session["asset_id"].eq("__cash__")].iloc[0][
+            "predicted_tracking_error"
+        ]
+        >= 0.0
+    )
 
 
 def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup(

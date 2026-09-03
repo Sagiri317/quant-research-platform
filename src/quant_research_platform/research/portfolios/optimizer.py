@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import numpy as np
@@ -18,9 +19,6 @@ class OptimizerConfig:
     industry_active_limit: float = 0.02
     style_active_limit: float = 0.20
     adv_participation_limit: float = 0.05
-    commission_bps: float = 3.0
-    slippage_bps: float = 5.0
-    impact_bps: float = 25.0
     solver_ftol: float = 1e-12
     solver_maxiter: int = 1000
 
@@ -45,7 +43,9 @@ def optimize_portfolio(
     factor_covariance: pd.DataFrame,
     industry_columns: tuple[str, ...] = (),
     style_columns: tuple[str, ...] = (),
+    expected_transaction_cost: Callable[[np.ndarray], float],
     financial_column: str | None = None,
+    cash_column: str | None = None,
     config: OptimizerConfig | None = None,
     eligibility_column: str | None = None,
 ) -> OptimizationResult:
@@ -65,11 +65,15 @@ def optimize_portfolio(
         raise ValueError("optimizer_columns_invalid")
     if not industry_columns and not style_columns:
         raise ValueError("optimizer_exposure_columns_required")
+    if not callable(expected_transaction_cost):
+        raise ValueError("optimizer_cost_provider_invalid")
     config = OptimizerConfig() if config is None else config
     if eligibility_column is not None and eligibility_column not in assets:
         raise ValueError("optimizer_eligibility_column_missing")
     if financial_column is not None and financial_column not in assets:
         raise ValueError("optimizer_financial_column_missing")
+    if cash_column is not None and cash_column not in assets:
+        raise ValueError("optimizer_cash_column_missing")
     columns = tuple(dict.fromkeys((*industry_columns, *style_columns)))
     if (
         tuple(factor_covariance.index) != columns
@@ -93,7 +97,7 @@ def optimize_portfolio(
         *columns,
     ):
         data[column] = pd.to_numeric(data[column], errors="raise").astype("float64")
-    for column in (eligibility_column, financial_column):
+    for column in (eligibility_column, financial_column, cash_column):
         if column is not None and (
             not pd.api.types.is_bool_dtype(data[column]) or data[column].isna().any()
         ):
@@ -124,6 +128,7 @@ def optimize_portfolio(
         data,
         benchmark=benchmark,
         financial_column=financial_column,
+        cash_column=cash_column,
         eligibility_column=eligibility_column,
         incomplete=incomplete.to_numpy(dtype=bool),
         config=config,
@@ -135,12 +140,6 @@ def optimize_portfolio(
             active @ exposure @ covariance @ exposure.T @ active
             + np.sum(specific * active**2)
         )
-
-    def transaction_cost(weights: np.ndarray) -> float:
-        quantity = np.abs(weights - current) * config.initial_nav
-        rates = (config.commission_bps + config.slippage_bps) / 10_000.0
-        impact = config.impact_bps / 10_000.0 * np.sqrt(quantity / adv)
-        return float(np.sum(quantity * (rates + impact)))
 
     constraints = [
         {"type": "eq", "fun": lambda weights: float(weights.sum() - 1.0)},
@@ -181,7 +180,7 @@ def optimize_portfolio(
     result = minimize(
         lambda weights: float(
             -(expected_alpha @ (weights - benchmark))
-            + transaction_cost(weights) / config.initial_nav
+            + float(expected_transaction_cost(weights)) / config.initial_nav
         ),
         current.copy(),
         method="SLSQP",
@@ -214,7 +213,7 @@ def optimize_portfolio(
         factor_variance=factor_variance,
         specific_variance=specific_variance,
         target_turnover=float(0.5 * np.abs(weights - current).sum()),
-        expected_transaction_cost=transaction_cost(weights),
+        expected_transaction_cost=float(expected_transaction_cost(weights)),
         maximum_adv_participation=float(participation.max(initial=0.0)),
     )
 
@@ -224,12 +223,16 @@ def _bounds(
     *,
     benchmark: np.ndarray,
     financial_column: str | None,
+    cash_column: str | None,
     eligibility_column: str | None,
     incomplete: np.ndarray,
     config: OptimizerConfig,
 ) -> tuple[tuple[float, float], ...]:
     bounds: list[tuple[float, float]] = []
     for position, row in data.iterrows():
+        if cash_column is not None and bool(row[cash_column]):
+            bounds.append((0.0, 1.0))
+            continue
         fixed = (
             (financial_column is not None and bool(row[financial_column]))
             or float(benchmark[position]) == 0.0
@@ -306,9 +309,6 @@ def _validate_config(config: OptimizerConfig) -> None:
         config.industry_active_limit,
         config.style_active_limit,
         config.adv_participation_limit,
-        config.commission_bps,
-        config.slippage_bps,
-        config.impact_bps,
         config.solver_ftol,
     )
     if any(

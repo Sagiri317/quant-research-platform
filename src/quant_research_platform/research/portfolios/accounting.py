@@ -8,6 +8,7 @@ from datetime import date
 
 import numpy as np
 import pandas as pd
+from scipy.stats import t as student_t
 
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_BLOCK_REASONS,
@@ -266,6 +267,13 @@ class AlphaCalibration:
     slope: float
     intercept: float
     expected_alpha: pd.Series
+    slope_standard_error: float
+    slope_t_statistic: float
+    slope_pvalue: float
+    slope_ci_low: float
+    slope_ci_high: float
+    weighted_r2: float
+    coverage: float
     valid_rebalance_dates: int
     scheduled_rebalance_dates: int
     benchmark_only: bool
@@ -302,19 +310,38 @@ def calibrate_expected_alpha(
     }:
         raise ValueError("alpha_calibration_schedule_invalid")
     scheduled = rebalance_dates(scheduled, schedule)
+    if not scheduled.empty:
+        scheduled = scheduled[scheduled >= scheduled.max() - pd.DateOffset(months=12)]
     alpha = pd.to_numeric(frame[alpha_column], errors="raise").astype("float64")
     returns = pd.to_numeric(frame[return_column], errors="raise").astype("float64")
     valid = alpha.notna() & returns.notna() & np.isfinite(alpha) & np.isfinite(returns)
     valid_dates = dates.loc[valid].isin(scheduled)
-    date_count = int(dates.loc[valid & valid_dates].nunique())
+    date_count = 0 if scheduled.empty else int(dates.loc[valid & valid_dates].nunique())
     enough_coverage = date_count >= minimum_valid_dates and (
         date_count / max(1, len(scheduled)) >= minimum_coverage
     )
     if not enough_coverage:
+        empty_inference = (
+            0.0,
+            0.0,
+            1.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            date_count / max(1, len(scheduled)),
+        )
         return AlphaCalibration(
             slope=0.0,
             intercept=0.0,
             expected_alpha=pd.Series(0.0, index=frame.index, dtype="float64"),
+            slope_standard_error=empty_inference[0],
+            slope_t_statistic=empty_inference[1],
+            slope_pvalue=empty_inference[2],
+            slope_ci_low=empty_inference[3],
+            slope_ci_high=empty_inference[4],
+            weighted_r2=empty_inference[5],
+            coverage=empty_inference[6],
             valid_rebalance_dates=date_count,
             scheduled_rebalance_dates=len(scheduled),
             benchmark_only=True,
@@ -337,10 +364,53 @@ def calibrate_expected_alpha(
     expected = pd.Series(0.0, index=frame.index, dtype="float64")
     if not benchmark_only:
         expected.loc[valid] = slope * alpha.loc[valid]
+    bread = np.zeros((2, 2), dtype="float64")
+    cluster_scores = []
+    weighted_actual = target * np.sqrt(
+        weights,
+    )
+    selected_dates = dates.loc[selected].to_numpy()
+    _, cluster_codes = np.unique(selected_dates, return_inverse=True)
+    for cluster in np.unique(cluster_codes):
+        rows = np.flatnonzero(cluster_codes == cluster)
+        score = design[rows].T @ (weighted_actual[rows] - fit[rows] @ coefficients)
+        cluster_scores.append(score)
+        bread += design[rows].T @ (weights[rows, None] * design[rows])
+    meat = sum(score[:, None] @ score[None, :] for score in cluster_scores)
+    covariance = np.linalg.pinv(bread) @ meat @ np.linalg.pinv(bread)
+    standard_error = float(np.sqrt(max(0.0, covariance[1, 1])))
+    degrees_freedom = max(1, len(cluster_scores) - 2)
+    if standard_error > 0.0:
+        statistic = slope / standard_error
+        pvalue = float(2.0 * student_t.sf(abs(statistic), df=degrees_freedom))
+        critical = float(student_t.ppf(0.975, df=degrees_freedom))
+        ci_low = slope - critical * standard_error
+        ci_high = slope + critical * standard_error
+        t_statistic = statistic
+    else:
+        statistic = 0.0 if slope == 0.0 else np.inf
+        pvalue = 1.0 if slope == 0.0 else 0.0
+        ci_low = ci_high = slope
+        t_statistic = statistic
+    fitted = fit @ coefficients
+    residual = weighted_actual - fitted
+    denominator = float(np.dot(weighted_actual, weighted_actual))
+    weighted_r2 = (
+        1.0 - float(np.dot(residual, residual)) / denominator
+        if denominator > 0.0
+        else 0.0
+    )
     return AlphaCalibration(
         slope=slope,
         intercept=intercept,
         expected_alpha=expected,
+        slope_standard_error=standard_error,
+        slope_t_statistic=float(t_statistic),
+        slope_pvalue=pvalue,
+        slope_ci_low=float(ci_low),
+        slope_ci_high=float(ci_high),
+        weighted_r2=float(weighted_r2),
+        coverage=date_count / max(1, len(scheduled)),
         valid_rebalance_dates=date_count,
         scheduled_rebalance_dates=len(scheduled),
         benchmark_only=benchmark_only,

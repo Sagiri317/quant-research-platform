@@ -1249,11 +1249,20 @@ def _build_semantic_target(
             )
             if prediction_root.name.startswith("__missing_"):
                 raise ValueError("prediction_target_root_missing")
+            prediction_window = time_window
+            if candidate.construction == "benchmark_enhanced":
+                prediction_window = TimeWindow(
+                    max(
+                        pd.Timestamp(protocol.formal_dataset_window.start),
+                        pd.Timestamp(time_window.start) - pd.DateOffset(months=12),
+                    ).date(),
+                    pd.Timestamp(time_window.end).date(),
+                )
             with read_prediction_output_bundle(
                 prediction_root / "outputs" / prediction_target,
                 expected_output_id=prediction_target,
                 expected_run_id=f"run_{prediction_target}",
-                time_window=time_window,
+                time_window=prediction_window,
             ) as (_manifest, prediction_lookup):
                 portfolio_chunks = binding.producer(
                     candidate=candidate,

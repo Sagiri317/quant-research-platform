@@ -529,8 +529,8 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
         "pv_all_ew_rank_top20_equal_weight_ledger",
         "pv_all_champion_top20_equal_weight_ledger",
         "pv_all_champion_top20_float_cap_ledger",
-        None,
-        None,
+        "pv_all_champion_csi500_enhanced_ledger",
+        "pv_all_champion_csi1000_enhanced_ledger",
     ]
 
     crypto_profile = research_profile(CRYPTO_PROFILE_ID)

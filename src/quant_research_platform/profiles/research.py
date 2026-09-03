@@ -235,7 +235,6 @@ def _a_share_profile() -> ResearchProfile:
                 )
                 for scenario_id in a_share.SCENARIO_IDS
                 for candidate in a_share.protocol(scenario_id).portfolio_candidates()
-                if candidate.benchmark_id is None
             },
         },
         schema_inventory_important_columns=(

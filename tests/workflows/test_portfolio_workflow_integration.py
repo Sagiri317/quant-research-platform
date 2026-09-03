@@ -104,6 +104,10 @@ def _processed_specs() -> ProcessedDataCatalog:
             "adj_open": ColumnRole.CONTEXT,
             "amount": ColumnRole.CONTEXT,
             "market_type": ColumnRole.CONTEXT,
+            "period_return": ColumnRole.CONTEXT,
+            "float_market_cap": ColumnRole.CONTEXT,
+            "industry_level1_code": ColumnRole.KEY,
+            "is_nonfinancial_industry": ColumnRole.CONTEXT,
         },
         primary_key=("market_id", "asset_id", "timestamp"),
         partition_columns=("year",),
@@ -214,6 +218,10 @@ def _frames() -> dict[str, pd.DataFrame]:
             for timestamp in dates
         ]
     )
+    panel["period_return"] = 0.001
+    panel["float_market_cap"] = panel["asset_id"].map({"a": 1_000.0, "b": 2_000.0})
+    panel["industry_level1_code"] = "A01"
+    panel["is_nonfinancial_industry"] = True
     calendar = pd.DataFrame(
         {
             "timestamp": dates,
@@ -263,7 +271,18 @@ def _frames() -> dict[str, pd.DataFrame]:
         "trading_calendar": calendar,
         "a_share_fee_schedule": fees,
         "benchmark_weights": pd.DataFrame(
-            columns=["market_id", "benchmark_id", "asset_id", "timestamp", "weight"]
+            [
+                {
+                    "market_id": "a_share",
+                    "benchmark_id": benchmark_id,
+                    "asset_id": asset,
+                    "timestamp": timestamp,
+                    "weight": 0.5,
+                }
+                for benchmark_id in ("csi500", "csi1000")
+                for timestamp in dates
+                for asset in assets
+            ]
         ),
     }
 
@@ -473,7 +492,7 @@ def _prepare_model_artifacts(
         )
 
 
-def test_three_simple_candidates_build_and_reuse_one_real_persisted_chain(
+def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     tmp_path: Path,
 ) -> None:
     profile = _profile(_frames())
@@ -512,9 +531,17 @@ def test_three_simple_candidates_build_and_reuse_one_real_persisted_chain(
     protocol = profile.protocol(scenario_id="pv_all", access_window="development")
     portfolio_ids = tuple(
         f"pv_all_{candidate.candidate_id}_ledger"
-        for candidate in protocol.portfolio_candidates()[:3]
+        for candidate in protocol.portfolio_candidates()
     )
-    assert all(results[target_id]["status"] == "BUILT" for target_id in portfolio_ids)
+    failed = {
+        target_id: (
+            results[target_id]["status"],
+            results[target_id].get("reason"),
+        )
+        for target_id in portfolio_ids
+        if results[target_id]["status"] != "BUILT"
+    }
+    assert not failed, failed
     assert results[protocol.persisted_prediction_target_id]["status"] == "BUILT"
     assert results[protocol.ew_rank_prediction_target_id]["status"] == "BUILT"
     for target_id in portfolio_ids:
@@ -531,6 +558,13 @@ def test_three_simple_candidates_build_and_reuse_one_real_persisted_chain(
         assert chunks
         assert all(tuple(chunk.columns) == PORTFOLIO_LEDGER_COLUMNS for chunk in chunks)
         assert all(chunk["asset_id"].iloc[-1] == "__cash__" for chunk in chunks)
+        if "enhanced" in target_id:
+            assert all(
+                chunk.loc[chunk["asset_id"].eq("__cash__"), "decision_reason"]
+                .eq("enhanced_benchmark_only")
+                .all()
+                for chunk in chunks
+            )
 
     reused = research.research_run(
         profile=profile,

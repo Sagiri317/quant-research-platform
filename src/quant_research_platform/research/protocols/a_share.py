@@ -340,11 +340,7 @@ class AShareProtocol:
                         else ()
                     ),
                 ),
-                producer_id=(
-                    f"{dataset}_{candidate.candidate_id}_ledger"
-                    if candidate.benchmark_id is None
-                    else None
-                ),
+                producer_id=f"{dataset}_{candidate.candidate_id}_ledger",
             )
             for candidate in portfolio_candidates
         )
@@ -478,6 +474,7 @@ class AShareProtocol:
                 rebalance_schedule="weekly-last-trading-day",
                 benchmark_id="csi500",
                 benchmark_weights_target_id="benchmark_weights",
+                risk_style_columns=RISK_STYLE_COLUMNS,
                 research_dataset_id=self.scenario_id,
                 market_panel_target_id=MARKET_PANEL_ID,
                 execution_mask_target_id="execution_mask",
@@ -492,6 +489,7 @@ class AShareProtocol:
                 rebalance_schedule="weekly-last-trading-day",
                 benchmark_id="csi1000",
                 benchmark_weights_target_id="benchmark_weights",
+                risk_style_columns=RISK_STYLE_COLUMNS,
                 research_dataset_id=self.scenario_id,
                 market_panel_target_id=MARKET_PANEL_ID,
                 execution_mask_target_id="execution_mask",

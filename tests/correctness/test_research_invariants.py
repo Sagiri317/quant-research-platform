@@ -50,6 +50,10 @@ from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
     optimize_portfolio,
 )
+from quant_research_platform.research.portfolios.risk import (
+    FactorRiskState,
+    MarketModelRiskState,
+)
 from quant_research_platform.research.protocols.a_share import (
     PROTOCOL_ID,
     SCENARIO_IDS,
@@ -426,7 +430,9 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
     assert calibrated.benchmark_only is False
     assert calibrated.valid_rebalance_dates == 6
     assert calibrated.expected_alpha.iloc[1] > calibrated.expected_alpha.iloc[0]
-
+    assert calibrated.slope_standard_error > 0.0
+    assert calibrated.slope_ci_low < calibrated.slope < calibrated.slope_ci_high
+    assert 0.0 <= calibrated.slope_pvalue <= 1.0
     inverse = calibrate_expected_alpha(
         frame.assign(forward_return_1d=-frame["forward_return_1d"]),
         schedule="daily",
@@ -434,6 +440,76 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
     )
     assert inverse.benchmark_only is True
     assert inverse.expected_alpha.eq(0.0).all()
+
+
+def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
+    dates = pd.bdate_range("2022-01-03", periods=564)
+    style_columns = (
+        "log_float_market_cap",
+        "beta_252d",
+        "momentum_252_20",
+        "residual_volatility_60d",
+        "amihud_60d",
+        "earnings_yield",
+    )
+    assets = tuple(f"a{index:02d}" for index in range(40))
+    market_model = MarketModelRiskState()
+    factor_risk = FactorRiskState(
+        style_columns=style_columns,
+        minimum_cross_section=2,
+    )
+    for position, timestamp in enumerate(dates):
+        returns = pd.Series(
+            {
+                asset: 0.001 + ((index % 7) - 3) * 0.0002 + 0.0001 * (position % 5)
+                for index, asset in enumerate(assets)
+            },
+            dtype="float64",
+        )
+        panel = pd.DataFrame(
+            {
+                "asset_id": assets,
+                "period_return": returns,
+                "float_market_cap": [1_000.0 + index for index in range(len(assets))],
+                "eligible": [True] * len(assets),
+            }
+        )
+        styles = market_model.observe(panel)
+        if position == 0:
+            continue
+        cross = pd.DataFrame(
+            {
+                "timestamp": timestamp,
+                "asset_id": assets,
+                "asset_return": returns,
+                "industry_level1_code": ["A01"] * len(assets),
+                "float_market_cap": [1_000.0 + index for index in range(len(assets))],
+                "eligible": [True] * len(assets),
+                **{
+                    column: (
+                        styles.beta
+                        if column == "beta_252d"
+                        else styles.residual_volatility
+                        if column == "residual_volatility_60d"
+                        else [
+                            ((index * (style_index + 2)) % 9 - 4) * 0.1
+                            for index in range(len(assets))
+                        ]
+                    )
+                    for style_index, column in enumerate(style_columns)
+                },
+            }
+        )
+        factor_risk.observe_return_session(cross)
+    assert styles.beta.notna().all()
+    assert styles.residual_volatility.notna().all()
+    estimate = factor_risk.estimate()
+    assert (
+        np.linalg.eigvalsh(estimate.factor_covariance.to_numpy(dtype="float64")).min()
+        >= -1e-12
+    )
+    assert estimate.specific_variance.notna().all()
+    assert estimate.specific_variance.gt(0.0).all()
 
 
 def test_future_execution_and_disclosure_facts_do_not_rewrite_past_facts() -> None:
@@ -513,9 +589,6 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         industry_active_limit=0.02,
         style_active_limit=0.20,
         adv_participation_limit=0.05,
-        commission_bps=3.0,
-        slippage_bps=5.0,
-        impact_bps=25.0,
         solver_ftol=1e-12,
         solver_maxiter=1000,
     )
@@ -524,11 +597,45 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         factor_covariance=covariance,
         industry_columns=("industry_a",),
         style_columns=exposure_columns[1:],
+        expected_transaction_cost=lambda _weights: 0.0,
         config=config,
     )
     assert result.weights.sum() == pytest.approx(1.0)
     assert result.target_turnover <= 0.20 + 1e-8
     assert result.maximum_adv_participation <= 0.05 + 1e-8
+    cash_assets = assets.copy()
+    cash_assets["current_weight"] = 0.225
+    cash_assets["is_cash"] = False
+    cash_assets = pd.concat(
+        [
+            cash_assets,
+            pd.DataFrame(
+                [
+                    {
+                        "asset_id": "__cash__",
+                        "expected_alpha": 0.0,
+                        "current_weight": 0.1,
+                        "benchmark_weight": 0.0,
+                        "specific_variance": 0.0,
+                        "adv": np.inf,
+                        **{column: 0.0 for column in exposure_columns},
+                        "is_cash": True,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+    )
+    cash_result = optimize_portfolio(
+        cash_assets,
+        factor_covariance=covariance,
+        industry_columns=("industry_a",),
+        style_columns=exposure_columns[1:],
+        expected_transaction_cost=lambda _weights: 0.0,
+        cash_column="is_cash",
+        config=config,
+    )
+    assert cash_result.weights.sum() == pytest.approx(1.0)
 
 
 def test_fundamental_value_factors_use_panel_total_cap() -> None:
