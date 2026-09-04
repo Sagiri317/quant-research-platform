@@ -1,35 +1,5 @@
-"""Portfolio dataframe output column contracts."""
+"""Portfolio dataframe return column contract."""
 
-POSITION_COLUMNS = ["timestamp", "asset", "signal", "position"]
-TARGET_WEIGHT_COLUMNS = ["timestamp", "asset", "signal", "target_weight"]
-EXECUTION_COLUMNS = [
-    "timestamp",
-    "asset",
-    "signal",
-    "side",
-    "pre_trade_weight",
-    "target_weight",
-    "realized_weight",
-    "blocked",
-]
-REALIZED_HOLDINGS_CASH_COLUMNS = [
-    "timestamp",
-    "asset",
-    "signal",
-    "realized_weight",
-    "cash_weight",
-]
-NAV_RETURN_COLUMNS = [
-    "timestamp",
-    "signal",
-    "gross_portfolio_return",
-    "net_portfolio_return",
-    "cost",
-    "turnover",
-    "nav",
-    "cumulative_cost",
-]
-TURNOVER_COLUMNS = ["timestamp", "signal", "turnover"]
 RETURNS_COLUMNS = [
     "timestamp",
     "signal",
@@ -43,42 +13,4 @@ RETURNS_COLUMNS = [
     "net_portfolio_return",
     "long_count",
     "short_count",
-]
-COST_BREAKDOWN_COLUMNS = [
-    "timestamp",
-    "signal",
-    "buy_turnover",
-    "sell_turnover",
-    "turnover",
-    "buy_cost",
-    "sell_cost",
-    "slippage_cost",
-    "spread_cost",
-    "impact_cost",
-    "total_cost",
-    "cost_model",
-]
-EXPOSURE_SUMMARY_COLUMNS = [
-    "signal",
-    "mean_gross_exposure",
-    "mean_net_exposure",
-    "max_gross_exposure",
-    "max_abs_net_exposure",
-    "mean_long_count",
-    "mean_short_count",
-    "mean_position_count",
-]
-WEIGHT_DIAGNOSTIC_COLUMNS = [
-    "timestamp",
-    "signal",
-    "method",
-    "universe_count",
-    "eligible_count",
-    "can_enter_count",
-    "can_exit_count",
-    "entry_blocked_count",
-    "exit_blocked_count",
-    "long_count",
-    "short_count",
-    "fallback_reason",
 ]

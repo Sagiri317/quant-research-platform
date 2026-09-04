@@ -12,7 +12,6 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
@@ -26,13 +25,8 @@ from quant_research_platform.contracts.models import (
     _model_algorithm_facts,
 )
 from quant_research_platform.contracts.portfolios import (
-    CostConfig,
     ExecutionAssumptions,
     PortfolioCandidateSpec,
-    PortfolioDiagnosticsConfig,
-    PortfolioSpec,
-    TradabilityConfig,
-    WeightConfig,
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import TargetSpec
@@ -798,78 +792,6 @@ def evaluation_catalog() -> EvaluationCatalog:
             n_groups=5,
         )
         for selected in SCENARIO_IDS
-    )
-
-
-def portfolio_catalog(
-    *, scenario_id: str = "pv_all", factor_scope: str = "core"
-) -> PortfolioCatalog:
-    columns = protocol(scenario_id, factor_scope=factor_scope).factor_columns
-    signals = tuple(
-        SignalSpec(signal_id=column, source_kind="factor", source_column=column)
-        for column in columns
-    )
-    diagnostics = PortfolioDiagnosticsConfig(
-        capacity_amount_column="amount",
-        capacity_float_market_cap_column="float_market_cap",
-        categorical_exposure_columns=("industry_level1_code",),
-    )
-    tradability = TradabilityConfig(
-        eligibility_column="eligible",
-        can_enter_column="can_enter",
-        can_exit_column="can_exit",
-    )
-    return PortfolioCatalog(
-        (
-            PortfolioSpec(
-                portfolio_id=f"{scenario_id}_top20_equal_weight",
-                market_id=MARKET_ID,
-                research_dataset_id=RESEARCH_DATASET_IDS[scenario_id],
-                signals=signals,
-                rebalance_schedule="weekly-last-trading-day",
-                execution_policy_id="a_share_next_open",
-                cost_policy_id="a_share_historical_costs",
-                cost_config=CostConfig(
-                    commission_bps=COMMISSION_BPS,
-                    slippage_bps=FIXED_SLIPPAGE_BPS,
-                    impact_bps=IMPACT_BPS,
-                    adv_participation=PRIMARY_PARTICIPATION,
-                    adv_sensitivities=PARTICIPATION_SENSITIVITIES,
-                ),
-                weight_config=WeightConfig(
-                    method="equal_weight_quantile",
-                    portfolio_mode="long_only",
-                    top_quantile=0.2,
-                    bottom_quantile=0.2,
-                ),
-                diagnostics_config=diagnostics,
-                tradability_config=tradability,
-            ),
-            PortfolioSpec(
-                portfolio_id=f"{scenario_id}_top20_float_cap_weight",
-                market_id=MARKET_ID,
-                research_dataset_id=RESEARCH_DATASET_IDS[scenario_id],
-                signals=signals,
-                rebalance_schedule="weekly-last-trading-day",
-                execution_policy_id="a_share_next_open",
-                cost_policy_id="a_share_historical_costs",
-                cost_config=CostConfig(
-                    commission_bps=COMMISSION_BPS,
-                    slippage_bps=FIXED_SLIPPAGE_BPS,
-                    impact_bps=IMPACT_BPS,
-                    adv_participation=PRIMARY_PARTICIPATION,
-                    adv_sensitivities=PARTICIPATION_SENSITIVITIES,
-                ),
-                weight_config=WeightConfig(
-                    method="float_cap_weighted_quantile",
-                    portfolio_mode="long_only",
-                    top_quantile=0.2,
-                    bottom_quantile=0.2,
-                ),
-                diagnostics_config=diagnostics,
-                tradability_config=tradability,
-            ),
-        )
     )
 
 

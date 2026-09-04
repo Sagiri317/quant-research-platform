@@ -97,6 +97,7 @@ def build_portfolio_ledger(
     output_window: TimeWindow,
     input_window: TimeWindow,
     formal_dataset_window: TimeWindow,
+    prediction_window: TimeWindow | None = None,
     prediction_lookup: object,
     assumptions: ExecutionAssumptions,
     resource_policy: RuntimeResourcePolicy | None,
@@ -151,10 +152,14 @@ def build_portfolio_ledger(
     del calendar
     if sessions.empty:
         raise PortfolioTargetBlocked("portfolio_execution_window_empty")
-    alpha_start = max(
-        session_start,
-        output_start - pd.DateOffset(months=12),
+    prediction_window = prediction_window or TimeWindow(
+        max(
+            pd.Timestamp(formal_dataset_window.start),
+            output_start - pd.DateOffset(months=12),
+        ).date(),
+        pd.Timestamp(output_window.end).date(),
     )
+    alpha_start = max(session_start, pd.Timestamp(prediction_window.start))
 
     fee_identity = _required_identity(
         upstream_identities,
@@ -341,7 +346,6 @@ def build_portfolio_ledger(
                         alpha = _prediction_alpha(
                             dataset,
                             prediction_lookup,
-                            required=decision_timestamp >= output_start,
                         )
                         if alpha is not None:
                             retained.enter_context(
@@ -900,9 +904,9 @@ def _optimizer_assets(
         result[column] = (
             exposures_by_asset[column].reindex(assets).to_numpy(dtype="float64")
         )
-    if not np.isclose(float(result["current_weight"].sum()), 1.0):
-        raise ValueError("optimizer_current_state_invalid")
     cash_weight = float(cash / nav)
+    if cash_weight < -1e-12:
+        raise ValueError("optimizer_current_state_invalid")
     if cash_weight > 1e-12:
         cash_row = {
             "asset_id": PORTFOLIO_CASH_ASSET_ID,
@@ -920,6 +924,8 @@ def _optimizer_assets(
             [result, pd.DataFrame([cash_row])],
             ignore_index=True,
         )
+    if not np.isclose(float(result["current_weight"].sum()), 1.0):
+        raise ValueError("optimizer_current_state_invalid")
     return result
 
 
@@ -1137,9 +1143,7 @@ def _build_session(
 def _prediction_alpha(
     dataset: pd.DataFrame,
     prediction_lookup: object,
-    *,
-    required: bool = True,
-) -> pd.Series | None:
+) -> pd.Series:
     dataset = _session_frame(dataset, _DATASET_COLUMNS).set_index(
         "asset_id",
         drop=False,
@@ -1154,14 +1158,10 @@ def _prediction_alpha(
         raise ValueError("portfolio_prediction_lookup_invalid")
     with values_for_frame(
         required_rows,
-        mark_matched=required,
+        mark_matched=True,
     ) as (values, found):
         if not all(found):
-            if required:
-                raise ValueError("missing_required_prediction_keys")
-            if any(found):
-                raise ValueError("missing_required_prediction_keys")
-            return None
+            raise ValueError("missing_required_prediction_keys")
         alpha.loc[required_rows["asset_id"]] = np.asarray(values, dtype="float64")
     if (
         alpha.loc[eligible].isna().any()

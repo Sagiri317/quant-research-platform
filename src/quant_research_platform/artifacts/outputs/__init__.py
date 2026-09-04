@@ -16,9 +16,6 @@ from quant_research_platform.artifacts.outputs.bundle_validation import (
 from quant_research_platform.artifacts.outputs.evaluation import (
     write_evaluation_outputs_from_chunks as evaluation_chunks_writer,
 )
-from quant_research_platform.artifacts.outputs.portfolio import (
-    write_portfolio_outputs as portfolio_writer,
-)
 from quant_research_platform.artifacts.outputs.prediction import (
     write_prediction_outputs as prediction_writer,
 )
@@ -27,7 +24,6 @@ from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
 )
 from quant_research_platform.contracts.outputs import OutputSpec
-from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -106,33 +102,6 @@ def write_evaluation_outputs_from_chunks(
             output_spec=output_spec,
             layout=layout,
             n_groups=n_groups,
-        ),
-        resource_policy=resource_policy,
-    )
-
-
-def write_portfolio_outputs(
-    *,
-    output_chunks: Iterable[
-        Mapping[str, pd.DataFrame] | OwnedValue[Mapping[str, pd.DataFrame]]
-    ],
-    summary_factory: Callable[[], Mapping[str, pd.DataFrame]],
-    additive_cumulative_returns_factory: Callable[
-        [], Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]
-    ],
-    spec: PortfolioSpec,
-    output_spec: OutputSpec,
-    layout: StorageLayout,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> Path:
-    return _write_in_resource_root(
-        lambda: portfolio_writer(
-            output_chunks=output_chunks,
-            summary_factory=summary_factory,
-            additive_cumulative_returns_factory=additive_cumulative_returns_factory,
-            spec=spec,
-            output_spec=output_spec,
-            layout=layout,
         ),
         resource_policy=resource_policy,
     )

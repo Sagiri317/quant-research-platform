@@ -3,18 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict
 from pathlib import PurePosixPath
 
 from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     validate_evaluation_output_metadata_shape,
-)
-from quant_research_platform.artifacts.outputs.portfolio_validation import (
-    PORTFOLIO_ARTIFACTS,
-    validate_portfolio_output_metadata_shape,
-    validate_portfolio_row_counts,
 )
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_output_metadata_shape,
@@ -27,7 +21,6 @@ from quant_research_platform.contracts.outputs import (
     OutputSpec,
     validate_output_identifier,
 )
-from quant_research_platform.contracts.portfolios import PortfolioSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.signals import SignalSpec
@@ -49,7 +42,6 @@ PREDICTION_ARTIFACTS = ("prediction.parquet",)
 _OUTPUT_DEFINITION_FILES = {
     "prediction_outputs": PREDICTION_ARTIFACTS,
     "evaluation_outputs": EVALUATION_ARTIFACTS,
-    "portfolio_outputs": tuple(PORTFOLIO_ARTIFACTS.values()),
 }
 
 
@@ -100,8 +92,6 @@ def validate_output_manifest_business_envelope(
         validate_prediction_output_metadata_shape(metadata)
     elif output_definition_id == "evaluation_outputs":
         validate_evaluation_output_metadata_shape(metadata)
-    elif output_definition_id == "portfolio_outputs":
-        validate_portfolio_output_metadata_shape(metadata)
     else:
         raise ValueError("output_manifest_definition_id_invalid")
     if "run_type" in metadata and metadata["run_type"] != definition.run_type:
@@ -252,38 +242,4 @@ def evaluation_output_metadata(
         "evaluation_diagnostics": _evaluation_diagnostics_payload(
             evaluation_diagnostics
         ),
-    }
-
-
-def portfolio_output_metadata_from_row_counts(
-    *,
-    spec: PortfolioSpec,
-    row_counts: Mapping[str, int],
-) -> dict[str, object]:
-    validated_counts = validate_portfolio_row_counts(row_counts)
-    return {
-        "portfolio_id": spec.portfolio_id,
-        "market_id": str(spec.market_id),
-        "research_dataset_id": spec.research_dataset_id,
-        "run_type": spec.run_type,
-        "signals": [_signal_payload(signal) for signal in spec.signals],
-        "rebalance_schedule": spec.rebalance_schedule,
-        "execution_policy_id": spec.execution_policy_id,
-        "cost_policy_id": spec.cost_policy_id,
-        "weight_config": asdict(spec.weight_config),
-        "tradability_config": asdict(spec.tradability_config),
-        "cost_config": asdict(spec.cost_config),
-        "diagnostics_config": {
-            "capacity_amount_column": spec.diagnostics_config.capacity_amount_column,
-            "capacity_float_market_cap_column": (
-                spec.diagnostics_config.capacity_float_market_cap_column
-            ),
-            "numeric_exposure_columns": list(
-                spec.diagnostics_config.numeric_exposure_columns
-            ),
-            "categorical_exposure_columns": list(
-                spec.diagnostics_config.categorical_exposure_columns
-            ),
-        },
-        "row_counts": dict(validated_counts),
     }

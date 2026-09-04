@@ -197,9 +197,10 @@ def _plan_targets(
     by_id: dict[str, TargetPlan] = {}
     for spec in ordered:
         data_spec = _catalog_data_spec(profile, spec.target_id)
-        target_window = _target_time_window(
+        target_window = _semantic_target_time_window(
             action,
             protocol,
+            spec,
             data_spec,
             window,
         )
@@ -884,9 +885,10 @@ def _build_target(
             reason="requested_identity_unavailable",
         )
     data_spec = _catalog_data_spec(profile, spec.target_id)
-    target_time_window = _target_time_window(
+    target_time_window = _semantic_target_time_window(
         action,
         protocol,
+        spec,
         data_spec,
         research_window,
     )
@@ -1251,12 +1253,10 @@ def _build_semantic_target(
                 raise ValueError("prediction_target_root_missing")
             prediction_window = time_window
             if candidate.construction == "benchmark_enhanced":
-                prediction_window = TimeWindow(
-                    max(
-                        pd.Timestamp(protocol.formal_dataset_window.start),
-                        pd.Timestamp(time_window.start) - pd.DateOffset(months=12),
-                    ).date(),
-                    pd.Timestamp(time_window.end).date(),
+                prediction_window = _a_share_champion_window(
+                    protocol,
+                    candidate.prediction_target_id,
+                    time_window,
                 )
             with read_prediction_output_bundle(
                 prediction_root / "outputs" / prediction_target,
@@ -1271,6 +1271,7 @@ def _build_semantic_target(
                     output_window=time_window,
                     input_window=protocol.data_window,
                     formal_dataset_window=protocol.formal_dataset_window,
+                    prediction_window=prediction_window,
                     prediction_lookup=prediction_lookup,
                     assumptions=protocol.execution_assumptions,
                     resource_policy=policy,
@@ -1373,9 +1374,10 @@ def _reuse_target(
         requested_identity,
     )
     data_spec = _catalog_data_spec(profile, spec.target_id)
-    target_time_window = _target_time_window(
+    target_time_window = _semantic_target_time_window(
         action,
         protocol,
+        spec,
         data_spec,
         research_window,
     )
@@ -1874,6 +1876,49 @@ def _window_payload(window: TimeWindow, *, access: str) -> dict[str, object]:
         "end": time_value_isoformat(window.end, preserve_datetime=True),
         "access": access,
     }
+
+
+def _semantic_target_time_window(
+    action: str,
+    protocol: Any,
+    target_spec: TargetSpec,
+    data_spec: Any,
+    requested: Mapping[str, object],
+) -> TimeWindow:
+    window = _target_time_window(action, protocol, data_spec, requested)
+    if action != "research run" or data_spec is not None:
+        return window
+    return _a_share_champion_window(protocol, target_spec.target_id, window)
+
+
+def _a_share_champion_window(
+    protocol: Any,
+    target_id: str,
+    time_window: TimeWindow,
+) -> TimeWindow:
+    if getattr(protocol, "protocol_id", None) != "a_share_low_frequency":
+        return time_window
+    champion_target_ids = {
+        protocol.model_selection_target_id,
+        protocol.persisted_prediction_target_id,
+    }
+    if target_id not in champion_target_ids:
+        return time_window
+    manifest = protocol.manifest()
+    development_window = manifest.get("development_window")
+    if type(development_window) is not dict:
+        raise ValueError("research_window_invalid")
+    development_start = development_window.get("start")
+    if type(development_start) is not str or not development_start:
+        raise ValueError("research_window_invalid")
+    start = max(
+        pd.Timestamp(development_start),
+        pd.Timestamp(time_window.start) - pd.DateOffset(months=12),
+    )
+    return TimeWindow(
+        start.date(),
+        pd.Timestamp(time_window.end).date(),
+    )
 
 
 def _matching_instance(

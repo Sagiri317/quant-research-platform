@@ -24,11 +24,5 @@ def output_catalog() -> OutputCatalog:
                 run_type="evaluation",
                 scope=OutputScope.LOCAL_ONLY,
             ),
-            OutputDefinition(
-                output_definition_id="portfolio_outputs",
-                display_name="Portfolio outputs",
-                run_type="portfolio",
-                scope=OutputScope.LOCAL_ONLY,
-            ),
         )
     )

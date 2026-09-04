@@ -5,12 +5,12 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.artifacts.outputs import validate_output_bundle
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.portfolios import PortfolioCatalog
 from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
@@ -417,7 +417,6 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
                 for algorithm in a_share.MODEL_FAMILY_ORDER
             )
         ),
-        build_portfolio_catalog=lambda **_kwargs: PortfolioCatalog(),
         producer_bindings=bindings,
         schema_inventory_important_columns=(),
     )
@@ -430,6 +429,7 @@ def _prepare_model_artifacts(
 ) -> None:
     protocol = profile.protocol(scenario_id="pv_all", access_window="development")
     plans = {item["target_id"]: item for item in plan["targets"]}
+    requested_window = plan["research_window"]
     champion_ids = tuple(
         f"pv_all_{algorithm}" for algorithm in a_share.MODEL_FAMILY_ORDER
     )
@@ -442,16 +442,23 @@ def _prepare_model_artifacts(
             for item in protocol.target_specs("research run")
             if item.target_id == target_id
         )
+        target_window = research._semantic_target_time_window(
+            "research run",
+            protocol,
+            target,
+            None,
+            requested_window,
+        )
+        target_research_window = research._window_payload(
+            target_window,
+            access=str(requested_window["access"]),
+        )
         envelope = research._target_envelope_for_spec(
             profile=profile,
             protocol=protocol,
             target_spec=target,
             data_spec=None,
-            research_window={
-                "start": "2019-01-02",
-                "end": "2019-01-15",
-                "access": "development",
-            },
+            research_window=target_research_window,
             upstream_identities=plans[target_id]["upstream_identities"],
             software_identity=research.production_software_identity(),
             raw_content_identity=None,
@@ -538,12 +545,35 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             results[target_id]["status"],
             results[target_id].get("reason"),
         )
-        for target_id in portfolio_ids
-        if results[target_id]["status"] != "BUILT"
+        for target_id in (
+            protocol.model_selection_target_id,
+            protocol.persisted_prediction_target_id,
+            *portfolio_ids,
+        )
+        if results[target_id]["status"] not in {"BUILT", "REUSED"}
     }
     assert not failed, failed
     assert results[protocol.persisted_prediction_target_id]["status"] == "BUILT"
     assert results[protocol.ew_rank_prediction_target_id]["status"] == "BUILT"
+    champion_identity = results[protocol.persisted_prediction_target_id][
+        "instance_identity"
+    ]
+    champion_root = layout.instance_root(
+        layout.semantic_artifact_root(
+            "a_share",
+            protocol.persisted_prediction_target_id,
+        ),
+        champion_identity,
+    )
+    prediction_manifest, _prediction_members = validate_output_bundle(
+        champion_root / "outputs" / protocol.persisted_prediction_target_id,
+        expected_output_id=protocol.persisted_prediction_target_id,
+        expected_run_id=f"run_{protocol.persisted_prediction_target_id}",
+    )
+    assert (
+        prediction_manifest["metadata"]["prediction_metadata"]["test_start"]
+        == "2019-01-01"
+    )
     for target_id in portfolio_ids:
         identity = results[target_id]["instance_identity"]
         root = layout.instance_root(
@@ -609,7 +639,6 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             == second[target_id]["requested_identity"]
         )
     for target_id in (
-        protocol.persisted_prediction_target_id,
         protocol.ew_rank_prediction_target_id,
         *portfolio_ids,
     ):
@@ -617,3 +646,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             first[target_id]["requested_identity"]
             != second[target_id]["requested_identity"]
         )
+    assert (
+        first[protocol.persisted_prediction_target_id]["requested_identity"]
+        == second[protocol.persisted_prediction_target_id]["requested_identity"]
+    )

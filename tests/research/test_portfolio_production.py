@@ -174,6 +174,7 @@ def _build_producer(
     formal_dataset_window: TimeWindow | None = None,
     resource_policy=None,
     candidate: PortfolioCandidateSpec | None = None,
+    prediction_window: TimeWindow | None = None,
 ):
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
     if candidate is None:
@@ -302,6 +303,7 @@ def _build_producer(
         input_window=input_window or TimeWindow("2022-12-01", "2023-01-10"),
         formal_dataset_window=formal_dataset_window
         or TimeWindow("2022-12-01", "2023-01-10"),
+        prediction_window=prediction_window,
         prediction_lookup=prediction_lookup or _PredictionLookup(),
         assumptions=assumptions,
         resource_policy=resource_policy,
@@ -527,6 +529,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         output_window=output_window,
         input_window=TimeWindow("2022-11-14", "2023-01-10"),
         candidate=candidate,
+        prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
     )
     result = list(chunks)
     optimized = [
@@ -534,7 +537,10 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         for frame in result
         if frame["decision_reason"].eq("enhanced_optimizer").any()
     ]
-    assert optimized
+    assert optimized, [
+        (frame["decision_timestamp"].iloc[0], frame["decision_reason"].iloc[-1])
+        for frame in result
+    ]
     session = optimized[-1]
     assert session["expected_alpha"].iloc[:2].notna().all()
     assert session["asset_specific_variance"].iloc[:2].tolist() == pytest.approx(
@@ -546,6 +552,39 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         ]
         >= 0.0
     )
+
+
+def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight() -> None:
+    assets = pd.Index(("a", "b"), dtype="string")
+    exposures = pd.DataFrame(
+        {
+            "asset_id": assets,
+            "industry_level1_code": ("A01", "A01"),
+            **{column: (0.1, -0.1) for column in RISK_STYLE_COLUMNS},
+        }
+    )
+    result = production._optimizer_assets(
+        benchmark_weights=pd.Series(0.5, index=assets),
+        current_weights=pd.Series(0.45, index=assets),
+        cash=10.0,
+        nav=100.0,
+        expected_alpha=pd.Series(0.01, index=assets),
+        exposures=exposures,
+        specific_variance=pd.Series(0.01, index=assets),
+        adv=pd.Series(1_000.0, index=assets),
+        eligible=pd.Series(True, index=assets),
+        panel=pd.DataFrame(
+            {
+                "asset_id": assets,
+                "is_nonfinancial_industry": (True, True),
+            }
+        ),
+    )
+    assert result["current_weight"].sum() == pytest.approx(1.0)
+    cash_row = result.loc[result["asset_id"].eq("__cash__")]
+    assert len(cash_row) == 1
+    assert cash_row["current_weight"].iloc[0] == pytest.approx(0.1)
+    assert cash_row["is_cash"].iloc[0]
 
 
 def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup(

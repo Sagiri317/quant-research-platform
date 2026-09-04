@@ -6,13 +6,6 @@ import pytest
 
 from quant_research_platform.contracts.experiments import legal_training_rows
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.portfolios import (
-    PortfolioDiagnosticsConfig,
-    PortfolioSpec,
-    TradabilityConfig,
-    WeightConfig,
-)
-from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
@@ -42,9 +35,6 @@ from quant_research_platform.research.models.supervised import (
 )
 from quant_research_platform.research.portfolios.accounting import (
     calibrate_expected_alpha,
-)
-from quant_research_platform.research.portfolios.engine import (
-    _construct_portfolio_positions,
 )
 from quant_research_platform.research.portfolios.optimizer import (
     OptimizerConfig,
@@ -77,7 +67,6 @@ def test_research_protocol_identity_and_surfaces_are_explicit() -> None:
     assert research_protocol.manifest()["protocol_id"] == PROTOCOL_ID
     assert "protocol_version" not in research_protocol.manifest()
     assert not hasattr(ModelSpec, "purge_gap_steps")
-    assert not hasattr(PortfolioSpec, "execution_lag_steps")
 
 
 def test_formal_price_volume_definitions_use_session_windows() -> None:
@@ -317,67 +306,6 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
         assert fitted.metadata["scaler"] is None
         if hasattr(result, "release"):
             result.release(owner="test.rank")
-
-
-def test_weekly_portfolio_rebalances_then_naturally_drifts() -> None:
-    sessions = pd.bdate_range("2024-01-01", periods=4)
-    frame = pd.DataFrame(
-        {
-            "asset_id": [asset for _date in sessions for asset in ("a", "b")],
-            "timestamp": [date for date in sessions for _asset in ("a", "b")],
-            "signal": [2.0, 1.0, 2.0, 1.0, 2.0, 1.0, 2.0, 1.0],
-            "forward_return_1d": [0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            "scenario_universe": True,
-            "can_enter": True,
-            "can_exit": True,
-            "amount": 1_000_000.0,
-            "float_market_cap": 10_000_000.0,
-            "industry_level1_code": "A",
-        }
-    )
-    spec = PortfolioSpec(
-        portfolio_id="weekly",
-        market_id="a_share",
-        research_dataset_id="pv_all",
-        signals=(
-            SignalSpec(
-                signal_id="signal", source_kind="factor", source_column="signal"
-            ),
-        ),
-        rebalance_schedule="weekly-last-trading-day",
-        execution_policy_id="a_share_next_open",
-        cost_policy_id="a_share_historical_costs",
-        weight_config=WeightConfig(
-            method="equal_weight_quantile",
-            portfolio_mode="long_only",
-            top_quantile=1.0,
-        ),
-        diagnostics_config=PortfolioDiagnosticsConfig(
-            capacity_amount_column="amount",
-            capacity_float_market_cap_column="float_market_cap",
-            categorical_exposure_columns=("industry_level1_code",),
-        ),
-        tradability_config=TradabilityConfig(
-            eligibility_column="scenario_universe",
-            can_enter_column="can_enter",
-            can_exit_column="can_exit",
-        ),
-    )
-    result = _construct_portfolio_positions(
-        frame,
-        spec,
-        source_columns_by_kind={
-            "factor": ("signal",),
-            "feature": (),
-            "prediction": (),
-        },
-    )
-    turnover = result.turnover.loc[result.turnover["signal"].eq("signal")]
-    assert turnover["turnover"].tolist()[1:3] == [0.0, 0.0]
-    first = result.positions.loc[result.positions["timestamp"].eq(sessions[0])]
-    middle = result.positions.loc[result.positions["timestamp"].eq(sessions[1])]
-    assert first.loc[first["asset"].eq("a"), "position"].iloc[0] == pytest.approx(0.5)
-    assert middle.loc[middle["asset"].eq("a"), "position"].iloc[0] != pytest.approx(0.5)
 
 
 def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
