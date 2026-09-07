@@ -393,6 +393,32 @@ def test_model_failure_blocks_real_semantic_descendant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     base = research_profile()
+    layout = StorageLayout(project_root=tmp_path)
+    dataset_spec = make_demo_research_dataset_spec(
+        data_id="pv_all",
+        factor_columns=("x",),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        context_columns=("label_available_at",),
+    )
+    write_dataset(
+        layout.research_dataset_root(dataset_spec.market_id, dataset_spec.data_id),
+        pd.DataFrame(
+            {
+                "market_id": ["a_share"],
+                "asset_id": ["a"],
+                "timestamp": pd.to_datetime(["2018-01-02"]),
+                "label_available_at": pd.to_datetime(["2018-02-01"]),
+                "x": [1.0],
+                "label": [0.1],
+                "eligible": [True],
+            }
+        ),
+        spec=dataset_spec,
+        resource_policy=None,
+        borrowed_input=True,
+    )
+    base = replace(base, research_datasets=ResearchDatasetCatalog((dataset_spec,)))
     model_calls = 0
 
     def fail_model(**_kwargs: object) -> object:

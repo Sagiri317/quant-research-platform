@@ -634,8 +634,12 @@ def _prepare_model_artifacts(
         ]
     )
 
-    def chunks(columns, *, input_columns):
-        yield training.loc[:, list(columns)]
+    def chunks(columns, *, input_columns, start, end):
+        history_start = protocol.manifest()["formal_dataset_window"]["start"]
+        selected = training["timestamp"].between(
+            pd.Timestamp(history_start if start is None else start), pd.Timestamp(end)
+        )
+        yield training.loc[selected, list(columns)]
 
     def fitted_families():
         for model_id, reference in zip(model_ids, references, strict=True):
@@ -1164,10 +1168,14 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     )
     pd.testing.assert_frame_equal(
         pd.read_parquet(
-            prediction_root / "outputs" / prediction_id / "prediction.parquet"
+            native_filesystem_path(
+                prediction_root / "outputs" / prediction_id / "prediction.parquet"
+            )
         ),
         pd.read_parquet(
-            corrected_root / "outputs" / prediction_id / "prediction.parquet"
+            native_filesystem_path(
+                corrected_root / "outputs" / prediction_id / "prediction.parquet"
+            )
         ),
         check_exact=True,
     )

@@ -19,7 +19,10 @@ from quant_research_platform.research.features.transforms import (
     canonical_feature_pipeline,
     neutralize_cross_section,
 )
-from quant_research_platform.research.protocols.a_share import research_dataset_specs
+from quant_research_platform.research.protocols.a_share import (
+    LABEL_HORIZONS,
+    research_dataset_specs,
+)
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -154,7 +157,9 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
     layout = StorageLayout(project_root=tmp_path)
     processed = processed_catalog()
     dataset_spec = research_dataset_specs()[0]
-    timestamps = pd.to_datetime(["2024-01-02"] * 3)
+    # Synthetic sessions: next-open entry, exit after the registered horizon.
+    sessions = pd.bdate_range("2023-01-03", periods=max(LABEL_HORIZONS) + 2)
+    timestamps = pd.DatetimeIndex([sessions[0]] * 3)
     keys = pd.DataFrame(
         {
             "market_id": "a_share",
@@ -233,9 +238,13 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         if column == "forward_return_20d":
             labels[column] = [0.10, 0.20, np.nan]
         elif column.endswith("_available_at"):
-            labels[column] = timestamps
+            horizon = int(
+                column.removeprefix("forward_return_").removesuffix("d_available_at")
+            )
+            labels[column] = sessions[horizon + 1]
         else:
             labels[column] = 0.10
+    labels.loc[2, "forward_return_20d_available_at"] = pd.NaT
     write_dataset(
         layout.processed_data_root(
             label_spec.market_id, label_spec.kind, label_spec.data_id
@@ -249,14 +258,14 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         dataset_catalog=ResearchDatasetCatalog((dataset_spec,)),
         processed_catalog=processed,
         dataset_id=dataset_spec.data_id,
-        time_window=TimeWindow("2024-01-02", "2024-01-02"),
+        time_window=TimeWindow("2023-01-03", "2023-01-03"),
     )
     result = pd.concat(
         iter_research_dataset_chunks(
             layout,
             market_id=MarketId("a_share"),
             dataset_id=dataset_spec.data_id,
-            time_window=TimeWindow("2024-01-02", "2024-01-02"),
+            time_window=TimeWindow("2023-01-03", "2023-01-03"),
         ),
         ignore_index=True,
     )
