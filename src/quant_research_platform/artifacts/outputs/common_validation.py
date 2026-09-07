@@ -7,7 +7,6 @@ from pathlib import Path
 import pandas as pd
 
 from quant_research_platform.artifacts.definitions import output_catalog
-from quant_research_platform.artifacts.layout import output_bundle_root
 from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
@@ -181,7 +180,7 @@ def derive_output_bundle_root(
         raise ValueError("output_spec_mismatch")
     if output_spec.scope != OutputScope.LOCAL_ONLY:
         raise ValueError("output_scope_must_be_local_only")
-    output_bundle = output_bundle_root(layout.project_root, output_spec.output_id)
+    output_bundle = Path(layout.project_root) / "outputs" / output_spec.output_id
     if any(
         f"data/{layer}" in output_bundle.as_posix()
         for layer in ("raw", "interim", "processed", "research")

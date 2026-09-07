@@ -1,6 +1,5 @@
 """Independent fold-maturity counts and publication failure checks."""
 
-import os
 from dataclasses import replace
 
 import numpy as np
@@ -13,7 +12,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.evaluations import runner
 from quant_research_platform.research.evaluations.engine import EvaluationResult
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.storage._scratch_ownership import _windows_extended_path
+from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact,
     read_semantic_artifact_record,
@@ -25,9 +24,7 @@ def check_crypto_evaluation_readback(
     *, layout, profile, targets, frame, plan, prediction_root
 ):
     def read_parquet(path):
-        return pd.read_parquet(
-            _windows_extended_path(path) if os.name == "nt" else path
-        )
+        return pd.read_parquet(native_filesystem_path(path))
 
     oos = pd.Series(False, index=frame.index)
     cutoff = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
@@ -223,9 +220,7 @@ def check_crypto_evaluation_input_boundaries(
                 targets[spec.evaluation_id]["instance_identity"],
             )
             path = root / "outputs" / spec.evaluation_id / "metrics.parquet"
-            expected = pd.read_parquet(
-                _windows_extended_path(path) if os.name == "nt" else path
-            )
+            expected = pd.read_parquet(native_filesystem_path(path))
             pd.testing.assert_frame_equal(actual, expected)
             assert policy.used_memory_bytes == 0
         spec = profile.evaluations.get("crypto_hft_linear_regression_oos_evaluation")

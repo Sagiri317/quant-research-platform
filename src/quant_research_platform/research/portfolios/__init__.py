@@ -11,13 +11,12 @@ from .accounting import (
 from .construction import build_simple_target_weights
 from .optimizer import OptimizationResult, OptimizerConfig, optimize_portfolio
 from .production import build_portfolio_ledger
-from .risk import FactorRiskEstimate, estimate_factor_risk
+from .risk import FactorRiskEstimate
 
 __all__ = [
     "FactorRiskEstimate",
     "OptimizationResult",
     "OptimizerConfig",
-    "estimate_factor_risk",
     "optimize_portfolio",
     "ExecutionAccounting",
     "AlphaCalibration",

@@ -8,6 +8,7 @@ from pathlib import Path
 import typer
 
 from quant_research_platform.interfaces import queries
+from quant_research_platform.policy.share_safety import sanitize_shared_text
 from quant_research_platform.profiles.research import (
     A_SHARE_PROFILE_ID,
     research_profile,
@@ -66,7 +67,7 @@ def research_dataset_requirements(
             research_profile(profile),
         )
     except Exception as exc:
-        typer.echo(str(exc), err=True)
+        typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
     typer.echo(json.dumps(result.model_dump(), ensure_ascii=False, sort_keys=True))
 
@@ -129,6 +130,7 @@ def research_run(
     research_plan: Path | None = typer.Option(None, "--research-plan"),  # noqa: B008
     raw_root: Path | None = typer.Option(None, "--raw-root"),  # noqa: B008
     holdout: bool = typer.Option(False, "--holdout"),  # noqa: B008
+    development_run_id: str | None = typer.Option(None, "--development-run-id"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
@@ -152,11 +154,12 @@ def research_run(
             start_date=start_date,
             end_date=end_date,
             holdout=holdout,
+            development_run_id=development_run_id,
             plan=plan,
             rebuild=rebuild,
         )
     except (PermissionError, ValueError) as exc:
-        typer.echo(str(exc), err=True)
+        typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc
     _echo_result(result)
 
@@ -217,7 +220,11 @@ def _echo_result(result: object) -> None:
 
 
 def main() -> None:
-    app()
+    try:
+        app()
+    except Exception as exc:
+        typer.echo(sanitize_shared_text(str(exc)), err=True)
+        raise SystemExit(2) from None
 
 
 if __name__ == "__main__":

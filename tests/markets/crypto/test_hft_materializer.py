@@ -21,7 +21,7 @@ from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_common_panel_alignment_ignores_asymmetric_frame_boundaries() -> None:
-    columns = ("timestamp", "asset_id", "value")
+    columns = ("timestamp", "asset_id", "segment_id", "value")
     timestamps = pd.date_range("2024-01-01", periods=4, freq="100ms")
     eth_tail_consumed = []
 
@@ -31,6 +31,7 @@ def test_common_panel_alignment_ignores_asymmetric_frame_boundaries() -> None:
                 {
                     "timestamp": timestamps[position],
                     "asset_id": asset_id,
+                    "segment_id": "source_segment",
                     "value": position,
                 }
                 for position in positions
@@ -62,12 +63,13 @@ def test_common_panel_alignment_ignores_asymmetric_frame_boundaries() -> None:
 
 
 def test_common_panel_initial_empty_stream_still_drains_required_symbols() -> None:
-    columns = ("timestamp", "asset_id", "value")
+    columns = ("timestamp", "asset_id", "segment_id", "value")
     exhausted = []
 
     def btc_frames():  # noqa: ANN202
         yield pd.DataFrame(
-            [(pd.Timestamp("2024-01-01"), "btc_usdt", 1)], columns=columns
+            [(pd.Timestamp("2024-01-01"), "btc_usdt", "source_segment", 1)],
+            columns=columns,
         )
         exhausted.append("BTCUSDT")
 
@@ -86,6 +88,165 @@ def test_common_panel_initial_empty_stream_still_drains_required_symbols() -> No
 
     assert output == []
     assert exhausted == ["ETHUSDT", "BTCUSDT"]
+
+
+@pytest.mark.parametrize(
+    ("fail_transform", "empty_symbols"),
+    [
+        (False, ()),
+        (False, ("BTCUSDT",)),
+        (False, ("ETHUSDT",)),
+        (False, ("BTCUSDT", "ETHUSDT")),
+        (True, ()),
+    ],
+)
+def test_panel_transform_waits_for_reservation_and_closes_source(
+    tmp_path, monkeypatch, fail_transform, empty_symbols
+):
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_default_dataset_frame,
+        make_processed_dataset_spec,
+    )
+
+    frame = make_default_dataset_frame()
+    root = make_dataset_artifact_root(tmp_path, "handshake")
+    pulls = []
+    closed = []
+    primary = KeyboardInterrupt("transform_primary")
+
+    def chunks(asset_session, **_kwargs):
+        try:
+            pulls.append("source")
+            asset = asset_session.parquet_filters[-1][2]
+            if asset not in {
+                producer.canonical_crypto_asset_id(symbol) for symbol in empty_symbols
+            }:
+                yield frame
+        finally:
+            closed.append("source")
+
+    def transform(source):
+        try:
+            for chunk in source:
+                pulls.append("transform")
+                if fail_transform:
+                    raise primary
+                yield chunk
+        finally:
+            closed.append("transform")
+
+    policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        write_dataset(
+            root,
+            frame,
+            spec=make_processed_dataset_spec("handshake"),
+            resource_policy=policy,
+            borrowed_input=True,
+        )
+        with open_dataset_session(
+            root, columns=None, time_window=None, resource_policy=policy
+        ) as session:
+            baseline = policy.used_memory_bytes
+            monkeypatch.setattr(producer, "iter_dataset_chunks", chunks)
+            output = producer._panel_frame_producer(
+                session,
+                transform=transform,
+                columns=tuple(frame.columns),
+                resource_policy=policy,
+            )
+            try:
+                bound = next(output)
+                assert pulls == []
+                if fail_transform:
+                    with policy.lease("test.panel.output", bound) as lease:
+                        with pytest.raises(KeyboardInterrupt) as raised:
+                            output.send(lease)
+                        assert raised.value is primary
+                    assert closed == ["transform", "source"]
+                else:
+                    emitted = 0
+                    while True:
+                        with policy.lease("test.panel.output", bound) as lease:
+                            try:
+                                owned = output.send(lease)
+                            except StopIteration:
+                                break
+                            assert owned.lease is lease
+                            pd.testing.assert_frame_equal(owned.value, frame)
+                            owned = None
+                            emitted += 1
+                        try:
+                            bound = output.send(None)
+                        except StopIteration:
+                            break
+                    assert emitted == 2 - len(empty_symbols)
+                    assert closed.count("transform") == closed.count("source") == 2
+                assert policy.used_memory_bytes == baseline
+            finally:
+                output.close()
+    assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("batch_rows", (2, 4, 8))
+def test_common_panel_gaps_start_new_segments_without_inventing_rows(batch_rows):
+    from quant_research_platform.markets.implementations.crypto import hft
+    from tests.helpers.binance_hft import _coverage
+    from tests.markets.crypto.test_hft import _boundary, _state
+
+    def panels(events, asset, coverage):
+        return tuple(
+            hft.iter_panel_frames(
+                events,
+                [],
+                market_id="crypto",
+                asset_id=asset,
+                start_ms=0,
+                end_ms=300,
+                book_coverage=coverage,
+                trade_coverage={"trade-connection-1": _coverage(0, 400)},
+                batch_rows=4,
+            )
+        )
+
+    btc = panels([_state(0), _state(300)], "btc_usdt", {"s1": _coverage(0, 400)})
+    eth = panels(
+        [
+            _state(0),
+            _boundary(100),
+            _state(200, segment_id="s2"),
+            _state(300, segment_id="s2"),
+        ],
+        "eth_usdt",
+        {"s1": _coverage(0, 100), "s2": _coverage(200, 400)},
+    )
+    tuple(hft.iter_factor_frames(btc))
+    tuple(hft.iter_factor_frames(eth))
+    parts = tuple(
+        producer._common_symbol_panel_frames(
+            {"BTCUSDT": btc, "ETHUSDT": eth},
+            columns=tuple(btc[0].columns),
+            batch_rows=batch_rows,
+        )
+    )
+    joined = pd.concat(parts, ignore_index=True)
+    assert len(joined) == 4
+    assert (
+        joined.timestamp.tolist()
+        == [pd.Timestamp(0, unit="ms")] * 2 + [pd.Timestamp(300, unit="ms")] * 2
+    )
+    for asset in ("btc_usdt", "eth_usdt"):
+        frames = tuple(part.loc[part.asset_id.eq(asset)] for part in parts)
+        factors = pd.concat(tuple(hft.iter_factor_frames(frames)), ignore_index=True)
+        assert factors.return_100ms.isna().all()
+        labels = pd.concat(
+            tuple(hft.iter_label_frames(frames, horizons_ms=(100,))), ignore_index=True
+        )
+        assert labels.future_mid_return_100ms.isna().all()
+        assert joined.loc[joined.asset_id.eq(asset), "segment_id"].nunique() == 2
 
 
 def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):

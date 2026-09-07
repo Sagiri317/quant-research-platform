@@ -3,37 +3,20 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from contextlib import ExitStack
 from dataclasses import replace
 
-import numpy as np
 import pandas as pd
 
-import quant_research_platform.research.models.fitting as fitting
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
-from quant_research_platform.research.models.fitting import (
-    model_training_read_columns,
-    training_scope_chunks,
-)
 from quant_research_platform.research.models.persisted import (
     PersistedQuarterlyModelArtifact,
     read_quarterly_predictor,
-)
-from quant_research_platform.research.models.supervised import (
-    build_estimator_from_model_spec,
-    preflight_model_specs,
-)
-from quant_research_platform.research.models.trial_selection import (
-    select_prediction_model_spec,
 )
 from quant_research_platform.research.predictions.outputs import (
     PredictionResult,
@@ -42,134 +25,9 @@ from quant_research_platform.research.predictions.outputs import (
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
-    current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.layout import StorageLayout
-
-
-def build_prediction_result_from_research_dataset(
-    *,
-    layout: StorageLayout,
-    dataset_catalog: ResearchDatasetCatalog,
-    model_catalog: ModelCatalog,
-    prediction_catalog: PredictionCatalog,
-    prediction_id: str,
-    time_window: TimeWindow | None = None,
-    prediction_train_end: str | None = None,
-    prediction_test_start: str | None = None,
-    prediction_test_end: str | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> PredictionResult:
-    configured_prediction = prediction_catalog.get(prediction_id)
-    preflight_model_specs(
-        model_catalog.get(model_id)
-        for model_id in dict.fromkeys(
-            (
-                configured_prediction.model_id,
-                *configured_prediction.candidate_model_ids,
-            )
-        )
-    )
-    operation = ExitStack()
-    operation.enter_context(runtime_resource_policy_scope(resource_policy))
-    try:
-        result = _build_prediction_result_from_research_dataset(
-            layout=layout,
-            dataset_catalog=dataset_catalog,
-            model_catalog=model_catalog,
-            prediction_catalog=prediction_catalog,
-            prediction_id=prediction_id,
-            time_window=time_window,
-            prediction_train_end=prediction_train_end,
-            prediction_test_start=prediction_test_start,
-            prediction_test_end=prediction_test_end,
-        )
-    except BaseException as primary:
-        try:
-            operation.close()
-        except BaseException as cleanup_error:
-            primary.add_note(
-                "prediction operation cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
-            )
-        raise
-    source_chunks = operation.enter_context(
-        closing_iterator(iter(result.output_chunks))
-    )
-    operation.enter_context(result)
-    chunks_complete = False
-    metadata_value: dict[str, object] | None = None
-    terminal_error: BaseException | None = None
-    operation_open = True
-
-    def close_operation() -> None:
-        nonlocal operation_open
-        if operation_open:
-            operation_open = False
-            operation.close()
-
-    def close_result() -> None:
-        nonlocal terminal_error
-        if terminal_error is not None or not operation_open:
-            return
-        closed = RuntimeError("prediction_result_closed")
-        try:
-            close_operation()
-        except BaseException as primary:
-            terminal_error = primary
-            raise
-        terminal_error = closed
-
-    def output_chunks() -> Iterable[pd.DataFrame]:
-        nonlocal chunks_complete, terminal_error
-        if terminal_error is not None:
-            raise terminal_error
-        try:
-            yield from source_chunks
-        except BaseException as primary:
-            terminal_error = primary
-            try:
-                close_operation()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "prediction operation cleanup also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-            raise
-        chunks_complete = True
-
-    def prediction_metadata() -> dict[str, object]:
-        nonlocal metadata_value, terminal_error
-        if terminal_error is not None:
-            raise terminal_error
-        if not chunks_complete:
-            raise RuntimeError("prediction_metadata_before_output_complete")
-        if metadata_value is not None:
-            return metadata_value
-        try:
-            candidate = result.prediction_metadata_factory()
-        except BaseException as primary:
-            terminal_error = primary
-            try:
-                close_operation()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "prediction operation cleanup also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-            raise
-        metadata_value = candidate
-        return metadata_value
-
-    owned_result = PredictionResult(
-        spec=result.spec,
-        output_chunks=output_chunks(),
-        model_metadata=result.model_metadata,
-        prediction_metadata_factory=prediction_metadata,
-        _close=close_result,
-    )
-    return owned_result
 
 
 def build_prediction_result_from_persisted_model(
@@ -179,17 +37,15 @@ def build_prediction_result_from_persisted_model(
     prediction_spec,
     persisted_model: PersistedQuarterlyModelArtifact,
     resource_policy: RuntimeResourcePolicy,
+    access_window: str = "development",
 ) -> PredictionResult:
     """Build predictions from the persisted quarterly model members."""
 
     dataset_spec = dataset_catalog.get(prediction_spec.research_dataset_id)
     requested_start = pd.Timestamp(prediction_spec.test_start)
     requested_end = pd.Timestamp(prediction_spec.test_end or prediction_spec.test_start)
-    selected = tuple(
-        item
-        for item in persisted_model.quarterly_models
-        if pd.Timestamp(item["prediction_window"]["end"]) >= requested_start
-        and pd.Timestamp(item["prediction_window"]["start"]) <= requested_end
+    selected = persisted_model.prediction_models(
+        TimeWindow(requested_start, requested_end), access_window=access_window
     )
     if not selected:
         raise ValueError("persisted_model_prediction_window_empty")
@@ -271,6 +127,7 @@ def build_prediction_result_from_persisted_model(
                             dataset_id=dataset_spec.data_id,
                             time_window=TimeWindow(_q_start, _q_end),
                             columns=_read_columns,
+                            access_window=access_window,
                         ),
                         dataset_spec=dataset_spec,
                         input_columns=_q_input_columns,
@@ -303,14 +160,13 @@ def build_prediction_result_from_persisted_model(
                 q_metadata.pop("rank_parameters", None)
                 with read_quarterly_predictor(
                     persisted_model,
-                    item["quarter_id"],
+                    item["source_quarter"],
                     item["family_id"],
                     resource_policy=policy,
                 ) as predictor:
                     q_result = build_prediction_result_from_frames(
                         chunks(),
                         q_spec,
-                        np.empty(0, dtype="float64"),
                         q_input_columns,
                         prediction_model=predictor,
                         model_metadata=q_metadata,
@@ -327,7 +183,7 @@ def build_prediction_result_from_persisted_model(
         spec=prediction_spec,
         output_chunks=source,
         model_metadata=persisted_model.prediction_lineage(
-            TimeWindow(requested_start, requested_end)
+            TimeWindow(requested_start, requested_end), access_window=access_window
         ),
         prediction_metadata_factory=lambda: state.metadata(prediction_spec),
         _close=source.close,
@@ -379,136 +235,6 @@ class _PredictionMetadataState:
             "input_count": len(self.input_columns),
             "prediction_column": spec.prediction_column,
         }
-
-
-def _build_prediction_result_from_research_dataset(
-    *,
-    layout: StorageLayout,
-    dataset_catalog: ResearchDatasetCatalog,
-    model_catalog: ModelCatalog,
-    prediction_catalog: PredictionCatalog,
-    prediction_id: str,
-    time_window: TimeWindow | None,
-    prediction_train_end: str | None,
-    prediction_test_start: str | None,
-    prediction_test_end: str | None,
-) -> PredictionResult:
-    prediction_spec = prediction_catalog.get(prediction_id)
-    if (
-        prediction_train_end is not None
-        or prediction_test_start is not None
-        or prediction_test_end is not None
-    ):
-        prediction_spec = replace(
-            prediction_spec,
-            train_end=prediction_train_end or prediction_spec.train_end,
-            test_start=prediction_test_start or prediction_spec.test_start,
-            test_end=(
-                prediction_test_end
-                if prediction_test_end is not None
-                else prediction_spec.test_end
-            ),
-        )
-    model_spec = model_catalog.get(prediction_spec.model_id)
-    dataset_spec = dataset_catalog.get(prediction_spec.research_dataset_id)
-
-    def _chunks(
-        read_columns: tuple[str, ...],
-        *,
-        input_columns: tuple[str, ...],
-    ) -> Iterable[pd.DataFrame]:
-        yield from iter_validated_research_input_chunks(
-            iter_research_dataset_chunks(
-                layout,
-                market_id=dataset_spec.market_id,
-                dataset_id=dataset_spec.data_id,
-                time_window=time_window,
-                columns=read_columns,
-            ),
-            dataset_spec=dataset_spec,
-            input_columns=input_columns,
-        )
-
-    _validate_prediction_window_order(prediction_spec)
-    model_selection_metadata: dict[str, object] | None = None
-    if prediction_spec.model_selection_enabled:
-        model_spec, model_selection_metadata = select_prediction_model_spec(
-            prediction_spec=prediction_spec,
-            dataset_spec=dataset_spec,
-            model_catalog=model_catalog,
-            chunks=_chunks,
-        )
-    train_read_columns = model_training_read_columns(
-        dataset_spec.primary_key,
-        model_spec.input_columns,
-        label_column=model_spec.label_column,
-        sample_filter_mode=model_spec.sample_filter_mode,
-    )
-    prediction_read_columns = tuple(
-        dict.fromkeys(
-            (
-                *dataset_spec.primary_key,
-                *model_spec.input_columns,
-                *required_filter_columns(prediction_spec.sample_filter_mode),
-            )
-        )
-    )
-    train_end = pd.Timestamp(prediction_spec.train_end)
-    try:
-        owned_model = fitting._fit_model_result_owned_from_frames(  # noqa: SLF001
-            training_scope_chunks(
-                _chunks(train_read_columns, input_columns=model_spec.input_columns),
-                asset_ids=prediction_spec.training_asset_ids,
-            ),
-            model_spec,
-            estimator=build_estimator_from_model_spec(model_spec),
-            fitting_cutoff=train_end,
-        )
-        model_result = (
-            owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
-        )
-        model_lease = owned_model.lease if isinstance(owned_model, OwnedValue) else None
-    except ValueError as exc:
-        if str(exc) == "model_training_sample_empty":
-            raise ValueError("empty_training_window") from exc
-        raise
-    model_metadata = model_result.metadata
-    if model_selection_metadata is not None:
-        model_metadata = {**model_metadata, "model_selection": model_selection_metadata}
-    try:
-        return build_prediction_result_from_frames(
-            _chunks(prediction_read_columns, input_columns=model_spec.input_columns),
-            prediction_spec,
-            model_result.coefficients,
-            model_spec.input_columns,
-            prediction_model=model_result.prediction_model,
-            model_metadata=model_metadata,
-            model_lease=model_lease,
-            resource_policy=current_runtime_resource_policy(),
-        )
-    except BaseException as primary:
-        model_result = None
-        owned_model = None
-        model_metadata = None
-        try:
-            if model_lease is not None:
-                model_lease.close()
-        except BaseException as cleanup_error:
-            primary.add_note(
-                "fitted model lease release also failed: "
-                f"{type(cleanup_error).__name__}"
-            )
-        raise
-
-
-def _validate_prediction_window_order(spec) -> None:
-    train_end = pd.Timestamp(spec.train_end)
-    test_start = pd.Timestamp(spec.test_start)
-    if train_end >= test_start:
-        raise ValueError("prediction_train_end_must_precede_test_start")
-    test_end = pd.Timestamp(spec.test_end) if spec.test_end is not None else None
-    if test_end is not None and test_end < test_start:
-        raise ValueError("prediction_test_end_must_not_precede_test_start")
 
 
 def build_crypto_predictions(
@@ -591,9 +317,8 @@ def build_crypto_predictions(
                         result = build_prediction_result_from_frames(
                             source,
                             folded,
-                            payload[0],
                             inputs,
-                            prediction_model=payload[1],
+                            prediction_model=payload,
                             model_metadata=dict(entry["model_metadata"]),
                             resource_policy=resource_policy,
                         )

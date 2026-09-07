@@ -1,4 +1,4 @@
-"""Price-volume factor calculations."""
+"""Price-volume calculations using complete session windows and exact endpoints."""
 
 from __future__ import annotations
 
@@ -11,490 +11,330 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
 )
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_timestamp_series,
+)
 
-from .columns import FORMAL_PRICE_VOLUME_FACTORS, price_volume_window_column
-from .formal import calculate_formal_price_volume_factors
-from .presets import price_volume_factor_columns
-from .requirements import (
-    price_volume_factor_input_columns,
-    unsupported_price_volume_factors,
-)
-from .rolling import (
-    rolling_aggregate,
-    rolling_correlation,
-    rolling_drawdown,
-    rolling_kurt,
-    rolling_rms,
-    rolling_skew,
-    rolling_std,
-)
-from .safety import finite_or_nan, safe_log, valid_denominator
-from .windows import windows_from_requested_factors
+from .definitions import _PRICE_VOLUME_INPUT_WINDOWS, FORMAL_PRICE_VOLUME_FACTORS
 
 
 def calculate_price_volume_factors(
     panel: pd.DataFrame,
     *,
     factor_columns: Iterable[str] | None = None,
-    asset_column: str = "asset_id",
-    date_column: str = "timestamp",
-    price_column: str = "adj_close",
-    return_column: str = "period_return",
-    amount_column: str = "amount",
-    volume_column: str = "volume",
-    turnover_column: str = "turnover",
-    high_column: str = "high",
-    low_column: str = "low",
-    prev_close_column: str = "prev_close",
-    float_market_cap_column: str = "float_market_cap",
-    total_market_cap_column: str = "total_market_cap",
     output_window: TimeWindow | None = None,
 ) -> pd.DataFrame:
-    """Add requested price-volume factors without future data."""
-
-    requested = tuple(dict.fromkeys(factor_columns or price_volume_factor_columns()))
-    if requested and set(requested).issubset(FORMAL_PRICE_VOLUME_FACTORS):
-        return calculate_formal_price_volume_factors(
-            panel,
-            factor_columns=requested,
-            output_window=output_window,
-        )
-    unsupported = unsupported_price_volume_factors(requested)
-    if unsupported:
-        raise ValueError("unsupported_price_volume_factors: " + ", ".join(unsupported))
-
-    required_inputs = tuple(
+    """Calculate only requested columns and output rows, preserving warmup inputs."""
+    requested = tuple(
         dict.fromkeys(
-            (
-                asset_column,
-                date_column,
-                *(
-                    column
-                    for factor in requested
-                    for column in price_volume_factor_input_columns(factor)
-                ),
-            )
+            FORMAL_PRICE_VOLUME_FACTORS if factor_columns is None else factor_columns
         )
     )
-    missing_inputs = [
-        column for column in required_inputs if column not in panel.columns
-    ]
-    if missing_inputs:
-        raise ValueError(
-            "missing_price_volume_input_columns: " + ", ".join(missing_inputs)
-        )
-
-    requested_set = set(requested)
-    required_windows = windows_from_requested_factors(requested_set)
-    result = panel.sort_values([asset_column, date_column]).copy()
-    group_keys = result[asset_column]
-    grouped = result.groupby(asset_column, sort=False)
-    group_positions = tuple(grouped.indices.values())
-    needs_trailing_price = any(
-        price_volume_window_column("mom", window) in requested_set
-        or price_volume_window_column("rev", window) in requested_set
-        for window in required_windows
-        if window != 1
-    )
-    needs_price = (
-        needs_trailing_price
-        or any(
-            price_volume_window_column("drawdown", window) in requested_set
-            for window in required_windows
-        )
-        or any(
-            price_volume_window_column("intraday_range", window) in requested_set
-            for window in required_windows
+    unknown = sorted(set(requested).difference(_PRICE_VOLUME_INPUT_WINDOWS))
+    if unknown:
+        raise ValueError("unknown_price_volume_factor: " + ", ".join(unknown))
+    names = tuple(
+        dict.fromkeys(
+            name
+            for factor in requested
+            for name in _PRICE_VOLUME_INPUT_WINDOWS[factor][0]
         )
     )
-    needs_returns = price_volume_window_column("rev", 1) in requested_set or any(
-        price_volume_window_column(prefix, window) in requested_set
-        for prefix in (
-            "vol",
-            "downside_vol",
-            "upside_vol",
-            "max_return",
-            "min_return",
-            "skew",
-            "kurt",
-            "amihud",
-            "ret_amount_corr",
-            "ret_volume_corr",
-            "ret_turnover_corr",
-            "trend_efficiency",
-            "signed_amount_flow",
-            "ret_amount_imbalance",
-        )
-        for window in required_windows
+    missing = [name for name in ("asset_id", "timestamp", *names) if name not in panel]
+    if missing:
+        raise ValueError("price_volume_inputs_missing: " + ", ".join(missing))
+    ordered = panel.loc[:, ("asset_id", "timestamp", *names)].copy()
+    ordered["timestamp"] = strict_timestamp_series(
+        ordered["timestamp"], error="price_volume_timestamp_invalid"
     )
-    needs_amount = any(
-        price_volume_window_column(prefix, window) in requested_set
-        for prefix in (
-            "avg_amount",
-            "amount_chg",
-            "amount_shock",
-            "amount_vol",
-            "amihud",
-            "zero_volume_ratio",
-            "ret_amount_corr",
-            "signed_amount_flow",
-            "ret_amount_imbalance",
-        )
-        for window in required_windows
+    if ordered.duplicated(["asset_id", "timestamp"]).any():
+        raise ValueError("price_volume_key_duplicate")
+    ordered = ordered.sort_values(["asset_id", "timestamp"], kind="mergesort")
+    output: dict[str, list[float]] = {factor: [] for factor in requested}
+    bounds = (
+        None if output_window is None else time_window_timestamp_interval(output_window)
     )
-    needs_volume = any(
-        price_volume_window_column(prefix, window) in requested_set
-        for prefix in ("volume_chg", "volume_shock", "ret_volume_corr")
-        for window in required_windows
-    )
-    needs_turnover = any(
-        price_volume_window_column(prefix, window) in requested_set
-        for prefix in (
-            "turnover",
-            "turnover_chg",
-            "turnover_vol",
-            "ret_turnover_corr",
-        )
-        for window in required_windows
-    )
-    price = _numeric(result[price_column]) if needs_price else None
-    returns = _numeric(result[return_column]) if needs_returns else None
-    amount = _numeric(result[amount_column]) if needs_amount else None
-    volume = _numeric(result[volume_column]) if needs_volume else None
-    turnover = _numeric(result[turnover_column]) if needs_turnover else None
-    price_grouped = price.groupby(group_keys, sort=False) if price is not None else None
-    amount_grouped = (
-        amount.groupby(group_keys, sort=False) if amount is not None else None
-    )
-    volume_grouped = (
-        volume.groupby(group_keys, sort=False) if volume is not None else None
-    )
-    turnover_grouped = (
-        turnover.groupby(group_keys, sort=False) if turnover is not None else None
-    )
-
-    one_bar_reversal = price_volume_window_column("rev", 1)
-    if one_bar_reversal in requested_set:
-        result[one_bar_reversal] = -returns
-    for window in required_windows:
-        if window == 1:
-            continue
-        momentum_column = price_volume_window_column("mom", window)
-        reversal_column = price_volume_window_column("rev", window)
-        needs_momentum = momentum_column in requested_set
-        needs_reversal = reversal_column in requested_set
-        if needs_momentum or needs_reversal:
-            shifted_price = price_grouped.shift(window)
-            denominator = valid_denominator(shifted_price)
-            trailing_return = finite_or_nan(price / denominator - 1.0)
-        if needs_momentum:
-            result[momentum_column] = trailing_return
-        if needs_reversal:
-            result[reversal_column] = -trailing_return
-
-    for window in required_windows:
-        column = price_volume_window_column("vol", window)
-        if column in requested_set:
-            result[column] = rolling_std(
-                returns,
-                group_keys,
-                group_positions,
-                window,
+    for _asset_id, group in ordered.groupby("asset_id", sort=False):
+        values = {
+            name: strict_finite_numeric_series(
+                group[name],
+                error=f"price_volume_value_invalid: {name}",
+                allow_null=True,
+            ).to_numpy(dtype="float64", copy=False)
+            for name in names
+        }
+        if any("turnover" in factor for factor in requested):
+            float_cap, close, volume = (
+                values["float_market_cap"],
+                values["close"],
+                values["volume"],
             )
-        column = price_volume_window_column("downside_vol", window)
-        if column in requested_set:
-            result[column] = rolling_rms(
-                returns.clip(upper=0.0),
-                group_keys,
-                group_positions,
-                window,
+            free_shares = np.divide(
+                float_cap,
+                close,
+                out=np.full(len(group), np.nan),
+                where=np.isfinite(float_cap) & np.isfinite(close) & (close != 0.0),
             )
-        column = price_volume_window_column("upside_vol", window)
-        if column in requested_set:
-            result[column] = rolling_rms(
-                returns.clip(lower=0.0),
-                group_keys,
-                group_positions,
-                window,
-            )
-        column = price_volume_window_column("max_return", window)
-        if column in requested_set:
-            result[column] = rolling_aggregate(
-                result[return_column],
-                grouped[return_column],
-                group_positions,
-                window,
-                "max",
-            )
-        column = price_volume_window_column("min_return", window)
-        if column in requested_set:
-            result[column] = rolling_aggregate(
-                result[return_column],
-                grouped[return_column],
-                group_positions,
-                window,
-                "min",
-            )
-        column = price_volume_window_column("drawdown", window)
-        if column in requested_set:
-            result[column] = rolling_drawdown(
-                price,
-                group_positions,
-                window,
-            )
-        column = price_volume_window_column("skew", window)
-        if column in requested_set:
-            result[column] = rolling_skew(
-                returns,
-                group_keys,
-                group_positions,
-                window,
-            )
-        column = price_volume_window_column("kurt", window)
-        if column in requested_set:
-            result[column] = rolling_kurt(
-                returns,
-                group_keys,
-                group_positions,
-                window,
-            )
-
-    for window in required_windows:
-        column = price_volume_window_column("avg_amount", window)
-        if column in requested_set:
-            result[column] = rolling_aggregate(
-                amount,
-                amount_grouped,
-                group_positions,
-                window,
-                "mean",
-            )
-        column = price_volume_window_column("turnover", window)
-        if column in requested_set:
-            result[column] = rolling_aggregate(
-                turnover,
-                turnover_grouped,
-                group_positions,
-                window,
-                "mean",
-            )
-        column = price_volume_window_column("turnover_chg", window)
-        if column in requested_set:
-            shifted_turnover = turnover_grouped.shift(window)
-            denominator = valid_denominator(shifted_turnover)
-            result[column] = turnover / denominator - 1.0
-        column = price_volume_window_column("turnover_vol", window)
-        if column in requested_set:
-            result[column] = rolling_std(
-                turnover,
-                group_keys,
-                group_positions,
-                window,
-            )
-        column = price_volume_window_column("zero_volume_ratio", window)
-        if column in requested_set:
-            zero_volume = (amount <= 0.0).astype(float)
-            result[column] = rolling_aggregate(
-                zero_volume,
-                zero_volume.groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-        column = price_volume_window_column("amount_chg", window)
-        if column in requested_set:
-            shifted_amount = amount_grouped.shift(window)
-            denominator = valid_denominator(shifted_amount)
-            result[column] = amount / denominator - 1.0
-        column = price_volume_window_column("amount_shock", window)
-        if column in requested_set:
-            mean_amount = rolling_aggregate(
-                amount,
-                amount_grouped,
-                group_positions,
-                window,
-                "mean",
-            )
-            result[column] = amount / valid_denominator(mean_amount) - 1.0
-        column = price_volume_window_column("amount_vol", window)
-        if column in requested_set:
-            result[column] = rolling_std(
-                amount,
-                group_keys,
-                group_positions,
-                window,
-            )
-        column = price_volume_window_column("volume_chg", window)
-        if column in requested_set:
-            shifted_volume = volume_grouped.shift(window)
-            denominator = valid_denominator(shifted_volume)
-            result[column] = volume / denominator - 1.0
-        column = price_volume_window_column("volume_shock", window)
-        if column in requested_set:
-            mean_volume = rolling_aggregate(
+            values["turnover"] = np.divide(
                 volume,
-                volume_grouped,
-                group_positions,
-                window,
-                "mean",
+                free_shares,
+                out=np.full(len(group), np.nan),
+                where=np.isfinite(volume)
+                & np.isfinite(free_shares)
+                & (free_shares > 0.0),
             )
-            result[column] = volume / valid_denominator(mean_volume) - 1.0
-        column = price_volume_window_column("ret_amount_corr", window)
-        if column in requested_set:
-            result[column] = rolling_correlation(
-                returns,
-                amount,
-                group_positions,
-                window,
+        start, stop = 0, len(group)
+        if bounds is not None:
+            lower, upper, closed = bounds
+            start = int(group["timestamp"].searchsorted(lower, side="left"))
+            stop = int(
+                group["timestamp"].searchsorted(
+                    upper, side="right" if closed else "left"
+                )
             )
-        column = price_volume_window_column("ret_volume_corr", window)
-        if column in requested_set:
-            result[column] = rolling_correlation(
-                returns,
-                volume,
-                group_positions,
-                window,
+        for factor in requested:
+            windows = _PRICE_VOLUME_INPUT_WINDOWS[factor][1]
+            size = windows[0] if windows else 0
+            output[factor].extend(
+                _calculate_value(values, factor, index, size)
+                for index in range(start, stop)
             )
-        column = price_volume_window_column("ret_turnover_corr", window)
-        if column in requested_set:
-            result[column] = rolling_correlation(
-                returns,
-                turnover,
-                group_positions,
-                window,
-            )
-        column = price_volume_window_column("trend_efficiency", window)
-        if column in requested_set:
-            return_mean = rolling_aggregate(
-                returns,
-                returns.groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-            abs_return_mean = rolling_aggregate(
-                returns.abs(),
-                returns.abs().groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-            result[column] = return_mean.abs() / valid_denominator(abs_return_mean)
-        column = price_volume_window_column("signed_amount_flow", window)
-        if column in requested_set:
-            signed_amount = np.sign(returns) * amount
-            numerator = rolling_aggregate(
-                signed_amount,
-                signed_amount.groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-            denominator = rolling_aggregate(
-                amount,
-                amount_grouped,
-                group_positions,
-                window,
-                "mean",
-            )
-            result[column] = numerator / valid_denominator(denominator)
-        column = price_volume_window_column("ret_amount_imbalance", window)
-        if column in requested_set:
-            weighted_return = returns * amount
-            weighted_abs_return = returns.abs() * amount
-            numerator = rolling_aggregate(
-                weighted_return,
-                weighted_return.groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-            denominator = rolling_aggregate(
-                weighted_abs_return,
-                weighted_abs_return.groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-            result[column] = numerator / valid_denominator(denominator)
-
-    illiquidity = None
-    if any(
-        price_volume_window_column("amihud", window) in requested_set
-        for window in required_windows
-    ):
-        denominator = valid_denominator(amount)
-        illiquidity = (returns.abs() / denominator).replace([np.inf, -np.inf], np.nan)
-    amplitude = None
-    if any(
-        price_volume_window_column("amplitude", window) in requested_set
-        for window in required_windows
-    ):
-        amplitude = (
-            _numeric(result[high_column]) - _numeric(result[low_column])
-        ) / valid_denominator(_numeric(result[prev_close_column]))
-        amplitude = finite_or_nan(amplitude)
-    for window in required_windows:
-        column = price_volume_window_column("amihud", window)
-        if column in requested_set:
-            result[column] = rolling_aggregate(
-                illiquidity,
-                illiquidity.groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-        column = price_volume_window_column("amplitude", window)
-        if column in requested_set:
-            result[column] = rolling_aggregate(
-                amplitude,
-                amplitude.groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-
-    intraday_range = None
-    if any(
-        price_volume_window_column("intraday_range", window) in requested_set
-        for window in required_windows
-    ):
-        intraday_range = (
-            _numeric(result[high_column]) - _numeric(result[low_column])
-        ) / valid_denominator(price)
-        intraday_range = finite_or_nan(intraday_range)
-    for window in required_windows:
-        column = price_volume_window_column("intraday_range", window)
-        if column in requested_set:
-            result[column] = rolling_aggregate(
-                intraday_range,
-                intraday_range.groupby(group_keys, sort=False),
-                group_positions,
-                window,
-                "mean",
-            )
-
-    if "log_float_market_cap" in requested_set:
-        result["log_float_market_cap"] = safe_log(result[float_market_cap_column])
-    if "log_total_market_cap" in requested_set:
-        result["log_total_market_cap"] = safe_log(result[total_market_cap_column])
-    output_columns = [column for column in requested if column in result.columns]
-    for column in output_columns:
-        result[column] = finite_or_nan(result[column])
-    if output_window is not None:
-        start, end, closed = time_window_timestamp_interval(output_window)
-        timestamps = pd.to_datetime(result[date_column])
-        result = result.loc[
-            timestamps.ge(start)
-            & (timestamps.le(end) if closed else timestamps.lt(end))
+    ordered = ordered.loc[:, ("asset_id", "timestamp")]
+    if bounds is not None:
+        lower, upper, closed = bounds
+        timestamps = ordered["timestamp"]
+        ordered = ordered.loc[
+            timestamps.ge(lower)
+            & (timestamps.le(upper) if closed else timestamps.lt(upper))
         ]
-    return result
+    ordered = ordered.reset_index(drop=True)
+    for factor in requested:
+        ordered[factor] = np.asarray(output[factor], dtype="float64")
+    return ordered
 
 
-def _numeric(values: pd.Series) -> pd.Series:
-    return strict_finite_numeric_series(
-        values,
-        error="invalid_price_volume_numeric_values",
-        allow_null=True,
-    ).astype("float64")
+def _calculate_value(
+    values: dict[str, np.ndarray], factor: str, index: int, size: int
+) -> float:
+    source = values[_PRICE_VOLUME_INPUT_WINDOWS[factor][0][0]]
+    if factor.startswith("reversal_") or factor in {"momentum_20d", "momentum_60d"}:
+        return _lagged_momentum(source, index, size, 0) * (
+            -1.0 if factor.startswith("reversal_") else 1.0
+        )
+    if factor.startswith("momentum_"):
+        return _lagged_momentum(
+            source, index, size, _PRICE_VOLUME_INPUT_WINDOWS[factor][1][1]
+        )
+    if factor.startswith("volatility_") or factor == "amount_volatility_20d":
+        return _window_stat(source, index, size, "std")
+    if factor.startswith("downside_volatility_"):
+        return _window_rms(source, index, size)
+    if factor == "upside_volatility_20d":
+        current = _window(source, index, size)
+        return (
+            float("nan")
+            if current is None
+            else float(np.sqrt(np.mean(np.maximum(current, 0.0) ** 2)))
+        )
+    if factor in {"max_return_20d", "min_return_20d", "skewness_60d", "kurtosis_60d"}:
+        statistic = {
+            "max_return_20d": "max",
+            "min_return_20d": "min",
+            "skewness_60d": "skew",
+            "kurtosis_60d": "kurt",
+        }[factor]
+        return _window_stat(source, index, size, statistic)
+    if factor == "drawdown_60d":
+        return _window_drawdown(source, index, size)
+    if factor == "amplitude_20d":
+        return _window_ratio_mean(
+            values["high"], values["low"], values["close"], index, size
+        )
+    if factor in {"log_avg_amount_20d", "avg_amount_20d"}:
+        mean = _window_stat(source, index, size, "mean")
+        return _log(mean) if factor == "log_avg_amount_20d" else mean
+    if factor in {"turnover_20d", "turnover_60d", "turnover_volatility_20d"}:
+        return _window_stat(
+            values["turnover"],
+            index,
+            size,
+            "std" if factor == "turnover_volatility_20d" else "mean",
+        )
+    if factor.endswith("_change_20d"):
+        current = values["turnover"] if factor == "turnover_change_20d" else source
+        return _lagged_momentum(current, index, size, 0)
+    if factor.startswith("amihud_"):
+        return _window_amihud(source, values["amount"], index, size)
+    if factor in {"amount_shock_20d", "volume_shock_20d"}:
+        return _amount_shock(source, index, size)
+    if factor.endswith("_corr_20d"):
+        right = values[factor.removeprefix("return_").removesuffix("_corr_20d")]
+        return _window_corr(source, right, index, size)
+    if factor == "trend_efficiency_60d":
+        return _trend_efficiency(source, index, size)
+    if factor == "signed_amount_flow_20d":
+        return _signed_amount_flow(source, values["amount"], index, size)
+    if factor == "return_amount_imbalance_20d":
+        ret, flow = _window(source, index, size), _window(values["amount"], index, size)
+        if ret is None or flow is None:
+            return float("nan")
+        denominator = float(np.sum(np.abs(ret) * flow))
+        return (
+            float(np.sum(ret * flow) / denominator)
+            if denominator != 0.0
+            else float("nan")
+        )
+    if factor == "zero_amount_ratio_20d":
+        current = _window(source, index, size)
+        return float("nan") if current is None else float(np.mean(current <= 0.0))
+    if factor in {"log_float_market_cap", "log_total_market_cap"}:
+        return _log(source[index])
+    raise ValueError("price_volume_calculation_missing")
+
+
+def _window(values: np.ndarray, index: int, size: int) -> np.ndarray | None:
+    start = index - size + 1
+    if start < 0:
+        return None
+    current = values[start : index + 1]
+    return current if np.isfinite(current).all() else None
+
+
+def _window_stat(values: np.ndarray, index: int, size: int, statistic: str) -> float:
+    current = _window(values, index, size)
+    if current is None:
+        return float("nan")
+    if statistic == "std":
+        return float(np.std(current, ddof=1)) if size >= 2 else float("nan")
+    if statistic == "max":
+        return float(np.max(current))
+    if statistic == "min":
+        return float(np.min(current))
+    if statistic == "kurt":
+        if size < 4 or np.min(current) == np.max(current):
+            return float("nan")
+        normalized = current / np.max(np.abs(current))
+        centered = normalized - np.mean(normalized)
+        centered /= np.max(np.abs(centered))
+        moment_2 = np.mean(centered * centered)
+        moment_4 = np.mean(centered**4)
+        return float(
+            (size - 1)
+            / ((size - 2) * (size - 3))
+            * ((size + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
+        )
+    if statistic == "mean":
+        return float(np.mean(current))
+    if statistic == "skew":
+        return float(pd.Series(current).skew()) if size >= 3 else float("nan")
+    raise ValueError("price_volume_statistic_invalid")
+
+
+def _window_rms(values: np.ndarray, index: int, size: int) -> float:
+    current = _window(values, index, size)
+    if current is None:
+        return float("nan")
+    return float(np.sqrt(np.mean(np.minimum(current, 0.0) ** 2)))
+
+
+def _window_drawdown(values: np.ndarray, index: int, size: int) -> float:
+    current = _window(values, index, size)
+    if current is None or (current <= 0.0).any():
+        return float("nan")
+    drawdowns = current / np.maximum.accumulate(current) - 1.0
+    return float(np.min(drawdowns))
+
+
+def _window_ratio_mean(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    index: int,
+    size: int,
+) -> float:
+    values = _window(high, index, size)
+    lows = _window(low, index, size)
+    closes = _window(close, index, size)
+    if values is None or lows is None or closes is None or (closes == 0.0).any():
+        return float("nan")
+    return float(np.mean((values - lows) / closes))
+
+
+def _window_amihud(
+    returns: np.ndarray, amount: np.ndarray, index: int, size: int
+) -> float:
+    ret = _window(returns, index, size)
+    flow = _window(amount, index, size)
+    if ret is None or flow is None or (flow <= 0.0).any():
+        return float("nan")
+    return float(np.mean(np.abs(ret) / flow))
+
+
+def _amount_shock(amount: np.ndarray, index: int, size: int) -> float:
+    if index < size:
+        return float("nan")
+    current = amount[index]
+    baseline = amount[index - size : index]
+    if not np.isfinite(current) or not np.isfinite(baseline).all():
+        return float("nan")
+    mean = float(np.mean(baseline))
+    return float(current / mean - 1.0) if mean != 0.0 else float("nan")
+
+
+def _window_corr(left: np.ndarray, right: np.ndarray, index: int, size: int) -> float:
+    left_window = _window(left, index, size)
+    right_window = _window(right, index, size)
+    if left_window is None or right_window is None:
+        return float("nan")
+    if np.ptp(left_window) == 0.0 or np.ptp(right_window) == 0.0:
+        return float("nan")
+    return float(np.corrcoef(left_window, right_window)[0, 1])
+
+
+def _trend_efficiency(values: np.ndarray, index: int, size: int) -> float:
+    current = _window(values, index, size)
+    if current is None:
+        return float("nan")
+    denominator = float(np.sum(np.abs(current)))
+    return (
+        float(abs(np.sum(current)) / denominator)
+        if denominator != 0.0
+        else float("nan")
+    )
+
+
+def _signed_amount_flow(
+    returns: np.ndarray, amount: np.ndarray, index: int, size: int
+) -> float:
+    ret = _window(returns, index, size)
+    flow = _window(amount, index, size)
+    if ret is None or flow is None:
+        return float("nan")
+    denominator = float(np.sum(flow))
+    return (
+        float(np.sum(np.sign(ret) * flow) / denominator)
+        if denominator != 0.0
+        else float("nan")
+    )
+
+
+def _lagged_momentum(
+    price: np.ndarray, index: int, long_window: int, skip: int
+) -> float:
+    if index < long_window:
+        return float("nan")
+    numerator = price[index - skip]
+    denominator = price[index - long_window]
+    return _return(numerator, denominator)
+
+
+def _return(numerator: float, denominator: float) -> float:
+    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator == 0.0:
+        return float("nan")
+    value = numerator / denominator - 1.0
+    return float(value)
+
+
+def _log(value: float) -> float:
+    return float(np.log(value)) if np.isfinite(value) and value > 0.0 else float("nan")

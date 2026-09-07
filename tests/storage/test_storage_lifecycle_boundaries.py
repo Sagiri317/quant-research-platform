@@ -46,6 +46,40 @@ _PRIMARY_EXCEPTION_TYPES = (
 )
 
 
+@pytest.mark.parametrize("primary_type", _PRIMARY_EXCEPTION_TYPES)
+def test_content_hash_close_preserves_primary_and_closes_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary_type
+) -> None:
+    path = tmp_path / "hash.bin"
+    path.write_bytes(b"synthetic")
+    expected = identity.dataset_file_identity(path)
+    raw = path.open("rb")
+    primary = primary_type("hash_primary")
+    closed = []
+
+    class Handle:
+        def fileno(self):
+            return raw.fileno()
+
+        def read(self, _size):
+            raise primary
+
+        def close(self):
+            closed.append(True)
+            raw.close()
+            raise OSError("close_secondary")
+
+    monkeypatch.setattr(identity, "open_filesystem_file", lambda _path: Handle())
+    try:
+        with pytest.raises(primary_type) as raised:
+            identity._hash_file_content(path, expected, "identity_changed")
+        assert raised.value is primary
+        assert raw.closed and closed == [True]
+        assert raised.value.__notes__ == ["iterator close also failed: OSError"]
+    finally:
+        raw.close()
+
+
 def _open_inventory_for_failure(data_root: Path, scratch_parent: Path):
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with runtime_resource_policy_scope(policy):
@@ -66,7 +100,9 @@ def test_shared_path_move_is_fail_if_destination_exists(
     parent = tmp_path
 
     def native(path):
-        return Path(shared._windows_extended_path(path)) if os.name == "nt" else path
+        from quant_research_platform.storage.identity import native_filesystem_path
+
+        return Path(native_filesystem_path(path))
 
     if long_path:
         parent = parent / ("nested" * 20) / ("nested" * 20)
@@ -761,6 +797,140 @@ def test_session_from_inventory_build_rejection_closes_lease_inside_same_root(
         assert policy.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize("failure_point", ("bound", "lease", "inspection", "close"))
+def test_dataset_writer_closes_session_once_across_result_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_default_dataset_frame,
+        make_processed_dataset_spec,
+    )
+
+    policy = capture_storage_test_policy(working_headroom_bytes=16 * 1024**2)
+    root = (
+        make_dataset_artifact_root(tmp_path, "result_failure")
+        / "instances"
+        / ("a" * 64)
+    )
+    previous = root.with_name("b" * 64)
+    frame = make_default_dataset_frame()
+    spec = make_processed_dataset_spec("result_failure")
+    with runtime_resource_policy_scope(policy):
+        dataset_writing.write_dataset(
+            previous, frame, spec=spec, resource_policy=policy, borrowed_input=True
+        )
+        original_bytes = {
+            path.relative_to(previous): path.read_bytes()
+            for path in previous.rglob("*")
+            if path.is_file()
+        }
+        members = set(root.parent.iterdir())
+        close_calls = []
+        original_close = dataset_reading.DatasetSession.close
+        original_lease = RuntimeResourcePolicy.lease
+        primary = KeyboardInterrupt("result_primary")
+
+        def close_session(session):
+            close_calls.append(session)
+            original_close(session)
+            if failure_point in {"bound", "close"}:
+                raise OSError("session_close_secondary")
+
+        def fail(*_args, **_kwargs):
+            raise primary
+
+        def acquire(self, owner, reserved_bytes):
+            if failure_point == "lease" and owner == "storage.dataset.write.result":
+                raise MemoryError("result_lease_rejected")
+            return original_lease(self, owner, reserved_bytes)
+
+        monkeypatch.setattr(dataset_reading.DatasetSession, "close", close_session)
+        monkeypatch.setattr(RuntimeResourcePolicy, "lease", acquire)
+        if failure_point == "bound":
+            monkeypatch.setattr(dataset_writing, "_inspection_result_bound", fail)
+        elif failure_point == "inspection":
+            monkeypatch.setattr(
+                dataset_writing, "inspection_from_persisted_session", fail
+            )
+        expected_error = (
+            ValueError
+            if failure_point == "lease"
+            else OSError
+            if failure_point == "close"
+            else KeyboardInterrupt
+        )
+        with pytest.raises(expected_error) as raised:
+            dataset_writing.write_dataset(
+                root, frame, spec=spec, resource_policy=policy, borrowed_input=True
+            )
+        if failure_point in {"bound", "inspection"}:
+            assert raised.value is primary
+        if failure_point == "bound":
+            assert (
+                "dataset session cleanup also failed: OSError" in raised.value.__notes__
+            )
+        assert len(close_calls) == 1
+        assert not close_calls[0]._lease.active
+        assert policy.used_memory_bytes == 0
+        assert set(root.parent.iterdir()) == members
+        assert {
+            path.relative_to(previous): path.read_bytes()
+            for path in previous.rglob("*")
+            if path.is_file()
+        } == original_bytes
+
+
+@pytest.mark.parametrize("long_path", (False, True))
+def test_dataset_write_read_long_path_preserves_existing_publication(
+    tmp_path: Path,
+    long_path: bool,
+) -> None:
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_default_dataset_frame,
+        make_processed_dataset_spec,
+    )
+
+    parent = tmp_path
+    if long_path:
+        while len(str(parent)) < 280:
+            parent /= "segment_" + "a" * 32
+    root = make_dataset_artifact_root(parent, "native_io")
+    native_root = Path(identity.native_filesystem_path(root))
+    frame = make_default_dataset_frame().astype({"timestamp": "datetime64[ns]"})
+    spec = make_processed_dataset_spec("native_io")
+    policy = capture_storage_test_policy(working_headroom_bytes=16 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        dataset_writing.write_dataset(
+            root, frame, spec=spec, resource_policy=policy, borrowed_input=True
+        )
+        actual = dataset_reading.read_dataset(root, resource_policy=policy)
+        pd.testing.assert_frame_equal(
+            actual.sort_values(list(spec.primary_key)).reset_index(drop=True),
+            frame.sort_values(list(spec.primary_key)).reset_index(drop=True),
+        )
+        original_bytes = {
+            path.relative_to(native_root): path.read_bytes()
+            for path in native_root.rglob("*")
+            if path.is_file()
+        }
+        members = set(native_root.parent.iterdir())
+        with pytest.raises(ValueError, match="dataset_exists"):
+            dataset_writing.write_dataset(
+                root, frame, spec=spec, resource_policy=policy, borrowed_input=True
+            )
+        assert set(native_root.parent.iterdir()) == members
+        assert {
+            path.relative_to(native_root): path.read_bytes()
+            for path in native_root.rglob("*")
+            if path.is_file()
+        } == original_bytes
+        assert policy.used_memory_bytes == 0
+
+
 def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -958,7 +1128,9 @@ def test_opened_parquet_close_preserves_generator_exit(
         "dataset_file_identity",
         lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
-    monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
+    monkeypatch.setattr(
+        physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
+    )
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(GeneratorExit):
@@ -1025,7 +1197,7 @@ def test_opened_parquet_reserves_metadata_for_lifetime_and_scales_with_footer(
             def close(self) -> None:
                 events.append(("close", policy.used_memory_bytes))
 
-        def construct(_handle: object) -> Parquet:
+        def construct(_handle: object, **_kwargs) -> Parquet:
             events.append(("construct", policy.used_memory_bytes))
             return Parquet()
 
@@ -1098,7 +1270,7 @@ def test_opened_parquet_rejects_metadata_before_constructor_and_releases_lease(
         lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
 
-    def construct(_handle: object) -> object:
+    def construct(_handle: object, **_kwargs) -> object:
         nonlocal constructor_calls
         constructor_calls += 1
         return object()
@@ -1223,7 +1395,9 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
         "dataset_file_identity",
         lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
-    monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
+    monkeypatch.setattr(
+        physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
+    )
 
     with pytest.raises(primary_type) as raised:
         with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
@@ -1275,7 +1449,9 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
         "dataset_file_identity",
         lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
-    monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle: Parquet())
+    monkeypatch.setattr(
+        physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
+    )
 
     with pytest.raises(OSError, match="raw_close_failed"):
         with physical._opened_parquet(Path("part.parquet"), expected_identity=None):

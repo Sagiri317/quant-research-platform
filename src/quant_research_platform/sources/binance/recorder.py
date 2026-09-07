@@ -1177,111 +1177,119 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     duration_reached = False
     cleanup_errors: list[str] = []
     files: list[dict[str, Any]] = []
-    with (
-        runtime_resource_policy_scope() as policy,
-        _writer_lifecycle(
+    with runtime_resource_policy_scope() as policy:
+        with _writer_lifecycle(
             writer,
             policy,
             files,
             cleanup_errors,
             capture_stats=stats,
-        ),
-    ):
-        stats.bind(policy)
-        market_metadata = _record_market_metadata(
-            writer,
-            policy,
-            market_types=market_types,
-            symbols=config.symbols,
-        )
-        websocket_reserve = len(streams) * _WS_STREAM_WORKING_SET_BYTES
-        with policy.lease(
-            "binance.recorder.websocket_buffers",
-            websocket_reserve,
         ):
-            try:
-                readers = [
-                    _StreamReader(
-                        stream=stream,
-                        writer=writer,
-                        stats=stats,
-                        stop=stop,
-                        config=config,
-                        on_generation_ready=(
-                            lambda reader, generation: _record_depth_snapshot(
-                                writer,
-                                policy,
-                                reader,
-                                generation=generation,
-                            )
-                        ),
-                    )
-                    for stream in streams
-                ]
-                for reader in readers:
-                    reader.start()
-                deadline = time.monotonic() + config.connect_timeout_seconds
-                for reader in readers:
-                    remaining = max(0.0, deadline - time.monotonic())
-                    if not reader.ready.wait(remaining):
-                        raise TimeoutError("binance_recorder_stream_connect_timeout")
-                depth_readers = [
-                    reader for reader in readers if reader.stream.data_kind == "depth"
-                ]
-                for reader in depth_readers:
-                    remaining = max(0.0, deadline - time.monotonic())
-                    generation = reader.current_identity()[0]
-                    if not reader.wait_for_snapshot(generation, remaining):
-                        raise TimeoutError("binance_recorder_snapshot_ack_timeout")
-                started_at = _utc_now()
-                started_clock = time.monotonic()
-                cpu_start = time.process_time()
-                while True:
-                    elapsed = time.monotonic() - started_clock
-                    remaining = config.duration_seconds - elapsed
-                    if remaining <= 0:
-                        duration_reached = True
-                        break
-                    stop.wait(min(0.25, remaining))
-                    peak_rss = max(peak_rss, process.memory_info().rss)
+            stats.bind(policy)
+            market_metadata = _record_market_metadata(
+                writer,
+                policy,
+                market_types=market_types,
+                symbols=config.symbols,
+            )
+            websocket_reserve = len(streams) * _WS_STREAM_WORKING_SET_BYTES
+            with policy.lease(
+                "binance.recorder.websocket_buffers",
+                websocket_reserve,
+            ):
+                try:
+                    readers = [
+                        _StreamReader(
+                            stream=stream,
+                            writer=writer,
+                            stats=stats,
+                            stop=stop,
+                            config=config,
+                            on_generation_ready=(
+                                lambda reader, generation: _record_depth_snapshot(
+                                    writer,
+                                    policy,
+                                    reader,
+                                    generation=generation,
+                                )
+                            ),
+                        )
+                        for stream in streams
+                    ]
                     for reader in readers:
-                        if reader.failure is not None:
-                            raise RuntimeError("binance_recorder_reader_failure")
-                        if not reader.is_alive():
-                            raise RuntimeError("binance_recorder_reader_thread_died")
-            finally:
-                active_primary = sys.exception()
-                stop.set()
-                join_failed = False
-                for reader in readers:
-                    try:
-                        reader.join(timeout=20)
-                        if reader.is_alive():
+                        reader.start()
+                    deadline = time.monotonic() + config.connect_timeout_seconds
+                    for reader in readers:
+                        remaining = max(0.0, deadline - time.monotonic())
+                        if not reader.ready.wait(remaining):
+                            raise TimeoutError(
+                                "binance_recorder_stream_connect_timeout"
+                            )
+                    depth_readers = [
+                        reader
+                        for reader in readers
+                        if reader.stream.data_kind == "depth"
+                    ]
+                    for reader in depth_readers:
+                        remaining = max(0.0, deadline - time.monotonic())
+                        generation = reader.current_identity()[0]
+                        if not reader.wait_for_snapshot(generation, remaining):
+                            raise TimeoutError("binance_recorder_snapshot_ack_timeout")
+                    started_at = _utc_now()
+                    started_clock = time.monotonic()
+                    cpu_start = time.process_time()
+                    while True:
+                        elapsed = time.monotonic() - started_clock
+                        remaining = config.duration_seconds - elapsed
+                        if remaining <= 0:
+                            duration_reached = True
+                            break
+                        stop.wait(min(0.25, remaining))
+                        peak_rss = max(peak_rss, process.memory_info().rss)
+                        for reader in readers:
+                            if reader.failure is not None:
+                                raise RuntimeError("binance_recorder_reader_failure")
+                            if not reader.is_alive():
+                                raise RuntimeError(
+                                    "binance_recorder_reader_thread_died"
+                                )
+                finally:
+                    active_primary = sys.exception()
+                    stop.set()
+                    join_failed = False
+                    for reader in readers:
+                        try:
+                            reader.join(timeout=20)
+                            if reader.is_alive():
+                                join_failed = True
+                                cleanup_errors.append(f"{reader.name}:join_timeout")
+                        except BaseException as cleanup_error:
                             join_failed = True
-                            cleanup_errors.append(f"{reader.name}:join_timeout")
-                    except BaseException as cleanup_error:
-                        join_failed = True
-                        if active_primary is not None:
+                            if active_primary is not None:
+                                active_primary.add_note(
+                                    "Binance reader join also failed: "
+                                    f"{type(cleanup_error).__name__}"
+                                )
+                            else:
+                                cleanup_errors.append(type(cleanup_error).__name__)
+                    if join_failed:
+                        try:
+                            writer.abort()
+                        except BaseException as cleanup_error:
+                            if active_primary is None:
+                                raise
                             active_primary.add_note(
-                                "Binance reader join also failed: "
+                                "Binance run writer abort also failed: "
                                 f"{type(cleanup_error).__name__}"
                             )
-                        else:
-                            cleanup_errors.append(type(cleanup_error).__name__)
-                if join_failed:
-                    try:
-                        writer.abort()
-                    except BaseException as cleanup_error:
                         if active_primary is None:
-                            raise
-                        active_primary.add_note(
-                            "Binance run writer abort also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                    if active_primary is None:
-                        raise _ReaderQuiescenceFailure(
-                            "binance_recorder_reader_quiescence_timeout"
-                        )
+                            raise _ReaderQuiescenceFailure(
+                                "binance_recorder_reader_quiescence_timeout"
+                            )
+                    if active_primary is None and any(
+                        reader.failure is not None for reader in readers
+                    ):
+                        raise RuntimeError("binance_recorder_reader_failure")
         captured = stats.payload()
 
     ended_at = _utc_now()

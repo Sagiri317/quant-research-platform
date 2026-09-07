@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
-import numpy as np
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs.prediction import (
@@ -19,6 +19,7 @@ from quant_research_platform.contracts.experiments import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.models.fitting import ModelFitResult
@@ -27,22 +28,23 @@ from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
     RankEnsemblePredictor,
 )
+from quant_research_platform.research.models.scaler import (
+    LinearScaledPredictor,
+    ModelMatrixScaler,
+)
+from quant_research_platform.research.protocols.a_share import (
+    quarter_id_for_fold,
+    resolve_trial_parameters,
+)
+from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.storage.experiments import append_trial_record
 from quant_research_platform.storage.layout import StorageLayout
 
 
-class _ColumnPredictor:
-    def __init__(self, column: str, offset: float = 0.0) -> None:
-        self.column = column
-        self.offset = offset
-
-    def predict(self, frame: pd.DataFrame) -> np.ndarray:
-        return frame[self.column].to_numpy(dtype="float64") + self.offset
-
-
-class _UnpicklablePredictor(_ColumnPredictor):
-    def __getstate__(self) -> object:
-        raise RuntimeError("predictor_serialization_failed")
+def _column_predictor(column: str, offset: float = 0.0) -> LinearScaledPredictor:
+    return LinearScaledPredictor(
+        (offset, 1.0), ModelMatrixScaler((column,), (0.0,), (1.0,))
+    )
 
 
 def _metadata(
@@ -76,7 +78,6 @@ def _metadata(
             "package": "internal",
             "version": "test",
         },
-        "coefficient_count": len(columns) + 1,
         "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
         "scaler": None,
         "feature_importance": {column: 1.0 for column in columns},
@@ -137,7 +138,29 @@ def _trial_reference(
     data_identity: str = "d" * 64,
     protocol: dict[str, object] | None = None,
     rankic: float = 0.2,
+    model_spec: ModelSpec | None = None,
+    root_seed: int = 11,
 ) -> dict[str, str]:
+    base = model_spec or ModelSpec(
+        model_id=model_id,
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+    )
+    trial_spec = replace(
+        base,
+        random_seed=derive_seed(
+            root_seed,
+            "a_share_model_trial",
+            base.model_algorithm,
+            model_id,
+            quarter_id_for_fold(fold),
+            0,
+        ),
+        hyperparameters=resolve_trial_parameters(
+            base.model_algorithm, n_train=2, config_index=0
+        ),
+    )
     plan = ExperimentPlan(
         experiment_id=f"experiment_{uuid4().hex}",
         market_id=MarketId("a_share"),
@@ -158,10 +181,11 @@ def _trial_reference(
         selection_direction="maximize",
         candidate_ids=(model_id,),
         trial_budget=1,
-        random_seed=11,
+        random_seed=root_seed,
         tie_break_order=(model_id,),
         backend_versions={"internal": "test"},
         thread_settings={"native_threads": 1},
+        candidate_parameters={model_id: model_spec_payload(trial_spec)},
     )
     record = TrialRecord(
         event_id=f"event_{uuid4().hex}",
@@ -178,7 +202,8 @@ def _trial_reference(
         target_id=target_id,
         horizon_id="label",
         common_coverage_id=data_identity,
-        random_seed=11,
+        random_seed=trial_spec.random_seed,
+        normalized_parameters=model_spec_payload(trial_spec),
         status="completed",
         validation_metrics={
             "validation_rankic": rankic,
@@ -211,7 +236,10 @@ def _quarterly_result(
     columns: tuple[str, ...],
     predictor: object | None = None,
 ) -> QuarterlyModelResult:
-    model = predictor or _ColumnPredictor(columns[0])
+    model = predictor or LinearScaledPredictor(
+        (0.0, 1.0, *([0.0] * (len(columns) - 1))),
+        ModelMatrixScaler(columns, (0.0,) * len(columns), (1.0,) * len(columns)),
+    )
     algorithm = (
         "ic_weighted_rank_ensemble"
         if isinstance(model, ICWeightedRankEnsemble)
@@ -220,8 +248,36 @@ def _quarterly_result(
         else "linear_regression"
     )
     metadata = _metadata(columns, algorithm=algorithm, model_id=model_id)
+    metadata["random_seed"] = derive_seed(
+        11,
+        "a_share_model_refit",
+        algorithm,
+        model_id,
+        quarter_id_for_fold(_fold(quarter)),
+    )
+    if isinstance(model, LinearScaledPredictor):
+        metadata["scaler"] = model.scaler.to_payload()
+        metadata["feature_importance"] = {
+            column: abs(value)
+            for column, value in zip(columns, model.coefficients[1:], strict=True)
+        }
+    else:
+        metadata["feature_importance"] = (
+            {column: 1 / len(model.columns) for column in model.columns}
+            if isinstance(model, RankEnsemblePredictor)
+            else dict(zip(model.columns, map(abs, model.weights), strict=True))
+        )
     reference = _trial_reference(
-        trial_layout, _fold(quarter), family_id=algorithm, model_id=model_id
+        trial_layout,
+        _fold(quarter),
+        family_id=algorithm,
+        model_id=model_id,
+        model_spec=ModelSpec(
+            model_id=model_id,
+            model_algorithm=algorithm,
+            input_factor_columns=columns,
+            label_column="label",
+        ),
     )
     selection = _selection_metadata(
         family_id=algorithm, model_id=model_id, columns=columns
@@ -233,7 +289,6 @@ def _quarterly_result(
         quarter=_fold(quarter),
         model_id=model_id,
         model_result=ModelFitResult(
-            coefficients=np.zeros(len(columns) + 1),
             metadata=metadata,
             prediction_model=model,
         ),
@@ -294,7 +349,7 @@ def _research_rows() -> pd.DataFrame:
             "timestamp": pd.to_datetime(
                 ["2014-01-02", "2014-01-02", "2014-01-03", "2014-01-03"]
             ),
-            "mom_20d": [1.0, 2.0, 2.0, 1.0],
+            "momentum_20d": [1.0, 2.0, 2.0, 1.0],
             "forward_return_20d": [0.01, 0.03, 0.02, 0.00],
             "eligible": [True, True, True, True],
             "can_enter": [True, True, True, True],
@@ -313,7 +368,7 @@ def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
                     "market_id": "a_share",
                     "asset_id": asset_id,
                     "timestamp": timestamp,
-                    "mom_20d": float(date_index + asset_index),
+                    "momentum_20d": float(date_index + asset_index),
                     "forward_return_20d": 0.01 * (date_index + asset_index),
                     "eligible": True,
                     "can_enter": True,

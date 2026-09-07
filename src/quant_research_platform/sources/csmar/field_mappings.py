@@ -251,6 +251,8 @@ RAW_TABLE_CONTRACTS = MappingProxyType(
             table_code="AF_Forecast",
             required_columns=(
                 "Stkcd",
+                "ReportID",
+                "AnanmID",
                 "DeclareDate",
                 "Fenddt",
                 "InstitutionID",
@@ -470,6 +472,8 @@ COLUMN_MAPPINGS = {
     },
     "analyst_forecast": {
         "Stkcd": "stock_code",
+        "ReportID": "report_id",
+        "AnanmID": "analyst_ids",
         "DeclareDate": "declare_date",
         "Fenddt": "forecast_end_date",
         "InstitutionID": "institution_id",

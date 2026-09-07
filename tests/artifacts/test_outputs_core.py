@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from pathlib import Path
 from types import MappingProxyType
 
 import pytest
 
 from quant_research_platform.artifacts.definitions import output_catalog
-from quant_research_platform.artifacts.layout import output_bundle_root
 from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
     prediction_output_metadata,
@@ -31,12 +29,6 @@ def _prediction_manifest_payload() -> dict[str, object]:
             prediction_metadata=frame.attrs["prediction_metadata"],
         ),
         files=("prediction.parquet",),
-    )
-
-
-def test_output_bundle_root_is_directly_keyed_by_output_id() -> None:
-    assert output_bundle_root(Path("."), "prediction_daily").as_posix() == (
-        "outputs/prediction_daily"
     )
 
 

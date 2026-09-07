@@ -93,10 +93,10 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
     )
     dispatches = []
 
-    def dispatch(*args, prediction_source, **kwargs):
-        dispatches.append(prediction_source)
+    def dispatch(*args, prediction_lookup, **kwargs):
+        dispatches.append(prediction_lookup)
         yield from alignment._iter_prediction_joined_chunks(
-            *args, prediction_source=prediction_source, **kwargs
+            *args, prediction_lookup=prediction_lookup, **kwargs
         )
 
     monkeypatch.setattr(portfolio, "_iter_prediction_joined_chunks", dispatch)

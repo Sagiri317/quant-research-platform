@@ -301,29 +301,25 @@ def training_availability_columns(label_column: str) -> tuple[str, ...]:
         return ("forward_return_20d_available_at",)
     if label_column.startswith(
         (
+            "forward_return_",
             "future_mid_return_",
             "future_mid_direction_",
             "maker_bid_sell_pressure_proxy_",
         )
     ):
         return (f"{label_column}_available_at",)
-    return ()
+    return ("label_available_at",)
 
 
 def resolve_training_availability_column(
     frame: pd.DataFrame,
     *,
     label_column: str,
-) -> str | None:
-    columns = training_availability_columns(label_column)
-    if columns:
-        column = columns[0]
-        if column not in frame.columns:
-            raise ValueError("label_availability_column_required")
-        return column
-    if "label_available_at" in frame.columns:
-        return "label_available_at"
-    return None
+) -> str:
+    column = training_availability_columns(label_column)[0]
+    if column not in frame.columns:
+        raise ValueError("label_availability_column_required")
+    return column
 
 
 def _strictly_before(left: date | datetime, right: date | datetime) -> bool:

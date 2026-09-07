@@ -65,13 +65,17 @@ def build_expectations_features(
     forecast["forecast_eps"] = strict_finite_numeric_series(
         forecast["forecast_eps"], error="expectations_eps_invalid", allow_null=True
     )
-    forecast = forecast.dropna(subset=["forecast_eps"])
+    forecast = forecast.loc[
+        forecast["forecast_eps"].notna()
+        & forecast["forecast_end_date"].dt.month.eq(12)
+        & forecast["forecast_end_date"].dt.day.eq(31)
+    ].copy()
     forecast["available_at"] = forecast["declare_date"].map(
         lambda value: _next_session(sessions, value)
     )
     forecast = forecast.dropna(subset=["available_at"])
     forecast = forecast.sort_values(
-        ["asset_id", "forecast_end_date", "institution_id", "available_at"],
+        ["asset_id", "forecast_end_date", "institution_id", "declare_date"],
         kind="mergesort",
     )
 
@@ -87,18 +91,21 @@ def build_expectations_features(
     )
     if output.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("expectations_observation_key_duplicate")
-    rows: list[dict[str, object]] = []
-    for observation in output.itertuples(index=False):
-        rows.append(
-            _features_for_observation(
+    rows: list[dict[str, object] | None] = [None] * len(output)
+    forecast_groups = forecast.groupby("asset_id", sort=False).indices
+    for asset_id, positions in output.groupby("asset_id", sort=False).indices.items():
+        asset_forecast = forecast.iloc[forecast_groups.get(asset_id, [])]
+        for position, observation in zip(
+            positions, output.iloc[positions].itertuples(index=False), strict=True
+        ):
+            rows[position] = _features_for_observation(
                 observation.asset_id,
                 observation.timestamp,
                 observation.close,
-                forecast,
+                asset_forecast,
                 freshness_days=freshness_days,
                 minimum_institutions=minimum_institutions,
             )
-        )
     return pd.DataFrame.from_records(
         rows,
         columns=("asset_id", "timestamp", *EXPECTATIONS_FACTORS),
@@ -122,10 +129,9 @@ def _features_for_observation(
     if not np.isfinite(close) or close <= 0.0:
         return base
     candidates = forecast.loc[
-        forecast["asset_id"].eq(asset_id)
-        & forecast["forecast_end_date"].ge(timestamp)
+        forecast["forecast_end_date"].ge(timestamp)
         & forecast["available_at"].le(timestamp)
-        & forecast["available_at"].ge(timestamp - pd.Timedelta(days=freshness_days))
+        & forecast["declare_date"].ge(timestamp - pd.Timedelta(days=freshness_days))
     ]
     if candidates.empty:
         return base
@@ -133,15 +139,15 @@ def _features_for_observation(
     selected: list[pd.DataFrame] = []
     for end_date in end_dates[:2]:
         current = candidates.loc[candidates["forecast_end_date"].eq(end_date)]
-        latest = current.groupby("institution_id", sort=False)["available_at"].max()
+        latest = current.groupby("institution_id", sort=False)["declare_date"].max()
         current = current.merge(
-            latest.rename("latest_available_at"),
+            latest.rename("latest_declare_date"),
             left_on="institution_id",
             right_index=True,
             how="inner",
         )
         current = current.loc[
-            current["available_at"].eq(current["latest_available_at"])
+            current["declare_date"].eq(current["latest_declare_date"])
         ]
         current = current.groupby("institution_id", as_index=False)[
             "forecast_eps"

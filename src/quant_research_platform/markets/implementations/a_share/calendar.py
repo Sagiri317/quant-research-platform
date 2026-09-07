@@ -8,8 +8,10 @@ import pandas as pd
 
 from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.time import TimeWindow, require_date_window
-from quant_research_platform.markets.implementations.a_share.validation import (
-    strict_values,
+from quant_research_platform.contracts.validation import (
+    strict_bool_series,
+    strict_integer_series,
+    strict_timestamp_series,
 )
 
 CURRENT_MARKET_TYPES = frozenset({1, 4, 16, 32})
@@ -79,11 +81,11 @@ def unified_trading_sessions(
     """Return sorted unique current-scope A-share trading sessions."""
 
     normalized = _require_normalized_calendar(calendar)
-    source_market_types = strict_values.strict_market_type_series(
+    source_market_types = strict_integer_series(
         normalized["source_market_type"],
         error="invalid_source_market_type",
     )
-    trading = strict_values.strict_trading_bool_series(
+    trading = strict_bool_series(
         normalized["is_trading_day"],
         error="invalid_is_trading_day",
     )
@@ -98,15 +100,15 @@ def market_type_trading_sessions(
     """Return sorted unique trading sessions for one source market type."""
 
     normalized = _require_normalized_calendar(calendar)
-    source_market_types = strict_values.strict_market_type_series(
+    source_market_types = strict_integer_series(
         normalized["source_market_type"],
         error="invalid_source_market_type",
     )
-    trading = strict_values.strict_trading_bool_series(
+    trading = strict_bool_series(
         normalized["is_trading_day"],
         error="invalid_is_trading_day",
     )
-    requested_market_type = strict_values.strict_market_type_series(
+    requested_market_type = strict_integer_series(
         pd.Series([market_type]),
         error="invalid_source_market_type",
     ).iloc[0]
@@ -133,11 +135,11 @@ def compute_listing_age_trading_days(
     ):
         raise ValueError("duplicate_trading_calendar_key")
 
-    observation_dates = strict_values.strict_timestamp_value_series(
+    observation_dates = strict_timestamp_series(
         frame[observation_date_column],
         error="invalid_listing_age_timestamp",
     ).dt.normalize()
-    listing_dates = strict_values.strict_timestamp_value_series(
+    listing_dates = strict_timestamp_series(
         frame[listing_date_column],
         error="invalid_listing_age_timestamp",
     ).dt.normalize()
@@ -152,7 +154,7 @@ def compute_listing_age_trading_days(
 
     assigned = pd.Series(False, index=frame.index, dtype=bool)
     market_types = (
-        strict_values.strict_market_type_series(
+        strict_integer_series(
             frame[market_type_column],
             error="invalid_source_market_type",
         )
@@ -160,11 +162,11 @@ def compute_listing_age_trading_days(
         else pd.Series(pd.NA, index=frame.index, dtype="Float64")
     )
 
-    trading = strict_values.strict_trading_bool_series(
+    trading = strict_bool_series(
         normalized["is_trading_day"],
         error="invalid_is_trading_day",
     )
-    available_market_types = strict_values.strict_market_type_series(
+    available_market_types = strict_integer_series(
         normalized.loc[trading, "source_market_type"],
         error="invalid_source_market_type",
     ).dropna()
@@ -199,7 +201,7 @@ def _require_normalized_calendar(calendar: pd.DataFrame) -> pd.DataFrame:
     if missing:
         raise ValueError("calendar_missing_normalized_columns: " + ", ".join(missing))
     result = calendar.copy()
-    result["calendar_date"] = strict_values.strict_timestamp_value_series(
+    result["calendar_date"] = strict_timestamp_series(
         result["calendar_date"],
         error="invalid_calendar_date",
     )
@@ -208,7 +210,7 @@ def _require_normalized_calendar(calendar: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sorted_unique_sessions(values: pd.Series) -> pd.DatetimeIndex:
-    dates = strict_values.strict_timestamp_value_series(
+    dates = strict_timestamp_series(
         values,
         error="invalid_calendar_date",
     ).dt.normalize()

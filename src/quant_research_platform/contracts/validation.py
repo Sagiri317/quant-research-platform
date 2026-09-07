@@ -7,6 +7,7 @@ import traceback
 import warnings
 from collections.abc import Iterable
 from datetime import date, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import numpy as np
@@ -282,13 +283,46 @@ def strict_integer_series(
     error: str,
     allow_null: bool = False,
 ) -> pd.Series:
-    numeric = _strict_numeric_series(values, error=error, allow_null=allow_null)
-    non_null = numeric.dropna()
-    if not bool(np.equal(non_null, np.floor(non_null)).all()):
+    series = pd.Series(values, copy=True)
+    null_mask = _null_mask(series)
+    if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
-    if allow_null:
-        return numeric.astype("Int64")
-    return numeric.astype("int64")
+    dtype = "Int64" if allow_null else "int64"
+    if pd.api.types.is_integer_dtype(series.dtype):
+        non_null = series.loc[~null_mask]
+        if bool(non_null.lt(-(2**63)).any()) or bool(non_null.gt(2**63 - 1).any()):
+            raise ValueError(error)
+        return series.astype(dtype)
+    if pd.api.types.is_float_dtype(series.dtype):
+        non_null = series.loc[~null_mask]
+        if (
+            not np.isfinite(non_null).all()
+            or non_null.lt(-(2**63)).any()
+            or non_null.ge(2**63).any()
+            or not np.equal(non_null, np.floor(non_null)).all()
+        ):
+            raise ValueError(error)
+        return series.astype(dtype)
+    output = []
+    for value, is_null in zip(series, null_mask, strict=True):
+        if is_null:
+            output.append(pd.NA)
+            continue
+        if isinstance(value, (bool, np.bool_)) or not isinstance(
+            value, (int, np.integer, float, np.floating, Decimal, str)
+        ):
+            raise ValueError(error)
+        try:
+            numeric = Decimal(value.strip()) if isinstance(value, str) else value
+            if not -(2**63) <= numeric <= 2**63 - 1:
+                raise ValueError(error)
+            integer = int(numeric)
+        except (ValueError, TypeError, OverflowError, InvalidOperation) as exc:
+            raise ValueError(error) from exc
+        if numeric != integer or not -(2**63) <= integer <= 2**63 - 1:
+            raise ValueError(error)
+        output.append(integer)
+    return pd.Series(output, index=series.index, name=series.name, dtype=dtype)
 
 
 def strict_finite_numeric_series(

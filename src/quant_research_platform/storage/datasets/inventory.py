@@ -18,6 +18,7 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
 )
 from quant_research_platform.storage._scratch_ownership import (
+    handle_preserving_primary,
     owned_scratch_name,
     remove_owned_scratch,
 )
@@ -26,6 +27,7 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     native_filesystem_path,
+    path_is_filesystem_alias,
     require_unaliased_path,
 )
 from quant_research_platform.storage.parquet import DatasetPartMetadata
@@ -34,6 +36,26 @@ _PREFIX = ".i-"
 _PART_FILE_PATTERN = re.compile(r"^part-(\d+)\.parquet$")
 DATASET_INVENTORY_RESERVE_BYTES = 1024
 _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES = 32 * DATASET_INVENTORY_RESERVE_BYTES
+
+
+def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
+    """Map filesystem failures before yielding entries to business callbacks."""
+    try:
+        entries = os.scandir(native_filesystem_path(directory))
+    except OSError as error:
+        raise ValueError("invalid_dataset_part_files") from error
+    with handle_preserving_primary(entries):
+        while True:
+            try:
+                entry = next(entries)
+                path = directory / entry.name
+                is_directory = entry.is_dir(follow_symlinks=False)
+                is_alias = is_directory and path_is_filesystem_alias(path)
+            except StopIteration:
+                return
+            except OSError as error:
+                raise ValueError("invalid_dataset_part_files") from error
+            yield path, is_directory, is_alias
 
 
 class DatasetInventoryPaths:
@@ -99,7 +121,9 @@ class DatasetSessionInventory:
             require_unaliased_path(
                 self._scratch_parent, error="invalid_storage_scratch_path"
             )
-            self._scratch_parent.mkdir(parents=True, exist_ok=True)
+            Path(native_filesystem_path(self._scratch_parent)).mkdir(
+                parents=True, exist_ok=True
+            )
             require_unaliased_path(
                 self._scratch_parent, error="invalid_storage_scratch_path"
             )
@@ -113,14 +137,16 @@ class DatasetSessionInventory:
             temporary_directory = self._scratch_parent / owned_scratch_name(
                 _PREFIX, uuid4().hex[:8]
             )
-            os.mkdir(temporary_directory)
+            os.mkdir(native_filesystem_path(temporary_directory))
             claimed_temporary = True
             self._temporary_directory = temporary_directory
             require_unaliased_path(
                 temporary_directory,
                 error="invalid_storage_scratch_path",
             )
-            self._connection = sqlite3.connect(temporary_directory / "i.db")
+            self._connection = sqlite3.connect(
+                native_filesystem_path(temporary_directory / "i.db")
+            )
             connection = self._connection
             connection.execute(f"PRAGMA page_size={DATASET_INVENTORY_RESERVE_BYTES}")
             sqlite_page_limit = (
@@ -584,37 +610,48 @@ class DatasetSessionInventory:
         if partition_columns not in ((), ("year",)):
             raise ValueError("unsupported_partitioning")
         require_unaliased_path(self.data_root, error="invalid_dataset_part_files")
-        native_root = Path(native_filesystem_path(self.data_root))
-        unpartitioned = any(
-            path.suffix.casefold() == ".parquet" for path in native_root.iterdir()
-        )
+        with handle_preserving_primary(_directory_entries(self.data_root)) as entries:
+            unpartitioned = any(
+                path.suffix.casefold() == ".parquet" for path, _, _ in entries
+            )
         partitioned = partition_columns == ("year",) and not unpartitioned
         if partitioned:
-            for native_path in native_root.glob("year=*"):
-                path = self.data_root / native_path.name
-                require_unaliased_path(path, error="invalid_dataset_part_files")
-                if not native_path.is_dir():
+            with handle_preserving_primary(
+                _directory_entries(self.data_root)
+            ) as entries:
+                for path, is_directory, _ in entries:
+                    if not path.name.casefold().startswith("year="):
+                        continue
+                    require_unaliased_path(path, error="invalid_dataset_part_files")
+                    if is_directory:
+                        on_year(parse_year_partition_label(path.name), path.name)
+        pending = [_directory_entries(self.data_root)]
+        try:
+            while pending:
+                entries = pending[-1]
+                try:
+                    path, is_directory, is_alias = next(entries)
+                except StopIteration:
+                    pending.pop().close()
                     continue
-                on_year(parse_year_partition_label(path.name), path.name)
-
-        def fail_walk(error: OSError) -> None:
-            raise ValueError("invalid_dataset_part_files") from error
-
-        for native_parent, dirnames, filenames in native_root.walk(
-            follow_symlinks=False,
-            on_error=fail_walk,
-        ):
-            parent = self.data_root / native_parent.relative_to(native_root)
-            dirnames.sort()
-            for name in sorted(filenames):
-                path = parent / name
-                if path.suffix.casefold() != ".parquet":
-                    continue
-                coordinates = self._validated_coordinates(
-                    path,
-                    partitioned=partitioned,
-                )
-                on_path(path, coordinates)
+                if is_directory:
+                    if not is_alias:
+                        pending.append(_directory_entries(path))
+                elif path.suffix.casefold() == ".parquet":
+                    coordinates = self._validated_coordinates(
+                        path, partitioned=partitioned
+                    )
+                    on_path(path, coordinates)
+        except BaseException as primary:
+            while pending:
+                try:
+                    pending.pop().close()
+                except BaseException as close_error:
+                    primary.add_note(
+                        "dataset inventory close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+            raise
 
     def _validated_coordinates(
         self,

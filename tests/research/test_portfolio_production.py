@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from collections import deque
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +17,10 @@ from quant_research_platform.contracts.business_manifest import (
 )
 from quant_research_platform.contracts.portfolios import (
     CONTINUOUS_EXECUTION_COLUMNS,
+    PORTFOLIO_DECISION_REASON_ENHANCED,
+    PORTFOLIO_DECISION_REASON_MAINTENANCE,
     PORTFOLIO_DECISION_REASON_SIMPLE,
+    PORTFOLIO_LEDGER_COST_COLUMNS,
     ExecutionAssumptions,
     PortfolioCandidateSpec,
     PortfolioTargetBlocked,
@@ -35,6 +40,7 @@ from quant_research_platform.research.portfolios.accounting import (
 )
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskEstimate,
+    FactorRiskState,
     MarketModelRiskStyles,
 )
 from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
@@ -42,6 +48,66 @@ from quant_research_platform.runtime.resources import runtime_resource_policy_sc
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
+
+
+def test_enhanced_decision_requires_history_for_current_industry_domain() -> None:
+    state = FactorRiskState(
+        style_columns=("style",),
+        minimum_cross_section=10,
+        minimum_factor_dates=3,
+        minimum_specific_dates=3,
+    )
+    x = np.arange(20, dtype="float64")
+    cross = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-01"),
+            "asset_id": [f"a{index}" for index in range(20)],
+            "industry_level1_code": "A",
+            "float_market_cap": 100 + x,
+            "style": x,
+            "asset_return": np.sin(x) / 100,
+        }
+    )
+    for day in range(3):
+        state.observe_return_session(
+            cross.assign(timestamp=pd.Timestamp("2020-01-01") + pd.Timedelta(days=day))
+        )
+    previous = state.estimate()
+    assert tuple(previous.factor_covariance.columns) == ("industry_A", "style")
+    cross.loc[cross.index >= 10, "industry_level1_code"] = "B"
+    scheduled = pd.DataFrame(
+        {
+            column: pd.Series(dtype="datetime64[ns]")
+            for column in ("timestamp", "entry_at", "available_at")
+        }
+    )
+
+    def decision():
+        return production._enhanced_decision(
+            benchmark_weights=pd.Series(1 / len(cross), index=cross.asset_id),
+            alpha=pd.Series(0.0, index=cross.asset_id),
+            factor_risk=state,
+            current_cross=cross,
+            calibration_rows=[],
+            calibration_intervals=scheduled,
+            as_of=pd.Timestamp("2020-01-07"),
+            risk_style_columns=("style",),
+        )
+
+    assert decision().risk is None
+    for day in range(3, 6):
+        state.observe_return_session(
+            cross.assign(timestamp=pd.Timestamp("2020-01-01") + pd.Timedelta(days=day))
+        )
+    current = decision()
+    assert current.risk is not None
+    assert tuple(current.risk.factor_covariance.columns) == (
+        "industry_A",
+        "industry_B",
+        "style",
+    )
+    assert current.risk.factor_returns.timestamp.min() == pd.Timestamp("2020-01-04")
+    assert tuple(previous.factor_covariance.columns) == ("industry_A", "style")
 
 
 class _PredictionLookup:
@@ -558,6 +624,161 @@ def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
     ] == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("can_sell_removed", [False, True])
+def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    can_sell_removed: bool,
+) -> None:
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    frames, fee_frame, _window = _inputs()
+    output_window = TimeWindow("2023-01-03", "2023-01-06")
+    frames["panel"] = frames["panel"].assign(
+        adj_open=100.0,
+        adj_close=100.0,
+        period_return=0.0,
+        float_market_cap=1_000.0,
+        industry_level1_code="A01",
+        is_nonfinancial_industry=True,
+    )
+    frames["benchmark"] = pd.DataFrame(
+        [
+            {
+                "benchmark_id": "csi500",
+                "asset_id": asset,
+                "timestamp": pd.Timestamp("2023-01-03"),
+                "weight": weight,
+            }
+            for asset, weight in (("a", 0.1), ("b", 0.9))
+        ]
+        + [
+            {
+                "benchmark_id": "csi500",
+                "asset_id": "b",
+                "timestamp": timestamp,
+                "weight": 1.0,
+            }
+            for timestamp in pd.bdate_range("2023-01-04", "2023-01-06")
+        ]
+    )
+    frames["execution"].loc[
+        frames["execution"].asset_id.eq("a")
+        & frames["execution"].timestamp.eq("2023-01-04"),
+        "can_exit",
+    ] = can_sell_removed
+    candidate = PortfolioCandidateSpec(
+        prediction_selector="champion",
+        candidate_id="maintenance",
+        construction="benchmark_enhanced",
+        prediction_target_id="prediction",
+        rebalance_schedule="weekly-last-trading-day",
+        top_quantile=None,
+        benchmark_id="csi500",
+        benchmark_weights_target_id="benchmark",
+        risk_style_columns=RISK_STYLE_COLUMNS,
+        risk_context_target_ids=("risk_context",),
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+    )
+    risk = FactorRiskEstimate(
+        factor_returns=pd.DataFrame(),
+        factor_covariance=pd.DataFrame(
+            np.eye(len(RISK_STYLE_COLUMNS)),
+            index=RISK_STYLE_COLUMNS,
+            columns=RISK_STYLE_COLUMNS,
+        ),
+        specific_variance=pd.Series({"a": 0.01, "b": 0.01}),
+        factor_half_life=126.0,
+        specific_half_life=63.0,
+        diagonal_shrinkage=0.20,
+        annualization_factor=252.0,
+    )
+    original_calibrate = production.calibrate_expected_alpha
+    monkeypatch.setattr(production.FactorRiskState, "estimate", lambda _self: risk)
+    monkeypatch.setattr(
+        production,
+        "calibrate_expected_alpha",
+        lambda *args, **kwargs: replace(
+            original_calibrate(*args, **kwargs), benchmark_only=False, slope=0.01
+        ),
+    )
+
+    def reject_optimizer(*_args, **_kwargs):
+        raise AssertionError("maintenance must execute its explicit benchmark target")
+
+    monkeypatch.setattr(production, "optimize_portfolio", reject_optimizer)
+    policy = capture_test_policy(
+        available_memory_bytes=256 * 1024**2, explicit_cap_bytes=64 * 1024**2
+    )
+    chunks, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+        candidate=candidate,
+        resource_policy=policy,
+    )
+    sessions = list(chunks)
+    assert policy.used_memory_bytes == 0
+    maintenance = next(
+        frame
+        for frame in sessions
+        if frame.decision_timestamp.iloc[0] == pd.Timestamp("2023-01-04")
+    )
+    indexed = maintenance.set_index("asset_id")
+    assert (
+        indexed.loc["__cash__", "decision_reason"]
+        == PORTFOLIO_DECISION_REASON_MAINTENANCE
+    )
+    assert indexed.loc["a", "target_notional"] == 0.0
+    assert indexed.loc["b", "target_notional"] == pytest.approx(100.0)
+    assert indexed.loc["a", "decision_delta_weight"] == pytest.approx(-0.1)
+    assert indexed.loc["b", "decision_delta_weight"] == pytest.approx(0.1)
+    assert indexed.loc["a", "post_trade_notional"] == pytest.approx(
+        0.0 if can_sell_removed else 10.0
+    )
+    assert indexed.loc["__cash__", "post_trade_notional"] >= 0.0
+    costs = maintenance.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum()
+    assert maintenance.post_trade_notional.sum() + costs == pytest.approx(100.0)
+    if can_sell_removed:
+        assert costs > 0.0
+    else:
+        assert indexed.loc["b", "executed_delta_notional"] == 0.0
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="maintenance",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": output_window.start.isoformat(),
+            "end": output_window.end.isoformat(),
+            "access": "development",
+        },
+        upstream_identities={"prediction": "b" * 64},
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": "maintenance",
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
+        },
+    )
+    root = write_test_sessions(
+        tmp_path / "ledger", envelope=envelope, ledger_chunks=iter(sessions)
+    )
+    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    loaded = [session_frame(batch) for batch in saved.iter_chunks()]
+    assert len(loaded) == len(sessions)
+    for actual, expected in zip(loaded, sessions, strict=True):
+        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+
+
 def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     tmp_path: Path,
     monkeypatch,
@@ -621,8 +842,21 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         annualization_factor=252.0,
     )
 
+    original_market_observe = production.MarketModelRiskState.observe
+
     def fixed_market_styles(self, panel):
-        del self, panel
+        from quant_research_platform.runtime.resources import (
+            current_runtime_resource_policy,
+        )
+
+        current_policy = current_runtime_resource_policy()
+        state = next(
+            lease
+            for lease in current_policy._leases
+            if lease.owner == "research.portfolio.state"
+        )
+        assert state.reserved_bytes >= 65536
+        original_market_observe(self, panel)
         return MarketModelRiskStyles(
             beta=pd.Series({"a": 1.0, "b": 1.0}),
             residual_volatility=pd.Series({"a": 0.1, "b": 0.1}),
@@ -849,7 +1083,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             return rows
 
         bounded = capture_test_policy(
-            available_memory_bytes=256 * 1024**2, explicit_cap_bytes=64 * 1024
+            available_memory_bytes=256 * 1024**2, explicit_cap_bytes=128 * 1024
         )
         with monkeypatch.context() as patch, runtime_resource_policy_scope(bounded):
             patch.setattr(production, "_build_session", actual_build)
@@ -877,18 +1111,28 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             assert bounded.used_memory_bytes == 0
 
 
-def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight() -> None:
-    assets = pd.Index(("a", "b"), dtype="string")
+@pytest.mark.parametrize("removed_member", [False, True])
+def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
+    removed_member: bool,
+) -> None:
+    assets = pd.Index(
+        ("a", "b", "old") if removed_member else ("a", "b"), dtype="string"
+    )
     exposures = pd.DataFrame(
         {
             "asset_id": assets,
-            "industry_level1_code": ("A01", "A01"),
-            **{column: (0.1, -0.1) for column in RISK_STYLE_COLUMNS},
+            "industry_level1_code": "A01",
+            **{
+                column: np.linspace(0.1, -0.1, len(assets))
+                for column in RISK_STYLE_COLUMNS
+            },
         }
     )
     result = production._optimizer_assets(
-        benchmark_weights=pd.Series(0.5, index=assets),
-        current_weights=pd.Series(0.45, index=assets),
+        benchmark_weights=pd.Series(0.5, index=assets[:2]),
+        current_weights=pd.Series(
+            [0.4, 0.4, 0.1] if removed_member else [0.45, 0.45], index=assets
+        ),
         cash=10.0,
         nav=100.0,
         expected_alpha=pd.Series(0.01, index=assets),
@@ -899,7 +1143,7 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight() -> Non
         panel=pd.DataFrame(
             {
                 "asset_id": assets,
-                "is_nonfinancial_industry": (True, True),
+                "is_nonfinancial_industry": True,
             }
         ),
     )
@@ -908,6 +1152,167 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight() -> Non
     assert len(cash_row) == 1
     assert cash_row["current_weight"].iloc[0] == pytest.approx(0.1)
     assert cash_row["is_cash"].iloc[0]
+    if removed_member:
+        old = result.set_index("asset_id").loc["old"]
+        assert old.current_weight == pytest.approx(0.1)
+        assert old.benchmark_weight == 0.0
+        optimized = production.optimize_portfolio(
+            result,
+            factor_covariance=pd.DataFrame(
+                np.eye(len(RISK_STYLE_COLUMNS)) * 0.01,
+                index=RISK_STYLE_COLUMNS,
+                columns=RISK_STYLE_COLUMNS,
+            ),
+            style_columns=RISK_STYLE_COLUMNS,
+            expected_transaction_cost=lambda _weights: 0.0,
+            config=production.OptimizerConfig(initial_nav=100.0),
+            eligibility_column="eligible",
+            financial_column="is_financial",
+            cash_column="is_cash",
+        )
+        assert optimized.weights.loc["old"] == 0.0
+        assert optimized.weights.sum() == pytest.approx(1.0)
+        assert optimized.target_turnover <= 0.20 + 1e-8
+
+
+@pytest.mark.parametrize("retain_cash", [False, True])
+def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
+    tmp_path: Path, retain_cash: bool
+) -> None:
+    frames, fee_frame, _window = _inputs()
+    panel = frames["panel"].assign(
+        adj_open=100.0,
+        adj_close=100.0,
+        period_return=0.0,
+        float_market_cap=1000.0,
+        industry_level1_code="A01",
+        is_nonfinancial_industry=True,
+    )
+
+    def at_date(frame, day):
+        return frame.loc[frame.timestamp.eq(pd.Timestamp(day))].copy()
+
+    alpha = pd.Series({"a": -0.1 if retain_cash else 0.1, "b": -0.2})
+    risk = FactorRiskEstimate(
+        pd.DataFrame(),
+        pd.DataFrame(
+            np.zeros((2, 2)),
+            index=("industry_A01", "style"),
+            columns=("industry_A01", "style"),
+        ),
+        pd.Series({"a": 0.01, "b": 0.01}),
+        126.0,
+        63.0,
+        0.2,
+        252.0,
+    )
+    enhanced = production._EnhancedDecision(
+        pd.Series({"a": 0.5, "b": 0.5}),
+        alpha,
+        pd.DataFrame(
+            {"asset_id": ["a", "b"], "industry_A01": 1.0, "style": [0.1, -0.1]}
+        ),
+        risk,
+        production.AlphaCalibration(
+            1.0, 0.0, 1.0, 1.0, 0.5, -1.0, 1.0, 0.0, 1.0, 6, 6, False
+        ),
+    )
+    candidate = PortfolioCandidateSpec(
+        candidate_id="cash_mapping",
+        construction="benchmark_enhanced",
+        prediction_target_id="prediction",
+        prediction_selector="champion",
+        rebalance_schedule="weekly-last-trading-day",
+        top_quantile=None,
+        benchmark_id="csi500",
+        benchmark_weights_target_id="benchmark",
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+        risk_style_columns=("style",),
+        risk_context_target_ids=("risk",),
+    )
+    assumptions = ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,))
+    with runtime_resource_policy_scope() as policy:
+        account, returns, adv, optimized, delta = production._build_session(
+            candidate=candidate,
+            decision_timestamp=pd.Timestamp("2023-01-06"),
+            next_timestamp=pd.Timestamp("2023-01-09"),
+            panel=at_date(panel, "2023-01-06"),
+            next_panel=at_date(panel, "2023-01-09"),
+            endpoint_panel=at_date(panel, "2023-01-10"),
+            dataset=at_date(frames["dataset"], "2023-01-06"),
+            execution=at_date(frames["execution"], "2023-01-06"),
+            holdings=pd.Series({"a": 45.0, "b": 45.0}),
+            cash=10.0,
+            nav=100.0,
+            initialize_at_execution=False,
+            amount_history={
+                asset: deque([1000.0] * 20, maxlen=20) for asset in ("a", "b")
+            },
+            alpha=alpha,
+            enhanced_decision=enhanced,
+            target_override=None,
+            decision_reason=PORTFOLIO_DECISION_REASON_ENHANCED,
+            assumptions=assumptions,
+            fee_schedule=fee_schedule_from_frame(fee_frame, content_identity="f" * 64),
+            fee_identity="f" * 64,
+            trade_cost=trade_cost,
+            market_name_for_type=lambda _market: "shanghai",
+        )
+        assert optimized is not None and "__cash__" in optimized.weights
+        assert "__cash__" not in set(account.asset_ledger.asset_id)
+        if retain_cash:
+            assert optimized.weights.loc["__cash__"] > 0.0
+        ledger = production._ledger_frame(
+            account=account,
+            decision_timestamp=pd.Timestamp("2023-01-06"),
+            returns=returns,
+            alpha_score=alpha,
+            adv20=adv,
+            enhanced_decision=enhanced,
+            benchmark_weights=enhanced.benchmark_weights,
+            optimization_result=optimized,
+            decision_reason=PORTFOLIO_DECISION_REASON_ENHANCED,
+            decision_delta=delta,
+        )
+        cash_row = ledger.loc[ledger.asset_id.eq("__cash__")].iloc[0]
+        assert cash_row.target_notional == pytest.approx(
+            optimized.weights.loc["__cash__"] * 100.0
+        )
+        assert cash_row.post_trade_notional >= 0.0
+        assert ledger.post_trade_notional.sum() + ledger.loc[
+            :, list(PORTFOLIO_LEDGER_COST_COLUMNS)
+        ].sum().sum() == pytest.approx(100.0)
+        envelope = build_business_manifest_envelope(
+            logical_artifact_id="cash_mapping",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window={
+                "start": "2023-01-06",
+                "end": "2023-01-10",
+                "access": "development",
+            },
+            upstream_identities={},
+            semantic_metadata={
+                "portfolio_capital": {
+                    "candidate_id": "cash_mapping",
+                    "initial_capital": 100.0,
+                    "valuation_currency": "CNY",
+                    "valuation_method": "adjusted_notional",
+                }
+            },
+        )
+        root = write_test_sessions(
+            tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((ledger,))
+        )
+        saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        (batch,) = tuple(saved.iter_chunks())
+        assert set(session_frame(batch).asset_id) == {"a", "b", "__cash__"}
+        assert policy.used_memory_bytes == 0
 
 
 def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup(

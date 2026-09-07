@@ -13,10 +13,13 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
 )
-from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.datasets import read_dataset
+from quant_research_platform.storage.datasets.reading import (
+    iter_dataset_chunks,
+    open_dataset_session,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
     make_demo_processed_catalog,
@@ -255,14 +258,14 @@ def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
 def test_persisted_research_sessions_are_complete_across_small_read_batches(
     tmp_path: Path,
 ) -> None:
-    dates = pd.bdate_range("2024-01-02", periods=8)
+    dates = pd.bdate_range("2023-01-02", periods=8)
     frame = pd.DataFrame(
         [
             {
                 "market_id": "a_share",
                 "asset_id": f"asset_{asset:03d}",
                 "timestamp": timestamp,
-                "mom_20d": float(asset + date),
+                "momentum_20d": float(asset + date),
                 "forward_return_20d": float(asset - date),
                 "eligible": True,
                 "can_enter": True,
@@ -284,15 +287,28 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
         dataset_id="demo",
         time_window=TimeWindow(dates[0], dates[-1]),
     )
-    policy = capture_test_policy(available_memory_bytes=512 * 1024)
-    with runtime_resource_policy_scope(policy):
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2, explicit_cap_bytes=16 * 1024**2
+    )
+    batch_sizes = []
+    with (
+        runtime_resource_policy_scope(policy),
+        open_dataset_session(
+            layout.research_dataset_root(datasets.get("demo").market_id, "demo"),
+            columns=None,
+            time_window=None,
+            resource_policy=policy,
+        ) as dataset,
+    ):
+
+        def measured_batches():
+            for batch in iter_dataset_chunks(dataset, target_chunk_bytes=4096):
+                batch_sizes.append(len(batch))
+                yield batch
+
         sessions = list(
             iter_complete_session_frames(
-                iter_research_dataset_chunks(
-                    layout,
-                    market_id=datasets.get("demo").market_id,
-                    dataset_id="demo",
-                ),
+                measured_batches(),
                 timestamp_column="timestamp",
                 resource_policy=policy,
             )
@@ -300,6 +316,9 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
 
     assert [session["timestamp"].iloc[0] for session in sessions] == list(dates)
     assert [len(session) for session in sessions] == [200] * len(dates)
+    assert len(batch_sizes) > len(dates)
+    assert max(batch_sizes) < 200
+    assert sum(batch_sizes) == 1600
 
 
 def test_research_dataset_fails_closed_on_empty_base_sessions(tmp_path: Path) -> None:

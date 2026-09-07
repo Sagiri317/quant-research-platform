@@ -344,36 +344,65 @@ def _member_inventory(root: Path) -> tuple[dict[str, object], ...]:
         error="semantic_artifact_root_invalid",
     )
     try:
-        _directory_identity(root)
+        root_identity = _directory_identity(root)
     except ValueError as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
-    pending = [(root, "")]
+    pending = []
     members: list[dict[str, object]] = []
-    while pending:
-        directory, prefix = pending.pop()
-        directory_identity = _directory_identity(directory)
+    try:
         try:
-            with os.scandir(native_filesystem_path(directory)) as entries:
-                children = sorted(entries, key=lambda entry: entry.name)
-                for entry in children:
-                    relative = f"{prefix}/{entry.name}" if prefix else entry.name
-                    if entry.is_symlink():
-                        raise ValueError("semantic_artifact_member_invalid")
-                    child = directory / entry.name
-                    if entry.is_dir(follow_symlinks=False):
-                        pending.append((child, relative))
-                    elif entry.is_file(follow_symlinks=False):
-                        if not prefix and entry.name == "manifest.json":
-                            continue
-                        members.append(_member_record(relative, child))
-                        if len(members) > MAX_SEMANTIC_ARTIFACT_MEMBERS:
-                            raise ValueError("semantic_artifact_member_limit_exceeded")
-                    else:
-                        raise ValueError("semantic_artifact_member_invalid")
-            if _directory_identity(directory) != directory_identity:
-                raise ValueError("semantic_artifact_member_set_changed")
-        except OSError as exc:
-            raise ValueError("semantic_artifact_member_invalid") from exc
+            pending.append(
+                (root, "", root_identity, os.scandir(native_filesystem_path(root)))
+            )
+            while pending:
+                directory, prefix, directory_identity, entries = pending[-1]
+                entry = next(entries, None)
+                if entry is None:
+                    pending.pop()
+                    entries.close()
+                    require_unaliased_path(
+                        directory, error="semantic_artifact_member_invalid"
+                    )
+                    if _directory_identity(directory) != directory_identity:
+                        raise ValueError("semantic_artifact_member_set_changed")
+                    continue
+                relative = f"{prefix}/{entry.name}" if prefix else entry.name
+                if entry.is_symlink():
+                    raise ValueError("semantic_artifact_member_invalid")
+                child = directory / entry.name
+                if entry.is_dir(follow_symlinks=False):
+                    require_unaliased_path(
+                        child, error="semantic_artifact_member_invalid"
+                    )
+                    pending.append(
+                        (
+                            child,
+                            relative,
+                            _directory_identity(child),
+                            os.scandir(native_filesystem_path(child)),
+                        )
+                    )
+                elif entry.is_file(follow_symlinks=False):
+                    if not prefix and entry.name == "manifest.json":
+                        continue
+                    if len(members) >= MAX_SEMANTIC_ARTIFACT_MEMBERS:
+                        raise ValueError("semantic_artifact_member_limit_exceeded")
+                    members.append(_member_record(relative, child))
+                else:
+                    raise ValueError("semantic_artifact_member_invalid")
+        except BaseException as primary:
+            while pending:
+                entries = pending.pop()[3]
+                try:
+                    entries.close()
+                except BaseException as close_error:
+                    primary.add_note(
+                        "semantic inventory close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+            raise
+    except OSError as exc:
+        raise ValueError("semantic_artifact_member_invalid") from exc
     return tuple(sorted(members, key=lambda item: str(item["path"])))
 
 

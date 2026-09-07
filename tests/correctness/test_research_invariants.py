@@ -12,12 +12,12 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 from quant_research_platform.research.factors.fundamental.calculations import (
     calculate_fundamental_factors,
 )
-from quant_research_platform.research.factors.price_volume.columns import (
+from quant_research_platform.research.factors.price_volume.calculations import (
+    calculate_price_volume_factors,
+)
+from quant_research_platform.research.factors.price_volume.definitions import (
     FORMAL_CORE_PRICE_VOLUME_FACTORS,
     FORMAL_PRICE_VOLUME_FACTORS,
-)
-from quant_research_platform.research.factors.price_volume.formal import (
-    calculate_formal_price_volume_factors,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -85,7 +85,7 @@ def test_formal_price_volume_definitions_use_session_windows() -> None:
             "float_market_cap": 100_000.0,
         }
     )
-    result = calculate_formal_price_volume_factors(
+    result = calculate_price_volume_factors(
         panel,
         factor_columns=("amount_shock_20d", "amplitude_20d"),
     )
@@ -327,8 +327,8 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
     changed = base.copy()
     changed.loc[changed["timestamp"] >= sessions[220], "adj_close"] *= 3.0
     changed.loc[changed["timestamp"] >= sessions[220], "period_return"] = 0.2
-    first = calculate_formal_price_volume_factors(base)
-    second = calculate_formal_price_volume_factors(changed)
+    first = calculate_price_volume_factors(base)
+    second = calculate_price_volume_factors(changed)
     assert second.loc[
         219, ["reversal_20d", "volatility_20d"]
     ].tolist() == pytest.approx(
@@ -337,13 +337,13 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
     from quant_research_platform.contracts.time import TimeWindow
 
     window = TimeWindow(sessions[200].date(), sessions[219].date())
-    selected = calculate_formal_price_volume_factors(base, output_window=window)
+    selected = calculate_price_volume_factors(base, output_window=window)
     pd.testing.assert_frame_equal(
         selected, first.iloc[200:220].reset_index(drop=True), check_exact=True
     )
     pd.testing.assert_frame_equal(
         selected,
-        calculate_formal_price_volume_factors(changed, output_window=window),
+        calculate_price_volume_factors(changed, output_window=window),
         check_exact=True,
     )
 
@@ -483,6 +483,201 @@ def test_calibration_intervals_use_adjacent_execution_opens_across_holidays():
     assert monthly.iloc[0].available_at == pd.Timestamp("2024-03-04")
 
 
+@pytest.mark.parametrize("changed_eligibility", (False, True))
+def test_market_risk_uses_daily_intercept_residuals_and_previous_session_caps(
+    changed_eligibility,
+):
+    state = MarketModelRiskState(window=4, residual_window=3)
+    histories = {asset: [] for asset in ("a", "b")}
+    residuals = {asset: [] for asset in histories}
+    previous_caps = {}
+    for position, market in enumerate(
+        (0.01, -0.02, 0.03, 0.02, -0.01, 0.04, 0.01, -0.03)
+    ):
+        suspended = changed_eligibility and position == 4
+        panel = pd.DataFrame(
+            {
+                "asset_id": ["a", "b"],
+                "period_return": [
+                    0.0 if suspended else 0.02 + 1.5 * market,
+                    -0.02 + 0.5 * market,
+                ],
+                "float_market_cap": [300.0 if suspended else 100.0, 100.0],
+                "eligible": [not suspended, True],
+            }
+        )
+        basket = panel.loc[panel.eligible]
+        denominator = sum(previous_caps.get(asset, 0.0) for asset in basket.asset_id)
+        benchmark = (
+            sum(
+                previous_caps[row.asset_id] * row.period_return
+                for row in basket.itertuples()
+            )
+            / denominator
+            if denominator
+            else np.nan
+        )
+        styles = state.observe(panel)
+        for row in panel.itertuples():
+            history = histories[row.asset_id]
+            if np.isfinite(benchmark):
+                history.append((benchmark, row.period_return))
+            expected_beta = expected_residual = np.nan
+            if len(history) >= 4:
+                values = np.array(history[-4:])
+                alpha, expected_beta = np.linalg.lstsq(
+                    np.column_stack((np.ones(4), values[:, 0])),
+                    values[:, 1],
+                    rcond=None,
+                )[0]
+                expected_residual = (
+                    row.period_return - alpha - expected_beta * benchmark
+                )
+            residuals[row.asset_id].append(expected_residual)
+            expected_volatility = np.std(residuals[row.asset_id][-3:], ddof=0)
+            assert styles.beta.get(row.asset_id, np.nan) == pytest.approx(
+                expected_beta, nan_ok=True
+            )
+            assert styles.residual_volatility.get(
+                row.asset_id, np.nan
+            ) == pytest.approx(expected_volatility, abs=1e-12, nan_ok=True)
+        previous_caps = dict(zip(panel.asset_id, panel.float_market_cap, strict=True))
+    if not changed_eligibility:
+        assert styles.residual_volatility.to_numpy() == pytest.approx(
+            [0.0, 0.0], abs=1e-12
+        )
+
+
+def test_market_risk_does_not_reuse_mature_residuals_after_missing_or_constant_days():
+    state = MarketModelRiskState(window=3, residual_window=2)
+
+    def observe(value, assets=("a", "b"), eligible=True):
+        return state.observe(
+            pd.DataFrame(
+                {
+                    "asset_id": assets,
+                    "period_return": [value] * len(assets),
+                    "float_market_cap": [100.0] * len(assets),
+                    "eligible": [eligible] * len(assets),
+                }
+            )
+        )
+
+    for value in (0.0, 0.01, 0.03, -0.02, 0.02):
+        mature = observe(value)
+    assert mature.residual_volatility.notna().all()
+    for _ in range(3):
+        invalid = observe(0.02)
+    assert invalid.beta.isna().all()
+    assert invalid.residual_volatility.isna().all()
+    observe(0.03, eligible=False)
+    assert observe(0.04).beta.isna().all()
+    for value in (0.01, -0.01, 0.02, 0.03):
+        observe(value)
+    observe(0.01, assets=("b",))
+    returned = observe(-0.01)
+    assert np.isnan(returned.beta["a"])
+    assert np.isnan(returned.residual_volatility["a"])
+
+
+@pytest.mark.parametrize("missing_column", ("period_return", "float_market_cap"))
+def test_canonical_listing_null_does_not_invalidate_complete_market_history(
+    missing_column,
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        panels,
+    )
+
+    state = MarketModelRiskState(window=3, residual_window=2)
+    assets = ["a", "new_listing"] if missing_column == "float_market_cap" else ["a"]
+    for value in (0.0, 0.01, 0.03, -0.02, 0.02):
+        state.observe(
+            pd.DataFrame(
+                {
+                    "asset_id": assets,
+                    "period_return": value,
+                    "float_market_cap": 100.0,
+                    "eligible": True,
+                }
+            )
+        )
+    raw = pd.DataFrame(
+        {
+            "source_asset_id": ["a", "new_listing"],
+            "timestamp": pd.Timestamp("2024-01-08"),
+            "market_type": 1,
+            "trading_status_code": 1,
+            "filling_flag": 0,
+            **{
+                name: 100.0
+                for name in (
+                    "open",
+                    "high",
+                    "low",
+                    "close",
+                    "adj_open",
+                    "adj_close",
+                    "float_market_cap",
+                    "total_market_cap",
+                )
+            },
+            "volume": 100.0,
+            "amount": 10000.0,
+            "period_return": [0.04, 0.2],
+        }
+    )
+    raw.loc[1, missing_column] = np.nan
+    panel = panels._apply_suspension_semantics(panels._canonical_bars(raw))
+    panel["eligible"] = panel.asset_id.eq("a")
+    assert panel.loc[panel.asset_id.eq("new_listing"), missing_column].isna().all()
+    result = state.observe(panel)
+    assert result.beta["a"] == pytest.approx(1.0)
+    assert result.residual_volatility["a"] == pytest.approx(0.0, abs=1e-12)
+    if missing_column == "period_return":
+        assert np.isnan(result.beta["new_listing"])
+    panel["eligible"] = True
+    panel["period_return"] = [0.01, -0.03]
+    panel["float_market_cap"] = 100.0
+    result = state.observe(panel)
+    if missing_column == "float_market_cap":
+        assert result.beta["a"] == pytest.approx(1.0)
+    else:
+        assert np.isnan(result.beta["new_listing"])
+    panel["eligible"] = [False, True]
+    panel["period_return"] = [np.nan, 0.03]
+    interrupted = state.observe(panel)
+    assert np.isnan(interrupted.beta["a"])
+    assert np.isnan(interrupted.residual_volatility["a"])
+    panel["eligible"] = True
+    panel["period_return"] = [0.02, -0.02]
+    assert np.isnan(state.observe(panel).beta["a"])
+
+
+@pytest.mark.parametrize(
+    "column,value",
+    (
+        ("period_return", np.inf),
+        ("period_return", True),
+        ("period_return", "invalid"),
+        ("float_market_cap", np.inf),
+        ("float_market_cap", 0.0),
+        ("float_market_cap", -1.0),
+    ),
+)
+def test_ineligible_market_risk_still_rejects_invalid_nonnull_inputs(column, value):
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["a"],
+            "period_return": [0.01],
+            "float_market_cap": [100.0],
+            "eligible": [False],
+        }
+    )
+    panel[column] = value
+    with pytest.raises(ValueError, match="market_model_risk_(numeric|key)_invalid"):
+        MarketModelRiskState().observe(panel)
+
+
 def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
     dates = pd.bdate_range("2022-01-03", periods=564)
     style_columns = (
@@ -551,6 +746,142 @@ def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
     )
     assert estimate.specific_variance.notna().all()
     assert estimate.specific_variance.gt(0.0).all()
+
+
+def test_factor_risk_projects_history_to_current_industry_domain() -> None:
+    state = FactorRiskState(
+        style_columns=("style",),
+        minimum_cross_section=10,
+        minimum_factor_dates=3,
+        minimum_specific_dates=3,
+    )
+    x = np.arange(20, dtype="float64")
+    cross = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-01"),
+            "asset_id": [f"a{index}" for index in range(20)],
+            "industry_level1_code": ["A"] * 10 + ["B"] * 10,
+            "float_market_cap": 100 + x,
+            "style": x,
+            "asset_return": np.sin(x) / 100,
+        }
+    )
+    for position in range(6):
+        current = cross.assign(
+            timestamp=pd.Timestamp("2020-01-01") + pd.Timedelta(days=position)
+        )
+        if position >= 3:
+            current["industry_level1_code"] = "A"
+        state.observe_return_session(current)
+    exposures = state.current_exposures(current)
+    assert "industry_B" not in exposures
+    estimate = state.estimate()
+    assert tuple(estimate.factor_covariance.columns) == ("industry_A", "style")
+    assert len(estimate.factor_returns) == 6
+    held = current.assign(eligible=True)
+    held.loc[held.index[-1], ["industry_level1_code", "eligible"]] = ["B", False]
+    assert "industry_B" in state.current_exposures(held)
+    assert "industry_B" in state.estimate().factor_covariance
+    current["industry_level1_code"] = "C"
+    state.current_exposures(current)
+    with pytest.raises(ValueError, match="factor_risk_factor_history_insufficient"):
+        state.estimate()
+
+
+@pytest.mark.parametrize("calendar", [False, True])
+@pytest.mark.parametrize(
+    "entry,exit_price", [(-1.0, 2.0), (1.0, 0.0), (1.0, -1.0), (1e-308, 1e308)]
+)
+def test_forward_labels_reject_invalid_economic_prices_and_overflow(
+    calendar, entry, exit_price
+) -> None:
+    dates = pd.bdate_range("2020-01-01", periods=3)
+    frame = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": dates,
+            "adj_open": [1.0, entry, exit_price],
+            "can_enter": True,
+        }
+    )
+    result = add_forward_return_labels(
+        frame,
+        horizons=(1,),
+        sessions=dates if calendar else None,
+        can_enter_column="can_enter",
+    )
+    assert pd.isna(result.loc[0, "forward_return_1d"])
+    assert pd.isna(result.loc[0, "forward_return_1d_available_at"])
+
+
+def test_factor_risk_windows_and_decay_follow_observed_sessions() -> None:
+    dates = pd.bdate_range("2020-01-01", periods=509)
+    specific_state = FactorRiskState(
+        style_columns=("style",),
+        minimum_cross_section=10,
+        minimum_factor_dates=3,
+        minimum_specific_dates=3,
+    )
+    factor_state = FactorRiskState(
+        style_columns=("style",),
+        minimum_cross_section=10,
+        minimum_factor_dates=3,
+        minimum_specific_dates=3,
+    )
+    x = np.arange(12, dtype="float64")
+
+    def cross(position: int) -> pd.DataFrame:
+        return pd.DataFrame(
+            {
+                "timestamp": dates[position],
+                "asset_id": [f"a{index}" for index in range(12)],
+                "industry_level1_code": "A",
+                "float_market_cap": 100 + x,
+                "style": x,
+                "asset_return": np.sin(x + position) / 100,
+            }
+        )
+
+    fits = []
+    for position in range(4):
+        current = cross(position)
+        if position == 2:
+            current["style"] = np.nan
+        else:
+            fits.append(specific_state.fit_return_session(current))
+        specific_state.observe_return_session(current)
+        factor_state.observe_return_session(current)
+    estimate = specific_state.estimate()
+    ages = np.array([3.0, 2.0, 0.0])
+    weights = 0.5 ** (ages / 126.0)
+    weights /= weights.sum()
+    returns = np.vstack([fit.factor_returns.to_numpy() for fit in fits])
+    centered = returns - np.average(returns, axis=0, weights=weights)
+    covariance = (centered * weights[:, None]).T @ centered
+    expected_covariance = (0.8 * covariance + 0.2 * np.diag(np.diag(covariance))) * 252
+    np.testing.assert_allclose(
+        estimate.factor_covariance, expected_covariance, rtol=1e-12, atol=1e-15
+    )
+    specific_weights = 0.5 ** (ages / 63.0)
+    specific_weights /= specific_weights.sum()
+    expected_specific = (
+        np.dot(specific_weights, [fit.residuals.loc["a0"] ** 2 for fit in fits]) * 252
+    )
+    assert estimate.specific_variance.loc["a0"] == pytest.approx(
+        expected_specific, rel=1e-12
+    )
+    assert estimate.factor_returns.timestamp.tolist() == dates[[0, 1, 3]].tolist()
+
+    for position in range(4, len(dates)):
+        current = cross(position)
+        current.loc[current.asset_id.eq("a0"), "style"] = np.nan
+        if position < 258:
+            specific_state.observe_return_session(current)
+        current["style"] = np.nan
+        factor_state.observe_return_session(current)
+    assert "a0" not in specific_state.estimate().specific_variance
+    with pytest.raises(ValueError, match="factor_risk_factor_history_insufficient"):
+        factor_state.estimate()
 
 
 def test_future_execution_and_disclosure_facts_do_not_rewrite_past_facts() -> None:
@@ -676,6 +1007,55 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         config=config,
     )
     assert cash_result.weights.sum() == pytest.approx(1.0)
+
+
+@pytest.mark.parametrize(
+    ("adv", "requires_trade", "error"),
+    [
+        (1e10, True, None),
+        (1e8, True, "optimizer_failed_closed"),
+        (np.nan, True, "optimizer_trade_adv_unavailable"),
+        (0.0, True, "optimizer_trade_adv_unavailable"),
+        (np.nan, False, None),
+    ],
+)
+def test_optimizer_fixed_missing_exposure_retains_real_trade_capacity(
+    adv: float, requires_trade: bool, error: str | None
+) -> None:
+    assets = pd.DataFrame(
+        {
+            "asset_id": list("abcd"),
+            "expected_alpha": [0.0, 0.2, -0.2, 0.1],
+            "current_weight": [0.3, 0.2, 0.25, 0.25] if requires_trade else [0.25] * 4,
+            "benchmark_weight": 0.25,
+            "specific_variance": 0.01,
+            "adv": [adv, 1e10, 1e10, 1e10],
+            "industry": 1.0,
+            "style": [np.nan, 1.0, -1.0, 0.0],
+        }
+    )
+    covariance = pd.DataFrame(
+        np.eye(2) * 0.01, index=("industry", "style"), columns=("industry", "style")
+    )
+
+    def optimize():
+        return optimize_portfolio(
+            assets,
+            factor_covariance=covariance,
+            industry_columns=("industry",),
+            style_columns=("style",),
+            expected_transaction_cost=lambda _weights: 0.0,
+        )
+
+    if error is not None:
+        with pytest.raises(ValueError, match=error):
+            optimize()
+    else:
+        result = optimize()
+        assert result.weights.loc["a"] == pytest.approx(0.25)
+        assert result.weights.loc["b"] > 0.25
+        assert np.isfinite(result.predicted_tracking_error)
+        assert result.maximum_adv_participation <= 0.05 + 1e-8
 
 
 def test_fundamental_value_factors_use_panel_total_cap() -> None:

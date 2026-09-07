@@ -18,10 +18,6 @@ from quant_research_platform.artifacts.outputs.common_validation import (
 )
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
-    EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
-    EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
-    EVALUATION_IC_SUMMARY_COLUMNS,
-    EVALUATION_METRICS_COLUMNS,
     validate_evaluation_artifact_structure,
     validate_evaluation_diagnostics_consistency,
 )
@@ -37,6 +33,10 @@ from quant_research_platform.artifacts.outputs.parquet import (
     write_parquet,
 )
 from quant_research_platform.contracts.evaluations import (
+    EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
+    EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+    EVALUATION_IC_SUMMARY_COLUMNS,
+    EVALUATION_METRICS_COLUMNS,
     EvaluationDiagnostics,
     EvaluationSpec,
     strict_non_negative_count_series,
@@ -54,6 +54,7 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import (
@@ -161,7 +162,7 @@ def write_evaluation_outputs_from_chunks(
         )
         if unsafe_summary is not None:
             raise ValueError(f"evaluation_summary_share_unsafe: {unsafe_summary}")
-        (temp_root / "summary.md").write_text(
+        Path(native_filesystem_path(temp_root / "summary.md")).write_text(
             rendered_summary,
             encoding="utf-8",
         )
@@ -258,7 +259,7 @@ def _write_evaluation_artifact_chunks(
             if writer is None:
                 try:
                     writer = pq.ParquetWriter(
-                        paths[name],
+                        native_filesystem_path(paths[name]),
                         persisted.schema,
                         compression="zstd",
                         write_batch_size=batch_rows,
@@ -388,7 +389,7 @@ def _write_evaluation_artifact_chunks(
                     )
                     chunk_min = (
                         time_value_isoformat(
-                            pd.Timestamp(timestamps.min()).to_pydatetime(),
+                            pd.Timestamp(timestamps.min()),
                             preserve_datetime=True,
                         )
                         if not timestamps.empty
@@ -396,7 +397,7 @@ def _write_evaluation_artifact_chunks(
                     )
                     chunk_max = (
                         time_value_isoformat(
-                            pd.Timestamp(timestamps.max()).to_pydatetime(),
+                            pd.Timestamp(timestamps.max()),
                             preserve_datetime=True,
                         )
                         if not timestamps.empty

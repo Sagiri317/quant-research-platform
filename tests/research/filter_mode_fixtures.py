@@ -48,7 +48,6 @@ def make_filter_mode_prediction_output_scores(
             spec=prediction_spec,
             input_columns=model_spec.input_columns,
             predictor=prediction_outputs.prediction_callable(
-                result.coefficients,
                 model_spec.input_columns,
                 result.prediction_model,
             ),

@@ -14,7 +14,10 @@ from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     remove_owned_scratch,
 )
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    native_filesystem_path,
+    require_unaliased_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -40,10 +43,10 @@ def rebuild_candidate_workspace(
         Path(layout.project_root) / ".run",
         error="invalid_rebuild_scratch_path",
     )
-    parent.mkdir(parents=True, exist_ok=True)
+    Path(native_filesystem_path(parent)).mkdir(parents=True, exist_ok=True)
     require_unaliased_path(parent, error="invalid_rebuild_scratch_path")
     token = uuid4().hex
-    root = _extended_path(parent / owned_scratch_name(".r-", token))
+    root = Path(native_filesystem_path(parent / owned_scratch_name(".r-", token)))
     require_unaliased_path(root, error="invalid_rebuild_scratch_path")
     os.mkdir(root)
     workspace = RebuildCandidateWorkspace(project_root=root, token=token)
@@ -64,10 +67,3 @@ def rebuild_candidate_workspace(
                     "rebuild candidate scratch cleanup also failed: "
                     f"{type(cleanup_error).__name__}"
                 )
-
-
-def _extended_path(path: Path) -> Path:
-    if os.name != "nt":
-        return Path(path)
-    value = os.path.abspath(path)
-    return Path(value if value.startswith("\\\\?\\") else "\\\\?\\" + value)

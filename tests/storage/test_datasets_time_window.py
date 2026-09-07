@@ -15,7 +15,7 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -33,6 +33,55 @@ from tests.storage.low_level_fixtures import (
     make_processed_dataset_spec,
     make_time_window_dataset_frame,
 )
+
+
+@pytest.mark.parametrize("objects", [False, True])
+@pytest.mark.parametrize(
+    "mode", (DatasetReadMode.MATERIALIZED, DatasetReadMode.CHUNKED)
+)
+def test_nanosecond_closed_windows_roundtrip_and_keep_date_window_semantics(
+    tmp_path: Path, objects: bool, mode: DatasetReadMode
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "nanoseconds")
+    timestamps = [
+        "2020-01-01T00:00:00.000000000",
+        "2020-01-01T00:00:00.000000001",
+        "2020-01-01T00:00:00.000000002",
+        "2020-01-01T00:00:00.000000003",
+        "2020-01-01T23:59:59.999999999",
+        "2020-01-02T00:00:00.000000000",
+    ]
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset",
+            "timestamp": pd.to_datetime(timestamps),
+            "value": [float(index) for index in range(6)],
+        }
+    )
+    write_dataset(root, frame, spec=make_processed_dataset_spec("nanoseconds"))
+    bounds = [
+        "2020-01-01T08:00:00.000000001+08:00",
+        "2020-01-01T08:00:00.000000002+08:00",
+    ]
+    window = TimeWindow(
+        *(pd.Timestamp(value) if objects else value for value in bounds)
+    )
+    encoded = {
+        "start": time_value_isoformat(window.start),
+        "end": time_value_isoformat(window.end),
+    }
+    assert encoded == {"start": timestamps[1], "end": timestamps[2]}
+    restored = TimeWindow(**json.loads(json.dumps(encoded)))
+    assert restored == window
+    result = read_dataset(root, time_window=restored, mode=mode)
+    if mode is DatasetReadMode.CHUNKED:
+        result = pd.concat(tuple(result), ignore_index=True)
+    assert result.value.tolist() == [1.0, 2.0]
+    assert result.timestamp.tolist() == frame.timestamp.iloc[1:3].tolist()
+    whole_day = read_dataset(root, time_window=TimeWindow("2020-01-01", "2020-01-01"))
+    assert whole_day.value.tolist() == [0.0, 1.0, 2.0, 3.0, 4.0]
+    assert time_value_isoformat(pd.Timestamp(timestamps[0])) == "2020-01-01"
 
 
 def capture_file_batch_paths(

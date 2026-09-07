@@ -34,6 +34,7 @@ from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
+from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
     iter_dataset_part_batches,
@@ -154,7 +155,7 @@ def write_portfolio_ledger_artifact(
                 name: stack.enter_context(
                     _preserving_close(
                         pq.ParquetWriter(
-                            staging / f"{name}.parquet",
+                            native_filesystem_path(staging / f"{name}.parquet"),
                             schema,
                             compression="zstd",
                             use_dictionary=False,

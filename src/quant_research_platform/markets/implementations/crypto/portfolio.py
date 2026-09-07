@@ -141,13 +141,11 @@ def _prediction_rows(
 
         joined = _iter_prediction_joined_chunks(
             frames(),
-            prediction_source=lookup,
-            primary_key=lookup.primary_key,
+            prediction_lookup=lookup,
             input_columns=inputs,
             sample_filter_mode=metadata["sample_filter_mode"],
             test_start=pd.Timestamp(output_window.start).isoformat(),
             test_end=pd.Timestamp(output_window.end).isoformat(),
-            resource_policy=resource_policy,
         )
         with closing_iterator(joined):
             for frame in joined:
@@ -329,7 +327,6 @@ def _paired_validation(artifact, fold_id, asset_id):
                     "asset_id": asset_id,
                     "book_segment_id": price.book_segment_id,
                     "trade_connection_id": price.trade_connection_id,
-                    "segment_id": price.segment_id,
                     "price_prediction": float(price.prediction_score),
                     "price_label": float(price.label),
                     "proxy_prediction": float(proxy.prediction_score),
@@ -670,7 +667,7 @@ def produce_maker_ledger(
                             **{
                                 key: value
                                 for key, value in price.items()
-                                if key != "prediction_score"
+                                if key not in {"prediction_score", "segment_id"}
                             },
                             "price_prediction": price["prediction_score"],
                             "proxy_prediction": proxy["prediction_score"],
@@ -706,6 +703,7 @@ def produce_maker_ledger(
                                         **{
                                             column: getattr(row, column)
                                             for column in HFT_EXECUTION_CONTEXT_COLUMNS
+                                            if column != "segment_id"
                                         },
                                     }
 

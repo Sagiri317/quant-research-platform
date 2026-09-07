@@ -1,0 +1,250 @@
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.research.factors.engine import (
+    calculate_factors_for_panel,
+    factor_lookback_bars,
+    factor_panel_input_columns,
+)
+from quant_research_platform.research.factors.price_volume.calculations import (
+    calculate_price_volume_factors,
+)
+from quant_research_platform.research.factors.price_volume.definitions import (
+    FORMAL_CORE_PRICE_VOLUME_FACTORS,
+    FORMAL_PRICE_VOLUME_FACTORS,
+    price_volume_factor_definitions,
+)
+
+UNIQUE_FACTORS = (
+    "momentum_20d",
+    "momentum_60d",
+    "upside_volatility_20d",
+    "min_return_20d",
+    "kurtosis_60d",
+    "avg_amount_20d",
+    "amount_change_20d",
+    "volume_change_20d",
+    "turnover_change_20d",
+    "amount_volatility_20d",
+    "volume_shock_20d",
+    "return_volume_corr_20d",
+    "return_turnover_corr_20d",
+    "return_amount_imbalance_20d",
+    "zero_amount_ratio_20d",
+    "log_total_market_cap",
+)
+
+
+def test_price_volume_selections_use_one_definition_and_minimum_inputs():
+    binding = dict(market_id=MarketId("a_share"), required_input_data_id="price_volume")
+    standard = price_volume_factor_definitions(**binding)
+    assert standard == price_volume_factor_definitions(**binding, preset="formal")
+    assert factor_lookback_bars(standard) == 252
+    assert tuple(item.output_column for item in standard) == FORMAL_PRICE_VOLUME_FACTORS
+    core = price_volume_factor_definitions(**binding, preset="core")
+    assert (
+        tuple(item.output_column for item in core) == FORMAL_CORE_PRICE_VOLUME_FACTORS
+    )
+    reversal = price_volume_factor_definitions(
+        **binding, factor_columns=("reversal_5d",)
+    )
+    assert factor_lookback_bars(reversal) == 5
+    assert reversal[0].required_windows == (5,)
+    x = np.arange(1.0, 301.0)
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=len(x)),
+            "adj_close": x,
+            "period_return": np.sin(x) * 0.01,
+            "high": x + 2.0,
+            "low": x - 0.5,
+            "close": x,
+            "amount": x * 10.0,
+            "volume": x + 10.0,
+            "float_market_cap": x * 1_000.0,
+            "total_market_cap": x * 2_000.0,
+        }
+    )
+    names = (*FORMAL_PRICE_VOLUME_FACTORS, *UNIQUE_FACTORS)
+    definitions = price_volume_factor_definitions(**binding, factor_columns=names)
+    assert len(definitions) == 41
+    window = TimeWindow(
+        panel.timestamp.iloc[280].date(), panel.timestamp.iloc[-1].date()
+    )
+    mixed = calculate_factors_for_panel(
+        panel, definitions=definitions, output_window=window
+    )
+    for definition in definitions:
+        minimum = panel.loc[:, factor_panel_input_columns((definition,))]
+        single = calculate_factors_for_panel(
+            minimum, definitions=(definition,), output_window=window
+        )
+        pd.testing.assert_frame_equal(
+            single, mixed.loc[:, single.columns], check_exact=True
+        )
+    reverse = calculate_factors_for_panel(
+        panel.iloc[::-1], definitions=definitions[::-1], output_window=window
+    )
+    pd.testing.assert_frame_equal(
+        reverse.sort_values("timestamp").reset_index(drop=True),
+        mixed.loc[:, reverse.columns],
+        check_exact=True,
+    )
+    assert next(
+        item for item in definitions if item.output_column == "momentum_252_20"
+    ) == next(item for item in standard if item.output_column == "momentum_252_20")
+
+
+def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
+    x = np.arange(1.0, 62.0)
+    returns = np.resize(np.array([-0.02, 0.01, 0.03, -0.01, 0.0]), len(x))
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=len(x)),
+            "adj_close": x,
+            "period_return": returns,
+            "amount": x,
+            "volume": 2.0 * x,
+            "float_market_cap": 1_000.0,
+            "close": 10.0,
+            "total_market_cap": 10_000.0,
+        }
+    )
+    result = calculate_price_volume_factors(panel, factor_columns=UNIQUE_FACTORS)
+    last = result.iloc[-1]
+    flow, ret = x[-20:], returns[-20:]
+    centered = returns[-60:] - returns[-60:].mean()
+    variance = np.mean(centered**2)
+    kurtosis = (
+        59.0 / (58.0 * 57.0) * (61.0 * (np.mean(centered**4) / variance**2 - 3.0) + 6.0)
+    )
+    expected = {
+        "momentum_20d": 61.0 / 41.0 - 1.0,
+        "momentum_60d": 60.0,
+        "upside_volatility_20d": np.sqrt((0.01**2 + 0.03**2) / 5.0),
+        "min_return_20d": -0.02,
+        "kurtosis_60d": kurtosis,
+        "avg_amount_20d": 51.5,
+        "amount_change_20d": 61.0 / 41.0 - 1.0,
+        "volume_change_20d": 61.0 / 41.0 - 1.0,
+        "turnover_change_20d": 61.0 / 41.0 - 1.0,
+        "amount_volatility_20d": np.sqrt(665.0 / 19.0),
+        "volume_shock_20d": 61.0 / 50.5 - 1.0,
+        "return_volume_corr_20d": np.sum((ret - ret.mean()) * (flow - flow.mean()))
+        / np.sqrt(np.sum((ret - ret.mean()) ** 2) * np.sum((flow - flow.mean()) ** 2)),
+        "return_turnover_corr_20d": np.sum((ret - ret.mean()) * (flow - flow.mean()))
+        / np.sqrt(np.sum((ret - ret.mean()) ** 2) * np.sum((flow - flow.mean()) ** 2)),
+        "return_amount_imbalance_20d": np.sum(ret * flow) / np.sum(np.abs(ret) * flow),
+        "zero_amount_ratio_20d": 0.0,
+        "log_total_market_cap": np.log(10_000.0),
+    }
+    for name, value in expected.items():
+        assert last[name] == pytest.approx(value), name
+    scaled = calculate_price_volume_factors(
+        panel.assign(period_return=returns * 1e200), factor_columns=("kurtosis_60d",)
+    )
+    assert scaled.loc[60, "kurtosis_60d"] == pytest.approx(kurtosis)
+    for name in UNIQUE_FACTORS:
+        if name != "log_total_market_cap":
+            first = (
+                60
+                if name == "momentum_60d"
+                else 59
+                if name == "kurtosis_60d"
+                else 20
+                if name
+                in {
+                    "momentum_20d",
+                    "amount_change_20d",
+                    "volume_change_20d",
+                    "turnover_change_20d",
+                    "volume_shock_20d",
+                }
+                else 19
+            )
+            assert result[name].iloc[:first].isna().all(), name
+            assert pd.notna(result[name].iloc[first]), name
+    missing = panel.copy()
+    missing.loc[50, ["amount", "volume", "period_return", "adj_close"]] = np.nan
+    missing_result = calculate_price_volume_factors(
+        missing, factor_columns=UNIQUE_FACTORS
+    )
+    assert (
+        missing_result.loc[
+            60,
+            [
+                "zero_amount_ratio_20d",
+                "volume_shock_20d",
+                "kurtosis_60d",
+                "return_amount_imbalance_20d",
+            ],
+        ]
+        .isna()
+        .all()
+    )
+    assert missing_result.loc[60, "momentum_20d"] == result.loc[60, "momentum_20d"]
+    constant = panel.assign(
+        amount=0.0, volume=0.0, period_return=0.0, total_market_cap=0.0
+    )
+    zero = calculate_price_volume_factors(constant, factor_columns=UNIQUE_FACTORS).iloc[
+        -1
+    ]
+    assert (
+        zero[
+            [
+                "volume_shock_20d",
+                "volume_change_20d",
+                "turnover_change_20d",
+                "amount_change_20d",
+                "return_volume_corr_20d",
+                "return_turnover_corr_20d",
+                "return_amount_imbalance_20d",
+                "kurtosis_60d",
+                "log_total_market_cap",
+            ]
+        ]
+        .isna()
+        .all()
+    )
+    assert zero["zero_amount_ratio_20d"] == 1.0
+    assert zero["amount_volatility_20d"] == 0.0
+    assert zero["upside_volatility_20d"] == 0.0
+    nonpositive = panel.assign(amount=1.0)
+    nonpositive.loc[60, "amount"] = -2.0
+    observed = calculate_price_volume_factors(
+        nonpositive, factor_columns=("zero_amount_ratio_20d",)
+    )
+    assert observed.loc[60, "zero_amount_ratio_20d"] == 1.0 / 20.0
+
+
+def test_price_volume_rejects_removed_names_before_calculation():
+    for name in (
+        "mom_20d",
+        "rev_1d",
+        "vol_20d",
+        "skew_60d",
+        "kurt_60d",
+        "ret_amount_corr_20d",
+        "amount_chg_20d",
+        "intraday_range_20d",
+        "zero_volume_ratio_20d",
+        "momentum_120d",
+    ):
+        with pytest.raises(ValueError, match="unknown_price_volume_factor"):
+            price_volume_factor_definitions(
+                market_id=MarketId("a_share"),
+                required_input_data_id="price_volume",
+                factor_columns=(name,),
+            )
+        with pytest.raises(ValueError, match="unknown_price_volume_factor"):
+            calculate_price_volume_factors(
+                pd.DataFrame(), factor_columns=("reversal_5d", name)
+            )

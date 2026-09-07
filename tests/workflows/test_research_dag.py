@@ -57,18 +57,14 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     from quant_research_platform.research.models import production as model_production
 
     model_read_windows: list[TimeWindow] = []
-    real_iter_research_dataset_chunks = model_production.iter_research_dataset_chunks
+    real_iter_dataset_chunks = model_production.iter_dataset_chunks
 
-    def observed_iter_research_dataset_chunks(*args: object, **kwargs: object):
-        window = kwargs.get("time_window")
-        if isinstance(window, TimeWindow):
-            model_read_windows.append(window)
-        return real_iter_research_dataset_chunks(*args, **kwargs)
+    def observed_iter_dataset_chunks(session, **kwargs):
+        model_read_windows.append(session.time_window)
+        return real_iter_dataset_chunks(session, **kwargs)
 
     monkeypatch.setattr(
-        model_production,
-        "iter_research_dataset_chunks",
-        observed_iter_research_dataset_chunks,
+        model_production, "iter_dataset_chunks", observed_iter_dataset_chunks
     )
     base = research_profile()
     source_id = "formal_source"
@@ -79,7 +75,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         factor_columns=("factor_a",),
         label_columns=("label",),
         filter_columns=("eligible",),
-        context_columns=(),
+        context_columns=("label_available_at",),
     )
     source_spec = InterimDataSpec(
         data_id=source_id,
@@ -121,11 +117,17 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         )
     )
     sessions = pd.date_range("2014-01-01", "2019-06-30", freq="B")
+    label_calendar = pd.bdate_range(sessions[0], periods=len(sessions) + 21)
     dataset_frame = pd.DataFrame(
         {
             "market_id": "a_share",
             "asset_id": [asset for timestamp in sessions for asset in ("a", "b", "c")],
             "timestamp": [timestamp for timestamp in sessions for _ in range(3)],
+            "label_available_at": [
+                label_calendar[index + 21]
+                for index in range(len(sessions))
+                for _ in range(3)
+            ],
             "factor_a": [
                 float(asset_index + (date_index % 5))
                 for date_index in range(len(sessions))
@@ -147,6 +149,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
                     "market_id": ["a_share"],
                     "asset_id": ["holdout"],
                     "timestamp": pd.to_datetime(["2024-01-02"]),
+                    "label_available_at": pd.to_datetime(["2024-01-31"]),
                     "factor_a": [float("nan")],
                     "label": [float("nan")],
                     "eligible": [True],
@@ -282,8 +285,20 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         for item in artifact.quarterly_selections.values()
     )
     assert model_read_windows
-    assert all(
+    assert any(
         pd.Timestamp(window.start) == pd.Timestamp("2014-01-01")
+        for window in model_read_windows
+    )
+    assert {
+        window
+        for window in model_read_windows
+        if pd.Timestamp(window.start) > pd.Timestamp("2014-01-01")
+    } == {
+        TimeWindow(item["validation_start"], item["validation_end"])
+        for item in artifact.quarterly_selections.values()
+    }
+    assert all(
+        pd.Timestamp(window.end) <= pd.Timestamp(a_share.DEVELOPMENT_END)
         for window in model_read_windows
     )
     prediction_root = (

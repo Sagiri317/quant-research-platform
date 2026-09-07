@@ -39,6 +39,9 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
+from quant_research_platform.storage.datasets.schema import (
+    logical_dtype_payload_from_frame,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _input_dataset_identity_payload,
@@ -817,6 +820,7 @@ def test_fingerprint_releases_hash_array_before_next_source_batch(
         spec={"primary_key": ["value"]},
         logical_columns=("value",),
         arrow_schema=arrow_batch.schema,
+        logical_dtypes=logical_dtype_payload_from_frame(frame),
         time_window=None,
         data_root=tmp_path / "data",
         schema_hash="schema",

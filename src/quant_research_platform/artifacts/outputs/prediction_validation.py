@@ -127,15 +127,20 @@ def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, o
     for model in models:
         if type(model) is not dict or set(model) != {
             "quarter_id",
+            "source_quarter",
             "family_id",
             "model_id",
             "prediction_window",
         }:
             raise ValueError("invalid_model_metadata")
         quarter, family = model["quarter_id"], model["family_id"]
+        source_quarter = model["source_quarter"]
         if (
             type(quarter) is not str
             or str(pd.Period(quarter, freq="Q")) != quarter
+            or type(source_quarter) is not str
+            or str(pd.Period(source_quarter, freq="Q")) != source_quarter
+            or pd.Period(source_quarter, freq="Q") > pd.Period(quarter, freq="Q")
             or (quarter, family) in seen
         ):
             raise ValueError("invalid_model_metadata")
@@ -488,15 +493,6 @@ def validate_model_metadata_consistency(
         metadata["test_start"] != spec.test_start
         or metadata["test_end"] != spec.test_end
         or metadata["oos_start"] != spec.test_start
-    ):
-        raise ValueError("model_metadata_inconsistent")
-    if (
-        require_non_negative_metadata_int(
-            metadata,
-            "coefficient_count",
-            "model_metadata_inconsistent",
-        )
-        <= 0
     ):
         raise ValueError("model_metadata_inconsistent")
     validate_model_selection_metadata_consistency(metadata, spec=spec)

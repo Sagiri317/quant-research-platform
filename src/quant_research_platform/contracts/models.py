@@ -64,7 +64,7 @@ MODEL_SELECTION_METRIC_DIRECTIONS = {
     "validation_rankic": "maximize",
     "validation_mse": "minimize",
 }
-A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID = "qrp-a-share-quarterly-model-artifact"
+A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID = "qrp-a-share-quarterly-predictor-artifact"
 _PARALLEL_MODEL_ALGORITHMS = frozenset(
     algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
 )
@@ -270,7 +270,6 @@ def validate_model_metadata_core(
         "random_seed",
         "max_train_rows",
         "dependency_status",
-        "coefficient_count",
         "rows_input",
         "rows_after_filter_mode",
         "rows_after_input_label_dropna",
@@ -304,15 +303,10 @@ def validate_model_metadata_core(
         "rows_input",
         "rows_after_filter_mode",
         "rows_after_input_label_dropna",
-        "coefficient_count",
         "input_count",
     ):
         value_for_key = metadata[key]
-        if (
-            type(value_for_key) is not int
-            or value_for_key < 0
-            or (key == "coefficient_count" and value_for_key < 1)
-        ):
+        if type(value_for_key) is not int or value_for_key < 0:
             raise ValueError("invalid_model_metadata")
     if not (
         0
@@ -390,14 +384,15 @@ def validate_model_metadata_core(
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid_model_metadata") from exc
-    for key in ("train_start", "train_end"):
-        if key in metadata and metadata[key] is not None:
-            if type(metadata[key]) is not str:
-                raise ValueError("invalid_model_metadata")
-            try:
-                pd.Timestamp(metadata[key])
-            except (TypeError, ValueError) as exc:
-                raise ValueError("invalid_model_metadata") from exc
+    for key in ("train_start", "train_end", *(("fit_cutoff",) if quarterly else ())):
+        if type(metadata[key]) is not str:
+            raise ValueError("invalid_model_metadata")
+        try:
+            timestamp = pd.Timestamp(metadata[key])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("invalid_model_metadata") from exc
+        if pd.isna(timestamp):
+            raise ValueError("invalid_model_metadata")
     train_start = pd.Timestamp(metadata["train_start"])
     train_end = pd.Timestamp(metadata["train_end"])
     if train_start > train_end:
@@ -803,4 +798,4 @@ def validate_completed_model_trial_metrics(
     _validate_model_selection_trial_record(trial, require_facts=False)
 
 
-CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID = "qrp-crypto-fold-model-artifact"
+CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID = "qrp-crypto-fold-predictor-artifact"

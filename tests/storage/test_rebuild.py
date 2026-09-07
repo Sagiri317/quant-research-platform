@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,34 @@ import quant_research_platform.storage.rebuild as rebuild
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def test_rebuild_candidate_success_cleans_owner_scratch(tmp_path: Path) -> None:
+@pytest.mark.skipif(os.name != "nt", reason="Windows UNC syntax")
+def test_rebuild_uses_canonical_unc_paths_without_network_access(monkeypatch) -> None:
+    created = []
+    cleaned = []
+    monkeypatch.setattr(
+        rebuild, "require_unaliased_path", lambda path, **_kwargs: Path(path)
+    )
+    monkeypatch.setattr(Path, "mkdir", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(rebuild.os, "mkdir", lambda path: created.append(str(path)))
+    monkeypatch.setattr(
+        rebuild, "remove_owned_scratch", lambda path: cleaned.append(str(path))
+    )
+    with rebuild.rebuild_candidate_workspace(
+        StorageLayout(Path(r"\\server\share\project"))
+    ) as candidate:
+        assert str(candidate.project_root).startswith(
+            "\\\\?\\UNC\\server\\share\\project\\.run\\.r-"
+        )
+    assert created == cleaned and len(created) == 1
+
+
+@pytest.mark.parametrize("long_path", (False, True))
+def test_rebuild_candidate_success_cleans_owner_scratch(
+    tmp_path: Path, long_path: bool
+) -> None:
+    if long_path:
+        while len(str(tmp_path)) < 280:
+            tmp_path /= "segment_" + "a" * 32
     with rebuild.rebuild_candidate_workspace(
         StorageLayout(project_root=tmp_path)
     ) as candidate:

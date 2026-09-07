@@ -430,7 +430,9 @@ def _append_panel_columns(
     buffers["book_observed_time_ms"].append(state.observed_time_ms)
     buffers["exchange_event_time_ms"].append(state.event_time_ms)
     buffers["transaction_time_ms"].append(state.transaction_time_ms)
-    buffers["local_receive_time"].append(_receive_timestamp(state.receive_time))
+    buffers["local_receive_time"].append(
+        pd.Timestamp(state.observed_time_ns, unit="ns")
+    )
     buffers["book_receive_monotonic_ns"].append(state.receive_monotonic_ns)
     buffers["update_id"].append(state.update_id)
     buffers["best_bid_price"].append(bid_price)
@@ -455,14 +457,6 @@ def _append_panel_columns(
 
 def _timestamp(value: int) -> dt.datetime:
     return dt.datetime(1970, 1, 1) + dt.timedelta(milliseconds=value)
-
-
-def _receive_timestamp(value: str) -> dt.datetime:
-    try:
-        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError as exc:
-        raise ValueError("hft_receive_time_invalid") from exc
-    return parsed.astimezone(dt.UTC).replace(tzinfo=None)
 
 
 def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]:

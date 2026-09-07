@@ -6,7 +6,6 @@ import pytest
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.benchmark import (
     iter_benchmark_weight_snapshots,
-    materialize_benchmark_weights,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     producer as processed_producer,
@@ -80,22 +79,6 @@ def test_benchmark_filters_repeated_codes_and_exact_snapshots():
     assert set(normalized["benchmark_id"]) == {"csi500", "csi1000"}
     assert set(normalized["asset_id"]) == {"000001", "000002"}
     assert len(normalized) == 8
-
-    observations = pd.DataFrame(
-        {
-            "benchmark_id": ["csi500", "csi500"],
-            "asset_id": ["000001", "000001"],
-            "timestamp": pd.to_datetime(["2020-01-02", "2020-01-04"]),
-        }
-    )
-    looked_up = materialize_benchmark_weights(observations, normalized)
-    assert looked_up["weight"].iloc[0] == pytest.approx(0.4)
-    assert pd.isna(looked_up["weight"].iloc[1])
-    with pytest.raises(ValueError, match="market_id_invalid"):
-        materialize_benchmark_weights(
-            observations,
-            normalized.assign(market_id="crypto"),
-        )
 
 
 def test_processed_benchmark_target_streams_exact_dates_and_requires_global_coverage(

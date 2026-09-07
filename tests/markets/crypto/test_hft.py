@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -26,6 +27,35 @@ from tests.helpers.binance_hft import _coverage, _panel_rows, _row_timestamp_ms
 from tests.helpers.runtime_resources import capture_test_policy
 
 
+def test_panel_uses_exact_validated_receipt_nanoseconds() -> None:
+    observed = pd.Timestamp("2023-01-01T00:00:00.000000123").value
+    origin_ms = observed // 1_000_000
+    state = replace(
+        _state(origin_ms),
+        observed_time_ns=observed,
+        receive_time=pd.Timestamp(observed, unit="ns").isoformat() + "Z",
+    )
+    frame = pd.concat(
+        tuple(
+            iter_panel_frames(
+                [state, _state(origin_ms + 300)],
+                [],
+                start_ms=origin_ms + 100,
+                end_ms=origin_ms + 300,
+                book_coverage={"s1": _coverage(origin_ms, origin_ms + 400)},
+                trade_coverage={
+                    "trade-connection-1": _coverage(origin_ms, origin_ms + 400)
+                },
+                market_id="crypto",
+                asset_id="btc_usdt",
+                batch_rows=4,
+            )
+        ),
+        ignore_index=True,
+    )
+    assert pd.Timestamp(frame.local_receive_time.iloc[0]).value == observed
+
+
 def _state(
     timestamp_ms: int,
     *,
@@ -40,7 +70,7 @@ def _state(
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
-        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
         segment_id=segment_id,
@@ -58,7 +88,7 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
-        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
         connection_id=f"connection-{segment_id}",
@@ -73,7 +103,7 @@ def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEve
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
-        receive_time="2026-08-27T00:00:00.000000Z",
+        receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
         receive_monotonic_ns=timestamp_ms + 10,
         connection_id="trade-connection-1",
         market_type=FUTURES_MARKET_TYPE,

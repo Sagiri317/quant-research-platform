@@ -7,7 +7,7 @@ import pickle
 import re
 import stat
 import sys
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,12 +23,16 @@ from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import (
     A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
     CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
+    ModelSpec,
+    model_spec_payload,
     validate_a_share_model_selection_metadata,
     validate_model_metadata_core,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.models.fitting import validate_model_state
+from quant_research_platform.research.models.production import _refit_model_spec
 from quant_research_platform.research.models.trial_selection import (
     select_best_validation_trial,
 )
@@ -38,6 +42,8 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
+    require_free_disk_headroom,
+    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.datasets.reading import (
@@ -92,16 +98,49 @@ class PersistedQuarterlyModelArtifact:
     member_records: tuple[dict[str, object], ...]
     trial_ledgers: tuple[dict[str, str], ...]
 
-    def prediction_lineage(self, window: TimeWindow) -> dict[str, object]:
-        models = [
-            item
-            for item in self.quarterly_models
-            if pd.Timestamp(item["prediction_window"]["end"])
-            >= pd.Timestamp(window.start)
-            and pd.Timestamp(item["prediction_window"]["start"])
-            <= pd.Timestamp(window.end)
-        ]
-        quarters = {item["quarter_id"] for item in models}
+    def prediction_models(
+        self, window: TimeWindow, *, access_window: str = "development"
+    ) -> tuple[dict[str, object], ...]:
+        """Bind observation quarters to the immutable source model quarter."""
+        if access_window not in {"development", "holdout"}:
+            raise ValueError("unknown_a_share_access_window")
+        source_quarter = max(self.quarterly_selections)
+        models = []
+        for period in pd.period_range(window.start, window.end, freq="Q"):
+            observed = str(period)
+            source = source_quarter if access_window == "holdout" else observed
+            entries = tuple(
+                item for item in self.quarterly_models if item["quarter_id"] == source
+            )
+            if not entries:
+                raise ValueError("persisted_model_prediction_window_uncovered")
+            start = max(pd.Timestamp(window.start), period.start_time)
+            end = min(pd.Timestamp(window.end), period.end_time.normalize())
+            if access_window == "holdout" and any(
+                pd.Timestamp(item["model_metadata"]["fit_cutoff"]) >= start
+                for item in entries
+            ):
+                raise ValueError("holdout_model_cutoff_invalid")
+            for item in entries:
+                models.append(
+                    {
+                        **item,
+                        "quarter_id": observed,
+                        "source_quarter": source,
+                        "prediction_window": item["prediction_window"]
+                        if access_window == "development"
+                        else {
+                            "start": start.date().isoformat(),
+                            "end": end.date().isoformat(),
+                        },
+                    }
+                )
+        return tuple(models)
+
+    def prediction_lineage(
+        self, window: TimeWindow, *, access_window: str = "development"
+    ) -> dict[str, object]:
+        models = self.prediction_models(window, access_window=access_window)
         return {
             "model_artifact_id": self.model_id,
             "model_artifact_identity": self.envelope["instance_identity"],
@@ -111,6 +150,7 @@ class PersistedQuarterlyModelArtifact:
                     key: item[key]
                     for key in (
                         "quarter_id",
+                        "source_quarter",
                         "family_id",
                         "model_id",
                         "prediction_window",
@@ -119,9 +159,10 @@ class PersistedQuarterlyModelArtifact:
                 for item in models
             ],
             "champion_by_quarter": {
-                quarter: selection["selected_family_id"]
-                for quarter, selection in self.quarterly_selections.items()
-                if quarter in quarters
+                item["quarter_id"]: self.quarterly_selections[item["source_quarter"]][
+                    "selected_family_id"
+                ]
+                for item in models
             },
         }
 
@@ -131,26 +172,25 @@ def write_quarterly_model_artifact(
     *,
     model_id: str,
     envelope: BusinessManifestEnvelope,
-    quarterly_results: Iterable[object],
+    quarterly_results: Iterable[OwnedValue],
     trial_layout: StorageLayout | None = None,
+    verify_source: Callable[[], None] | None = None,
 ) -> Path:
     validate_run_id(model_id)
     if model_id != envelope.logical_artifact_id or quarterly_results is None:
         raise ValueError("model_artifact_identity_invalid")
     operational = {"model_trial_ledgers": []}
+    quarterly_payload: list[dict[str, object]] = []
 
     def write(staging: Path) -> None:
-        quarterly_payload: list[dict[str, object]] = []
         selections: dict[str, dict[str, object]] = {}
         models_root = staging / "models"
         os.mkdir(native_filesystem_path(models_root))
         iterator = iter(quarterly_results)
         try:
-            for yielded in iterator:
-                owned_quarterly = yielded if isinstance(yielded, OwnedValue) else None
-                quarterly = (
-                    owned_quarterly.value if owned_quarterly is not None else yielded
-                )
+            for owned_quarterly in iterator:
+                owned_quarterly.lease.transfer("research.model.artifact")
+                quarterly = owned_quarterly.value
                 quarter = None
                 quarterly_result = None
                 try:
@@ -171,11 +211,10 @@ def write_quarterly_model_artifact(
                     quarter_root = models_root / quarter_id
                     quarter_root.mkdir(exist_ok=True)
 
-                    metadata.update(
-                        {
-                            "fit_cutoff": _date_text(quarter.validation.end),
-                        }
-                    )
+                    cutoff = _date_text(quarter.validation.end)
+                    if "fit_cutoff" in metadata and metadata["fit_cutoff"] != cutoff:
+                        raise ValueError("model_fit_cutoff_mismatch")
+                    metadata["fit_cutoff"] = cutoff
                     model_algorithm = metadata["model_algorithm"]
                     if model_algorithm in {
                         "equal_weight_rank_ensemble",
@@ -205,6 +244,11 @@ def write_quarterly_model_artifact(
                                     (),
                                 )
                             )
+                        if (
+                            "rank_parameters" in metadata
+                            and metadata["rank_parameters"] != rank_parameters
+                        ):
+                            raise ValueError("model_state_metadata_mismatch")
                         metadata["rank_parameters"] = rank_parameters
                     quarterly_payload.append(
                         {
@@ -222,9 +266,14 @@ def write_quarterly_model_artifact(
                             ),
                         }
                     )
+                    validate_model_state(
+                        quarterly_result.prediction_model,
+                        quarterly_payload[-1]["model_metadata"],
+                    )
                     _write_model_member(
                         quarter_root / f"{family_id}.pkl",
                         quarterly_result.prediction_model,
+                        state_bytes=owned_quarterly.lease.reserved_bytes,
                     )
                 finally:
                     ownership = owned_quarterly
@@ -232,7 +281,7 @@ def write_quarterly_model_artifact(
                     quarterly = None
                     quarterly_result = None
                     owned_quarterly = None
-                    if ownership is not None and ownership.lease.active:
+                    if ownership.lease.active:
                         try:
                             ownership.release(owner="research.model.artifact")
                         except BaseException as cleanup_error:
@@ -293,8 +342,20 @@ def write_quarterly_model_artifact(
             },
         )
 
+    def verify_models(root, members):
+        for entry in quarterly_payload:
+            relative = f"models/{entry['quarter_id']}/{entry['family_id']}.pkl"
+            with _read_model_member(root, members, relative) as owned:
+                validate_model_state(owned.value, entry["model_metadata"])
+        if verify_source is not None:
+            verify_source()
+
     return write_semantic_artifact(
-        logical_root, envelope, write, operational_metadata=operational
+        logical_root,
+        envelope,
+        write,
+        operational_metadata=operational,
+        staged_validator=verify_models,
     )
 
 
@@ -472,6 +533,45 @@ def _validate_trial_references(
         if selected != family["selected_config_id"]:
             raise ValueError("model_trial_selection_mismatch")
         winning = next(record for record in records if record.candidate_id == selected)
+        parameters = winning.payload()["normalized_parameters"]
+        if not plan.candidate_parameters or not parameters:
+            raise ValueError("model_trial_parameters_missing")
+        metadata = entry["model_metadata"]
+        if (
+            parameters["model_id"] != selected
+            or winning.random_seed != parameters["random_seed"]
+        ):
+            raise ValueError("model_trial_parameters_misaligned")
+        for key in (
+            "model_algorithm",
+            "input_factor_columns",
+            "input_feature_columns",
+            "label_column",
+            "sample_filter_mode",
+            "max_train_rows",
+        ):
+            if metadata[key] != parameters[key]:
+                raise ValueError("model_trial_parameters_misaligned")
+        selected_spec = ModelSpec(
+            **{
+                **parameters,
+                "input_factor_columns": tuple(parameters["input_factor_columns"]),
+                "input_feature_columns": tuple(parameters["input_feature_columns"]),
+            }
+        )
+        refit = _refit_model_spec(
+            selected_spec,
+            n_train=metadata["rows_after_input_label_dropna"],
+            quarter_id=entry["quarter_id"],
+            root_seed=plan.random_seed,
+            config_index=plan.candidate_ids.index(selected),
+        )
+        if (
+            metadata["random_seed"] != refit.random_seed
+            or metadata["hyperparameters"]
+            != model_spec_payload(refit)["hyperparameters"]
+        ):
+            raise ValueError("model_trial_refit_misaligned")
         family_metrics.setdefault(entry["quarter_id"], []).append(
             {"model_id": family["family_id"], **dict(winning.validation_metrics)}
         )
@@ -518,13 +618,18 @@ def read_quarterly_predictor(
         artifact.member_records,
         relative,
         resource_policy=resource_policy,
-    ) as predictor:
-        if not callable(getattr(predictor, "predict", None)):
-            raise ValueError("model_artifact_model_invalid")
-        yield predictor
+    ) as owned:
+        predictor = owned.value
+        try:
+            validate_model_state(predictor, entry["model_metadata"])
+            yield predictor
+        finally:
+            predictor = None
 
 
-def _write_model_member(path, value):
+def _write_model_member(path, value, *, state_bytes):
+    # Retain the model envelope plus pickle overhead without serializing a copy.
+    require_free_disk_headroom(path.parent, reserve_bytes=2 * state_bytes)
     with handle_preserving_primary(open_filesystem_file(path, "wb")) as handle:
         pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
         handle.flush()
@@ -539,34 +644,40 @@ def _read_model_member(
     if member is None:
         raise ValueError("model_artifact_model_invalid")
     path = root / relative
-    policy = resource_policy or current_runtime_resource_policy()
     size = os.stat(native_filesystem_path(path), follow_symlinks=False).st_size
-    lease = None
-    value = None
-    try:
-        if policy is not None:
-            lease = policy.lease(
-                "research.model.predictor", max(1, size * workspace_factor)
-            )
-        verify_semantic_artifact_member(root, relative_path=relative, expected=member)
-        try:
-            with handle_preserving_primary(open_filesystem_file(path)) as handle:
-                value = pickle.load(handle)
-                if handle.read(1):
-                    raise ValueError("model_artifact_model_invalid")
-        except (
-            OSError,
-            pickle.PickleError,
-            EOFError,
-            AttributeError,
-            ImportError,
-        ) as error:
-            raise ValueError("model_artifact_model_invalid") from error
-        verify_semantic_artifact_member(root, relative_path=relative, expected=member)
-        yield value
-    finally:
+    with runtime_resource_policy_scope(resource_policy) as policy:
+        lease = policy.lease(
+            "research.model.predictor", max(1, size * workspace_factor)
+        )
         value = None
-        if lease is not None:
+        owned = None
+        try:
+            verify_semantic_artifact_member(
+                root, relative_path=relative, expected=member
+            )
+            try:
+                with handle_preserving_primary(open_filesystem_file(path)) as handle:
+                    value = pickle.load(handle)
+                    if handle.read(1):
+                        raise ValueError("model_artifact_model_invalid")
+            except (
+                OSError,
+                pickle.PickleError,
+                EOFError,
+                AttributeError,
+                ImportError,
+            ) as error:
+                raise ValueError("model_artifact_model_invalid") from error
+            verify_semantic_artifact_member(
+                root, relative_path=relative, expected=member
+            )
+            owned = OwnedValue(value, lease)
+            value = None
+            yield owned
+        finally:
+            value = None
+            if owned is not None:
+                owned.value = None
             from quant_research_platform.runtime.resources import (
                 _close_lease_preserving_primary,
             )
@@ -660,6 +771,10 @@ def _validated_quarterly_payload(
         if family is None or family["selected_config_id"] != model_id:
             raise ValueError("model_artifact_family_selection_mismatch")
         nested = validate_model_metadata_core(item["model_metadata"], quarterly=True)
+        if pd.Timestamp(nested["train_start"]) < pd.Timestamp(
+            item["training_window"]["start"]
+        ):
+            raise ValueError("model_artifact_training_range_invalid")
         if (
             pd.Timestamp(nested["fit_cutoff"])
             != pd.Timestamp(item["validation_window"]["end"])
@@ -771,14 +886,16 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
             iter(model_results(on_validation=write_validation))
         ) as source:
             for owned in source:
-                member = owned.value if isinstance(owned, OwnedValue) else owned
+                owned.lease.transfer("research.model.crypto.persist")
+                member = owned.value
                 try:
                     fold = member.fold
                     fold_root = staging / "models" / fold.fold_id
                     fold_root.mkdir(parents=True, exist_ok=True)
                     _write_model_member(
                         fold_root / f"{member.spec.model_id}.pkl",
-                        (member.result.coefficients, member.result.prediction_model),
+                        member.result.prediction_model,
+                        state_bytes=owned.lease.reserved_bytes,
                     )
                     entry = {
                         "fold_id": fold.fold_id,
@@ -803,7 +920,7 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
                     operational["model_trial_ledgers"].append(member.trial_reference)
                 finally:
                     member = None
-                    if isinstance(owned, OwnedValue):
+                    if owned.lease.active:
                         primary = sys.exception()
                         try:
                             owned.release(owner="research.model.crypto.persist")
@@ -1084,17 +1201,11 @@ def read_crypto_model_member(artifact, entry, *, resource_policy):
         relative,
         resource_policy=resource_policy,
         workspace_factor=4,
-    ) as value:
-        if (
-            type(value) is not tuple
-            or len(value) != 2
-            or not isinstance(value[0], np.ndarray)
-            or value[0].ndim != 1
-            or (value[1] is None and not np.isfinite(value[0]).all())
-            or (
-                value[1] is not None
-                and not callable(getattr(value[1], "predict", None))
-            )
-        ):
-            raise ValueError("model_artifact_model_invalid")
-        yield value
+    ) as owned:
+        value = owned.value
+        try:
+            if not callable(getattr(value, "predict", None)):
+                raise ValueError("model_artifact_model_invalid")
+            yield value
+        finally:
+            value = None

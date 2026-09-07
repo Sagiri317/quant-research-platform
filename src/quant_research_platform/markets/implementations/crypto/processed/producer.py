@@ -12,6 +12,7 @@ import pandas as pd
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import is_intraday_time_window
 from quant_research_platform.markets.implementations.crypto.hft import (
+    HFT_GRID_MS,
     iter_factor_frames,
     iter_label_frames,
     iter_panel_frames,
@@ -212,6 +213,7 @@ def _common_symbol_panel_frames(
     ):
         raise ValueError("hft_common_panel_inputs_invalid")
     timestamp_position = columns.index("timestamp")
+    segment_position = columns.index("segment_id")
 
     def rows(frames: Iterable[pd.DataFrame]) -> Iterator[tuple[object, ...]]:
         previous = None
@@ -230,6 +232,8 @@ def _common_symbol_panel_frames(
         rows(frames_by_symbol[symbol]) for symbol in binance_ids.RESEARCH_SYMBOLS
     ]
     records: list[tuple[object, ...]] = []
+    previous_common_time = None
+    common_start_ns = None
     with ExitStack() as live:
         active = [live.enter_context(closing_iterator(stream)) for stream in streams]
         empty = object()
@@ -260,7 +264,21 @@ def _common_symbol_panel_frames(
                     ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
                 )
                 records.clear()
-            records.extend(current)
+            if (
+                previous_common_time is None
+                or target - previous_common_time
+                != pd.Timedelta(milliseconds=HFT_GRID_MS)
+            ):
+                common_start_ns = pd.Timestamp(target).value
+            previous_common_time = target
+            records.extend(
+                (
+                    *row[:segment_position],
+                    f"{row[segment_position]}:common@{common_start_ns}",
+                    *row[segment_position + 1 :],
+                )
+                for row in current
+            )
             for index, stream in enumerate(active):
                 try:
                     current[index] = next(stream)
@@ -321,32 +339,29 @@ def _panel_frame_producer(
     resource_policy: RuntimeResourcePolicy,
 ) -> Iterator[object]:
     target_chunk_bytes = max(1, resource_policy.operation_headroom_bytes // 8)
-    for symbol in binance_ids.RESEARCH_SYMBOLS:
-        asset_filter = ("asset_id", "==", canonical_crypto_asset_id(symbol))
-        asset_session = replace(
-            session,
-            parquet_filters=(*(session.parquet_filters or ()), asset_filter),
-            owns_inventory=False,
-            owns_lease=False,
-        )
-        chunks = iter_dataset_chunks(
-            asset_session, target_chunk_bytes=target_chunk_bytes
-        )
-        frames = iter(transform(chunks))
-        with closing_iterator(chunks), closing_iterator(frames):
-            while True:
-                try:
-                    frame = next(frames)
-                except StopIteration:
-                    break
-                producer_bound = resource_policy.operation_headroom_bytes // 2
-                if producer_bound <= _FRAME_FIXED_BYTES:
-                    raise MemoryError("runtime_memory_budget_exceeded")
-                lease = yield producer_bound
-                output = frame.loc[:, list(columns)]
-                actual_bound = pandas_frame_payload_bytes(output) + 64 * 1024
-                if actual_bound > lease.reserved_bytes:
-                    raise ValueError("hft_dataframe_producer_bound_invalid")
-                lease.shrink_to(actual_bound)
-                yield OwnedValue(output, lease)
-                del frame, output
+    producer_bound = resource_policy.operation_headroom_bytes // 2
+    if producer_bound <= _FRAME_FIXED_BYTES:
+        raise MemoryError("runtime_memory_budget_exceeded")
+
+    def frames() -> Iterator[pd.DataFrame]:
+        for symbol in binance_ids.RESEARCH_SYMBOLS:
+            asset_filter = ("asset_id", "==", canonical_crypto_asset_id(symbol))
+            asset_session = replace(
+                session,
+                parquet_filters=(*(session.parquet_filters or ()), asset_filter),
+                owns_inventory=False,
+                owns_lease=False,
+            )
+            chunks = iter_dataset_chunks(
+                asset_session, target_chunk_bytes=target_chunk_bytes
+            )
+            with (
+                closing_iterator(chunks),
+                closing_iterator(iter(transform(chunks))) as transformed,
+            ):
+                for frame in transformed:
+                    yield frame.loc[:, list(columns)]
+
+    yield from _event_frame_producer(
+        frames(), columns=columns, producer_bound=producer_bound
+    )

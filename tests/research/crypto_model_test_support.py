@@ -124,7 +124,6 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                         :6
                     ]
                     predict = fitting.prediction_callable(
-                        member.result.coefficients,
                         member.spec.input_columns,
                         member.result.prediction_model,
                     )
@@ -286,16 +285,20 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
 
 
 def check_crypto_model_staging(*, layout, profile, saved):
+    from types import SimpleNamespace
+
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
     )
+    from quant_research_platform.research.models import persisted
     from quant_research_platform.research.models.persisted import (
-        read_crypto_model_member,
+        _read_model_member,
         write_crypto_model_artifact,
     )
     from quant_research_platform.research.protocols.crypto_hft import (
         protocol as crypto_protocol,
     )
+    from quant_research_platform.runtime import resources
     from quant_research_platform.storage.semantic_artifacts import (
         read_semantic_artifact_operational_metadata,
         read_semantic_artifact_record,
@@ -312,7 +315,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
     logical_root = saved.instance_root.parent.parent
     previous_instances = {p.name for p in saved.instance_root.parent.iterdir()}
     with runtime_resource_policy_scope() as policy:
-        for index, failure in enumerate(("seed", "missing_fold")):
+        for index, failure in enumerate(("seed", "missing_fold", "disk", "primary")):
             envelope = build_business_manifest_envelope(
                 **{
                     key: (
@@ -339,9 +342,14 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 for number, entry in enumerate(saved.models):
                     if failure == "missing_fold" and entry["fold_id"] == "fold_2":
                         break
-                    with read_crypto_model_member(
-                        saved, entry, resource_policy=policy
-                    ) as payload:
+                    with _read_model_member(
+                        saved.instance_root,
+                        saved.member_records,
+                        f"models/{entry['fold_id']}/{entry['model_id']}.pkl",
+                        resource_policy=policy,
+                        workspace_factor=4,
+                    ) as owned:
+                        payload = owned.value
                         metadata = deepcopy(entry["model_metadata"])
                         if failure == "seed" and number == 0:
                             metadata["random_seed"] += 1
@@ -352,28 +360,76 @@ def check_crypto_model_staging(*, layout, profile, saved):
                                 if f.fold_id == entry["fold_id"]
                             ),
                             profile.models.get(entry["model_id"]),
-                            fitting.ModelFitResult(payload[0], metadata, payload[1]),
+                            fitting.ModelFitResult(metadata, payload),
                             tuple(entry["training_asset_ids"]),
                             tuple(entry["evaluation_asset_ids"]),
                             references[number],
                         )
+                        owned.value = member
+                        member = payload = None
                         try:
-                            yield member
+                            yield owned
                         finally:
-                            member = payload = None
+                            assert owned.value is None
+                            assert not owned.lease.active
 
             error = (
                 "crypto_model_parameters_misaligned"
                 if failure == "seed"
                 else "crypto_model_fold_coverage_invalid"
             )
-            with pytest.raises(ValueError, match=error):
-                write_crypto_model_artifact(
-                    logical_root,
-                    envelope=envelope,
-                    model_results=lambda **_kwargs: members(),
-                    trial_layout=layout,
+            primary = KeyboardInterrupt("model_pickle_primary")
+            with pytest.MonkeyPatch.context() as patch:
+                if failure == "disk":
+                    patch.setattr(
+                        resources.shutil,
+                        "disk_usage",
+                        lambda _path: SimpleNamespace(free=1),
+                    )
+
+                    def reject_dump(*_args, **_kwargs):
+                        raise AssertionError("pickle_started_before_disk_admission")
+
+                    patch.setattr(persisted.pickle, "dump", reject_dump)
+                if failure == "primary":
+                    close = resources.MemoryLease.close
+
+                    def close_then_fail(lease, close=close):
+                        close(lease)
+                        if lease.owner == "research.model.crypto.persist":
+                            raise RuntimeError("secondary_model_release")
+
+                    def fail_dump(*_args, primary=primary, **_kwargs):
+                        raise primary
+
+                    patch.setattr(resources.MemoryLease, "close", close_then_fail)
+                    patch.setattr(persisted.pickle, "dump", fail_dump)
+                expected = (
+                    RuntimeError
+                    if failure == "disk"
+                    else KeyboardInterrupt
+                    if failure == "primary"
+                    else ValueError
                 )
+                message = (
+                    "insufficient_free_disk"
+                    if failure == "disk"
+                    else "model_pickle_primary"
+                    if failure == "primary"
+                    else error
+                )
+                with pytest.raises(expected, match=message) as raised:
+                    write_crypto_model_artifact(
+                        logical_root,
+                        envelope=envelope,
+                        model_results=lambda **_kwargs: members(),
+                        trial_layout=layout,
+                    )
+                if failure == "primary":
+                    assert raised.value is primary
+                    assert any(
+                        "lease close also failed" in note for note in primary.__notes__
+                    )
             assert {
                 p.name for p in saved.instance_root.parent.iterdir()
             } == previous_instances

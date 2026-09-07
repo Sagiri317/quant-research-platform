@@ -29,6 +29,62 @@ from tests.storage.low_level_fixtures import (
 )
 
 
+@pytest.mark.parametrize("parent_has_time", [False, True])
+@pytest.mark.parametrize("operator", ("==", "in"))
+def test_filtered_views_only_narrow_parent_rows_and_preserve_projection(
+    tmp_path: Path, parent_has_time: bool, operator: str
+) -> None:
+    from quant_research_platform.contracts.time import TimeWindow
+
+    root = make_dataset_artifact_root(tmp_path, "views")
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": ["a", "b"] * 3,
+            "timestamp": pd.date_range("2020-01-01", periods=3).repeat(2),
+            "value": [1.0, 101.0, 2.0, 102.0, 3.0, 103.0],
+        }
+    )
+    write_dataset(root, frame, spec=make_processed_dataset_spec("views"))
+    day = TimeWindow("2020-01-02", "2020-01-02")
+    wide = TimeWindow("2020-01-01", "2020-01-03")
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+
+    def values(session):
+        result = pd.concat(
+            tuple(
+                dataset_reading.iter_dataset_chunks(session, target_chunk_bytes=1024**2)
+            ),
+            ignore_index=True,
+        )
+        assert tuple(result.columns) == ("value",)
+        return result.value.tolist()
+
+    with runtime_resource_policy_scope(policy):
+        with dataset_reading.open_dataset_session(
+            root,
+            columns=("value",),
+            time_window=day if parent_has_time else None,
+            row_filters=(("asset_id", operator, "a" if operator == "==" else ("a",)),),
+            resource_policy=policy,
+        ) as parent:
+            baseline = policy.used_memory_bytes
+            with parent.filtered_view(wide) as widened:
+                assert values(widened) == (
+                    [2.0] if parent_has_time else [1.0, 2.0, 3.0]
+                )
+                with widened.filtered_view(day) as narrowed:
+                    with narrowed.filtered_view(wide) as descendant:
+                        assert values(descendant) == [2.0]
+                    with narrowed.filtered_view(
+                        TimeWindow("2020-01-03", "2020-01-03")
+                    ) as disjoint:
+                        assert values(disjoint) == []
+            assert values(parent) == ([2.0] if parent_has_time else [1.0, 2.0, 3.0])
+            assert policy.used_memory_bytes == baseline
+        assert policy.used_memory_bytes == 0
+
+
 def test_dataset_session_rejects_mutable_filter_values(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "immutable_filter")
     write_dataset(

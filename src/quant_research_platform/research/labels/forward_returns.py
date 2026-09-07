@@ -107,11 +107,16 @@ def add_forward_return_labels(
             exit_price = prices[exit_row]
             if (
                 not np.isfinite(entry_price)
-                or entry_price == 0.0
+                or entry_price <= 0.0
                 or not np.isfinite(exit_price)
+                or exit_price <= 0.0
             ):
                 continue
-            labels[position] = exit_price / entry_price - 1.0
+            with np.errstate(over="ignore"):
+                value = exit_price / entry_price - 1.0
+            if not np.isfinite(value):
+                continue
+            labels[position] = value
             available[position] = exit_date.to_datetime64()
         label_column = forward_return_label_column(horizon, frequency)
         result[label_column] = labels
@@ -236,7 +241,7 @@ def _add_valid_row_labels(
             [result[asset_column], segments], sort=False
         )
     entry = grouped.shift(-1)
-    entry = entry.where(np.isfinite(entry) & entry.ne(0.0))
+    entry = entry.where(np.isfinite(entry) & entry.gt(0.0))
     can_enter = (
         strict_bool_series(
             result[can_enter_column], error="invalid_forward_return_can_enter"
@@ -245,7 +250,8 @@ def _add_valid_row_labels(
         else None
     )
     for horizon in horizons:
-        exit_price = grouped.shift(-(horizon + 1)).where(np.isfinite)
+        exit_price = grouped.shift(-(horizon + 1))
+        exit_price = exit_price.where(np.isfinite(exit_price) & exit_price.gt(0.0))
         column = forward_return_label_column(horizon, frequency)
         result[column] = (exit_price / entry - 1.0).replace([np.inf, -np.inf], np.nan)
         if can_enter is not None:

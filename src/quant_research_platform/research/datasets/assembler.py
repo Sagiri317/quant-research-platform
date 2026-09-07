@@ -510,8 +510,8 @@ def _iter_research_chunk_windows_from_base_input(
                     saw_timestamp = True
                     if intraday:
                         window = TimeWindow(
-                            start.to_pydatetime(),
-                            end.to_pydatetime(),
+                            start,
+                            end,
                         )
                     else:
                         window = TimeWindow(start.date(), end.date())
@@ -916,10 +916,7 @@ def _apply_feature_transforms(
 ) -> pd.DataFrame:
     if not dataset_spec.feature_transforms:
         return frame
-    if {
-        "industry_level1_code",
-        "log_float_market_cap",
-    }.issubset(frame.columns) and dataset_spec.factor_columns:
+    if dataset_spec.data_id in _A_SHARE_SCENARIO_IDS:
         return canonical_feature_pipeline(
             frame,
             factor_columns=dataset_spec.factor_columns,

@@ -2,23 +2,23 @@
 
 from __future__ import annotations
 
-from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
-from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.columns import (
+    PLATFORM_ENTITY_TIME_KEY,
+    ColumnRole,
+)
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
     ProcessedDataKind,
     ProcessedDataSpec,
 )
-from quant_research_platform.markets.implementations.crypto import fields
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_FACTOR_COLUMNS,
     HFT_LABEL_AVAILABILITY_COLUMNS,
     HFT_LABEL_COLUMNS,
 )
 
-HFT_PRIMARY_KEY = platform_entity_time_key()
 HFT_PANEL_CONTEXT_COLUMNS = (
     "segment_id",
     "book_segment_id",
@@ -51,7 +51,7 @@ HFT_PANEL_CONTEXT_COLUMNS = (
     "observed_taker_buy_volume_100ms",
     "observed_taker_sell_volume_100ms",
 )
-HFT_PANEL_COLUMNS = (*HFT_PRIMARY_KEY, *HFT_PANEL_CONTEXT_COLUMNS, "eligible")
+HFT_PANEL_COLUMNS = (*PLATFORM_ENTITY_TIME_KEY, *HFT_PANEL_CONTEXT_COLUMNS, "eligible")
 
 
 def hft_processed_catalog() -> ProcessedDataCatalog:
@@ -65,14 +65,18 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 "binance_futures_microstructure_factors_100ms",
                 ProcessedDataKind.FACTOR,
-                (*HFT_PRIMARY_KEY, *HFT_FACTOR_COLUMNS),
+                (*PLATFORM_ENTITY_TIME_KEY, *HFT_FACTOR_COLUMNS),
                 processed_input_data_ids=("binance_futures_l2_panel_100ms",),
                 semantic_role=ColumnRole.FACTOR,
             ),
             _spec(
                 "binance_futures_mid_labels_100ms",
                 ProcessedDataKind.LABEL,
-                (*HFT_PRIMARY_KEY, *HFT_LABEL_COLUMNS, *HFT_LABEL_AVAILABILITY_COLUMNS),
+                (
+                    *PLATFORM_ENTITY_TIME_KEY,
+                    *HFT_LABEL_COLUMNS,
+                    *HFT_LABEL_AVAILABILITY_COLUMNS,
+                ),
                 processed_input_data_ids=("binance_futures_l2_panel_100ms",),
                 semantic_role=ColumnRole.LABEL,
             ),
@@ -89,20 +93,19 @@ def _spec(
     processed_input_data_ids: tuple[str, ...] = (),
     semantic_role: ColumnRole | None = None,
 ) -> ProcessedDataSpec:
-    catalog = fields.field_catalog()
     roles = {
         column: (
             ColumnRole.TIMESTAMP
             if column == "timestamp"
             else ColumnRole.KEY
-            if column in HFT_PRIMARY_KEY
+            if column in PLATFORM_ENTITY_TIME_KEY
             else ColumnRole.UNIVERSE
             if column == "eligible"
             else ColumnRole.CONTEXT
             if column in HFT_LABEL_AVAILABILITY_COLUMNS
             else semantic_role
             if semantic_role is not None
-            else catalog.get(column).role
+            else ColumnRole.CONTEXT
         )
         for column in columns
     }
@@ -115,6 +118,6 @@ def _spec(
         frequency=DataFrequency.TICK,
         grain=DataGrain.RESEARCH_ROW,
         column_roles=roles,
-        primary_key=HFT_PRIMARY_KEY,
+        primary_key=PLATFORM_ENTITY_TIME_KEY,
         partition_columns=("year",),
     )

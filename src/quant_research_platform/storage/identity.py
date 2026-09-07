@@ -10,6 +10,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
+from quant_research_platform.policy.lifecycle import closing_iterator
+
 _INSTANCE_IDENTITY_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -137,7 +139,7 @@ def _hash_file_content(
     if chunk_size <= 0:
         raise ValueError(error)
     digest = hashlib.sha256()
-    with open_filesystem_file(Path(path)) as handle:
+    with closing_iterator(open_filesystem_file(Path(path))) as handle:
         handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
         if handle_identity != expected:
             raise ValueError(error)

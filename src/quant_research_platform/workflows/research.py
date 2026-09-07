@@ -93,6 +93,7 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.profiles.research import ResearchProfile
+from quant_research_platform.research.datasets.io import _research_dataset_access_window
 from quant_research_platform.research.models.persisted import (
     read_crypto_model_artifact,
     read_quarterly_model_artifact,
@@ -100,6 +101,9 @@ from quant_research_platform.research.models.persisted import (
     write_quarterly_model_artifact,
 )
 from quant_research_platform.research.models.supervised import preflight_model_specs
+from quant_research_platform.research.portfolios.production import (
+    frozen_alpha_calibration,
+)
 from quant_research_platform.runtime.execution_metrics import record_run_observations
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
@@ -112,6 +116,7 @@ from quant_research_platform.storage.datasets.inspection import (
 from quant_research_platform.storage.datasets.instances import (
     discover_dataset_instances,
 )
+from quant_research_platform.storage.datasets.reading import open_dataset_session
 from quant_research_platform.storage.datasets.schema import (
     COMMON_MANIFEST_METADATA_KEY,
     data_spec_payload,
@@ -240,6 +245,27 @@ def _plan_targets(
     plans: list[TargetPlan] = []
     by_id: dict[str, TargetPlan] = {}
     for spec in ordered:
+        frozen = protocol.manifest().get("frozen_development")
+        if frozen is not None and spec.target_id == protocol.model_selection_target_id:
+            reference = frozen["model"]
+            plan = TargetPlan(
+                target_id=spec.target_id,
+                upstream_target_ids=(),
+                producer_id=spec.producer_id,
+                decision=PlanDecision.REUSE,
+                requested_identity=reference["instance_identity"],
+                matching_instance_identity=reference["instance_identity"],
+                upstream_identities=frozen["model_upstream_identities"],
+                rebuild=False,
+                producer_kind=ProducerKind.MODEL,
+                schema_identity=reference["schema_identity"],
+                artifact_root=reference["path"],
+            )
+            plans.append(plan)
+            by_id[spec.target_id] = plan
+            if reference_sink is not None:
+                reference_sink[spec.target_id] = plan
+            continue
         data_spec = _catalog_data_spec(profile, spec.target_id)
         target_window = _semantic_target_time_window(
             action,
@@ -529,6 +555,7 @@ def research_run(
     research_plan: Mapping[str, object] | None = None,
     raw_root: Path | None = None,
     holdout: bool = False,
+    development_run_id: str | None = None,
     plan: bool = False,
     rebuild: bool = False,
 ) -> dict[str, object]:
@@ -544,93 +571,222 @@ def research_run(
         )
     elif research_plan is not None:
         raise ValueError("research_plan_not_supported")
-    if holdout:
-        raise PermissionError("holdout_frozen_development_identity_unavailable")
     protocol = _protocol(profile, scenario_id)
-    _require_development_window(protocol, start_date, end_date)
-    terminals = tuple(protocol.terminal_targets("research run"))
-    if plan:
-        return plan_targets(
-            profile=profile,
-            action="research run",
-            terminal_targets=terminals,
-            layout=layout,
-            scenario_id=scenario_id,
-            rebuild=rebuild,
-            raw_root=raw_root or _default_raw_root(layout),
-            research_window=_research_window(
-                _protocol(profile, scenario_id),
-                None,
-                start_date=start_date,
-                end_date=end_date,
-            ),
+    if not plan:
+        model_ids = tuple(
+            dict.fromkeys(
+                model_id
+                for target in protocol.target_specs("research run")
+                if target.producer_id
+                and profile.producer_bindings.get(target.producer_id) is not None
+                and profile.producer_bindings[target.producer_id].kind
+                is ProducerKind.MODEL
+                for model_id in protocol.model_ids_for_target(target.target_id)
+            )
         )
-    run_id = f"run_{uuid4().hex}"
-    window = _research_window(
-        protocol,
-        None,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    software = production_software_identity()
-    result_sink: dict[str, TargetResult] = {}
-    reference_sink: dict[str, TargetPlan] = {}
-    operation_evidence = unmeasured_operation_evidence("operation_not_started")
-    try:
-        result = _execute_action(
-            run_id=run_id,
-            profile=profile,
-            action="research run",
-            terminal_targets=terminals,
-            layout=layout,
-            time_window=TimeWindow(start_date, end_date),
+        preflight_model_specs(profile.models.get(model_id) for model_id in model_ids)
+    with runtime_resource_policy_scope(None):
+        if holdout:
+            if protocol.protocol_id != "a_share_low_frequency":
+                raise PermissionError("holdout_frozen_development_identity_unavailable")
+            try:
+                protocol = _frozen_holdout_protocol(
+                    profile, layout, protocol, development_run_id, start_date, end_date
+                )
+            except PortfolioTargetBlocked as exc:
+                return {
+                    "stage": "research run",
+                    "plan": plan,
+                    "status": "BLOCKED",
+                    "blockers": [{"target_id": scenario_id, "reason": str(exc)}],
+                }
+            profile = replace(profile, protocol=lambda **kwargs: protocol)
+        else:
+            if development_run_id is not None:
+                raise ValueError("development_run_id_requires_holdout")
+            _require_development_window(protocol, start_date, end_date)
+        terminals = tuple(protocol.terminal_targets("research run"))
+        if plan:
+            return plan_targets(
+                profile=profile,
+                action="research run",
+                terminal_targets=terminals,
+                layout=layout,
+                scenario_id=scenario_id,
+                rebuild=rebuild,
+                raw_root=raw_root or _default_raw_root(layout),
+                research_window=_research_window(
+                    _protocol(profile, scenario_id),
+                    None,
+                    start_date=start_date,
+                    end_date=end_date,
+                ),
+            )
+        run_id = f"run_{uuid4().hex}"
+        window = _research_window(
+            protocol,
+            None,
             start_date=start_date,
             end_date=end_date,
-            rebuild=rebuild,
-            raw_root=raw_root or _default_raw_root(layout),
-            research_window=window,
-            software_identity=software,
-            result_sink=result_sink,
-            reference_sink=reference_sink,
-            operation_evidence_sink=operation_evidence,
         )
-    except BaseException as primary:
+        software = production_software_identity()
+        result_sink: dict[str, TargetResult] = {}
+        reference_sink: dict[str, TargetPlan] = {}
+        operation_evidence = unmeasured_operation_evidence("operation_not_started")
         try:
-            record = _research_run_record(
-                layout=layout,
+            result = _execute_action(
                 run_id=run_id,
                 profile=profile,
-                protocol=protocol,
+                action="research run",
+                terminal_targets=terminals,
+                layout=layout,
+                time_window=TimeWindow(start_date, end_date),
+                start_date=start_date,
+                end_date=end_date,
+                rebuild=rebuild,
+                raw_root=raw_root or _default_raw_root(layout),
                 research_window=window,
                 software_identity=software,
-                terminal_targets=terminals,
-                target_results=tuple(result_sink.values()),
-                target_references=reference_sink,
-                status=RunStatus.FAILED,
-                failure_reason=f"research_run_failed:{type(primary).__name__.lower()}",
-                operation_evidence=operation_evidence,
+                result_sink=result_sink,
+                reference_sink=reference_sink,
+                operation_evidence_sink=operation_evidence,
             )
-            write_research_run_record(layout.research_run_path(run_id), record)
-        except BaseException as record_error:
-            primary.add_note(
-                f"research run record write also failed: {type(record_error).__name__}"
+        except BaseException as primary:
+            try:
+                record = _research_run_record(
+                    layout=layout,
+                    run_id=run_id,
+                    profile=profile,
+                    protocol=protocol,
+                    research_window=window,
+                    software_identity=software,
+                    terminal_targets=terminals,
+                    target_results=tuple(result_sink.values()),
+                    target_references=reference_sink,
+                    status=RunStatus.FAILED,
+                    failure_reason=f"research_run_failed:{type(primary).__name__.lower()}",
+                    operation_evidence=operation_evidence,
+                )
+                write_research_run_record(layout.research_run_path(run_id), record)
+            except BaseException as record_error:
+                primary.add_note(
+                    "research run record write also failed: "
+                    f"{type(record_error).__name__}"
+                )
+            raise
+        record = _research_run_record(
+            layout=layout,
+            run_id=run_id,
+            profile=profile,
+            protocol=protocol,
+            research_window=window,
+            software_identity=software,
+            terminal_targets=terminals,
+            target_results=tuple(result_sink.values()),
+            target_references=reference_sink,
+            status=RunStatus(result["status"]),
+            operation_evidence=operation_evidence,
+        )
+        write_research_run_record(layout.research_run_path(run_id), record)
+        return {**result, "run_id": run_id}
+
+
+def _frozen_holdout_protocol(
+    profile: ResearchProfile,
+    layout: StorageLayout,
+    protocol: Any,
+    development_run_id: str | None,
+    start_date: str,
+    end_date: str,
+) -> Any:
+    if development_run_id is None:
+        raise PermissionError("holdout_frozen_development_identity_unavailable")
+    requested = TimeWindow(start_date, end_date)
+    holdout_window = TimeWindow(**protocol.manifest()["holdout_window"])
+    if requested.start < holdout_window.start or requested.end > holdout_window.end:
+        raise PermissionError("holdout_window_invalid")
+    with runtime_resource_policy_scope(None):
+        record = read_research_run_record(
+            layout.research_run_path(development_run_id),
+            expected_profile_id=profile.profile_id,
+        )
+        if (
+            record.status is not RunStatus.COMPLETE
+            or record.scenario_id != protocol.scenario_id
+            or dict(record.protocol) != protocol.manifest()
+            or record.research_window["access"] != "development"
+            or pd.Timestamp(record.research_window["end"])
+            != pd.Timestamp(protocol.manifest()["development_window"]["end"])
+            or set(record.terminal_targets)
+            != set(protocol.terminal_targets("research run"))
+        ):
+            raise ValueError("holdout_development_run_invalid")
+        references = {item.target_id: item for item in record.target_results}
+        for target_id in (*record.terminal_targets, protocol.model_selection_target_id):
+            reference = references.get(target_id)
+            if reference is None:
+                raise ValueError("holdout_development_reference_missing")
+            _validate_reference(layout, reference)
+        reference = references[protocol.model_selection_target_id]
+        root = _target_instance_root(
+            profile, layout, reference.target_id, reference.instance_identity
+        )
+        _validate_semantic_target_root(
+            profile,
+            protocol,
+            next(
+                item
+                for item in protocol.target_specs("research run")
+                if item.target_id == reference.target_id
+            ),
+            root,
+            reference.instance_identity,
+            trial_layout=layout,
+        )
+        persisted = read_quarterly_model_artifact(
+            root, expected_identity=reference.instance_identity, trial_layout=layout
+        )
+        if max(persisted.quarterly_selections) != str(
+            pd.Period(protocol.manifest()["development_window"]["end"], freq="Q")
+        ):
+            raise ValueError("holdout_development_model_quarter_invalid")
+        frozen = {
+            "run_id": record.run_id,
+            "run_identity": canonical_json_hash(record.payload()),
+            "model": reference.payload(),
+            "model_upstream_identities": persisted.envelope["upstream_identities"],
+        }
+        calibration = None
+        calibration_date = None
+        sources = []
+        for candidate in protocol.portfolio_candidates():
+            if candidate.construction != "benchmark_enhanced":
+                continue
+            target_id = f"{protocol.scenario_id}_{candidate.candidate_id}_ledger"
+            source = references[target_id]
+            artifact = read_portfolio_ledger_artifact(
+                _target_instance_root(
+                    profile, layout, target_id, source.instance_identity
+                ),
+                expected_identity=source.instance_identity,
             )
-        raise
-    record = _research_run_record(
-        layout=layout,
-        run_id=run_id,
-        profile=profile,
-        protocol=protocol,
-        research_window=window,
-        software_identity=software,
-        terminal_targets=terminals,
-        target_results=tuple(result_sink.values()),
-        target_references=reference_sink,
-        status=RunStatus(result["status"]),
-        operation_evidence=operation_evidence,
+            current, observed_at = frozen_alpha_calibration(
+                artifact, cutoff=pd.Timestamp(record.research_window["end"])
+            )
+            if calibration is not None and (
+                current != calibration or observed_at != calibration_date
+            ):
+                raise ValueError("holdout_alpha_sources_disagree")
+            calibration = current
+            calibration_date = observed_at
+            sources.append({"reference": source.payload(), "observed_at": observed_at})
+        frozen["alpha_sources"] = sources
+    return replace(
+        protocol,
+        access_window="holdout",
+        frozen_development=frozen,
+        frozen_alpha=calibration,
     )
-    write_research_run_record(layout.research_run_path(run_id), record)
-    return {**result, "run_id": run_id}
 
 
 def _require_development_window(protocol: Any, start_date: str, end_date: str) -> None:
@@ -836,21 +992,6 @@ def _execute_action(
     run_id: str | None = None,
     operation_evidence_sink: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    if action == "research run":
-        scenario_id = _scenario_from_terminal(profile, action, terminal_targets)
-        protocol = _protocol(profile, scenario_id)
-        model_ids = tuple(
-            dict.fromkeys(
-                model_id
-                for target in protocol.target_specs("research run")
-                if target.producer_id
-                and profile.producer_bindings.get(target.producer_id) is not None
-                and profile.producer_bindings[target.producer_id].kind
-                is ProducerKind.MODEL
-                for model_id in protocol.model_ids_for_target(target.target_id)
-            )
-        )
-        preflight_model_specs(profile.models.get(model_id) for model_id in model_ids)
     with (
         runtime_resource_policy_scope(None) as policy,
         (
@@ -1466,7 +1607,7 @@ def _build_semantic_target(
                 **(
                     {"protocol_manifest": protocol.manifest()}
                     if protocol.protocol_id == "crypto_hft"
-                    else {}
+                    else {"access_window": protocol.access_window}
                 ),
             )
 
@@ -1496,28 +1637,45 @@ def _build_semantic_target(
             if run_id is None:
                 raise ValueError("model_run_id_required")
             model_ids = protocol.model_ids_for_target(spec.target_id)
-            model_result = binding.producer(
-                layout=target_layout,
-                dataset_catalog=profile.research_datasets,
-                model_catalog=profile.models,
-                dataset_id=protocol.scenario_id,
-                model_ids=model_ids,
-                tie_break_order=model_ids,
-                time_window=time_window,
+            dataset_spec = profile.research_datasets.get(protocol.scenario_id)
+            dataset_root = target_layout.target_root(
+                dataset_spec.data_id,
+                target_layout.research_dataset_root(
+                    dataset_spec.market_id, dataset_spec.data_id
+                ),
+            )
+            with open_dataset_session(
+                dataset_root,
+                columns=None,
+                time_window=_research_dataset_access_window(
+                    dataset_spec.market_id, None
+                ),
                 resource_policy=policy,
-                protocol_manifest=protocol.manifest(),
-                run_id=run_id,
-                research_protocol_identity=canonical_json_hash(protocol.manifest()),
-                model_target_id=spec.target_id,
-                backend_versions=software_identity.payload["dependency_versions"],
-            )
-            write_quarterly_model_artifact(
-                logical_root,
-                model_id=spec.target_id,
-                envelope=envelope,
-                quarterly_results=model_result,
-                trial_layout=target_layout,
-            )
+            ) as dataset_session:
+                model_result = binding.producer(
+                    layout=target_layout,
+                    dataset_session=dataset_session,
+                    dataset_catalog=profile.research_datasets,
+                    model_catalog=profile.models,
+                    dataset_id=protocol.scenario_id,
+                    model_ids=model_ids,
+                    tie_break_order=model_ids,
+                    time_window=time_window,
+                    resource_policy=policy,
+                    protocol_manifest=protocol.manifest(),
+                    run_id=run_id,
+                    research_protocol_identity=canonical_json_hash(protocol.manifest()),
+                    model_target_id=spec.target_id,
+                    backend_versions=software_identity.payload["dependency_versions"],
+                )
+                write_quarterly_model_artifact(
+                    logical_root,
+                    model_id=spec.target_id,
+                    envelope=envelope,
+                    quarterly_results=model_result,
+                    trial_layout=target_layout,
+                    verify_source=dataset_session.verify,
+                )
         elif binding.kind is ProducerKind.PREDICTION:
             model_dependencies = tuple(
                 dependency
@@ -1534,7 +1692,9 @@ def _build_semantic_target(
             if type(model_identity) is not str:
                 raise ValueError("model_identity_missing")
             persisted = read_quarterly_model_artifact(
-                _target_instance_root(profile, layout, model_target, model_identity),
+                target_layout.target_root(
+                    model_target, Path("__missing_model_target__")
+                ),
                 expected_identity=model_identity,
                 trial_layout=target_layout,
             )
@@ -1554,6 +1714,7 @@ def _build_semantic_target(
                 prediction_spec=prediction_spec,
                 persisted_model=persisted,
                 resource_policy=policy,
+                access_window=protocol.access_window,
             )
 
             def write(staging: Path) -> None:
@@ -1675,7 +1836,9 @@ def _build_semantic_target(
             if type(model_identity) is not str:
                 raise ValueError("model_identity_missing")
             persisted = read_quarterly_model_artifact(
-                _target_instance_root(profile, layout, model_target, model_identity),
+                target_layout.target_root(
+                    model_target, Path("__missing_model_target__")
+                ),
                 expected_identity=model_identity,
                 trial_layout=target_layout,
             )
@@ -1764,6 +1927,7 @@ def _build_semantic_target(
                     input_window=protocol.data_window,
                     formal_dataset_window=protocol.formal_dataset_window,
                     prediction_window=prediction_window,
+                    frozen_calibration=protocol.frozen_alpha,
                     prediction_lookup=prediction_lookup,
                     assumptions=protocol.execution_assumptions,
                     resource_policy=policy,
@@ -1891,7 +2055,99 @@ def _research_run_record(
         status=status,
         operation_evidence=operation_evidence,
         failure_reason=failure_reason,
+        holdout_evidence=_holdout_evidence(
+            layout=layout,
+            profile=profile,
+            protocol=protocol,
+            research_window=research_window,
+            software_identity=software_identity.identity_hash,
+            target_references=target_references,
+        ),
     )
+
+
+def _holdout_evidence(
+    *,
+    layout: StorageLayout,
+    profile: ResearchProfile,
+    protocol: Any,
+    research_window: Mapping[str, object],
+    software_identity: str,
+    target_references: Mapping[str, TargetPlan],
+) -> dict[str, object]:
+    if (
+        protocol.protocol_id != "a_share_low_frequency"
+        or protocol.access_window != "holdout"
+    ):
+        return {}
+    prior = []
+    same_evidence = False
+    same_inputs = False
+
+    def alpha_sources(frozen):
+        return tuple(
+            (
+                item["reference"]["target_id"],
+                item["reference"]["instance_identity"],
+                item["observed_at"],
+            )
+            for item in frozen["alpha_sources"]
+        )
+
+    evidence_targets = tuple(
+        key
+        for key, item in target_references.items()
+        if item.producer_kind
+        in {
+            ProducerKind.INTERIM,
+            ProducerKind.PROCESSED,
+            ProducerKind.DATASET,
+            ProducerKind.MODEL,
+        }
+    )
+    for path in sorted(layout.research_run_path("run_probe").parent.glob("*.json")):
+        record = read_research_run_record(path)
+        if (
+            record.profile_id != profile.profile_id
+            or record.scenario_id != protocol.scenario_id
+            or record.research_window["access"] != "holdout"
+        ):
+            continue
+        prior.append(
+            {"run_id": record.run_id, "identity": canonical_json_hash(record.payload())}
+        )
+        old = {item.target_id: item.instance_identity for item in record.target_results}
+        if (
+            record.status is RunStatus.COMPLETE
+            and protocol.scenario_id in target_references
+            and protocol.model_selection_target_id in target_references
+            and record.software_identity == software_identity
+            and all(
+                key in target_references
+                and old.get(key) == target_references[key].requested_identity
+                for key in evidence_targets
+            )
+        ):
+            if alpha_sources(record.protocol["frozen_development"]) == alpha_sources(
+                protocol.frozen_development
+            ):
+                same_inputs = True
+                same_evidence |= dict(record.research_window) == dict(
+                    research_window
+                ) and old == {
+                    key: item.requested_identity
+                    for key, item in target_references.items()
+                }
+    return {
+        "qualification": "REUSE"
+        if same_evidence
+        else "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
+        if same_inputs
+        else "POST_HOLDOUT_CORRECTED"
+        if prior
+        else "HOLDOUT_FIRST_EVIDENCE",
+        "prior_runs": prior,
+    }
 
 
 def _build_report_from_run(
@@ -2296,7 +2552,8 @@ def _validate_semantic_target_root(
                     TimeWindow(
                         prediction_metadata["test_start"],
                         prediction_metadata["test_end"],
-                    )
+                    ),
+                    access_window=protocol.access_window,
                 ):
                     raise ValueError("prediction_model_lineage_mismatch")
         except (KeyError, TypeError, ValueError) as exc:
@@ -2635,7 +2892,7 @@ def _research_window(
     return {
         "start": time_value_isoformat(window.start, preserve_datetime=True),
         "end": time_value_isoformat(window.end, preserve_datetime=True),
-        "access": "development",
+        "access": protocol.access_window,
     }
 
 
@@ -2710,6 +2967,8 @@ def _a_share_champion_window(
     time_window: TimeWindow,
 ) -> TimeWindow:
     if getattr(protocol, "protocol_id", None) != "a_share_low_frequency":
+        return time_window
+    if protocol.access_window == "holdout":
         return time_window
     champion_target_ids = {
         protocol.model_selection_target_id,

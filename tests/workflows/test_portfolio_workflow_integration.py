@@ -55,7 +55,10 @@ from quant_research_platform.research.models.production import (
 )
 from quant_research_platform.research.models.rank_ensemble import RankEnsemblePredictor
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    OwnedValue,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import (
@@ -208,6 +211,7 @@ def _dataset_spec() -> ResearchDatasetSpec:
             "x": ColumnRole.FACTOR,
             **{factor: ColumnRole.FACTOR for factor in statistical_factors},
             "label": ColumnRole.LABEL,
+            "label_available_at": ColumnRole.CONTEXT,
             "forward_return_20d": ColumnRole.LABEL,
             "forward_return_20d_available_at": ColumnRole.LABEL,
             "eligible": ColumnRole.MASK,
@@ -225,12 +229,16 @@ def _dataset_spec() -> ResearchDatasetSpec:
             "forward_return_20d_available_at",
         ),
         filter_columns=("eligible",),
-        context_columns=("float_market_cap",),
+        context_columns=("float_market_cap", "label_available_at"),
     )
 
 
-def _frames() -> dict[str, pd.DataFrame]:
-    dates = pd.bdate_range("2018-12-03", "2019-01-15")
+def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
+    if dates is None:
+        dates = pd.bdate_range("2018-12-03", "2019-01-15")
+    calendar_dates = dates.append(
+        pd.bdate_range(dates[-1] + pd.offsets.BDay(1), periods=21)
+    )
     assets = ("a", "b")
     panel = pd.DataFrame(
         [
@@ -273,13 +281,14 @@ def _frames() -> dict[str, pd.DataFrame]:
                     if factor != "x"
                 },
                 "label": float(asset == "b") * 0.01,
+                "label_available_at": calendar_dates[date_index + 1],
                 "forward_return_20d": float(asset == "b") * 0.02,
-                "forward_return_20d_available_at": timestamp,
+                "forward_return_20d_available_at": calendar_dates[date_index + 21],
                 "eligible": True,
                 "float_market_cap": 1_000.0 if asset == "a" else 2_000.0,
             }
             for asset in assets
-            for timestamp in dates
+            for date_index, timestamp in enumerate(dates)
         ]
     )
     panel["period_return"] = 0.001
@@ -288,8 +297,8 @@ def _frames() -> dict[str, pd.DataFrame]:
     panel["is_nonfinancial_industry"] = True
     calendar = pd.DataFrame(
         {
-            "timestamp": dates,
-            "calendar_date": dates,
+            "timestamp": calendar_dates,
+            "calendar_date": calendar_dates,
             "source_market_type": 1,
             "is_trading_day": True,
         }
@@ -597,6 +606,8 @@ def _prepare_model_artifacts(
             data_identity=plans[target_id]["upstream_identities"][protocol.scenario_id],
             protocol=protocol.manifest(),
             rankic=0.3 if model_id == selected_model_id else 0.2,
+            model_spec=profile.models.get(model_id),
+            root_seed=42,
         )
         references.append(reference)
         selection["families"].append(
@@ -615,6 +626,7 @@ def _prepare_model_artifacts(
                 "timestamp": timestamp,
                 "x": float(asset),
                 "label": float(asset) / 10,
+                "label_available_at": timestamp + pd.offsets.BDay(1),
                 "eligible": True,
             }
             for timestamp in pd.bdate_range("2018-11-01", periods=30)
@@ -636,18 +648,23 @@ def _prepare_model_artifacts(
                 root_seed=42,
                 config_index=0,
             )
-            try:
-                yield replace(
+            owned = OwnedValue(
+                replace(
                     quarterly,
                     model_id=model_id,
                     family_id=model_id,
                     model_result=fitted,
                     trial_ledgers=(reference,),
-                )
+                ),
+                lease,
+            )
+            fitted = None
+            try:
+                yield owned
             finally:
-                fitted = None
-                if lease is not None:
-                    lease.close()
+                if owned.lease.active:
+                    owned.release(owner="test.model")
+                owned = None
 
     for algorithm in a_share.MODEL_FAMILY_ORDER:
         preflight_model_dependency(algorithm)
@@ -661,11 +678,527 @@ def _prepare_model_artifacts(
         )
 
 
+def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_path):
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.targets import (
+        ResearchRunRecord,
+        ResearchRunTargetResult,
+        TargetPlan,
+        unmeasured_operation_evidence,
+    )
+
+    layout = StorageLayout(tmp_path)
+    profile = _profile(_frames())
+    protocol = replace(
+        profile.protocol("pv_all"),
+        access_window="holdout",
+        frozen_development={
+            "run_id": "run_development",
+            "alpha_sources": [
+                {
+                    "reference": {
+                        "target_id": "alpha_ledger",
+                        "instance_identity": "a" * 64,
+                    },
+                    "observed_at": "2023-12-29",
+                }
+            ],
+        },
+    )
+    window = {"start": "2024-01-01", "end": "2024-03-31", "access": "holdout"}
+    facts = (
+        ("pv_all", ProducerKind.DATASET, "b" * 64),
+        (protocol.model_selection_target_id, ProducerKind.MODEL, "c" * 64),
+        (protocol.persisted_prediction_target_id, ProducerKind.PREDICTION, "d" * 64),
+    )
+    results = tuple(
+        ResearchRunTargetResult(
+            target_id=target,
+            producer_kind=kind,
+            status="BUILT",
+            instance_identity=identity,
+            schema_identity="e" * 64,
+            artifact_root=f"data/artifacts/a_share/{target}",
+        )
+        for target, kind, identity in facts
+    )
+    record = ResearchRunRecord(
+        run_id="run_first",
+        profile_id=profile.profile_id,
+        scenario_id="pv_all",
+        protocol=protocol.manifest(),
+        protocol_identity=canonical_json_hash(protocol.manifest()),
+        research_window=window,
+        software_identity="f" * 64,
+        terminal_targets=(protocol.persisted_prediction_target_id,),
+        target_results=results,
+        status="COMPLETE",
+        operation_evidence=unmeasured_operation_evidence("fixture"),
+        holdout_evidence={"qualification": "HOLDOUT_FIRST_EVIDENCE", "prior_runs": []},
+    )
+    research.write_research_run_record(layout.research_run_path(record.run_id), record)
+    references = {
+        target: TargetPlan(
+            target_id=target,
+            upstream_target_ids=(),
+            producer_id=target,
+            decision="REUSE",
+            requested_identity=identity,
+            matching_instance_identity=identity,
+            producer_kind=kind,
+        )
+        for target, kind, identity in facts
+    }
+    arguments = dict(
+        layout=layout,
+        profile=profile,
+        protocol=protocol,
+        research_window=window,
+        software_identity="f" * 64,
+        target_references=references,
+    )
+    assert research._holdout_evidence(**arguments)["qualification"] == "REUSE"
+    other_window = {"start": "2025-01-01", "end": "2025-03-31", "access": "holdout"}
+    assert (
+        research._holdout_evidence(**{**arguments, "research_window": other_window})[
+            "qualification"
+        ]
+        == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
+    )
+    new_protocol = replace(
+        protocol,
+        frozen_development={
+            **protocol.frozen_development,
+            "run_id": "run_other_development",
+        },
+    )
+    changed_output = {
+        **references,
+        protocol.persisted_prediction_target_id: replace(
+            references[protocol.persisted_prediction_target_id],
+            requested_identity="1" * 64,
+            matching_instance_identity="1" * 64,
+        ),
+    }
+    assert (
+        research._holdout_evidence(
+            **{
+                **arguments,
+                "protocol": new_protocol,
+                "target_references": changed_output,
+            }
+        )["qualification"]
+        == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
+    )
+    assert (
+        research._holdout_evidence(
+            **{**arguments, "protocol": new_protocol, "software_identity": "2" * 64}
+        )["qualification"]
+        == "POST_HOLDOUT_CORRECTED"
+    )
+
+
+def test_holdout_freezes_models_and_alpha_across_observation_quarters(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.research.models import fitting, production
+    from quant_research_platform.research.portfolios import production as portfolios
+    from quant_research_platform.runtime import resources
+
+    captured = []
+    original_capture = resources._capture_runtime_resource_policy
+
+    def capture(**kwargs):
+        policy = original_capture(**kwargs)
+        captured.append(policy)
+        return policy
+
+    def assert_one_capture(previous):
+        assert len(captured) == previous + 1
+        assert captured[-1].state == "CLOSED"
+        assert captured[-1].used_memory_bytes == 0
+        assert resources.current_runtime_resource_policy() is None
+
+    monkeypatch.setattr(resources, "_capture_runtime_resource_policy", capture)
+
+    dates = (
+        pd.bdate_range("2014-01-01", "2025-12-31", freq="BME")
+        .union(pd.bdate_range("2023-12-01", "2024-01-15"))
+        .union(pd.bdate_range("2025-12-01", "2025-12-31"))
+    )
+    frames = _frames(dates)
+    profile = _profile(frames)
+    layout = StorageLayout(tmp_path)
+    for spec in profile.interim.list():
+        marker = (
+            tmp_path / "data/raw" / str(spec.source_id) / f"{spec.data_id}.synthetic"
+        )
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_bytes(spec.data_id.encode())
+    previous = len(captured)
+    development = research.research_run(
+        profile=profile,
+        layout=layout,
+        scenario_id="pv_all",
+        start_date="2023-12-01",
+        end_date="2023-12-31",
+    )
+    assert development["status"] == "COMPLETE", development
+    assert_one_capture(previous)
+    development_record = read_research_run_record(
+        layout.research_run_path(development["run_id"])
+    )
+    assert development_record.trial_ledgers
+    from quant_research_platform.research.datasets.io import (
+        iter_research_dataset_chunks,
+    )
+
+    dataset_reference = next(
+        item for item in development_record.target_results if item.target_id == "pv_all"
+    )
+    dataset_layout = layout.with_target_roots(
+        {
+            "pv_all": layout.instance_root(
+                layout.research_dataset_root("a_share", "pv_all"),
+                dataset_reference.instance_identity,
+            )
+        }
+    )
+    with runtime_resource_policy_scope() as policy:
+        for chunk in iter_research_dataset_chunks(
+            dataset_layout,
+            market_id="a_share",
+            dataset_id="pv_all",
+            columns=("timestamp",),
+        ):
+            assert chunk.timestamp.max() <= pd.Timestamp("2023-12-31")
+        with pytest.raises(
+            PermissionError, match="research_dataset_access_window_forbidden"
+        ):
+            iter_research_dataset_chunks(
+                dataset_layout,
+                market_id="a_share",
+                dataset_id="pv_all",
+                time_window=TimeWindow("2024-01-01", "2024-01-02"),
+            )
+        assert policy.used_memory_bytes == 0
+    source_model = next(
+        item
+        for item in development_record.target_results
+        if item.producer_kind is ProducerKind.MODEL
+    )
+    model_root = layout.instance_root(
+        layout.semantic_artifact_root("a_share", source_model.target_id),
+        source_model.instance_identity,
+    )
+    model_hash = content_hash_for_files(
+        (
+            (item.relative_to(model_root).as_posix(), item)
+            for item in model_root.rglob("*")
+            if item.is_file()
+        ),
+        error="model_hash_invalid",
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("holdout attempted supervised learning")
+
+    monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", forbidden)
+    monkeypatch.setattr(production, "_select_model_family_winners", forbidden)
+    monkeypatch.setattr(portfolios, "calibrate_expected_alpha", forbidden)
+    request = dict(
+        profile=profile,
+        layout=layout,
+        scenario_id="pv_all",
+        start_date="2024-01-01",
+        end_date="2025-12-31",
+        holdout=True,
+        development_run_id=development["run_id"],
+    )
+    with pytest.raises(
+        PermissionError, match="holdout_frozen_development_identity_unavailable"
+    ):
+        research.research_run(**{**request, "development_run_id": None}, plan=True)
+    previous = len(captured)
+    with pytest.raises(ValueError, match="dataset_metadata_file_invalid"):
+        research.research_run(
+            **{**request, "development_run_id": "run_missing"}, plan=True
+        )
+    assert_one_capture(previous)
+    with pytest.raises(ValueError, match="holdout_development_run_invalid"):
+        research.research_run(**{**request, "scenario_id": "fusion_nf_core"}, plan=True)
+    incomplete = replace(
+        development_record,
+        run_id="run_incomplete",
+        trial_ledgers=(),
+        terminal_targets=development_record.terminal_targets[:1],
+    )
+    research.write_research_run_record(
+        layout.research_run_path(incomplete.run_id), incomplete
+    )
+    with pytest.raises(ValueError, match="holdout_development_run_invalid"):
+        research.research_run(
+            **{**request, "development_run_id": incomplete.run_id}, plan=True
+        )
+    wrong_reference = replace(
+        development_record,
+        run_id="run_wrong_reference",
+        trial_ledgers=(),
+        target_results=tuple(
+            replace(item, schema_identity="f" * 64)
+            if item.target_id == source_model.target_id
+            else item
+            for item in development_record.target_results
+        ),
+    )
+    research.write_research_run_record(
+        layout.research_run_path(wrong_reference.run_id), wrong_reference
+    )
+    with pytest.raises(ValueError, match="research_run_target_reference_invalid"):
+        research.research_run(
+            **{**request, "development_run_id": wrong_reference.run_id}, plan=True
+        )
+    previous = len(captured)
+    planned = research.research_run(**request, plan=True)
+    assert_one_capture(previous)
+    model_plan = next(
+        item
+        for item in planned["targets"]
+        if item["target_id"] == source_model.target_id
+    )
+    assert model_plan["decision"] == "REUSE"
+    assert model_plan["upstream_target_ids"] == []
+    assert model_plan["requested_identity"] == source_model.instance_identity
+    previous = len(captured)
+    holdout = research.research_run(**request)
+    assert holdout["status"] == "COMPLETE", holdout
+    assert_one_capture(previous)
+    record = read_research_run_record(layout.research_run_path(holdout["run_id"]))
+    assert record.trial_ledgers == ()
+    assert record.holdout_evidence["qualification"] == "HOLDOUT_FIRST_EVIDENCE"
+    assert len(record.protocol["frozen_development"]["alpha_sources"]) == 2
+    results = {item.target_id: item for item in record.target_results}
+    assert (
+        results[source_model.target_id].instance_identity
+        == source_model.instance_identity
+    )
+    prediction_id = profile.protocol("pv_all").persisted_prediction_target_id
+    prediction_root = layout.instance_root(
+        layout.semantic_artifact_root("a_share", prediction_id),
+        results[prediction_id].instance_identity,
+    )
+    manifest, _ = validate_output_bundle(
+        prediction_root / "outputs" / prediction_id,
+        expected_output_id=prediction_id,
+        expected_run_id=f"run_{prediction_id}",
+    )
+    models = manifest["metadata"]["model_metadata"]["quarterly_models"]
+    assert {item["source_quarter"] for item in models} == {"2023Q4"}
+    assert {item["quarter_id"] for item in models} == {
+        str(period) for period in pd.period_range("2024Q1", "2025Q4", freq="Q")
+    }
+    assert len(models) == 8 * len(a_share.MODEL_FAMILY_ORDER)
+    from quant_research_platform.storage.semantic_artifacts import (
+        compare_semantic_artifacts,
+    )
+
+    frozen = research._frozen_holdout_protocol(
+        profile,
+        layout,
+        profile.protocol("pv_all"),
+        development["run_id"],
+        "2024-01-01",
+        "2025-12-31",
+    )
+    target_layout = layout.with_target_roots(
+        {
+            item.target_id: layout.instance_root(
+                layout.project_root / item.artifact_root, item.instance_identity
+            )
+            for item in record.target_results
+        }
+    )
+    rebuild_layout = StorageLayout(tmp_path / "prediction_statistics_rebuild")
+    with runtime_resource_policy_scope() as policy:
+        for target_id in (prediction_id, "pv_all_statistics"):
+            spec = next(
+                item
+                for item in frozen.target_specs("research run")
+                if item.target_id == target_id
+            )
+            target_plan = next(
+                item for item in planned["targets"] if item["target_id"] == target_id
+            )
+            rebuilt = research._build_target(
+                profile=profile,
+                protocol=frozen,
+                layout=rebuild_layout,
+                spec=spec,
+                planned=target_plan,
+                action="research run",
+                research_window=record.research_window,
+                software_identity=research.production_software_identity(),
+                target_layout=target_layout,
+                policy=policy,
+                raw_root=tmp_path / "data/raw",
+            )
+            assert rebuilt.status.value == "BUILT", rebuilt
+            rebuilt_root = research._target_instance_root(
+                profile, rebuild_layout, target_id, rebuilt.instance_identity
+            )
+            assert (
+                compare_semantic_artifacts(
+                    target_layout.target_root(target_id, Path("missing")),
+                    rebuilt_root,
+                    trial_layout=layout,
+                ).status
+                == "MATCH"
+            )
+        assert policy.used_memory_bytes == 0
+    assert not rebuild_layout.semantic_artifact_root(
+        "a_share", source_model.target_id
+    ).exists()
+    sources = []
+    for candidate in profile.protocol("pv_all").portfolio_candidates():
+        target_id = f"pv_all_{candidate.candidate_id}_ledger"
+        artifact = research.read_portfolio_ledger_artifact(
+            layout.instance_root(
+                layout.semantic_artifact_root("a_share", target_id),
+                results[target_id].instance_identity,
+            ),
+            expected_identity=results[target_id].instance_identity,
+        )
+        if candidate.construction == "benchmark_enhanced":
+            values = {
+                row.number
+                for batch in artifact.iter_chunks()
+                for row in batch.diagnostics
+                if row.name == "alpha_slope"
+            }
+            assert len(values) == 1
+            source = next(
+                item
+                for item in development_record.target_results
+                if item.target_id == target_id
+            )
+            original = research.read_portfolio_ledger_artifact(
+                layout.instance_root(
+                    layout.semantic_artifact_root("a_share", target_id),
+                    source.instance_identity,
+                ),
+                expected_identity=source.instance_identity,
+            )
+            calibration, _ = portfolios.frozen_alpha_calibration(
+                original, cutoff=pd.Timestamp("2023-12-31")
+            )
+            assert (
+                calibration.valid_rebalance_dates >= 6 and calibration.coverage >= 0.8
+            )
+            assert values == {calibration.slope}
+            sources.append(values)
+    assert sources[0] == sources[1]
+    report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
+    assert (
+        report["report"]["sections"]["development vs holdout"]["evidence"][
+            "qualification"
+        ]
+        == "HOLDOUT_FIRST_EVIDENCE"
+    )
+    previous = len(captured)
+    reused = research.research_run(**request)
+    assert reused["status"] == "COMPLETE", reused
+    assert_one_capture(previous)
+    reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
+    assert reused_record.holdout_evidence["qualification"] == "REUSE"
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.storage.software_identity import (
+        ProductionSoftwareIdentity,
+    )
+
+    previous = len(captured)
+    new_development = research.research_run(
+        profile=profile,
+        layout=layout,
+        scenario_id="pv_all",
+        start_date="2023-12-01",
+        end_date="2023-12-31",
+    )
+    assert new_development["status"] == "COMPLETE", new_development
+    assert_one_capture(previous)
+    assert new_development["run_id"] != development["run_id"]
+    future = frames["pv_all"].timestamp.ge("2024-01-01")
+    frames["pv_all"].loc[future, ["label", "forward_return_20d"]] *= -100.0
+    software_payload = research.production_software_identity().payload
+    software_payload["package_content_hash"] = "f" * 64
+    corrected_software = ProductionSoftwareIdentity(
+        software_payload,
+        canonical_json_hash(software_payload),
+    )
+    monkeypatch.setattr(
+        research, "production_software_identity", lambda: corrected_software
+    )
+    previous = len(captured)
+    corrected = research.research_run(
+        **{**request, "development_run_id": new_development["run_id"]}
+    )
+    assert corrected["status"] == "COMPLETE", corrected
+    assert_one_capture(previous)
+    corrected_record = read_research_run_record(
+        layout.research_run_path(corrected["run_id"])
+    )
+    assert (
+        corrected_record.holdout_evidence["qualification"] == "POST_HOLDOUT_CORRECTED"
+    )
+    assert record.run_id in {
+        item["run_id"] for item in corrected_record.holdout_evidence["prior_runs"]
+    }
+    corrected_prediction = next(
+        item
+        for item in corrected_record.target_results
+        if item.target_id == prediction_id
+    )
+    corrected_root = layout.instance_root(
+        layout.semantic_artifact_root("a_share", prediction_id),
+        corrected_prediction.instance_identity,
+    )
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(
+            prediction_root / "outputs" / prediction_id / "prediction.parquet"
+        ),
+        pd.read_parquet(
+            corrected_root / "outputs" / prediction_id / "prediction.parquet"
+        ),
+        check_exact=True,
+    )
+    corrected_report = research.report_build(
+        profile=profile, layout=layout, run_id=corrected_record.run_id
+    )
+    assert (
+        corrected_report["report"]["sections"]["development vs holdout"]["evidence"][
+            "qualification"
+        ]
+        == "POST_HOLDOUT_CORRECTED"
+    )
+    assert (
+        content_hash_for_files(
+            (
+                (item.relative_to(model_root).as_posix(), item)
+                for item in model_root.rglob("*")
+                if item.is_file()
+            ),
+            error="model_hash_invalid",
+        )
+        == model_hash
+    )
+
+
 def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    profile = _profile(_frames())
+    frames = _frames()
+    profile = _profile(frames)
     layout = StorageLayout(project_root=tmp_path)
     for spec in profile.interim.list():
         marker = (
@@ -771,6 +1304,12 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     assert set(robustness["reason"]) == {
         "bootstrap_block_exceeds_common_observations",
     }
+    observations = frames["pv_all"]
+    mature_dates = observations.loc[
+        observations.timestamp.between(request["start"], request["end"])
+        & observations.forward_return_20d_available_at.le(pd.Timestamp(request["end"])),
+        "timestamp",
+    ].nunique()
     assert (
         robustness.loc[
             robustness.test_id.isin(
@@ -778,7 +1317,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             ),
             "observation_count",
         ]
-        .eq(10)
+        .eq(mature_dates)
         .all()
     )
     assert (

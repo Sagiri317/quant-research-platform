@@ -4,6 +4,7 @@ import math
 import warnings
 import weakref
 from datetime import timedelta, timezone
+from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -86,6 +87,43 @@ def test_strict_integer_series_accepts_integral_numeric_values() -> None:
         pd.Series([1, 1.0, "2"]),
         error="invalid_contract_integer",
     ).tolist() == [1, 1, 2]
+
+
+@pytest.mark.parametrize("dtype", ["int64", "Int64", "uint64", "object"])
+def test_strict_integer_series_preserves_large_exact_values(dtype: str) -> None:
+    values = pd.Series(
+        [2**53 + 1, 2**63 - 1], dtype=dtype, index=["a", "b"], name="market_type"
+    )
+    result = validation.strict_integer_series(values, error="invalid_integer")
+    pd.testing.assert_series_equal(result, values.astype("int64"))
+
+
+def test_strict_integer_series_preserves_nullable_and_mixed_exact_values() -> None:
+    values = pd.Series([2**53 + 1, None, str(2**63 - 1), "2.0", -(2**63)], dtype=object)
+    result = validation.strict_integer_series(
+        values, error="invalid_integer", allow_null=True
+    )
+    pd.testing.assert_series_equal(
+        result, pd.Series([2**53 + 1, pd.NA, 2**63 - 1, 2, -(2**63)], dtype="Int64")
+    )
+
+
+@pytest.mark.parametrize("value", [2**63, -(2**63) - 1, str(2**63), float(2**63)])
+def test_strict_integer_series_rejects_int64_overflow(value: object) -> None:
+    with pytest.raises(ValueError, match="invalid_integer"):
+        validation.strict_integer_series(pd.Series([value]), error="invalid_integer")
+
+
+def test_strict_integer_series_rejects_out_of_range_before_integer_allocation() -> None:
+    class OutOfRange(Decimal):
+        def __int__(self):
+            pytest.fail("out-of-range integer conversion must not allocate")
+
+    with pytest.raises(ValueError, match="invalid_integer"):
+        validation.strict_integer_series(
+            pd.Series([OutOfRange("1e1000000000")], dtype=object),
+            error="invalid_integer",
+        )
 
 
 @pytest.mark.parametrize("value", [float("nan"), math.inf, -math.inf, True, []])

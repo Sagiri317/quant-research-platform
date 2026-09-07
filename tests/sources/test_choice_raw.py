@@ -21,6 +21,7 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
 from tests.helpers.choice_raw import SDK
 from tests.helpers.choice_raw import response as _response
+from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _request(endpoint: str = "ctr") -> ChoiceRequest:
@@ -212,6 +213,42 @@ def test_admission_precedes_query_and_leases_are_released(tmp_path: Path) -> Non
                 session.fetch(StorageLayout(tmp_path), _request())
             assert sdk.calls == 0 and policy.used_memory_bytes == 0
     assert sdk.stops == 1
+
+
+@pytest.mark.parametrize("mode", ["fetch", "read"])
+@pytest.mark.parametrize("boundary", ["soft", "captured", "explicit"])
+def test_choice_request_uses_capacity_instead_of_soft_plan(tmp_path, mode, boundary):
+    request = _request()
+    response = _response(Indicators=["QKMZ"], Data={"0": [12.0]})
+    if mode == "read":
+        with choice_session(SDK(response)) as session:
+            root = session.fetch(StorageLayout(tmp_path / "seed"), request)
+    policy = capture_test_policy(
+        available_memory_bytes=(100 if boundary == "captured" else 180) * 1024**2,
+        explicit_cap_bytes=100 * 1024**2 if boundary == "explicit" else None,
+    )
+    sdk = SDK(response)
+
+    def execute():
+        if mode == "fetch":
+            with choice_session(sdk, resource_policy=policy) as session:
+                session.fetch(StorageLayout(tmp_path / "output"), request)
+        else:
+            with read_choice_response(
+                root, request, resource_policy=policy
+            ) as restored:
+                assert restored["Data"]["0"] == [12.0]
+
+    with runtime_resource_policy_scope(policy):
+        if boundary == "soft":
+            assert 128 * 1024**2 > policy.memory_budget_bytes
+            execute()
+            assert sdk.calls == (1 if mode == "fetch" else 0)
+        else:
+            with pytest.raises(MemoryError, match="choice_request_exceeds_memory_plan"):
+                execute()
+            assert sdk.calls == 0
+        assert policy.used_memory_bytes == 0
 
 
 def test_invalid_shape_or_oversize_preserves_old_good(tmp_path: Path) -> None:

@@ -84,10 +84,9 @@ class PredictionResult:
 def build_prediction_result_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: PredictionSpec,
-    coefficients: np.ndarray,
     input_columns: tuple[str, ...],
     *,
-    prediction_model: object | None = None,
+    prediction_model: object,
     model_metadata: dict[str, object],
     model_lease: MemoryLease | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
@@ -146,7 +145,6 @@ def build_prediction_result_from_frames(
         spec=spec,
         input_columns=input_columns,
         predictor=prediction_callable(
-            coefficients,
             input_columns,
             prediction_model,
         ),

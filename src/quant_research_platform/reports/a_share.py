@@ -110,6 +110,8 @@ def build_a_share_report(
             "requested_access": record.research_window["access"],
             "development_window": record.protocol.get("development_window"),
             "holdout_window": record.protocol.get("holdout_window"),
+            "frozen_development": record.protocol.get("frozen_development"),
+            "evidence": dict(record.holdout_evidence),
         },
         "robustness": statistics.get("robustness", [dict(statistics)])
         + portfolio_statistics.get("robustness", [dict(portfolio_statistics)]),

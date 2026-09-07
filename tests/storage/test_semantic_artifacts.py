@@ -185,3 +185,196 @@ def test_semantic_compare_read_failure_keeps_primary_when_close_fails(
         storage.compare_semantic_artifacts(left, right)
     assert caught.value is primary
     assert any("close also failed" in note for note in primary.__notes__)
+
+
+def test_member_limit_precedes_wide_directory_materialization_and_hashing(
+    tmp_path, monkeypatch
+):
+    from types import SimpleNamespace
+
+    import quant_research_platform.storage.semantic_artifacts as storage
+
+    root = _write_artifact(tmp_path)
+    counts = {"next": 0, "hash": 0, "close": 0}
+
+    class Entries:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if counts["next"] == 10_000:
+                raise StopIteration
+            counts["next"] += 1
+            return SimpleNamespace(
+                name=f"member-{counts['next']}.bin",
+                is_symlink=lambda: False,
+                is_dir=lambda **_: False,
+                is_file=lambda **_: True,
+            )
+
+        def close(self):
+            counts["close"] += 1
+
+    def record(relative, _path):
+        counts["hash"] += 1
+        return {"path": relative, "size": 0, "sha256": "a" * 64}
+
+    monkeypatch.setattr(storage.os, "scandir", lambda _path: Entries())
+    monkeypatch.setattr(storage, "_member_record", record)
+    with pytest.raises(ValueError, match="semantic_artifact_member_limit_exceeded"):
+        storage.read_semantic_artifact_record(root)
+    assert counts == {"next": 257, "hash": 256, "close": 1}
+
+
+def test_nested_inventory_descends_before_reading_next_sibling(tmp_path, monkeypatch):
+    import quant_research_platform.storage.semantic_artifacts as storage
+
+    def writer(staging):
+        for index in range(50):
+            (staging / f"empty-{index}").mkdir()
+        nested = staging / "z" / "inner"
+        nested.mkdir(parents=True)
+        (nested / "model.bin").write_bytes(b"nested")
+        (staging / "a.bin").write_bytes(b"root")
+
+    actual_scandir = storage.os.scandir
+    opened = []
+
+    class Entries:
+        def __init__(self, path):
+            self.entries = actual_scandir(path)
+            opened.append(self)
+
+        def __next__(self):
+            assert opened[-1] is self
+            return next(self.entries)
+
+        def close(self):
+            assert opened.pop() is self
+            self.entries.close()
+
+    # Restrict the wrapper to inventory: atomic publication owns its own scans.
+    actual_inventory = storage._member_inventory
+
+    def inventory(root):
+        with monkeypatch.context() as scoped:
+            scoped.setattr(storage.os, "scandir", Entries)
+            return actual_inventory(root)
+
+    monkeypatch.setattr(storage, "_member_inventory", inventory)
+    root = storage.write_semantic_artifact(tmp_path / "model", _envelope(), writer)
+    envelope, members = storage.read_semantic_artifact_record(root)
+    assert envelope == _envelope().payload()
+    assert [member["path"] for member in members] == ["a.bin", "z/inner/model.bin"]
+    assert [member["size"] for member in members] == [4, 6]
+    assert not opened
+
+
+def test_inventory_closes_all_ancestors_without_replacing_primary(
+    tmp_path, monkeypatch
+):
+    import quant_research_platform.storage.semantic_artifacts as storage
+
+    root = _write_artifact(tmp_path)
+    (root / "nested").mkdir()
+    (root / "nested" / "bad.bin").write_bytes(b"bad")
+    primary = KeyboardInterrupt("inventory primary")
+    actual_scandir = storage.os.scandir
+    closed = []
+
+    class Entries:
+        def __init__(self, path):
+            self.path = Path(path)
+            self.entries = actual_scandir(path)
+
+        def __next__(self):
+            return next(self.entries)
+
+        def close(self):
+            self.entries.close()
+            closed.append(self.path)
+            raise RuntimeError("close failed")
+
+    actual_record = storage._member_record
+
+    def record(relative, path):
+        if relative == "nested/bad.bin":
+            raise primary
+        return actual_record(relative, path)
+
+    monkeypatch.setattr(storage.os, "scandir", Entries)
+    monkeypatch.setattr(storage, "_member_record", record)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        storage.read_semantic_artifact_record(root)
+    assert caught.value is primary
+    assert closed == [
+        Path(storage.native_filesystem_path(root / "nested")),
+        Path(storage.native_filesystem_path(root)),
+    ]
+    assert len(primary.__notes__) == 2
+
+
+@pytest.mark.parametrize("alias_kind", ("symlink", "junction"))
+def test_inventory_rejects_child_alias_before_scanning_external_content(
+    tmp_path, monkeypatch, alias_kind
+):
+    import os
+    import subprocess
+
+    import quant_research_platform.storage.semantic_artifacts as storage
+
+    root = _write_artifact(tmp_path)
+    external = tmp_path / "external"
+    external.mkdir()
+    payload = external / "outside.bin"
+    payload.write_bytes(b"external synthetic content")
+    alias = root / "alias"
+    if alias_kind == "symlink":
+        try:
+            alias.symlink_to(external, target_is_directory=True)
+        except OSError:
+            pytest.skip("symlink_not_available")
+    else:
+        if os.name != "nt" or not hasattr(Path, "is_junction"):
+            pytest.skip("junction_capability_required")
+        created = subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(alias), str(external)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if created.returncode != 0:
+            pytest.skip("junction_not_available")
+    actual_scandir = storage.os.scandir
+
+    def scan(path):
+        assert Path(path) == Path(storage.native_filesystem_path(root))
+        return actual_scandir(path)
+
+    monkeypatch.setattr(storage.os, "scandir", scan)
+    with pytest.raises(ValueError, match="semantic_artifact_member_invalid"):
+        storage.read_semantic_artifact_record(root)
+    assert payload.read_bytes() == b"external synthetic content"
+
+
+def test_inventory_limit_failure_preserves_published_artifact_and_parent(tmp_path):
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    root = _write_artifact(tmp_path)
+    old_good = {path.name: path.read_bytes() for path in root.iterdir()}
+    before = set(root.parent.iterdir())
+    candidate_fields = _envelope().payload()
+    del candidate_fields["instance_identity"], candidate_fields["status"]
+    candidate_fields["semantic_metadata"] = {"candidate": True}
+    candidate = build_business_manifest_envelope(**candidate_fields)
+
+    def writer(staging):
+        for index in range(257):
+            (staging / f"member-{index}.bin").write_bytes(b"small")
+
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="semantic_artifact_member_limit_exceeded"):
+            write_semantic_artifact(tmp_path / "model", candidate, writer)
+        assert policy.used_memory_bytes == 0
+    assert set(root.parent.iterdir()) == before
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == old_good

@@ -309,8 +309,12 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
             for data_id, columns in FINANCIAL_VALUE_COLUMNS.items()
             if data_id in source
         )
+        event_bytes = 1024**2 + event_rows * 1024
+        policy.require_working_set(
+            event_bytes, error="a_share_financial_events_exceeds_task_memory_budget"
+        )
         event_lease = retained.enter_context(
-            policy.lease("a_share.financial.events", 1024**2 + event_rows * 1024)
+            policy.lease("a_share.financial.events", event_bytes)
         )
         events = _financial_pit_events(source)
         event_lease.shrink_to(pandas_frame_payload_bytes(events))

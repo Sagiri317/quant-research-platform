@@ -33,52 +33,6 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
 )
 
-EVALUATION_METRICS_COLUMNS = (
-    "timestamp",
-    "signal",
-    "label",
-    "ic",
-    "rankic",
-    "n_obs",
-    "ic_reason",
-    "rankic_reason",
-)
-EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
-    "timestamp",
-    "signal",
-    "label",
-    "group",
-    "mean_label_value",
-    "n_obs",
-)
-EVALUATION_IC_SUMMARY_COLUMNS = (
-    "signal",
-    "label",
-    "mean_ic",
-    "std_ic",
-    "icir",
-    "positive_ic_rate",
-    "valid_ic_count",
-    "mean_rankic",
-    "std_rankic",
-    "rankicir",
-    "positive_rankic_rate",
-    "valid_rankic_count",
-    "ic_reason",
-    "icir_reason",
-    "rankic_reason",
-    "rankicir_reason",
-)
-EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
-    "signal",
-    "label",
-    "top_group_mean_label_value",
-    "bottom_group_mean_label_value",
-    "top_bottom_label_value_spread_mean",
-    "top_bottom_label_value_spread_hit_rate",
-    "group_monotonicity_score",
-    "group_monotonicity_score_reason",
-)
 EVALUATION_ARTIFACTS = [
     "metrics.parquet",
     "grouped_label_values.parquet",
@@ -442,6 +396,11 @@ def validate_evaluation_artifact_structure(
         ("ic", "ic_reason"),
         ("rankic", "rankic_reason"),
     ):
+        if (
+            value_column == "rankic"
+            and spec.evaluation_axis == "single_asset_time_series"
+        ):
+            continue
         for n_obs, value, reason in zip(
             metrics["n_obs"],
             metrics[value_column],

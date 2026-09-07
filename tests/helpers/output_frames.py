@@ -6,14 +6,11 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.factors.price_volume.columns import (
-    price_volume_window_column,
-)
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 
-PRICE_VOLUME_SIGNAL_COLUMN = price_volume_window_column("mom", 20)
+PRICE_VOLUME_SIGNAL_COLUMN = "momentum_20d"
 FORWARD_RETURN_LABEL_COLUMN = forward_return_label_column(20)
 
 
@@ -244,7 +241,6 @@ def _price_volume_model_metadata() -> dict[str, object]:
             "package": "internal",
             "version": "test",
         },
-        "coefficient_count": 2,
         "feature_importance": {PRICE_VOLUME_SIGNAL_COLUMN: 1.0},
     }
 
@@ -302,7 +298,6 @@ def _artifacts_model_metadata() -> dict[str, object]:
             "package": "internal",
             "version": "test",
         },
-        "coefficient_count": 3,
         "feature_importance": {"factor": 0.1, "feature": 0.2},
     }
 

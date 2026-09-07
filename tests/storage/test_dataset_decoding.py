@@ -69,7 +69,7 @@ def test_converter_rejects_before_pandas_allocation_when_bound_exceeds_headroom(
     batch = pa.record_batch([pa.array([1])], names=["value"])
     converted = False
 
-    def reject_conversion(_slice: pa.RecordBatch) -> pd.DataFrame:
+    def reject_conversion(_slice: pa.RecordBatch, **_kwargs) -> pd.DataFrame:
         nonlocal converted
         converted = True
         raise AssertionError("Pandas conversion ran before conservative admission")
@@ -262,7 +262,7 @@ def test_dataset_file_batches_subtract_live_root_reservations_before_conversion(
         lambda *_args, **_kwargs: iter((batch,)),
     )
 
-    def reject_conversion(_batch: pa.RecordBatch) -> pd.DataFrame:
+    def reject_conversion(_batch: pa.RecordBatch, **_kwargs) -> pd.DataFrame:
         raise AssertionError("Pandas conversion ran before shared-root admission")
 
     monkeypatch.setattr(dataset_reading, "_arrow_slice_to_pandas", reject_conversion)
@@ -356,7 +356,7 @@ def test_dataset_file_batches_do_not_credit_implicit_live_reservations(
         lambda *_args, **_kwargs: iter((batch,)),
     )
 
-    def reject_conversion(_batch: pa.RecordBatch) -> pd.DataFrame:
+    def reject_conversion(_batch: pa.RecordBatch, **_kwargs) -> pd.DataFrame:
         raise AssertionError("conversion ran after uncomposed reservation was credited")
 
     monkeypatch.setattr(dataset_reading, "_arrow_slice_to_pandas", reject_conversion)
@@ -405,12 +405,12 @@ def test_dataset_file_batches_subtract_new_reservation_before_next_conversion(
     original_conversion = dataset_reading._arrow_slice_to_pandas
     conversion_count = 0
 
-    def reject_second_conversion(batch: pa.RecordBatch) -> pd.DataFrame:
+    def reject_second_conversion(batch: pa.RecordBatch, **kwargs) -> pd.DataFrame:
         nonlocal conversion_count
         conversion_count += 1
         if conversion_count == 2:
             raise AssertionError("second conversion ran before shared-root admission")
-        return original_conversion(batch)
+        return original_conversion(batch, **kwargs)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -507,10 +507,10 @@ def test_declared_variable_width_member_decodes_multirow_batches(
     conversions = 0
     original = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(batch: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(batch: pa.RecordBatch, **kwargs) -> pd.DataFrame:
         nonlocal conversions
         conversions += 1
-        return original(batch)
+        return original(batch, **kwargs)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -573,49 +573,142 @@ def test_dataset_file_batches_refresh_headroom_after_internal_release(
     )
 
 
-def test_metadata_free_oversized_row_group_rejects_before_first_arrow_pull(
+def test_metadata_free_batches_advance_without_delivering_oversized_payload(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "skewed-variable-width.parquet"
     values = ["x"] * 1023 + ["y" * 1024**2]
     pq.write_table(pa.table({"value": values}), path)
-    real_parquet_file = dataset_physical.pq.ParquetFile
-    pulled = False
-
-    class ObservedParquetFile:
-        def __init__(self, *args, **kwargs) -> None:  # noqa: ANN002, ANN003
-            self._inner = real_parquet_file(*args, **kwargs)
-
-        def __getattr__(self, name: str) -> object:
-            return getattr(self._inner, name)
-
-        def iter_batches(self, **kwargs):  # noqa: ANN003, ANN202
-            nonlocal pulled
-            for batch in self._inner.iter_batches(**kwargs):
-                pulled = True
-                raise AssertionError("Arrow decode ran before conservative admission")
-                yield batch
-
-        def close(self) -> None:
-            self._inner.close()
-
-    monkeypatch.setattr(dataset_physical.pq, "ParquetFile", ObservedParquetFile)
-
+    delivered = []
     with pytest.raises(
         storage_errors.DatasetReadCapacityExceeded,
         match="dataset_working_set_exceeds_task_memory_budget",
     ):
-        list(
+        with closing_iterator(
             dataset_physical.iter_dataset_part_batches(
                 path,
                 expected_identity=dataset_physical.dataset_file_identity(path),
                 target_chunk_bytes=8 * 1024,
                 operation_headroom_bytes=64 * 1024,
             )
-        )
+        ) as batches:
+            for batch in batches:
+                delivered.append((batch.num_rows, batch.get_total_buffer_size()))
 
-    assert not pulled
+    assert 0 < sum(rows for rows, _bytes in delivered) < len(values)
+    assert all(size <= 64 * 1024 for _rows, size in delivered)
+
+
+def test_dictionary_expansion_is_rejected_before_batch_handoff(tmp_path, monkeypatch):
+    path = tmp_path / "dictionary-expansion.parquet"
+    table = pa.table({"value": ["x" * (32 * 1024)] * 256}).replace_schema_metadata(
+        {
+            b"qrp.decoded-row-bounds": json.dumps(
+                {
+                    "schema_id": "qrp-dataset-part-decoded-row-bounds",
+                    "columns": [
+                        {"name": "value", "per_row_bytes": 1, "fixed_bytes": 0}
+                    ],
+                }
+            ).encode(),
+            b"qrp.parquet-page-rows": b"1",
+        }
+    )
+    pq.write_table(
+        table, path, compression="zstd", use_dictionary=True, write_statistics=False
+    )
+    del table
+    constructor = pq.ParquetFile
+    pulled = []
+
+    class ObservedParquet:
+        def __init__(self, *args, **kwargs):
+            self.inner = constructor(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def iter_batches(self, **kwargs):
+            for batch in self.inner.iter_batches(**kwargs):
+                pulled.append(batch.get_total_buffer_size())
+                yield batch
+
+    monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with closing_iterator(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=None,
+                target_chunk_bytes=128 * 1024,
+                operation_headroom_bytes=256 * 1024,
+            )
+        ) as batches:
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="dataset_working_set_exceeds_task_memory_budget",
+            ):
+                next(batches)
+        assert policy.used_memory_bytes == 0
+    assert pulled and pulled[0] > 256 * 1024
+
+
+@pytest.mark.parametrize("boundary", ["soft", "captured", "explicit", "parent"])
+def test_materialization_uses_capacity_and_keeps_explicit_parent_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    boundary: str,
+):
+    expected = pd.DataFrame({"value": np.arange(10000, dtype=np.int64)})
+    available = (
+        100 if boundary == "soft" else 64 if boundary == "captured" else 128
+    ) * 1024
+    policy = capture_test_policy(
+        available_memory_bytes=available,
+        explicit_cap_bytes=64 * 1024 if boundary == "explicit" else None,
+    )
+    context = SimpleNamespace(
+        resource_policy=policy,
+        logical_columns=tuple(expected.columns),
+        logical_dtypes=logical_dtype_payload_from_frame(expected),
+    )
+
+    def source(*args, **kwargs):
+        for start in range(0, len(expected), 512):
+            yield expected.iloc[start : start + 512]
+
+    allocations = []
+    allocate = dataset_reading._allocate_materialized_buffers
+
+    def observed_allocate(*args, **kwargs):
+        allocations.append(kwargs["row_count"])
+        return allocate(*args, **kwargs)
+
+    monkeypatch.setattr(dataset_reading, "iter_dataset_chunks", source)
+    monkeypatch.setattr(
+        dataset_reading, "_allocate_materialized_buffers", observed_allocate
+    )
+    with runtime_resource_policy_scope(policy):
+        if boundary == "soft":
+            assert pandas_frame_payload_bytes(expected) > policy.memory_budget_bytes
+            actual = dataset_reading.materialize_dataset_session(
+                context, target_chunk_bytes=8192
+            )
+            pd.testing.assert_frame_equal(actual, expected)
+            assert allocations == [len(expected)]
+        else:
+            with pytest.raises(
+                storage_errors.DatasetReadCapacityExceeded,
+                match="dataset_materialized_result_exceeds_target_bytes",
+            ):
+                dataset_reading.materialize_dataset_session(
+                    context,
+                    target_chunk_bytes=8192,
+                    materialized_budget_bytes=64 * 1024
+                    if boundary == "parent"
+                    else None,
+                )
+            assert not allocations
+        assert policy.used_memory_bytes == 0
 
 
 def test_categorical_converter_releases_temporary_codes_after_publication(
@@ -678,10 +771,10 @@ def test_arrow_batch_converter_preflights_without_duplicate_observer_effects(
     logical_rows: list[int] = []
     original = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch, **kwargs) -> pd.DataFrame:
         nonlocal conversions
         conversions += 1
-        return original(arrow_slice)
+        return original(arrow_slice, **kwargs)
 
     monkeypatch.setattr(dataset_reading, "_arrow_slice_to_pandas", record_conversion)
 
@@ -810,9 +903,9 @@ def test_wide_single_row_can_exceed_the_soft_chunk_target(
     calls = {"count": 0}
     convert = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch, **kwargs) -> pd.DataFrame:
         calls["count"] += 1
-        return convert(arrow_slice)
+        return convert(arrow_slice, **kwargs)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -847,9 +940,9 @@ def test_large_map_row_uses_only_approved_pandas_payload_diagnostic(
     calls = {"count": 0}
     convert = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch, **kwargs) -> pd.DataFrame:
         calls["count"] += 1
-        return convert(arrow_slice)
+        return convert(arrow_slice, **kwargs)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -880,9 +973,9 @@ def test_wide_numeric_row_uses_only_approved_pandas_payload_diagnostic(
     calls = {"count": 0}
     convert = dataset_reading._arrow_slice_to_pandas
 
-    def record_conversion(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
+    def record_conversion(arrow_slice: pa.RecordBatch, **kwargs) -> pd.DataFrame:
         calls["count"] += 1
-        return convert(arrow_slice)
+        return convert(arrow_slice, **kwargs)
 
     monkeypatch.setattr(
         dataset_reading,
@@ -1308,8 +1401,10 @@ def test_reads_reject_nonnull_category_outside_declared_domain(
             tuple(result)
 
 
+@pytest.mark.parametrize("ordered", [False, True])
 def test_fingerprint_preserves_content_identity_across_unused_categories(
     tmp_path: Path,
+    ordered: bool,
 ) -> None:
     left_root = make_dataset_artifact_root(tmp_path / "left", "category_identity")
     right_root = make_dataset_artifact_root(tmp_path / "right", "category_identity")
@@ -1319,10 +1414,12 @@ def test_fingerprint_preserves_content_identity_across_unused_categories(
     left["asset_id"] = pd.Categorical(
         left["asset_id"],
         categories=[value, "unused_left"],
+        ordered=ordered,
     )
     right["asset_id"] = pd.Categorical(
         right["asset_id"],
         categories=[value, "unused_right"],
+        ordered=ordered,
     )
     spec = make_processed_dataset_spec("category_identity")
     write_dataset(left_root, left, spec=spec)
@@ -1330,7 +1427,215 @@ def test_fingerprint_preserves_content_identity_across_unused_categories(
 
     comparison = compare_datasets(left_root, right_root)
 
-    assert comparison.matches
+    assert comparison.status == ("SCHEMA_MISMATCH" if ordered else "MATCH")
+
+
+@pytest.mark.parametrize(
+    ("column", "left_dtype", "right_dtype"),
+    [
+        ("value", "int64", "Int64"),
+        ("value", "float64", "Float64"),
+        ("value", "bool", "boolean"),
+        ("asset_id", "object", "string"),
+    ],
+)
+def test_comparison_projects_logical_dtypes_and_always_includes_primary_key(
+    tmp_path: Path,
+    column: str,
+    left_dtype: str,
+    right_dtype: str,
+) -> None:
+    roots = [
+        make_dataset_artifact_root(tmp_path / side, "dtypes")
+        for side in ("left", "right")
+    ]
+    spec = make_processed_dataset_spec("dtypes")
+    for root, dtype in zip(roots, (left_dtype, right_dtype), strict=True):
+        frame = make_default_dataset_frame(values=[1, 0, 1]).astype({column: dtype})
+        write_dataset(root, frame, spec=spec)
+        assert str(read_dataset(root)[column].dtype) == dtype
+    assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"
+    projected = compare_datasets(
+        *roots, columns=("value",) if column == "asset_id" else ("asset_id",)
+    )
+    assert projected.status == ("SCHEMA_MISMATCH" if column == "asset_id" else "MATCH")
+
+
+@pytest.mark.parametrize("mode", ("materialized", "chunked", "writer"))
+@pytest.mark.parametrize("timestamp", [False, True])
+def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, timestamp: bool
+) -> None:
+    from quant_research_platform.contracts.columns import ColumnRole
+    from quant_research_platform.storage.datasets import writing
+    from quant_research_platform.storage.datasets.schema import (
+        logical_dtype_metadata_bytes,
+    )
+
+    spec = make_processed_dataset_spec(
+        "logical_forgery",
+        value_role=ColumnRole.CONTEXT if timestamp else ColumnRole.FACTOR,
+    )
+    frame = make_default_dataset_frame().iloc[:1].copy().assign(value=1.5)
+    if timestamp:
+        frame["value"] = pd.Series(
+            [pd.Timestamp("2020-01-01") + pd.Timedelta(1, unit="ns")],
+            dtype="datetime64[ns]",
+        )
+    original_root = make_dataset_artifact_root(tmp_path / "original", spec.data_id)
+    root = make_dataset_artifact_root(tmp_path / "candidate", spec.data_id)
+    write_dataset(original_root, frame, spec=spec)
+    original_bytes = {
+        path.relative_to(original_root): path.read_bytes()
+        for path in original_root.rglob("*")
+        if path.is_file()
+    }
+
+    def forge(table):
+        metadata = dict(table.schema.metadata)
+        logical = json.loads(metadata[b"qrp.logical-dtypes"])
+        for descriptor in logical["columns"]:
+            if descriptor["name"] == "value":
+                descriptor.update(
+                    kind="datetime" if timestamp else "numpy_integer",
+                    dtype="datetime64[s]" if timestamp else "int64",
+                )
+        metadata[b"qrp.logical-dtypes"] = logical_dtype_metadata_bytes(logical)
+        return table.replace_schema_metadata(metadata), logical
+
+    if mode == "writer":
+        original_write = writing.write_parquet_file
+
+        def forged_write(table, path):
+            forged, _logical = forge(table)
+            return original_write(forged, path)
+
+        monkeypatch.setattr(writing, "write_parquet_file", forged_write)
+        with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
+            write_dataset(root, frame, spec=spec)
+        assert not root.exists()
+        assert not tuple(root.parent.iterdir())
+    else:
+        write_dataset(root, frame, spec=spec)
+        part = next((root / "data").rglob("*.parquet"))
+        with pq.ParquetFile(part) as parquet:
+            forged, logical = forge(parquet.read())
+        pq.write_table(forged, part, compression="zstd")
+        manifest_path = root / "_manifest" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["logical_dtypes"] = logical
+        manifest["logical_dtype_hash"] = canonical_json_hash(logical)
+        manifest["file_size_bytes"] = part.stat().st_size
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+        with runtime_resource_policy_scope(policy):
+            with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
+                result = dataset_reading.read_dataset(
+                    root, mode=DatasetReadMode(mode), resource_policy=policy
+                )
+                if mode == "chunked":
+                    tuple(result)
+            assert policy.used_memory_bytes == 0
+    assert {
+        path.relative_to(original_root): path.read_bytes()
+        for path in original_root.rglob("*")
+        if path.is_file()
+    } == original_bytes
+
+
+@pytest.mark.parametrize(
+    "mode", (DatasetReadMode.MATERIALIZED, DatasetReadMode.CHUNKED)
+)
+def test_timestamp_seconds_survive_native_parquet_unit_widening(
+    tmp_path: Path, mode
+) -> None:
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    root = make_dataset_artifact_root(tmp_path, "seconds")
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["timestamp"] = frame.timestamp.astype("datetime64[ns]")
+    frame["value"] = pd.Series(
+        [pd.Timestamp("2020-01-01"), pd.NaT], dtype="datetime64[s]"
+    )
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("seconds", value_role=ColumnRole.CONTEXT),
+    )
+    result = read_dataset(root, mode=mode)
+    if mode is DatasetReadMode.CHUNKED:
+        result = pd.concat(tuple(result), ignore_index=True)
+    keys = ["market_id", "asset_id", "timestamp"]
+    pd.testing.assert_frame_equal(
+        result.sort_values(keys).reset_index(drop=True),
+        frame.sort_values(keys).reset_index(drop=True),
+        check_exact=True,
+    )
+
+
+@pytest.mark.parametrize("dtype", ("Int64", "UInt64"))
+def test_nullable_integer_values_and_numeric_keys_remain_exact_with_nulls(
+    tmp_path: Path, dtype: str
+) -> None:
+    base = 2**53 + 1 if dtype == "Int64" else 2**63 + 1
+    root = make_dataset_artifact_root(tmp_path, "nullable_precision")
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": pd.Series([base, base + 1], dtype=dtype),
+            "timestamp": pd.Series(
+                pd.to_datetime(["2020-01-01"] * 2), dtype="datetime64[ns]"
+            ),
+            "value": pd.Series([base, pd.NA], dtype=dtype),
+        }
+    )
+    write_dataset(root, frame, spec=make_processed_dataset_spec("nullable_precision"))
+    assert len(tuple((root / "data").rglob("*.parquet"))) == 1
+    pd.testing.assert_frame_equal(read_dataset(root), frame, check_exact=True)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with dataset_reading.open_dataset_session(
+            root, columns=None, time_window=None, resource_policy=policy
+        ) as session:
+            for target in (1, 1024**2):
+                loaded = pd.concat(
+                    tuple(
+                        dataset_reading.iter_dataset_chunks(
+                            session, target_chunk_bytes=target
+                        )
+                    ),
+                    ignore_index=True,
+                )
+                pd.testing.assert_frame_equal(loaded, frame, check_exact=True)
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "mode", (DatasetReadMode.MATERIALIZED, DatasetReadMode.CHUNKED)
+)
+def test_nonnullable_boolean_rejects_physical_null_values(
+    tmp_path: Path, mode: DatasetReadMode
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "boolean_null")
+    frame = make_default_dataset_frame().iloc[:1].assign(value=True)
+    write_dataset(root, frame, spec=make_processed_dataset_spec("boolean_null"))
+    part = next((root / "data").rglob("*.parquet"))
+    with pq.ParquetFile(part) as parquet:
+        table = parquet.read()
+    table = table.set_column(
+        table.schema.get_field_index("value"),
+        table.schema.field("value"),
+        pa.array([None], type=pa.bool_()),
+    )
+    pq.write_table(table, part, compression="zstd")
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["file_size_bytes"] = part.stat().st_size
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="dataset_nonnullable_value_missing"):
+        result = read_dataset(root, mode=mode)
+        if mode is DatasetReadMode.CHUNKED:
+            tuple(result)
 
 
 def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -> None:

@@ -731,9 +731,14 @@ def test_capture_stats_streams_finalized_intervals_to_sidecar(
         assert sum(1 for _ in handle) == 10_000
 
 
-def test_recorder_does_not_publish_when_reader_join_times_out(
+@pytest.mark.parametrize(
+    "join_completes,late_failure", [(False, False), (True, False), (True, True)]
+)
+def test_recorder_publishes_only_after_reader_and_writer_completion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    join_completes: bool,
+    late_failure: bool,
 ) -> None:
     policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
     output_root = tmp_path / "run"
@@ -745,15 +750,19 @@ def test_recorder_does_not_publish_when_reader_join_times_out(
             self.stream = kwargs["stream"]
             self.ready = threading.Event()
             self.failure = None
+            self.alive = True
 
         def start(self) -> None:
             self.ready.set()
 
         def is_alive(self) -> bool:
-            return True
+            return self.alive
 
         def join(self, timeout: float) -> None:
             del timeout
+            self.alive = not join_completes
+            if late_failure:
+                self.failure = OSError("final_write_failed")
 
     monkeypatch.setitem(
         recorder.RECORDER_STREAMS_BY_SCOPE,
@@ -772,10 +781,25 @@ def test_recorder_does_not_publish_when_reader_join_times_out(
     )
     monkeypatch.setattr(recorder, "_StreamReader", Reader)
 
-    with pytest.raises(RuntimeError, match="quiescence_timeout"):
-        recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
-
-    assert not output_root.exists()
+    if late_failure:
+        with pytest.raises(RuntimeError, match="binance_recorder_reader_failure"):
+            recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
+        assert not output_root.exists()
+    elif join_completes:
+        result = recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
+        assert result == json.loads((output_root / "run.json").read_text())
+        assert result["status"] == "PARTIAL"
+        descriptor = result["capture"]["connection_intervals"]
+        sidecar = output_root / descriptor["path"]
+        assert descriptor["sha256"] == hashlib.sha256(sidecar.read_bytes()).hexdigest()
+        assert descriptor["record_count"] == 0
+        with gzip.open(sidecar, "rb") as handle:
+            assert handle.read() == b""
+    else:
+        with pytest.raises(RuntimeError, match="quiescence_timeout"):
+            recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
+        assert not output_root.exists()
+    assert policy.used_memory_bytes == 0
 
 
 def test_recorder_abort_failure_preserves_reader_failure(

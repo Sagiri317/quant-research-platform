@@ -248,16 +248,6 @@ def is_local_only_path(path: Path) -> bool:
     )
 
 
-def local_run_root_reason(run_root: Path, repo_root: Path) -> str | None:
-    """Return why an explicitly selected local run root is unsafe."""
-
-    root = Path(repo_root).resolve(strict=False)
-    target = Path(run_root).resolve(strict=False)
-    if target == root:
-        return "run_root_must_not_be_repo_root"
-    return None
-
-
 def unsafe_for_share_reason(
     text: object,
     *,
@@ -429,6 +419,8 @@ def internal_artifact_metadata_unsafe_reason(
 ) -> str | None:
     """Return why internal artifact metadata is unsafe, if applicable."""
 
+    if key is not None and _CREDENTIAL_KEY_RE.fullmatch(key):
+        return "credential"
     if key is not None and key.lower() in _ROW_SAMPLE_KEYS and value:
         return "row_sample"
     typed_identifier = key in _TYPED_IDENTIFIER_KEYS

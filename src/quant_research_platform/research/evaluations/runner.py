@@ -123,13 +123,11 @@ def build_crypto_evaluation_result(
         if prediction:
             chunks = _iter_prediction_joined_chunks(
                 chunks,
-                prediction_source=lookup,
-                primary_key=dataset.primary_key,
+                prediction_lookup=lookup,
                 input_columns=input_columns,
                 sample_filter_mode=metadata["sample_filter_mode"],
                 test_start=pd.Timestamp(time_window.start).isoformat(),
                 test_end=pd.Timestamp(time_window.end).isoformat(),
-                resource_policy=policy,
             )
         operation.enter_context(closing_iterator(chunks))
 
@@ -201,6 +199,7 @@ def build_evaluation_result_from_research_dataset(
     time_window: TimeWindow | None = None,
     n_groups: int | None = None,
     resource_policy: RuntimeResourcePolicy | None = None,
+    access_window: str = "development",
 ) -> EvaluationResult:
     spec = evaluation_catalog.get(evaluation_id)
     dataset_spec = dataset_catalog.get(spec.research_dataset_id)
@@ -223,6 +222,7 @@ def build_evaluation_result_from_research_dataset(
                 dataset_id=dataset_spec.data_id,
                 time_window=time_window,
                 columns=read_columns,
+                access_window=access_window,
             )
         )
     )

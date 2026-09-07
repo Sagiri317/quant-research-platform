@@ -59,7 +59,9 @@ def test_soft_target_is_not_an_exact_hard_cap_but_explicit_cap_is() -> None:
         lease = soft.lease("test.soft.target", soft.memory_budget_bytes + 1)
         assert soft.used_memory_bytes == 700_001
         assert soft.planning_headroom_bytes == 0
-        assert soft.operation_headroom_bytes == soft.memory_budget_bytes
+        assert soft.operation_headroom_bytes == 299_999
+        lease.grow(300_000)
+        assert soft.operation_headroom_bytes == 0
         lease.close()
 
     high_cap = capture_test_policy(
@@ -221,6 +223,51 @@ def test_nested_scope_reuses_exact_context_and_rejects_conflict() -> None:
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
             with runtime_resource_policy_scope(other):
                 pass
+
+
+@pytest.mark.parametrize("explicit_policy", (False, True))
+def test_independent_thread_scope_is_busy_then_can_reenter(
+    explicit_policy: bool,
+) -> None:
+    entered = threading.Event()
+    attempted = threading.Event()
+    finished = threading.Event()
+    outcomes: list[str] = []
+
+    def contender() -> None:
+        assert entered.wait(timeout=5)
+        assert resources.current_runtime_resource_policy() is None
+        try:
+            with runtime_resource_policy_scope(
+                root if explicit_policy else resources.current_runtime_resource_policy()
+            ):
+                outcomes.append("incorrectly_shared")
+        except RuntimeError as exc:
+            outcomes.append(str(exc))
+        finally:
+            attempted.set()
+        assert finished.wait(timeout=5)
+        with runtime_resource_policy_scope() as subsequent:
+            with subsequent.lease("subsequent", 1):
+                outcomes.append("reentered")
+        assert subsequent.state == "CLOSED"
+
+    thread = threading.Thread(target=contender)
+    thread.start()
+    try:
+        with runtime_resource_policy_scope() as root:
+            with root.lease("first", 1):
+                entered.set()
+                assert attempted.wait(timeout=5)
+                assert root.state == "ACTIVE"
+                assert root.used_memory_bytes == 1
+        assert root.state == "CLOSED"
+        assert root.used_memory_bytes == 0
+    finally:
+        finished.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert outcomes == ["runtime_data_scale_lock_busy", "reentered"]
 
 
 def test_lease_overflow_release_and_leak_poison() -> None:

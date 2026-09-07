@@ -2339,21 +2339,82 @@ def test_inventory_discovery_does_not_descend_nested_junction(
     assert _discovered_paths(data_root, spec={"partition_columns": []}) == []
 
 
-def test_inventory_discovery_maps_walk_error(
+def test_inventory_discovery_maps_scan_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
 
-    def fail_walk(_self: Path, *, on_error, **_kwargs):  # noqa: ANN001, ANN202
-        on_error(OSError("walk_failed"))
-        yield
+    def fail_scan(_path):
+        raise OSError("scan_failed")
 
-    monkeypatch.setattr(Path, "walk", fail_walk)
+    monkeypatch.setattr(os, "scandir", fail_scan)
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         _discovered_paths(data_root, spec={"partition_columns": []})
+
+
+@pytest.mark.parametrize("owner", ["dataset", "binance"])
+def test_directory_scan_processes_first_entry_before_enumerating_siblings(
+    tmp_path, monkeypatch, owner
+):
+    from quant_research_platform.sources.binance import raw_exports
+
+    root = tmp_path / "data"
+    root.mkdir()
+    for index in range(64):
+        pq.write_table(pa.table({"value": [index]}), root / f"part-{index:03d}.parquet")
+    scanned, processed = [], []
+    scan = os.scandir
+
+    class Entries:
+        def __init__(self, path):
+            self.inner = scan(path)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            entry = next(self.inner)
+            scanned.append(entry.name)
+            return entry
+
+        def close(self):
+            self.inner.close()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+    monkeypatch.setattr(
+        os,
+        "scandir",
+        lambda path: Entries(path) if Path(path).name == root.name else scan(path),
+    )
+    if owner == "dataset":
+        validate = DatasetSessionInventory._validated_coordinates
+
+        def observed(self, *args, **kwargs):
+            processed.append(len(scanned))
+            return validate(self, *args, **kwargs)
+
+        monkeypatch.setattr(DatasetSessionInventory, "_validated_coordinates", observed)
+        paths = _discovered_paths(root, spec={"partition_columns": []})
+        assert [path.name for path in paths] == [
+            f"part-{i:03d}.parquet" for i in range(64)
+        ]
+        assert processed[0] == 2
+    else:
+        entries = raw_exports._iter_raw_directory_entries(root)
+        try:
+            path, _metadata = next(entries)
+            assert path.parent == root
+            assert len(scanned) == 1
+        finally:
+            entries.close()
 
 
 def test_inventory_discovery_rejects_hardlinked_part_alias(tmp_path: Path) -> None:

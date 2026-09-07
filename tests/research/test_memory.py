@@ -227,6 +227,44 @@ def test_complete_time_frames_allow_soft_overrun_without_explicit_cap() -> None:
     assert policy.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize("available", (65_536, 1_000_000))
+def test_indivisible_borrowed_frame_admits_new_copy_before_allocation(
+    monkeypatch, available
+):
+    frame = pd.DataFrame(
+        {"timestamp": [pd.Timestamp("2026-01-01")], "value": ["x" * 700_000]}
+    )
+    before = frame.copy(deep=True)
+    copies = []
+    actual_copy = pd.DataFrame.copy
+
+    def copy(value, *args, **kwargs):
+        copies.append(len(value))
+        return actual_copy(value, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "copy", copy)
+    policy = capture_test_policy(available_memory_bytes=available)
+    with runtime_resource_policy_scope(policy):
+        chunks = iter_complete_time_sized_frames(
+            iter((frame,)), timestamp_column="timestamp", resource_policy=policy
+        )
+        if available == 65_536:
+            with pytest.raises(
+                ValueError,
+                match="research_indivisible_time_unit_exceeds_task_memory_budget",
+            ):
+                list(chunks)
+            assert not copies
+        else:
+            output = next(chunks)
+            assert policy.memory_budget_bytes < policy.used_memory_bytes < available
+            pd.testing.assert_frame_equal(output, frame, check_exact=True)
+            assert list(chunks) == []
+            assert copies == [1]
+        assert policy.used_memory_bytes == 0
+    pd.testing.assert_frame_equal(frame, before, check_exact=True)
+
+
 def test_complete_time_sized_frames_honor_live_root_reservations() -> None:
     frame = _single_time_frame()
     policy = capture_test_policy(

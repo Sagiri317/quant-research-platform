@@ -22,7 +22,6 @@ from quant_research_platform.contracts.validation import (
 class RankEnsemblePredictor:
     columns: tuple[str, ...]
     directions: tuple[float, ...] = ()
-    coefficient_count: int = 1
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         directions = self.directions or (1.0,) * len(self.columns)
@@ -67,7 +66,6 @@ class ICWeightedRankEnsembleFactory:
 class ICWeightedRankEnsemble:
     columns: tuple[str, ...]
     weights: tuple[float, ...]
-    coefficient_count: int
 
     @classmethod
     def fit(
@@ -112,7 +110,6 @@ class ICWeightedRankEnsemble:
         return cls(
             columns=tuple(defined_columns),
             weights=tuple(float(value) for value in values / normalizer),
-            coefficient_count=len(defined_columns),
         )
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:

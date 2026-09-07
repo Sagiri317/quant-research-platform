@@ -12,8 +12,6 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.manifests import (
-    build_layer_summary,
-    build_run_data_summary,
     write_manifest,
 )
 from tests.storage.low_level_fixtures import (
@@ -197,48 +195,3 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
         write_manifest(manifest, {"schema_id": "qrp-output-manifest"})
 
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
-
-
-def test_build_layer_summary_detects_missing_dataset_manifests(tmp_path: Path) -> None:
-    layer_root = tmp_path / "data" / "processed"
-    present = layer_root / "a_share" / "factor" / "present"
-    missing = layer_root / "a_share" / "label" / "missing"
-    write_dataset(
-        present,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("present"),
-    )
-
-    payload = build_layer_summary(
-        logical_layer="processed",
-        dataset_roots=(present, missing),
-    )
-
-    assert payload["dataset_count"] == 1
-    assert payload["total_rows"] == 3
-    assert payload["missing_dataset_manifests"] == [
-        "data/processed/a_share/label/missing/_manifest/manifest.json"
-    ]
-    assert payload["layer_validation_status"] == "FAIL"
-
-
-def test_build_run_data_summary_aggregates_dynamic_layers() -> None:
-    processed = build_layer_summary(
-        logical_layer="processed",
-        dataset_roots=(),
-    )
-    research = build_layer_summary(
-        logical_layer="research",
-        dataset_roots=(),
-    )
-
-    payload = build_run_data_summary(
-        layer_summaries=(processed, research),
-    )
-
-    assert payload["layer_count"] == 2
-    assert payload["run_validation_status"] == "PASS"
-    assert [layer["logical_layer"] for layer in payload["layers"]] == [
-        "processed",
-        "research",
-    ]

@@ -16,12 +16,15 @@ from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    native_filesystem_path,
+    require_unaliased_path,
+)
 
 
 def reject_if_exists(path: Path) -> None:
     candidate = require_unaliased_path(Path(path), error="invalid_storage_write_path")
-    if candidate.exists():
+    if os.path.exists(native_filesystem_path(candidate)):
         raise OutputAlreadyExistsError()
 
 
@@ -78,12 +81,12 @@ def atomic_write_directory[T](
 ) -> T:
     final_root = require_unaliased_path(Path(root), error="invalid_storage_write_path")
     require_unaliased_path(final_root.parent, error="invalid_storage_write_path")
-    final_root.parent.mkdir(parents=True, exist_ok=True)
+    Path(native_filesystem_path(final_root.parent)).mkdir(parents=True, exist_ok=True)
     reject_if_exists(final_root)
     temp_root = final_root.with_name(owned_scratch_name(".a-", uuid4().hex[:12]))
     claimed_temp = False
     try:
-        os.mkdir(temp_root)
+        os.mkdir(native_filesystem_path(temp_root))
         claimed_temp = True
         require_unaliased_path(
             final_root.parent,
@@ -105,7 +108,7 @@ def _prepare_file_target(path: Path) -> tuple[Path, Path]:
     final_path = require_unaliased_path(Path(path), error="invalid_storage_write_path")
     reject_if_exists(final_path)
     require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
-    final_path.parent.mkdir(parents=True, exist_ok=True)
+    Path(native_filesystem_path(final_path.parent)).mkdir(parents=True, exist_ok=True)
     require_unaliased_path(final_path, error="invalid_storage_write_path")
     temp_path = final_path.with_name(owned_scratch_name(".f-", uuid4().hex[:12]))
     require_unaliased_path(temp_path, error="invalid_storage_write_path")
@@ -136,7 +139,7 @@ def publish_no_replace(
     try:
         move_path_no_replace(source, target)
     except FileExistsError as exc:
-        if target.exists():
+        if os.path.exists(native_filesystem_path(target)):
             raise OutputAlreadyExistsError() from exc
         raise
 

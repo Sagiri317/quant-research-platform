@@ -39,6 +39,7 @@ from quant_research_platform.research.models.fitting import prediction_callable
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
+from quant_research_platform.runtime.dataframes import iter_complete_time_sized_frames
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     current_runtime_resource_policy,
@@ -530,7 +531,7 @@ class _ScaledSquareAccumulator:
             float(np.nextafter(0.0, 1.0))
         ):
             raise ValueError("model_selection_mse_unrepresentable")
-        result = self.scale * self.scale * mean_scaled_square
+        result = self.scale * (self.scale * mean_scaled_square)
         if result == 0.0 or not np.isfinite(result):
             raise ValueError("model_selection_mse_unrepresentable")
         return float(result)
@@ -795,7 +796,10 @@ def select_prediction_model_spec(
             owned_model = fitting._fit_model_result_owned_from_frames(  # noqa: SLF001
                 fitting.training_scope_chunks(
                     chunks(
-                        train_read_columns, input_columns=candidate_spec.input_columns
+                        train_read_columns,
+                        input_columns=candidate_spec.input_columns,
+                        start=None,
+                        end=prediction_spec.train_end,
                     ),
                     asset_ids=prediction_spec.training_asset_ids,
                 ),
@@ -818,6 +822,8 @@ def select_prediction_model_spec(
             ):
                 return chunks(
                     validation_columns,
+                    start=prediction_spec.model_selection_validation_start,
+                    end=prediction_spec.model_selection_validation_end,
                     input_columns=tuple(
                         dict.fromkeys(
                             (*common_validation_input_columns, *candidate_input_columns)
@@ -935,9 +941,12 @@ def iter_validation_prediction_chunks(
     extra_output_columns: tuple[str, ...] = (),
 ) -> Iterable[object]:
     predictor = prediction_callable(
-        model_result.coefficients,
         candidate_spec.input_columns,
         model_result.prediction_model,
+    )
+    rank_inputs_allow_missing = (
+        _model_algorithm_facts(candidate_spec.model_algorithm).input_kind
+        == "rank_ensemble_inputs"
     )
     output_columns = (
         "timestamp",
@@ -946,7 +955,10 @@ def iter_validation_prediction_chunks(
         *extra_output_columns,
     )
     policy = current_runtime_resource_policy()
-    with closing_iterator(iter(chunks())) as source:
+    complete_frames = iter_complete_time_sized_frames(
+        iter(chunks()), timestamp_column="timestamp", resource_policy=policy
+    )
+    with closing_iterator(complete_frames) as source:
         for chunk in source:
             full_chunk_payload = pandas_frame_payload_bytes(chunk)
             index_bytes = int(chunk.index.memory_usage(deep=True))
@@ -987,24 +999,38 @@ def iter_validation_prediction_chunks(
                         filtered,
                         label_column=candidate_spec.label_column,
                     )
+                    prediction_rows = (
+                        filtered
+                        if rank_inputs_allow_missing
+                        else filtered.loc[
+                            filtered.loc[:, list(candidate_spec.input_columns)]
+                            .notna()
+                            .all(axis=1)
+                        ]
+                    )
                     usable = legal_training_rows(
-                        filtered,
+                        prediction_rows,
                         fitting_cutoff=validation_end,
                         availability_column=availability_column,
                         feature_columns=(
                             usable_input_columns
                             if usable_input_columns is not None
+                            else ()
+                            if rank_inputs_allow_missing
                             else candidate_spec.input_columns
                         ),
                         target_column=candidate_spec.label_column,
                     )
                     if not usable.empty:
+                        predictions = pd.Series(
+                            predictor(prediction_rows), index=prediction_rows.index
+                        )
                         output = usable.loc[:, list(output_columns)].copy()
                         if include_availability:
-                            if availability_column is None:
-                                raise ValueError("label_availability_column_required")
                             output["label_available_at"] = usable[availability_column]
-                        output[prediction_spec.prediction_column] = predictor(usable)
+                        output[prediction_spec.prediction_column] = predictions.loc[
+                            usable.index
+                        ]
                         if chunk_lease is not None:
                             output_bytes = pandas_frame_payload_bytes(output)
                             if output_bytes > chunk_lease.reserved_bytes:
@@ -1018,7 +1044,16 @@ def iter_validation_prediction_chunks(
                             item = OwnedValue(output, chunk_lease)
                         else:
                             item = output
-                        del chunk, timestamps, validation, filtered, usable, output
+                        del (
+                            chunk,
+                            timestamps,
+                            validation,
+                            filtered,
+                            prediction_rows,
+                            predictions,
+                            usable,
+                            output,
+                        )
                         yield item
             except BaseException as primary:
                 if chunk_lease is not None and chunk_lease.active:

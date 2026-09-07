@@ -19,23 +19,6 @@ def holding_intervals(sessions: pd.DatetimeIndex, window: TimeWindow) -> pd.Data
     return pd.DataFrame(records, columns=("decision_at", "entry_at", "end_at"))
 
 
-def rebalance_dates(
-    sessions: pd.DatetimeIndex,
-    schedule: str,
-) -> pd.DatetimeIndex:
-    _validate_schedule(schedule)
-    values = pd.DatetimeIndex(sessions).drop_duplicates().sort_values()
-    if values.empty or schedule == "daily":
-        return values
-    return values[
-        [
-            is_rebalance_session(timestamp, next_timestamp, schedule)
-            for timestamp, next_timestamp in zip(values[:-1], values[1:], strict=True)
-        ]
-        + [True]
-    ]
-
-
 def is_rebalance_session(
     timestamp: pd.Timestamp,
     next_timestamp: pd.Timestamp,

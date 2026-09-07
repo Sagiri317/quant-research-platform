@@ -17,6 +17,7 @@ from quant_research_platform.research.datasets.assembler import (
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.features.transforms import (
     canonical_feature_pipeline,
+    neutralize_cross_section,
 )
 from quant_research_platform.research.protocols.a_share import research_dataset_specs
 from quant_research_platform.storage.datasets import write_dataset
@@ -122,6 +123,29 @@ def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
     assert result["feature_factor"].tolist() == [0.0, 0.0]
     assert result["feature_missing_factor"].tolist() == [1, 1]
     assert result["feature_observed_factor"].tolist() == [0, 0]
+
+
+def test_missing_factor_in_other_industry_does_not_change_valid_neutralization():
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "eligible": True,
+            "industry_level1_code": ["A"] * 200 + ["B"],
+            "log_float_market_cap": np.linspace(1.0, 3.0, 201),
+            "factor": [*np.sin(np.arange(200)), np.nan],
+        }
+    )
+    valid = frame.iloc[:200].copy()
+    for operation in (neutralize_cross_section, canonical_feature_pipeline):
+        expected = operation(valid, factor_columns=("factor",))
+        result = operation(frame, factor_columns=("factor",))
+        pd.testing.assert_frame_equal(result.iloc[:200], expected)
+        if operation is canonical_feature_pipeline:
+            assert result.feature_observed_factor.iloc[:200].eq(1).all()
+            assert result.feature_missing_factor.iloc[-1] == 1
+        else:
+            assert result.factor.iloc[:200].notna().all()
+            assert pd.isna(result.factor.iloc[-1])
 
 
 def test_a_share_assembler_persists_only_eligible_sample_truth(

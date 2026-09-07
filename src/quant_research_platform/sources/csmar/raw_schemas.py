@@ -12,7 +12,6 @@ import tempfile
 from collections import deque
 from collections.abc import Iterator
 from dataclasses import dataclass
-from functools import cache
 from pathlib import Path
 
 from quant_research_platform.runtime.resources import (
@@ -136,20 +135,6 @@ def require_raw_resource_policy(
     if type(policy) is not RuntimeResourcePolicy:
         raise TypeError("invalid_runtime_resource_policy")
     return policy
-
-
-@cache
-def _legal_provider_field_count_bound() -> int:
-    """Return the largest current legal provider header width."""
-
-    return max(
-        len(mapping)
-        + sum(
-            len(values)
-            for values in _field_mappings.COLUMN_ALIASES.get(dataset, {}).values()
-        )
-        for dataset, mapping in _field_mappings.COLUMN_MAPPINGS.items()
-    )
 
 
 class BoundedCsvRecord:
@@ -376,35 +361,6 @@ class _BoundedCsvRecords:
         except UnicodeDecodeError as exc:
             raise ValueError("malformed_csmar_csv_row") from exc
 
-    def next_materialized(
-        self,
-        *,
-        max_fields: int,
-        field_count_error: str = "malformed_csmar_csv_row",
-    ) -> tuple[list[str], int]:
-        self._start_record()
-        self.generation += 1
-        try:
-            fast_fields = self._try_fast_fields()
-            if fast_fields is not None:
-                fields, source_bytes, _canonical_bytes = fast_fields
-                if len(fields) > max_fields:
-                    raise ValueError(field_count_error)
-                return fields, source_bytes
-            self._ensure_spool()
-            self._spool.seek(0)
-            self._spool.truncate(0)
-            record = self._parse_record()
-            return (
-                record.materialize(
-                    max_fields=max_fields,
-                    field_count_error=field_count_error,
-                ),
-                record.source_bytes,
-            )
-        except UnicodeDecodeError as exc:
-            raise ValueError("malformed_csmar_csv_row") from exc
-
     def _start_record(self) -> None:
         if self._parser_lease is not None:
             _close_lease_preserving_primary(
@@ -475,10 +431,7 @@ class _BoundedCsvRecords:
         if self._spool is not None:
             return
         self._require_capacity(self._slow_control_span_bytes)
-        scratch_parent = getattr(self._path, "parent", None)
-        if scratch_parent is None:
-            self._handle.read(1)
-            raise ValueError("csmar_raw_scratch_parent_unavailable")
+        scratch_parent = self._path.parent
         scratch_parent = require_unaliased_path(
             Path(scratch_parent), error="csmar_raw_scratch_parent_invalid"
         )
@@ -512,7 +465,7 @@ class _BoundedCsvRecords:
         if source_bytes > self._limit_bytes:
             raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
         comma_count = line.count(b",")
-        if b'"' in line or comma_count + 1 > _legal_provider_field_count_bound():
+        if b'"' in line or comma_count + 1 > _MAX_PROVIDER_HEADER_FIELDS:
             self._handle.seek(self._handle.tell() - source_bytes)
             return None
         content_end = source_bytes
@@ -860,12 +813,10 @@ def iter_export_csv_records(
     resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None = None,
     payload_lease_ref: list[MemoryLease | None] | None = None,
-    materialize_records: bool = True,
-    first_record_field_count_error: str = "malformed_csmar_csv_row",
-) -> Iterator[tuple[list[str] | BoundedCsvRecord, int]]:
+) -> Iterator[tuple[BoundedCsvRecord, int]]:
     bound_policy = require_raw_resource_policy(resource_policy)
 
-    def activate() -> Iterator[tuple[list[str] | BoundedCsvRecord, int]]:
+    def activate() -> Iterator[tuple[BoundedCsvRecord, int]]:
         assert bound_policy is not None
         records: _BoundedCsvRecords | None = None
         with runtime_resource_policy_scope(bound_policy):
@@ -877,26 +828,9 @@ def iter_export_csv_records(
                     payload_lease_ref=payload_lease_ref,
                     expected_identity=expected_identity,
                 )
-                if materialize_records:
-                    legal_field_count = _legal_provider_field_count_bound()
-                    first_record = True
-                    while True:
-                        try:
-                            yield records.next_materialized(
-                                max_fields=legal_field_count,
-                                field_count_error=(
-                                    first_record_field_count_error
-                                    if first_record
-                                    else "malformed_csmar_csv_row"
-                                ),
-                            )
-                            first_record = False
-                        except StopIteration:
-                            break
-                else:
-                    for record in records:
-                        yield record, record.source_bytes
-                        del record
+                for record in records:
+                    yield record, record.source_bytes
+                    del record
             finally:
                 primary = sys.exception()
                 if records is not None:
@@ -946,7 +880,6 @@ def _read_export_header_under_policy(
         export_path,
         resource_policy=policy,
         expected_identity=expected_identity,
-        materialize_records=False,
     )
     try:
         record = next(rows, None)

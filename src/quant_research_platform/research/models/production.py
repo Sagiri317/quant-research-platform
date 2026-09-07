@@ -20,7 +20,10 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.datasets.io import (
+    _research_dataset_access_window,
+    iter_research_dataset_chunks,
+)
 from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
@@ -39,6 +42,11 @@ from quant_research_platform.research.models.trial_selection import (
     select_prediction_model_spec,
 )
 from quant_research_platform.research.protocols.a_share import (
+    HUBER_LAMBDAS,
+    LASSO_ALPHAS,
+    RF_CONFIGS,
+    RIDGE_LAMBDAS,
+    XGB_CONFIGS,
     model_folds,
     quarter_id_for_fold,
 )
@@ -47,6 +55,11 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     OwnedValue,
     RuntimeResourcePolicy,
+)
+from quant_research_platform.storage.datasets.reading import (
+    DatasetSession,
+    iter_dataset_chunks,
+    resolve_columns_from_schema,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -76,6 +89,7 @@ def build_model_selection_result(
     research_protocol_identity: str,
     model_target_id: str,
     backend_versions: Mapping[str, str],
+    dataset_session: DatasetSession,
 ) -> Iterable[QuarterlyModelResult | OwnedValue[QuarterlyModelResult]]:
     if not model_ids or set(model_ids) != set(tie_break_order):
         raise ValueError("model_selection_model_ids_invalid")
@@ -95,23 +109,44 @@ def build_model_selection_result(
     root_seed = protocol_manifest.get("root_seed")
     if type(root_seed) is not int or root_seed < 0:
         raise ValueError("model_root_seed_missing")
-    dataset_read_window = TimeWindow(
-        formal_dataset_window["start"],
-        development_window["end"],
-    )
+
+    def read_chunks(read_columns: tuple[str, ...], window: TimeWindow):
+        columns = resolve_columns_from_schema(
+            tuple(dataset_session.arrow_schema.names),
+            spec=dataset_session.spec,
+            columns=read_columns,
+        )
+        projection = replace(
+            dataset_session,
+            logical_columns=columns,
+            physical_columns=columns,
+            owns_inventory=False,
+            owns_lease=False,
+        )
+        window = _research_dataset_access_window(dataset_spec.market_id, window)
+        with projection.filtered_view(window) as view:
+            with closing_iterator(
+                iter_dataset_chunks(
+                    view,
+                    target_chunk_bytes=max(1, resource_policy.operation_headroom_bytes),
+                )
+            ) as source:
+                yield from source
 
     def chunks(
         read_columns: tuple[str, ...],
         *,
         input_columns: tuple[str, ...],
+        start: object | None,
+        end: object,
     ) -> Iterable[pd.DataFrame]:
         yield from iter_validated_research_input_chunks(
-            iter_research_dataset_chunks(
-                layout,
-                market_id=dataset_spec.market_id,
-                dataset_id=dataset_spec.data_id,
-                time_window=dataset_read_window,
-                columns=read_columns,
+            read_chunks(
+                read_columns,
+                TimeWindow(
+                    formal_dataset_window["start"] if start is None else start,
+                    end,
+                ),
             ),
             dataset_spec=dataset_spec,
             input_columns=input_columns,
@@ -126,6 +161,12 @@ def build_model_selection_result(
         tie_break_order=tie_break_order,
         time_window=time_window,
         chunks=chunks,
+        sessions=_dataset_sessions(
+            read_chunks(
+                ("timestamp",),
+                TimeWindow(formal_dataset_window["start"], development_window["end"]),
+            )
+        ),
         chronology=chronology,
         formal_dataset_window=formal_dataset_window,
         development_window=development_window,
@@ -148,6 +189,7 @@ def _build_a_share_quarterly_models(
     tie_break_order: tuple[str, ...],
     time_window: TimeWindow,
     chunks,
+    sessions: pd.DatetimeIndex,
     chronology: Mapping[str, object],
     formal_dataset_window: Mapping[str, object],
     development_window: Mapping[str, object],
@@ -158,14 +200,6 @@ def _build_a_share_quarterly_models(
     backend_versions: Mapping[str, str],
     holdout_window: Mapping[str, object],
 ) -> Iterable[QuarterlyModelResult | OwnedValue[QuarterlyModelResult]]:
-    sessions = _dataset_sessions(
-        layout,
-        dataset_spec=dataset_spec,
-        time_window=TimeWindow(
-            formal_dataset_window["start"],
-            development_window["end"],
-        ),
-    )
     quarters = model_folds(
         sessions,
         chronology=chronology,
@@ -287,22 +321,12 @@ def _build_a_share_quarterly_models(
     return quarterly_results()
 
 
-def _dataset_sessions(
-    layout: StorageLayout,
-    *,
-    dataset_spec,
-    time_window: TimeWindow,
-) -> pd.DatetimeIndex:
+def _dataset_sessions(chunks: Iterable[pd.DataFrame]) -> pd.DatetimeIndex:
     values: set[pd.Timestamp] = set()
-    for frame in iter_research_dataset_chunks(
-        layout,
-        market_id=dataset_spec.market_id,
-        dataset_id=dataset_spec.data_id,
-        time_window=time_window,
-        columns=("timestamp",),
-    ):
-        timestamps = pd.to_datetime(frame["timestamp"], errors="raise")
-        values.update(pd.Timestamp(value).normalize() for value in timestamps)
+    with closing_iterator(iter(chunks)) as source:
+        for frame in source:
+            timestamps = pd.to_datetime(frame["timestamp"], errors="raise")
+            values.update(pd.Timestamp(value).normalize() for value in timestamps)
     if not values:
         raise ValueError("a_share_walk_forward_sessions_empty")
     return pd.DatetimeIndex(sorted(values))
@@ -318,26 +342,15 @@ def _fit_selected_model_result(
     root_seed: int,
     config_index: int,
 ) -> tuple[fitting.ModelFitResult, MemoryLease | None]:
-    refit_seed = derive_seed(
-        root_seed,
-        "a_share_model_refit",
-        selected_spec.model_algorithm,
-        selected_spec.model_id,
-        quarter_id,
-    )
-    from quant_research_platform.research.protocols.a_share import (
-        resolve_trial_parameters,
-    )
-
     n_refit = _count_training_rows(
         dataset_spec, selected_spec, chunks=chunks, train_end=fitting_cutoff
     )
-    refit_spec = replace(
+    refit_spec = _refit_model_spec(
         selected_spec,
-        random_seed=refit_seed,
-        hyperparameters=resolve_trial_parameters(
-            selected_spec.model_algorithm, n_train=n_refit, config_index=config_index
-        ),
+        n_train=n_refit,
+        quarter_id=quarter_id,
+        root_seed=root_seed,
+        config_index=config_index,
     )
     refit_read_columns = model_training_read_columns(
         dataset_spec.primary_key,
@@ -347,7 +360,12 @@ def _fit_selected_model_result(
     )
     owned_model = fitting._fit_model_result_owned_from_frames(
         training_scope_chunks(
-            chunks(refit_read_columns, input_columns=refit_spec.input_columns),
+            chunks(
+                refit_read_columns,
+                input_columns=refit_spec.input_columns,
+                start=None,
+                end=fitting_cutoff,
+            ),
         ),
         refit_spec,
         estimator=build_estimator_from_model_spec(refit_spec),
@@ -359,6 +377,26 @@ def _fit_selected_model_result(
     return model_result, owned_model.lease if isinstance(
         owned_model, OwnedValue
     ) else None
+
+
+def _refit_model_spec(selected_spec, *, n_train, quarter_id, root_seed, config_index):
+    from quant_research_platform.research.protocols.a_share import (
+        resolve_trial_parameters,
+    )
+
+    return replace(
+        selected_spec,
+        random_seed=derive_seed(
+            root_seed,
+            "a_share_model_refit",
+            selected_spec.model_algorithm,
+            selected_spec.model_id,
+            quarter_id,
+        ),
+        hyperparameters=resolve_trial_parameters(
+            selected_spec.model_algorithm, n_train=n_train, config_index=config_index
+        ),
+    )
 
 
 def _date_text(value: object) -> str:
@@ -538,11 +576,11 @@ def _a_share_trial_specs(
     root_seed: int,
 ) -> tuple[object, ...]:
     counts = {
-        "ridge_regression": 4,
-        "huber_regression": 4,
-        "lasso_regression": 4,
-        "random_forest_regressor": 3,
-        "xgboost_regressor": 3,
+        "ridge_regression": len(RIDGE_LAMBDAS),
+        "huber_regression": len(HUBER_LAMBDAS),
+        "lasso_regression": len(LASSO_ALPHAS),
+        "random_forest_regressor": len(RF_CONFIGS),
+        "xgboost_regressor": len(XGB_CONFIGS),
     }
     count = counts.get(base_spec.model_algorithm, 1)
     result = []
@@ -605,7 +643,12 @@ def _count_training_rows(
         else model_spec.input_columns
     )
     for frame in iter_legal_training_chunks(
-        chunks(read_columns, input_columns=model_spec.input_columns),
+        chunks(
+            read_columns,
+            input_columns=model_spec.input_columns,
+            start=None,
+            end=train_end,
+        ),
         train_end=pd.Timestamp(train_end),
         label_column=model_spec.label_column,
         input_columns=required_input_columns,

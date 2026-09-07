@@ -97,6 +97,48 @@ _ENHANCED_PANEL_COLUMNS = (
 _EXECUTION_COLUMNS = ("asset_id", "timestamp", "can_enter", "can_exit")
 _BENCHMARK_COLUMNS = ("benchmark_id", "asset_id", "timestamp", "weight")
 _SESSION_KEY = ("timestamp", "asset_id")
+_ALPHA_DIAGNOSTICS = {
+    "alpha_slope": "slope",
+    "alpha_intercept": "intercept",
+    "alpha_slope_se": "slope_standard_error",
+    "alpha_slope_t": "slope_t_statistic",
+    "alpha_slope_pvalue": "slope_pvalue",
+    "alpha_slope_ci_low": "slope_ci_low",
+    "alpha_slope_ci_high": "slope_ci_high",
+    "alpha_weighted_r2": "weighted_r2",
+    "alpha_coverage": "coverage",
+    "alpha_valid_dates": "valid_rebalance_dates",
+    "alpha_scheduled_dates": "scheduled_rebalance_dates",
+}
+
+
+def frozen_alpha_calibration(
+    artifact, *, cutoff: pd.Timestamp
+) -> tuple[AlphaCalibration, str]:
+    """Read the last published, sufficiently observed development calibration."""
+    latest = None
+    for batch in artifact.iter_chunks():
+        observed_at = pd.Timestamp(min(row.timestamp_ns for row in batch.valuations))
+        if observed_at > cutoff:
+            raise ValueError("holdout_alpha_source_after_cutoff")
+        values = {
+            _ALPHA_DIAGNOSTICS[row.name]: row.number
+            for row in batch.diagnostics
+            if row.asset_id == PORTFOLIO_CASH_ASSET_ID
+            and row.name in _ALPHA_DIAGNOSTICS
+        }
+        if len(values) == len(_ALPHA_DIAGNOSTICS):
+            latest = (values, observed_at.date().isoformat())
+    if latest is None:
+        raise PortfolioTargetBlocked("holdout_alpha_calibration_missing")
+    values, observed_at = latest
+    if values["valid_rebalance_dates"] < 6 or values["coverage"] < 0.8:
+        raise PortfolioTargetBlocked("holdout_alpha_calibration_insufficient")
+    for name in ("valid_rebalance_dates", "scheduled_rebalance_dates"):
+        values[name] = int(values[name])
+    return AlphaCalibration(
+        **values, benchmark_only=values["slope"] <= 0.0
+    ), observed_at
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +159,7 @@ def build_portfolio_ledger(
     input_window: TimeWindow,
     formal_dataset_window: TimeWindow,
     prediction_window: TimeWindow | None = None,
+    frozen_calibration: AlphaCalibration | None = None,
     prediction_lookup: object,
     assumptions: ExecutionAssumptions,
     resource_policy: RuntimeResourcePolicy | None,
@@ -258,6 +301,7 @@ def build_portfolio_ledger(
     cash = float(assumptions.initial_nav)
     nav = cash
     amount_history: dict[str, deque[float]] = {}
+    risk_assets: set[str] = set()
     market_model = MarketModelRiskState() if enhanced else None
     factor_risk = (
         FactorRiskState(style_columns=risk_style_columns) if enhanced else None
@@ -285,6 +329,8 @@ def build_portfolio_ledger(
             + (len(amount_history) + len(holdings) + extra_assets) * 672
             + len(calibration_rows) * 640
         )
+        if enhanced:
+            retained_bytes += max(65536, (len(risk_assets) + extra_assets) * 16384)
         retained_bytes += pandas_frame_payload_bytes(
             calibration_intervals
         ) + pandas_frame_payload_bytes(calibration_dates)
@@ -344,6 +390,8 @@ def build_portfolio_ledger(
                     if panel.empty:
                         raise PortfolioTargetBlocked("portfolio_panel_session_missing")
                     resize_state(extra_assets=len(panel))
+                    if enhanced:
+                        risk_assets.update(panel.asset_id.astype(str))
                     _update_amount_history(panel, amount_history, holdings)
                     resize_state()
 
@@ -466,6 +514,7 @@ def build_portfolio_ledger(
                             has_next_session = position + 1 < len(sessions)
                             if (
                                 alpha is not None
+                                and frozen_calibration is None
                                 and has_next_session
                                 and decision_timestamp in calibration_dates.index
                                 and is_rebalance_session(
@@ -632,6 +681,7 @@ def build_portfolio_ledger(
                                     calibration_intervals=calibration_intervals,
                                     as_of=decision_timestamp,
                                     risk_style_columns=risk_style_columns,
+                                    frozen_calibration=frozen_calibration,
                                 )
                                 resize_state()
                                 if maintenance:
@@ -711,6 +761,7 @@ def build_portfolio_ledger(
             clear_exception_frames(primary)
         calibration_rows.clear()
         amount_history.clear()
+        risk_assets.clear()
         previous_risk_cross = pending_calibration = waiting_alpha = holdings = None
         risk_frames = context = None
         market_model = factor_risk = None
@@ -1041,8 +1092,9 @@ def _enhanced_decision(
     calibration_intervals: pd.DataFrame,
     as_of: pd.Timestamp,
     risk_style_columns: tuple[str, ...],
+    frozen_calibration: AlphaCalibration | None = None,
 ) -> _EnhancedDecision:
-    calibration = calibrate_expected_alpha(
+    calibration = frozen_calibration or calibrate_expected_alpha(
         pd.DataFrame(
             calibration_rows,
             columns=["timestamp", "alpha_score", "holding_return"],
@@ -1055,12 +1107,6 @@ def _enhanced_decision(
         expected.loc[alpha.notna()] = calibration.slope * alpha.loc[alpha.notna()]
     else:
         expected.loc[alpha.notna()] = 0.0
-    try:
-        risk = factor_risk.estimate()
-    except ValueError as exc:
-        if str(exc) != "factor_risk_factor_history_insufficient":
-            raise
-        risk = None
     complete = current_cross.loc[
         current_cross.loc[:, risk_style_columns].notna().all(axis=1)
     ]
@@ -1070,6 +1116,12 @@ def _enhanced_decision(
         else complete
     )
     exposures = factor_risk.current_exposures(processed)
+    try:
+        risk = factor_risk.estimate()
+    except ValueError as exc:
+        if str(exc) != "factor_risk_factor_history_insufficient":
+            raise
+        risk = None
     return _EnhancedDecision(
         benchmark_weights=benchmark_weights,
         expected_alpha=expected,
@@ -1092,7 +1144,10 @@ def _optimizer_assets(
     eligible: pd.Series,
     panel: pd.DataFrame,
 ) -> pd.DataFrame:
-    assets = pd.Index(sorted(benchmark_weights.index), dtype="string")
+    assets = pd.Index(
+        sorted(set(benchmark_weights.index) | set(current_weights.index)),
+        dtype="string",
+    )
     panel_by_asset = panel.set_index("asset_id")
     exposure_columns = tuple(
         column
@@ -1111,9 +1166,9 @@ def _optimizer_assets(
             "current_weight": current_weights.reindex(assets, fill_value=0.0).to_numpy(
                 dtype="float64"
             ),
-            "benchmark_weight": benchmark_weights.reindex(assets).to_numpy(
-                dtype="float64"
-            ),
+            "benchmark_weight": benchmark_weights.reindex(
+                assets, fill_value=0.0
+            ).to_numpy(dtype="float64"),
             "specific_variance": specific_variance.reindex(assets).to_numpy(),
             "adv": adv.reindex(assets).to_numpy(dtype="float64"),
             "eligible": eligible.reindex(assets, fill_value=False).to_numpy(),
@@ -1271,7 +1326,8 @@ def _build_session(
         )
 
     if (
-        enhanced_decision is not None
+        target_override is None
+        and enhanced_decision is not None
         and enhanced_decision.risk is not None
         and not enhanced_decision.calibration.benchmark_only
     ):
@@ -1329,7 +1385,9 @@ def _build_session(
             financial_column="is_financial",
             cash_column="is_cash",
         )
-        target = optimization.weights
+        target = optimization.weights.loc[
+            optimization.weights.index != PORTFOLIO_CASH_ASSET_ID
+        ]
 
     orders_requested = (
         is_rebalance_session(
@@ -1670,44 +1728,12 @@ def _ledger_frame(
         "decision_delta_weight": -float(decision_delta.sum()),
         "benchmark_weight": np.nan,
         "asset_specific_variance": np.nan,
-        "alpha_slope": (
-            enhanced_decision.calibration.slope if enhanced_decision else np.nan
-        ),
-        "alpha_slope_se": (
-            enhanced_decision.calibration.slope_standard_error
+        **{
+            name: getattr(enhanced_decision.calibration, field)
             if enhanced_decision
             else np.nan
-        ),
-        "alpha_slope_t": (
-            enhanced_decision.calibration.slope_t_statistic
-            if enhanced_decision
-            else np.nan
-        ),
-        "alpha_slope_pvalue": (
-            enhanced_decision.calibration.slope_pvalue if enhanced_decision else np.nan
-        ),
-        "alpha_slope_ci_low": (
-            enhanced_decision.calibration.slope_ci_low if enhanced_decision else np.nan
-        ),
-        "alpha_slope_ci_high": (
-            enhanced_decision.calibration.slope_ci_high if enhanced_decision else np.nan
-        ),
-        "alpha_weighted_r2": (
-            enhanced_decision.calibration.weighted_r2 if enhanced_decision else np.nan
-        ),
-        "alpha_coverage": (
-            enhanced_decision.calibration.coverage if enhanced_decision else np.nan
-        ),
-        "alpha_valid_dates": (
-            enhanced_decision.calibration.valid_rebalance_dates
-            if enhanced_decision
-            else np.nan
-        ),
-        "alpha_scheduled_dates": (
-            enhanced_decision.calibration.scheduled_rebalance_dates
-            if enhanced_decision
-            else np.nan
-        ),
+            for name, field in _ALPHA_DIAGNOSTICS.items()
+        },
         "predicted_tracking_error": (
             optimization_result.predicted_tracking_error
             if optimization_result

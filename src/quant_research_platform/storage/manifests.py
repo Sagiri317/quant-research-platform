@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -14,18 +13,15 @@ from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
     render_qrp_json_object,
 )
-from quant_research_platform.policy.check_status import require_status
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
     evidence_json_value_unsafe_reason,
 )
-from quant_research_platform.runtime.logical_paths import logical_path
 from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
 )
 from quant_research_platform.storage.atomic import atomic_write_text
 from quant_research_platform.storage.datasets.schema import (
-    validate_dataset_manifest_consumable,
     validate_dataset_manifest_payload,
     validate_dataset_spec_payload,
 )
@@ -39,7 +35,6 @@ from quant_research_platform.storage.identity import (
     require_unaliased_path,
 )
 
-_DATASET_LOGICAL_PATH_MARKERS = ("data",)
 _MAX_QRP_JSON_BYTES = 1024 * 1024
 
 
@@ -237,106 +232,6 @@ def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
                 )
         raise
     return final_path
-
-
-def build_layer_summary(
-    *,
-    logical_layer: str,
-    dataset_roots: tuple[Path, ...],
-) -> dict[str, Any]:
-    datasets: list[dict[str, Any]] = []
-    missing: list[str] = []
-    invalid: list[str] = []
-    failed: list[str] = []
-    total_rows = 0
-    date_min_values: list[str] = []
-    date_max_values: list[str] = []
-    for dataset_root in dataset_roots:
-        path = Path(dataset_root) / "_manifest" / "manifest.json"
-        manifest_logical_path = logical_path(
-            path,
-            markers=_DATASET_LOGICAL_PATH_MARKERS,
-        )
-        try:
-            payload = read_dataset_manifest_evidence(dataset_root)
-        except FileNotFoundError:
-            missing.append(manifest_logical_path)
-            continue
-        except (OSError, ValueError):
-            invalid.append(manifest_logical_path)
-            continue
-        data_id = payload["data_id"]
-        try:
-            validate_dataset_manifest_consumable(payload)
-            effective_validation_status = "PASS"
-        except ValueError:
-            effective_validation_status = "FAIL"
-        summary = {
-            "row_count": payload.get("row_count"),
-            "date_min": payload.get("date_min"),
-            "date_max": payload.get("date_max"),
-            "partition_count": payload.get("partition_count"),
-            "duplicate_primary_key_count": payload.get("duplicate_primary_key_count"),
-            "validation_status": effective_validation_status,
-        }
-        datasets.append(
-            {
-                "data_id": data_id,
-                "manifest_path": manifest_logical_path,
-                "manifest_summary": summary,
-            }
-        )
-        total_rows += payload["row_count"]
-        if payload.get("date_min"):
-            date_min_values.append(payload["date_min"])
-        if payload.get("date_max"):
-            date_max_values.append(payload["date_max"])
-        if effective_validation_status != "PASS":
-            failed.append(data_id)
-    status = "PASS" if not missing and not invalid and not failed else "FAIL"
-    payload = {
-        "logical_layer": logical_layer,
-        "dataset_count": len(datasets),
-        "datasets": datasets,
-        "total_rows": total_rows,
-        "date_min": min(date_min_values) if date_min_values else None,
-        "date_max": max(date_max_values) if date_max_values else None,
-        "missing_dataset_manifests": missing,
-        "invalid_dataset_manifests": invalid,
-        "failed_dataset_validations": failed,
-        "layer_validation_status": status,
-        "created_at": datetime.now(UTC)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z"),
-    }
-    return payload
-
-
-def build_run_data_summary(
-    *,
-    layer_summaries: tuple[dict[str, Any], ...],
-) -> dict[str, Any]:
-    layers = [dict(layer) for layer in layer_summaries]
-    failed: list[str] = []
-    for layer in layers:
-        logical_layer = layer.get("logical_layer")
-        if type(logical_layer) is not str or not logical_layer:
-            raise ValueError("run_data_summary_layer_invalid")
-        status = require_status(layer.get("layer_validation_status"))
-        if status != "PASS":
-            failed.append(logical_layer)
-    payload = {
-        "layer_count": len(layers),
-        "layers": layers,
-        "run_validation_status": "PASS" if not failed else "FAIL",
-        "failed_layers": failed,
-        "created_at": datetime.now(UTC)
-        .replace(microsecond=0)
-        .isoformat()
-        .replace("+00:00", "Z"),
-    }
-    return payload
 
 
 def _require_schema_id(payload: object) -> None:

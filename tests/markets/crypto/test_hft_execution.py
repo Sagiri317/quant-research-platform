@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 
+import numpy as np
+import pandas as pd
 import pytest
 
 import quant_research_platform.markets.implementations.crypto.execution as execution
@@ -42,6 +45,51 @@ from tests.helpers.binance_hft import (
     with_test_resource_policy,
 )
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
+    fills = []
+    with runtime_resource_policy_scope() as policy:
+        calibration = execution.MakerCalibration(
+            np.array([1.0]),
+            np.array([0.0]),
+            np.array([[0.0, 400_000_000.0, 1.0]]),
+            resource_policy=policy,
+        )
+        try:
+            result = _simulate_maker(
+                [_state(stamp) for stamp in (0, 100, 200, 300, 400, 500, 600, 700)],
+                [
+                    _trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)
+                    for stamp, quantity in ((100, "1"), (350, "2"), (650, "1"))
+                ],
+                [
+                    {
+                        **_quote(stamp, book_segment_id="s1"),
+                        "fold_id": "fold",
+                        "price_prediction": 0.0,
+                        "proxy_prediction": 1.0,
+                    }
+                    for stamp in (0, 200)
+                ],
+                config=replace(
+                    _maker_config(), max_position=1.0, maker_fee_bps=0.0, latency_ms=0
+                ),
+                observed_coverage={"s1": (0, 1_000_000_000)},
+                trade_coverage={"trade-connection-1": (0, 1_000_000_000)},
+                resource_policy=policy,
+                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_forecasts=(FundingForecast(0, 1_000_000_000, ()),),
+                calibrations={"fold": {"buy": calibration, "sell": calibration}},
+                on_fill=fills.append,
+            )
+        finally:
+            calibration.close()
+        assert result["created_orders"] == 4
+        assert [fill["timestamp_ms"] for fill in fills] == [650]
+        assert policy.used_memory_bytes == 0
 
 
 def _state(
@@ -134,6 +182,70 @@ def _maker_config() -> MakerConfig:
 
 simulate_taker = with_test_resource_policy(_simulate_taker)
 simulate_maker = with_test_resource_policy(_simulate_maker)
+
+
+@pytest.mark.parametrize(
+    "wrong_identity", (None, "book_segment_id", "trade_connection_id")
+)
+def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) -> None:
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _paired_validation,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer,
+    )
+
+    frames = {
+        symbol: pd.DataFrame(
+            [
+                {
+                    "timestamp": pd.Timestamp(0),
+                    "asset_id": asset,
+                    "segment_id": "s1:trade-connection-1",
+                    "book_segment_id": "s1",
+                    "trade_connection_id": "trade-connection-1",
+                    "prediction_score": 1.0,
+                    "label": 0.0,
+                    "label_available_at": pd.Timestamp(100_000_000),
+                }
+            ]
+        )
+        for symbol, asset in (("BTCUSDT", "btc_usdt"), ("ETHUSDT", "eth_usdt"))
+    }
+    panel = pd.concat(
+        producer._common_symbol_panel_frames(
+            {symbol: iter((frame,)) for symbol, frame in frames.items()},
+            columns=tuple(frames["BTCUSDT"].columns),
+            batch_rows=2,
+        ),
+        ignore_index=True,
+    )
+    assert panel["segment_id"].tolist() == ["s1:trade-connection-1:common@0"] * 2
+    if wrong_identity is not None:
+        panel[wrong_identity] = "wrong-raw-identity"
+
+    class ValidationArtifact:
+        def validation_chunks(self, *, fold_id, model_id):
+            yield panel
+
+    quotes = list(_paired_validation(ValidationArtifact(), "fold", "btc_usdt"))
+    assert len(quotes) == 1
+    assert "segment_id" not in quotes[0]
+    fills = []
+    result = simulate_maker(
+        [_state(0), _state(200)],
+        [_trade(50, price="99.4", quantity="0.1", maker_buyer=True)],
+        quotes,
+        config=_maker_config(),
+        observed_coverage={"s1": _coverage(0, 201)},
+        trade_coverage={"trade-connection-1": _coverage(0, 201)},
+        on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+    )
+    assert len(fills) == (1 if wrong_identity is None else 0)
+    assert result["created_orders"] == (2 if wrong_identity is None else 0)
 
 
 def test_market_event_first_trade_failure_releases_first_book_and_children() -> None:

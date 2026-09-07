@@ -41,7 +41,10 @@ from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    native_filesystem_path,
+    require_unaliased_path,
+)
 from quant_research_platform.storage.parquet import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _parquet_row_group_footer_upper_bound,
@@ -419,7 +422,7 @@ def write_parquet(
             payload_bytes * 2,
         ),
     )
-    final_path.parent.mkdir(parents=True, exist_ok=True)
+    Path(native_filesystem_path(final_path.parent)).mkdir(parents=True, exist_ok=True)
     require_unaliased_path(final_path, error="invalid_output_write_path")
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])

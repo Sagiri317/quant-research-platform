@@ -5,8 +5,11 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.sources.reference import interim
 from quant_research_platform.sources.reference.a_share_fees import (
     FEE_CSV_COLUMNS,
     load_a_share_fee_source,
@@ -22,9 +25,9 @@ from quant_research_platform.storage.manifests import read_dataset_manifest_evid
 from quant_research_platform.workflows import research
 
 
-def _write_reference_root(root: Path) -> Path:
+def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
     schedule_root = root / "reference" / "a_share_fee_schedule"
-    schedule_root.mkdir(parents=True)
+    schedule_root.mkdir(parents=True, exist_ok=True)
     csv_path = schedule_root / A_SHARE_FEE_CSV_NAME
     rows = [
         _row(
@@ -33,7 +36,7 @@ def _write_reference_root(root: Path) -> Path:
             "2025-12-31",
             "沪深",
             "买入+卖出",
-            0.0003,
+            commission,
         ),
         _row(
             "TRANSFER_FEE",
@@ -188,3 +191,90 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
         third["target_results"][0]["instance_identity"]
         != first_target["instance_identity"]
     )
+
+
+@pytest.mark.parametrize("mutation", ("planned", "loaded", "staged"))
+@pytest.mark.parametrize("existing_target", (False, True))
+def test_fee_source_identity_race_preserves_old_good(
+    tmp_path, monkeypatch, mutation, existing_target
+):
+    raw_root = _write_reference_root(tmp_path / "raw")
+    layout = StorageLayout(project_root=tmp_path)
+    built = research.data_materialize(
+        profile=research_profile(),
+        layout=layout,
+        raw_root=raw_root,
+        start_date=None,
+        end_date=None,
+        data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
+    )
+    identity = built["target_results"][0]["instance_identity"]
+    root = layout.instance_root(
+        layout.interim_data_root("reference", A_SHARE_FEE_SCHEDULE_DATA_ID), identity
+    )
+    metadata = {
+        "common_manifest": read_dataset_manifest_evidence(root)["common_manifest"]
+    }
+    old_good = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    target = (
+        root
+        if existing_target
+        else StorageLayout(tmp_path / "candidate").interim_data_root(
+            "reference", A_SHARE_FEE_SCHEDULE_DATA_ID
+        )
+    )
+    target_layout = layout.with_target_roots({A_SHARE_FEE_SCHEDULE_DATA_ID: target})
+    target.parent.mkdir(parents=True, exist_ok=True)
+    unrelated = target.parent / "unrelated.txt"
+    unrelated.write_text("keep", encoding="utf-8")
+    previous_members = set(target.parent.iterdir())
+    if mutation == "planned":
+        _write_reference_root(raw_root, commission=0.0004)
+    elif mutation == "loaded":
+        original = interim.load_a_share_fee_source
+        calls = 0
+
+        def load(**kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                _write_reference_root(raw_root, commission=0.0004)
+            return original(**kwargs)
+
+        monkeypatch.setattr(interim, "load_a_share_fee_source", load)
+    else:
+        original_frame = interim._frame_from_rows
+
+        def frame(rows):
+            value = original_frame(rows)
+            _write_reference_root(raw_root, commission=0.0004)
+            return value
+
+        monkeypatch.setattr(interim, "_frame_from_rows", frame)
+    with runtime_resource_policy_scope() as policy:
+        expected_error = (
+            "dataset_exists"
+            if existing_target and mutation == "staged"
+            else "reference_raw_identity_changed"
+        )
+        with pytest.raises(ValueError, match=expected_error):
+            interim.materialize_interim_data(
+                layout=target_layout,
+                raw_root=raw_root / "reference",
+                instance_metadata=metadata,
+                resource_policy=policy,
+            )
+        assert policy.used_memory_bytes == 0
+    assert {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    } == old_good
+    assert set(target.parent.iterdir()) == previous_members
+    assert unrelated.read_text(encoding="utf-8") == "keep"
+    if not existing_target:
+        assert not target.exists()

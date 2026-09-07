@@ -42,9 +42,6 @@ from quant_research_platform.storage.datasets.inventory import (
     DatasetInventoryPaths,
     DatasetSessionInventory,
 )
-from quant_research_platform.storage.datasets.manifest_validation import (
-    manifest_has_runtime_metadata,
-)
 from quant_research_platform.storage.datasets.paths import (
     format_year_partition_label,
     parse_year_partition_label,
@@ -53,6 +50,7 @@ from quant_research_platform.storage.datasets.paths import (
 )
 from quant_research_platform.storage.datasets.schema import (
     logical_dtype_metadata_bytes,
+    manifest_has_runtime_metadata,
     merge_logical_dtype_payloads,
     pandas_dtype_overrides_from_logical_payload,
     parse_logical_dtype_metadata,
@@ -61,6 +59,7 @@ from quant_research_platform.storage.datasets.schema import (
     validate_dataset_manifest_consumable,
     validate_dataset_manifest_payload,
     validate_dataset_spec_payload,
+    validate_persisted_logical_schema,
 )
 from quant_research_platform.storage.datasets.types import (
     DatasetReadMode,
@@ -222,9 +221,15 @@ class DatasetSession:
     def filtered_view(self, time_window: TimeWindow) -> Iterator[DatasetSession]:
         if current_runtime_resource_policy() is not self.resource_policy:
             raise ValueError("dataset_session_resource_policy_mismatch")
-        parquet_filters = parquet_filters_for_time_window(
-            timestamp_column=self.timestamp_column,
-            time_window=time_window,
+        parquet_filters = (
+            *(self.parquet_filters or ()),
+            *(
+                parquet_filters_for_time_window(
+                    timestamp_column=self.timestamp_column,
+                    time_window=time_window,
+                )
+                or ()
+            ),
         )
         selection: int | None = None
         spec = self.spec
@@ -253,6 +258,16 @@ class DatasetSession:
             path_selection=selection if selection is not None else self.path_selection,
             time_window=time_window,
             parquet_filters=parquet_filters,
+            physical_columns=tuple(
+                dict.fromkeys(
+                    (
+                        *self.physical_columns,
+                        *read_columns_for_time_window(
+                            self.logical_columns, spec=spec, time_window=time_window
+                        ),
+                    )
+                )
+            ),
             owns_inventory=False,
             owns_lease=False,
         )
@@ -348,7 +363,6 @@ def read_dataset(
                 1,
                 context.resource_policy.operation_headroom_bytes,
             ),
-            materialized_budget_bytes=context.resource_policy.memory_budget_bytes,
         )
 
 
@@ -399,13 +413,13 @@ def _materialize_dataset_session(
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
     configured_budget = _validated_target_chunk_bytes(
-        context.resource_policy.memory_budget_bytes
+        max(1, context.resource_policy.working_set_headroom_bytes)
         if materialized_budget_bytes is None
         else materialized_budget_bytes
     )
     materialized_budget = min(
         configured_budget,
-        context.resource_policy.operation_headroom_bytes,
+        context.resource_policy.working_set_headroom_bytes,
     )
     if materialized_budget <= 0:
         raise DatasetReadCapacityExceeded(
@@ -432,6 +446,9 @@ def _materialize_dataset_session(
             string_bytes=string_bytes,
         )
         + object_bytes
+    )
+    materialized_budget = min(
+        configured_budget, context.resource_policy.working_set_headroom_bytes
     )
     if required_payload_bytes > materialized_budget:
         raise DatasetReadCapacityExceeded(
@@ -1096,6 +1113,7 @@ def _build_dataset_session(
         if physical_schema_from_schema(metadata.schema) != schema:
             raise ValueError("dataset_schema_mismatch")
         current_dtypes = parse_logical_dtype_metadata(metadata.logical_dtype_payload)
+        validate_persisted_logical_schema(metadata.schema, current_dtypes)
         logical_dtypes = (
             current_dtypes
             if logical_dtypes is None
@@ -1427,7 +1445,7 @@ def iter_declared_parquet_member_batches(
         fixed_operation_headroom = (
             operation_headroom_bytes
             if operation_headroom_bytes is not None
-            else policy.operation_headroom_bytes
+            else policy.working_set_headroom_bytes
         )
 
         def current_operation_headroom(
@@ -1436,7 +1454,7 @@ def iter_declared_parquet_member_batches(
         ) -> int:
             return min(
                 maximum,
-                active_policy.operation_headroom_bytes,
+                active_policy.working_set_headroom_bytes,
             )
 
         live_operation_headroom = current_operation_headroom
@@ -1494,7 +1512,7 @@ def _iter_dataset_file_batches(
     """Yield deterministic file batches after Arrow-level bounded conversion."""
 
     target_bytes = _validated_target_chunk_bytes(target_chunk_bytes)
-    policy_available = context.resource_policy.operation_headroom_bytes
+    policy_available = context.resource_policy.working_set_headroom_bytes
     if operation_headroom_bytes is None:
         operation_headroom = policy_available
     else:
@@ -1515,12 +1533,9 @@ def _iter_dataset_file_batches(
     previous_output_bytes = [0]
 
     def current_operation_headroom() -> int:
-        current = (
-            min(
-                operation_headroom,
-                context.resource_policy.operation_headroom_bytes,
-            )
-            - previous_output_bytes[0]
+        current = min(
+            operation_headroom,
+            context.resource_policy.working_set_headroom_bytes,
         )
         if current <= 0:
             raise DatasetReadCapacityExceeded(
@@ -1834,7 +1849,8 @@ def _empty_frame(
         pa.RecordBatch.from_arrays(
             [pa.array([], type=field.type) for field in selected],
             schema=selected,
-        )
+        ),
+        dtype_overrides=overrides,
     )
     output = frame.astype(overrides) if overrides else frame
     return output
@@ -1946,7 +1962,7 @@ def _arrow_batch_to_bounded_pandas(
                     )
                 )
             arrow_slice = batch.slice(start, stop - start)
-            frame = _arrow_slice_to_pandas(arrow_slice)
+            frame = _arrow_slice_to_pandas(arrow_slice, dtype_overrides=overrides)
             frame_bytes = pandas_frame_payload_bytes(frame)
             if overrides:
                 ordinary_overrides = {
@@ -1994,8 +2010,47 @@ def _arrow_batch_to_bounded_pandas(
         start = stop
 
 
-def _arrow_slice_to_pandas(arrow_slice: pa.RecordBatch) -> pd.DataFrame:
-    return arrow_slice.to_pandas(use_threads=False)
+def _arrow_slice_to_pandas(
+    arrow_slice: pa.RecordBatch,
+    *,
+    dtype_overrides: Mapping[str, object] | None = None,
+) -> pd.DataFrame:
+    native_types = set()
+    for name, dtype in (dtype_overrides or {}).items():
+        dtype = pd.api.types.pandas_dtype(dtype)
+        data_type = arrow_slice.schema.field(name).type
+        if pa.types.is_timestamp(data_type) and pd.api.types.is_datetime64_any_dtype(
+            dtype
+        ):
+            expected = pa.Array.from_pandas(pd.Series([], dtype=dtype)).type
+            if data_type != expected:
+                try:
+                    values = arrow_slice.column(name).cast(expected, safe=True)
+                except (pa.ArrowInvalid, pa.ArrowNotImplementedError):
+                    raise ValueError("dataset_logical_dtype_mismatch") from None
+                arrow_slice = arrow_slice.set_column(
+                    arrow_slice.schema.get_field_index(name),
+                    name,
+                    values,
+                )
+        if pa.types.is_integer(data_type) or pa.types.is_boolean(data_type):
+            native_types.add(data_type)
+        if (
+            isinstance(dtype, np.dtype)
+            and dtype.kind in "biu"
+            and arrow_slice.column(name).null_count
+        ):
+            raise ValueError("dataset_nonnullable_value_missing")
+    return arrow_slice.to_pandas(
+        use_threads=False,
+        types_mapper=(
+            lambda data_type: (
+                pd.ArrowDtype(data_type) if data_type in native_types else None
+            )
+        )
+        if native_types
+        else None,
+    )
 
 
 def iter_bounded_frame_chunks(

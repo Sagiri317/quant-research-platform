@@ -8,10 +8,47 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
+    _apply_suspension_semantics,
     compute_market_panel,
 )
 from quant_research_platform.research.labels.engine import calculate_labels_for_panel
 from quant_research_platform.research.protocols.a_share import label_definitions
+
+
+@pytest.mark.parametrize("has_raw_history", [False, True])
+def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
+    has_raw_history,
+) -> None:
+    from quant_research_platform.research.datasets.assembler import _a_share_eligibility
+
+    frame = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=3),
+            "filling_flag": [0, 0, 1],
+            "close": [10.0 if has_raw_history else np.nan, np.nan, np.nan],
+            "adj_close": [100.0, 110.0, np.nan],
+            "open": [10.0 if has_raw_history else np.nan, np.nan, np.nan],
+            "high": [10.0 if has_raw_history else np.nan, np.nan, np.nan],
+            "low": [10.0 if has_raw_history else np.nan, np.nan, np.nan],
+            "adj_open": [100.0, np.nan, np.nan],
+            "period_return": [0.0, 0.07, np.nan],
+            "volume": 100.0,
+            "amount": 1000.0,
+            "float_market_cap": 1000.0,
+            "market_type": 1,
+            "is_st": False,
+            "is_pt": False,
+            "listing_age_trading_days": 300,
+        }
+    )
+    actual = _apply_suspension_semantics(frame)
+    assert actual.loc[1, ["close", "open", "high", "low", "adj_open"]].isna().all()
+    assert not _a_share_eligibility(actual, "pv_all").iloc[1]
+    assert actual.loc[1, "period_return"] == 0.07
+    assert actual.loc[2, "adj_close"] == actual.loc[2, "adj_open"] == 110.0
+    raw = actual.loc[2, ["close", "open", "high", "low"]]
+    assert raw.eq(10.0).all() if has_raw_history else raw.isna().all()
 
 
 def test_market_panel_keeps_suspension_and_excludes_holiday_fill() -> None:

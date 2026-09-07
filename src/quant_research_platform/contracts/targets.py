@@ -418,6 +418,7 @@ class ResearchRunRecord:
     operation_evidence: Mapping[str, object]
     failure_reason: str | None = None
     trial_ledgers: tuple[Mapping[str, str], ...] = ()
+    holdout_evidence: Mapping[str, object] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         validate_run_id(self.run_id)
@@ -508,11 +509,50 @@ class ResearchRunRecord:
             raise ValueError("research_run_protocol_request_mismatch")
         object.__setattr__(self, "protocol", MappingProxyType(protocol))
         object.__setattr__(self, "research_window", MappingProxyType(window))
+        evidence = bounded_qrp_json_object_snapshot(
+            dict(self.holdout_evidence), max_bytes=_MAX_RESEARCH_RUN_RECORD_BYTES
+        )
+        if window["access"] == "holdout" and not evidence:
+            raise ValueError("research_run_holdout_evidence_invalid")
+        if evidence:
+            if (
+                window["access"] != "holdout"
+                or set(evidence) != {"qualification", "prior_runs"}
+                or evidence["qualification"]
+                not in {
+                    "HOLDOUT_FIRST_EVIDENCE",
+                    "REUSE",
+                    "POST_HOLDOUT_CORRECTED",
+                    "POST_HOLDOUT_ADDITIONAL_EVIDENCE",
+                }
+                or type(evidence["prior_runs"]) is not list
+            ):
+                raise ValueError("research_run_holdout_evidence_invalid")
+            for reference in evidence["prior_runs"]:
+                if type(reference) is not dict or set(reference) != {
+                    "run_id",
+                    "identity",
+                }:
+                    raise ValueError("research_run_holdout_evidence_invalid")
+                validate_run_id(reference["run_id"])
+                _require_hash(
+                    reference["identity"], "research_run_holdout_evidence_invalid"
+                )
+            prior_ids = [item["run_id"] for item in evidence["prior_runs"]]
+            if (
+                len(prior_ids) != len(set(prior_ids))
+                or self.run_id in prior_ids
+                or (evidence["qualification"] == "HOLDOUT_FIRST_EVIDENCE")
+                != (not prior_ids)
+            ):
+                raise ValueError("research_run_holdout_evidence_invalid")
+        object.__setattr__(self, "holdout_evidence", MappingProxyType(evidence))
 
     def payload(self) -> dict[str, object]:
         return {
             "schema_id": "qrp-research-run",
             "trial_ledgers": [dict(reference) for reference in self.trial_ledgers],
+            "holdout_evidence": dict(self.holdout_evidence),
             "run_id": self.run_id,
             "profile_id": self.profile_id,
             "scenario_id": self.scenario_id,
@@ -532,6 +572,7 @@ def research_run_record_from_payload(value: object) -> ResearchRunRecord:
     if type(value) is not dict or set(value) != {
         "schema_id",
         "trial_ledgers",
+        "holdout_evidence",
         "run_id",
         "profile_id",
         "scenario_id",
@@ -590,6 +631,7 @@ def research_run_record_from_payload(value: object) -> ResearchRunRecord:
             status=value["status"],
             failure_reason=value["failure_reason"],
             trial_ledgers=tuple(value["trial_ledgers"]),
+            holdout_evidence=value["holdout_evidence"],
             operation_evidence=value["operation_evidence"],
         )
     except (KeyError, TypeError, ValueError) as exc:

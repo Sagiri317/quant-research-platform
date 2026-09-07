@@ -12,6 +12,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from quant_research_platform.storage.identity import native_filesystem_path
+
 
 @contextmanager
 def handle_preserving_primary(handle: Any) -> Iterator[Any]:
@@ -37,7 +39,7 @@ def move_path_no_replace(source: Path, target: Path) -> None:
     source = Path(source)
     target = Path(target)
     if os.name == "nt":
-        os.rename(_windows_extended_path(source), _windows_extended_path(target))
+        os.rename(native_filesystem_path(source), native_filesystem_path(target))
         return
     if not sys.platform.startswith("linux"):
         raise OSError(errno.ENOTSUP, "no-replace move is unsupported", target)
@@ -61,15 +63,6 @@ def move_path_no_replace(source: Path, target: Path) -> None:
     raise OSError(error_number, os.strerror(error_number), target)
 
 
-def _windows_extended_path(path: Path) -> str:
-    absolute = os.path.abspath(path)
-    if absolute.startswith("\\\\?\\"):
-        return absolute
-    if absolute.startswith("\\\\"):
-        return f"\\\\?\\UNC\\{absolute[2:]}"
-    return f"\\\\?\\{absolute}"
-
-
 def remove_owned_scratch(
     path: Path,
     *,
@@ -77,7 +70,7 @@ def remove_owned_scratch(
     | None = None,
 ) -> None:
     path = Path(path)
-    target: str | Path = _windows_extended_path(path) if os.name == "nt" else path
+    target = native_filesystem_path(path)
     try:
         current = os.lstat(target)
     except FileNotFoundError:
@@ -96,7 +89,9 @@ def open_owned_scratch_file(
     """Create and claim one exclusive ordinary scratch file."""
 
     path = Path(path)
-    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
+    descriptor = os.open(
+        native_filesystem_path(path), os.O_RDWR | os.O_CREAT | os.O_EXCL
+    )
     try:
         if encoding is None:
             handle = os.fdopen(descriptor, "w+b")

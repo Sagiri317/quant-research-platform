@@ -155,6 +155,7 @@ class RuntimeResourcePolicy:
     state: str
     _lock: _MachineLock
     _ledger_lock: threading.RLock
+    _scope_thread: threading.Thread
     _leases: set[MemoryLease] = field(default_factory=set, repr=False)
 
     def __new__(cls) -> RuntimeResourcePolicy:
@@ -180,7 +181,7 @@ class RuntimeResourcePolicy:
             if planning > 0:
                 return planning
             if self.explicit_memory_cap_bytes is None:
-                return self.memory_budget_bytes
+                return max(0, self.captured_available_memory_bytes - used)
             return max(
                 0,
                 min(
@@ -188,6 +189,23 @@ class RuntimeResourcePolicy:
                     self.explicit_memory_cap_bytes - used,
                 ),
             )
+
+    @property
+    def working_set_headroom_bytes(self) -> int:
+        """Return captured capacity remaining after all current reservations."""
+        with self._ledger_lock:
+            available = self.captured_available_memory_bytes
+            if self.explicit_memory_cap_bytes is not None:
+                available = min(available, self.explicit_memory_cap_bytes)
+            return available - self._used_memory_bytes()
+
+    def require_working_set(self, additional_bytes: int, *, error: str) -> None:
+        """Reject an indivisible new workspace beyond the captured free capacity."""
+
+        with self._ledger_lock:
+            self._require_active_root()
+            if additional_bytes > self.working_set_headroom_bytes:
+                raise ValueError(error)
 
     def lease(self, owner: str, reserved_bytes: int) -> MemoryLease:
         with self._ledger_lock:
@@ -277,7 +295,10 @@ _PROCESS_POISONED = False
 
 
 def current_runtime_resource_policy() -> RuntimeResourcePolicy | None:
-    return _ACTIVE_RUNTIME_RESOURCE_POLICY
+    active = _ACTIVE_RUNTIME_RESOURCE_POLICY
+    if active is not None and active._scope_thread is threading.current_thread():
+        return active
+    return None
 
 
 @contextmanager
@@ -288,6 +309,8 @@ def runtime_resource_policy_scope(
 ) -> Iterator[RuntimeResourcePolicy]:
     global _ACTIVE_RUNTIME_RESOURCE_POLICY
     active = current_runtime_resource_policy()
+    if active is None and _ACTIVE_RUNTIME_RESOURCE_POLICY is not None:
+        raise RuntimeError("runtime_data_scale_lock_busy")
     owns_root = active is None
     if policy is not None:
         if explicit_cap_bytes is not None:
@@ -313,6 +336,7 @@ def runtime_resource_policy_scope(
     if policy.state != "ACTIVE":
         raise RuntimeError("runtime_resource_policy_not_active")
     if active is None:
+        object.__setattr__(policy, "_scope_thread", threading.current_thread())
         _ACTIVE_RUNTIME_RESOURCE_POLICY = policy
     try:
         yield policy
@@ -422,6 +446,7 @@ def _capture_runtime_resource_policy(
         object.__setattr__(policy, "state", "ACTIVE")
         object.__setattr__(policy, "_lock", lock)
         object.__setattr__(policy, "_ledger_lock", threading.RLock())
+        object.__setattr__(policy, "_scope_thread", threading.current_thread())
         object.__setattr__(policy, "_leases", set())
         return policy
     except BaseException as primary:

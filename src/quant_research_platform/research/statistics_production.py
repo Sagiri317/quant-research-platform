@@ -107,7 +107,9 @@ def build_a_share_statistics_tables(
         raise ValueError("statistics_core_factors_missing")
     model_entries = {
         (item["quarter_id"], item["family_id"]): item
-        for item in persisted_model.quarterly_models
+        for item in persisted_model.prediction_models(
+            time_window, access_window=protocol_manifest["access_window"]
+        )
     }
     family_ids = tuple(
         persisted_model.quarterly_selections[
@@ -156,6 +158,7 @@ def build_a_share_statistics_tables(
                 dataset_id=dataset_id,
                 time_window=time_window,
                 columns=read_columns,
+                access_window=protocol_manifest["access_window"],
             ),
             timestamp_column="timestamp",
             resource_policy=resource_policy,
@@ -182,7 +185,10 @@ def build_a_share_statistics_tables(
                         )
                         timestamp = pd.Timestamp(session["timestamp"].iloc[0])
                         quarter_id = str(timestamp.to_period("Q"))
-                        selection = persisted_model.quarterly_selections[quarter_id]
+                        source_quarter = model_entries[(quarter_id, family_ids[0])][
+                            "source_quarter"
+                        ]
+                        selection = persisted_model.quarterly_selections[source_quarter]
                         for family_id in family_ids:
                             entry = model_entries[(quarter_id, family_id)]
                             metadata = entry["model_metadata"]

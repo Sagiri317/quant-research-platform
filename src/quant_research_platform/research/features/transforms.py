@@ -293,8 +293,7 @@ def neutralize_cross_section(
         cross = frame.loc[positions]
         industry = cross[industry_column]
         valid_industry = industry.notna()
-        dummies = pd.get_dummies(industry, dtype="float64").loc[valid_industry]
-        if dummies.empty:
+        if not valid_industry.any():
             continue
         for factor in factor_columns:
             values = strict_finite_numeric_series(
@@ -305,18 +304,21 @@ def neutralize_cross_section(
             valid = values.notna()
             if factor != size_column and size_column not in cross:
                 raise ValueError("neutralization_size_column_required")
-            if factor == size_column:
-                design = dummies.loc[valid]
-            else:
+            if factor != size_column:
                 size = strict_finite_numeric_series(
                     cross.loc[valid_industry, size_column],
                     error="invalid_neutralization_size",
                     allow_null=True,
                 )
                 valid &= size.notna()
+            design = pd.get_dummies(
+                industry.loc[valid_industry].loc[valid], dtype="float64"
+            )
+            design = design.loc[:, design.any(axis=0)]
+            if factor != size_column:
                 design = pd.concat(
                     [
-                        dummies.loc[valid],
+                        design,
                         (size.loc[valid] - size.loc[valid].mean()).rename("size"),
                     ],
                     axis=1,

@@ -86,3 +86,48 @@ def test_model_selection_rejects_nonfinite_values() -> None:
             label_column="label",
             prediction_column="prediction",
         )
+
+
+@pytest.mark.parametrize("residual", [1e155, 1e-155, 0.0, 2.0])
+def test_model_selection_mse_scales_before_squaring(residual: float) -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=100),
+            "asset_id": "asset",
+            "label": 0.0,
+            "prediction": [residual, *([0.0] * 99)],
+        }
+    )
+    whole = evaluate_model_trial_metrics_from_chunks(
+        (frame,), model_id="model", label_column="label", prediction_column="prediction"
+    )
+    split = evaluate_model_trial_metrics_from_chunks(
+        (frame.iloc[:1], frame.iloc[1:]),
+        model_id="model",
+        label_column="label",
+        prediction_column="prediction",
+    )
+    assert whole == split
+    assert whole["validation_mse"] == pytest.approx(
+        (residual / 10) ** 2, rel=1e-12, abs=0.0
+    )
+    assert whole["validation_ic"] is None
+    assert whole["validation_rankic"] is None
+
+
+def test_model_selection_mse_rejects_unrepresentable_final_value() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"]),
+            "asset_id": "a",
+            "label": 0.0,
+            "prediction": 1e155,
+        }
+    )
+    with pytest.raises(ValueError, match="model_selection_mse_unrepresentable"):
+        evaluate_model_trial_metrics_from_chunks(
+            (frame,),
+            model_id="model",
+            label_column="label",
+            prediction_column="prediction",
+        )

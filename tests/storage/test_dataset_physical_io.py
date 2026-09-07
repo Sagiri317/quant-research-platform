@@ -543,37 +543,6 @@ def test_physical_membership_releases_search_temporaries_after_publication(
     assert references and all(reference() is None for reference in references)
 
 
-def test_physical_multi_filter_admits_each_current_filtered_batch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    batch = pa.RecordBatch.from_arrays(
-        [pa.array([1, 2, 3, 4], type=pa.int64())],
-        names=["value"],
-    )
-    observed: list[weakref.ReferenceType[pa.RecordBatch]] = []
-    original = dataset_physical._require_filter_batch_capacity
-
-    def observe(current: pa.RecordBatch, **kwargs) -> None:  # noqa: ANN003
-        observed.append(weakref.ref(current))
-        original(current, **kwargs)
-
-    monkeypatch.setattr(
-        dataset_physical,
-        "_require_filter_batch_capacity",
-        observe,
-    )
-
-    filtered = dataset_physical._filter_arrow_batch(
-        batch,
-        [("value", ">=", 2), ("value", "<=", 3)],
-        operation_headroom_bytes=1024,
-    )
-
-    assert observed[0]() is batch
-    assert observed[1]() is None
-    assert filtered.column(0).to_pylist() == [2, 3]
-
-
 def test_physical_owner_releases_raw_batch_before_bounded_yield(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

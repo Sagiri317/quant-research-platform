@@ -11,6 +11,7 @@ import pytest
 import quant_research_platform.sources.binance.raw_exports as raw_exports
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
@@ -461,6 +462,67 @@ def test_binance_raw_exports_admits_valid_large_depth_record(tmp_path: Path) -> 
     assert len(rows) == 1
     assert len(rows[0]["payload"]["bids"]) == 500
     assert len(rows[0]["payload"]["asks"]) == 500
+
+
+@pytest.mark.parametrize("available_bytes", [1024**2, 2 * 1024**2])
+def test_binance_record_admission_uses_captured_capacity_before_growth_or_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, available_bytes: int
+) -> None:
+    path = tmp_path / "record.jsonl"
+    envelope = _envelope(data_kind="klines")
+    envelope["padding"] = "x" * 22000
+    _write_jsonl(path, envelope)
+    policy = capture_test_policy(available_memory_bytes=available_bytes)
+    calls = []
+    original_decode = raw_exports._loads_json
+    original_open = Path.open
+    original_grow = MemoryLease.grow
+
+    class Handle:
+        def __init__(self, raw):
+            self.raw = raw
+
+        def __getattr__(self, name):
+            return getattr(self.raw, name)
+
+        def read(self, size):
+            calls.append("read")
+            return self.raw.read(size)
+
+    def decode(*args, **kwargs):
+        calls.append("decode")
+        return original_decode(*args, **kwargs)
+
+    def open_file(candidate, *args, **kwargs):
+        raw = original_open(candidate, *args, **kwargs)
+        return Handle(raw) if candidate == path else raw
+
+    def grow(lease, additional_bytes):
+        calls.append("grow")
+        return original_grow(lease, additional_bytes)
+
+    monkeypatch.setattr(Path, "open", open_file)
+    monkeypatch.setattr(MemoryLease, "grow", grow)
+    monkeypatch.setattr(raw_exports, "_loads_json", decode)
+    with runtime_resource_policy_scope(policy):
+        if available_bytes == 1024**2:
+            with pytest.raises(
+                ValueError,
+                match="binance_raw_record_working_set_exceeds_task_memory_budget",
+            ):
+                tuple(_iter_test_raw_envelopes(path, resource_policy=policy))
+            assert calls == []
+        else:
+            assert (
+                raw_exports.json_record_working_set_bytes(path.stat().st_size)
+                + 64 * 1024
+                > policy.memory_budget_bytes
+            )
+            assert tuple(_iter_test_raw_envelopes(path, resource_policy=policy)) == (
+                envelope,
+            )
+            assert calls == ["grow", "read", "decode"]
+        assert policy.used_memory_bytes == 0
 
 
 def test_large_canonical_file_with_small_records_starts_from_scan_bound(

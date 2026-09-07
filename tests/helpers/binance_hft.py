@@ -157,7 +157,6 @@ def _quote(
     return {
         "timestamp_ms": timestamp_ms,
         "asset_id": "btc_usdt",
-        "segment_id": f"{book_segment_id}:{trade_connection_id}",
         "book_segment_id": book_segment_id,
         "trade_connection_id": trade_connection_id,
     }

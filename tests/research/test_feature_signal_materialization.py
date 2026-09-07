@@ -20,20 +20,22 @@ def test_winsorize_clips_by_timestamp_quantiles_instead_of_zscore() -> None:
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-02"]),
-            "mom_20d": [0.0, 10.0, 100.0],
+            "momentum_20d": [0.0, 10.0, 100.0],
         }
     )
     spec = FeatureTransformSpec(
-        transform_id="mom_20d_winsorized",
-        source_columns=("mom_20d",),
+        transform_id="momentum_20d_winsorized",
+        source_columns=("momentum_20d",),
         transform="winsorize",
-        output_columns=("mom_20d_winsorized",),
+        output_columns=("momentum_20d_winsorized",),
         winsorize_quantiles=(0.2, 0.8),
     )
 
     result = apply_feature_transforms(frame, (spec,))
 
-    assert result["mom_20d_winsorized"].tolist() == pytest.approx([4.0, 10.0, 64.0])
+    assert result["momentum_20d_winsorized"].tolist() == pytest.approx(
+        [4.0, 10.0, 64.0]
+    )
 
 
 def test_fillna_transform_names_apply_their_fill_policy() -> None:

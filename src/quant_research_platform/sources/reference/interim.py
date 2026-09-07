@@ -10,6 +10,9 @@ from types import MappingProxyType
 import pandas as pd
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
+from quant_research_platform.contracts.business_manifest import (
+    validate_business_manifest_envelope,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -27,6 +30,7 @@ from quant_research_platform.sources.reference.a_share_fees import (
     FeeSourceRow,
     load_a_share_fee_source,
 )
+from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -112,11 +116,29 @@ def materialize_interim_data(
     if type(data_ids) is not tuple or data_ids != (A_SHARE_FEE_SCHEDULE_DATA_ID,):
         raise ValueError("reference_interim_data_ids_invalid")
     with runtime_resource_policy_scope(resource_policy) as policy:
-        source = load_a_share_fee_source(
-            reference_root=Path(raw_root)
+        root = (
+            Path(raw_root)
             if raw_root is not None
             else layout.project_root / "data/raw" / str(SOURCE_ID)
         )
+        identity = source_content_identity(root, A_SHARE_FEE_SCHEDULE_DATA_ID)
+        if (
+            instance_metadata is not None
+            and COMMON_MANIFEST_METADATA_KEY in instance_metadata
+        ):
+            envelope = validate_business_manifest_envelope(
+                instance_metadata[COMMON_MANIFEST_METADATA_KEY]
+            )
+            if envelope["semantic_metadata"]["raw_content_identity"] != identity:
+                raise ValueError("reference_raw_identity_changed")
+        source = load_a_share_fee_source(reference_root=root)
+        if source.source_identity != identity:
+            raise ValueError("reference_raw_identity_changed")
+
+        def verify_source(_receipt):
+            if source_content_identity(root, A_SHARE_FEE_SCHEDULE_DATA_ID) != identity:
+                raise ValueError("reference_raw_identity_changed")
+
         spec = fee_schedule_spec()
         frame = _frame_from_rows(source.rows)
         artifact_root = layout.target_root(
@@ -130,6 +152,7 @@ def materialize_interim_data(
             resource_policy=policy,
             instance_metadata=instance_metadata,
             borrowed_input=True,
+            staged_validator=verify_source,
         )
         return ReferenceInterimImportResult(
             artifact_roots={spec.data_id: artifact_root},

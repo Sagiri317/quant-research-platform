@@ -109,6 +109,12 @@ def optimize_portfolio(
     benchmark = data["benchmark_weight"].to_numpy()
     if not np.isclose(current.sum(), 1.0) or not np.isclose(benchmark.sum(), 1.0):
         raise ValueError("optimizer_weight_sum_invalid")
+    valid_adv = np.isfinite(data["adv"]) & data["adv"].gt(0.0)
+    unavailable_trade_adv = ~valid_adv & (current != benchmark)
+    if cash_column is not None:
+        unavailable_trade_adv &= ~data[cash_column]
+    if unavailable_trade_adv.any():
+        raise ValueError("optimizer_trade_adv_unavailable")
     incomplete = (
         ~np.isfinite(data["expected_alpha"])
         | ~np.isfinite(data["specific_variance"])
@@ -119,8 +125,10 @@ def optimize_portfolio(
     )
     data["expected_alpha"] = data["expected_alpha"].where(~incomplete, 0.0)
     data["specific_variance"] = data["specific_variance"].where(~incomplete, 0.0)
-    data["adv"] = data["adv"].where(~incomplete, np.inf)
-    exposure = data.loc[:, columns].to_numpy(dtype="float64")
+    data["adv"] = data["adv"].where(valid_adv, np.inf)
+    exposure = (
+        data.loc[:, columns].where(~incomplete, 0.0, axis=0).to_numpy(dtype="float64")
+    )
     expected_alpha = data["expected_alpha"].to_numpy(dtype="float64")
     specific = data["specific_variance"].to_numpy(dtype="float64")
     adv = data["adv"].to_numpy(dtype="float64")

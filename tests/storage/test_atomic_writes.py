@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 import quant_research_platform.storage.atomic as atomic
+from quant_research_platform.storage import _scratch_ownership as scratch
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
@@ -12,6 +13,7 @@ from quant_research_platform.storage.atomic import (
     publish_no_replace,
 )
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
+from quant_research_platform.storage.identity import native_filesystem_path
 
 
 def test_atomic_directory_writer_failure_removes_only_operation_temp(
@@ -87,24 +89,31 @@ def test_atomic_directory_rejects_existing_target_without_overwrite(
     assert (final_root / "winner").read_text(encoding="utf-8") == "winner"
 
 
+@pytest.mark.parametrize("long_path", (False, True))
 def test_publish_no_replace_preserves_concurrent_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    long_path: bool,
 ) -> None:
+    if long_path:
+        tmp_path = tmp_path / ("long" * 25) / ("path" * 25)
+        Path(native_filesystem_path(tmp_path)).mkdir(parents=True)
     source = tmp_path / "candidate.tmp"
     target = tmp_path / "output.txt"
-    source.write_text("candidate", encoding="utf-8")
+    Path(native_filesystem_path(source)).write_text("candidate", encoding="utf-8")
 
     def race(_source_path: Path, target_path: Path) -> None:
-        target_path.write_text("winner", encoding="utf-8")
+        Path(native_filesystem_path(target_path)).write_text("winner", encoding="utf-8")
         raise FileExistsError(target_path)
 
     monkeypatch.setattr(atomic, "move_path_no_replace", race)
     with pytest.raises(OutputAlreadyExistsError):
         publish_no_replace(source, target)
 
-    assert source.read_text(encoding="utf-8") == "candidate"
-    assert target.read_text(encoding="utf-8") == "winner"
+    assert (
+        Path(native_filesystem_path(source)).read_text(encoding="utf-8") == "candidate"
+    )
+    assert Path(native_filesystem_path(target)).read_text(encoding="utf-8") == "winner"
 
 
 def test_publish_replace_preserves_old_good_until_candidate_wins(
@@ -181,3 +190,76 @@ def test_atomic_directory_publishes_writer_result(tmp_path: Path) -> None:
 
     assert atomic_write_directory(final_root, write) == "published"
     assert (final_root / "done.txt").read_text(encoding="utf-8") == "done"
+
+
+def test_long_scratch_and_existing_target_use_native_io(tmp_path):
+    parent = tmp_path / ("long" * 25) / ("path" * 25)
+    native_parent = Path(native_filesystem_path(parent))
+    native_parent.mkdir(parents=True)
+    existing = parent / "existing.txt"
+    Path(native_filesystem_path(existing)).write_text("old", encoding="utf-8")
+    with pytest.raises(OutputAlreadyExistsError):
+        atomic.reject_if_exists(existing)
+    candidate = parent / ".f-owned"
+    assert len(str(candidate)) > 260
+    with scratch.open_owned_scratch_file(candidate, encoding="utf-8") as handle:
+        handle.write("candidate")
+    assert (
+        Path(native_filesystem_path(candidate)).read_text(encoding="utf-8")
+        == "candidate"
+    )
+    scratch.remove_owned_scratch(candidate)
+    assert Path(native_filesystem_path(existing)).read_text(encoding="utf-8") == "old"
+
+
+@pytest.mark.parametrize("kind", ("file", "directory"))
+def test_atomic_long_paths_create_parents_keep_old_good_and_preserve_primary(
+    tmp_path, monkeypatch, kind
+):
+    parent = tmp_path / ("long" * 25) / ("path" * 25)
+    final = parent / kind
+    assert len(str(final)) > 260
+    if kind == "file":
+        assert atomic_write_text(final, "old") == final
+
+        def forbidden():
+            pytest.fail("existing_target_consumed_input")
+            yield "new"
+
+        with pytest.raises(OutputAlreadyExistsError):
+            atomic.atomic_write_chunks(final, forbidden())
+        assert Path(native_filesystem_path(final)).read_text(encoding="utf-8") == "old"
+    else:
+        atomic_write_directory(
+            final, lambda stage: atomic_write_text(stage / "value", "old")
+        )
+        with pytest.raises(OutputAlreadyExistsError):
+            atomic_write_directory(
+                final, lambda _stage: pytest.fail("existing_target_entered_writer")
+            )
+        assert (
+            Path(native_filesystem_path(final / "value")).read_text(encoding="utf-8")
+            == "old"
+        )
+    unrelated = parent / ".a-user"
+    Path(native_filesystem_path(unrelated)).mkdir()
+    primary = KeyboardInterrupt("writer_primary")
+    cleanup = atomic.remove_owned_scratch
+
+    def failing_cleanup(path):
+        cleanup(path)
+        raise OSError("cleanup_secondary")
+
+    def fail(stage):
+        atomic_write_text(stage / "partial", "partial")
+        raise primary
+
+    monkeypatch.setattr(atomic, "remove_owned_scratch", failing_cleanup)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        atomic_write_directory(parent / "failed", fail)
+    assert caught.value is primary
+    assert "atomic scratch cleanup also failed: OSError" in primary.__notes__
+    assert {path.name for path in Path(native_filesystem_path(parent)).iterdir()} == {
+        kind,
+        ".a-user",
+    }

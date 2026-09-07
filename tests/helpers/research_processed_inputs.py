@@ -4,9 +4,11 @@ from collections.abc import Mapping, Sequence
 
 import pandas as pd
 
-from quant_research_platform.catalog.fields import platform_entity_time_key
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
-from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.columns import (
+    PLATFORM_ENTITY_TIME_KEY,
+    ColumnRole,
+)
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
@@ -135,7 +137,7 @@ def _dummy_processed_catalog(
         _dummy_processed_spec(
             "base",
             ProcessedDataKind.PANEL,
-            platform_entity_time_key(),
+            PLATFORM_ENTITY_TIME_KEY,
         ),
         _dummy_processed_spec(
             "factors",
@@ -144,7 +146,7 @@ def _dummy_processed_catalog(
                 *(
                     ("market_id", "timestamp")
                     if missing_factor_key
-                    else platform_entity_time_key()
+                    else PLATFORM_ENTITY_TIME_KEY
                 ),
                 "factor_1",
                 *(("factor_2",) if include_extensions else ()),
@@ -153,14 +155,14 @@ def _dummy_processed_catalog(
             primary_key=(
                 ("market_id", "timestamp")
                 if missing_factor_key
-                else platform_entity_time_key()
+                else PLATFORM_ENTITY_TIME_KEY
             ),
         ),
         _dummy_processed_spec(
             "labels",
             ProcessedDataKind.LABEL,
             (
-                *platform_entity_time_key(),
+                *PLATFORM_ENTITY_TIME_KEY,
                 "label_1",
                 *(("label_2",) if include_extensions else ()),
             ),
@@ -169,14 +171,14 @@ def _dummy_processed_catalog(
         _dummy_processed_spec(
             "filters",
             ProcessedDataKind.ANNOTATION,
-            (*platform_entity_time_key(), "eligible"),
+            (*PLATFORM_ENTITY_TIME_KEY, "eligible"),
             role=ColumnRole.MASK,
         ),
         _dummy_processed_spec(
             "context",
             ProcessedDataKind.ANNOTATION,
             (
-                *platform_entity_time_key(),
+                *PLATFORM_ENTITY_TIME_KEY,
                 "context_1",
                 *(("context_2",) if include_extensions else ()),
                 *(("factor_1",) if duplicate_factor_context else ()),
@@ -193,7 +195,7 @@ def _processed_spec(
     market_id: MarketId,
     kind: ProcessedDataKind,
     column_roles: Mapping[str, ColumnRole],
-    primary_key: tuple[str, ...] = platform_entity_time_key(),
+    primary_key: tuple[str, ...] = PLATFORM_ENTITY_TIME_KEY,
 ) -> ProcessedDataSpec:
     return ProcessedDataSpec(
         data_id=data_id,
@@ -213,7 +215,7 @@ def _dummy_processed_spec(
     columns: tuple[str, ...],
     *,
     role: ColumnRole = ColumnRole.CONTEXT,
-    primary_key: tuple[str, ...] = platform_entity_time_key(),
+    primary_key: tuple[str, ...] = PLATFORM_ENTITY_TIME_KEY,
 ) -> ProcessedDataSpec:
     roles: dict[str, ColumnRole] = {}
     for column in columns:
@@ -260,7 +262,12 @@ def write_demo_processed_inputs(
         | {
             "demo_labels": labels.loc[
                 :,
-                ["market_id", "asset_id", "timestamp", DEMO_LABEL_COLUMN],
+                [
+                    "market_id",
+                    "asset_id",
+                    "timestamp",
+                    DEMO_LABEL_COLUMN,
+                ],
             ],
         },
     )

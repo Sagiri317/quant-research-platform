@@ -9,7 +9,7 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
-from itertools import islice
+from itertools import groupby, islice
 from pathlib import Path
 
 import pandas as pd
@@ -159,10 +159,10 @@ def _raw_requests(raw_root: Path, *, financial: bool):
             for name, _, value in (part.partition("="),)
         )
         fields = set(request.arguments[1].upper().split(","))
-        disclosure = _DISCLOSURE_INDICATORS.issubset(fields)
+        disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
         snapshot = (
             financial
-            and set(_INDICATORS).issubset(fields)
+            and bool(set(_INDICATORS).intersection(fields))
             and options.get("type", "1") in {"1", "3"}
         )
         if "reportdate" not in options or not (disclosure or snapshot):
@@ -199,25 +199,25 @@ def _encode(value: object) -> bytes:
     return json.dumps(value, ensure_ascii=True, separators=(",", ":")).encode()
 
 
-def _put(index, namespace, key, value):
+def _identity_payload_row(index, namespace, key, value):
     key, payload = _encode(key), _encode(value)
     old = index.identity_payload_value(namespace=namespace, payload=key)
     if old is not None:
         previous = json.loads(old)
         equal = (
             previous["values"] == value["values"]
-            if namespace == "snapshot"
+            if namespace in {"snapshot", "disclosure_field"}
             else previous == value
         )
         if not equal:
             error = ValueError(f"choice_{namespace}_conflict")
-            if namespace == "snapshot":
+            if namespace in {"snapshot", "disclosure_field"}:
                 identities = sorted(
                     (previous["request_identity"], value["request_identity"])
                 )
                 error.add_note(f"request_identities={identities}")
             raise error
-    index.add_identity_payloads(namespace=namespace, payloads=((key, payload),))
+    return namespace, key, payload
 
 
 def _get(index, namespace, key):
@@ -265,71 +265,112 @@ def _raw_index(raw_root, financial, policy):
         scratch_parent=raw_root.parent,
     )
     with policy.lease("source.choice.index", index.retained_memory_bytes), index:
-        for root, request, options, disclosure in _raw_requests(
-            raw_root, financial=financial
-        ):
-            period = options["reportdate"]
-            with read_choice_response(
-                root, request, resource_policy=policy
-            ) as response:
-                if not response["Data"]:
-                    continue
-                if len(response["Dates"]) != 1:
-                    raise ValueError("choice_financial_snapshot_dates_invalid")
-                fields = response["Indicators"]
-                for code, cells in response["Data"].items():
-                    if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
-                        raise ValueError("invalid_choice_asset_id")
-                    values = dict(zip(fields, cells, strict=True))
-                    pair = [code, period]
-                    if disclosure:
-                        first = [
-                            day
-                            for day in _dates(values["STMTACTDATE"])
-                            if day <= request.cutoff
-                        ]
-                        if first:
-                            _put(
-                                index,
-                                "disclosure",
-                                pair,
-                                [code, period, first[0].isoformat()],
-                            )
-                            _put(index, "report", pair, pair)
-                        for event in _dates(values["ITEMVALUECHANGEDATE"]):
-                            if event <= request.cutoff:
-                                _put(
-                                    index,
-                                    f"events:{code}:{period}",
-                                    event.isoformat(),
-                                    event.isoformat(),
-                                )
-                    if (
-                        financial
-                        and set(_INDICATORS).issubset(values)
-                        and options.get("type", "1") in {"1", "3"}
-                    ):
+
+        def rows():
+            for root, request, options, disclosure in _raw_requests(
+                raw_root, financial=financial
+            ):
+                period = options["reportdate"]
+                with read_choice_response(
+                    root, request, resource_policy=policy
+                ) as response:
+                    if not response["Data"]:
+                        continue
+                    if len(response["Dates"]) != 1:
+                        raise ValueError("choice_financial_snapshot_dates_invalid")
+                    fields = response["Indicators"]
+                    for code, cells in response["Data"].items():
+                        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
+                            raise ValueError("invalid_choice_asset_id")
+                        values = dict(zip(fields, cells, strict=True))
+                        pair = [code, period]
                         coordinate = [
                             *pair,
                             options["enddate"],
                             options.get("type", "1"),
                         ]
-                        snapshot = _values(values[field] for field in _INDICATORS)
-                        _put(
-                            index,
-                            "snapshot",
-                            coordinate,
-                            {
-                                "values": snapshot,
-                                "request_identity": root.name,
-                            },
-                        )
-                        _put(index, "report", pair, pair)
+                        if disclosure:
+                            for field in _DISCLOSURE_INDICATORS.intersection(values):
+                                yield _identity_payload_row(
+                                    index,
+                                    "disclosure_field",
+                                    [*coordinate, field],
+                                    {
+                                        "values": [
+                                            day.isoformat()
+                                            for day in _dates(values[field])
+                                        ],
+                                        "request_identity": root.name,
+                                    },
+                                )
+                            yield _identity_payload_row(
+                                index,
+                                f"disclosure_coordinates:{code}:{period}",
+                                coordinate,
+                                coordinate,
+                            )
+                            yield _identity_payload_row(index, "report", pair, pair)
+                            if "STMTACTDATE" in values:
+                                first = [
+                                    day
+                                    for day in _dates(values["STMTACTDATE"])
+                                    if day <= request.cutoff
+                                ]
+                                if first:
+                                    yield _identity_payload_row(
+                                        index,
+                                        "disclosure",
+                                        pair,
+                                        [*pair, first[0].isoformat()],
+                                    )
+                            if "ITEMVALUECHANGEDATE" in values:
+                                for event in _dates(values["ITEMVALUECHANGEDATE"]):
+                                    if event <= request.cutoff:
+                                        yield _identity_payload_row(
+                                            index,
+                                            f"events:{code}:{period}",
+                                            event.isoformat(),
+                                            event.isoformat(),
+                                        )
+                        if (
+                            financial
+                            and set(_INDICATORS).intersection(values)
+                            and options.get("type", "1") in {"1", "3"}
+                        ):
+                            for field in set(_INDICATORS).intersection(values):
+                                yield _identity_payload_row(
+                                    index,
+                                    "snapshot",
+                                    [*coordinate, field],
+                                    {
+                                        "values": _values((values[field],))[0],
+                                        "request_identity": root.name,
+                                    },
+                                )
+                            yield _identity_payload_row(index, "report", pair, pair)
+
+        index.add_identity_payload_rows(rows=rows())
         yield index
 
 
 def _snapshot(index, pair, day, branch):
-    return _get(index, "snapshot", [*pair, day.isoformat(), branch])
+    coordinate = [*pair, day.isoformat(), branch]
+    fields = [_get(index, "snapshot", [*coordinate, field]) for field in _INDICATORS]
+    if all(value is None for value in fields):
+        return None
+    missing = [
+        field for field, value in zip(_INDICATORS, fields, strict=True) if value is None
+    ]
+    if missing:
+        error = PortfolioTargetBlocked("choice_financial_snapshot_field_missing")
+        error.add_note(
+            f"fields={missing}; report_period={pair[1]}; EndDate={day}; type={branch}"
+        )
+        raise error
+    return {
+        "values": [value["values"] for value in fields],
+        "request_identities": sorted({value["request_identity"] for value in fields}),
+    }
 
 
 def _report_versions(index, pair, first):
@@ -346,7 +387,10 @@ def _report_versions(index, pair, first):
                 error = ValueError("choice_financial_version_values_conflict")
                 error.add_note(f"public_date={first}; field={_INDICATORS[position]}")
                 identities = sorted(
-                    (initial["request_identity"], initial_adjusted["request_identity"])
+                    {
+                        *initial["request_identities"],
+                        *initial_adjusted["request_identities"],
+                    }
                 )
                 error.add_note(f"request_identities={identities}")
                 raise error
@@ -376,7 +420,9 @@ def _report_versions(index, pair, first):
                         f"report_period={pair[1]}; public_date={event}; type={branch}"
                     )
                     raise error
-                requests.extend((before["request_identity"], after["request_identity"]))
+                requests.extend(
+                    (*before["request_identities"], *after["request_identities"])
+                )
                 for position, value in enumerate(after["values"]):
                     prior = before["values"][position]
                     if value != prior:
@@ -400,8 +446,7 @@ def _report_versions(index, pair, first):
 
 
 def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
-    namespace = "disclosure" if data_id == FIRST_DISCLOSURE_DATA_ID else "report"
-    reports = index.identity_payload_values(namespace=namespace)
+    reports = index.identity_payload_values(namespace="report")
     with closing_iterator(reports):
         for payload in reports:
             row = json.loads(payload)
@@ -411,6 +456,23 @@ def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
                 end is not None and period > end
             ):
                 continue
+            coordinates = index.identity_payload_values(
+                namespace=f"disclosure_coordinates:{pair[0]}:{pair[1]}"
+            )
+            with closing_iterator(coordinates):
+                for payload in coordinates:
+                    coordinate = json.loads(payload)
+                    for field in sorted(_DISCLOSURE_INDICATORS):
+                        value = _get(index, "disclosure_field", [*coordinate, field])
+                        if value is None:
+                            error = PortfolioTargetBlocked(
+                                "choice_disclosure_field_missing"
+                            )
+                            error.add_note(
+                                f"field={field}; report_period={pair[1]}; "
+                                f"EndDate={coordinate[2]}; type={coordinate[3]}"
+                            )
+                            raise error
             disclosure = _get(index, "disclosure", pair)
             if disclosure is None:
                 raise PortfolioTargetBlocked("choice_first_disclosure_missing")
@@ -520,8 +582,11 @@ def materialize_interim_data(
         raise ValueError("choice_interim_window_invalid")
     written, skipped = {}, []
     with runtime_resource_policy_scope(resource_policy) as policy:
-        for spec in specs:
-            identity = source_content_identity(root, spec.data_id)
+        for financial, grouped in groupby(
+            specs, key=lambda spec: spec.data_id != FIRST_DISCLOSURE_DATA_ID
+        ):
+            group = tuple(grouped)
+            identity = source_content_identity(root, group[0].data_id)
             if (
                 instance_metadata is not None
                 and COMMON_MANIFEST_METADATA_KEY in instance_metadata
@@ -532,32 +597,34 @@ def materialize_interim_data(
                 if envelope["semantic_metadata"]["raw_content_identity"] != identity:
                     raise ValueError("choice_raw_identity_changed")
 
-            def verify_source(_receipt, data_id=spec.data_id, expected=identity):
-                if source_content_identity(root, data_id) != expected:
-                    raise ValueError("choice_raw_identity_changed")
+            with _raw_index(root, financial, policy) as index:
+                for spec in group:
 
-            with _raw_index(
-                root, spec.data_id != FIRST_DISCLOSURE_DATA_ID, policy
-            ) as index:
-                rows = _rows(index, spec.data_id, start, end)
-                frames = _frames(rows, spec, policy)
-                target = layout.target_root(
-                    spec.data_id, layout.interim_data_root(SOURCE_ID, spec.data_id)
-                )
-                with closing_iterator(rows), closing_iterator(frames):
-                    try:
-                        write_dataset(
-                            target,
-                            frames,
-                            spec=spec,
-                            resource_policy=policy,
-                            instance_metadata=instance_metadata,
-                            staged_validator=verify_source,
-                        )
-                    except ValueError as error:
-                        if str(error) != "empty_dataset_schema_missing":
-                            raise
-                        skipped.append(spec.data_id)
-                        continue
-                written[spec.data_id] = target
+                    def verify_source(
+                        _receipt, data_id=spec.data_id, expected=identity
+                    ):
+                        if source_content_identity(root, data_id) != expected:
+                            raise ValueError("choice_raw_identity_changed")
+
+                    rows = _rows(index, spec.data_id, start, end)
+                    frames = _frames(rows, spec, policy)
+                    target = layout.target_root(
+                        spec.data_id, layout.interim_data_root(SOURCE_ID, spec.data_id)
+                    )
+                    with closing_iterator(rows), closing_iterator(frames):
+                        try:
+                            write_dataset(
+                                target,
+                                frames,
+                                spec=spec,
+                                resource_policy=policy,
+                                instance_metadata=instance_metadata,
+                                staged_validator=verify_source,
+                            )
+                        except ValueError as error:
+                            if str(error) != "empty_dataset_schema_missing":
+                                raise
+                            skipped.append(spec.data_id)
+                            continue
+                    written[spec.data_id] = target
     return ChoiceInterimImportResult(written, tuple(skipped))

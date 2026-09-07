@@ -28,7 +28,6 @@ from quant_research_platform.research.portfolios.accounting import (
 from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
-from quant_research_platform.research.portfolios.schedules import rebalance_dates
 from quant_research_platform.sources.reference.a_share_fees import (
     FEE_CSV_COLUMNS,
     load_a_share_fee_source,
@@ -316,13 +315,6 @@ def _source_row(
         }
     )
     return row
-
-
-def test_empty_rebalance_schedule_is_empty() -> None:
-    assert rebalance_dates(
-        pd.DatetimeIndex([]),
-        "weekly-last-trading-day",
-    ).empty
 
 
 def _rewrite_sidecar(sidecar_path: Path, **changes: object) -> None:

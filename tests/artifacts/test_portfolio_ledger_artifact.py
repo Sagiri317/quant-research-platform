@@ -22,12 +22,110 @@ from quant_research_platform.contracts.portfolios import (
     FundingEvent,
     FundingForecast,
     PortfolioCapital,
+    PortfolioLedgerBatch,
     PortfolioTargetBlocked,
+    PortfolioValuation,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.helpers.binance_hft import KNOWN_NO_FUNDING
 from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+@pytest.mark.parametrize("boundary", ("batch", "cross_session"))
+def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
+    tmp_path: Path, boundary: str
+) -> None:
+    capital = PortfolioCapital("quantity", 1e9, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="quantity",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01",
+            "end": "1970-01-02",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+
+    def batch(sequence, quantities):
+        return PortfolioLedgerBatch(
+            sequence,
+            (),
+            (),
+            tuple(
+                row
+                for index, (phase, quantity) in enumerate(
+                    zip(("before", "after", "end"), quantities, strict=True)
+                )
+                for row in (
+                    PortfolioValuation(
+                        sequence * 3 + index, "__cash__", phase, 1e9, 1e9
+                    ),
+                    PortfolioValuation(
+                        sequence * 3 + index,
+                        "asset",
+                        phase,
+                        quantity,
+                        quantity * 100000.0,
+                        100000.0,
+                    ),
+                )
+            ),
+            (),
+        )
+
+    baseline = replace(
+        batch(0, (0.0, 0.0, 0.0)),
+        trades=tuple(
+            ExecutedTrade(
+                str(index), str(index), 1, "asset", quantity, quantity * 100.0
+            )
+            for index, quantity in enumerate((0.1, 0.2, -0.3))
+        ),
+    )
+    with runtime_resource_policy_scope() as policy:
+        old_root = ledger_artifact.write_portfolio_ledger_artifact(
+            tmp_path / "old", envelope=envelope, produce=lambda emit: emit(baseline)
+        )
+        old = read_portfolio_ledger_artifact(
+            old_root, expected_identity=envelope.instance_identity
+        )
+        assert len(tuple(old.iter_chunks())) == 1
+        assert ledger_artifact.summarize_portfolio_ledger(old)["net_pnl"] == 0.0
+        old_bytes = {
+            path.relative_to(old_root): path.read_bytes()
+            for path in old_root.rglob("*")
+            if path.is_file()
+        }
+
+        def invalid(emit):
+            if boundary == "batch":
+                emit(batch(0, (0.0, 1e-5, 1e-5)))
+            else:
+                emit(baseline)
+                emit(batch(1, (1e-5, 1e-5, 1e-5)))
+
+        error = (
+            "portfolio_ledger_position_reconciliation_invalid"
+            if boundary == "batch"
+            else "portfolio_ledger_cross_session_state_invalid"
+        )
+        candidate = tmp_path / "candidate"
+        with pytest.raises(ValueError, match=error):
+            ledger_artifact.write_portfolio_ledger_artifact(
+                candidate, envelope=envelope, produce=invalid
+            )
+        assert not (candidate / "instances" / envelope.instance_identity).exists()
+        assert {
+            path.relative_to(old_root): path.read_bytes()
+            for path in old_root.rglob("*")
+            if path.is_file()
+        } == old_bytes
+        assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("mode", ("maker", "taker"))
@@ -415,9 +513,13 @@ def _session(
     return frame.loc[:, list(CONTINUOUS_EXECUTION_COLUMNS)]
 
 
+@pytest.mark.parametrize("long_path", (False, True))
 def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
     tmp_path: Path,
+    long_path: bool,
 ) -> None:
+    if long_path:
+        tmp_path = tmp_path / ("long" * 25) / ("path" * 25)
     first = _session(
         "2019-01-01",
         "2019-01-02",
@@ -443,11 +545,17 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
         envelope=_envelope(),
         ledger_chunks=(frame for frame in (first, second)),
     )
+    with pytest.raises(ValueError, match="output_already_exists"):
+        write_test_sessions(
+            tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(first, second)
+        )
 
     artifact = read_portfolio_ledger_artifact(
         root,
         expected_identity=root.name,
     )
+    if long_path:
+        assert len(str(root / "trades.parquet")) > 260
     chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
     assert len(chunks) == 2
     assert [chunk["asset_id"].tolist() for chunk in chunks] == [
@@ -743,10 +851,14 @@ def test_portfolio_ledger_small_row_groups_preserve_complete_transitions(
     assert policy.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize("long_path", (False, True))
 def test_portfolio_ledger_primary_error_survives_writer_close_failure(
     tmp_path: Path,
     monkeypatch,
+    long_path: bool,
 ) -> None:
+    if long_path:
+        tmp_path = tmp_path / ("long" * 25) / ("path" * 25)
     first = _session(
         "2019-01-01",
         "2019-01-02",
@@ -782,6 +894,11 @@ def test_portfolio_ledger_primary_error_survives_writer_close_failure(
             ledger_chunks=(first, second),
         )
     assert any("close also failed" in note for note in raised.value.__notes__)
+    from quant_research_platform.storage.identity import native_filesystem_path
+
+    assert not list(
+        Path(native_filesystem_path(tmp_path / "portfolio" / "instances")).iterdir()
+    )
 
 
 @pytest.mark.parametrize(

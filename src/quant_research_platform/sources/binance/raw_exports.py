@@ -17,7 +17,10 @@ from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.validation import clear_exception_frames
-from quant_research_platform.runtime.resources import OwnedValue
+from quant_research_platform.runtime.resources import (
+    OwnedValue,
+    current_runtime_resource_policy,
+)
 from quant_research_platform.sources.binance.validation import (
     depth_side_levels,
     first_present,
@@ -31,12 +34,14 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
     strict_symbol,
 )
+from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     _file_identity_bytes,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    native_filesystem_path,
     require_unaliased_path,
 )
 
@@ -161,7 +166,12 @@ def _iter_raw_envelope_batches(
                 if required_bound > lease.reserved_bytes:
                     if batch:
                         break
-                    lease.grow(required_bound - lease.reserved_bytes)
+                    additional_bytes = required_bound - lease.reserved_bytes
+                    current_runtime_resource_policy().require_working_set(
+                        additional_bytes,
+                        error="binance_raw_record_working_set_exceeds_task_memory_budget",
+                    )
+                    lease.grow(additional_bytes)
                 raw = handle.read(record_length)
                 line_number += 1
                 if raw.isspace():
@@ -337,18 +347,20 @@ def _iter_raw_directory_entries(
     if not stat.S_ISDIR(metadata.st_mode):
         return
     try:
-        children = path.iterdir()
+        children = os.scandir(native_filesystem_path(path))
     except OSError as error:
         raise ValueError(_RAW_IDENTITY_ERROR) from error
     try:
-        for child in children:
-            require_unaliased_path(child, error=_RAW_IDENTITY_ERROR)
-            try:
-                metadata = child.lstat()
-            except OSError as error:
-                raise ValueError(_RAW_IDENTITY_ERROR) from error
-            _reject_raw_reparse(metadata)
-            yield child, metadata
+        with handle_preserving_primary(children):
+            for entry in children:
+                child = path / entry.name
+                require_unaliased_path(child, error=_RAW_IDENTITY_ERROR)
+                try:
+                    metadata = entry.stat(follow_symlinks=False)
+                except OSError as error:
+                    raise ValueError(_RAW_IDENTITY_ERROR) from error
+                _reject_raw_reparse(metadata)
+                yield child, metadata
     except OSError as error:
         raise ValueError(_RAW_IDENTITY_ERROR) from error
 

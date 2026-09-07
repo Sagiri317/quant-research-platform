@@ -394,7 +394,10 @@ def read_prediction_output_bundle(
                                 pc.any(
                                     pc.less(
                                         timestamps,
-                                        pa.scalar(pd.Timestamp(test_start)),
+                                        pa.scalar(
+                                            pd.Timestamp(test_start),
+                                            type=pa.timestamp("ns"),
+                                        ),
                                     )
                                 ).as_py()
                             ) or (
@@ -403,7 +406,10 @@ def read_prediction_output_bundle(
                                     pc.any(
                                         pc.greater(
                                             timestamps,
-                                            pa.scalar(pd.Timestamp(test_end)),
+                                            pa.scalar(
+                                                pd.Timestamp(test_end),
+                                                type=pa.timestamp("ns"),
+                                            ),
                                         )
                                     ).as_py()
                                 )
@@ -437,11 +443,17 @@ def read_prediction_output_bundle(
                                 keep = pc.and_(
                                     pc.greater_equal(
                                         timestamps,
-                                        pa.scalar(pd.Timestamp(time_window.start)),
+                                        pa.scalar(
+                                            pd.Timestamp(time_window.start),
+                                            type=pa.timestamp("ns"),
+                                        ),
                                     ),
                                     pc.less_equal(
                                         timestamps,
-                                        pa.scalar(pd.Timestamp(time_window.end)),
+                                        pa.scalar(
+                                            pd.Timestamp(time_window.end),
+                                            type=pa.timestamp("ns"),
+                                        ),
                                     ),
                                 )
                                 table = table.filter(keep)

@@ -10,7 +10,7 @@ import sqlite3
 import sys
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
@@ -490,34 +490,41 @@ class RecorderRun:
             raise ValueError("binance_replay_requested_files_missing")
         previous_capture_seq: int | None = None
         for group in _overlapping_capture_groups(selected):
-            streams = [
-                _iter_raw_file(
-                    self.root,
-                    item,
-                    manifest=self.manifest,
-                    resource_policy=self.resource_policy,
-                    record_observer=_record_observer,
-                )
-                for item in group
-            ]
-            for record in heapq.merge(
-                *streams,
-                key=lambda value: value["capture_seq"],
-            ):
-                _validate_record_coverage(
-                    record,
-                    coverage_index=self._coverage_index,
-                )
-                capture_seq = record["capture_seq"]
-                if (
-                    previous_capture_seq is not None
-                    and capture_seq <= previous_capture_seq
-                ):
-                    raise ValueError(
-                        "binance_replay_capture_seq_duplicate_or_non_monotonic"
+            with ExitStack() as stack:
+                streams = [
+                    stack.enter_context(
+                        closing_iterator(
+                            _iter_raw_file(
+                                self.root,
+                                item,
+                                manifest=self.manifest,
+                                resource_policy=self.resource_policy,
+                                record_observer=_record_observer,
+                            )
+                        )
                     )
-                previous_capture_seq = capture_seq
-                yield record
+                    for item in group
+                ]
+                records = stack.enter_context(
+                    closing_iterator(
+                        heapq.merge(*streams, key=lambda value: value["capture_seq"])
+                    )
+                )
+                for record in records:
+                    _validate_record_coverage(
+                        record,
+                        coverage_index=self._coverage_index,
+                    )
+                    capture_seq = record["capture_seq"]
+                    if (
+                        previous_capture_seq is not None
+                        and capture_seq <= previous_capture_seq
+                    ):
+                        raise ValueError(
+                            "binance_replay_capture_seq_duplicate_or_non_monotonic"
+                        )
+                    previous_capture_seq = capture_seq
+                    yield record
 
     def connection_coverage(
         self,

@@ -222,6 +222,7 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
                 "market_id": "a_share",
                 "x": float(index),
                 "label": float(2 * index),
+                "label_available_at": pd.Timestamp(day),
                 "eligible": True,
             }
             for day in ("2020-01-01", "2020-01-02", "2020-01-03", "2020-01-04")

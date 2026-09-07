@@ -33,10 +33,66 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
+from tests.helpers.runtime_resources import capture_test_policy
 from tests.markets.a_share.test_target_dag_chain import (
     _synthetic_financial_frames,
     _synthetic_interim_frames,
 )
+
+
+@pytest.mark.parametrize("boundary", ["soft", "captured", "explicit"])
+def test_financial_event_builder_is_admitted_before_expansion(monkeypatch, boundary):
+    source = _synthetic_financial_frames()
+    dates = pd.bdate_range("2019-01-01", "2022-01-01")
+    source["trading_calendar"] = pd.DataFrame(
+        {"calendar_date": dates, "is_trading_day": True}
+    )
+    event_rows = sum(
+        len(source[name]) * len(columns)
+        for name, columns in producer.FINANCIAL_VALUE_COLUMNS.items()
+    )
+    bound = 1024**2 + event_rows * 1024
+    policy = capture_test_policy(
+        available_memory_bytes=bound - 1 if boundary == "captured" else bound * 5 // 4,
+        explicit_cap_bytes=bound - 1 if boundary == "explicit" else None,
+    )
+    calls = []
+    builder = producer._financial_pit_events
+
+    def observed_builder(source):
+        calls.append(True)
+        events = builder(source)
+        assert not events.empty
+        return events
+
+    monkeypatch.setattr(producer, "_processed_axis", lambda *args, **kwargs: ((), {}))
+    monkeypatch.setattr(producer, "_financial_pit_events", observed_builder)
+    with runtime_resource_policy_scope(policy):
+        with (
+            ExitStack() as retained,
+            closing_iterator(
+                producer._processed_frames(
+                    research_profile().processed.get("fundamental_pit"),
+                    source=source,
+                    source_sessions={},
+                    dependencies={"panel": object()},
+                    policy=policy,
+                    retained=retained,
+                )
+            ) as frames,
+        ):
+            if boundary == "soft":
+                assert bound > policy.memory_budget_bytes
+                assert list(frames) == []
+                assert calls == [True]
+            else:
+                with pytest.raises(
+                    ValueError,
+                    match="a_share_financial_events_exceeds_task_memory_budget",
+                ):
+                    next(frames)
+                assert calls == []
+        assert policy.used_memory_bytes == 0
 
 
 def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):

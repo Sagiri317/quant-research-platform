@@ -17,6 +17,10 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.research.models.scaler import (
+    LinearScaledPredictor,
+    ModelMatrixScaler,
+)
 from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
 )
@@ -87,10 +91,18 @@ def write_prediction_output_and_read(
 ) -> tuple[pd.DataFrame, Path, dict[str, object]]:
     layout = StorageLayout(project_root=project_root)
     with runtime_resource_policy_scope(resource_policy) as policy:
+        if prediction_model is None:
+            prediction_model = LinearScaledPredictor(
+                tuple(coefficients),
+                ModelMatrixScaler(
+                    input_columns,
+                    (0.0,) * len(input_columns),
+                    (1.0,) * len(input_columns),
+                ),
+            )
         result = build_prediction_result_from_frames(
             frames,
             spec,
-            coefficients,
             input_columns,
             prediction_model=prediction_model,
             model_metadata=model_metadata
@@ -162,6 +174,5 @@ def synthetic_prediction_model_metadata(
             "package": "internal",
             "version": "1",
         },
-        "coefficient_count": len(input_columns) + 1,
         "feature_importance": {column: 1.0 for column in input_columns},
     }

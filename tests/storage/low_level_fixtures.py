@@ -7,8 +7,10 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from quant_research_platform.catalog.fields import platform_entity_time_key
-from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.columns import (
+    PLATFORM_ENTITY_TIME_KEY,
+    ColumnRole,
+)
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
@@ -135,7 +137,7 @@ def make_processed_dataset_spec(
     value_column: str = "value",
     value_role: ColumnRole | None = None,
     market_id: str = "a_share",
-    primary_key: tuple[str, ...] = platform_entity_time_key(),
+    primary_key: tuple[str, ...] = PLATFORM_ENTITY_TIME_KEY,
     partition_columns: tuple[str, ...] = ("year",),
 ) -> ProcessedDataSpec:
     role = value_role or (

@@ -20,7 +20,7 @@ from quant_research_platform.contracts.signals import (
     SignalSpec,
     _cross_signal_id_column_overlaps,
 )
-from quant_research_platform.contracts.time import time_value_isoformat
+from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
@@ -31,6 +31,52 @@ if TYPE_CHECKING:
     from quant_research_platform.contracts.signals import SignalSpec as _SignalSpec
 
 
+EVALUATION_METRICS_COLUMNS = (
+    "timestamp",
+    "signal",
+    "label",
+    "ic",
+    "rankic",
+    "n_obs",
+    "ic_reason",
+    "rankic_reason",
+)
+EVALUATION_GROUPED_LABEL_VALUE_COLUMNS = (
+    "timestamp",
+    "signal",
+    "label",
+    "group",
+    "mean_label_value",
+    "n_obs",
+)
+EVALUATION_IC_SUMMARY_COLUMNS = (
+    "signal",
+    "label",
+    "mean_ic",
+    "std_ic",
+    "icir",
+    "positive_ic_rate",
+    "valid_ic_count",
+    "mean_rankic",
+    "std_rankic",
+    "rankicir",
+    "positive_rankic_rate",
+    "valid_rankic_count",
+    "ic_reason",
+    "icir_reason",
+    "rankic_reason",
+    "rankicir_reason",
+)
+EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS = (
+    "signal",
+    "label",
+    "top_group_mean_label_value",
+    "bottom_group_mean_label_value",
+    "top_bottom_label_value_spread_mean",
+    "top_bottom_label_value_spread_hit_rate",
+    "group_monotonicity_score",
+    "group_monotonicity_score_reason",
+)
 CORRELATION_RAW_REASON_CODES = frozenset(
     {
         "insufficient_observations",
@@ -174,11 +220,7 @@ class EvaluationDiagnostics:
             parsed: date | datetime | None = None
             if value is not None:
                 try:
-                    parsed = (
-                        datetime.fromisoformat(value)
-                        if "T" in value
-                        else date.fromisoformat(value)
-                    )
+                    parsed = TimeWindow(value, value).start
                 except (TypeError, ValueError) as exc:
                     raise ValueError(f"invalid_evaluation_{field_name}") from exc
                 if (

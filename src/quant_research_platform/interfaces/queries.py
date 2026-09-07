@@ -143,10 +143,13 @@ def portfolio_curve(
                 "status": result.status.value,
                 "reason": result.reason,
             }
-        with policy.lease(
-            "queries.portfolio_curve",
-            report_artifact.report_payload_working_set(record.payload()) + 8192,
-        ) as retained:
+        initial_bytes = (
+            report_artifact.report_payload_working_set(record.payload()) + 8192
+        )
+        policy.require_working_set(
+            initial_bytes, error="portfolio_curve_exceeds_task_memory_budget"
+        )
+        with policy.lease("queries.portfolio_curve", initial_bytes) as retained:
             report_artifact._validate_reference(layout, result)
             artifact = read_portfolio_ledger_artifact(
                 report_artifact._instance_root(layout, result),
@@ -181,12 +184,19 @@ def portfolio_curve(
                         for row in batch.diagnostics
                     )
                     if batch.sequence % stride == 0 or has_marker:
+                        policy.require_working_set(
+                            1024 * len(last_points),
+                            error="portfolio_curve_exceeds_task_memory_budget",
+                        )
                         retained.grow(1024 * len(last_points))
                         points.extend(last_points)
                         last_retained_sequence = batch.sequence
                     for marker in batch.diagnostics:
                         if marker.name not in {"oos_window_start", "oos_window_end"}:
                             continue
+                        policy.require_working_set(
+                            1024, error="portfolio_curve_exceeds_task_memory_budget"
+                        )
                         retained.grow(1024)
                         boundaries.append(
                             {
@@ -196,6 +206,10 @@ def portfolio_curve(
                             }
                         )
             if last_points and last_retained_sequence != last_points[-1]["sequence"]:
+                policy.require_working_set(
+                    1024 * len(last_points),
+                    error="portfolio_curve_exceeds_task_memory_budget",
+                )
                 retained.grow(1024 * len(last_points))
                 points.extend(last_points)
             return {

@@ -83,6 +83,7 @@ CONTINUOUS_EXECUTION_COLUMNS = (
     "asset_specific_variance",
     "decision_reason",
     "alpha_slope",
+    "alpha_intercept",
     "alpha_slope_se",
     "alpha_slope_t",
     "alpha_slope_pvalue",
@@ -305,21 +306,29 @@ class PortfolioLedgerBatch:
             or end[PORTFOLIO_CASH_ASSET_ID].value != cash_after
         ):
             raise ValueError("portfolio_ledger_cash_reconciliation_invalid")
-        deltas = defaultdict(float)
+        deltas = defaultdict(lambda: [0.0, 0.0])
         for trade in self.trades:
-            deltas[trade.asset_id] += trade.quantity
+            deltas[trade.asset_id][0] += trade.quantity
+            deltas[trade.asset_id][1] = max(
+                deltas[trade.asset_id][1], abs(trade.quantity)
+            )
             if trade.timestamp_ns != after[trade.asset_id].timestamp_ns:
                 raise ValueError("portfolio_ledger_fill_timing_invalid")
         for flow in self.cashflows:
             if flow.timestamp_ns != after[flow.asset_id].timestamp_ns:
                 raise ValueError("portfolio_ledger_cashflow_timing_invalid")
         for asset in before.keys() - {PORTFOLIO_CASH_ASSET_ID}:
-            delta = deltas[asset]
+            delta, trade_quantity_scale = deltas[asset]
             if not isclose(
                 before[asset].quantity + delta,
                 after[asset].quantity,
                 rel_tol=0.0,
-                abs_tol=tolerance,
+                abs_tol=_quantity_tolerance(
+                    before[asset].quantity,
+                    delta,
+                    trade_quantity_scale,
+                    after[asset].quantity,
+                ),
             ):
                 raise ValueError("portfolio_ledger_position_reconciliation_invalid")
         if any(
@@ -392,6 +401,10 @@ class FundingForecast:
             previous = item[0]
 
 
+def _quantity_tolerance(*quantities: float) -> float:
+    return max(ulp(value) for value in quantities) * 512.0
+
+
 def validate_portfolio_transition(
     batch: PortfolioLedgerBatch,
     capital: PortfolioCapital,
@@ -415,17 +428,26 @@ def validate_portfolio_transition(
     else:
         for asset in before.keys() | previous.keys():
             old, current = previous.get(asset), before.get(asset)
-            if not isclose(
+            previous_quantity = (
                 (
                     old.value
                     if capital.valuation_method == "adjusted_notional"
                     else old.quantity
                 )
                 if old
-                else 0.0,
-                current.quantity if current else 0.0,
+                else 0.0
+            )
+            current_quantity = current.quantity if current else 0.0
+            if not isclose(
+                previous_quantity,
+                current_quantity,
                 rel_tol=0.0,
-                abs_tol=tolerance,
+                abs_tol=(
+                    tolerance
+                    if capital.valuation_method == "adjusted_notional"
+                    or asset == PORTFOLIO_CASH_ASSET_ID
+                    else _quantity_tolerance(previous_quantity, current_quantity)
+                ),
             ):
                 raise ValueError("portfolio_ledger_cross_session_state_invalid")
             if (

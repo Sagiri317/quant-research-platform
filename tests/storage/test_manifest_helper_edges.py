@@ -6,11 +6,6 @@ import pytest
 
 from quant_research_platform.storage import manifests
 from quant_research_platform.storage._scratch_ownership import owned_scratch_name
-from quant_research_platform.storage.datasets import write_dataset
-from tests.storage.low_level_fixtures import (
-    make_default_dataset_frame,
-    make_processed_dataset_spec,
-)
 
 
 def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
@@ -143,6 +138,8 @@ def test_manifest_writers_render_the_snapshot_checked_for_safety(
         ({"path": "/workspace/qrp/data/research/a_share/demo"}, "local_only_path"),
         ({"file": "daily__vendor__export-20240101.csv"}, "raw_export_filename"),
         ({"row_sample": [{"a": 1}]}, "row_sample"),
+        ({"api_key": "SYNTHETIC_SECRET"}, "credential"),
+        ({"nested": {"Authorization": "Bearer SYNTHETIC_SECRET"}}, "credential"),
     ],
 )
 def test_internal_manifest_rejects_private_or_row_level_metadata(
@@ -158,167 +155,16 @@ def test_internal_manifest_rejects_private_or_row_level_metadata(
             tmp_path / "manifest.json",
             {"schema_id": "qrp-dataset-manifest", **payload},
         )
+    assert not (tmp_path / "manifest.json").exists()
 
 
-def test_layer_and_run_manifests_summarize_dataset_manifests(tmp_path: Path) -> None:
-    dataset_root = tmp_path / "data" / "processed" / "a_share" / "factor" / "daily"
-    write_dataset(
-        dataset_root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("daily"),
-    )
-    missing_root = tmp_path / "data" / "processed" / "a_share" / "factor" / "missing"
-    failed_root = tmp_path / "data" / "processed" / "a_share" / "factor" / "failed"
-    write_dataset(
-        failed_root,
-        make_default_dataset_frame(
-            asset_ids=("asset_001",),
-            dates=("2014-01-02",),
-            values=(1.0,),
-        ),
-        spec=make_processed_dataset_spec("failed"),
-    )
-    failed_manifest_path = failed_root / "_manifest" / "manifest.json"
-    failed_manifest = manifests.read_manifest(failed_manifest_path)
-    failed_manifest["validation_status"] = "FAIL"
-    manifests.replace_qrp_json(failed_manifest_path, failed_manifest)
-
-    layer = manifests.build_layer_summary(
-        logical_layer="processed",
-        dataset_roots=(dataset_root, missing_root, failed_root),
-    )
-    assert layer["layer_validation_status"] == "FAIL"
-    assert layer["total_rows"] == 4
-    assert layer["date_min"] == "2014-01-02"
-    assert layer["failed_dataset_validations"] == ["failed"]
-    assert layer["missing_dataset_manifests"]
-
-    run = manifests.build_run_data_summary(layer_summaries=(layer,))
-    assert run["run_validation_status"] == "FAIL"
-    assert run["failed_layers"] == ["processed"]
-
-
-@pytest.mark.parametrize(
-    "relative_path",
-    (Path("spec.json"), Path("_manifest") / "manifest.json"),
-)
-def test_layer_summary_distinguishes_present_invalid_dataset_evidence(
-    tmp_path: Path,
-    relative_path: Path,
-) -> None:
-    dataset_root = tmp_path / "data" / "processed" / "a_share" / "factor" / "bad"
-    write_dataset(
-        dataset_root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("bad"),
-    )
-    (dataset_root / relative_path).write_text("{", encoding="utf-8")
-
-    layer = manifests.build_layer_summary(
-        logical_layer="processed",
-        dataset_roots=(dataset_root,),
-    )
-
-    assert layer["missing_dataset_manifests"] == []
-    assert layer["invalid_dataset_manifests"] == [
-        "data/processed/a_share/factor/bad/_manifest/manifest.json"
-    ]
-    assert layer["layer_validation_status"] == "FAIL"
-
-
-@pytest.mark.parametrize(
-    "null_count_summary",
-    ({}, {"market_id": 0, "asset_id": 0}),
-    ids=("empty", "composite-key-member-omitted"),
-)
-def test_layer_and_run_summaries_fail_when_primary_key_null_facts_are_missing(
-    tmp_path: Path,
-    null_count_summary: dict[str, int],
-) -> None:
-    dataset_root = tmp_path / "data" / "processed" / "a_share" / "factor" / "daily"
-    write_dataset(
-        dataset_root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("daily"),
-    )
-    manifest_path = dataset_root / "_manifest" / "manifest.json"
-    manifest = manifests.read_manifest(manifest_path)
-    manifest["null_count_summary"] = null_count_summary
-    manifests.replace_qrp_json(manifest_path, manifest)
-
-    layer = manifests.build_layer_summary(
-        logical_layer="processed",
-        dataset_roots=(dataset_root,),
-    )
-
-    assert layer["dataset_count"] == 1
-    assert layer["datasets"][0]["data_id"] == "daily"
-    assert layer["missing_dataset_manifests"] == []
-    assert layer["failed_dataset_validations"] == ["daily"]
-    assert layer["datasets"][0]["manifest_summary"]["validation_status"] == "FAIL"
-    assert layer["layer_validation_status"] == "FAIL"
-
-    run = manifests.build_run_data_summary(layer_summaries=(layer,))
-    assert run["run_validation_status"] == "FAIL"
-    assert run["failed_layers"] == ["processed"]
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("duplicate_primary_key_count", 1),
-        ("non_finite_count_summary", {"value": 1}),
-    ),
-)
-def test_layer_summary_uses_effective_manifest_consumability(
-    tmp_path: Path,
-    field: str,
-    value: object,
-) -> None:
-    dataset_root = tmp_path / "data" / "processed" / "a_share" / "factor" / "daily"
-    write_dataset(
-        dataset_root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("daily"),
-    )
-    manifest_path = dataset_root / "_manifest" / "manifest.json"
-    manifest = manifests.read_manifest(manifest_path)
-    manifest[field] = value
-    manifests.replace_qrp_json(manifest_path, manifest)
-
-    layer = manifests.build_layer_summary(
-        logical_layer="processed",
-        dataset_roots=(dataset_root,),
-    )
-
-    assert layer["datasets"][0]["manifest_summary"]["validation_status"] == "FAIL"
-    assert layer["failed_dataset_validations"] == ["daily"]
-    assert layer["layer_validation_status"] == "FAIL"
-
-
-@pytest.mark.parametrize("status", ("pass", "ok", " PASS ", 1, None))
-def test_run_data_summary_rejects_status_normalization(status: object) -> None:
-    with pytest.raises(ValueError, match="invalid_check_status"):
-        manifests.build_run_data_summary(
-            layer_summaries=(
-                {
-                    "logical_layer": "processed",
-                    "layer_validation_status": status,
-                },
-            )
-        )
-
-
-@pytest.mark.parametrize("logical_layer", (None, "", 1, True))
-def test_run_data_summary_rejects_logical_layer_coercion(
-    logical_layer: object,
-) -> None:
-    with pytest.raises(ValueError, match="run_data_summary_layer_invalid"):
-        manifests.build_run_data_summary(
-            layer_summaries=(
-                {
-                    "logical_layer": logical_layer,
-                    "layer_validation_status": "FAIL",
-                },
-            )
-        )
+def test_internal_manifest_keeps_provider_schema_field_names(tmp_path: Path) -> None:
+    payload = {
+        "schema_id": "provider-schema",
+        "source_id": "choice",
+        "fields": [{"name": "api_key", "dtype": "string"}],
+        "key_columns": ["source_asset_id"],
+    }
+    path = tmp_path / "schema.json"
+    manifests.write_internal_artifact_manifest(path, payload)
+    assert manifests.read_manifest(path) == payload

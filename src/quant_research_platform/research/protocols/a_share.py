@@ -40,17 +40,16 @@ from quant_research_platform.research.factors.fundamental.definitions import (
     FUNDAMENTAL_FACTORS,
     fundamental_factor_definitions,
 )
-from quant_research_platform.research.factors.price_volume.columns import (
+from quant_research_platform.research.factors.price_volume.definitions import (
     FORMAL_CORE_PRICE_VOLUME_FACTORS,
     FORMAL_PRICE_VOLUME_FACTORS,
-)
-from quant_research_platform.research.factors.price_volume.definitions import (
-    formal_price_volume_factor_definitions,
+    price_volume_factor_definitions,
 )
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_available_at_column,
     forward_return_label_column,
 )
+from quant_research_platform.research.portfolios.accounting import AlphaCalibration
 from quant_research_platform.research.randomness import ROOT_SEED
 
 MARKET_ID = MarketId("a_share")
@@ -180,6 +179,8 @@ class AShareProtocol:
     access_window: str = "development"
     factor_scope: str = "core"
     root_seed: int = ROOT_SEED
+    frozen_development: dict[str, object] | None = None
+    frozen_alpha: AlphaCalibration | None = None
 
     def __post_init__(self) -> None:
         if self.scenario_id not in SCENARIO_IDS:
@@ -243,6 +244,11 @@ class AShareProtocol:
 
     def manifest(self) -> dict[str, object]:
         return {
+            **(
+                {"frozen_development": self.frozen_development}
+                if self.frozen_development is not None
+                else {}
+            ),
             "protocol_id": self.protocol_id,
             "scenario_id": self.scenario_id,
             "access_window": self.access_window,
@@ -378,7 +384,7 @@ class AShareProtocol:
             ),
             TargetSpec(
                 model_selection,
-                dependencies=(dataset,),
+                dependencies=() if self.access_window == "holdout" else (dataset,),
                 producer_id=model_selection,
             ),
             TargetSpec(
@@ -602,7 +608,7 @@ def protocol(
 def factor_catalog() -> FactorCatalog:
     return FactorCatalog(
         (
-            *formal_price_volume_factor_definitions(
+            *price_volume_factor_definitions(
                 market_id=MARKET_ID,
                 required_input_data_id=PRICE_VOLUME_DATA_ID,
             ),

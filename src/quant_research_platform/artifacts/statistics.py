@@ -14,12 +14,17 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.artifacts.outputs.parquet import (
+    _artifact_frame_bound,
     _artifact_frame_reservation,
     _artifact_table_write_state,
     _artifact_writer_fixed_reservation,
 )
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
+)
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_integer_series,
 )
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
@@ -29,6 +34,7 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
+    _parquet_row_group_size,
     dataset_file_identity,
     parquet_decoded_working_set_bounds,
 )
@@ -610,13 +616,28 @@ class StatisticsArtifact:
                 row_bytes, fixed_bytes = parquet_decoded_working_set_bounds(
                     parquet, _TABLE_COLUMNS[member]
                 )
+                working_bytes = max(
+                    1, 4 * fixed_bytes + 8 * row_bytes * parquet.metadata.num_rows
+                )
+                policy.require_working_set(
+                    working_bytes, error="statistics_table_exceeds_task_memory_budget"
+                )
                 with policy.lease(
                     "artifacts.statistics.table",
-                    max(1, 4 * fixed_bytes + 8 * row_bytes * parquet.metadata.num_rows),
-                ):
+                    working_bytes,
+                ) as working:
                     table = frame = result = None
                     try:
                         table = parquet.read()
+                        actual_bound = max(
+                            working_bytes, 8 * table.get_total_buffer_size()
+                        )
+                        additional = actual_bound - working.reserved_bytes
+                        policy.require_working_set(
+                            additional,
+                            error="statistics_table_exceeds_task_memory_budget",
+                        )
+                        working.grow(additional)
                         frame = table.to_pandas()
                         result = _validated_frame(frame, member=member)
                         yield result
@@ -640,64 +661,69 @@ def write_statistics_artifact(
         _validate_crypto_maker_calibration(tables, envelope.payload())
 
     def write(staging: Path) -> None:
-        states: list[ExitStack] = []
-        retained_memory = (0, 0)
-        primary: BaseException | None = None
-        try:
-            with _artifact_writer_fixed_reservation(
-                writer_count=len(tables),
-                index_bytes=0,
-            ):
-                for table_name, frame in tables.items():
-                    member = f"{table_name}.parquet"
-                    validated = _validated_frame(frame, member=member)
-                    with _artifact_frame_reservation(validated):
-                        table = pa.Table.from_pandas(
-                            validated,
-                            schema=_ARROW_SCHEMAS[member],
-                            preserve_index=False,
+        policy = current_runtime_resource_policy()
+        for table_name, frame in tables.items():
+            member = f"{table_name}.parquet"
+            state = ExitStack()
+            validated = table = persisted = None
+            primary: BaseException | None = None
+            try:
+                state.enter_context(
+                    _artifact_writer_fixed_reservation(writer_count=1, index_bytes=0)
+                )
+                if policy is not None:
+                    payload_bytes = pandas_frame_payload_bytes(frame)
+                    validation_bytes = max(65536, 2 * payload_bytes)
+                    policy.require_working_set(
+                        validation_bytes
+                        + _artifact_frame_bound(frame, key_columns=())
+                        - payload_bytes,
+                        error="statistics_validation_exceeds_task_memory_budget",
+                    )
+                    state.enter_context(
+                        policy.lease(
+                            "artifacts.statistics.validation",
+                            validation_bytes,
                         )
-                        persisted, state, batch_rows, retained_memory = (
-                            _artifact_table_write_state(
-                                table,
-                                retained_memory=retained_memory,
-                            )
-                        )
-                        states.append(state)
-                        state.__enter__()
-                        if batch_rows < len(validated):
-                            raise MemoryError(
-                                "statistics_table_exceeds_task_memory_budget"
-                            )
-                        pq.write_table(
-                            persisted,
-                            native_filesystem_path(staging / member),
-                            row_group_size=batch_rows,
-                            compression="zstd",
-                            use_dictionary=False,
-                            write_statistics=False,
-                            write_page_index=False,
-                            write_page_checksum=False,
-                        )
-        except BaseException as exc:
-            primary = exc
-        finally:
-            cleanup_error: BaseException | None = None
-            for state in states:
+                    )
+                state.enter_context(
+                    _artifact_frame_reservation(frame, borrowed_input=True)
+                )
+                validated = _validated_frame(frame, member=member)
+                table = pa.Table.from_pandas(
+                    validated, schema=_ARROW_SCHEMAS[member], preserve_index=False
+                )
+                persisted, native_state, batch_rows, _retained = (
+                    _artifact_table_write_state(table)
+                )
+                state.enter_context(native_state)
+                pq.write_table(
+                    persisted,
+                    native_filesystem_path(staging / member),
+                    row_group_size=_parquet_row_group_size(persisted.num_rows),
+                    write_batch_size=batch_rows,
+                    max_rows_per_page=batch_rows,
+                    compression="zstd",
+                    use_dictionary=False,
+                    write_statistics=False,
+                    write_page_index=False,
+                    write_page_checksum=False,
+                )
+            except BaseException as exc:
+                primary = exc
+            finally:
+                validated = table = persisted = None
                 try:
-                    state.__exit__(None, None, None)
+                    state.close()
                 except BaseException as close_error:
-                    if primary is None and cleanup_error is None:
-                        cleanup_error = close_error
-                    elif primary is not None:
-                        primary.add_note(
-                            "statistics table state release also failed: "
-                            f"{type(close_error).__name__}"
-                        )
-            if primary is not None:
-                raise primary
-            if cleanup_error is not None:
-                raise cleanup_error
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "statistics table state release also failed: "
+                        f"{type(close_error).__name__}"
+                    )
+                if primary is not None:
+                    raise primary
 
     return write_semantic_artifact(Path(logical_root), envelope, write)
 
@@ -894,10 +920,12 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             result[column] = values.astype("string").fillna("")
         result[column] = result[column].astype(str)
     for column in _COUNT_COLUMNS[member]:
-        values = pd.to_numeric(result[column], errors="raise")
-        if values.isna().any() or values.lt(0).any():
+        values = strict_integer_series(
+            result[column], error="statistics_table_count_invalid"
+        )
+        if values.lt(0).any():
             raise ValueError("statistics_table_count_invalid")
-        result[column] = values.astype("int64")
+        result[column] = values
     for column in _TIMESTAMP_COLUMNS.get(member, ()):
         values = pd.to_datetime(result[column], errors="raise")
         if values.isna().any():
@@ -911,12 +939,91 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         and column not in _TIMESTAMP_COLUMNS.get(member, ())
     )
     for column in numeric_columns:
-        values = pd.to_numeric(result[column], errors="raise")
-        if not bool(np.isfinite(values.dropna().to_numpy(dtype="float64")).all()):
-            raise ValueError("statistics_table_numeric_invalid")
-        result[column] = values.astype("float64")
+        result[column] = strict_finite_numeric_series(
+            result[column], error="statistics_table_numeric_invalid", allow_null=True
+        ).astype("float64")
     if result.empty and member not in _EMPTY_TABLE_MEMBERS:
         raise ValueError("statistics_table_empty")
+    if member in STATISTICS_TABLE_GROUPS["research"]:
+        if not result.status.isin(("DEFINED", "UNDEFINED")).all():
+            raise ValueError("statistics_table_status_invalid")
+        defined = result.status.eq("DEFINED")
+        measurements = [
+            column
+            for column in (
+                "value",
+                "loss",
+                "mean",
+                "standard_error",
+                "t_statistic",
+                "p_value",
+                "ci_lower",
+                "ci_upper",
+                "bootstrap_lower",
+                "bootstrap_upper",
+            )
+            if column in result
+        ]
+        if (
+            result.loc[defined, measurements].isna().any().any()
+            or result.loc[~defined, measurements].notna().any().any()
+            or result.loc[defined, "reason"].ne("").any()
+            or result.loc[~defined, "reason"].str.strip().eq("").any()
+        ):
+            raise ValueError("statistics_table_status_value_invalid")
+        for column in ("p_value", "fdr_adjusted_p_value", "white_p_value"):
+            if column in result and not result[column].dropna().between(0, 1).all():
+                raise ValueError("statistics_table_probability_invalid")
+        if "standard_error" in result and result.standard_error.lt(0).any():
+            raise ValueError("statistics_table_standard_error_invalid")
+        for lower, upper in (
+            ("ci_lower", "ci_upper"),
+            ("bootstrap_lower", "bootstrap_upper"),
+        ):
+            if lower in result and result[lower].gt(result[upper]).any():
+                raise ValueError("statistics_table_interval_invalid")
+        if member == "factor_diagnostics.parquet":
+            applicable = result.fdr_method.isin(("BH", "BY"))
+            if (
+                not (applicable | result.fdr_method.eq("NOT_APPLICABLE")).all()
+                or result.defined_hypothesis_count.gt(
+                    result.planned_hypothesis_count
+                ).any()
+                or not result.missing_hypothesis_count.eq(
+                    result.planned_hypothesis_count - result.defined_hypothesis_count
+                ).all()
+                or result.loc[applicable, "fdr_alpha"].isna().any()
+                or not result.loc[applicable, "fdr_alpha"]
+                .between(0, 1, inclusive="neither")
+                .all()
+                or result.loc[applicable & defined, "fdr_adjusted_p_value"].isna().any()
+                or result.loc[~applicable | ~defined, "fdr_adjusted_p_value"]
+                .notna()
+                .any()
+                or result.loc[~applicable, "fdr_alpha"].notna().any()
+            ):
+                raise ValueError("statistics_table_fdr_invalid")
+        if member == "fama_macbeth_periods.parquet":
+            white_defined = result.white_p_value.notna()
+            if (
+                (white_defined & ~defined).any()
+                or not result.loc[white_defined, "white_p_value"].between(0, 1).all()
+                or result.loc[white_defined, "white_reason"].ne("").any()
+                or result.loc[~white_defined, "white_reason"].str.strip().eq("").any()
+            ):
+                raise ValueError("statistics_table_white_invalid")
+        if member == "model_reality_checks.parquet":
+            indicator = result.statistic_id.isin(("superior", "included"))
+            probability = result.statistic_id.isin(
+                ("lower_p_value", "consistent_p_value", "upper_p_value", "p_value")
+            )
+            if (
+                not (indicator | probability).all()
+                or not result.alpha.between(0, 1, inclusive="neither").all()
+                or not result.loc[defined & indicator, "value"].isin((0, 1)).all()
+                or not result.loc[defined & probability, "value"].between(0, 1).all()
+            ):
+                raise ValueError("statistics_table_reality_check_invalid")
     if member in {
         "model_losses.parquet",
         "model_comparison.parquet",
@@ -984,4 +1091,5 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             and not result.component_type.isin(("additive", "detail")).all()
         ):
             raise ValueError("statistics_attribution_component_invalid")
-    return result.reset_index(drop=True)
+    result.index = pd.RangeIndex(len(result))
+    return result

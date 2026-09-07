@@ -3,21 +3,20 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.catalog.fields import platform_entity_time_key
-from quant_research_platform.contracts.columns import ColumnRole
+from quant_research_platform.contracts.columns import (
+    PLATFORM_ENTITY_TIME_KEY,
+    ColumnRole,
+)
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.signals import SignalSpec
-from quant_research_platform.research.factors.price_volume.columns import (
-    price_volume_window_column,
-)
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 
-DEMO_FACTOR_COLUMN = price_volume_window_column("mom", 20)
+DEMO_FACTOR_COLUMN = "momentum_20d"
 DEMO_FACTOR_ZSCORE_COLUMN = f"{DEMO_FACTOR_COLUMN}_zscore"
 DEMO_LABEL_COLUMN = forward_return_label_column(20)
 
@@ -55,7 +54,7 @@ def make_demo_research_dataset_spec(
     filter_column_roles: Mapping[str, ColumnRole] | None = None,
     frequency: DataFrequency = DataFrequency.DAILY,
     grain: DataGrain = DataGrain.RESEARCH_ROW,
-    primary_key: tuple[str, ...] = platform_entity_time_key(),
+    primary_key: tuple[str, ...] = PLATFORM_ENTITY_TIME_KEY,
     partition_columns: tuple[str, ...] = ("year",),
 ) -> ResearchDatasetSpec:
     defaults = _demo_research_dataset_defaults()
@@ -111,7 +110,7 @@ def _research_dataset_spec_from_defaults(
     filter_column_roles: Mapping[str, ColumnRole] | None = None,
     frequency: DataFrequency = DataFrequency.DAILY,
     grain: DataGrain = DataGrain.RESEARCH_ROW,
-    primary_key: tuple[str, ...] = platform_entity_time_key(),
+    primary_key: tuple[str, ...] = PLATFORM_ENTITY_TIME_KEY,
     partition_columns: tuple[str, ...] = ("year",),
 ) -> ResearchDatasetSpec:
     if data_id == "demo" and defaults["data_id"] != "demo":

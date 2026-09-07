@@ -19,6 +19,7 @@ from quant_research_platform.contracts.business_manifest import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.models import (
+    A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
     ModelSpec,
     validate_model_selection_metadata,
 )
@@ -68,13 +69,12 @@ from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.prediction_output_helpers import write_prediction_result
 from tests.research.workflow_test_support import (
-    _ColumnPredictor,
+    _column_predictor,
     _fold,
     _metadata,
     _quarterly_result,
     _selection_metadata,
     _trial_reference,
-    _UnpicklablePredictor,
 )
 
 
@@ -107,6 +107,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     frame["market_id"] = "a_share"
     frame["eligible"] = True
     frame["label"] = frame[inputs[0]] * 0.3 + rng.normal(scale=0.01, size=len(frame))
+    frame["label_available_at"] = frame["timestamp"]
     dataset = replace(
         a_share.research_dataset_catalog().get(protocol.scenario_id), data_id="fixture"
     )
@@ -118,6 +119,8 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
             family_id=spec.model_id,
             model_id=spec.model_id,
             protocol=protocol.manifest(),
+            model_spec=spec,
+            root_seed=42,
         )
         for spec in specs
     )
@@ -172,7 +175,8 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
             item = QuarterlyModelResult(
                 _fold(1), spec.model_id, result, spec.model_id, selection, (reference,)
             )
-            owned = OwnedValue(item, lease) if lease is not None else item
+            owned = OwnedValue(item, lease)
+            item = result = None
             try:
                 yield owned
             finally:
@@ -202,6 +206,45 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
         assert any(
             item["model_metadata"]["scaler"] is not None for item in payload["models"]
         )
+        from quant_research_platform.contracts import models as model_contract
+        from quant_research_platform.research.models.persisted import (
+            read_quarterly_predictor,
+        )
+
+        for entry in artifact.quarterly_models:
+            algorithm = entry["model_metadata"]["model_algorithm"]
+            with read_quarterly_predictor(
+                artifact, "2019Q1", entry["family_id"], resource_policy=policy
+            ) as actual:
+                if algorithm in {
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                }:
+                    changed = (
+                        replace(
+                            actual,
+                            directions=tuple(-value for value in actual.directions),
+                        )
+                        if algorithm == "equal_weight_rank_ensemble"
+                        else replace(
+                            actual, weights=tuple(-value for value in actual.weights)
+                        )
+                    )
+                    with pytest.raises(
+                        ValueError, match="model_state_metadata_mismatch"
+                    ):
+                        fitting.validate_model_state(changed, entry["model_metadata"])
+                    changed = None
+                elif algorithm == "random_forest_regressor":
+                    with pytest.MonkeyPatch.context() as patch:
+                        patch.setattr(
+                            model_contract.psutil, "cpu_count", lambda **_kwargs: None
+                        )
+                        fitting.validate_model_state(actual, entry["model_metadata"])
+                    assert (
+                        actual.n_jobs
+                        == entry["model_metadata"]["resolved_hyperparameters"]["n_jobs"]
+                    )
         assert policy.used_memory_bytes == 0
     development = len(
         pd.period_range(a_share.DEVELOPMENT_START, a_share.DEVELOPMENT_END, freq="Q")
@@ -214,12 +257,12 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     assert 1 + total * 9 <= MAX_SEMANTIC_ARTIFACT_MEMBERS == 256
 
 
-def _envelope() -> object:
+def _envelope(*, software_identity="c" * 64) -> object:
     return build_business_manifest_envelope(
         logical_artifact_id="model-artifact",
         schema_identity="a" * 64,
         protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
+        software_identity=software_identity,
         research_window={
             "start": "2019-01-01",
             "end": "2019-06-30",
@@ -258,28 +301,49 @@ def test_persisted_quarter_consumption_uses_active_columns_and_actual_model_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = write_quarterly_model_artifact(
-        tmp_path / "model",
-        model_id="model-artifact",
-        trial_layout=StorageLayout(tmp_path),
-        envelope=_envelope(),
-        quarterly_results=(
-            _quarterly_result(
-                1,
-                trial_layout=StorageLayout(tmp_path),
-                model_id="champion_q1",
-                columns=("x",),
-                predictor=_ColumnPredictor("x", 1.0),
+    with runtime_resource_policy_scope() as policy:
+        root = write_quarterly_model_artifact(
+            tmp_path / "model",
+            model_id="model-artifact",
+            trial_layout=StorageLayout(tmp_path),
+            envelope=_envelope(),
+            quarterly_results=(
+                OwnedValue(
+                    item,
+                    policy.lease(
+                        "test.model",
+                        fitting._linear_model_state_upper_bound_bytes(
+                            ModelSpec(
+                                model_id=item.model_id,
+                                model_algorithm=item.model_result.metadata[
+                                    "model_algorithm"
+                                ],
+                                input_factor_columns=tuple(
+                                    item.model_result.metadata["input_columns"]
+                                ),
+                                label_column="label",
+                            )
+                        ),
+                    ),
+                )
+                for item in (
+                    _quarterly_result(
+                        1,
+                        trial_layout=StorageLayout(tmp_path),
+                        model_id="champion_q1",
+                        columns=("x",),
+                        predictor=_column_predictor("x", 1.0),
+                    ),
+                    _quarterly_result(
+                        2,
+                        trial_layout=StorageLayout(tmp_path),
+                        model_id="champion_q2",
+                        columns=("y",),
+                        predictor=_column_predictor("y", 2.0),
+                    ),
+                )
             ),
-            _quarterly_result(
-                2,
-                trial_layout=StorageLayout(tmp_path),
-                model_id="champion_q2",
-                columns=("y",),
-                predictor=_ColumnPredictor("y", 2.0),
-            ),
-        ),
-    )
+        )
     artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
     spec = _dataset_spec()
     frame = pd.DataFrame(
@@ -325,26 +389,48 @@ def test_persisted_quarter_consumption_uses_active_columns_and_actual_model_ids(
     assert output["model_id"].tolist() == ["champion_q1", "champion_q2"]
     assert output["raw_prediction"].tolist() == pytest.approx([4.0, 6.0])
     assert output["alpha_score"].tolist() == pytest.approx([0.0, 0.0])
+    assert policy.used_memory_bytes == 0
 
 
 def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alpha(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = write_quarterly_model_artifact(
-        tmp_path / "model",
-        model_id="model-artifact",
-        trial_layout=StorageLayout(tmp_path),
-        envelope=_envelope(),
-        quarterly_results=(
-            _quarterly_result(
-                1,
-                trial_layout=StorageLayout(tmp_path),
-                model_id="champion",
-                columns=("x",),
+    with runtime_resource_policy_scope() as policy:
+        root = write_quarterly_model_artifact(
+            tmp_path / "model",
+            model_id="model-artifact",
+            trial_layout=StorageLayout(tmp_path),
+            envelope=_envelope(),
+            quarterly_results=(
+                OwnedValue(
+                    item,
+                    policy.lease(
+                        "test.model",
+                        fitting._linear_model_state_upper_bound_bytes(
+                            ModelSpec(
+                                model_id=item.model_id,
+                                model_algorithm=item.model_result.metadata[
+                                    "model_algorithm"
+                                ],
+                                input_factor_columns=tuple(
+                                    item.model_result.metadata["input_columns"]
+                                ),
+                                label_column="label",
+                            )
+                        ),
+                    ),
+                )
+                for item in (
+                    _quarterly_result(
+                        1,
+                        trial_layout=StorageLayout(tmp_path),
+                        model_id="champion",
+                        columns=("x",),
+                    ),
+                )
             ),
-        ),
-    )
+        )
     artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
     spec = _dataset_spec()
     frame = pd.DataFrame(
@@ -422,26 +508,48 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
         second_table.reset_index(drop=True),
         check_dtype=True,
     )
+    assert policy.used_memory_bytes == 0
 
 
 def test_persisted_quarter_request_is_clipped_to_requested_window(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    root = write_quarterly_model_artifact(
-        tmp_path / "model",
-        model_id="model-artifact",
-        trial_layout=StorageLayout(tmp_path),
-        envelope=_envelope(),
-        quarterly_results=(
-            _quarterly_result(
-                1,
-                trial_layout=StorageLayout(tmp_path),
-                model_id="champion",
-                columns=("x",),
+    with runtime_resource_policy_scope() as policy:
+        root = write_quarterly_model_artifact(
+            tmp_path / "model",
+            model_id="model-artifact",
+            trial_layout=StorageLayout(tmp_path),
+            envelope=_envelope(),
+            quarterly_results=(
+                OwnedValue(
+                    item,
+                    policy.lease(
+                        "test.model",
+                        fitting._linear_model_state_upper_bound_bytes(
+                            ModelSpec(
+                                model_id=item.model_id,
+                                model_algorithm=item.model_result.metadata[
+                                    "model_algorithm"
+                                ],
+                                input_factor_columns=tuple(
+                                    item.model_result.metadata["input_columns"]
+                                ),
+                                label_column="label",
+                            )
+                        ),
+                    ),
+                )
+                for item in (
+                    _quarterly_result(
+                        1,
+                        trial_layout=StorageLayout(tmp_path),
+                        model_id="champion",
+                        columns=("x",),
+                    ),
+                )
             ),
-        ),
-    )
+        )
     artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
     spec = _dataset_spec()
     frame = pd.DataFrame(
@@ -486,25 +594,47 @@ def test_persisted_quarter_request_is_clipped_to_requested_window(
     assert output["timestamp"].min() >= pd.Timestamp("2019-02-01")
     assert output["timestamp"].max() <= pd.Timestamp("2019-03-15")
     assert len(output) == 1
+    assert policy.used_memory_bytes == 0
 
 
 def test_persisted_quarter_route_rejects_uncovered_first_quarter(
     tmp_path: Path,
 ) -> None:
-    root = write_quarterly_model_artifact(
-        tmp_path / "model",
-        model_id="model-artifact",
-        trial_layout=StorageLayout(tmp_path),
-        envelope=_envelope(),
-        quarterly_results=(
-            _quarterly_result(
-                2,
-                trial_layout=StorageLayout(tmp_path),
-                model_id="champion",
-                columns=("x",),
+    with runtime_resource_policy_scope() as policy:
+        root = write_quarterly_model_artifact(
+            tmp_path / "model",
+            model_id="model-artifact",
+            trial_layout=StorageLayout(tmp_path),
+            envelope=_envelope(),
+            quarterly_results=(
+                OwnedValue(
+                    item,
+                    policy.lease(
+                        "test.model",
+                        fitting._linear_model_state_upper_bound_bytes(
+                            ModelSpec(
+                                model_id=item.model_id,
+                                model_algorithm=item.model_result.metadata[
+                                    "model_algorithm"
+                                ],
+                                input_factor_columns=tuple(
+                                    item.model_result.metadata["input_columns"]
+                                ),
+                                label_column="label",
+                            )
+                        ),
+                    ),
+                )
+                for item in (
+                    _quarterly_result(
+                        2,
+                        trial_layout=StorageLayout(tmp_path),
+                        model_id="champion",
+                        columns=("x",),
+                    ),
+                )
             ),
-        ),
-    )
+        )
     artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
     prediction_spec = PredictionSpec(
         prediction_id="prediction",
@@ -527,6 +657,7 @@ def test_persisted_quarter_route_rejects_uncovered_first_quarter(
             persisted_model=artifact,
             resource_policy=None,
         )
+    assert policy.used_memory_bytes == 0
 
 
 def test_quarter_id_must_match_prediction_window_and_repeated_champion_is_valid() -> (
@@ -559,26 +690,47 @@ def test_quarter_id_must_match_prediction_window_and_repeated_champion_is_valid(
 
 
 def test_same_champion_and_ic_columns_are_canonicalized(tmp_path: Path) -> None:
-    root = write_quarterly_model_artifact(
-        tmp_path / "model",
-        model_id="model-artifact",
-        trial_layout=StorageLayout(tmp_path),
-        envelope=_envelope(),
-        quarterly_results=(
-            _quarterly_result(
-                1,
-                trial_layout=StorageLayout(tmp_path),
-                model_id="same_champion",
-                columns=("x",),
+    with runtime_resource_policy_scope() as policy:
+        root = write_quarterly_model_artifact(
+            tmp_path / "model",
+            model_id="model-artifact",
+            trial_layout=StorageLayout(tmp_path),
+            envelope=_envelope(),
+            quarterly_results=(
+                OwnedValue(
+                    item,
+                    policy.lease(
+                        "test.model",
+                        fitting._linear_model_state_upper_bound_bytes(
+                            ModelSpec(
+                                model_id=item.model_id,
+                                model_algorithm=item.model_result.metadata[
+                                    "model_algorithm"
+                                ],
+                                input_factor_columns=tuple(
+                                    item.model_result.metadata["input_columns"]
+                                ),
+                                label_column="label",
+                            )
+                        ),
+                    ),
+                )
+                for item in (
+                    _quarterly_result(
+                        1,
+                        trial_layout=StorageLayout(tmp_path),
+                        model_id="same_champion",
+                        columns=("x",),
+                    ),
+                    _quarterly_result(
+                        2,
+                        trial_layout=StorageLayout(tmp_path),
+                        model_id="same_champion",
+                        columns=("x",),
+                    ),
+                )
             ),
-            _quarterly_result(
-                2,
-                trial_layout=StorageLayout(tmp_path),
-                model_id="same_champion",
-                columns=("x",),
-            ),
-        ),
-    )
+        )
     artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
     assert [item["model_id"] for item in artifact.quarterly_models] == [
         "same_champion",
@@ -593,16 +745,36 @@ def test_same_champion_and_ic_columns_are_canonicalized(tmp_path: Path) -> None:
         predictor=ICWeightedRankEnsemble(
             columns=("x",),
             weights=(1.0,),
-            coefficient_count=1,
         ),
     )
-    ic_root = write_quarterly_model_artifact(
-        tmp_path / "ic-model",
-        model_id="model-artifact",
-        trial_layout=StorageLayout(tmp_path),
-        envelope=_envelope(),
-        quarterly_results=(ic_result,),
-    )
+    with runtime_resource_policy_scope() as policy:
+        ic_root = write_quarterly_model_artifact(
+            tmp_path / "ic-model",
+            model_id="model-artifact",
+            trial_layout=StorageLayout(tmp_path),
+            envelope=_envelope(),
+            quarterly_results=(
+                OwnedValue(
+                    item,
+                    policy.lease(
+                        "test.model",
+                        fitting._linear_model_state_upper_bound_bytes(
+                            ModelSpec(
+                                model_id=item.model_id,
+                                model_algorithm=item.model_result.metadata[
+                                    "model_algorithm"
+                                ],
+                                input_factor_columns=tuple(
+                                    item.model_result.metadata["input_columns"]
+                                ),
+                                label_column="label",
+                            )
+                        ),
+                    ),
+                )
+                for item in (ic_result,)
+            ),
+        )
     ic_artifact = read_quarterly_model_artifact(
         ic_root, trial_layout=StorageLayout(tmp_path)
     )
@@ -610,28 +782,51 @@ def test_same_champion_and_ic_columns_are_canonicalized(tmp_path: Path) -> None:
         "columns": ["x"],
         "weights": [1.0],
     }
+    assert policy.used_memory_bytes == 0
 
 
 def test_model_member_mutation_is_rejected_before_loading_predictor(
     tmp_path: Path,
 ) -> None:
-    root = write_quarterly_model_artifact(
-        tmp_path / "model",
-        model_id="model-artifact",
-        trial_layout=StorageLayout(tmp_path),
-        envelope=_envelope(),
-        quarterly_results=(
-            _quarterly_result(
-                1,
-                trial_layout=StorageLayout(tmp_path),
-                model_id="champion",
-                columns=("x",),
+    with runtime_resource_policy_scope() as policy:
+        root = write_quarterly_model_artifact(
+            tmp_path / "model",
+            model_id="model-artifact",
+            trial_layout=StorageLayout(tmp_path),
+            envelope=_envelope(),
+            quarterly_results=(
+                OwnedValue(
+                    item,
+                    policy.lease(
+                        "test.model",
+                        fitting._linear_model_state_upper_bound_bytes(
+                            ModelSpec(
+                                model_id=item.model_id,
+                                model_algorithm=item.model_result.metadata[
+                                    "model_algorithm"
+                                ],
+                                input_factor_columns=tuple(
+                                    item.model_result.metadata["input_columns"]
+                                ),
+                                label_column="label",
+                            )
+                        ),
+                    ),
+                )
+                for item in (
+                    _quarterly_result(
+                        1,
+                        trial_layout=StorageLayout(tmp_path),
+                        model_id="champion",
+                        columns=("x",),
+                    ),
+                )
             ),
-        ),
-    )
+        )
     (root / "models" / "2019Q1" / "linear_regression.pkl").write_bytes(b"mutated")
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
+    assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize(
@@ -714,6 +909,9 @@ def test_mixed_rank_and_supervised_trials_share_validation_keys(
             "x": [1.0, 2.0, 3.0, 1.0, np.nan, 3.0, 2.0, 3.0, 4.0],
             "y": [1.0, 2.0, 3.0, 1.0, 2.0, np.nan, 2.0, 3.0, 4.0],
             "label": [1.0, 2.0, 3.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0],
+            "label_available_at": pd.to_datetime(
+                ["2018-12-31"] * 3 + ["2019-01-01"] * 3 + ["2019-01-02"] * 3
+            ),
             "eligible": [True] * 9,
         }
     )
@@ -778,7 +976,9 @@ def test_mixed_rank_and_supervised_trials_share_validation_keys(
             prediction_spec=prediction_spec,
             dataset_spec=_dataset_spec(),
             model_catalog=catalog,
-            chunks=lambda columns, *, input_columns: (frame.loc[:, list(columns)],),
+            chunks=lambda columns, *, input_columns, start, end: (
+                frame.loc[:, list(columns)],
+            ),
         )
     assert selected.model_id in {"linear", "rank"}
     assert len(keys) == 2
@@ -894,7 +1094,7 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
             "model_metadata": {
                 "model_artifact_id": "model",
                 "model_artifact_identity": "b" * 64,
-                "model_artifact_schema": "qrp-a-share-quarterly-model-artifact",
+                "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
             }
         }
     }
@@ -985,7 +1185,14 @@ def test_model_selection_rejects_protocol_family_mismatch(
 
 def test_quarterly_writer_releases_owned_member_on_primary_failure(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    from quant_research_platform.research.models import persisted
+
+    def fail_dump(*_args, **_kwargs):
+        raise RuntimeError("predictor_serialization_failed")
+
+    monkeypatch.setattr(persisted.pickle, "dump", fail_dump)
     policy = capture_test_policy(
         available_memory_bytes=8 * 1024 * 1024,
         explicit_cap_bytes=2 * 1024 * 1024,
@@ -995,11 +1202,20 @@ def test_quarterly_writer_releases_owned_member_on_primary_failure(
         trial_layout=StorageLayout(tmp_path),
         model_id="champion",
         columns=("x",),
-        predictor=_UnpicklablePredictor("x"),
     )
 
     def yielded() -> object:
-        lease = policy.lease("research.test.quarter", 1024)
+        lease = policy.lease(
+            "research.test.quarter",
+            fitting._linear_model_state_upper_bound_bytes(
+                ModelSpec(
+                    model_id="champion",
+                    model_algorithm="linear_regression",
+                    input_factor_columns=("x",),
+                    label_column="label",
+                )
+            ),
+        )
         owned = OwnedValue(quarter, lease)
         try:
             yield owned
@@ -1107,9 +1323,8 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
     def fit_owned(_frames, spec, **_kwargs):  # noqa: ANN001, ANN003
         captured.append(spec.random_seed)
         return ModelFitResult(
-            coefficients=np.array([0.0, 1.0]),
             metadata=_metadata(("x",)),
-            prediction_model=_ColumnPredictor("x"),
+            prediction_model=_column_predictor("x"),
         )
 
     monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", fit_owned)
@@ -1123,6 +1338,7 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
                     "asset_id": ["a"],
                     "x": [1.0],
                     "label": [2.0],
+                    "label_available_at": pd.to_datetime(["2018-01-01"]),
                     "eligible": [True],
                 }
             ),
@@ -1221,10 +1437,13 @@ def test_two_level_selection_mutations_are_rejected() -> None:
 def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted(
     tmp_path: Path,
 ) -> None:
+    import json
     from dataclasses import replace
 
     from quant_research_platform.catalog.models import ModelCatalog
+    from quant_research_platform.contracts.filtering import filter_definition
     from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.research.models import persisted
     from quant_research_platform.research.models.persisted import (
         read_quarterly_predictor,
     )
@@ -1234,6 +1453,9 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
     )
     from quant_research_platform.research.models.supervised import preflight_model_specs
     from quant_research_platform.storage.experiments import read_trial_ledger_reference
+    from quant_research_platform.storage.semantic_artifacts import (
+        write_semantic_artifact,
+    )
     from tests.research.workflow_test_support import _fold
 
     layout = StorageLayout(tmp_path).with_target_roots(
@@ -1256,6 +1478,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                 "market_id": "a_share",
                 "x": float(i),
                 "label": float(i * 2),
+                "label_available_at": pd.Timestamp(day),
                 "eligible": True,
             }
             for day in ("2017-12-29", "2018-12-28", "2019-01-02")
@@ -1279,7 +1502,9 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
     protocol = {"fixture": True}
     envelope = build_business_manifest_envelope(
         logical_artifact_id="model-artifact",
-        schema_identity="a" * 64,
+        schema_identity=canonical_json_hash(
+            {"model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID}
+        ),
         protocol_or_spec_identity="b" * 64,
         software_identity="c" * 64,
         research_window={
@@ -1291,6 +1516,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         semantic_metadata={
             "target_contract": {
                 "protocol": protocol,
+                "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
                 "model_specs": [{"model_id": "ridge"}],
             }
         },
@@ -1334,13 +1560,14 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             tmp_path / "model",
             model_id="model-artifact",
             envelope=envelope,
-            quarterly_results=(
-                OwnedValue(quarterly, lease) if lease is not None else quarterly,
-            ),
+            quarterly_results=(OwnedValue(quarterly, lease),),
             trial_layout=layout,
         )
         artifact = read_quarterly_model_artifact(root, trial_layout=layout)
         saved = artifact.quarterly_models[0]["model_metadata"]
+        assert pd.Timestamp(saved["train_start"]) > pd.Timestamp(
+            artifact.quarterly_models[0]["training_window"]["start"]
+        )
         assert saved["rows_after_input_label_dropna"] == 6
         assert saved["resolved_hyperparameters"]["alpha"] == 60.0
         plan, trials = read_trial_ledger_reference(layout, artifact.trial_ledgers[0])
@@ -1358,6 +1585,160 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             assert predictor.estimator.alpha == 60.0
             probe = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
             before = predictor.predict(probe).copy()
+        original_bytes = {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        for mutation in (
+            "none_start",
+            "early_start",
+            "nat_end",
+            "cutoff",
+            "algorithm",
+            "inputs",
+            "label",
+            "filter",
+            "seed",
+            "refit_count",
+            "refit_strength",
+            "winner",
+            "backend",
+            "scaler",
+        ):
+
+            def changed(staging, mutation=mutation):
+                for relative, content in original_bytes.items():
+                    if relative == Path("manifest.json"):
+                        continue
+                    destination = staging / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    destination.write_bytes(content)
+                metadata_path = staging / "models/2019Q1/metadata.json"
+                payload = json.loads(metadata_path.read_text())
+                entry = payload["models"][0]
+                altered = entry["model_metadata"]
+                if mutation == "none_start":
+                    altered["train_start"] = None
+                elif mutation == "early_start":
+                    altered["train_start"] = (
+                        pd.Timestamp(entry["training_window"]["start"])
+                        - pd.Timedelta(days=1)
+                    ).isoformat()
+                elif mutation == "nat_end":
+                    altered["train_end"] = "NaT"
+                elif mutation == "cutoff":
+                    altered["fit_cutoff"] = "NaT"
+                elif mutation == "algorithm":
+                    altered["model_algorithm"] = "lasso_regression"
+                elif mutation == "inputs":
+                    altered["input_factor_columns"] = altered["input_columns"] = [
+                        "other"
+                    ]
+                    altered["scaler"]["columns"] = ["other"]
+                    altered["feature_importance"] = {
+                        "other": altered["feature_importance"]["x"]
+                    }
+                elif mutation == "label":
+                    altered["label_column"] = "other_label"
+                elif mutation == "filter":
+                    altered["sample_filter_mode"] = "unfiltered"
+                    altered["filter_columns_used"] = []
+                    altered["filter_definition"] = filter_definition("unfiltered")
+                elif mutation == "seed":
+                    altered["random_seed"] += 1
+                elif mutation == "refit_count":
+                    for key in (
+                        "rows_input",
+                        "rows_after_filter_mode",
+                        "rows_after_input_label_dropna",
+                    ):
+                        altered[key] += 1
+                elif mutation == "refit_strength":
+                    altered["hyperparameters"]["alpha"] *= 2
+                    altered["resolved_hyperparameters"]["alpha"] *= 2
+                elif mutation == "winner":
+                    loser = plan.candidate_ids[0]
+                    entry["model_id"] = loser
+                    payload["selection"]["selected_model_id"] = loser
+                    payload["selection"]["families"][0]["selected_config_id"] = loser
+                if mutation in {"backend", "scaler", "refit_strength"}:
+                    relative = "models/2019Q1/ridge.pkl"
+                    with persisted._read_model_member(
+                        root, artifact.member_records, relative, resource_policy=policy
+                    ) as owned:
+                        model = owned.value
+                        if mutation == "scaler":
+                            model.scaler = replace(
+                                model.scaler, mean_=(model.scaler.mean_[0] + 1.0,)
+                            )
+                        else:
+                            model.estimator.set_params(alpha=model.estimator.alpha * 2)
+                        persisted._write_model_member(
+                            staging / relative,
+                            model,
+                            state_bytes=owned.lease.reserved_bytes,
+                        )
+                        model = None
+                metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+
+            altered_root = write_semantic_artifact(
+                tmp_path / mutation,
+                envelope,
+                changed,
+                operational_metadata={
+                    "model_trial_ledgers": list(artifact.trial_ledgers)
+                },
+            )
+            with pytest.raises(
+                ValueError,
+                match=(
+                    "invalid_model_metadata|model_trial_|model_state_metadata_mismatch"
+                    "|model_artifact_training_range_invalid"
+                ),
+            ):
+                corrupted = read_quarterly_model_artifact(
+                    altered_root, trial_layout=layout
+                )
+                with read_quarterly_predictor(
+                    corrupted, "2019Q1", "ridge", resource_policy=policy
+                ):
+                    pass
+            assert policy.used_memory_bytes == 0
+        assert {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        } == original_bytes
+        with persisted._read_model_member(
+            root,
+            artifact.member_records,
+            "models/2019Q1/ridge.pkl",
+            resource_policy=policy,
+        ) as owned:
+            altered_metadata = {**saved, "label_column": "other_label"}
+            altered = QuarterlyModelResult(
+                _fold(1),
+                selected.model_id,
+                ModelFitResult(
+                    altered_metadata,
+                    owned.value,
+                ),
+                "ridge",
+                metadata,
+                refs,
+            )
+            owned.value = altered
+            altered = None
+            with pytest.raises(ValueError, match="model_trial_parameters_misaligned"):
+                write_quarterly_model_artifact(
+                    tmp_path / "writer_reject",
+                    model_id="model-artifact",
+                    envelope=envelope,
+                    quarterly_results=(owned,),
+                    trial_layout=layout,
+                )
+        assert policy.used_memory_bytes == 0
         frame.loc[frame.timestamp.ge("2019-01-01"), ["x", "label"]] *= 1000000.0
         later_winners, later_selection, later_refs, later_indices = (
             _select_model_family_winners(
@@ -1437,11 +1818,588 @@ def test_model_publication_rejects_self_consistent_wrong_trial_provenance(
         )
         logical_root = tmp_path / f"wrong_{index}"
         with pytest.raises(ValueError, match="model_trial_"):
+            with runtime_resource_policy_scope() as policy:
+                write_quarterly_model_artifact(
+                    logical_root,
+                    model_id="model-artifact",
+                    envelope=_envelope(),
+                    quarterly_results=(
+                        OwnedValue(
+                            item,
+                            policy.lease(
+                                "test.model",
+                                fitting._linear_model_state_upper_bound_bytes(
+                                    ModelSpec(
+                                        model_id=item.model_id,
+                                        model_algorithm=item.model_result.metadata[
+                                            "model_algorithm"
+                                        ],
+                                        input_factor_columns=tuple(
+                                            item.model_result.metadata["input_columns"]
+                                        ),
+                                        label_column="label",
+                                    )
+                                ),
+                            ),
+                        )
+                        for item in (wrong,)
+                    ),
+                    trial_layout=layout,
+                )
+        assert not (logical_root / "instances" / _envelope().instance_identity).exists()
+    assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("max_train_rows", (None, 4))
+def test_linear_workspace_cap_rejects_before_weights_and_solver(
+    monkeypatch, max_train_rows
+):
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    spec = ModelSpec(
+        model_id="linear",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+        max_train_rows=max_train_rows,
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.bdate_range("2017-01-02", periods=8),
+            "label_available_at": pd.bdate_range("2017-01-02", periods=8),
+            "x": np.arange(8.0),
+            "label": np.arange(8.0) * 2 + 1,
+            "eligible": True,
+        }
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=1_000_000, explicit_cap_bytes=200_000
+    )
+    actual_collect = fitting._collect_training_frame_owned
+    blockers = []
+
+    def collect(*args, **kwargs):
+        owned = actual_collect(*args, **kwargs)
+        assert policy.used_memory_bytes == (
+            owned.lease.reserved_bytes
+            + fitting._linear_model_state_upper_bound_bytes(spec)
+        )
+        blockers.append(
+            policy.lease("test.blocker", 200_000 - policy.used_memory_bytes - 1)
+        )
+        return owned
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("linear_allocation_before_admission")
+
+    monkeypatch.setattr(fitting, "_collect_training_frame_owned", collect)
+    monkeypatch.setattr(fitting, "equal_date_sample_weights", forbidden)
+    monkeypatch.setattr(fitting.np.linalg, "lstsq", forbidden)
+    with runtime_resource_policy_scope(policy):
+        try:
+            with pytest.raises(
+                ValueError,
+                match="model_training_working_set_exceeds_task_memory_budget",
+            ):
+                fitting._fit_linear_model_result_owned_from_frames(
+                    (frame,), spec, fitting_cutoff="2018-12-31"
+                )
+            assert policy.used_memory_bytes == blockers[0].reserved_bytes
+        finally:
+            for blocker in blockers:
+                blocker.close()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("boundary", ("soft", "captured", "explicit"))
+def test_estimator_admission_uses_capacity_not_soft_thread_planning(
+    monkeypatch, boundary
+):
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2,
+        explicit_cap_bytes=12 * 1024**2 if boundary == "explicit" else None,
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2015-01-01", periods=1000),
+            "label_available_at": pd.date_range("2015-01-01", periods=1000),
+            "x": np.arange(1000, dtype="float64"),
+            "label": np.arange(1000, dtype="float64") / 10,
+            "eligible": True,
+        }
+    )
+    spec = ModelSpec(
+        model_id="ridge",
+        model_algorithm="ridge_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+    )
+    estimator = build_estimator_from_model_spec(spec)
+    original_collect = fitting._collect_training_frame_owned
+    original_fit = fitting._fit_predictor
+    blockers = []
+    fits = []
+
+    def collect(*args, **kwargs):
+        owned = original_collect(*args, **kwargs)
+        training = owned.value[0]
+        required = (
+            len(training) * 8
+            + fitting._model_state_upper_bound_bytes(
+                training, spec, estimator=estimator
+            )
+            + fitting._estimator_fit_working_set_bytes(training, spec, threads=1)
+        )
+        limit = (
+            policy.memory_budget_bytes
+            if boundary == "soft"
+            else policy.captured_available_memory_bytes
+            if boundary == "captured"
+            else policy.explicit_memory_cap_bytes
+        )
+        blockers.append(
+            policy.lease(
+                "test.other_work",
+                limit - policy.used_memory_bytes - required + required // 4,
+            )
+        )
+        assert policy.used_memory_bytes + required > limit
+        return owned
+
+    def fit(*args, **kwargs):
+        fits.append(kwargs["threads"])
+        return original_fit(*args, **kwargs)
+
+    with runtime_resource_policy_scope(policy):
+        baseline = fitting._fit_model_result_owned_from_frames(
+            (frame,),
+            spec,
+            estimator=build_estimator_from_model_spec(spec),
+            fitting_cutoff="2018-12-31",
+        )
+        try:
+            expected = baseline.value.prediction_model.predict(
+                frame.loc[:, spec.input_columns]
+            )
+        finally:
+            baseline.release(owner="test.baseline")
+        monkeypatch.setattr(fitting, "_collect_training_frame_owned", collect)
+        monkeypatch.setattr(fitting, "_fit_predictor", fit)
+        try:
+            if boundary == "soft":
+                fitted = fitting._fit_model_result_owned_from_frames(
+                    (frame,), spec, estimator=estimator, fitting_cutoff="2018-12-31"
+                )
+                try:
+                    np.testing.assert_array_equal(
+                        fitted.value.prediction_model.predict(
+                            frame.loc[:, spec.input_columns]
+                        ),
+                        expected,
+                    )
+                finally:
+                    fitted.release(owner="test.soft.fit")
+                assert fits == [1]
+            else:
+                with pytest.raises(
+                    ValueError,
+                    match="model_training_working_set_exceeds_task_memory_budget",
+                ):
+                    fitting._fit_model_result_owned_from_frames(
+                        (frame,), spec, estimator=estimator, fitting_cutoff="2018-12-31"
+                    )
+                assert fits == []
+            assert policy.used_memory_bytes == blockers[0].reserved_bytes
+        finally:
+            for blocker in blockers:
+                blocker.close()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("max_train_rows", (None, 400))
+def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
+    tmp_path, monkeypatch, max_train_rows
+):
+    from quant_research_platform.research.models import persisted
+    from quant_research_platform.research.models.persisted import (
+        read_quarterly_predictor,
+    )
+    from quant_research_platform.runtime import resources
+
+    layout = StorageLayout(tmp_path)
+    template = _quarterly_result(
+        1, trial_layout=layout, model_id="champion", columns=("x",)
+    )
+    spec = ModelSpec(
+        model_id="champion",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+        max_train_rows=max_train_rows,
+        random_seed=template.model_result.metadata["random_seed"],
+    )
+    reference = _trial_reference(
+        layout,
+        _fold(1),
+        family_id="linear_regression",
+        model_id="champion",
+        model_spec=spec,
+    )
+    selection = {
+        **template.selection_metadata,
+        "families": [
+            {
+                **template.selection_metadata["families"][0],
+                "trial_ledger_semantic_identity": reference["semantic_identity"],
+            }
+        ],
+    }
+    template = replace(
+        template, selection_metadata=selection, trial_ledgers=(reference,)
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2017-01-02"] * 400 + ["2017-01-03"] * 400),
+            "label_available_at": pd.to_datetime(
+                ["2017-01-02"] * 400 + ["2017-01-03"] * 400
+            ),
+            "x": np.arange(800.0),
+            "label": np.arange(800.0) * 2.0 + 1.0,
+            "eligible": True,
+        }
+    )
+    logical = tmp_path / "model"
+    with runtime_resource_policy_scope() as policy:
+        actual_collect = fitting._collect_training_frame_owned
+        actual_lstsq = fitting.np.linalg.lstsq
+        training_bytes = []
+        solver_calls = []
+
+        def collect(*args, **kwargs):
+            value = actual_collect(*args, **kwargs)
+            training_bytes.append(value.lease.reserved_bytes)
+            return value
+
+        def solve(design, labels, **kwargs):
+            assert (
+                policy.used_memory_bytes
+                >= training_bytes[-1] + design.nbytes + labels.nbytes
+            )
+            solver_calls.append(design.shape[0])
+            return actual_lstsq(design, labels, **kwargs)
+
+        monkeypatch.setattr(fitting, "_collect_training_frame_owned", collect)
+        monkeypatch.setattr(fitting.np.linalg, "lstsq", solve)
+
+        def members():
+            owned = fitting._fit_linear_model_result_owned_from_frames(
+                (frame,), spec, fitting_cutoff="2018-12-31"
+            )
+            assert (
+                owned.lease.reserved_bytes
+                == fitting._linear_model_state_upper_bound_bytes(spec)
+            )
+            result = replace(
+                template,
+                model_result=owned.value,
+            )
+            owned.value = result
+            result = None
+            try:
+                yield owned
+            finally:
+                if owned.lease.active:
+                    owned.release(owner="test.model")
+
+        root = write_quarterly_model_artifact(
+            logical,
+            model_id="model-artifact",
+            envelope=_envelope(),
+            quarterly_results=members(),
+            trial_layout=layout,
+        )
+        assert solver_calls == [800 if max_train_rows is None else max_train_rows]
+        artifact = read_quarterly_model_artifact(root, trial_layout=layout)
+        with read_quarterly_predictor(
+            artifact, "2019Q1", "linear_regression", resource_policy=policy
+        ) as predictor:
+            np.testing.assert_allclose(
+                predictor.predict(pd.DataFrame({"x": [1.0, 2.0]})), [3.0, 5.0]
+            )
+        old_good = {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        previous = set(root.parent.iterdir())
+        dump = persisted.pickle.dump
+        calls = []
+
+        def traced_dump(*args, **kwargs):
+            calls.append(True)
+            return dump(*args, **kwargs)
+
+        monkeypatch.setattr(persisted.pickle, "dump", traced_dump)
+        paths = []
+
+        def no_space(path):
+            paths.append(Path(path))
+            return SimpleNamespace(free=1)
+
+        monkeypatch.setattr(resources.shutil, "disk_usage", no_space)
+        with pytest.raises(RuntimeError, match="insufficient_free_disk"):
             write_quarterly_model_artifact(
-                logical_root,
+                logical,
                 model_id="model-artifact",
-                envelope=_envelope(),
-                quarterly_results=(wrong,),
+                envelope=_envelope(software_identity="e" * 64),
+                quarterly_results=members(),
                 trial_layout=layout,
             )
-        assert not (logical_root / "instances" / _envelope().instance_identity).exists()
+        assert calls == []
+        assert paths and all(path.is_relative_to(logical) for path in paths)
+        assert set(root.parent.iterdir()) == previous
+        assert {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        } == old_good
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("cap", (None, 13))
+@pytest.mark.parametrize("chunk_rows", (5, 17))
+def test_training_retention_preserves_trailing_rows_and_same_day_order(cap, chunk_rows):
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    spec = ModelSpec(
+        model_id="linear",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+        max_train_rows=cap,
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.bdate_range("2017-01-02", periods=16).repeat(2),
+            "label_available_at": pd.Timestamp("2017-02-01"),
+            "asset_id": ["b", "a"] * 16,
+            "x": np.arange(32.0),
+            "label": np.arange(32.0) * 2 + 1,
+            "eligible": True,
+        }
+    )
+    frame.loc[frame.index % 7 == 0, "label_available_at"] = pd.Timestamp("2018-01-01")
+    expected = frame.loc[frame.index % 7 != 0, ["timestamp", "x", "label"]].copy()
+    expected["timestamp"] = expected["timestamp"].dt.as_unit("ns")
+    if cap is not None:
+        expected = expected.tail(cap)
+    policy = capture_test_policy(available_memory_bytes=1024**2)
+    with runtime_resource_policy_scope(policy):
+        owned = fitting._collect_training_frame_owned(
+            (
+                frame.iloc[start : start + chunk_rows]
+                for start in range(0, 32, chunk_rows)
+            ),
+            spec,
+            fitting_cutoff="2017-12-31",
+        )
+        try:
+            actual, _, _ = owned.value
+            pd.testing.assert_frame_equal(
+                actual, expected.reset_index(drop=True), check_exact=True
+            )
+            assert policy.used_memory_bytes == owned.lease.reserved_bytes
+        finally:
+            owned.lease.close()
+    assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("part", "spec", "manifest", "unselected_year", "cancel", "exception", "staged"),
+)
+def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+):
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.datasets.io import (
+        _research_dataset_access_window,
+    )
+    from quant_research_platform.research.models import production
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from quant_research_platform.storage.datasets.writing import write_dataset
+
+    dataset = make_demo_research_dataset_spec(
+        data_id="snapshot",
+        factor_columns=("x",),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        context_columns=("label_available_at",),
+    )
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 3,
+            "asset_id": ["a"] * 3,
+            "timestamp": pd.to_datetime(["2014-01-02", "2018-01-02", "2024-01-02"]),
+            "label_available_at": pd.to_datetime(
+                ["2014-02-03", "2018-02-02", "2024-02-02"]
+            ),
+            "x": [1.0, 2.0, 3.0],
+            "label": [0.1, 0.2, 0.3],
+            "eligible": True,
+        }
+    )
+    frame = frame.astype(
+        {"timestamp": "datetime64[ns]", "label_available_at": "datetime64[ns]"}
+    )
+    layout = StorageLayout(tmp_path)
+    root = layout.research_dataset_root(dataset.market_id, dataset.data_id)
+    with runtime_resource_policy_scope() as policy:
+        write_dataset(
+            root, frame, spec=dataset, resource_policy=policy, borrowed_input=True
+        )
+        with open_dataset_session(
+            root,
+            columns=None,
+            time_window=_research_dataset_access_window(dataset.market_id, None),
+            resource_policy=policy,
+        ) as session:
+            scratch = session.inventory.scratch_path
+            baseline = policy.used_memory_bytes
+            observed = []
+
+            def exercise(**kwargs):
+                assert list(kwargs["sessions"]) == list(frame["timestamp"][:2])
+
+                def read():
+                    return kwargs["chunks"](
+                        tuple(frame.columns),
+                        input_columns=("x",),
+                        start=None,
+                        end="2018-12-31",
+                    )
+
+                first = pd.concat(read(), ignore_index=True)
+                pd.testing.assert_frame_equal(
+                    first, frame.iloc[:2].reset_index(drop=True)
+                )
+                observed.append(True)
+                if mutation == "staged":
+                    item = _quarterly_result(
+                        1, trial_layout=layout, model_id="champion", columns=("x",)
+                    )
+                    state_bytes = fitting._linear_model_state_upper_bound_bytes(
+                        ModelSpec(
+                            model_id="champion",
+                            model_algorithm="linear_regression",
+                            input_factor_columns=("x",),
+                            label_column="label",
+                        )
+                    )
+
+                    def members(change):
+                        owned = OwnedValue(
+                            item, policy.lease("test.model", state_bytes)
+                        )
+                        try:
+                            yield owned
+                            if change:
+                                path = root / "spec.json"
+                                path.write_bytes(path.read_bytes() + b" ")
+                        finally:
+                            if owned.lease.active:
+                                owned.release(owner="test.model")
+
+                    logical = tmp_path / "models"
+                    good = write_quarterly_model_artifact(
+                        logical,
+                        model_id="model-artifact",
+                        envelope=_envelope(),
+                        quarterly_results=members(False),
+                        trial_layout=layout,
+                        verify_source=session.verify,
+                    )
+                    old_good = {
+                        p.relative_to(good): p.read_bytes()
+                        for p in good.rglob("*")
+                        if p.is_file()
+                    }
+                    previous = set(good.parent.iterdir())
+                    with pytest.raises(
+                        ValueError, match="dataset_spec_identity_changed"
+                    ):
+                        write_quarterly_model_artifact(
+                            logical,
+                            model_id="model-artifact",
+                            envelope=_envelope(software_identity="e" * 64),
+                            quarterly_results=members(True),
+                            trial_layout=layout,
+                            verify_source=session.verify,
+                        )
+                    assert set(good.parent.iterdir()) == previous
+                    assert {
+                        p.relative_to(good): p.read_bytes()
+                        for p in good.rglob("*")
+                        if p.is_file()
+                    } == old_good
+                    return ()
+                if mutation in {"cancel", "exception"}:
+                    iterator = iter(read())
+                    try:
+                        next(iterator)
+                        if mutation == "exception":
+                            raise RuntimeError("consumer_failure")
+                    finally:
+                        iterator.close()
+                    return ()
+                if mutation == "part":
+                    part = session.read_paths[0]
+                    part.write_bytes(part.read_bytes() + b" ")
+                elif mutation in {"spec", "manifest"}:
+                    path = (
+                        root / "spec.json"
+                        if mutation == "spec"
+                        else root / "_manifest" / "manifest.json"
+                    )
+                    path.write_bytes(path.read_bytes() + b" ")
+                else:
+                    path = root / "data" / "year=2025" / "part-00000.parquet"
+                    path.parent.mkdir()
+                    path.write_bytes(session.all_paths[0].read_bytes())
+                return tuple(read())
+
+            monkeypatch.setattr(production, "_build_a_share_quarterly_models", exercise)
+
+            def run():
+                return production.build_model_selection_result(
+                    layout=layout,
+                    dataset_catalog=ResearchDatasetCatalog((dataset,)),
+                    model_catalog=research_profile().models,
+                    dataset_id=dataset.data_id,
+                    model_ids=("linear",),
+                    tie_break_order=("linear",),
+                    time_window=TimeWindow("2019-01-01", "2019-03-31"),
+                    resource_policy=policy,
+                    protocol_manifest=a_share.protocol("pv_all").manifest(),
+                    run_id="snapshot",
+                    research_protocol_identity="a" * 64,
+                    model_target_id="snapshot_model",
+                    backend_versions={},
+                    dataset_session=session,
+                )
+
+            if mutation in {"cancel", "staged"}:
+                assert run() == ()
+            elif mutation == "exception":
+                with pytest.raises(RuntimeError, match="^consumer_failure$"):
+                    run()
+            else:
+                with pytest.raises(
+                    ValueError,
+                    match="dataset_(file_identity|spec_identity|manifest_identity|inventory)_changed",
+                ):
+                    run()
+            assert observed == [True]
+            assert policy.used_memory_bytes == baseline
+        assert not scratch.exists()
+        assert policy.used_memory_bytes == 0

@@ -6,11 +6,13 @@ import io
 import json
 import tempfile
 import weakref
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 import pandas as pd
 import pytest
 
+import quant_research_platform.contracts.order_book as order_book
 import quant_research_platform.sources.binance.replay as replay
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.order_book import (
@@ -772,6 +774,58 @@ def test_invalid_raw_record_releases_decode_inside_owner_lease(
     assert all(used > 0 for used in released)
 
 
+@pytest.mark.parametrize("invalid_record", [False, True])
+def test_replay_merge_closes_all_streams_without_collecting_retained_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_record: bool,
+) -> None:
+    root = tmp_path / "run"
+    depth = _futures_delta(2, 1, 2, previous=0, transaction_time=100, segment_id="seg")
+    if invalid_record:
+        depth["receive_monotonic_ns"] = -1
+    _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [_agg_trade(1), _agg_trade(3)],
+            ),
+            (FUTURES_MARKET_TYPE, "depth", "btcusdt@depth@100ms", [depth]),
+        ],
+    )
+    handles = []
+    original_open = Path.open
+
+    def observe_open(path: Path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        if (
+            path.name.endswith(".jsonl.gz")
+            and path.name != "connection_intervals.jsonl.gz"
+        ):
+            handles.append(handle)
+        return handle
+
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with open_recorder_run(root, policy) as run:
+            baseline = policy.used_memory_bytes
+            monkeypatch.setattr(Path, "open", observe_open)
+            records = run.iter_records(market_type=FUTURES_MARKET_TYPE)
+            if invalid_record:
+                with pytest.raises(ValueError, match="monotonic") as retained:
+                    tuple(records)
+                assert retained.value is not None
+            else:
+                assert next(records)["capture_seq"] == 1
+                records.close()
+            assert handles and all(handle.closed for handle in handles)
+            assert policy.used_memory_bytes == baseline
+    assert policy.used_memory_bytes == 0
+
+
 def test_connection_coverage_rejects_disk_before_scratch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1193,6 +1247,60 @@ def test_futures_bootstrap_keeps_all_clocks_and_exact_tick_identity(
     assert tick_to_price(1000, "0.1") == 100.0
     with pytest.raises(ValueError, match="bad"):
         price_to_tick("100.05", "0.1", error="bad")
+
+
+@pytest.mark.parametrize("precision", (1, 7, 28))
+def test_tick_conversion_is_exact_independently_of_decimal_context(
+    precision: int,
+) -> None:
+    price = "12345678901234567890.123456789"
+    with localcontext() as context:
+        context.prec = precision
+        ticks = price_to_tick(price, "0.000000001", error="off_tick")
+        assert ticks == 12345678901234567890123456789
+        assert tick_to_price(ticks, "0.000000001") == float(Decimal(price))
+        assert tick_to_price(-ticks, "0.000000001") == -float(Decimal(price))
+        assert tick_to_price(0, "0.000000001") == 0.0
+        assert price_to_tick("5e-324", "5e-324", error="off_tick") == 1
+        assert tick_to_price(1, "5e-324") == 5e-324
+        with pytest.raises(ValueError, match="off_tick"):
+            replay._levels(
+                [["100.00000000000000000000000000001", "1"]],
+                tick_size="0.1",
+                error="off_tick",
+                allow_zero=False,
+                max_levels=1,
+            )
+        assert replay._levels(
+            [[price, "1"]],
+            tick_size="0.000000001",
+            error="off_tick",
+            allow_zero=False,
+            max_levels=1,
+        ) == {ticks: 1.0}
+
+
+@pytest.mark.parametrize("value", ("1e1000000000", "1e-1000000000"))
+@pytest.mark.parametrize("is_tick", (False, True))
+def test_extreme_decimal_exponents_reject_before_integer_expansion(
+    monkeypatch: pytest.MonkeyPatch, value: str, is_tick: bool
+) -> None:
+    monkeypatch.setattr(
+        order_book,
+        "Fraction",
+        lambda *_args: pytest.fail("integer expansion before float-range admission"),
+    )
+    with pytest.raises(
+        ValueError, match="order_book_tick_size_invalid" if is_tick else "off_tick"
+    ):
+        price_to_tick(
+            "1" if is_tick else value, value if is_tick else "1", error="off_tick"
+        )
+
+
+def test_tick_price_output_rejects_unrepresentable_economic_price() -> None:
+    with pytest.raises(ValueError, match="order_book_price_tick_invalid"):
+        tick_to_price(10**1000, "1")
 
 
 def test_snapshot_frontier_is_not_promoted_to_executable_depth(tmp_path: Path) -> None:

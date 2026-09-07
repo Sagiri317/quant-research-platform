@@ -190,7 +190,7 @@ class ChoiceRawSession:
             # SDK has no streaming response: caller sizes each request beforehand.
             # Native/Python response and JSON/CSV expansion coexist in this lease.
             bound = 64 * (request.max_response_bytes + MAX_RECORD_BYTES)
-            if bound > self.policy.operation_headroom_bytes:
+            if bound > self.policy.working_set_headroom_bytes:
                 raise MemoryError("choice_request_exceeds_memory_plan")
             with self.policy.lease("choice.raw.request", bound):
                 if root.exists():
@@ -269,7 +269,7 @@ def read_choice_response(
     request.payload()
     with runtime_resource_policy_scope(resource_policy) as policy:
         bound = 64 * (request.max_response_bytes + MAX_RECORD_BYTES)
-        if bound > policy.operation_headroom_bytes:
+        if bound > policy.working_set_headroom_bytes:
             raise MemoryError("choice_request_exceeds_memory_plan")
         with policy.lease("choice.raw.read", bound):
             metadata = response = header = {}

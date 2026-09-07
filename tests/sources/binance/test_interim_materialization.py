@@ -790,7 +790,10 @@ def test_binance_raw_explicit_cap_rejects_oversize_before_read_or_decode(
         lease = policy.lease("test.binance.raw", bound)
         declared.append(lease.reserved_bytes)
         try:
-            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            with pytest.raises(
+                ValueError,
+                match="binance_raw_record_working_set_exceeds_task_memory_budget",
+            ):
                 stream.send(lease)
         finally:
             stream.close()

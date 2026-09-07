@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 
+import pandas as pd
+
 
 @dataclass(frozen=True)
 class TimeWindow:
@@ -72,7 +74,10 @@ def time_value_isoformat(
 
     if isinstance(value, datetime):
         normalized = _normalize_datetime(value)
-        if date_only or (not preserve_datetime and normalized.time() == time.min):
+        if date_only or (
+            not preserve_datetime
+            and normalized == datetime.combine(normalized.date(), time.min)
+        ):
             return normalized.date().isoformat()
         return normalized.isoformat()
     if isinstance(value, date):
@@ -92,7 +97,7 @@ def _coerce_bound(value: date | datetime | str) -> date | datetime:
     if isinstance(value, str):
         try:
             if "T" in value or " " in value:
-                parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+                parsed = pd.to_datetime(value, format="ISO8601")
                 return _normalize_datetime(parsed)
             return date.fromisoformat(value)
         except ValueError as exc:

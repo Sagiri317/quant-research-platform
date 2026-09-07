@@ -15,6 +15,9 @@ import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
+from quant_research_platform.contracts.business_manifest import (
+    validate_business_manifest_envelope,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -24,6 +27,7 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.ids import SourceId
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
+    strict_integer_series,
     strict_string_series,
     strict_timestamp_series,
 )
@@ -48,6 +52,7 @@ from quant_research_platform.sources.csmar.raw_exports import (
     dataset_files_with_identity_by_id,
     iter_private_export_chunks_with_policy,
 )
+from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
@@ -308,6 +313,8 @@ EQUITY_CHANGE_COLUMNS = (
 ANALYST_FORECAST_COLUMNS = (
     "source_asset_id",
     "timestamp",
+    "report_id",
+    "analyst_ids",
     "declare_date",
     "forecast_end_date",
     "institution_id",
@@ -765,16 +772,30 @@ def normalize_raw_frame(
         )
         result["float_market_cap"] = result["float_market_cap_thousand"] * 1000.0
         result["total_market_cap"] = result["total_market_cap_thousand"] * 1000.0
-        result["after_hours_volume"] = strict_finite_numeric_series(
-            result["after_hours_volume"],
-            error="invalid_csmar_after_hours_volume",
-            allow_null=True,
-        ).fillna(0.0)
-        result["after_hours_amount"] = strict_finite_numeric_series(
-            result["after_hours_amount"],
-            error="invalid_csmar_after_hours_amount",
-            allow_null=True,
-        ).fillna(0.0)
+        market_type = strict_integer_series(
+            result["market_type"], error="invalid_csmar_market_type"
+        )
+        filling = strict_integer_series(
+            result["filling_flag"], error="invalid_csmar_filling_flag"
+        )
+        if not filling.isin((0, 1, 2)).all():
+            raise ValueError("invalid_csmar_filling_flag")
+        dates = result["trade_date"].dt.normalize()
+        active_board = (market_type.eq(32) & dates.ge(pd.Timestamp("2019-07-22"))) | (
+            market_type.eq(16) & dates.ge(pd.Timestamp("2020-08-24"))
+        )
+        not_applicable = (
+            dates.le(pd.Timestamp("2025-12-31"))
+            & market_type.isin((1, 2, 4, 8, 16, 32, 64))
+            & (~active_board | filling.isin((1, 2)))
+        )
+        for column in ("after_hours_volume", "after_hours_amount"):
+            values = strict_finite_numeric_series(
+                result[column], error=f"invalid_csmar_{column}", allow_null=True
+            )
+            if (values.isna() & ~not_applicable).any():
+                raise ValueError(f"invalid_csmar_{column}_missing")
+            result[column] = values.fillna(0.0)
         result["volume"] = (
             strict_finite_numeric_series(
                 result["volume"], error="invalid_csmar_volume", allow_null=True
@@ -950,16 +971,27 @@ def normalize_raw_frame(
         result = mapped
         result["source_asset_id"] = normalize_provider_stock_code_series(
             result["stock_code"]
-        )
-        result["declare_date"] = strict_timestamp_series(
-            result["declare_date"], error="invalid_analyst_declare_date"
+        ).astype("string")
+        result["declare_date"] = _parse_optional_csmar_date(
+            result["declare_date"], "declare_date", error_code="invalid_analyst_date"
         ).dt.normalize()
         result["forecast_end_date"] = strict_timestamp_series(
             result["forecast_end_date"], error="invalid_analyst_forecast_end_date"
         ).dt.normalize()
-        result["institution_id"] = strict_string_series(
-            result["institution_id"], error="invalid_analyst_institution_id"
-        )
+        result["report_id"] = strict_string_series(
+            result["report_id"], error="invalid_analyst_report_id"
+        ).astype("string")
+        for column in ("institution_id", "analyst_ids"):
+            values = result[column]
+            blank = values.map(
+                lambda value: isinstance(value, str) and not value.strip()
+            )
+            result[column] = strict_string_series(
+                values.mask(blank),
+                error=f"invalid_analyst_{column}",
+                allow_null=True,
+                strip=column != "analyst_ids",
+            ).astype("string")
         for column in ("forecast_eps", "forecast_pe"):
             result[column] = strict_finite_numeric_series(
                 result[column],
@@ -967,14 +999,26 @@ def normalize_raw_frame(
                 allow_null=True,
             )
         result["timestamp"] = result["declare_date"]
-        return (
-            result.loc[:, ANALYST_FORECAST_COLUMNS]
+        missing_date = result["declare_date"].isna()
+        missing_institution = result["institution_id"].isna()
+        excluded = missing_date | missing_institution
+        counts = {
+            "raw_rows": len(result),
+            "missing_declare_date_rows": int(missing_date.sum()),
+            "missing_institution_id_rows": int(missing_institution.sum()),
+            "excluded_missing_required_rows": int(excluded.sum()),
+            "retained_before_date_filter_rows": int((~excluded).sum()),
+        }
+        output = (
+            result.loc[~excluded, ANALYST_FORECAST_COLUMNS]
             .sort_values(
-                ["source_asset_id", "timestamp", "forecast_end_date", "institution_id"],
+                ["source_asset_id", "timestamp", "report_id", "forecast_end_date"],
                 kind="mergesort",
             )
             .reset_index(drop=True)
         )
+        output.attrs["source_row_counts"] = counts
+        return output
     raise ValueError(f"unsupported_csmar_data_id: {data_id}")
 
 
@@ -1153,6 +1197,7 @@ def _iter_interim_frames(
     pruning_reports: list[dict[str, object]] | None,
     scratch_parent: Path | None = None,
     verify_members: Callable[[], None] | None = None,
+    source_row_counts: dict[str, int] | None = None,
 ) -> Iterator[object]:
     validated_overrides = {} if overrides is None else overrides
 
@@ -1204,6 +1249,7 @@ def _iter_interim_frames(
                     overrides=validated_overrides,
                     chunksize=chunksize,
                     pruning_reports=operation_reports,
+                    source_row_counts=source_row_counts,
                 )
                 if data_id in SOURCE_REFERENCE_DATA_IDS:
                     assert selected_scratch_parent is not None
@@ -1318,7 +1364,39 @@ def _materialize_interim_data(
                 data_id = requested_by_raw.get(raw_dataset)
                 if data_id is None:
                     continue
-                input_files = ((item[1], item[2]) for item in group)
+                selected = tuple(group)
+                identity = content_hash_for_files(
+                    selected,
+                    error="csmar_raw_export_identity_changed",
+                    resource_policy=resource_policy,
+                )
+                if (
+                    instance_metadata is not None
+                    and COMMON_MANIFEST_METADATA_KEY in instance_metadata
+                ):
+                    envelope = validate_business_manifest_envelope(
+                        instance_metadata[COMMON_MANIFEST_METADATA_KEY]
+                    )
+                    if (
+                        envelope["semantic_metadata"]["raw_content_identity"]
+                        != identity
+                    ):
+                        raise ValueError("csmar_raw_export_identity_changed")
+
+                def verify_source(_receipt, files=selected, expected=identity):
+                    verify_members()
+                    if (
+                        content_hash_for_files(
+                            files,
+                            error="csmar_raw_export_identity_changed",
+                            resource_policy=resource_policy,
+                        )
+                        != expected
+                    ):
+                        raise ValueError("csmar_raw_export_identity_changed")
+                    verify_members()
+
+                input_files = ((item[1], item[2]) for item in selected)
                 pending.discard(data_id)
                 spec = catalog.get(data_id)
                 artifact_root = require_artifact_root(
@@ -1327,6 +1405,14 @@ def _materialize_interim_data(
                         layout.interim_data_root(spec.source_id, spec.data_id),
                     )
                 )
+                metadata = dict(instance_metadata or {})
+                source_row_counts = None
+                if data_id == "analyst_forecast":
+                    source_row_counts = {}
+                    metadata["producer_diagnostics"] = {
+                        **metadata.get("producer_diagnostics", {}),
+                        "source_row_counts": source_row_counts,
+                    }
                 frames = _iter_interim_frames(
                     data_id=data_id,
                     input_files=input_files,
@@ -1337,6 +1423,7 @@ def _materialize_interim_data(
                     pruning_reports=pruning_reports,
                     scratch_parent=artifact_root.parent,
                     verify_members=verify_members,
+                    source_row_counts=source_row_counts,
                 )
                 with closing_iterator(frames):
                     try:
@@ -1345,7 +1432,8 @@ def _materialize_interim_data(
                             frames,
                             spec=spec,
                             resource_policy=resource_policy,
-                            instance_metadata=instance_metadata,
+                            instance_metadata=metadata,
+                            staged_validator=verify_source,
                         )
                     except ValueError as exc:
                         if str(exc) != "empty_dataset_schema_missing":
@@ -1372,6 +1460,7 @@ def _iter_pruned_interim_frames(
     overrides: Mapping[str, Mapping[str, object]],
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
+    source_row_counts: dict[str, int] | None = None,
 ) -> Iterator[object]:
     policy = current_runtime_resource_policy()
     if policy is None:
@@ -1474,15 +1563,26 @@ def _iter_pruned_interim_frames(
                             )
                             downsized = True
                             continue
-                        if pruned.empty:
+                        if data_id == "analyst_forecast":
+                            counts = report.pop("source_row_counts")
+                        if source_row_counts is not None:
+                            for key, count in counts.items():
+                                source_row_counts[key] = (
+                                    source_row_counts.get(key, 0) + count
+                                )
+                        if pruned.empty and data_id != "analyst_forecast":
                             del pruned, report, candidate
                             start = stop
                             continue
-                        _merge_pruning_report(local_reports, report)
-                        first_key = tuple(pruned.iloc[0].loc[list(ordering_key)])
-                        if previous_key is not None and first_key < previous_key:
-                            raise ValueError("csmar_source_order_regression")
-                        previous_key = tuple(pruned.iloc[-1].loc[list(ordering_key)])
+                        if report:
+                            _merge_pruning_report(local_reports, report)
+                        if data_id != "analyst_forecast":
+                            first_key = tuple(pruned.iloc[0].loc[list(ordering_key)])
+                            if previous_key is not None and first_key < previous_key:
+                                raise ValueError("csmar_source_order_regression")
+                            previous_key = tuple(
+                                pruned.iloc[-1].loc[list(ordering_key)]
+                            )
                         pruned_bytes = pandas_frame_payload_bytes(pruned)
                         next_pending_frame: pd.DataFrame | None = None
                         next_pending_lease: MemoryLease | None = None
@@ -1598,6 +1698,7 @@ def _transform_interim_chunk(
         policy.operation_headroom_bytes,
     )
     normalized = normalize_raw_frame(chunk, data_id)
+    source_row_counts = normalized.attrs.pop("source_row_counts", None)
     normalized_bytes = pandas_frame_payload_bytes(normalized)
     filter_preallocation_bytes = _filter_preallocation_bytes(
         normalized,
@@ -1621,8 +1722,17 @@ def _transform_interim_chunk(
         policy.operation_headroom_bytes,
     )
     del normalized
+    if source_row_counts is not None:
+        source_row_counts["retained_after_date_filter_rows"] = len(filtered)
+        source_row_counts["excluded_date_range_rows"] = source_row_counts[
+            "retained_before_date_filter_rows"
+        ] - len(filtered)
     if filtered.empty:
-        return filtered, {}
+        return filtered, (
+            {"source_row_counts": source_row_counts}
+            if source_row_counts is not None
+            else {}
+        )
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + filtered_bytes,
         policy.operation_headroom_bytes,
@@ -1637,6 +1747,8 @@ def _transform_interim_chunk(
         policy.operation_headroom_bytes,
     )
     del filtered
+    if source_row_counts is not None:
+        report["source_row_counts"] = source_row_counts
     return pruned, report
 
 
@@ -1933,6 +2045,17 @@ def _append_reference_duplicate_summary(
 
 
 def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
+    if data_id == "analyst_forecast":
+        primary_key = ("source_asset_id", "timestamp", "report_id", "forecast_end_date")
+        return InterimDataSpec(
+            data_id=data_id,
+            source_id=SourceId(SOURCE_ID),
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
+            column_roles=_column_roles(columns, primary_key=primary_key),
+            primary_key=primary_key,
+            partition_columns=("year",),
+        )
     if data_id == "industry_classification":
         primary_key = ("source_asset_id", "timestamp", "industry_standard_id")
         return InterimDataSpec(
@@ -2093,23 +2216,18 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
         result["calendar_date"],
         error="invalid_trading_calendar_date",
     )
-    result["source_market_type"] = pd.to_numeric(
+    result["source_market_type"] = strict_integer_series(
         result["source_market_type"],
-        errors="raise",
-    ).astype("int64")
-    result["source_day_of_week"] = pd.to_numeric(
+        error="invalid_trading_calendar_market_type",
+    )
+    result["source_day_of_week"] = strict_integer_series(
         result["source_day_of_week"],
-        errors="raise",
-    ).astype("int64")
+        error="invalid_trading_calendar_day_of_week",
+    )
     result["source_state"] = result["source_state"].astype("string").str.strip()
     result["source_state"] = result["source_state"].str.upper()
-    invalid = sorted(
-        state
-        for state in result["source_state"].dropna().unique()
-        if state not in {"O", "C"}
-    )
-    if invalid or result["source_state"].isna().any():
-        raise ValueError(f"invalid_trading_calendar_state: {invalid}")
+    if not result["source_state"].isin(("O", "C")).all():
+        raise ValueError("invalid_trading_calendar_state")
     duplicate = result.duplicated(["source_market_type", "calendar_date"], keep=False)
     if duplicate.any():
         raise ValueError("duplicate_trading_calendar_key")

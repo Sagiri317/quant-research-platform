@@ -3,7 +3,6 @@ from __future__ import annotations
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -23,6 +22,7 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import unmeasured_operation_evidence
 from quant_research_platform.contracts.time import TimeWindow
@@ -30,17 +30,162 @@ from quant_research_platform.research import statistics_production
 from quant_research_platform.research.evaluations.runner import (
     build_evaluation_result_from_research_dataset,
 )
+from quant_research_platform.research.models.persisted import (
+    read_quarterly_model_artifact,
+    write_quarterly_model_artifact,
+)
+from quant_research_platform.research.models.production import (
+    QuarterlyModelResult,
+    _fit_selected_model_result,
+)
+from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics_production import (
     build_a_share_statistics_tables,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    OwnedValue,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
-from tests.research.workflow_test_support import _trial_reference
+from tests.research.workflow_test_support import _selection_metadata, _trial_reference
+
+
+def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
+    factor = spec.factor_columns[0]
+    models = tuple(
+        ModelSpec(
+            model_id=f"{spec.data_id}_{algorithm}{config_suffix}",
+            model_algorithm=algorithm,
+            input_factor_columns=(factor,),
+            label_column=a_share.PRIMARY_LABEL_COLUMN,
+        )
+        for algorithm in a_share.MODEL_FAMILY_ORDER
+    )
+    preflight_model_specs(models)
+    families = tuple(f"{spec.data_id}_{model.model_algorithm}" for model in models)
+    year = pd.Timestamp(window.start).year
+    training_calendar = pd.bdate_range(f"{year - 1}-01-02", periods=53)
+    rng = np.random.default_rng(101)
+    training = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [f"asset_{i}" for _ in range(32) for i in range(6)],
+            "timestamp": training_calendar[:32].repeat(6),
+            "eligible": True,
+            factor: rng.normal(size=192),
+            "forward_return_20d_available_at": training_calendar[21:].repeat(6),
+        }
+    )
+    training[a_share.PRIMARY_LABEL_COLUMN] = training[factor] * 0.3 + rng.normal(
+        scale=0.01, size=192
+    )
+
+    def chunks(columns, **_kwargs):
+        yield training.loc[:, list(columns)]
+
+    def fitted():
+        for period in pd.period_range(window.start, window.end, freq="Q"):
+            fold = ExperimentFold(
+                fold_id=f"{period.year}-q{period.quarter}",
+                train=TimeWindow(f"{year - 5}-01-01", f"{year - 2}-12-31"),
+                validation=TimeWindow(f"{year - 1}-01-01", f"{year - 1}-12-31"),
+                development_test=TimeWindow(
+                    period.start_time.date().isoformat(),
+                    period.end_time.date().isoformat(),
+                ),
+            )
+            references = tuple(
+                _trial_reference(
+                    layout,
+                    fold,
+                    family_id=family,
+                    model_id=model.model_id,
+                    dataset_id=spec.data_id,
+                    protocol=protocol,
+                    model_spec=model,
+                    root_seed=42,
+                )
+                for family, model in zip(families, models, strict=True)
+            )
+            selection = _selection_metadata(
+                family_id=families[0], model_id=models[0].model_id, columns=(factor,)
+            )
+            selection.update(
+                validation_start=f"{year - 1}-01-01",
+                validation_end=f"{year - 1}-12-31",
+                candidate_family_ids=list(families),
+                tie_break_order=list(families),
+                families=[
+                    {
+                        "family_id": family,
+                        "config_tie_break_order": [model.model_id],
+                        "selected_config_id": model.model_id,
+                        "trial_ledger_semantic_identity": reference[
+                            "semantic_identity"
+                        ],
+                    }
+                    for family, model, reference in zip(
+                        families, models, references, strict=True
+                    )
+                ],
+            )
+            for family, model, reference in zip(
+                families, models, references, strict=True
+            ):
+                result, lease = _fit_selected_model_result(
+                    dataset_spec=spec,
+                    selected_spec=model,
+                    chunks=chunks,
+                    fitting_cutoff=f"{year - 1}-12-31",
+                    quarter_id=str(period),
+                    root_seed=42,
+                    config_index=0,
+                )
+                owned = OwnedValue(
+                    QuarterlyModelResult(
+                        fold, model.model_id, result, family, selection, (reference,)
+                    ),
+                    lease,
+                )
+                result = None
+                try:
+                    yield owned
+                finally:
+                    if owned.lease.active:
+                        owned.release(owner="research.model.artifact")
+
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="model-artifact",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": str(pd.Timestamp(window.start).date()),
+            "end": str(pd.Timestamp(window.end).date()),
+            "access": "development",
+        },
+        upstream_identities={spec.data_id: "d" * 64},
+        semantic_metadata={
+            "target_contract": {
+                "protocol": protocol,
+                "model_specs": [{"model_id": family} for family in families],
+            }
+        },
+    )
+    with runtime_resource_policy_scope():
+        root = write_quarterly_model_artifact(
+            layout.semantic_artifact_root("a_share", "model-artifact"),
+            model_id="model-artifact",
+            envelope=envelope,
+            quarterly_results=fitted(),
+            trial_layout=layout,
+        )
+        return read_quarterly_model_artifact(root, trial_layout=layout)
 
 
 class _PredictionLookup:
@@ -67,6 +212,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     protocol["statistics"]["fama_macbeth_core_factors"] = ["x"]
     families = tuple(f"pv_all_{algorithm}" for algorithm in a_share.MODEL_FAMILY_ORDER)
     dates = pd.bdate_range("2019-01-01", periods=64)
+    label_calendar = pd.bdate_range(dates[0], periods=len(dates) + 21)
+    cutoff = label_calendar[-1]
     assets = [f"asset_{i}" for i in range(12)]
     rng = np.random.default_rng(901)
     frame = pd.DataFrame(
@@ -79,7 +226,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             a_share.PRIMARY_LABEL_COLUMN: np.tile(
                 np.arange(len(assets), dtype=float), len(dates)
             ),
-            "forward_return_20d_available_at": dates.repeat(len(assets)),
+            "forward_return_20d_available_at": label_calendar[21:].repeat(len(assets)),
         }
     )
     scores = rng.normal(size=(len(dates), len(assets), len(families)))
@@ -122,49 +269,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         context_columns=(),
     )
     write_dataset(layout.research_dataset_root("a_share", "pv_all"), frame, spec=spec)
-    fold = ExperimentFold(
-        fold_id="2019-q1",
-        train=TimeWindow("2017-01-01", "2017-12-31"),
-        validation=TimeWindow("2018-01-01", "2018-12-31"),
-        development_test=TimeWindow("2019-01-01", "2019-03-31"),
-    )
-    references = tuple(
-        _trial_reference(layout, fold, family_id=family, model_id=family)
-        for family in families
-    )
-    model = SimpleNamespace(
-        trial_ledgers=references,
-        quarterly_selections={
-            "2019Q1": {
-                "selected_family_id": families[0],
-                "tie_break_order": list(families),
-                "families": [
-                    {
-                        "family_id": family,
-                        "selected_config_id": family,
-                        "trial_ledger_semantic_identity": reference[
-                            "semantic_identity"
-                        ],
-                    }
-                    for family, reference in zip(families, references, strict=True)
-                ],
-            }
-        },
-        quarterly_models=tuple(
-            {
-                "quarter_id": "2019Q1",
-                "family_id": family,
-                "model_id": family,
-                "model_metadata": {
-                    "model_algorithm": algorithm,
-                    "input_columns": ["x"],
-                },
-            }
-            for family, algorithm in zip(
-                families, a_share.MODEL_FAMILY_ORDER, strict=True
-            )
-        ),
-    )
+    model = _statistics_models(layout, spec, protocol, TimeWindow(dates[0], cutoff))
     envelope = build_business_manifest_envelope(
         logical_artifact_id="pv_all_statistics",
         schema_identity="a" * 64,
@@ -172,7 +277,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         software_identity="c" * 64,
         research_window={
             "start": "2019-01-01",
-            "end": "2019-03-29",
+            "end": str(cutoff.date()),
             "access": "development",
         },
         upstream_identities={},
@@ -186,7 +291,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             prediction_id="prediction",
             persisted_model=model,
             protocol_manifest=protocol,
-            time_window=TimeWindow(dates[0], dates[-1]),
+            time_window=TimeWindow(dates[0], cutoff),
             prediction_lookup=Lookup(),
             resource_policy=policy,
         )
@@ -416,8 +521,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     for name, immature_sign in (("first", 1.0), ("changed", -1.0), ("zero", 1.0)):
         root = tmp_path / name
         layout = StorageLayout(project_root=root)
-        dates = pd.bdate_range("2024-01-02", periods=25)
-        cutoff = dates[-1]
+        dates = pd.bdate_range("2023-01-02", periods=25)
+        label_calendar = pd.bdate_range(dates[0], periods=len(dates) + 21)
+        cutoff = label_calendar[40]
         rows = []
         for date_index, timestamp in enumerate(dates):
             mature = date_index < 20
@@ -442,9 +548,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                         a_share.PV_CORE[0]: x,
                         a_share.PV_CORE[1]: x * x,
                         a_share.PRIMARY_LABEL_COLUMN: label,
-                        "forward_return_20d_available_at": (
-                            timestamp if mature else cutoff + pd.Timedelta(days=1)
-                        ),
+                        "forward_return_20d_available_at": label_calendar[
+                            date_index + 21
+                        ],
                         "eligible": True,
                     }
                 )
@@ -501,57 +607,8 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         finally:
             evaluation.close()
         protocol = deepcopy(a_share.protocol("pv_all").manifest())
-        family_ids = tuple(
-            f"stats_demo_{algorithm}" for algorithm in a_share.MODEL_FAMILY_ORDER
-        )
-        references = tuple(
-            _trial_reference(
-                layout,
-                ExperimentFold(
-                    fold_id="2024-q1",
-                    train=TimeWindow("2022-01-01", "2022-12-31"),
-                    validation=TimeWindow("2023-01-01", "2023-12-31"),
-                    development_test=TimeWindow("2024-01-01", "2024-03-31"),
-                ),
-                family_id=family,
-                model_id=f"{family}_0",
-            )
-            for family in family_ids
-        )
-        model = SimpleNamespace(
-            trial_ledgers=references,
-            quarterly_selections={
-                "2024Q1": {
-                    "selected_family_id": family_ids[0],
-                    "tie_break_order": list(family_ids),
-                    "families": [
-                        {
-                            "family_id": family,
-                            "selected_config_id": f"{family}_0",
-                            "trial_ledger_semantic_identity": reference[
-                                "semantic_identity"
-                            ],
-                        }
-                        for family, reference in zip(
-                            family_ids, references, strict=True
-                        )
-                    ],
-                }
-            },
-            quarterly_models=tuple(
-                {
-                    "quarter_id": "2024Q1",
-                    "family_id": family,
-                    "model_id": f"{family}_0",
-                    "model_metadata": {
-                        "model_algorithm": algorithm,
-                        "input_columns": [a_share.PV_CORE[0]],
-                    },
-                }
-                for family, algorithm in zip(
-                    family_ids, a_share.MODEL_FAMILY_ORDER, strict=True
-                )
-            ),
+        model = _statistics_models(
+            layout, spec, protocol, TimeWindow(dates[0], cutoff), config_suffix="_0"
         )
         policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
         with runtime_resource_policy_scope(policy):
@@ -603,7 +660,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     assert {0, 20}.issubset(set(fmb["period_count"]))
     trials = outputs[0]["model_trials"]
     assert trials.loc[0, ["quarter_id", "family_id", "config_id"]].tolist() == [
-        "2024Q1",
+        "2023Q1",
         "stats_demo_equal_weight_rank_ensemble",
         "stats_demo_equal_weight_rank_ensemble_0",
     ]
@@ -617,8 +674,8 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         protocol_or_spec_identity="a" * 64,
         software_identity="b" * 64,
         research_window={
-            "start": "2024-01-02",
-            "end": "2024-02-05",
+            "start": "2023-01-02",
+            "end": str(cutoff.date()),
             "access": "development",
         },
         upstream_identities={},

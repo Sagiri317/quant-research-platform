@@ -91,6 +91,10 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
             raise ApiError("published_evidence_invalid", status_code=422) from exc
         except OSError as exc:
             raise ApiError("published_evidence_unavailable", status_code=422) from exc
+        except RuntimeError as exc:
+            if str(exc) == "runtime_data_scale_lock_busy":
+                raise ApiError("runtime_data_scale_lock_busy", status_code=503) from exc
+            raise
 
     @app.get(
         "/api/0.1/catalog/factors",

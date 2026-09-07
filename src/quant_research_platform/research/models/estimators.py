@@ -14,7 +14,7 @@ from quant_research_platform.research.models.rank_ensemble import (
 
 @dataclass(frozen=True)
 class _LinearRegressionEstimator:
-    coefficient_count: int = 0
+    pass
 
 
 def linear_regression_estimator(

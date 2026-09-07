@@ -114,9 +114,22 @@ def _fingerprint_dataset_session_owned_with_lease(
     output_columns = tuple(context.logical_columns)
     reader_upstream_headroom_bytes = operation_headroom_bytes
     projected_schema_hash = canonical_json_hash(
-        physical_schema_from_schema(
-            pa.schema([context.arrow_schema.field(column) for column in hash_columns])
-        )
+        {
+            "physical_schema": physical_schema_from_schema(
+                pa.schema(
+                    [context.arrow_schema.field(column) for column in hash_columns]
+                )
+            ),
+            "logical_dtypes": {
+                descriptor["name"]: {
+                    key: value
+                    for key, value in descriptor.items()
+                    if key != "categories" or descriptor["ordered"]
+                }
+                for descriptor in context.logical_dtypes["columns"]
+                if descriptor["name"] in hash_columns
+            },
+        }
     )
     row_count = 0
     row_hash_sum = 0

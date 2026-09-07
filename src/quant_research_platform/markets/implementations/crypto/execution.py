@@ -1740,16 +1740,11 @@ def _checked_quote_schedule(
                 raise ValueError("hft_maker_prediction_forbidden")
             for key in (
                 "asset_id",
-                "segment_id",
                 "book_segment_id",
                 "trade_connection_id",
             ):
                 if not isinstance(row.get(key), str) or not row[key]:
                     raise ValueError("hft_maker_quote_schedule_identity_invalid")
-            if row["segment_id"] != (
-                f"{row['book_segment_id']}:{row['trade_connection_id']}"
-            ):
-                raise ValueError("hft_maker_quote_schedule_identity_invalid")
             timestamp = row.get("timestamp_ms")
             if type(timestamp) is not int or timestamp < 0:
                 raise ValueError("hft_maker_quote_schedule_time_invalid")
@@ -2256,6 +2251,8 @@ def simulate_maker(
                     )
                     if side in active:
                         reserved += active[side].remaining
+                    if config.latency_ms == 0:
+                        reserved = 0.0
                     keep = (
                         current is not None
                         and quantity > 0

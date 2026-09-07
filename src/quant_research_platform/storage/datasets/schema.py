@@ -41,7 +41,6 @@ from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
     render_qrp_json_object,
 )
-from quant_research_platform.policy.check_status import VALID_STATUS_TOKENS
 from quant_research_platform.storage.datasets.paths import (
     parse_year_partition_label,
     timestamp_column_from_spec_payload,
@@ -752,6 +751,41 @@ def validate_logical_dtype_payload(value: object) -> dict[str, Any]:
     }
 
 
+def validate_persisted_logical_schema(
+    schema: pa.Schema,
+    logical_dtypes: Mapping[str, Any],
+) -> None:
+    """Require logical dtypes to preserve the persisted physical values."""
+
+    if {item["name"] for item in logical_dtypes["columns"]} != set(schema.names):
+        raise ValueError("dataset_logical_dtype_mismatch")
+    for descriptor in logical_dtypes["columns"]:
+        data_type = schema.field(descriptor["name"]).type
+        if descriptor["kind"] == "categorical":
+            if not pa.types.is_dictionary(data_type) or bool(data_type.ordered) != bool(
+                descriptor["ordered"]
+            ):
+                raise ValueError("dataset_categorical_domain_mismatch")
+            continue
+        if pa.types.is_dictionary(data_type):
+            raise ValueError("dataset_logical_dtype_mismatch")
+        if descriptor["kind"] == "object":
+            continue
+        expected = pa.Array.from_pandas(pd.Series([], dtype=descriptor["dtype"])).type
+        if (
+            pa.types.is_timestamp(data_type)
+            and pa.types.is_timestamp(expected)
+            and data_type.tz == expected.tz
+        ):
+            continue
+        if (pa.types.is_string(data_type) or pa.types.is_large_string(data_type)) and (
+            pa.types.is_string(expected) or pa.types.is_large_string(expected)
+        ):
+            continue
+        if data_type != expected:
+            raise ValueError("dataset_logical_dtype_mismatch")
+
+
 def _canonical_logical_dtype_descriptor(
     descriptor: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -848,11 +882,15 @@ def pandas_dtype_overrides_from_logical_payload(
                 ordered=bool(descriptor["ordered"]),
             )
         elif kind in {
+            "numpy_integer",
+            "numpy_boolean",
+            "numpy_float",
             "nullable_integer",
             "nullable_boolean",
             "nullable_float",
             "string",
             "datetime",
+            "timedelta",
             "object",
         }:
             result[name] = pd.api.types.pandas_dtype(descriptor["dtype"])
@@ -1481,7 +1519,12 @@ def validate_dataset_manifest_payload(
     elif date_range is not None:
         raise ValueError("manifest_date_range_invalid")
     status = manifest.get("validation_status")
-    if not isinstance(status, str) or status not in VALID_STATUS_TOKENS:
+    if not isinstance(status, str) or status not in (
+        "PASS",
+        "FAIL",
+        "NOT_RUN",
+        "BLOCKED",
+    ):
         raise ValueError("manifest_validation_status_invalid")
     validate_dataset_manifest_instance_metadata(manifest, spec=spec)
 
@@ -1810,3 +1853,17 @@ def _validate_date_range(
 def _require_exact_keys(value: Mapping[str, Any], expected: set[str]) -> None:
     if set(value) != expected:
         raise ValueError("manifest_physical_schema_invalid")
+
+
+def manifest_has_runtime_metadata(manifest: Mapping[str, Any]) -> bool:
+    return all(
+        key in manifest
+        for key in (
+            "columns",
+            "physical_schema",
+            "schema_hash",
+            "partition_row_counts",
+            "file_count",
+            "row_count",
+        )
+    )

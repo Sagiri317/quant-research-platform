@@ -1,15 +1,222 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import numpy as np
 import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.evaluations import engine as evaluation_engine
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.helpers.output_frames import make_artifact_signal_spec
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+@pytest.mark.parametrize("boundary", ["soft", "captured", "explicit"])
+def test_complete_cross_section_admits_kernel_against_capacity(monkeypatch, boundary):
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2023-01-02"),
+            "asset_id": [f"asset_{i}" for i in range(500)],
+            "signal": np.arange(500, dtype=float),
+            "label": np.arange(500, dtype=float) * 0.1,
+        }
+    )
+    bound = evaluation_engine._evaluation_batch_peak_bytes(
+        frame,
+        compute_columns_by_label=(("timestamp", "asset_id", "signal", "label"),),
+        signal_count=1,
+        n_groups=2,
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=bound - 1 if boundary == "captured" else bound * 5 // 4,
+        explicit_cap_bytes=bound - 1 if boundary == "explicit" else None,
+    )
+    calls = []
+    kernel = evaluation_engine.compute_ic_and_grouped_label_values
+
+    def observed_kernel(*args, **kwargs):
+        calls.append(True)
+        return kernel(*args, **kwargs)
+
+    monkeypatch.setattr(
+        evaluation_engine, "compute_ic_and_grouped_label_values", observed_kernel
+    )
+    with (
+        runtime_resource_policy_scope(policy),
+        closing_iterator(
+            evaluation_engine._iter_evaluation_filtered_chunks(
+                frame,
+                {
+                    "rows_input": len(frame),
+                    "rows_after_filter_mode": len(frame),
+                    "filter_columns_used": [],
+                    "filter_definition": "all",
+                },
+                signal_columns=("signal",),
+                label_columns=("label",),
+                n_groups=2,
+                asset_column="asset_id",
+                resource_policy=policy,
+            )
+        ) as outputs,
+    ):
+        if boundary == "soft":
+            assert bound > policy.memory_budget_bytes
+            owned = next(outputs)
+            assert owned.value[0].n_obs.tolist() == [500]
+            assert owned.value[0].ic.iloc[0] == pytest.approx(1.0)
+            owned.release(owner="research.evaluation.output")
+            with pytest.raises(StopIteration):
+                next(outputs)
+            assert calls == [True]
+        else:
+            with pytest.raises(
+                ValueError,
+                match="research_evaluation_working_set_exceeds_task_memory_budget",
+            ):
+                next(outputs)
+            assert calls == []
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("valid_pairs", (0, 1))
+def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
+    tmp_path: Path, valid_pairs: int
+) -> None:
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.storage.layout import StorageLayout
+
+    spec = EvaluationSpec(
+        evaluation_id="single_undefined",
+        market_id=MarketId("crypto"),
+        research_dataset_id="hft_research",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+        evaluation_axis="single_asset_time_series",
+        n_groups=2,
+    )
+    output = OutputSpec(
+        output_id="single_undefined",
+        output_definition_id="evaluation_outputs",
+        run_id="test_run",
+        market_id=spec.market_id,
+        run_type="evaluation",
+        scope=OutputScope.LOCAL_ONLY,
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2023-01-02")],
+            "asset_id": "asset",
+            "feature": 1.0,
+            "label": 2.0 if valid_pairs else np.nan,
+            "eligible": True,
+        }
+    )
+    with runtime_resource_policy_scope() as policy:
+        with evaluation_engine.build_evaluation_result_from_frames(
+            (frame,),
+            spec=spec,
+            signal_columns=("signal",),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+            source_columns_by_kind={"feature": ("feature",)},
+            resource_policy=policy,
+        ) as result:
+            root = write_evaluation_outputs_from_chunks(
+                result.output_chunks,
+                summary_factory=result.summaries,
+                spec=spec,
+                output_spec=output,
+                layout=StorageLayout(tmp_path),
+                n_groups=2,
+            )
+        metrics = pd.read_parquet(root / "metrics.parquet")
+        assert metrics.n_obs.tolist() == [valid_pairs]
+        assert (
+            metrics.ic.isna().all()
+            and metrics.ic_reason.eq("insufficient_observations").all()
+        )
+        assert (
+            metrics.rankic.isna().all()
+            and metrics.rankic_reason.eq("not_applicable").all()
+        )
+        assert policy.used_memory_bytes == 0
+
+
+def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
+    tmp_path: Path,
+) -> None:
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        validate_output_bundle,
+    )
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.storage.layout import StorageLayout
+
+    times = pd.Timestamp("2020-01-01") + pd.to_timedelta([1, 2], unit="ns")
+    frame = pd.DataFrame(
+        {
+            "timestamp": times,
+            "asset_id": "asset",
+            "feature": [1.0, 2.0],
+            "label": [2.0, 4.0],
+            "eligible": True,
+        }
+    )
+    spec = EvaluationSpec(
+        evaluation_id="nanosecond_eval",
+        market_id=MarketId("crypto"),
+        research_dataset_id="hft_research",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+        evaluation_axis="single_asset_time_series",
+        n_groups=2,
+    )
+    output = OutputSpec(
+        output_id=spec.evaluation_id,
+        output_definition_id="evaluation_outputs",
+        run_id="test_run",
+        market_id=spec.market_id,
+        run_type="evaluation",
+        scope=OutputScope.LOCAL_ONLY,
+    )
+    with runtime_resource_policy_scope() as policy:
+        with evaluation_engine.build_evaluation_result_from_frames(
+            (frame,),
+            spec=spec,
+            signal_columns=("signal",),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+            source_columns_by_kind={"feature": ("feature",)},
+            resource_policy=policy,
+        ) as result:
+            root = write_evaluation_outputs_from_chunks(
+                result.output_chunks,
+                summary_factory=result.summaries,
+                spec=spec,
+                output_spec=output,
+                layout=StorageLayout(tmp_path),
+                n_groups=2,
+            )
+        validate_output_bundle(root)
+        diagnostics = json.loads((root / "manifest.json").read_text())["metadata"][
+            "evaluation_diagnostics"
+        ]
+        assert diagnostics["min_timestamp"] == times[0].isoformat()
+        assert diagnostics["max_timestamp"] == times[-1].isoformat()
+        assert policy.used_memory_bytes == 0
 
 
 def test_evaluation_chunk_producer_does_not_terminal_concat(
@@ -319,3 +526,63 @@ def _evaluation_frame() -> pd.DataFrame:
             "eligible": [True, True],
         }
     )
+
+
+def test_evaluation_writer_roundtrips_long_windows_path(tmp_path):
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.storage.identity import native_filesystem_path
+    from quant_research_platform.storage.layout import StorageLayout
+
+    layout = StorageLayout(tmp_path / ("long" * 25) / ("path" * 25))
+    spec = EvaluationSpec(
+        evaluation_id="eval_long",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+        n_groups=2,
+    )
+    output = OutputSpec(
+        output_id=spec.evaluation_id,
+        output_definition_id="evaluation_outputs",
+        run_id="test_run",
+        market_id=spec.market_id,
+        run_type="evaluation",
+        scope=OutputScope.LOCAL_ONLY,
+    )
+    with runtime_resource_policy_scope() as policy:
+        with evaluation_engine.build_evaluation_result_from_frames(
+            (_evaluation_frame(),),
+            spec=spec,
+            signal_columns=("signal",),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+            source_columns_by_kind={"feature": ("feature",)},
+            resource_policy=policy,
+        ) as result:
+            root = write_evaluation_outputs_from_chunks(
+                result.output_chunks,
+                summary_factory=result.summaries,
+                spec=spec,
+                output_spec=output,
+                layout=layout,
+                n_groups=2,
+            )
+        assert len(str(root / "grouped_label_values.parquet")) > 260
+        with pytest.raises(ValueError, match="output_already_exists"):
+            write_evaluation_outputs_from_chunks(
+                (),
+                summary_factory=lambda: pytest.fail("existing_output_was_rewritten"),
+                spec=spec,
+                output_spec=output,
+                layout=layout,
+                n_groups=2,
+            )
+        metrics = pd.read_parquet(native_filesystem_path(root / "metrics.parquet"))
+        assert metrics.n_obs.tolist() == [2]
+        assert metrics.ic.iloc[0] == pytest.approx(1.0)
+        assert policy.used_memory_bytes == 0

@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -27,6 +31,96 @@ FORBIDDEN_PUBLIC_MARKERS = (
 )
 
 
+@pytest.mark.parametrize("boundary", ["soft", "captured", "explicit"])
+def test_curve_output_growth_is_admitted_before_retention(
+    tmp_path, monkeypatch, boundary
+):
+    from types import SimpleNamespace
+
+    from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
+    from quant_research_platform.interfaces import queries
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    policy = capture_test_policy(
+        available_memory_bytes=(256 if boundary == "captured" else 400) * 1024,
+        explicit_cap_bytes=256 * 1024 if boundary == "explicit" else None,
+    )
+    target = SimpleNamespace(
+        target_id="ledger",
+        producer_kind=ProducerKind.PORTFOLIO,
+        status=TargetStatus.BUILT,
+        instance_identity="b" * 64,
+    )
+    record = SimpleNamespace(target_results=(target,), payload=lambda: {})
+    pulled, closed, observed_bytes = [], [], []
+
+    def chunks():
+        try:
+            for sequence in range(100):
+                pulled.append(sequence)
+                observed_bytes.append(policy.used_memory_bytes)
+                yield SimpleNamespace(
+                    sequence=sequence,
+                    valuations=tuple(
+                        SimpleNamespace(
+                            phase=phase,
+                            timestamp_ns=sequence * 10 + offset,
+                            value=100.0,
+                        )
+                        for offset, phase in enumerate(("before", "after", "end"))
+                    ),
+                    diagnostics=(),
+                )
+        finally:
+            closed.append(True)
+
+    artifact = SimpleNamespace(
+        iter_chunks=chunks,
+        capital=SimpleNamespace(
+            candidate_id="synthetic",
+            valuation_currency="USD",
+            initial_capital=100.0,
+        ),
+    )
+    monkeypatch.setattr(
+        queries.report_artifact,
+        "read_research_run_record",
+        lambda *args, **kwargs: record,
+    )
+    monkeypatch.setattr(
+        queries.report_artifact, "_validate_reference", lambda *args: None
+    )
+    monkeypatch.setattr(
+        queries.report_artifact, "_instance_root", lambda *args: tmp_path
+    )
+    monkeypatch.setattr(
+        queries, "read_portfolio_ledger_artifact", lambda *args, **kwargs: artifact
+    )
+    with runtime_resource_policy_scope(policy):
+        kwargs = dict(
+            profile=SimpleNamespace(profile_id="synthetic"),
+            layout=StorageLayout(tmp_path),
+            run_id="run_" + "a" * 32,
+            target_id="ledger",
+        )
+        if boundary == "soft":
+            result = queries.portfolio_curve(**kwargs)
+            assert (
+                result["source_point_count"] == result["displayed_point_count"] == 300
+            )
+            assert max(observed_bytes) > policy.memory_budget_bytes
+        else:
+            with pytest.raises(
+                ValueError, match="portfolio_curve_exceeds_task_memory_budget"
+            ):
+                queries.portfolio_curve(**kwargs)
+            assert 0 < len(pulled) < 100
+        assert closed == [True]
+        assert policy.used_memory_bytes == 0
+
+
 def test_api_routes_are_current_and_exact() -> None:
     api = create_app()
     routes = {
@@ -43,6 +137,58 @@ def test_api_routes_are_current_and_exact() -> None:
         ("GET", "/api/0.1/runs/{run_id}/reports/{report_identity}"),
         ("GET", "/api/0.1/runs/{run_id}/portfolios/{target_id}"),
     }
+
+
+@pytest.mark.parametrize("module_entry", (False, True))
+def test_real_cli_entrypoints_emit_safe_failure_without_traceback(
+    tmp_path, module_entry
+):
+    command = (
+        [sys.executable, "-m", "quant_research_platform.interfaces.cli"]
+        if module_entry
+        else [
+            sys.executable,
+            "-c",
+            "from quant_research_platform.interfaces.cli.commands import main; main()",
+        ]
+    )
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[2] / "src")
+    result = subprocess.run(
+        [
+            *command,
+            "report",
+            "build",
+            "--run-id",
+            "../synthetic_private_marker",
+            "--project-root",
+            str(tmp_path),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=30,
+    )
+    output = result.stdout + result.stderr
+    assert result.returncode != 0
+    assert "Traceback" not in output
+    assert str(Path(__file__).resolve().parents[2]) not in output
+    assert "synthetic_private_marker" not in output
+    assert "invalid_run_id" in output
+
+
+def test_cli_main_preserves_keyboard_interrupt(monkeypatch):
+    primary = KeyboardInterrupt("cancelled")
+
+    def interrupt():
+        raise primary
+
+    monkeypatch.setattr(cli_commands, "app", interrupt)
+    with pytest.raises(KeyboardInterrupt) as caught:
+        cli_commands.main()
+    assert caught.value is primary
 
 
 def test_api_catalog_and_requirements_use_current_a_share_protocol() -> None:
@@ -242,6 +388,104 @@ def test_catalog_queries_support_both_existing_profiles():
     )
     assert requirements.status_code == 200
     assert requirements.json()["market_id"] == "crypto"
+
+
+def test_overlapping_published_queries_reject_busy_and_recover(tmp_path, monkeypatch):
+    from quant_research_platform.artifacts import research as artifact
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.targets import (
+        ProducerKind,
+        ResearchRunRecord,
+        ResearchRunTargetResult,
+        RunStatus,
+        TargetStatus,
+        unmeasured_operation_evidence,
+    )
+    from quant_research_platform.runtime import resources
+    from quant_research_platform.storage.layout import StorageLayout
+
+    layout = StorageLayout(project_root=tmp_path)
+    protocol = {"scenario_id": "pv_all", "access_window": "development"}
+    record = ResearchRunRecord(
+        run_id="run_one",
+        profile_id=research_profile().profile_id,
+        scenario_id="pv_all",
+        protocol=protocol,
+        protocol_identity=canonical_json_hash(protocol),
+        research_window={
+            "start": "2019-01-01",
+            "end": "2019-12-31",
+            "access": "development",
+        },
+        software_identity="c" * 64,
+        terminal_targets=("portfolio",),
+        target_results=(
+            ResearchRunTargetResult(
+                target_id="portfolio",
+                producer_kind=ProducerKind.PORTFOLIO,
+                status=TargetStatus.BLOCKED,
+                reason="missing_prediction",
+            ),
+        ),
+        status=RunStatus.BLOCKED,
+        operation_evidence=unmeasured_operation_evidence("fixture_record"),
+    )
+    artifact.write_research_run_record(layout.research_run_path(record.run_id), record)
+    entered, release = threading.Event(), threading.Event()
+    roots, responses = [], []
+    original_read = artifact.read_research_run_record
+
+    def paused_read(*args, **kwargs):
+        root = resources.current_runtime_resource_policy()
+        assert root is not None
+        roots.append(root)
+        with root.lease("test.query_read", 1):
+            if len(roots) == 1:
+                entered.set()
+                assert release.wait(timeout=5)
+            return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(artifact, "read_research_run_record", paused_read)
+    client = TestClient(
+        create_app(project_root=tmp_path), raise_server_exceptions=False
+    )
+    url = "/api/0.1/runs/run_one/portfolios/portfolio"
+    thread = threading.Thread(target=lambda: responses.append(client.get(url)))
+    thread.start()
+    try:
+        assert entered.wait(timeout=5)
+        rejected = client.get(url)
+        assert rejected.status_code == 503
+        assert rejected.json()["error"]["error_code"] == "runtime_data_scale_lock_busy"
+        assert len(roots) == 1 and roots[0].used_memory_bytes == 1
+    finally:
+        release.set()
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert len(responses) == 1 and responses[0].status_code == 200
+    subsequent = client.get(url)
+    assert subsequent.status_code == 200
+    assert (
+        subsequent.json()
+        == responses[0].json()
+        == {
+            "target_id": "portfolio",
+            "status": "BLOCKED",
+            "reason": "missing_prediction",
+        }
+    )
+    assert len(roots) == 2 and roots[0] is not roots[1]
+    assert all(root.state == "CLOSED" and root.used_memory_bytes == 0 for root in roots)
+    assert not resources._PROCESS_POISONED
+
+    def fail_read(*_args, **_kwargs):
+        raise RuntimeError("private_runtime_failure")
+
+    monkeypatch.setattr(artifact, "read_research_run_record", fail_read)
+    failed = client.get(url)
+    assert failed.status_code == 500
+    assert failed.json()["error"]["error_code"] == "internal_error"
+    assert "private_runtime_failure" not in failed.text
 
 
 def _assert_public_text_is_sanitized(text: str) -> None:

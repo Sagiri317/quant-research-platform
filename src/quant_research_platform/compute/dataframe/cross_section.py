@@ -9,53 +9,10 @@ from quant_research_platform.compute.panels import (
     ComputePanelSpec,
     validate_compute_panel,
 )
-
-IC_RESULT_COLUMNS = [
-    "timestamp",
-    "signal",
-    "label",
-    "ic",
-    "rankic",
-    "n_obs",
-    "ic_reason",
-    "rankic_reason",
-]
-IC_SUMMARY_COLUMNS = [
-    "signal",
-    "label",
-    "mean_ic",
-    "std_ic",
-    "icir",
-    "positive_ic_rate",
-    "valid_ic_count",
-    "mean_rankic",
-    "std_rankic",
-    "rankicir",
-    "positive_rankic_rate",
-    "valid_rankic_count",
-    "ic_reason",
-    "icir_reason",
-    "rankic_reason",
-    "rankicir_reason",
-]
-GROUPED_LABEL_VALUE_COLUMNS = [
-    "timestamp",
-    "signal",
-    "label",
-    "group",
-    "mean_label_value",
-    "n_obs",
-]
-GROUP_SPREAD_SUMMARY_COLUMNS = [
-    "signal",
-    "label",
-    "top_group_mean_label_value",
-    "bottom_group_mean_label_value",
-    "top_bottom_label_value_spread_mean",
-    "top_bottom_label_value_spread_hit_rate",
-    "group_monotonicity_score",
-    "group_monotonicity_score_reason",
-]
+from quant_research_platform.contracts.evaluations import (
+    EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+    EVALUATION_METRICS_COLUMNS,
+)
 
 
 def compute_ic_and_grouped_label_values(
@@ -142,7 +99,7 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
                 }
             )
 
-    metrics = pd.DataFrame.from_records(ic_records, columns=IC_RESULT_COLUMNS)
+    metrics = pd.DataFrame.from_records(ic_records, columns=EVALUATION_METRICS_COLUMNS)
     metrics["timestamp"] = metrics["timestamp"].astype("datetime64[ns]")
     for column in ("signal", "label", "ic_reason", "rankic_reason"):
         metrics[column] = metrics[column].astype("string")
@@ -152,7 +109,7 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
 
     grouped = pd.DataFrame.from_records(
         grouped_records,
-        columns=GROUPED_LABEL_VALUE_COLUMNS,
+        columns=EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     )
     grouped["timestamp"] = grouped["timestamp"].astype("datetime64[ns]")
     for column in ("signal", "label"):

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import sys
 import warnings
+from collections import deque
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
@@ -14,6 +14,7 @@ import pandas as pd
 from threadpoolctl import threadpool_limits
 
 import quant_research_platform.research.models.dependencies as dependencies
+import quant_research_platform.research.models.estimators as estimators
 import quant_research_platform.research.models.feature_importance as feature_importance
 import quant_research_platform.research.models.supervised as supervised
 import quant_research_platform.research.models.validation_split as validation_split
@@ -58,10 +59,8 @@ from quant_research_platform.runtime.resources import (
 
 @dataclass
 class ModelFitResult:
-    coefficients: np.ndarray
     metadata: dict[str, object]
-    prediction_model: object | None = field(
-        default=None,
+    prediction_model: object = field(
         repr=False,
         compare=False,
     )
@@ -71,31 +70,122 @@ type _OwnedModelFitResult = OwnedValue[ModelFitResult]
 
 
 def prediction_callable(
-    coefficients: np.ndarray,
     input_columns: tuple[str, ...],
-    prediction_model: object | None,
+    prediction_model: object,
 ):
     """Build the model-owned prediction callable used by selection and output."""
 
-    if prediction_model is not None:
+    def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
+        columns = input_columns
+        if isinstance(
+            prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
+        ):
+            columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
+        predicted = prediction_model.predict(frame.loc[:, list(columns)])
+        return np.asarray(predicted, dtype="float64")
 
-        def predict_from_model(frame: pd.DataFrame) -> np.ndarray:
-            columns = input_columns
-            if isinstance(
-                prediction_model,
-                (RankEnsemblePredictor, ICWeightedRankEnsemble),
+    return predict_from_model
+
+
+def validate_model_state(predictor: object, metadata: dict[str, object]) -> None:
+    """Bind persisted model metadata to the actual trained predictor state."""
+
+    spec = ModelSpec(
+        model_id="persisted_model",
+        model_algorithm=metadata["model_algorithm"],
+        input_factor_columns=tuple(metadata["input_factor_columns"]),
+        input_feature_columns=tuple(metadata["input_feature_columns"]),
+        label_column=metadata["label_column"],
+        sample_filter_mode=metadata["sample_filter_mode"],
+        hyperparameters=metadata["hyperparameters"],
+        random_seed=metadata["random_seed"],
+        max_train_rows=metadata["max_train_rows"],
+    )
+    if spec.model_algorithm == "linear_regression":
+        if type(predictor) is not LinearScaledPredictor:
+            raise ValueError("model_state_metadata_mismatch")
+        try:
+            coefficients = np.asarray(predictor.coefficients, dtype="float64")
+        except (TypeError, ValueError):
+            raise ValueError("model_state_metadata_mismatch") from None
+        if (
+            coefficients.shape != (len(spec.input_columns) + 1,)
+            or not np.isfinite(coefficients).all()
+        ):
+            raise ValueError("model_state_metadata_mismatch")
+        importance = feature_importance.linear_feature_importance(spec, coefficients)
+    elif spec.model_algorithm in {
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    }:
+        expected_type = (
+            RankEnsemblePredictor
+            if spec.model_algorithm == "equal_weight_rank_ensemble"
+            else ICWeightedRankEnsemble
+        )
+        if type(predictor) is not expected_type:
+            raise ValueError("model_state_metadata_mismatch")
+        parameters = {"columns": list(predictor.columns)}
+        if isinstance(predictor, RankEnsemblePredictor):
+            parameters["directions"] = list(predictor.directions)
+            if any(direction not in (-1.0, 1.0) for direction in predictor.directions):
+                raise ValueError("model_state_metadata_mismatch")
+        else:
+            parameters["weights"] = list(predictor.weights)
+            if not np.isclose(
+                sum(abs(weight) for weight in predictor.weights),
+                1.0,
+                rtol=0.0,
+                atol=1e-12,
             ):
-                columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
-            predicted = prediction_model.predict(frame.loc[:, list(columns)])
-            return np.asarray(predicted, dtype="float64")
-
-        return predict_from_model
-
-    def predict_from_coefficients(frame: pd.DataFrame) -> np.ndarray:
-        x = frame.loc[:, input_columns].to_numpy(dtype=float, copy=False)
-        return np.asarray(float(coefficients[0]) + x @ coefficients[1:])
-
-    return predict_from_coefficients
+                raise ValueError("model_state_metadata_mismatch")
+        if (
+            metadata.get("rank_parameters") != parameters
+            or metadata["scaler"] is not None
+        ):
+            raise ValueError("model_state_metadata_mismatch")
+        importance = feature_importance.estimator_feature_importance(spec, predictor)
+    else:
+        if type(predictor) is not ScaledPredictor:
+            raise ValueError("model_state_metadata_mismatch")
+        expected = estimators._MODEL_ESTIMATOR_FACTORIES[spec.model_algorithm](
+            spec, dict(metadata["resolved_hyperparameters"])
+        )
+        actual = predictor.estimator
+        if type(actual) is not type(expected):
+            raise ValueError("model_state_metadata_mismatch")
+        actual_parameters, expected_parameters = (
+            actual.get_params(deep=False),
+            expected.get_params(deep=False),
+        )
+        if set(actual_parameters) != set(expected_parameters):
+            raise ValueError("model_state_metadata_mismatch")
+        for name, expected_value in expected_parameters.items():
+            actual_value = actual_parameters[name]
+            if isinstance(expected_value, float) and np.isnan(expected_value):
+                matches = isinstance(actual_value, float) and np.isnan(actual_value)
+            else:
+                matches = actual_value == expected_value
+            if not matches:
+                raise ValueError("model_state_metadata_mismatch")
+        try:
+            inputs_match = (
+                actual.n_features_in_ == len(spec.input_columns)
+                and tuple(actual.feature_names_in_) == spec.input_columns
+            )
+        except AttributeError:
+            raise ValueError("model_state_metadata_mismatch") from None
+        if not inputs_match:
+            raise ValueError("model_state_metadata_mismatch")
+        importance = feature_importance.estimator_feature_importance(spec, predictor)
+    if isinstance(predictor, (LinearScaledPredictor, ScaledPredictor)):
+        if (
+            type(predictor.scaler) is not ModelMatrixScaler
+            or predictor.scaler.to_payload() != metadata["scaler"]
+        ):
+            raise ValueError("model_state_metadata_mismatch")
+    if importance != metadata.get("feature_importance"):
+        raise ValueError("model_state_metadata_mismatch")
 
 
 def _fit_model_result_owned_from_frames(
@@ -157,96 +247,30 @@ def _fit_linear_model_result_with_lease(
     model_lease: MemoryLease | None,
     fitting_cutoff: object,
 ) -> ModelFitResult | _OwnedModelFitResult:
-    if spec.max_train_rows is None:
-        return _fit_unbounded_linear_model_result(
-            frames,
-            spec,
-            model_lease=model_lease,
-            fitting_cutoff=fitting_cutoff,
-        )
-    if spec.max_train_rows is not None:
-        return _fit_controlled_linear_model_result_owned_from_frames(
-            frames,
-            spec,
-            model_lease=model_lease,
-            fitting_cutoff=fitting_cutoff,
-        )
-    input_columns = spec.input_columns
-    required = set(input_columns)
-    required.add(spec.label_column)
-    required.add("timestamp")
-    required.add("eligible")
-    availability_columns = training_availability_columns(spec.label_column)
-    work_columns = tuple(
-        dict.fromkeys(
-            (
-                "timestamp",
-                *input_columns,
-                spec.label_column,
-                "eligible",
-                *availability_columns,
-                *required_filter_columns(spec.sample_filter_mode),
-            )
-        )
-    )
-    fit_columns = tuple(
-        column
-        for column in ("timestamp", *input_columns, spec.label_column)
-        if column in work_columns
-    )
-    work_frames = iter_model_work_frames(
-        frames,
-        required=required,
-        work_columns=work_columns,
-    )
-    with closing_iterator(iter(work_frames)) as active_frames:
-        beta, row_counts, filter_metadata = fit_linear_coefficients(
-            active_frames,
-            spec=spec,
-            fit_columns=fit_columns,
-            fitting_cutoff=fitting_cutoff,
-        )
-    if row_counts["rows_after_input_label_dropna"] == 0:
-        raise ValueError("model_training_sample_empty")
-    metadata = model_metadata(
-        spec,
-        filter_metadata=filter_metadata,
-        row_counts=row_counts,
-        coefficient_count=int(len(beta)),
-        feature_importance=feature_importance.linear_feature_importance(spec, beta),
-    )
-    result = ModelFitResult(
-        coefficients=beta,
-        metadata=metadata,
-    )
-    if model_lease is None:
-        return result
-    model_lease.shrink_to(int(beta.nbytes))
-    return OwnedValue(result, model_lease)
-
-
-def _fit_unbounded_linear_model_result(
-    frames: Iterable[pd.DataFrame],
-    spec: ModelSpec,
-    *,
-    model_lease: MemoryLease | None,
-    fitting_cutoff: object,
-) -> ModelFitResult | _OwnedModelFitResult:
     owned_training = _collect_training_frame_owned(
         frames, spec, fitting_cutoff=fitting_cutoff
     )
-    collected = (
+    training, row_counts, filter_metadata = (
         owned_training.value
         if isinstance(owned_training, OwnedValue)
         else owned_training
     )
-    training, row_counts, filter_metadata = collected
     training_lease = (
         owned_training.lease if isinstance(owned_training, OwnedValue) else None
     )
+    weights = matrix = transformed = design = weighted = None
+    beta = scaler = predictor = metadata = result = None
     try:
         if training.empty:
             raise ValueError("model_training_sample_empty")
+        if model_lease is not None:
+            policy = current_runtime_resource_policy()
+            fit_work_bytes = _estimator_fit_working_set_bytes(training, spec, threads=1)
+            policy.require_working_set(
+                fit_work_bytes,
+                error="model_training_working_set_exceeds_task_memory_budget",
+            )
+            model_lease.grow(fit_work_bytes)
         weights = equal_date_sample_weights(training["timestamp"])
         matrix = training.loc[:, spec.input_columns]
         scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
@@ -254,11 +278,11 @@ def _fit_unbounded_linear_model_result(
         design = np.column_stack((np.ones(len(transformed)), transformed))
         weighted = np.sqrt(weights)
         with threadpool_limits(limits=1, user_api="blas"):
-            beta, *_ = np.linalg.lstsq(
+            beta = np.linalg.lstsq(
                 design * weighted[:, None],
                 training[spec.label_column].to_numpy(dtype="float64") * weighted,
                 rcond=None,
-            )
+            )[0]
         predictor = LinearScaledPredictor(
             coefficients=tuple(float(value) for value in beta),
             scaler=scaler,
@@ -267,29 +291,32 @@ def _fit_unbounded_linear_model_result(
             spec,
             filter_metadata=filter_metadata,
             row_counts=row_counts,
-            coefficient_count=len(beta),
             feature_importance=feature_importance.linear_feature_importance(spec, beta),
             scaler=scaler,
         )
         result = ModelFitResult(
-            coefficients=beta,
             metadata=metadata,
             prediction_model=predictor,
         )
+        weights = matrix = transformed = design = weighted = None
+        training = owned_training = None
         if training_lease is not None:
             training_lease.close()
             training_lease = None
         if model_lease is None:
             return result
-        model_lease.shrink_to(int(beta.nbytes))
+        model_lease.shrink_to(_linear_model_state_upper_bound_bytes(spec))
         return OwnedValue(result, model_lease)
     except BaseException as primary:
+        weights = matrix = transformed = design = weighted = None
+        beta = scaler = predictor = metadata = result = None
+        training = owned_training = None
         if training_lease is not None:
             try:
                 training_lease.close()
             except BaseException as cleanup_error:
                 primary.add_note(
-                    "unbounded linear training lease release also failed: "
+                    "linear training lease release also failed: "
                     f"{type(cleanup_error).__name__}"
                 )
         raise
@@ -300,7 +327,6 @@ def model_metadata(
     *,
     filter_metadata: dict[str, object],
     row_counts: dict[str, object],
-    coefficient_count: int,
     feature_importance: dict[str, float] | None = None,
     feature_importance_status: str | None = None,
     resolved_hyperparameters: dict[str, object] | None = None,
@@ -338,7 +364,6 @@ def model_metadata(
         "dependency_status": dependencies.require_model_dependency(
             spec.model_algorithm,
         ),
-        "coefficient_count": coefficient_count,
         "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
         "scaler": None if scaler is None else scaler.to_payload(),
     }
@@ -349,387 +374,6 @@ def model_metadata(
             feature_importance_status or "not_available_for_model_algorithm"
         )
     return metadata
-
-
-def _fit_controlled_linear_model_result_owned_from_frames(
-    frames: Iterable[pd.DataFrame],
-    spec: ModelSpec,
-    *,
-    model_lease: MemoryLease | None = None,
-    fitting_cutoff: object,
-) -> ModelFitResult | _OwnedModelFitResult:
-    owned_training = _collect_training_frame_owned(
-        frames, spec, fitting_cutoff=fitting_cutoff
-    )
-    training, row_counts, filter_metadata = (
-        owned_training.value
-        if isinstance(owned_training, OwnedValue)
-        else owned_training
-    )
-    training_lease = (
-        owned_training.lease if isinstance(owned_training, OwnedValue) else None
-    )
-    beta: np.ndarray | None = None
-    metadata: dict[str, object] | None = None
-    result: ModelFitResult | None = None
-    try:
-        if row_counts["rows_after_input_label_dropna"] == 0:
-            raise ValueError("model_training_sample_empty")
-        weights = equal_date_sample_weights(training["timestamp"])
-        scaler = ModelMatrixScaler.fit(
-            training.loc[:, spec.input_columns],
-            sample_weight=weights,
-        )
-        transformed = scaler.transform(training.loc[:, spec.input_columns]).to_numpy(
-            dtype="float64"
-        )
-        design = np.column_stack((np.ones(len(transformed)), transformed))
-        weighted = np.sqrt(weights)
-        with threadpool_limits(limits=1, user_api="blas"):
-            beta, *_ = np.linalg.lstsq(
-                design * weighted[:, None],
-                training[spec.label_column].to_numpy(dtype="float64") * weighted,
-                rcond=None,
-            )
-        predictor = LinearScaledPredictor(
-            coefficients=tuple(float(value) for value in beta),
-            scaler=scaler,
-        )
-        metadata = model_metadata(
-            spec,
-            filter_metadata=filter_metadata,
-            row_counts=row_counts,
-            coefficient_count=int(len(beta)),
-            feature_importance=feature_importance.linear_feature_importance(spec, beta),
-            scaler=scaler,
-        )
-        result = ModelFitResult(
-            coefficients=beta,
-            metadata=metadata,
-            prediction_model=predictor,
-        )
-        training = None
-        owned_training = None
-        if training_lease is not None:
-            training_lease.close()
-            training_lease = None
-        if model_lease is None:
-            return result
-        model_lease.shrink_to(int(beta.nbytes))
-        return OwnedValue(result, model_lease)
-    except BaseException as primary:
-        beta = None
-        metadata = None
-        result = None
-        training = None
-        owned_training = None
-        if training_lease is not None:
-            try:
-                training_lease.close()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "training lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-        if model_lease is not None and model_lease.active:
-            try:
-                model_lease.close()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    f"model lease release also failed: {type(cleanup_error).__name__}"
-                )
-        raise
-
-
-def fit_linear_coefficients(
-    frames: Iterable[pd.DataFrame],
-    *,
-    spec: ModelSpec,
-    fit_columns: tuple[str, ...],
-    fitting_cutoff: object,
-) -> tuple[np.ndarray, dict[str, object], dict[str, object]]:
-    input_count = len(spec.input_columns)
-    chunk_count = 0
-    row_count = 0
-    rows_input = 0
-    rows_after_filter = 0
-    first_usable: pd.DataFrame | None = None
-    filter_columns_used: list[str] = []
-    filter_definition = ""
-    r_factor: np.ndarray | None = None
-    qt_y: np.ndarray | None = None
-    next_r_factor: np.ndarray | None = None
-    next_qt_y: np.ndarray | None = None
-    y: np.ndarray | None = None
-    usable_timestamps: pd.Series | None = None
-    chunk_design: np.ndarray | None = None
-    stacked_design: np.ndarray | None = None
-    stacked_y: np.ndarray | None = None
-    q_factor: np.ndarray | None = None
-    qr_lease: MemoryLease | None = None
-    old_factor_lease: MemoryLease | None = None
-    usable: pd.DataFrame | None = None
-    filtered: pd.DataFrame | None = None
-    train_start: str | None = None
-    train_end: str | None = None
-    factor_lease: MemoryLease | None = None
-    first_usable_reservation = ExitStack()
-    try:
-        for chunk in frames:
-            chunk_count += 1
-            policy = current_runtime_resource_policy()
-            if chunk_count == 2:
-                first_usable = None
-                first_usable_reservation.close()
-                first_usable_reservation = ExitStack()
-            with _filter_mode_scope(
-                chunk,
-                mode=spec.sample_filter_mode,
-                metadata_key="sample_filter_mode",
-            ) as (filtered, metadata):
-                rows_input += _strict_non_negative_count_value(metadata["rows_input"])
-                rows_after_filter += _strict_non_negative_count_value(
-                    metadata["rows_after_filter_mode"]
-                )
-                filter_columns_used = list(metadata["filter_columns_used"])
-                filter_definition = str(metadata["filter_definition"])
-                with ExitStack() as chunk_work:
-                    usable_bound = _selected_frame_payload_bytes(
-                        filtered,
-                        list(fit_columns),
-                    )
-                    if policy is not None:
-                        chunk_work.enter_context(
-                            policy.lease(
-                                "research.model.linear_projection",
-                                usable_bound,
-                            )
-                        )
-                    availability_column = resolve_training_availability_column(
-                        filtered,
-                        label_column=spec.label_column,
-                    )
-                    usable = legal_training_rows(
-                        filtered,
-                        fitting_cutoff=fitting_cutoff,
-                        availability_column=availability_column,
-                        feature_columns=spec.input_columns,
-                        target_column=spec.label_column,
-                    ).loc[:, list(fit_columns)]
-                    if pandas_frame_payload_bytes(usable) > usable_bound:
-                        raise ValueError(
-                            "model_training_working_set_exceeds_task_memory_budget"
-                        )
-                    if chunk_count == 1:
-                        first_usable = usable
-                        first_usable_reservation = chunk_work.pop_all()
-                    row_count += int(len(usable))
-                    if len(usable) == 0:
-                        del usable, filtered, chunk
-                        continue
-                    qr_lease = None
-                    try:
-                        if policy is not None:
-                            qr_lease = policy.lease(
-                                "research.model.qr_work",
-                                _linear_qr_working_set_bytes(
-                                    row_count=len(usable),
-                                    input_count=input_count,
-                                    has_retained_factor=r_factor is not None,
-                                ),
-                            )
-                        y = usable.loc[:, spec.label_column].to_numpy(
-                            dtype="float64", copy=False
-                        )
-                        usable_timestamps = strict_timestamp_series(
-                            usable["timestamp"],
-                            error="invalid_model_training_timestamp",
-                        )
-                        chunk_start = time_value_isoformat(
-                            pd.Timestamp(usable_timestamps.min())
-                        )
-                        chunk_end = time_value_isoformat(
-                            pd.Timestamp(usable_timestamps.max())
-                        )
-                        train_start = (
-                            chunk_start
-                            if train_start is None
-                            else min(train_start, chunk_start)
-                        )
-                        train_end = (
-                            chunk_end
-                            if train_end is None
-                            else max(train_end, chunk_end)
-                        )
-                        chunk_design = linear_design_matrix(usable, spec)
-                        if r_factor is None or qt_y is None:
-                            stacked_design = chunk_design
-                            stacked_y = y
-                        else:
-                            stacked_design = np.vstack([r_factor, chunk_design])
-                            stacked_y = np.concatenate([qt_y, y])
-                        with threadpool_limits(limits=1, user_api="blas"):
-                            q_factor, next_r_factor = np.linalg.qr(
-                                stacked_design, mode="reduced"
-                            )
-                            next_qt_y = q_factor.T @ stacked_y
-                        chunk_design = None
-                        q_factor = None
-                        stacked_design = None
-                        stacked_y = None
-                        usable_timestamps = None
-                        y = None
-                    except BaseException as primary:
-                        first_usable = None
-                        usable = None
-                        filtered = None
-                        chunk = None
-                        y = None
-                        usable_timestamps = None
-                        chunk_design = None
-                        stacked_design = None
-                        stacked_y = None
-                        q_factor = None
-                        next_r_factor = None
-                        next_qt_y = None
-                        if qr_lease is not None:
-                            try:
-                                qr_lease.close()
-                            except BaseException as cleanup_error:
-                                primary.add_note(
-                                    "linear QR lease release also failed: "
-                                    f"{type(cleanup_error).__name__}"
-                                )
-                        raise
-                    old_factor_lease = factor_lease
-                    r_factor = None
-                    qt_y = None
-                    try:
-                        if old_factor_lease is not None:
-                            old_factor_lease.close()
-                        if qr_lease is not None:
-                            qr_lease.shrink_to(
-                                int(next_r_factor.nbytes + next_qt_y.nbytes)
-                            )
-                            qr_lease.transfer("research.model.qr_state")
-                            factor_lease = qr_lease
-                            qr_lease = None
-                        r_factor = next_r_factor
-                        qt_y = next_qt_y
-                        next_r_factor = None
-                        next_qt_y = None
-                    except BaseException as primary:
-                        first_usable = None
-                        usable = None
-                        filtered = None
-                        chunk = None
-                        y = None
-                        usable_timestamps = None
-                        chunk_design = None
-                        stacked_design = None
-                        stacked_y = None
-                        q_factor = None
-                        r_factor = None
-                        qt_y = None
-                        next_r_factor = None
-                        next_qt_y = None
-                        if qr_lease is not None:
-                            try:
-                                qr_lease.close()
-                            except BaseException as cleanup_error:
-                                primary.add_note(
-                                    "linear QR lease release also failed: "
-                                    f"{type(cleanup_error).__name__}"
-                                )
-                        raise
-                    usable = None
-                    filtered = None
-            del chunk
-
-        row_counts = {
-            "rows_input": rows_input,
-            "rows_after_filter_mode": rows_after_filter,
-            "rows_after_input_label_dropna": row_count,
-            "train_start": train_start,
-            "train_end": train_end,
-        }
-        filter_metadata = {
-            "sample_filter_mode": spec.sample_filter_mode,
-            "filter_columns_used": filter_columns_used,
-            "filter_definition": filter_definition,
-            "rows_input": rows_input,
-            "rows_after_filter_mode": rows_after_filter,
-        }
-        if row_count == 0:
-            return (
-                np.empty(input_count + 1, dtype="float64"),
-                row_counts,
-                filter_metadata,
-            )
-        if chunk_count == 1 and first_usable is not None:
-            r_factor = None
-            qt_y = None
-            if factor_lease is not None:
-                factor_lease.close()
-                factor_lease = None
-            try:
-                beta = fit_linear_coefficients_exact(first_usable, spec)
-            except BaseException:
-                first_usable = None
-                raise
-            first_usable = None
-            first_usable_reservation.close()
-            return beta, row_counts, filter_metadata
-        if r_factor is None or qt_y is None:
-            return (
-                np.empty(input_count + 1, dtype="float64"),
-                row_counts,
-                filter_metadata,
-            )
-        try:
-            beta = fit_linear_coefficients_from_tsqr(r_factor, qt_y)
-        finally:
-            r_factor = None
-            qt_y = None
-        return beta, row_counts, filter_metadata
-    finally:
-        primary = sys.exception()
-        first_failure: BaseException | None = None
-        first_usable = None
-        r_factor = None
-        qt_y = None
-        next_r_factor = None
-        next_qt_y = None
-        usable = None
-        filtered = None
-        if factor_lease is not None:
-            try:
-                factor_lease.close()
-            except BaseException as cleanup_error:
-                if primary is not None:
-                    primary.add_note(
-                        "linear QR state release also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-                else:
-                    first_failure = cleanup_error
-        try:
-            first_usable_reservation.close()
-        except BaseException as cleanup_error:
-            if primary is not None:
-                primary.add_note(
-                    "linear first usable release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-            elif first_failure is None:
-                first_failure = cleanup_error
-            else:
-                first_failure.add_note(
-                    "linear first usable release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-        if first_failure is not None:
-            raise first_failure
 
 
 def _fit_estimator_model_result_owned_from_frames(
@@ -767,8 +411,6 @@ def _fit_estimator_model_result_owned_from_frames(
     model_lease = None
     y: np.ndarray | None = None
     predictor: object | None = None
-    coefficient_values: object | None = None
-    coefficients: np.ndarray | None = None
     metadata: dict[str, object] | None = None
     resolved_hyperparameters: dict[str, object] | None = None
     result: ModelFitResult | None = None
@@ -796,6 +438,10 @@ def _fit_estimator_model_result_owned_from_frames(
                 spec,
                 threads=threads,
             )
+            policy.require_working_set(
+                target_bytes + fit_work_bytes + model_state_bytes,
+                error="model_training_working_set_exceeds_task_memory_budget",
+            )
             model_lease = policy.lease(
                 "research.model.fitted",
                 target_bytes + fit_work_bytes + model_state_bytes,
@@ -822,9 +468,6 @@ def _fit_estimator_model_result_owned_from_frames(
             threads=threads,
         )
         y = None
-        coefficient_count = int(
-            getattr(predictor, "coefficient_count", len(spec.input_columns))
-        )
         resolved_hyperparameters = supervised.resolved_model_hyperparameters(spec)
         if spec.model_algorithm in supervised._PARALLEL_MODEL_ALGORITHMS:  # noqa: SLF001
             fitted_threads = getattr(predictor, "n_jobs", None)
@@ -835,7 +478,6 @@ def _fit_estimator_model_result_owned_from_frames(
             spec,
             filter_metadata=filter_metadata,
             row_counts=row_counts,
-            coefficient_count=coefficient_count,
             feature_importance=feature_importance.estimator_feature_importance(
                 spec,
                 predictor,
@@ -845,12 +487,7 @@ def _fit_estimator_model_result_owned_from_frames(
                 predictor.scaler if isinstance(predictor, ScaledPredictor) else None
             ),
         )
-        coefficient_values = getattr(predictor, "coefficients", None)
-        if coefficient_values is None:
-            coefficient_values = np.full(coefficient_count, np.nan)
-        coefficients = np.asarray(coefficient_values, dtype="float64")
         result = ModelFitResult(
-            coefficients=coefficients,
             metadata=metadata,
             prediction_model=predictor,
         )
@@ -871,8 +508,6 @@ def _fit_estimator_model_result_owned_from_frames(
         if y is not None:
             y = None
         predictor = None
-        coefficient_values = None
-        coefficients = None
         metadata = None
         resolved_hyperparameters = None
         result = None
@@ -927,7 +562,9 @@ def _collect_training_frame_owned(
     rows_after_filter = 0
     filter_columns_used: list[str] = []
     filter_definition = ""
-    capped_training: pd.DataFrame | None = None
+    retained: deque[tuple[pd.DataFrame, MemoryLease | None, int]] = deque()
+    retained_rows = 0
+    retained_bytes = 0
     training_lease: MemoryLease | None = None
     projection_lease: MemoryLease | None = None
     try:
@@ -966,13 +603,18 @@ def _collect_training_frame_owned(
                 )
                 projection_lease = None
                 if resource_policy is not None:
-                    projection_lease = resource_policy.lease(
-                        "research.model.training_projection",
+                    projection_bound = (
                         usable_bound
                         + _training_control_working_set_bytes(
-                            usable_bound,
-                            len(filtered),
-                        ),
+                            usable_bound, len(filtered)
+                        )
+                    )
+                    resource_policy.require_working_set(
+                        projection_bound,
+                        error="model_training_working_set_exceeds_task_memory_budget",
+                    )
+                    projection_lease = resource_policy.lease(
+                        "research.model.training_projection", projection_bound
                     )
                 availability_column = resolve_training_availability_column(
                     filtered,
@@ -1002,77 +644,83 @@ def _collect_training_frame_owned(
                         projection_lease.close()
                         projection_lease = None
                     continue
-                usable = validation_split.trim_training_buffer(usable, spec)
-                usable_payload_bytes = pandas_frame_payload_bytes(usable)
-                if capped_training is None:
-                    capped_training = usable
-                    usable = None
-                    filtered = None
-                    if projection_lease is not None:
-                        projection_lease.shrink_to(usable_payload_bytes)
-                        projection_lease.transfer("research.model.training")
-                        training_lease = projection_lease
-                        projection_lease = None
-                    continue
-                combined_payload_bytes = (
-                    pandas_frame_payload_bytes(capped_training) + usable_payload_bytes
-                )
-                concat_lease = None
-                if resource_policy is not None:
-                    concat_lease = resource_policy.lease(
-                        "research.model.training_concat",
-                        combined_payload_bytes
-                        + _training_control_working_set_bytes(
-                            combined_payload_bytes,
-                            len(capped_training) + len(usable),
-                        ),
-                    )
-                try:
-                    combined = validation_split.trim_training_buffer(
-                        pd.concat([capped_training, usable], ignore_index=True),
-                        spec,
-                    )
-                    capped_training = None
-                    usable = None
-                    if training_lease is not None:
-                        training_lease.close()
-                        training_lease = None
-                    if projection_lease is not None:
-                        projection_lease.close()
-                        projection_lease = None
-                    if concat_lease is not None:
-                        concat_lease.shrink_to(pandas_frame_payload_bytes(combined))
-                        concat_lease.transfer("research.model.training")
-                        training_lease = concat_lease
-                        concat_lease = None
-                    capped_training = combined
-                    combined = None
-                    filtered = None
-                except BaseException as primary:
-                    capped_training = None
-                    usable = None
-                    filtered = None
-                    combined = None
-                    if concat_lease is not None:
-                        try:
-                            concat_lease.close()
-                        except BaseException as cleanup_error:
-                            primary.add_note(
-                                "training concat lease release also failed: "
-                                f"{type(cleanup_error).__name__}"
+                if spec.max_train_rows is not None:
+                    usable = validation_split.trim_training_buffer(usable, spec)
+                    usable_payload_bytes = pandas_frame_payload_bytes(usable)
+                if projection_lease is not None:
+                    projection_lease.shrink_to(usable_payload_bytes)
+                    projection_lease.transfer("research.model.training")
+                retained.append((usable, projection_lease, usable_payload_bytes))
+                projection_lease = None
+                retained_rows += len(usable)
+                retained_bytes += usable_payload_bytes
+                usable = None
+                filtered = None
+                if spec.max_train_rows is not None:
+                    while retained_rows - len(retained[0][0]) >= spec.max_train_rows:
+                        removed, removed_lease, removed_bytes = retained.popleft()
+                        retained_rows -= len(removed)
+                        retained_bytes -= removed_bytes
+                        removed = None
+                        if removed_lease is not None:
+                            removed_lease.close()
+                    excess = retained_rows - spec.max_train_rows
+                    if excess > 0:
+                        oldest, oldest_lease, oldest_bytes = retained[0]
+                        if resource_policy is not None:
+                            resource_policy.require_working_set(
+                                oldest_bytes,
+                                error="model_training_working_set_exceeds_task_memory_budget",
                             )
-                    raise
+                            projection_lease = resource_policy.lease(
+                                "research.model.training_trim", oldest_bytes
+                            )
+                        trimmed = oldest.iloc[excess:].copy()
+                        trimmed_bytes = pandas_frame_payload_bytes(trimmed)
+                        if projection_lease is not None:
+                            projection_lease.shrink_to(trimmed_bytes)
+                            projection_lease.transfer("research.model.training")
+                        retained[0] = (trimmed, projection_lease, trimmed_bytes)
+                        projection_lease = None
+                        retained_rows -= excess
+                        retained_bytes += trimmed_bytes - oldest_bytes
+                        oldest = trimmed = None
+                        if oldest_lease is not None:
+                            oldest_lease.close()
         resource_policy = current_runtime_resource_policy()
-        training = capped_training if capped_training is not None else pd.DataFrame()
-        capped_training = None
+        if len(retained) == 1:
+            training, training_lease, _ = retained.popleft()
+        elif retained:
+            if resource_policy is not None:
+                resource_policy.require_working_set(
+                    retained_bytes,
+                    error="model_training_working_set_exceeds_task_memory_budget",
+                )
+                training_lease = resource_policy.lease(
+                    "research.model.training_concat", retained_bytes
+                )
+            training = pd.concat([part for part, _, _ in retained], ignore_index=True)
+            while retained:
+                removed, removed_lease, _ = retained.popleft()
+                removed = None
+                if removed_lease is not None:
+                    removed_lease.close()
+            if training_lease is not None:
+                training_lease.shrink_to(pandas_frame_payload_bytes(training))
+                training_lease.transfer("research.model.training")
+        else:
+            training = pd.DataFrame()
         final_lease = None
         if resource_policy is not None:
+            control_bound = _training_control_working_set_bytes(
+                pandas_frame_payload_bytes(training), len(training)
+            )
+            resource_policy.require_working_set(
+                control_bound,
+                error="model_training_working_set_exceeds_task_memory_budget",
+            )
             final_lease = resource_policy.lease(
-                "research.model.training_controls",
-                _training_control_working_set_bytes(
-                    pandas_frame_payload_bytes(training),
-                    len(training),
-                ),
+                "research.model.training_controls", control_bound
             )
         previous_training = training
         try:
@@ -1100,7 +748,6 @@ def _collect_training_frame_owned(
             previous_training = None
             controlled_training = None
             training = None
-            capped_training = None
             if final_lease is not None:
                 try:
                     final_lease.close()
@@ -1113,7 +760,18 @@ def _collect_training_frame_owned(
     except BaseException as primary:
         filtered = None
         usable = None
-        capped_training = None
+        training = None
+        while retained:
+            removed, removed_lease, _ = retained.popleft()
+            removed = None
+            if removed_lease is not None:
+                try:
+                    removed_lease.close()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "retained training lease release also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
         if projection_lease is not None:
             try:
                 projection_lease.close()
@@ -1302,26 +960,6 @@ def _fit_predictor(
     return estimator
 
 
-def fit_linear_coefficients_exact(
-    frame: pd.DataFrame,
-    spec: ModelSpec,
-) -> np.ndarray:
-    policy = current_runtime_resource_policy()
-    with ExitStack() as solve_reservation:
-        if policy is not None:
-            solve_reservation.enter_context(
-                policy.lease(
-                    "research.model.linear_solve",
-                    _linear_exact_working_set_bytes(frame, spec),
-                )
-            )
-        design = linear_design_matrix(frame, spec)
-        y = frame.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
-        with threadpool_limits(limits=1, user_api="blas"):
-            beta, *_ = np.linalg.lstsq(design, y, rcond=None)
-        return beta
-
-
 def iter_model_work_frames(
     frames: Iterable[pd.DataFrame],
     *,
@@ -1339,13 +977,11 @@ def iter_model_work_frames(
         selected = [column for column in work_columns if column in frame.columns]
         selected_bytes = _selected_frame_payload_bytes(frame, selected)
         policy = current_runtime_resource_policy()
-        if (
-            policy is not None
-            and policy.explicit_memory_cap_bytes is not None
-            and policy.used_memory_bytes + selected_bytes
-            > policy.explicit_memory_cap_bytes
-        ):
-            raise ValueError("model_training_working_set_exceeds_task_memory_budget")
+        if policy is not None:
+            policy.require_working_set(
+                selected_bytes,
+                error="model_training_working_set_exceeds_task_memory_budget",
+            )
         projection_lease = None
         if policy is not None:
             projection_lease = policy.lease(
@@ -1369,17 +1005,6 @@ def iter_model_work_frames(
                 projection_lease.close()
 
 
-def linear_design_matrix(
-    frame: pd.DataFrame,
-    spec: ModelSpec,
-) -> np.ndarray:
-    x = frame.loc[:, spec.input_columns].to_numpy(dtype="float64", copy=False)
-    design = np.empty((len(x), len(spec.input_columns) + 1), dtype="float64")
-    design[:, 0] = 1.0
-    design[:, 1:] = x
-    return design
-
-
 def _estimator_fit_working_set_bytes(
     frame: pd.DataFrame,
     spec: ModelSpec,
@@ -1394,6 +1019,16 @@ def _estimator_fit_working_set_bytes(
     label_copy = rows * np.dtype(np.float64).itemsize
     row_index = rows * np.dtype(np.intp).itemsize
     coefficient_workspace = (inputs + 1) ** 2 * np.dtype(np.float64).itemsize
+    if spec.model_algorithm == "linear_regression":
+        # Cover scaling temporaries, intercept design, weighted LAPACK inputs/copies,
+        # equal-date grouping, and the dense least-squares workspace together.
+        return (
+            feature_frame
+            + 8 * dense_features
+            + 12 * label_copy
+            + 4 * row_index
+            + 4 * coefficient_workspace
+        )
     parallel_workspace = _parallel_estimator_workspace_bytes(
         rows=rows,
         inputs=inputs,
@@ -1451,77 +1086,13 @@ def _effective_model_thread_count(
     available_bytes: int | None,
 ) -> int:
     requested = supervised.model_thread_count(spec)
-    if available_bytes is None:
+    if available_bytes is None or requested == 1:
         return requested
-    if requested == 1:
-        if _estimator_fit_working_set_bytes(frame, spec, threads=1) > available_bytes:
-            raise MemoryError("runtime_memory_budget_exceeded")
-        return 1
     base = _estimator_fit_working_set_bytes(frame, spec, threads=0)
     per_thread = _estimator_fit_working_set_bytes(frame, spec, threads=1) - base
     if per_thread <= 0:
         return requested
-    effective = min(requested, max(1, (available_bytes - base) // per_thread))
-    if base + effective * per_thread > available_bytes:
-        raise MemoryError("runtime_memory_budget_exceeded")
-    return effective
-
-
-def _linear_exact_working_set_bytes(frame: pd.DataFrame, spec: ModelSpec) -> int:
-    rows = len(frame)
-    columns = len(spec.input_columns) + 1
-    design = rows * columns * np.dtype(np.float64).itemsize
-    solver_input_copy = design
-    left_singular_vectors = design
-    right_singular_vectors = columns * columns * np.dtype(np.float64).itemsize
-    label_copy = rows * np.dtype(np.float64).itemsize
-    solver_vectors = 2 * columns * np.dtype(np.float64).itemsize
-    native_workspace = design + right_singular_vectors + solver_vectors
-    return (
-        design
-        + solver_input_copy
-        + left_singular_vectors
-        + right_singular_vectors
-        + label_copy
-        + solver_vectors
-        + native_workspace
-    )
-
-
-def _linear_qr_working_set_bytes(
-    *,
-    row_count: int,
-    input_count: int,
-    has_retained_factor: bool,
-) -> int:
-    columns = input_count + 1
-    stacked_rows = row_count + (columns if has_retained_factor else 0)
-    chunk_design = row_count * columns * np.dtype(np.float64).itemsize
-    timestamp_values = row_count * np.dtype("datetime64[ns]").itemsize
-    stacked_design = (
-        stacked_rows * columns * np.dtype(np.float64).itemsize
-        if has_retained_factor
-        else 0
-    )
-    stacked_label = (
-        stacked_rows * np.dtype(np.float64).itemsize if has_retained_factor else 0
-    )
-    qr_input_copy = stacked_rows * columns * np.dtype(np.float64).itemsize
-    q_factor = qr_input_copy
-    r_factor = columns * columns * np.dtype(np.float64).itemsize
-    projected_label = columns * np.dtype(np.float64).itemsize
-    native_workspace = qr_input_copy + r_factor + projected_label
-    return (
-        chunk_design
-        + timestamp_values
-        + stacked_design
-        + stacked_label
-        + qr_input_copy
-        + q_factor
-        + r_factor
-        + projected_label
-        + native_workspace
-    )
+    return min(requested, max(1, (available_bytes - base) // per_thread))
 
 
 def _model_state_upper_bound_bytes(
@@ -1762,34 +1333,6 @@ def _positive_model_int(value: object, *, default: int) -> int:
     if isinstance(value, Integral) and not isinstance(value, bool) and value > 0:
         return int(value)
     raise ValueError("invalid_model_state_sizing_parameter")
-
-
-def fit_linear_coefficients_from_tsqr(
-    r_factor: np.ndarray,
-    qt_y: np.ndarray,
-) -> np.ndarray:
-    policy = current_runtime_resource_policy()
-    with ExitStack() as solve_reservation:
-        if policy is not None:
-            columns = len(qt_y)
-            solver_input_copy = int(r_factor.nbytes + qt_y.nbytes)
-            right_singular_vectors = columns * columns * np.dtype(np.float64).itemsize
-            solver_vectors = 2 * columns * np.dtype(np.float64).itemsize
-            native_workspace = (
-                solver_input_copy + right_singular_vectors + solver_vectors
-            )
-            solve_reservation.enter_context(
-                policy.lease(
-                    "research.model.qr_solve",
-                    solver_input_copy
-                    + right_singular_vectors
-                    + solver_vectors
-                    + native_workspace,
-                )
-            )
-        with threadpool_limits(limits=1, user_api="blas"):
-            beta, *_ = np.linalg.lstsq(r_factor, qt_y, rcond=None)
-        return beta
 
 
 def _strict_non_negative_count_value(value: object) -> int:

@@ -99,31 +99,6 @@ def equal_date_sample_weights(timestamps: object) -> np.ndarray:
     return len(values) / (date_count * counts.astype("float64"))
 
 
-def prepare_model_matrix(
-    frame: pd.DataFrame,
-    columns: tuple[str, ...],
-) -> tuple[pd.DataFrame, tuple[str, ...]]:
-    """Fill legitimate feature missingness and append one indicator per column."""
-
-    if not columns or any(column not in frame.columns for column in columns):
-        raise ValueError("model_matrix_columns_invalid")
-    output: dict[str, pd.Series] = {}
-    names: list[str] = []
-    for column in columns:
-        values = strict_finite_numeric_series(
-            frame[column],
-            error=f"invalid_model_matrix_column: {column}",
-            allow_null=True,
-        ).astype("float64")
-        missing = values.isna()
-        output[column] = values.fillna(0.0)
-        names.append(column)
-        missing_name = f"feature_missing_{column}"
-        output[missing_name] = missing.astype("float64")
-        names.append(missing_name)
-    return pd.DataFrame(output, index=frame.index).loc[:, names], tuple(names)
-
-
 def _finite_matrix(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:
     values = np.column_stack(
         [

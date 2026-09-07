@@ -12,10 +12,6 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
-    GROUP_SPREAD_SUMMARY_COLUMNS,
-    GROUPED_LABEL_VALUE_COLUMNS,
-    IC_RESULT_COLUMNS,
-    IC_SUMMARY_COLUMNS,
     _add_correlation_aggregate,
     _pearson_correlation_from_moments,
     _summarize_correlation_aggregates,
@@ -23,6 +19,10 @@ from quant_research_platform.compute.dataframe.cross_section import (
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import (
+    EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
+    EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+    EVALUATION_IC_SUMMARY_COLUMNS,
+    EVALUATION_METRICS_COLUMNS,
     EvaluationDiagnostics,
     EvaluationSpec,
     strict_non_negative_count_series,
@@ -274,7 +274,7 @@ class _EvaluationStreamingState:
                     "rankicir_reason": rankic["ratio_reason"],
                 }
             )
-        return pd.DataFrame.from_records(records, columns=IC_SUMMARY_COLUMNS)
+        return pd.DataFrame.from_records(records, columns=EVALUATION_IC_SUMMARY_COLUMNS)
 
     def group_spread_summary(self) -> pd.DataFrame:
         records: list[dict[str, object]] = []
@@ -303,7 +303,7 @@ class _EvaluationStreamingState:
             )
         return pd.DataFrame.from_records(
             records,
-            columns=GROUP_SPREAD_SUMMARY_COLUMNS,
+            columns=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
         )
 
     def coverage_summary(self) -> pd.DataFrame:
@@ -345,7 +345,7 @@ class _EvaluationStreamingState:
                 None
                 if self._min_timestamp is None
                 else time_value_isoformat(
-                    self._min_timestamp.to_pydatetime(),
+                    self._min_timestamp,
                     preserve_datetime=True,
                 )
             ),
@@ -353,7 +353,7 @@ class _EvaluationStreamingState:
                 None
                 if self._max_timestamp is None
                 else time_value_isoformat(
-                    self._max_timestamp.to_pydatetime(),
+                    self._max_timestamp,
                     preserve_datetime=True,
                 )
             ),
@@ -722,11 +722,11 @@ def _iter_single_asset_time_series_output_chunks(
             "filter_definition": filter_definition_value,
             "timestamp_count": timestamp_count,
             "min_timestamp": time_value_isoformat(
-                minimum_timestamp.to_pydatetime(),
+                minimum_timestamp,
                 preserve_datetime=True,
             ),
             "max_timestamp": time_value_isoformat(
-                maximum_timestamp.to_pydatetime(),
+                maximum_timestamp,
                 preserve_datetime=True,
             ),
             "skipped_timestamp_count": 0,
@@ -826,7 +826,7 @@ def _time_series_metrics_frame(
                 "rankic_reason": "not_applicable",
             }
         )
-    metrics = pd.DataFrame.from_records(records, columns=IC_RESULT_COLUMNS)
+    metrics = pd.DataFrame.from_records(records, columns=EVALUATION_METRICS_COLUMNS)
     metrics["timestamp"] = metrics["timestamp"].astype("datetime64[ns]")
     for column in ("signal", "label", "ic_reason", "rankic_reason"):
         metrics[column] = metrics[column].astype("string")
@@ -846,7 +846,7 @@ def _empty_grouped_label_values() -> pd.DataFrame:
             "mean_label_value": pd.Series(dtype="float64"),
             "n_obs": pd.Series(dtype="int64"),
         },
-        columns=GROUPED_LABEL_VALUE_COLUMNS,
+        columns=EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     )
 
 
@@ -944,12 +944,12 @@ def _iter_evaluation_filtered_chunks(
         batch_min = pd.Timestamp(batch_timestamps.min())
         batch_max = pd.Timestamp(batch_timestamps.max())
         batch_min_timestamp = (
-            time_value_isoformat(batch_min.to_pydatetime(), preserve_datetime=True)
+            time_value_isoformat(batch_min, preserve_datetime=True)
             if batch_timestamp_count
             else None
         )
         batch_max_timestamp = (
-            time_value_isoformat(batch_max.to_pydatetime(), preserve_datetime=True)
+            time_value_isoformat(batch_max, preserve_datetime=True)
             if batch_timestamp_count
             else None
         )
@@ -1312,17 +1312,10 @@ def _iter_evaluation_compute_batches(
             candidate_bytes = planned_bytes + session_bytes
             if candidate_bytes > resource_policy.operation_headroom_bytes:
                 if stop == start:
-                    explicit_cap = resource_policy.explicit_memory_cap_bytes
-                    if (
-                        explicit_cap is not None
-                        and resource_policy.used_memory_bytes + candidate_bytes
-                        > explicit_cap
-                    ):
-                        with resource_policy.lease(
-                            "research.evaluation.kernel",
-                            candidate_bytes,
-                        ):
-                            pass
+                    resource_policy.require_working_set(
+                        candidate_bytes,
+                        error="research_evaluation_working_set_exceeds_task_memory_budget",
+                    )
                     planned_bytes = candidate_bytes
                     stop = session_stop
                     session_index += 1
@@ -1379,15 +1372,24 @@ def _iter_evaluation_work_frames(
             * sum(signal.signal_id not in selected_set for signal in spec.signals)
         )
         normalized_bound = projection_bytes + added_signal_bytes
+        resource_policy.require_working_set(
+            projection_bytes,
+            error="research_evaluation_working_set_exceeds_task_memory_budget",
+        )
         normalized_lease = resource_policy.lease(
             "research.evaluation.projection",
             projection_bytes,
         )
         try:
             projected = frame.loc[:, selected]
-            normalized_lease.grow(
-                _signal_normalization_working_bytes(projected, spec.signals)
+            normalization_bytes = _signal_normalization_working_bytes(
+                projected, spec.signals
             )
+            resource_policy.require_working_set(
+                normalization_bytes,
+                error="research_evaluation_working_set_exceeds_task_memory_budget",
+            )
+            normalized_lease.grow(normalization_bytes)
             normalized = normalize_signal_frame(
                 projected,
                 signals=spec.signals,

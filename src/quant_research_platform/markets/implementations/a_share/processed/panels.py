@@ -783,21 +783,16 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
     for asset_id, positions in result.groupby("asset_id", sort=False).groups.items():
         _ = asset_id
         values = result.loc[positions]
-        last_close = (
-            values["adj_close"].where(result.loc[positions, "is_trading"]).ffill()
-        )
-        missing_price = ~result.loc[positions, "is_trading"]
-        result.loc[positions, "adj_close"] = result.loc[positions, "adj_close"].where(
-            result.loc[positions, "adj_close"].notna(), last_close
-        )
-        result.loc[positions, "close"] = result.loc[positions, "close"].where(
-            result.loc[positions, "close"].notna(), result.loc[positions, "adj_close"]
-        )
-        for column in ("open", "high", "low", "adj_open"):
-            result.loc[positions, column] = result.loc[positions, column].where(
-                result.loc[positions, column].notna(),
-                result.loc[positions, "adj_close"],
-            )
+        trading = result.loc[positions, "is_trading"]
+        for close_column, price_columns in (
+            ("close", ("close", "open", "high", "low")),
+            ("adj_close", ("adj_close", "adj_open")),
+        ):
+            last_close = values[close_column].where(trading).ffill()
+            for column in price_columns:
+                result.loc[positions, column] = values[column].where(
+                    trading | values[column].notna(), last_close
+                )
         result.loc[positions, "period_return"] = result.loc[
             positions, "period_return"
         ].where(result.loc[positions, "is_trading"], 0.0)
@@ -824,14 +819,15 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
         result.loc[positions, "turnover"] = result.loc[positions, "turnover"].where(
             result.loc[positions, "is_trading"], 0.0
         )
-        previous_trading = result.loc[positions, "is_trading"].shift(1).fillna(False)
+        previous_trading = result.loc[positions, "is_trading"].shift(
+            1, fill_value=False
+        )
         reopening = result.loc[positions, "is_trading"] & ~previous_trading
         prior_close = result.loc[positions, "adj_close"].shift(1).ffill()
         reopening_return = result.loc[positions, "adj_close"].div(prior_close) - 1.0
         result.loc[positions, "period_return"] = result.loc[
             positions, "period_return"
         ].where(~reopening | reopening_return.isna(), reopening_return)
-        _ = missing_price
     result["is_trading"] = result["is_trading"].astype(bool)
     result["is_a_share_scope"] = result["market_type"].isin(CURRENT_MARKET_TYPES)
     return result

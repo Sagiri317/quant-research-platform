@@ -56,6 +56,8 @@ from .raw_schemas import (
 
 SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv"}
 STRING_CODE_DTYPES = {
+    "ReportID": str,
+    "AnanmID": str,
     "Stkcd": str,
     "Symbol": str,
     "Indexcd": str,
@@ -972,7 +974,6 @@ def _iter_csv_records(
             resource_policy=resource_policy,
             expected_identity=expected_identity,
             payload_lease_ref=payload_lease_ref,
-            materialize_records=False,
         )
     )
     with closing_iterator(rows):
@@ -1271,53 +1272,23 @@ def _verify_csmar_member_set(
     requested_datasets: Iterable[str] | None = None,
 ) -> None:
     requested = _requested_raw_datasets(requested_datasets)
-    if requested is None:
-        _verify_all_csmar_members(root, index, namespace=namespace)
-        return
     policy = current_runtime_resource_policy()
-    if policy is None:
+    if requested is not None and policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    expected_paths = {
-        payload.split(b"\0", 1)[0]
-        for payload in index.identity_payload_values(namespace=namespace)
-    }
-    current_paths: set[bytes] = set()
-    with _raw_export_path_session(root) as (paths, _verify_root):
-        for path in paths:
-            identity = raw_export_file_identity(path)
-            candidate = _raw_dataset_candidate(
-                path,
-                resource_policy=policy,
-                expected_identity=identity,
-            )
-            if candidate not in requested:
-                continue
-            relative = path.relative_to(root).as_posix().encode("utf-8")
-            if relative not in expected_paths:
-                raise ValueError("csmar_raw_export_identity_changed")
-            current_paths.add(relative)
-            expected = index.identity_payload_value(
-                namespace=namespace,
-                payload=relative,
-            )
-            actual = (
-                relative + b"\0" + _file_identity_bytes(raw_export_file_identity(path))
-            )
-            if expected != actual:
-                raise ValueError("csmar_raw_export_identity_changed")
-    if current_paths != expected_paths:
-        raise ValueError("csmar_raw_export_identity_changed")
-
-
-def _verify_all_csmar_members(
-    root: Path,
-    index: ExactPrimaryKeyIndex,
-    *,
-    namespace: str,
-) -> None:
     with _raw_export_path_session(root) as (paths, _verify_root):
         current_count = 0
         for path in paths:
+            identity = raw_export_file_identity(path)
+            if (
+                requested is not None
+                and _raw_dataset_candidate(
+                    path,
+                    resource_policy=policy,
+                    expected_identity=identity,
+                )
+                not in requested
+            ):
+                continue
             relative = path.relative_to(root).as_posix().encode("utf-8")
             expected = index.identity_payload_value(
                 namespace=namespace,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
+from math import isfinite
 
 
 @dataclass(frozen=True)
@@ -87,20 +89,25 @@ def price_to_tick(value: object, tick_size: str, *, error: str) -> int:
         price = Decimal(value)
     except InvalidOperation as exc:
         raise ValueError(error) from exc
-    if not price.is_finite() or price <= 0:
+    if not price.is_finite() or price <= 0 or not 0.0 < float(price) < float("inf"):
         raise ValueError(error)
-    ticks = price / tick
-    integral = ticks.to_integral_value()
-    if ticks != integral:
+    ticks = Fraction(price) / Fraction(tick)
+    if ticks.denominator != 1:
         raise ValueError(error)
-    return int(integral)
+    return ticks.numerator
 
 
 def tick_to_price(price_tick: int, tick_size: str) -> float:
     _, tick = _tick_size(tick_size)
     if type(price_tick) is not int:
         raise ValueError("order_book_price_tick_invalid")
-    return float(Decimal(price_tick) * tick)
+    try:
+        price = float(price_tick * Fraction(tick))
+    except OverflowError:
+        raise ValueError("order_book_price_tick_invalid") from None
+    if not isfinite(price):
+        raise ValueError("order_book_price_tick_invalid")
+    return price
 
 
 def _tick_size(value: object) -> tuple[str, Decimal]:
@@ -110,6 +117,10 @@ def _tick_size(value: object) -> tuple[str, Decimal]:
         decimal = Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as exc:
         raise ValueError("order_book_tick_size_invalid") from exc
-    if not decimal.is_finite() or decimal <= 0:
+    if (
+        not decimal.is_finite()
+        or decimal <= 0
+        or not 0.0 < float(decimal) < float("inf")
+    ):
         raise ValueError("order_book_tick_size_invalid")
     return value, decimal

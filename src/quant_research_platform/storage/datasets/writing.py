@@ -71,6 +71,7 @@ from quant_research_platform.storage.datasets.schema import (
     require_frame_logical_dtype_metadata_within_target,
     require_logical_dtype_metadata_within_target,
     validate_dataset_spec,
+    validate_persisted_logical_schema,
 )
 from quant_research_platform.storage.datasets.types import DatasetInspection
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
@@ -80,6 +81,7 @@ from quant_research_platform.storage.exact_keys import (
 )
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
+    native_filesystem_path,
     require_artifact_root,
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
@@ -223,7 +225,7 @@ class _WriteStats:
                 )
             )
             physical_schema = physical_schema_from_schema(metadata.schema)
-            _validate_persisted_logical_schema(metadata.schema, logical_payload)
+            validate_persisted_logical_schema(metadata.schema, logical_payload)
             if self._schema is None:
                 self._schema = physical_schema
                 self.columns = physical_schema_columns(physical_schema)
@@ -554,14 +556,13 @@ def _write_dataset_body(
                     temp_root / "_manifest" / "manifest.json",
                     manifest,
                 )
-                session = dataset_session_from_inventory(
+                with dataset_session_from_inventory(
                     temp_root,
                     inventory=inventory,
                     columns=None,
                     time_window=None,
                     resource_policy=resource_policy,
-                )
-                try:
+                ) as session:
                     if staged_validator is not None:
                         staged_validator(
                             DatasetWriteReceipt(
@@ -571,53 +572,34 @@ def _write_dataset_body(
                             )
                         )
                     session.verify()
-                except BaseException:
-                    primary = sys.exception()
+                    result_bound = _inspection_result_bound(session)
                     try:
-                        session.close()
-                    except BaseException as cleanup_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "dataset session close also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                    raise
-                result_bound = _inspection_result_bound(session)
-                try:
-                    result_lease = resource_policy.lease(
-                        "storage.dataset.write.result",
-                        result_bound,
-                    )
-                except MemoryError:
-                    raise ValueError(
-                        "dataset_working_set_exceeds_task_memory_budget"
-                    ) from None
-                try:
-                    result = inspection_from_persisted_session(
-                        session,
-                        published_root=final_root,
-                    )
-                    result_bytes = dataset_inspection_retained_memory_bytes(result)
-                    if result_bytes > result_lease.reserved_bytes:
-                        raise ValueError("dataset_write_result_bound_invalid")
-                    result_lease.shrink_to(result_bytes)
-                    session.close()
-                    pending_result = OwnedValue(result, result_lease)
-                    return pending_result
-                except BaseException as primary:
-                    result = None
-                    try:
-                        session.close()
-                    except BaseException as cleanup_error:
-                        primary.add_note(
-                            "dataset session close also failed: "
-                            f"{type(cleanup_error).__name__}"
+                        result_lease = resource_policy.lease(
+                            "storage.dataset.write.result",
+                            result_bound,
                         )
-                    _close_lease_preserving_primary(
-                        result_lease,
-                        owner="storage.dataset.write.result",
-                    )
-                    raise
+                    except MemoryError:
+                        raise ValueError(
+                            "dataset_working_set_exceeds_task_memory_budget"
+                        ) from None
+                    try:
+                        result = inspection_from_persisted_session(
+                            session,
+                            published_root=final_root,
+                        )
+                        result_bytes = dataset_inspection_retained_memory_bytes(result)
+                        if result_bytes > result_lease.reserved_bytes:
+                            raise ValueError("dataset_write_result_bound_invalid")
+                        result_lease.shrink_to(result_bytes)
+                        pending_result = OwnedValue(result, result_lease)
+                    except BaseException:
+                        result = None
+                        _close_lease_preserving_primary(
+                            result_lease,
+                            owner="storage.dataset.write.result",
+                        )
+                        raise
+                return pending_result
         finally:
             close_input_and_active_leases()
 
@@ -1049,20 +1031,6 @@ def _canonical_storage_schema(schema: pa.Schema) -> pa.Schema:
     )
 
 
-def _validate_persisted_logical_schema(
-    schema: pa.Schema,
-    logical_dtypes: Mapping[str, Any],
-) -> None:
-    for descriptor in logical_dtypes["columns"]:
-        if descriptor["kind"] != "categorical":
-            continue
-        data_type = schema.field(descriptor["name"]).type
-        if not pa.types.is_dictionary(data_type) or bool(data_type.ordered) != bool(
-            descriptor["ordered"]
-        ):
-            raise ValueError("dataset_categorical_domain_mismatch")
-
-
 def _validate_persisted_categorical_values(
     frame: pd.DataFrame,
     logical_dtypes: Mapping[str, Any],
@@ -1116,7 +1084,7 @@ def _bounded_persisted_tables(
 
 
 def write_parquet_file(table: pa.Table, path: Path) -> Path:
-    path.parent.mkdir(parents=True, exist_ok=True)
+    Path(native_filesystem_path(path.parent)).mkdir(parents=True, exist_ok=True)
     persisted = table_with_decoded_row_bounds(table)
     metadata = dict(persisted.schema.metadata or {})
     metadata[_PHYSICAL_PAGE_ROWS_KEY] = str(max(1, persisted.num_rows)).encode("ascii")
@@ -1181,7 +1149,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
     with reservation:
         pq.write_table(
             persisted,
-            path,
+            native_filesystem_path(path),
             compression="zstd",
             row_group_size=_parquet_row_group_size(persisted.num_rows),
             write_batch_size=batch_rows,
