@@ -148,6 +148,74 @@ def test_holiday_fill_on_open_session_fails_without_cross_asset_deletion() -> No
         )
 
 
+def test_market_panel_physical_order_is_time_major_without_changing_rows() -> None:
+    sessions = pd.bdate_range("2024-01-02", periods=2)
+    rows = [(asset, timestamp) for asset in ("A", "B") for timestamp in sessions]
+    bars = pd.DataFrame(
+        {
+            "source_asset_id": [asset for asset, _timestamp in rows],
+            "timestamp": [timestamp for _asset, timestamp in rows],
+            "market_type": 1,
+            "trading_status_code": 0,
+            "filling_flag": 0,
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "close": 10.0,
+            "volume": 100.0,
+            "amount": 1_000.0,
+            "period_return": 0.0,
+            "adj_close": 10.0,
+            "adj_open": 10.0,
+            "float_market_cap": 1_000.0,
+            "total_market_cap": 1_000.0,
+            "limit_status": 0.0,
+        }
+    )
+    stock_master = pd.DataFrame(
+        {
+            "source_asset_id": ["A", "B"],
+            "timestamp": sessions[0],
+            "stock_name": ["A", "B"],
+            "listing_date": sessions[0] - pd.Timedelta(days=500),
+            "delisting_date": pd.NaT,
+            "company_status": "normal",
+        }
+    )
+    market_cap = pd.DataFrame(
+        {
+            "source_asset_id": ["A", "B"],
+            "timestamp": sessions[0] - pd.Timedelta(days=500),
+            "share_change_date": sessions[0] - pd.Timedelta(days=500),
+            "total_shares": 100.0,
+            "a_float_shares": 100.0,
+        }
+    )
+    calendar = pd.DataFrame(
+        {
+            "calendar_date": sessions,
+            "source_market_type": 1,
+            "is_trading_day": True,
+        }
+    )
+
+    result = compute_market_panel(
+        bars,
+        stock_master=stock_master,
+        market_cap=market_cap,
+        trading_calendar=calendar,
+    )
+
+    assert list(
+        result[["timestamp", "asset_id"]].itertuples(index=False, name=None)
+    ) == [
+        (sessions[0], "A"),
+        (sessions[0], "B"),
+        (sessions[1], "A"),
+        (sessions[1], "B"),
+    ]
+
+
 def test_execution_mask_is_independent_and_uses_signal_row_legality() -> None:
     sessions = pd.bdate_range("2024-01-01", periods=3)
     panel = pd.DataFrame(

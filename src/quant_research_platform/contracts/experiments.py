@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time
@@ -12,13 +13,19 @@ from typing import Literal
 import pandas as pd
 
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
-from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.json_codec import (
+    bounded_qrp_json_object_snapshot,
+    canonical_json_hash,
+)
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.contracts.validation import (
     _validate_non_empty_string,
     strict_finite_numeric_series,
     strict_timestamp_series,
+)
+from quant_research_platform.policy.share_safety import (
+    evidence_json_value_unsafe_reason,
 )
 
 SelectionDirection = Literal["maximize", "minimize"]
@@ -107,6 +114,8 @@ class ExperimentPlan:
     thread_settings: Mapping[str, int] = field(default_factory=dict)
     cost_assumptions: Mapping[str, object] = field(default_factory=dict)
     risk_assumptions: Mapping[str, object] = field(default_factory=dict)
+    candidate_parameters: Mapping[str, object] = field(default_factory=dict)
+    research_protocol_identity: str = ""
     holdout_status: Literal["LOCKED"] = "LOCKED"
 
     def __post_init__(self) -> None:
@@ -159,6 +168,17 @@ class ExperimentPlan:
             raise ValueError("experiment_random_seed_invalid")
         if self.holdout_status != "LOCKED":
             raise ValueError("experiment_holdout_must_be_locked")
+        if (
+            self.research_protocol_identity
+            and re.fullmatch(r"[0-9a-f]{64}", self.research_protocol_identity) is None
+        ):
+            raise ValueError("experiment_research_protocol_identity_invalid")
+        parameters = bounded_qrp_json_object_snapshot(
+            _thaw_json(self.candidate_parameters), max_bytes=256 * 1024
+        )
+        if parameters and set(parameters) != set(self.candidate_ids):
+            raise ValueError("experiment_candidate_parameters_mismatch")
+        object.__setattr__(self, "candidate_parameters", _freeze_json(parameters))
         object.__setattr__(
             self, "backend_versions", _freeze_string_mapping(self.backend_versions)
         )
@@ -197,11 +217,28 @@ class ExperimentPlan:
             "thread_settings": dict(self.thread_settings),
             "cost_assumptions": dict(self.cost_assumptions),
             "risk_assumptions": dict(self.risk_assumptions),
+            "candidate_parameters": _thaw_json(self.candidate_parameters),
+            "research_protocol_identity": self.research_protocol_identity,
             "holdout_status": self.holdout_status,
         }
 
     def development_windows(self) -> tuple[TimeWindow, ...]:
         return tuple(fold.development_test for fold in self.folds)
+
+    @classmethod
+    def from_payload(cls, value: dict[str, object]) -> ExperimentPlan:
+        payload = dict(value)
+        folds = []
+        for item in payload["folds"]:
+            fold = dict(item)
+            for key in ("train", "validation", "development_test"):
+                fold[key] = TimeWindow(**fold[key])
+            folds.append(ExperimentFold(**fold))
+        payload["folds"] = tuple(folds)
+        payload["final_holdout"] = TimeWindow(**payload["final_holdout"])
+        for key in ("input_lineage", "candidate_ids", "tie_break_order"):
+            payload[key] = tuple(payload[key])
+        return cls(**payload)
 
     def window(self, role: ExperimentRole) -> tuple[TimeWindow, ...]:
         if role == "final_holdout":
@@ -262,6 +299,14 @@ def legal_training_rows(
 def training_availability_columns(label_column: str) -> tuple[str, ...]:
     if label_column == "model_target":
         return ("forward_return_20d_available_at",)
+    if label_column.startswith(
+        (
+            "future_mid_return_",
+            "future_mid_direction_",
+            "maker_bid_sell_pressure_proxy_",
+        )
+    ):
+        return (f"{label_column}_available_at",)
     return ()
 
 
@@ -270,8 +315,9 @@ def resolve_training_availability_column(
     *,
     label_column: str,
 ) -> str | None:
-    if label_column == "model_target":
-        column = training_availability_columns(label_column)[0]
+    columns = training_availability_columns(label_column)
+    if columns:
+        column = columns[0]
         if column not in frame.columns:
             raise ValueError("label_availability_column_required")
         return column
@@ -357,3 +403,260 @@ def _fold_payload(fold: ExperimentFold) -> dict[str, object]:
         "final_holdout_start_step": fold.final_holdout_start_step,
         "complete": fold.complete,
     }
+
+
+TrialStatus = Literal["attempted", "completed", "failed", "abandoned", "invalid"]
+_PROTOCOL_HASH = re.compile(r"^[0-9a-f]{64}$")
+_MAX_TRIAL_RECORD_BYTES = 256 * 1024
+
+
+@dataclass(frozen=True, kw_only=True)
+class TrialRecord:
+    event_id: str
+    run_id: str
+    attempt_index: int
+    experiment_id: str
+    protocol_hash: str
+    candidate_family_id: str
+    candidate_id: str
+    trial_id: str
+    fold_id: str
+    market_id: str
+    research_dataset_id: str
+    target_id: str
+    horizon_id: str
+    common_coverage_id: str
+    factor_definition_ids: tuple[str, ...] = ()
+    model_definition_id: str | None = None
+    portfolio_definition_id: str | None = None
+    normalized_parameters: Mapping[str, object] = field(default_factory=dict)
+    random_seed: int
+    backend_versions: Mapping[str, str] = field(default_factory=dict)
+    thread_settings: Mapping[str, int] = field(default_factory=dict)
+    status: TrialStatus
+    validation_metrics: Mapping[str, object] = field(default_factory=dict)
+    development_test_metrics: Mapping[str, object] = field(default_factory=dict)
+    development_test_contaminated: bool = False
+    undefined_reasons: Mapping[str, object] = field(default_factory=dict)
+    cost_assumptions: Mapping[str, object] = field(default_factory=dict)
+    risk_assumptions: Mapping[str, object] = field(default_factory=dict)
+    rebalance_assumption: str = "not_applicable"
+    artifact_lineage: tuple[str, ...] = ()
+    holdout_accessed: bool = False
+    contract_version: str = "1.0"
+
+    def __post_init__(self) -> None:
+        for value in (
+            self.event_id,
+            self.run_id,
+            self.experiment_id,
+            self.candidate_family_id,
+            self.candidate_id,
+            self.trial_id,
+            self.fold_id,
+        ):
+            validate_run_id(value)
+        if type(self.attempt_index) is not int or self.attempt_index <= 0:
+            raise ValueError("trial_attempt_index_invalid")
+        if _PROTOCOL_HASH.fullmatch(self.protocol_hash) is None:
+            raise ValueError("trial_protocol_hash_invalid")
+        for value in (
+            self.market_id,
+            self.research_dataset_id,
+            self.target_id,
+            self.horizon_id,
+            self.common_coverage_id,
+            self.rebalance_assumption,
+        ):
+            if type(value) is not str or not value:
+                raise ValueError("trial_identifier_invalid")
+        for value in (self.factor_definition_ids, self.artifact_lineage):
+            if type(value) is not tuple or any(
+                type(item) is not str or not item for item in value
+            ):
+                raise ValueError("trial_lineage_invalid")
+        for value in (self.model_definition_id, self.portfolio_definition_id):
+            if value is not None and (type(value) is not str or not value):
+                raise ValueError("trial_definition_id_invalid")
+        if type(self.random_seed) is not int:
+            raise ValueError("trial_random_seed_invalid")
+        if self.status not in {
+            "attempted",
+            "completed",
+            "failed",
+            "abandoned",
+            "invalid",
+        }:
+            raise ValueError("trial_status_invalid")
+        if not isinstance(self.backend_versions, Mapping) or any(
+            type(key) is not str or not key or type(value) is not str or not value
+            for key, value in self.backend_versions.items()
+        ):
+            raise ValueError("trial_backend_versions_invalid")
+        if not isinstance(self.thread_settings, Mapping) or any(
+            type(key) is not str or not key or type(value) is not int or value <= 0
+            for key, value in self.thread_settings.items()
+        ):
+            raise ValueError("trial_thread_settings_invalid")
+        if self.holdout_accessed is not False:
+            raise ValueError("trial_holdout_access_forbidden")
+        if type(self.development_test_contaminated) is not bool:
+            raise ValueError("trial_development_test_contamination_invalid")
+        if self.contract_version != "1.0":
+            raise ValueError("trial_contract_version_invalid")
+        for field_name in (
+            "normalized_parameters",
+            "backend_versions",
+            "thread_settings",
+            "validation_metrics",
+            "development_test_metrics",
+            "undefined_reasons",
+            "cost_assumptions",
+            "risk_assumptions",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, Mapping):
+                raise ValueError("trial_mapping_invalid")
+            snapshot = bounded_qrp_json_object_snapshot(
+                _thaw_json(value), max_bytes=_MAX_TRIAL_RECORD_BYTES
+            )
+            object.__setattr__(self, field_name, _freeze_json(snapshot))
+        if evidence_json_value_unsafe_reason(self.payload()) is not None:
+            raise ValueError("trial_evidence_unsafe")
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "contract_version": self.contract_version,
+            "event_id": self.event_id,
+            "run_id": self.run_id,
+            "attempt_index": self.attempt_index,
+            "experiment_id": self.experiment_id,
+            "protocol_hash": self.protocol_hash,
+            "candidate_family_id": self.candidate_family_id,
+            "candidate_id": self.candidate_id,
+            "trial_id": self.trial_id,
+            "fold_id": self.fold_id,
+            "market_id": self.market_id,
+            "research_dataset_id": self.research_dataset_id,
+            "target_id": self.target_id,
+            "horizon_id": self.horizon_id,
+            "common_coverage_id": self.common_coverage_id,
+            "factor_definition_ids": list(self.factor_definition_ids),
+            "model_definition_id": self.model_definition_id,
+            "portfolio_definition_id": self.portfolio_definition_id,
+            "normalized_parameters": _thaw_json(self.normalized_parameters),
+            "random_seed": self.random_seed,
+            "backend_versions": _thaw_json(self.backend_versions),
+            "thread_settings": _thaw_json(self.thread_settings),
+            "status": self.status,
+            "validation_metrics": _thaw_json(self.validation_metrics),
+            "development_test_metrics": _thaw_json(self.development_test_metrics),
+            "development_test_contaminated": self.development_test_contaminated,
+            "undefined_reasons": _thaw_json(self.undefined_reasons),
+            "cost_assumptions": _thaw_json(self.cost_assumptions),
+            "risk_assumptions": _thaw_json(self.risk_assumptions),
+            "rebalance_assumption": self.rebalance_assumption,
+            "artifact_lineage": list(self.artifact_lineage),
+            "holdout_accessed": self.holdout_accessed,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: dict[str, object]) -> TrialRecord:
+        value = dict(payload)
+        value["factor_definition_ids"] = tuple(value["factor_definition_ids"])
+        value["artifact_lineage"] = tuple(value["artifact_lineage"])
+        return cls(**value)  # type: ignore[arg-type]
+
+
+def validate_trial_record_against_plan(
+    plan: ExperimentPlan,
+    record: TrialRecord,
+) -> None:
+    if not isinstance(plan, ExperimentPlan):
+        raise TypeError("experiment_plan_required")
+    expected = (
+        (record.experiment_id, plan.experiment_id),
+        (record.protocol_hash, plan.protocol_hash),
+        (record.candidate_family_id, plan.candidate_family_id),
+        (record.market_id, str(plan.market_id)),
+        (record.research_dataset_id, plan.research_dataset_id),
+        (record.target_id, plan.target_id),
+    )
+    if any(actual != required for actual, required in expected):
+        raise ValueError("trial_plan_mismatch")
+    if record.candidate_id not in plan.candidate_ids:
+        raise ValueError("trial_candidate_not_registered")
+    if (
+        plan.candidate_parameters
+        and record.normalized_parameters
+        != plan.candidate_parameters[record.candidate_id]
+    ):
+        raise ValueError("trial_parameters_not_frozen")
+    if record.fold_id not in {fold.fold_id for fold in plan.folds}:
+        raise ValueError("trial_fold_not_registered")
+    if record.attempt_index > plan.trial_budget:
+        raise ValueError("trial_budget_exceeded")
+
+
+def trial_ledger_semantic_identity(
+    plan: ExperimentPlan, records: tuple[TrialRecord, ...]
+) -> str:
+    return canonical_json_hash(trial_ledger_semantic_payload(plan, records))
+
+
+def trial_ledger_semantic_payload(
+    plan: ExperimentPlan, records: tuple[TrialRecord, ...]
+) -> dict[str, object]:
+    """Only invocation provenance is excluded; plans and result values stay exact."""
+    protocol = plan.protocol_payload()
+    del protocol["experiment_id"]
+    del protocol["thread_settings"]
+    events = []
+    for record in records:
+        validate_trial_record_against_plan(plan, record)
+        event = record.payload()
+        for key in (
+            "event_id",
+            "run_id",
+            "experiment_id",
+            "trial_id",
+            "protocol_hash",
+            "thread_settings",
+        ):
+            del event[key]
+        events.append(event)
+    return {"plan": protocol, "events": events}
+
+
+def validate_trial_ledger_reference(value: object) -> dict[str, str]:
+    if type(value) is not dict or set(value) != {
+        "run_id",
+        "experiment_id",
+        "protocol_hash",
+        "semantic_identity",
+    }:
+        raise ValueError("trial_ledger_reference_invalid")
+    validate_run_id(value["run_id"])
+    validate_run_id(value["experiment_id"])
+    for key in ("protocol_hash", "semantic_identity"):
+        if type(value[key]) is not str or _PROTOCOL_HASH.fullmatch(value[key]) is None:
+            raise ValueError("trial_ledger_reference_invalid")
+    return dict(value)
+
+
+def _freeze_json(value: object) -> object:
+    if type(value) is dict:
+        return MappingProxyType(
+            {key: _freeze_json(item) for key, item in value.items()}
+        )
+    if type(value) is list:
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+def _thaw_json(value: object) -> object:
+    if isinstance(value, Mapping):
+        return {key: _thaw_json(item) for key, item in value.items()}
+    if type(value) is tuple:
+        return [_thaw_json(item) for item in value]
+    return value

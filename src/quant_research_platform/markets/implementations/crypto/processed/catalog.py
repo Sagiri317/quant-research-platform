@@ -12,9 +12,9 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.markets.implementations.crypto import fields
-from quant_research_platform.markets.implementations.crypto.processed import source_ids
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_FACTOR_COLUMNS,
+    HFT_LABEL_AVAILABILITY_COLUMNS,
     HFT_LABEL_COLUMNS,
 )
 
@@ -61,7 +61,6 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 "binance_futures_l2_panel_100ms",
                 ProcessedDataKind.PANEL,
                 HFT_PANEL_COLUMNS,
-                source_input_data_ids=(source_ids.RAW_RECORDER_RUN_DATA_ID,),
             ),
             _spec(
                 "binance_futures_microstructure_factors_100ms",
@@ -73,7 +72,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 "binance_futures_mid_labels_100ms",
                 ProcessedDataKind.LABEL,
-                (*HFT_PRIMARY_KEY, *HFT_LABEL_COLUMNS),
+                (*HFT_PRIMARY_KEY, *HFT_LABEL_COLUMNS, *HFT_LABEL_AVAILABILITY_COLUMNS),
                 processed_input_data_ids=("binance_futures_l2_panel_100ms",),
                 semantic_role=ColumnRole.LABEL,
             ),
@@ -99,6 +98,8 @@ def _spec(
             if column in HFT_PRIMARY_KEY
             else ColumnRole.UNIVERSE
             if column == "eligible"
+            else ColumnRole.CONTEXT
+            if column in HFT_LABEL_AVAILABILITY_COLUMNS
             else semantic_role
             if semantic_role is not None
             else catalog.get(column).role

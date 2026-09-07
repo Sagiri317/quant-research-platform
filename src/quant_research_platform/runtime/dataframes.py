@@ -1,4 +1,4 @@
-"""Internal memory-bound chunk helpers for research compute layers."""
+"""Memory-bound DataFrame sessions shared by compute and artifact owners."""
 
 from __future__ import annotations
 

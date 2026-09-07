@@ -10,6 +10,7 @@ from quant_research_platform.research.factors.microstructure.columns import (
 from quant_research_platform.research.protocols.crypto_hft import (
     CRYPTO_FORWARD_RETURN_COLUMNS,
     HFT_FACTOR_COLUMNS,
+    HFT_LABEL_AVAILABILITY_COLUMNS,
     HFT_LABEL_COLUMNS,
 )
 
@@ -156,6 +157,10 @@ def field_catalog() -> FieldCatalog:
             *(
                 FieldSpec(name=column, role=ColumnRole.LABEL, dtype="float64")
                 for column in CRYPTO_FORWARD_RETURN_COLUMNS
+            ),
+            *(
+                FieldSpec(name=column, role=ColumnRole.CONTEXT, dtype="datetime64[ns]")
+                for column in HFT_LABEL_AVAILABILITY_COLUMNS
             ),
             *(
                 FieldSpec(name=column, role=ColumnRole.LABEL, dtype="float64")

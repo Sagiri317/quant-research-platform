@@ -16,6 +16,11 @@ import pyarrow.compute as pc
 from quant_research_platform.artifacts.outputs.manifest import (
     validate_output_manifest_business_envelope,
 )
+from quant_research_platform.artifacts.outputs.prediction_validation import (
+    validate_crypto_prediction_frame,
+    validate_family_prediction_frame,
+    validate_prediction_output_metadata_shape,
+)
 from quant_research_platform.contracts.predictions import (
     ALPHA_SCORE_COLUMN,
     prediction_output_columns,
@@ -144,11 +149,15 @@ class _PredictionLookup:
         primary_key: tuple[str, ...],
         prediction_column: str,
         resource_policy: RuntimeResourcePolicy,
+        family_selection: str | None = None,
+        champions: dict[str, str] | None = None,
     ) -> None:
         self._index = index
         self.primary_key = primary_key
         self.prediction_column = prediction_column
         self.resource_policy = resource_policy
+        self.family_selection = family_selection
+        self.champions = champions or {}
         self.row_count = 0
 
     def add_table(self, table: pa.Table, *, payload_headroom_bytes: int) -> None:
@@ -169,32 +178,56 @@ class _PredictionLookup:
         *,
         mark_matched: bool,
     ) -> Iterator[tuple[Sequence[float], bytearray]]:
-        if tuple(column for column in self.primary_key if column not in frame.columns):
+        required = (
+            tuple(key for key in self.primary_key if key != "family_id")
+            if self.family_selection is not None
+            else self.primary_key
+        )
+        if any(column not in frame for column in required):
             raise ValueError("persisted_prediction_join_key_invalid")
         row_count = len(frame)
         index_bytes = int(frame.index.memory_usage(deep=True))
         key_frame_bytes = index_bytes + sum(
             int(frame[column].memory_usage(index=False, deep=True))
-            for column in self.primary_key
+            for column in required
         )
-        key_arrow_bytes = key_frame_bytes + 9 * row_count * len(self.primary_key)
-        lookup_state_bytes = 9 * row_count
-        operation_bytes = key_frame_bytes + key_arrow_bytes + lookup_state_bytes
+        operation_bytes = (
+            2 * key_frame_bytes
+            + 18 * row_count * len(self.primary_key)
+            + (512 * row_count if self.family_selection is not None else 9 * row_count)
+        )
         with self.resource_policy.lease(
-            "artifacts.prediction.lookup.batch",
-            operation_bytes,
+            "artifacts.prediction.lookup.batch", operation_bytes
         ):
-            table = pa.Table.from_pandas(
-                frame.loc[:, list(self.primary_key)],
-                preserve_index=False,
-            )
-            values, found = self._index.lookup_float_values(
-                table,
-                source_namespace="prediction",
-                matched_namespace="prediction-matched" if mark_matched else None,
-                payload_target_bytes=max(1, operation_bytes),
-            )
-            yield values, found
+            lookup_frame = table = values = found = family = None
+            try:
+                lookup_frame = frame.loc[:, list(required)].copy()
+                if self.family_selection is not None:
+                    family = (
+                        pd.to_datetime(frame["timestamp"])
+                        .dt.to_period("Q")
+                        .astype(str)
+                        .map(self.champions)
+                        if self.family_selection == "champion"
+                        else pd.Series(self.family_selection, index=frame.index)
+                    )
+                    if family.isna().any() or (
+                        "family_id" in frame and not frame["family_id"].eq(family).all()
+                    ):
+                        raise ValueError("persisted_prediction_family_invalid")
+                    lookup_frame["family_id"] = family
+                table = pa.Table.from_pandas(
+                    lookup_frame.loc[:, list(self.primary_key)], preserve_index=False
+                )
+                values, found = self._index.lookup_float_values(
+                    table,
+                    source_namespace="prediction",
+                    matched_namespace="prediction-matched" if mark_matched else None,
+                    payload_target_bytes=max(1, operation_bytes),
+                )
+                yield values, found
+            finally:
+                lookup_frame = table = values = found = family = None
 
     def coverage_counts(self) -> tuple[int, int]:
         return self._index.difference_counts(
@@ -210,6 +243,7 @@ def read_prediction_output_bundle(
     expected_output_id: str,
     expected_run_id: str | None = None,
     time_window=None,  # noqa: ANN001
+    family_selection: str | None = None,
 ) -> Iterator[tuple[dict[str, object], _PredictionLookup]]:
     lookup: _PredictionLookup | None = None
     policy = current_runtime_resource_policy()
@@ -225,6 +259,7 @@ def read_prediction_output_bundle(
         metadata = manifest.get("metadata")
         if type(metadata) is not dict:
             raise ValueError("persisted_prediction_metadata_mismatch")
+        validate_prediction_output_metadata_shape(metadata)
         primary_key_value = metadata.get("primary_key")
         prediction_column = metadata.get("prediction_column")
         prediction_mode = metadata.get("prediction_mode")
@@ -237,7 +272,7 @@ def read_prediction_output_bundle(
             or type(prediction_column) is not str
             or not prediction_column
             or type(prediction_mode) is not str
-            or prediction_mode not in {"minimal_oos", "a_share_oos"}
+            or prediction_mode not in {"minimal_oos", "a_share_oos", "crypto_oos"}
         ):
             raise ValueError("persisted_prediction_metadata_mismatch")
         lookup_column = (
@@ -245,6 +280,18 @@ def read_prediction_output_bundle(
             if prediction_mode == "a_share_oos"
             else prediction_column
         )
+        if family_selection is not None and (
+            prediction_mode != "a_share_oos"
+            or (
+                family_selection != "champion"
+                and family_selection
+                not in {
+                    item["family_id"]
+                    for item in metadata["model_metadata"]["quarterly_models"]
+                }
+            )
+        ):
+            raise ValueError("persisted_prediction_family_invalid")
         primary_key = tuple(primary_key_value)
         prediction_path, prediction_identity = next(
             (path, identity)
@@ -271,6 +318,8 @@ def read_prediction_output_bundle(
                 primary_key=primary_key,
                 prediction_column=lookup_column,
                 resource_policy=policy,
+                family_selection=family_selection,
+                champions=metadata["model_metadata"].get("champion_by_quarter", {}),
             )
             with _opened_parquet(
                 prediction_path,
@@ -283,6 +332,11 @@ def read_prediction_output_bundle(
                 )
                 if tuple(parquet.schema_arrow.names) != expected_columns:
                     raise ValueError("persisted_prediction_columns_mismatch")
+                if (
+                    parquet.metadata.num_rows
+                    != metadata["prediction_metadata"]["prediction_rows"]
+                ):
+                    raise ValueError("persisted_prediction_row_count_mismatch")
                 test_start = metadata.get("test_start")
                 test_end = metadata.get("test_end")
                 if (
@@ -298,7 +352,7 @@ def read_prediction_output_bundle(
                     parquet_decoded_working_set_bounds(parquet, expected_columns)
                 )
                 filter_row_bytes = 0 if time_window is None else decoded_row_bytes + 3
-                batch_row_bytes = decoded_row_bytes + filter_row_bytes
+                batch_row_bytes = 4 * decoded_row_bytes + filter_row_bytes
                 batch_headroom = policy.operation_headroom_bytes
                 if decode_fixed_bytes + batch_row_bytes > batch_headroom:
                     raise MemoryError("runtime_memory_budget_exceeded")
@@ -318,13 +372,23 @@ def read_prediction_output_bundle(
                         "artifacts.prediction.read.batch",
                         batch_working_bytes,
                     ):
-                        batch = table = timestamps = keep = None
+                        batch = table = timestamps = keep = frame = None
                         try:
                             try:
                                 batch = next(batches)
                             except StopIteration:
                                 break
                             table = pa.Table.from_batches([batch])
+                            if prediction_mode == "a_share_oos":
+                                frame = table.to_pandas()
+                                validate_family_prediction_frame(
+                                    frame, metadata["model_metadata"]
+                                )
+                            if prediction_mode == "crypto_oos":
+                                frame = table.to_pandas()
+                                validate_crypto_prediction_frame(
+                                    frame, metadata["model_metadata"]
+                                )
                             timestamps = table.column("timestamp")
                             if bool(
                                 pc.any(
@@ -353,6 +417,22 @@ def read_prediction_output_bundle(
                             )
                             if duplicates:
                                 raise ValueError("duplicate_persisted_prediction_keys")
+                            if family_selection is not None:
+                                selected_families = (
+                                    frame["quarter_id"].map(
+                                        metadata["model_metadata"][
+                                            "champion_by_quarter"
+                                        ]
+                                    )
+                                    if family_selection == "champion"
+                                    else family_selection
+                                )
+                                keep = pa.array(
+                                    frame["family_id"].eq(selected_families).to_numpy()
+                                )
+                                table = table.filter(keep)
+                                timestamps = table.column("timestamp")
+                            frame = None
                             if time_window is not None:
                                 keep = pc.and_(
                                     pc.greater_equal(
@@ -374,7 +454,7 @@ def read_prediction_output_bundle(
                             clear_exception_frames(error)
                             raise
                         finally:
-                            batch = table = timestamps = keep = None
+                            batch = table = timestamps = keep = frame = None
                 if lookup.row_count == 0:
                     raise ValueError("empty_prediction_window")
         except Exception as exc:
@@ -382,7 +462,7 @@ def read_prediction_output_bundle(
                 raise
             raise ValueError("prediction_output_unreadable") from exc
 
-    with runtime_resource_policy_scope(policy):
+    with runtime_resource_policy_scope(policy) as policy:
         try:
             manifest, _members = validate_output_bundle(
                 root,

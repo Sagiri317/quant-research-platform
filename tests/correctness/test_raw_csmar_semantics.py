@@ -25,6 +25,66 @@ def _collect_raw_export(
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
+def test_index_weight_handoff_releases_raw_frame_before_persisting_normalized_rows(
+    tmp_path, monkeypatch
+):
+    import weakref
+
+    from quant_research_platform.storage.datasets import writing
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    root = layout.raw_source_root("csmar")
+    root.mkdir(parents=True)
+    _write_csmar(
+        root,
+        "index_weights",
+        (
+            {
+                "Indexcd": benchmark,
+                "Enddt": timestamp.date().isoformat(),
+                "Stkcd": f"{index:06}",
+                "Constdnme": f"synthetic_{index:06}",
+                "Weight": 1.0,
+            }
+            for benchmark in ("000852", "000905")
+            for timestamp in pd.bdate_range("2019-03-01", "2019-03-29")
+            for index in range(1, 101)
+        ),
+    )
+    references = []
+    actual_frame = raw_exports._raw_frame
+    actual_declared = writing._WriteStats.declared_frame
+
+    def tracked_frame(*args):
+        frame = actual_frame(*args)
+        references.append(weakref.ref(frame))
+        return frame
+
+    def declared_frame(self, frame, **kwargs):
+        assert references and all(reference() is None for reference in references)
+        return actual_declared(self, frame, **kwargs)
+
+    monkeypatch.setattr(raw_exports, "_raw_frame", tracked_frame)
+    monkeypatch.setattr(writing._WriteStats, "declared_frame", declared_frame)
+    with runtime_resource_policy_scope() as policy:
+        result = interim.materialize_interim_data(
+            layout=layout,
+            data_ids=("index_weights",),
+            resource_policy=policy,
+        )
+        saved = read_dataset(
+            result.artifact_roots["index_weights"], resource_policy=policy
+        )
+        assert len(saved) == 4200
+        assert (
+            saved.groupby(["source_asset_id", "timestamp"]).weight.sum().eq(1.0).all()
+        )
+        assert policy.used_memory_bytes == 0
+
+
 def _collect_raw_chunks(
     path: Path,
     dataset: str,
@@ -87,6 +147,53 @@ def _financial_fixture_row(
         )
         for column in columns
     ]
+
+
+def test_index_weights_raw_date_and_constituent_name_remain_text(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "csmar__index_weights__synthetic__full__export-20260101.csv"
+    path.write_text(
+        "Indexcd,Enddt,Stkcd,Constdnme,Weight\n000905,2019-01-02,000001,合成证券,1.0\n",
+        encoding="utf-8-sig",
+    )
+    raw = _collect_raw_export(path, "index_weights")
+    assert raw["Enddt"].tolist() == ["2019-01-02"]
+    assert raw["Constdnme"].tolist() == ["合成证券"]
+    normalized = interim.normalize_raw_frame(raw, "index_weights")
+    assert normalized["effective_date"].tolist() == [pd.Timestamp("2019-01-02")]
+    assert normalized["constituent_asset_id"].tolist() == ["000001"]
+    assert normalized["weight"].tolist() == [0.01]
+
+
+def test_raw_csv_batch_accounting_visits_row_sizes_only_linearly(tmp_path, monkeypatch):
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    dates = pd.date_range("2020-01-01", periods=512).strftime("%Y-%m-%d").tolist()
+    path = tmp_path / "csmar__trading_calendar__synthetic__full__export-20260101.csv"
+    path.write_text(
+        "Markettype,Clddt,Daywk,State\n"
+        + "".join(f"4,{stamp},1,O\n" for stamp in dates),
+        encoding="utf-8",
+    )
+    actual_records = raw_exports._iter_csv_records
+    size_visits = 0
+
+    class CountedRow(list):
+        def __len__(self):
+            nonlocal size_visits
+            size_visits += 1
+            return super().__len__()
+
+    def observed_records(*args, **kwargs):
+        with closing_iterator(actual_records(*args, **kwargs)) as records:
+            for header, row, source_bytes in records:
+                yield header, CountedRow(row), source_bytes
+
+    monkeypatch.setattr(raw_exports, "_iter_csv_records", observed_records)
+    result = _collect_raw_export(path, "trading_calendar", chunksize=len(dates))
+    assert result["Clddt"].tolist() == dates
+    assert size_visits <= 16 * len(dates), size_visits
 
 
 def test_raw_export_discovery_contract_keeps_csv_only(
@@ -586,3 +693,26 @@ def _audit_index_info_csv(path: Path) -> dict[str, object]:
         "final_rows": len(raw),
         "out_of_enum_counts": out_of_enum_counts,
     }
+
+
+def test_index_market_preserves_nullable_official_open_without_close_substitution():
+    raw = pd.DataFrame(
+        {
+            "Indexcd": ["H00905", "H00852"],
+            "Idxtrd01": ["2023-01-03"] * 2,
+            "Idxtrd02": ["123.5", None],
+            "Idxtrd03": ["125"] * 2,
+            "Idxtrd04": ["120"] * 2,
+            "Idxtrd05": ["124"] * 2,
+            "Idxtrd06": ["1"] * 2,
+            "Idxtrd07": ["1"] * 2,
+            "Idxtrd08": ["0.5"] * 2,
+            "Idxtrd09": ["fixture"] * 2,
+        }
+    )
+    actual = interim.normalize_raw_frame(raw, "index_market").set_index(
+        "source_asset_id"
+    )
+    assert actual.loc["H00905", "open"] == 123.5
+    assert pd.isna(actual.loc["H00852", "open"])
+    assert "open" in interim.INDEX_RETURN_INTERIM_COLUMNS

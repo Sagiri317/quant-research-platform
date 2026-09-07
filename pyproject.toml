@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "quant-research-platform"
 version = "0.1.0"
-description = "Local multi-market quantitative research platform."
+description = "本地多市场量化研究平台。"
 requires-python = ">=3.13,<3.14"
 dependencies = [
   "fastapi>=0.136,<1",

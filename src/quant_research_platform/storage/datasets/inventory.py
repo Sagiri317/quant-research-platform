@@ -25,6 +25,7 @@ from quant_research_platform.storage.datasets.paths import parse_year_partition_
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
+    native_filesystem_path,
     require_unaliased_path,
 )
 from quant_research_platform.storage.parquet import DatasetPartMetadata
@@ -583,24 +584,27 @@ class DatasetSessionInventory:
         if partition_columns not in ((), ("year",)):
             raise ValueError("unsupported_partitioning")
         require_unaliased_path(self.data_root, error="invalid_dataset_part_files")
+        native_root = Path(native_filesystem_path(self.data_root))
         unpartitioned = any(
-            path.suffix.casefold() == ".parquet" for path in self.data_root.iterdir()
+            path.suffix.casefold() == ".parquet" for path in native_root.iterdir()
         )
         partitioned = partition_columns == ("year",) and not unpartitioned
         if partitioned:
-            for path in self.data_root.glob("year=*"):
+            for native_path in native_root.glob("year=*"):
+                path = self.data_root / native_path.name
                 require_unaliased_path(path, error="invalid_dataset_part_files")
-                if not path.is_dir():
+                if not native_path.is_dir():
                     continue
                 on_year(parse_year_partition_label(path.name), path.name)
 
         def fail_walk(error: OSError) -> None:
             raise ValueError("invalid_dataset_part_files") from error
 
-        for parent, dirnames, filenames in self.data_root.walk(
+        for native_parent, dirnames, filenames in native_root.walk(
             follow_symlinks=False,
             on_error=fail_walk,
         ):
+            parent = self.data_root / native_parent.relative_to(native_root)
             dirnames.sort()
             for name in sorted(filenames):
                 path = parent / name

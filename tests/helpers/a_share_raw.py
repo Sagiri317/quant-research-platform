@@ -1,0 +1,361 @@
+"""Deterministic provider-shaped inputs for the actual A-share production chain."""
+
+from __future__ import annotations
+
+import csv
+import hashlib
+import json
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from quant_research_platform.markets.implementations.a_share.benchmark import (
+    FORMAL_BENCHMARKS,
+)
+from quant_research_platform.research.protocols.a_share import protocol
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
+from quant_research_platform.sources.choice.raw_exports import choice_session
+from quant_research_platform.sources.csmar.field_mappings import RAW_TABLE_CONTRACTS
+from quant_research_platform.sources.reference.a_share_fees import (
+    A_SHARE_FEE_CSV_NAME,
+    A_SHARE_FEE_SIDECAR_NAME,
+    FEE_CSV_COLUMNS,
+)
+from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.choice_raw import SDK, response, write_css
+
+
+def _write_csmar(root, data_id, rows, *, extra_columns=()):
+    columns = (*RAW_TABLE_CONTRACTS[data_id].required_columns, *extra_columns)
+    path = root / f"csmar__{data_id}__synthetic__full__export-20260101.csv"
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def write_a_share_raw_fixture(layout: StorageLayout) -> None:
+    """Keep real source, processed, dataset, model, and portfolio bindings intact."""
+    with runtime_resource_policy_scope() as policy:
+        with policy.lease("tests.a_share.raw_fixture", 64 * 1024**2):
+            _write_raw(layout, policy)
+
+
+def _write_raw(layout, policy):
+    raw_root = layout.raw_source_root("csmar").parent
+    root = Path(raw_root) / "csmar"
+    root.mkdir(parents=True)
+    sessions = pd.bdate_range("2011-01-03", "2019-09-30")
+    assets = tuple(f"{index:06}" for index in range(1, 101))
+    rng = np.random.default_rng(91027)
+    drift = np.linspace(-0.0006, 0.0014, len(assets))
+    returns = drift[None, :] + rng.normal(0, 0.002, (len(sessions), len(assets)))
+    close = np.linspace(10.0, 30.0, len(assets))[None, :] * np.cumprod(
+        1 + returns, axis=0
+    )
+    previous = close / (1 + returns)
+    opened = previous * (1 + rng.normal(0, 0.0005, close.shape))
+    shares = np.linspace(1.0e9, 2.0e9, len(assets))
+    volume = shares[None, :] * rng.uniform(0.03, 0.07, close.shape)
+
+    def bars():
+        for column, asset in enumerate(assets):
+            for row, timestamp in enumerate(sessions):
+                price = float(close[row, column])
+                opening = float(opened[row, column])
+                yield {
+                    "Stkcd": asset,
+                    "Trddt": timestamp.date().isoformat(),
+                    "Markettype": 4,
+                    "Trdsta": 0,
+                    "Filling": 0,
+                    "Opnprc": opening,
+                    "Hiprc": max(price, opening) * 1.002,
+                    "Loprc": min(price, opening) * 0.998,
+                    "Clsprc": price,
+                    "Dnshrtrd": float(volume[row, column]),
+                    "Dnvaltrd": float(volume[row, column]) * price,
+                    "Ahshrtrd_D": 0.0,
+                    "Ahvaltrd_D": 0.0,
+                    "Dsmvosd": price * shares[column] / 1000,
+                    "Dsmvtl3": price * shares[column] * 1.2 / 1000,
+                    "Dretwd": float(returns[row, column]),
+                    "Adjprcwd": price,
+                    "PreClosePrice": float(previous[row, column]),
+                    "LimitStatus": 0,
+                }
+
+    _write_csmar(root, "market_bars_1d", bars())
+    _write_csmar(
+        root,
+        "stock_master",
+        (
+            {
+                "Stkcd": asset,
+                "Stknme": f"synthetic_{asset}",
+                "Listdt": "2011-01-03" if index == 0 else "2000-01-03",
+                "DelistedDate": "",
+                "Markettype": 4,
+                "Nnindcd": "A" if index % 2 else "C",
+                "Nnindnme": "synthetic industry",
+                "Statco": "normal",
+                "Statdt": "2011-01-03",
+            }
+            for index, asset in enumerate(assets)
+        ),
+    )
+    _write_csmar(
+        root,
+        "market_cap",
+        (
+            {
+                "Stkcd": asset,
+                "Shrchgdt": "2011-01-03",
+                "Nshrttl": shares[index] * 1.2,
+                "Nshra": shares[index],
+            }
+            for index, asset in enumerate(assets)
+        ),
+    )
+    _write_csmar(
+        root,
+        "trading_calendar",
+        (
+            {
+                "Markettype": 4,
+                "Clddt": timestamp.date().isoformat(),
+                "Daywk": timestamp.weekday() + 1,
+                "State": "O",
+            }
+            for timestamp in sessions
+        ),
+    )
+    _write_csmar(
+        root,
+        "industry_classification",
+        (
+            {
+                "Symbol": asset,
+                "IndustryClassificationID": "P0207",
+                "ImplementDate": "2011-01-03",
+                "IndustryCode": "A" if index % 2 else "C",
+                "IndustryName": "synthetic industry",
+            }
+            for index, asset in enumerate(assets)
+        ),
+    )
+    _write_csmar(
+        root,
+        "industry_classification_sets",
+        (
+            {
+                "INDUSTRYCODE": code,
+                "INDCLASSIFYSYSTEMCODE": "P0207",
+                "INDUSTRYNAME": f"synthetic_{code}",
+                "P_INDUSTRYCODE": "",
+                "INDUSTRYID": code,
+                "RANK": "1",
+            }
+            for code in ("A", "C")
+        ),
+    )
+    _write_csmar(
+        root,
+        "industry_classification_versions",
+        (
+            {
+                "IndClassifySystemCode": "P0207",
+                "IndClassifySystem": "synthetic CSRC2012",
+                "ImplementDate": "2011-01-03",
+                "AbandonDate": "",
+                "InstitutionName": "synthetic provider",
+            },
+        ),
+    )
+    _write_csmar(
+        root,
+        "trading_no_limit",
+        (
+            {
+                "TradingDate": "2011-01-03",
+                "Symbol": assets[0],
+                "Reason": "新股上市首日",
+            },
+        ),
+    )
+    _write_csmar(
+        root,
+        "special_treatment_changes",
+        (
+            {"Symbol": assets[1], "Chgtype": code, "Annoudt": stamp, "Execudt": stamp}
+            for code, stamp in (("B", "2011-01-04"), ("A", "2011-01-06"))
+        ),
+    )
+    total_return_codes = protocol("pv_all").manifest()["benchmark_total_return_indices"]
+    info = []
+    for code, (benchmark, name) in FORMAL_BENCHMARKS.items():
+        for source_code, label in (
+            (code, name),
+            (total_return_codes[benchmark], f"{name}全收益"),
+        ):
+            info.append(
+                {
+                    "Indexcd": source_code,
+                    "Idxinfo01": label,
+                    "Idxinfo11": "2000-01-03",
+                    "Idxinfo02": "2000-01-03",
+                    "Idxinfo03": 1000.0,
+                    "Idxinfo04": "synthetic_a_share",
+                    "Idxinfo05": "market_cap",
+                    "Idxinfo06": "synthetic_provider",
+                    "Idxinfo07": "synthetic_scale_index",
+                    "Idxinfo08": "total_return"
+                    if source_code.startswith("H")
+                    else "price",
+                    "Idxinfo09": "a_share",
+                    "Idxinfo10": "weighted_index",
+                }
+            )
+    _write_csmar(
+        root,
+        "index_info",
+        info,
+        extra_columns=tuple(
+            f"Idxinfo{index:02}" for index in range(1, 11) if index != 2
+        ),
+    )
+    _write_csmar(
+        root,
+        "index_weights",
+        (
+            {
+                "Indexcd": code,
+                "Enddt": timestamp.date().isoformat(),
+                "Stkcd": asset,
+                "Constdnme": f"synthetic_{asset}",
+                "Weight": 100 / len(assets),
+            }
+            for code in sorted(FORMAL_BENCHMARKS)
+            for timestamp in pd.bdate_range("2019-03-01", "2019-03-29")
+            for asset in assets
+        ),
+    )
+
+    def index_rows():
+        for code in sorted(info, key=lambda item: item["Indexcd"]):
+            for index, timestamp in enumerate(sessions):
+                opening = 1000 * (1.0002**index)
+                yield {
+                    "Indexcd": code["Indexcd"],
+                    "Idxtrd01": timestamp.date().isoformat(),
+                    "Idxtrd02": opening,
+                    "Idxtrd03": opening * 1.001,
+                    "Idxtrd04": opening * 0.999,
+                    "Idxtrd05": opening * 1.0001,
+                    "Idxtrd06": 10000.0,
+                    "Idxtrd07": 100000.0,
+                    "Idxtrd08": 0.02,
+                    "Idxtrd09": code["Idxinfo01"],
+                }
+
+    _write_csmar(root, "index_market", index_rows())
+    schedule_root = Path(raw_root) / "reference/a_share_fee_schedule"
+    schedule_root.mkdir(parents=True)
+    schedule = schedule_root / A_SHARE_FEE_CSV_NAME
+    rows = []
+    for fee_code, direction, rate in (
+        ("BROKER_COMMISSION", "买入+卖出", 0.0003),
+        ("TRANSFER_FEE", "买入+卖出", 0.00001),
+        ("STAMP_DUTY", "卖出", 0.001),
+    ):
+        row = dict.fromkeys(FEE_CSV_COLUMNS, "")
+        row.update(
+            {
+                "费用代码": fee_code,
+                "生效日": "2011-01-01",
+                "截止日": "2025-12-31",
+                "市场": "沪深",
+                "方向": direction,
+                "计费基数": "成交金额",
+                "十进制费率": str(rate),
+                "费率(‰)": str(rate * 1000),
+                "费率(bps)": str(rate * 10000),
+                "进入正式账本": "是",
+            }
+        )
+        rows.append(row)
+    with schedule.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FEE_CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    (schedule_root / A_SHARE_FEE_SIDECAR_NAME).write_text(
+        json.dumps(
+            {
+                "file_sha256": hashlib.sha256(schedule.read_bytes()).hexdigest(),
+                "file_bytes": schedule.stat().st_size,
+                "row_count": len(rows),
+                "fields_raw": list(FEE_CSV_COLUMNS),
+            }
+        ),
+        encoding="utf-8",
+    )
+    fields = tuple(field for mapping in FINANCIAL_FIELDS.values() for field in mapping)
+    names = tuple(
+        name for mapping in FINANCIAL_FIELDS.values() for name in mapping.values()
+    )
+    profitability = np.random.default_rng(563).uniform(0.03, 0.08, len(assets))
+    with choice_session(SDK(response()), resource_policy=policy) as session:
+        for period in pd.period_range("2010Q1", "2019Q2", freq="Q"):
+            quarter = period.quarter
+            first = pd.Timestamp(
+                year=period.year + int(quarter == 4),
+                month={1: 5, 2: 8, 3: 11, 4: 3}[quarter],
+                day=15,
+            )
+            report_date = period.end_time.date().isoformat()
+            first_text = first.date().isoformat()
+            total_assets = (
+                shares
+                * np.linspace(8.0, 13.0, len(assets))
+                * (1 + 0.05 * (period.year - 2010))
+            )
+            fraction = quarter / 4
+            values = {
+                "total_assets": total_assets,
+                "total_liabilities": total_assets * 0.4,
+                "parent_equity": total_assets * 0.6,
+                "cash": total_assets * 0.12,
+                "short_term_borrowings": total_assets * 0.03,
+                "current_portion_noncurrent_liabilities": total_assets * 0.02,
+                "long_term_borrowings": total_assets * 0.1,
+                "bonds_payable": total_assets * 0.02,
+                "operating_revenue": total_assets * 0.9 * fraction,
+                "operating_cost": total_assets * 0.6 * fraction,
+                "consolidated_net_income": total_assets * profitability * fraction,
+                "parent_net_income": total_assets * profitability * 0.9 * fraction,
+                "operating_cash_flow": total_assets * 0.06 * fraction,
+                "capex_cash_paid": total_assets * 0.025 * fraction,
+            }
+            write_css(
+                session,
+                layout,
+                period=report_date,
+                end_date="2025-12-31",
+                indicators=("STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE"),
+                data={
+                    f"{asset}.SZ": [first_text, first_text, None] for asset in assets
+                },
+            )
+            write_css(
+                session,
+                layout,
+                period=report_date,
+                end_date=first_text,
+                indicators=fields,
+                data={
+                    f"{asset}.SZ": [float(values[name][index]) for name in names]
+                    for index, asset in enumerate(assets)
+                },
+            )

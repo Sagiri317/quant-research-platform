@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 
 from quant_research_platform.interfaces import queries
@@ -17,7 +18,11 @@ from quant_research_platform.interfaces.models import (
     LabelCatalogResponse,
     ResearchDatasetRequirementsResponse,
 )
-from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.profiles.research import (
+    A_SHARE_PROFILE_ID,
+    research_profile,
+)
+from quant_research_platform.storage.layout import StorageLayout
 
 CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
 DEFAULT_CORS_ORIGINS = (
@@ -35,15 +40,15 @@ def _cors_origins_from_env() -> list[str]:
     return origins
 
 
-def create_app() -> FastAPI:
+def create_app(*, project_root: Path | None = None) -> FastAPI:
     """Create the QRP 0.1 API app."""
 
     app = FastAPI(
         title="Quant Research Platform",
         version="0.1.0",
         description=(
-            "Spec-first local API for catalog queries and research dataset "
-            "requirements."
+            "Read-only local catalog and explicitly selected "
+            "published research evidence."
         ),
     )
     app.add_middleware(
@@ -53,24 +58,53 @@ def create_app() -> FastAPI:
         allow_headers=["*"],
     )
     register_api_error_handlers(app)
-    _include_api_01_skeleton(app)
+    _include_routes(
+        app,
+        layout=None
+        if project_root is None
+        else StorageLayout(project_root=Path(project_root).resolve()),
+    )
     return app
 
 
-def _include_api_01_skeleton(app: FastAPI) -> None:
+def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
+    def selected_profile(profile_id):
+        try:
+            return research_profile(profile_id)
+        except KeyError as exc:
+            raise ApiError(
+                "unknown_profile_id", status_code=404, field="profile"
+            ) from exc
+
+    def evidence_query(query, **kwargs):
+        if layout is None:
+            raise ApiError("project_root_not_configured", status_code=503)
+        try:
+            return query(layout=layout, **kwargs)
+        except KeyError as exc:
+            raise ApiError(
+                "unknown_target_id", status_code=404, field="target_id"
+            ) from exc
+        except FileNotFoundError as exc:
+            raise ApiError("published_evidence_missing", status_code=404) from exc
+        except (ValueError, TypeError) as exc:
+            raise ApiError("published_evidence_invalid", status_code=422) from exc
+        except OSError as exc:
+            raise ApiError("published_evidence_unavailable", status_code=422) from exc
+
     @app.get(
         "/api/0.1/catalog/factors",
         operation_id="list_catalog_factors",
     )
-    def catalog_factors() -> FactorCatalogResponse:
-        return queries.list_factors(research_profile())
+    def catalog_factors(profile: str = A_SHARE_PROFILE_ID) -> FactorCatalogResponse:
+        return queries.list_factors(selected_profile(profile))
 
     @app.get(
         "/api/0.1/catalog/labels",
         operation_id="list_catalog_labels",
     )
-    def catalog_labels() -> LabelCatalogResponse:
-        return queries.list_labels(research_profile())
+    def catalog_labels(profile: str = A_SHARE_PROFILE_ID) -> LabelCatalogResponse:
+        return queries.list_labels(selected_profile(profile))
 
     @app.get(
         "/api/0.1/research-datasets/{dataset_id}/requirements",
@@ -78,11 +112,12 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
     )
     def describe_research_dataset_requirements(
         dataset_id: str,
+        profile: str = A_SHARE_PROFILE_ID,
     ) -> ResearchDatasetRequirementsResponse:
         try:
             return queries.describe_research_dataset_requirements(
                 dataset_id,
-                research_profile(),
+                selected_profile(profile),
             )
         except KeyError as exc:
             raise ApiError(
@@ -90,6 +125,57 @@ def _include_api_01_skeleton(app: FastAPI) -> None:
                 status_code=404,
                 field="dataset_id",
             ) from exc
+
+    @app.get("/api/0.1/status", operation_id="read_run_status")
+    def run_status(
+        profile: str = A_SHARE_PROFILE_ID, run_id: str | None = None
+    ) -> dict[str, object]:
+        return evidence_query(
+            queries.run_status, profile=selected_profile(profile), run_id=run_id
+        )
+
+    @app.get("/api/0.1/inspect/{target_id}", operation_id="inspect_published_target")
+    def inspect_target(
+        target_id: str, profile: str = A_SHARE_PROFILE_ID, run_id: str | None = None
+    ) -> dict[str, object]:
+        return evidence_query(
+            queries.inspect_target,
+            profile=selected_profile(profile),
+            target_id=target_id,
+            run_id=run_id,
+        )
+
+    @app.get(
+        "/api/0.1/runs/{run_id}/reports/{report_identity}",
+        operation_id="read_published_report",
+    )
+    def report(
+        run_id: str, report_identity: str, profile: str = A_SHARE_PROFILE_ID
+    ) -> dict[str, object]:
+        return evidence_query(
+            queries.read_report,
+            profile=selected_profile(profile),
+            run_id=run_id,
+            report_identity=report_identity,
+        )
+
+    @app.get(
+        "/api/0.1/runs/{run_id}/portfolios/{target_id}",
+        operation_id="read_portfolio_curve",
+    )
+    def portfolio(
+        run_id: str,
+        target_id: str,
+        profile: str = A_SHARE_PROFILE_ID,
+        stride: int = Query(1, ge=1),
+    ) -> dict[str, object]:
+        return evidence_query(
+            queries.portfolio_curve,
+            profile=selected_profile(profile),
+            run_id=run_id,
+            target_id=target_id,
+            stride=stride,
+        )
 
 
 app = create_app()

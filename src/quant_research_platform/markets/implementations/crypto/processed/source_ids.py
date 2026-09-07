@@ -5,7 +5,6 @@ from __future__ import annotations
 from quant_research_platform.contracts.data import ProcessedDataSpec
 from quant_research_platform.sources.binance import ids as binance_ids
 
-RAW_RECORDER_RUN_DATA_ID = binance_ids.RAW_RECORDER_RUN_DATA_ID
 MARKET_BARS_SOURCE_DATA_ID = binance_ids.market_bars_data_id()
 AGGREGATE_TRADES_SOURCE_DATA_ID = binance_ids.aggregate_trades_data_id()
 DEPTH_LEVELS_SOURCE_DATA_ID = binance_ids.depth_levels_data_id()

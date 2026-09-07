@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from functools import cache, partial
 from types import MappingProxyType
 
+from quant_research_platform.artifacts.research import produce_a_share_report
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
@@ -19,12 +20,24 @@ from quant_research_platform.catalog.processed import (
 from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.targets import ProducerBinding, ProducerKind
+from quant_research_platform.research.portfolios.diagnostics import (
+    build_portfolio_statistics_tables,
+)
 from quant_research_platform.research.protocols import a_share, crypto_hft
+from quant_research_platform.research.statistics_production import (
+    build_a_share_statistics_tables,
+)
 from quant_research_platform.sources.binance.interim import (
     materialize_interim_data as binance_interim_producer,
 )
 from quant_research_platform.sources.choice.interim import (
     interim_catalog as choice_interim_catalog,
+)
+from quant_research_platform.sources.choice.interim import (
+    materialize_interim_data as choice_interim_producer,
+)
+from quant_research_platform.sources.choice.interim import (
+    source_content_identity as choice_source_identity,
 )
 from quant_research_platform.sources.csmar.interim import (
     interim_catalog as csmar_interim_catalog,
@@ -136,10 +149,16 @@ def _a_share_profile() -> ResearchProfile:
         unified_trading_sessions=unified_trading_sessions,
     )
 
+    choice_interim = choice_interim_catalog()
+    choice_data_ids = {spec.data_id for spec in choice_interim.list()}
     interim = InterimDataCatalog(
         (
-            *csmar_interim_catalog().list(),
-            *choice_interim_catalog().list(),
+            *(
+                spec
+                for spec in csmar_interim_catalog().list()
+                if spec.data_id not in choice_data_ids
+            ),
+            *choice_interim.list(),
             *reference_interim_catalog().list(),
         )
     )
@@ -161,6 +180,14 @@ def _a_share_profile() -> ResearchProfile:
             **{
                 spec.data_id: ProducerBinding(
                     ProducerKind.INTERIM,
+                    choice_interim_producer,
+                    source_identity=choice_source_identity,
+                )
+                for spec in choice_interim.list()
+            },
+            **{
+                spec.data_id: ProducerBinding(
+                    ProducerKind.INTERIM,
                     csmar_interim_producer,
                     source_identity=csmar_source_identity,
                 )
@@ -179,7 +206,7 @@ def _a_share_profile() -> ResearchProfile:
             **{
                 spec.data_id: ProducerBinding(
                     ProducerKind.PROCESSED,
-                    a_share_producer.produce_a_share_processed_frame,
+                    a_share_producer.produce_a_share_processed_data,
                 )
                 for spec in processed.list()
             },
@@ -198,14 +225,17 @@ def _a_share_profile() -> ResearchProfile:
                 for scenario_id in a_share.SCENARIO_IDS
             },
             **{
-                f"{scenario_id}_model_selection_refit": ProducerBinding(
-                    ProducerKind.MODEL,
-                    build_model_selection_result,
+                f"{scenario}_portfolio_statistics": ProducerBinding(
+                    ProducerKind.STATISTIC,
+                    partial(
+                        build_portfolio_statistics_tables,
+                        unified_trading_sessions=unified_trading_sessions,
+                    ),
                 )
-                for scenario_id in a_share.SCENARIO_IDS
+                for scenario in a_share.SCENARIO_IDS
             },
             **{
-                f"{scenario_id}_ew_rank_model": ProducerBinding(
+                f"{scenario_id}_model_selection_refit": ProducerBinding(
                     ProducerKind.MODEL,
                     build_model_selection_result,
                 )
@@ -219,9 +249,9 @@ def _a_share_profile() -> ResearchProfile:
                 for scenario_id in a_share.SCENARIO_IDS
             },
             **{
-                f"{scenario_id}_ew_rank_predictions": ProducerBinding(
-                    ProducerKind.PREDICTION,
-                    build_prediction_result_from_persisted_model,
+                f"{scenario_id}_statistics": ProducerBinding(
+                    ProducerKind.STATISTIC,
+                    build_a_share_statistics_tables,
                 )
                 for scenario_id in a_share.SCENARIO_IDS
             },
@@ -232,6 +262,13 @@ def _a_share_profile() -> ResearchProfile:
                 )
                 for scenario_id in a_share.SCENARIO_IDS
                 for candidate in a_share.protocol(scenario_id).portfolio_candidates()
+            },
+            **{
+                f"{scenario_id}_report_artifact": ProducerBinding(
+                    ProducerKind.REPORT,
+                    produce_a_share_report,
+                )
+                for scenario_id in a_share.SCENARIO_IDS
             },
         },
         schema_inventory_important_columns=(
@@ -247,17 +284,78 @@ def _a_share_profile() -> ResearchProfile:
 
 @cache
 def _crypto_profile() -> ResearchProfile:
+    from quant_research_platform.artifacts.crypto_hft import (
+        produce_crypto_report,
+        summarize_crypto_execution,
+        summarize_crypto_ledger_windows,
+    )
+    from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        summarize_portfolio_ledger,
+    )
+    from quant_research_platform.artifacts.statistics import (
+        STATISTICS_TABLE_COLUMNS,
+        read_statistics_artifact,
+    )
+    from quant_research_platform.markets.implementations.crypto.ids import (
+        HFT_PANEL_DATA_ID,
+        canonical_crypto_asset_id,
+    )
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        produce_maker_calibration,
+        produce_maker_ledger,
+        produce_taker_ledger,
+    )
     from quant_research_platform.markets.implementations.crypto.processed import (
         catalog as crypto_catalog,
     )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer as crypto_producer,
+    )
+    from quant_research_platform.research.datasets.assembler import (
+        assemble_research_dataset,
+    )
+    from quant_research_platform.research.evaluations.runner import (
+        build_crypto_evaluation_result,
+    )
+    from quant_research_platform.research.models.persisted import (
+        read_crypto_model_artifact,
+    )
+    from quant_research_platform.research.models.production import (
+        build_crypto_fold_models,
+    )
+    from quant_research_platform.research.portfolios.diagnostics import (
+        build_crypto_portfolio_statistics_tables,
+    )
+    from quant_research_platform.research.predictions.runner import (
+        build_crypto_predictions,
+    )
     from quant_research_platform.research.protocols.crypto_hft import (
-        build_evaluation_catalog,
+        build_crypto_evaluation_catalog,
         build_hft_research_dataset_catalog,
+    )
+    from quant_research_platform.sources.binance.funding import (
+        funding_source_identity,
+        read_funding_observations,
+    )
+    from quant_research_platform.sources.binance.ids import (
+        FUTURES_MARKET_TYPE,
+        RESEARCH_SYMBOLS,
+    )
+    from quant_research_platform.sources.binance.replay import (
+        ReconstructionStats,
+        iter_agg_trades,
+        iter_reconstructed_depth,
+        open_recorder_run,
+        recorder_source_identity,
     )
 
     interim = binance_interim_catalog()
     processed = crypto_catalog.hft_processed_catalog()
     research_datasets = build_hft_research_dataset_catalog()
+    scenario = crypto_hft.HFT_RESEARCH_DATASET_ID
+    symbols = {canonical_crypto_asset_id(symbol): symbol for symbol in RESEARCH_SYMBOLS}
     return ResearchProfile(
         profile_id=CRYPTO_PROFILE_ID,
         market_id=MarketId("crypto"),
@@ -268,13 +366,133 @@ def _crypto_profile() -> ResearchProfile:
         interim=interim,
         processed=processed,
         research_datasets=research_datasets,
-        evaluations=build_evaluation_catalog(),
-        models=ModelCatalog(),
+        evaluations=build_crypto_evaluation_catalog(),
+        models=crypto_hft.build_hft_model_catalog(training_row_bound=None),
         producer_bindings={
-            spec.data_id: ProducerBinding(
-                ProducerKind.INTERIM, binance_interim_producer
-            )
-            for spec in interim.list()
+            f"{scenario}_report_artifact": ProducerBinding(
+                ProducerKind.REPORT,
+                partial(
+                    produce_crypto_report,
+                    panel_id=HFT_PANEL_DATA_ID,
+                    read_model_artifact=read_crypto_model_artifact,
+                    expected_symbols=RESEARCH_SYMBOLS,
+                    read_reconstruction=ReconstructionStats.from_payload,
+                ),
+            ),
+            f"{scenario}_portfolio_statistics": ProducerBinding(
+                ProducerKind.STATISTIC,
+                partial(
+                    build_crypto_portfolio_statistics_tables,
+                    read_ledger=read_portfolio_ledger_artifact,
+                    summarize_ledger=summarize_portfolio_ledger,
+                    summarize_windows=summarize_crypto_ledger_windows,
+                    summarize_execution=summarize_crypto_execution,
+                    table_columns=STATISTICS_TABLE_COLUMNS,
+                ),
+            ),
+            f"{crypto_hft.HFT_RESEARCH_DATASET_ID}_maker_calibration": ProducerBinding(
+                ProducerKind.STATISTIC,
+                partial(
+                    produce_maker_calibration,
+                    symbol="BTCUSDT",
+                    market_type=FUTURES_MARKET_TYPE,
+                    open_run=open_recorder_run,
+                    reconstruct_depth=partial(
+                        iter_reconstructed_depth, market_type=FUTURES_MARKET_TYPE
+                    ),
+                    read_trades=partial(
+                        iter_agg_trades, market_type=FUTURES_MARKET_TYPE
+                    ),
+                    read_model_artifact=read_crypto_model_artifact,
+                ),
+            ),
+            **{
+                candidate.target_id: ProducerBinding(
+                    ProducerKind.PORTFOLIO,
+                    partial(
+                        produce_maker_ledger,
+                        symbol=symbols[candidate.asset_id],
+                        market_type=FUTURES_MARKET_TYPE,
+                        open_run=open_recorder_run,
+                        reconstruct_depth=partial(
+                            iter_reconstructed_depth, market_type=FUTURES_MARKET_TYPE
+                        ),
+                        read_trades=partial(
+                            iter_agg_trades, market_type=FUTURES_MARKET_TYPE
+                        ),
+                        read_funding=read_funding_observations,
+                        read_prediction_bundle=read_prediction_output_bundle,
+                        read_statistics_artifact=read_statistics_artifact,
+                    ),
+                    source_identity=partial(
+                        funding_source_identity, symbol=symbols[candidate.asset_id]
+                    ),
+                )
+                for candidate in crypto_hft.maker_candidates()
+            },
+            **{
+                candidate.target_id: ProducerBinding(
+                    ProducerKind.PORTFOLIO,
+                    partial(
+                        produce_taker_ledger,
+                        symbol=symbols[candidate.asset_id],
+                        open_run=open_recorder_run,
+                        reconstruct_depth=partial(
+                            iter_reconstructed_depth, market_type=FUTURES_MARKET_TYPE
+                        ),
+                        read_funding=read_funding_observations,
+                        read_prediction_bundle=read_prediction_output_bundle,
+                    ),
+                    source_identity=partial(
+                        funding_source_identity, symbol=symbols[candidate.asset_id]
+                    ),
+                )
+                for candidate in crypto_hft.taker_candidates()
+            },
+            **{
+                spec.evaluation_id: ProducerBinding(
+                    ProducerKind.EVALUATION,
+                    partial(
+                        build_crypto_evaluation_result,
+                        read_prediction_bundle=read_prediction_output_bundle,
+                    ),
+                )
+                for spec in build_crypto_evaluation_catalog().list()
+            },
+            f"{crypto_hft.HFT_RESEARCH_DATASET_ID}_models": ProducerBinding(
+                ProducerKind.MODEL, build_crypto_fold_models
+            ),
+            f"{crypto_hft.HFT_RESEARCH_DATASET_ID}_predictions": ProducerBinding(
+                ProducerKind.PREDICTION, build_crypto_predictions
+            ),
+            **{
+                spec.data_id: ProducerBinding(
+                    ProducerKind.INTERIM, binance_interim_producer
+                )
+                for spec in interim.list()
+            },
+            **{
+                spec.data_id: ProducerBinding(
+                    ProducerKind.PROCESSED,
+                    partial(
+                        crypto_producer.produce_hft_processed_data,
+                        open_run=open_recorder_run,
+                        reconstruct_depth=iter_reconstructed_depth,
+                        read_trades=iter_agg_trades,
+                        make_stats=ReconstructionStats,
+                    ),
+                    source_identity=recorder_source_identity
+                    if spec.data_id == HFT_PANEL_DATA_ID
+                    else None,
+                )
+                for spec in processed.list()
+            },
+            **{
+                spec.data_id: ProducerBinding(
+                    ProducerKind.DATASET, assemble_research_dataset
+                )
+                for spec in research_datasets.list()
+            },
         },
         schema_inventory_important_columns=("close", "eligible"),
     )

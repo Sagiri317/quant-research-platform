@@ -1,87 +1,136 @@
-# QRP Agent 说明
+# QRP 代理说明
 
-本文件只保存长期、可执行的仓库边界。一次性状态、运行证据和当前改动以 live Git、代码、测试、配置以及 ignored `.run/` 记录为准。修改前读取目标文件、适用规则和 `git status`，保留用户及其他 agent 的已有改动。
+本文件只保存长期、可执行的仓库边界。一次性状态、运行证据和当前改动以当前 Git、
+代码、测试、配置以及被忽略的 `.run/` 记录为准。修改前读取目标文件、适用规则和
+`git status`，保留用户及其他代理的已有改动。
 
 ## 权威与产品边界
 
-任务边界按明确任务范围 -> ignored `.run/` 相关控制文件 -> `AGENTS.md` -> 工程规范绑定；当前代码/测试/配置/运行时只提供当前事实。历史提交和旧报告只能作为线索，不替代当前证据；不得覆盖无法解释的 WIP。
+任务边界按明确任务范围 -> 被忽略的 `.run/` 相关控制文件 -> `AGENTS.md` -> 工程规范绑定；
+当前代码、测试、配置和运行时只提供当前事实。历史提交和旧报告只能作为线索，
+不替代当前证据；不得覆盖无法解释的 WIP。
 
 QRP 是本地量化研究平台：
 
 ```text
-source / market data
--> interim / processed dataset
--> factor / label / mask / context
--> research dataset
--> evaluation / model / prediction
--> portfolio / diagnostics
--> artifact / report
+来源 / 市场数据
+-> 中间层 / 已处理数据集
+-> 因子 / 标签 / 掩码 / 上下文
+-> 研究数据集
+-> 评估 / 模型 / 预测
+-> 组合 / 诊断
+-> 产物 / 报告
 ```
 
-它不属于实盘交易、模拟交易账户、broker/exchange、SaaS、部署或投资建议。除非明确批准，不新增 public API/CLI、scheduler/worker、connector、产品垂直、长期架构 owner 或重型 runtime dependency。不得为了删代码、降内存、缩依赖或测试方便删除已批准的量化能力、模型、scenario、schema、artifact/report、A-share/CSMAR、Binance/Crypto 或 mandatory dependencies。
+它不属于实盘交易、模拟交易账户、经纪商/交易所、SaaS、部署或投资建议。
+除非明确批准，不新增公开 API/CLI、调度器/工作进程、连接器、产品垂直方向、
+长期架构责任模块或重型运行时依赖。不得为了删代码、降内存、缩依赖或测试方便，
+删除已批准的量化能力、模型、场景、结构定义、产物/报告、A-share/CSMAR、
+Binance/Crypto 或必需依赖。
 
-未经明确批准，不得静默改变 factor/label/mask 定义、point-in-time availability、schema/dtype/PK、logical window/horizon/output scope、train-validation-test 分离、timing/lag/cost/return attribution、prediction determinism、持久化 identity 或已批准的 machine contract。确认语义 bug 需要可执行 RED、手算 fixture 或唯一的静态证据，并验证持久化及下游行为。
+未经明确批准，不得静默改变因子/标签/掩码定义、时点可用性、schema/dtype/PK、
+逻辑窗口/预测期限/输出范围、训练-验证-测试分离、时序/滞后/成本/收益归因、
+预测确定性、持久化标识或已批准的机器合同。确认语义错误需要可执行的 RED、
+手算测试样例或唯一的静态证据，并验证持久化及下游行为。
 
 ## Ponytail 与最小设计
 
-使用本地已经安装的官方 Ponytail Ultra；不得安装、升级、复制、仿写或声称执行未实际运行的工具。理解真实调用流后，按第一个可行层停止：
+使用本地已经安装的官方 Ponytail Ultra；不得安装、升级、复制、仿写或声称执行未实际运行的工具。
+理解真实调用流后，按第一个可行层停止：
 
 ```text
 需求能否不存在？
--> 删除旧路径或旧 surface？
--> 复用已有 owner？
--> stdlib / Git / pytest / 平台原生能力？
--> 已安装 dependency？
+-> 删除旧路径或旧接口面？
+-> 复用已有责任模块？
+-> 标准库 / Git / pytest / 平台原生能力？
+-> 已安装依赖？
 -> 内联？
 -> 最后才新增最小机制
 ```
 
-优先删除无用或测试专用的 surface、无独立 invariant 的 wrapper/alias/shim/fallback、重复 owner/materialization、无当前 caller 的平台/并发机制和仅检查 shape 的测试。不要增加投机性 abstraction、第二套 source of truth 或不必要的 dependency。删减不得削弱 private-data boundary、量化语义、资源准入、有界完成、exact identity、old-good、primary exception、owner-qualified cleanup 或真实 public/trust boundary。
+优先删除无用或测试专用的接口面、没有独立不变量的包装/别名/兼容层/备用路径、
+重复责任模块/物化、没有当前调用方的平台/并发机制，以及仅检查形状的测试。
+不要增加投机性抽象、第二套事实源或不必要依赖。删减不得削弱私有数据边界、
+量化语义、资源准入、有界完成、精确标识、原有已验证产物、主异常、
+责任归属明确的清理或真实公开/信任边界。
 
-## 语义 owner
+## 语义责任模块
 
-同一 invariant 只允许一个权威 owner；唯一 owner 表示唯一规则来源，不要求把所有逻辑塞进一个文件。当前 owner 关系如下：
+同一不变量只允许一个权威责任模块；唯一责任模块表示唯一规则来源，
+不要求把所有逻辑塞进一个文件。当前责任关系如下：
 
-| 语义 | Owner |
+| 语义 | 责任模块 |
 |---|---|
 | 基础合同、IDs、时间窗口、校验 | `contracts/` |
-| provider/raw 摄取、解码、标准化 | `sources/` |
-| 日历、市场规则、有效 bars、masks | 对应市场实现 |
+| 供应商/原始数据摄取、解码、标准化 | `sources/` |
+| 日历、市场规则、有效行情柱、掩码 | 对应市场实现 |
 | 共享安全规则与结果汇总 | `policy/` |
-| profile/composition-root 绑定 | `profiles/` |
-| 基于 owner 定义事实的 catalog 视图 | `catalog/` |
-| factor/label/dataset/model/prediction/portfolio 语义 | `research/` / `compute/` |
-| 物理 IO、manifest、持久化 identity、exact compare | `storage/` |
-| 准入、root budget、reservation、RSS 证据 | `runtime/` |
-| artifact 校验/写入 | `artifacts/` |
+| 配置组合/组合根绑定 | `profiles/` |
+| 基于责任模块定义事实的目录视图 | `catalog/` |
+| 因子/标签/数据集/模型/预测/组合语义 | `research/` / `compute/` |
+| 物理 IO、清单、持久化标识、精确比较 | `storage/` |
+| 准入、根预算、预留、RSS 证据 | `runtime/` |
+| 产物校验/写入 | `artifacts/` |
 | 报告内容 | `reports/` |
 | 编排、发布、部分真实状态 | `workflows/` |
 | 已批准路由与适配器 | `interfaces/` |
 
-仓库采用 current-contract-only：旧名称、目录和实现形状不自动构成兼容义务；迁移完成后删除旧入口，不保留平行实现。
+仓库只支持当前合同：旧名称、目录和实现形状不自动构成兼容义务；
+迁移完成后删除旧入口，不保留平行实现。
 
 ## 托管操作与性能
 
-每个托管的数据规模操作只有一个简单资源边界：先取得 host-local data-scale lock，只捕获一次 `available0`，默认规划目标为 `min(available0 * 70%, explicit cap)`。70% 和派生出的 `memory_budget_bytes` 都是相对安全的软规划参考，不是进程 RSS、真实 allocation 或逻辑内存的硬上限。lease 以 bytes 表达只是为了让 owner 的保守粗估可相加比较，不要求或声称字节级精确。进入数据规模 read/decode/allocation 前按大致工作集估算选择有界批次；只有保守估算表明无法维持相对安全或 explicit cap 明确限制时才稳定失败，不因轻微估算或观测越过 70% 的精确点自动判死，也不建立第二套硬阈值。聚合持久化输出可以超过 RAM 规划目标而 exact 完成。已有 operation 内的 public DataFrame/ndarray 是 borrowed baseline；新 payload/workspace/output 只有一个 logical owner，跨 producer/consumer 转移而不重复计费，离开 owner context 时关闭。borrowed baseline、native workspace 与仓库外 RSS 观测不得重复计费。
+每个托管的数据规模操作只有一个简单资源边界：先取得主机本地数据规模锁，
+只捕获一次 `available0`，默认规划目标为 `min(available0 * 70%, explicit cap)`。
+70% 和派生出的 `memory_budget_bytes` 都是相对安全的软规划参考，
+不是进程 RSS、真实分配或逻辑内存的硬上限。租约以 bytes 表达，
+只是为了让各责任模块的保守粗估可相加比较，不要求或声称字节级精确。
+进入数据规模读取/解码/分配前，按大致工作集估算选择有界批次；
+只有保守估算表明无法维持相对安全或显式上限明确限制时才稳定失败，
+不因轻微估算或观测越过 70% 的精确点自动判死，也不建立第二套硬阈值。
+聚合持久化输出可以超过 RAM 规划目标而精确完成。
+已有操作内的公开 DataFrame/ndarray 是借用基线；新载荷、工作区或输出只有一个逻辑归属，
+在生产者/消费者之间转移而不重复计费，离开责任上下文时关闭。
+借用基线、原生工作区与仓库外 RSS 观测不得重复计费。
 
-默认使用 single-process + native threads，只允许一层主要并行；线程数不超过物理核并可因预算下调。不得叠加 Python worker pool、native fan-out、scheduler 或 executor。native thread environment 必须在 measured fresh child 导入相关库前设置。
+默认使用单进程加原生线程，只允许一层主要并行；线程数不超过物理核并可因预算下调。
+不得叠加 Python 工作进程池、原生并行扇出、调度器或执行器。
+原生线程环境必须在受测全新子进程导入相关库前设置。
 
-发布使用 transaction-local 保守磁盘预检、同父目录 UUID staging 和平台 native no-replace 或 owner-qualified replace。成功才 atomic publish，失败保留 old-good；只清理本次 operation 能证明创建的资源。存在 primary `BaseException` 时，cleanup/verify/release failure 不得覆盖它。
+发布使用事务内保守磁盘预检、同父目录 UUID 暂存，以及平台原生不覆盖移动或责任归属明确的替换。
+成功才原子发布，失败保留原有已验证产物；只清理本次操作能证明创建的资源。
+存在主 `BaseException` 时，清理、验证或释放失败不得覆盖它。
 
-Persisted identity 以 schema、dtype、PK、lineage 和 exact equality 为准；fingerprint 只作 quick reject，partial output 必须真实标记。
+持久化标识以 schema、dtype、PK、来源谱系和精确相等为准；指纹只作快速拒绝，
+部分输出必须如实标记。
 
-性能优先使用列投影、predicate/partition pushdown、列式有界批次和增量输出，避免重复 concat、vstack、full copy 与 Python row graph；不为可能的收益增加重型 dependency。
+性能优先使用列投影、谓词/分区下推、列式有界批次和增量输出，
+避免重复 concat、vstack、完整复制与 Python 行对象图；不为可能的收益增加重型依赖。
 
 ## 量化与私有数据安全
 
-- Label timing、signal observation、entry、exit、portfolio attribution 用少量有效 bar 的手算 fixture 明确；防泄漏复用 live lookahead 与 purge/split contract。
-- Prediction artifact 与 portfolio/research 输入按 persisted PK 对齐；missing、duplicate、misaligned required prediction 必须稳定失败。
-- Fixed seed、backend version、thread settings 与既有 exact/tolerance contract 决定 determinism；不得承诺无法证明的跨平台 bitwise identity。
-- Diagnostics/proxy 必须诚实命名；未实现的模型不得输出零值并声称已生效。Mandatory model dependency 和 base-registered algorithm 不得通过 silent fallback、dummy backend 或 optionalization 逃避验证。
-- 不打印、上传或保留私有行值、raw payload、secret、未经清洗的本地绝对路径或 raw traceback。共享证据只包含 schema、计数、hash、状态、逻辑路径别名和不含私有行的摘要。
+- 标签时序、信号观测、入场、离场和组合归因，用少量有效行情柱的手算测试样例明确；
+  防泄漏复用当前前视检查与清除/切分合同。
+- 预测产物与组合/研究输入按持久化 PK 对齐；必需预测缺失、重复或错位时必须稳定失败。
+- 固定种子、后端版本、线程设置与既有精确/容差合同决定确定性；
+  不得承诺无法证明的跨平台逐比特一致。
+- 诊断/代理量必须诚实命名；未实现的模型不得输出零值并声称已生效。
+  必需模型依赖与基础注册算法不得通过静默备用路径、虚假后端或改为可选依赖逃避验证。
+- 不打印、上传或保留私有行值、原始载荷、秘密、未经清洗的本地绝对路径或原始异常回溯。
+  共享证据只包含结构、计数、哈希、状态、逻辑路径别名和不含私有行的摘要。
 
 ## 检查与 Git
 
-- 修改后运行覆盖本次行为的最窄、非破坏性检查，并通过 `python -m ruff format --check .`；默认 `pytest -q` 运行全部测试。
-- Package acceptance 从仓库外 clean export 开始：构建 fresh sdist，从解出的 sdist 构建 wheel，在仓库外隔离环境安装，再从 empty CWD 做 CLI/API smoke；editable checkout 或直接从源码路径导入不算通过。
-- 不 force push、rebase、amend、reset、restore、clean、stash；仅在明确任务范围授权时合并到 main；不覆盖其他 agent 的改动。`.run/` 为被忽略的本地状态，永不 stage/commit。
+- 语言边界：控制 Markdown 与 `.run/` 操作脚本的人类说明使用中文；
+  `src/`、`tests/` 的工程注释和文档字符串使用英文，并尽量避免无必要中文。
+  供应商中文字段映射、中文业务标签/输出，以及验证 Unicode 或真实来源文本的测试数据，
+  必须按真实语义保留，不因语言约定改写或删除。
+
+- 修改后运行覆盖本次行为的最窄、非破坏性检查，并通过 `python -m ruff format --check .`；
+  默认 `pytest -q` 运行全部测试。
+- 包验收从仓库外干净导出开始：构建全新 sdist，从解出的 sdist 构建 wheel，
+  在仓库外隔离环境安装，再从空工作目录做 CLI/API 冒烟检查；
+  可编辑安装的检出目录或直接从源码路径导入不算通过。
+- 不使用 force push、rebase、amend、reset、restore、clean、stash；
+  仅在明确任务范围授权时合并到 main；不覆盖其他代理的改动。
+  `.run/` 为被忽略的本地状态，永不 stage/commit。

@@ -38,6 +38,10 @@ def test_api_routes_are_current_and_exact() -> None:
         ("GET", "/api/0.1/catalog/factors"),
         ("GET", "/api/0.1/catalog/labels"),
         ("GET", "/api/0.1/research-datasets/{dataset_id}/requirements"),
+        ("GET", "/api/0.1/status"),
+        ("GET", "/api/0.1/inspect/{target_id}"),
+        ("GET", "/api/0.1/runs/{run_id}/reports/{report_identity}"),
+        ("GET", "/api/0.1/runs/{run_id}/portfolios/{target_id}"),
     }
 
 
@@ -73,6 +77,10 @@ def test_openapi_has_closed_current_response_models() -> None:
         "/api/0.1/catalog/factors",
         "/api/0.1/catalog/labels",
         "/api/0.1/research-datasets/{dataset_id}/requirements",
+        "/api/0.1/status",
+        "/api/0.1/inspect/{target_id}",
+        "/api/0.1/runs/{run_id}/reports/{report_identity}",
+        "/api/0.1/runs/{run_id}/portfolios/{target_id}",
     }
     assert {
         name: schema["components"]["schemas"][name]["additionalProperties"]
@@ -129,11 +137,14 @@ def test_cli_exposes_only_current_research_surface() -> None:
             "2019-12-31",
             "--plan",
         ),
-        ("report", "build", "--plan"),
+        ("report", "build", "--help"),
     ):
         result = runner.invoke(app, list(args))
         assert result.exit_code == 0, result.output
         _assert_public_text_is_sanitized(result.output)
+
+    missing_run_id = runner.invoke(app, ["report", "build", "--plan"])
+    assert missing_run_id.exit_code != 0
 
     research_help = runner.invoke(app, ["research", "run", "--help"])
     assert research_help.exit_code == 0, research_help.output
@@ -173,6 +184,63 @@ def test_cli_exposes_only_current_research_surface() -> None:
     assert holdout.exit_code != 0
     assert "holdout_frozen_development_identity_unavailable" in holdout.output
     assert '"status": "READY"' not in holdout.output
+
+
+def test_read_only_status_never_plans_and_client_cannot_bind_a_project(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.workflows import research
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("read_only_query_started_work")
+
+    for name in (
+        "plan_targets",
+        "preflight_model_specs",
+        "research_run",
+        "report_build",
+        "_default_raw_root",
+    ):
+        monkeypatch.setattr(research, name, forbidden)
+    root = tmp_path / "bound"
+    outside = tmp_path / "untrusted"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("must_not_be_returned", encoding="utf-8")
+    client = TestClient(create_app(project_root=root))
+    response = client.get("/api/0.1/status", params={"project_root": str(outside)})
+    assert response.status_code == 200
+    assert response.json() == {"profile_id": "a_share_csmar_choice", "runs": []}
+    assert not root.exists()
+    assert TestClient(create_app()).get("/api/0.1/status").status_code == 503
+    for params in (
+        {"run_id": "../secret"},
+        {"run_id": "missing"},
+        {"profile": "../secret"},
+    ):
+        failed = client.get("/api/0.1/status", params=params)
+        assert failed.status_code in {404, 422}
+        assert "must_not_be_returned" not in failed.text
+        assert str(tmp_path) not in failed.text
+    assert not root.exists()
+
+
+def test_catalog_queries_support_both_existing_profiles():
+    from quant_research_platform.profiles.research import CRYPTO_PROFILE_ID
+
+    client = TestClient(create_app())
+    profile = research_profile(CRYPTO_PROFILE_ID)
+    response = client.get(
+        "/api/0.1/catalog/factors", params={"profile": CRYPTO_PROFILE_ID}
+    )
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == len(profile.factors.list())
+    dataset_id = profile.research_datasets.list()[0].data_id
+    requirements = client.get(
+        f"/api/0.1/research-datasets/{dataset_id}/requirements",
+        params={"profile": CRYPTO_PROFILE_ID},
+    )
+    assert requirements.status_code == 200
+    assert requirements.json()["market_id"] == "crypto"
 
 
 def _assert_public_text_is_sanitized(text: str) -> None:

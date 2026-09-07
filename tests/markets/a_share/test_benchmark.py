@@ -1,14 +1,12 @@
 from __future__ import annotations
 
-from types import SimpleNamespace
-
 import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.a_share.benchmark import (
+    iter_benchmark_weight_snapshots,
     materialize_benchmark_weights,
-    normalize_benchmark_weight_snapshots,
 )
 from quant_research_platform.markets.implementations.a_share.processed import (
     producer as processed_producer,
@@ -68,7 +66,9 @@ def _benchmark_facts() -> tuple[pd.DataFrame, pd.DataFrame]:
 
 def test_benchmark_filters_repeated_codes_and_exact_snapshots():
     index_info, weights = _benchmark_facts()
-    normalized = normalize_benchmark_weight_snapshots(index_info, weights)
+    normalized = pd.concat(
+        iter_benchmark_weight_snapshots(index_info, (weights,)), ignore_index=True
+    )
 
     assert tuple(normalized.columns) == (
         "market_id",
@@ -98,53 +98,86 @@ def test_benchmark_filters_repeated_codes_and_exact_snapshots():
         )
 
 
-def test_processed_benchmark_target_reads_required_index_facts(
-    monkeypatch: pytest.MonkeyPatch,
+def test_processed_benchmark_target_streams_exact_dates_and_requires_global_coverage(
     tmp_path,
-) -> None:
-    index_info, weights = _benchmark_facts()
-    frames = {"index_info": index_info, "index_weights": weights}
-    observed: list[tuple[str, bool, bool]] = []
-
-    monkeypatch.setattr(processed_producer, "_source_available", lambda *_: True)
-
-    def read_source(
-        _layout,
-        spec,
-        *,
-        time_window,
-        policy,
-        optional,
-        full_history,
-    ):
-        del time_window, policy
-        observed.append((spec.data_id, optional, full_history))
-        return frames[spec.data_id]
-
-    monkeypatch.setattr(processed_producer, "_read_source", read_source)
-    spec = processed_catalog().get("benchmark_weights")
-    result = processed_producer.produce_a_share_processed_frame(
-        spec,
-        layout=StorageLayout(project_root=tmp_path),
-        time_window=TimeWindow("2020-01-02", "2020-01-03"),
-        processed_catalog=processed_catalog(),
-        source_catalog=SimpleNamespace(
-            get=lambda data_id: SimpleNamespace(data_id=data_id)
-        ),
-        resource_policy=object(),
+):
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.runtime.dataframes import iter_complete_session_frames
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.datasets.reading import (
+        DatasetReadMode,
+        read_dataset,
     )
+    from quant_research_platform.storage.datasets.writing import write_dataset
 
-    assert tuple(result.columns) == (
-        "market_id",
-        "benchmark_id",
-        "asset_id",
-        "timestamp",
-        "weight",
+    profile = research_profile()
+    layout = StorageLayout(tmp_path)
+    index_info, _ = _benchmark_facts()
+    dates = pd.bdate_range("2020-01-02", periods=130)
+    index_info["timestamp"] = dates[0]
+    weights = pd.DataFrame(
+        [
+            {
+                "source_asset_id": "000905" if offset < 64 else "000852",
+                "constituent_asset_id": asset,
+                "timestamp": date,
+                "effective_date": date,
+                "constituent_name": asset,
+                "weight": weight,
+            }
+            for offset, date in enumerate(dates)
+            for asset, weight in (("000001", 0.4), ("000002", 0.6))
+        ]
     )
-    assert observed == [
-        ("index_info", False, True),
-        ("index_weights", False, False),
-    ]
+    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+        for data_id, frame in (("index_info", index_info), ("index_weights", weights)):
+            source_spec = profile.interim.get(data_id)
+            frame = frame.reindex(columns=source_spec.required_columns)
+            write_dataset(
+                layout.interim_data_root(source_spec.source_id, data_id),
+                frame,
+                spec=source_spec,
+                resource_policy=policy,
+                borrowed_input=True,
+            )
+        spec = processed_catalog().get("benchmark_weights")
+        root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        with processed_producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+            resource_policy=policy,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                resource_policy=policy,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        actual = read_dataset(root, resource_policy=policy)
+        expected = pd.concat(
+            iter_benchmark_weight_snapshots(index_info, (weights,)), ignore_index=True
+        )
+        pd.testing.assert_frame_equal(actual, expected)
+        assert len(tuple((root / "data").rglob("*.parquet"))) > 1
+        streamed = list(
+            iter_complete_session_frames(
+                read_dataset(
+                    root, mode=DatasetReadMode.CHUNKED, resource_policy=policy
+                ),
+                timestamp_column="timestamp",
+                resource_policy=policy,
+            )
+        )
+        pd.testing.assert_frame_equal(pd.concat(streamed, ignore_index=True), expected)
+        assert policy.used_memory_bytes == 0
+
+    with pytest.raises(ValueError, match="coverage_incomplete"):
+        tuple(iter_benchmark_weight_snapshots(index_info, (weights.iloc[:128],)))
 
 
 @pytest.mark.parametrize(
@@ -170,4 +203,6 @@ def test_benchmark_normalization_rejects_fact_mutations(
     else:
         index_info.loc[0, "index_name"] = "wrong"
     with pytest.raises(ValueError, match=error):
-        normalize_benchmark_weight_snapshots(index_info, weights)
+        pd.concat(
+            iter_benchmark_weight_snapshots(index_info, (weights,)), ignore_index=True
+        )

@@ -23,21 +23,37 @@ PREDICTION_SCORE_COLUMN = "prediction_score"
 RAW_PREDICTION_COLUMN = "raw_prediction"
 ALPHA_SCORE_COLUMN = "alpha_score"
 PREDICTION_PRIMARY_KEY = ("timestamp", "asset_id")
-PREDICTION_MODES = frozenset({"minimal_oos", "a_share_oos"})
+A_SHARE_PREDICTION_PRIMARY_KEY = (*PREDICTION_PRIMARY_KEY, "family_id")
+PREDICTION_MODES = frozenset({"minimal_oos", "a_share_oos", "crypto_oos"})
 
 
 def prediction_output_columns(
     prediction_mode: str,
     prediction_column: str,
-    primary_key: tuple[str, ...] = PREDICTION_PRIMARY_KEY,
+    primary_key: tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
-    if primary_key != PREDICTION_PRIMARY_KEY:
+    expected_key = (
+        A_SHARE_PREDICTION_PRIMARY_KEY
+        if prediction_mode == "a_share_oos"
+        else PREDICTION_PRIMARY_KEY
+    )
+    primary_key = expected_key if primary_key is None else primary_key
+    if primary_key != expected_key:
         raise ValueError("prediction_output_columns_must_be_fixed")
     if prediction_mode == "a_share_oos":
         if prediction_column != RAW_PREDICTION_COLUMN:
             raise ValueError("prediction_output_columns_must_be_fixed")
-        return (*primary_key, "model_id", RAW_PREDICTION_COLUMN, ALPHA_SCORE_COLUMN)
-    if prediction_mode != "minimal_oos" or prediction_column != PREDICTION_SCORE_COLUMN:
+        return (
+            *primary_key,
+            "quarter_id",
+            "model_id",
+            RAW_PREDICTION_COLUMN,
+            ALPHA_SCORE_COLUMN,
+        )
+    if (
+        prediction_mode not in {"minimal_oos", "crypto_oos"}
+        or prediction_column != PREDICTION_SCORE_COLUMN
+    ):
         raise ValueError("prediction_output_columns_must_be_fixed")
     return (*primary_key, prediction_column)
 
@@ -51,7 +67,7 @@ class PredictionSpec:
     test_start: str
     test_end: str | None = None
     prediction_column: str = PREDICTION_SCORE_COLUMN
-    primary_key: tuple[str, ...] = PREDICTION_PRIMARY_KEY
+    primary_key: tuple[str, ...] | None = None
     run_type: str = "prediction"
     prediction_mode: str = "minimal_oos"
     sample_filter_mode: SampleFilterMode = "eligible"
@@ -77,7 +93,10 @@ class PredictionSpec:
         )
         test_start = _time_bound(self.test_start, "test_start")
         if self.train_end is None:
-            if self.prediction_mode != "a_share_oos" or self.candidate_model_ids:
+            if (
+                self.prediction_mode not in {"a_share_oos", "crypto_oos"}
+                or self.candidate_model_ids
+            ):
                 raise ValueError("prediction_train_end_required")
         else:
             train_end = _time_bound(self.train_end, "train_end")
@@ -105,8 +124,15 @@ class PredictionSpec:
         if self.train_end is not None and train_end >= test_start:
             raise ValueError("prediction_train_end_must_precede_test_start")
         _validate_non_empty_string(self.prediction_column, "prediction_column_required")
+        expected_key = (
+            A_SHARE_PREDICTION_PRIMARY_KEY
+            if self.prediction_mode == "a_share_oos"
+            else PREDICTION_PRIMARY_KEY
+        )
+        if self.primary_key is None:
+            object.__setattr__(self, "primary_key", expected_key)
         _validate_column_tuple(self.primary_key, "prediction_primary_key")
-        if self.primary_key != PREDICTION_PRIMARY_KEY:
+        if self.primary_key != expected_key:
             raise ValueError("prediction_output_columns_must_be_fixed")
         if (
             type(self.prediction_mode) is not str

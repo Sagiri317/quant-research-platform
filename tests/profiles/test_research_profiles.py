@@ -22,6 +22,8 @@ def test_profiles_use_stable_ids_and_immutable_producer_bindings() -> None:
         "a_share_low_frequency"
     )
     assert crypto.protocol().manifest()["protocol_id"] == "crypto_hft"
+    with pytest.raises(ValueError, match="unknown_crypto_scenario"):
+        crypto.protocol("microstructure_forward_returns")
     assert isinstance(a_share.producer_bindings, MappingProxyType)
     assert isinstance(crypto.producer_bindings, MappingProxyType)
     assert all(

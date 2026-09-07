@@ -5,6 +5,18 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_research_platform.contracts.portfolios import REBALANCE_SCHEDULES
+from quant_research_platform.contracts.time import TimeWindow
+
+
+def holding_intervals(sessions: pd.DatetimeIndex, window: TimeWindow) -> pd.DataFrame:
+    """Actual close decisions and their next-open to following-open intervals."""
+    records = [
+        (sessions[index], sessions[index + 1], sessions[index + 2])
+        for index in range(len(sessions) - 2)
+        if sessions[index] >= pd.Timestamp(window.start)
+        and sessions[index + 2] <= pd.Timestamp(window.end)
+    ]
+    return pd.DataFrame(records, columns=("decision_at", "entry_at", "end_at"))
 
 
 def rebalance_dates(

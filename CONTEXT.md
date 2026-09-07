@@ -1,44 +1,37 @@
-# QRP context
+# QRP 上下文
 
-## Active raw root
+## 当前原始数据根目录
 
-CSMAR raw exports live under one recursively scanned active root: `data/raw/csmar`.
-The source owner discovers files below that root; a sibling raw root is not an
-input or fallback.
+CSMAR 原始导出文件位于唯一、递归扫描的活动根目录：`data/raw/csmar`。
+来源责任模块在该目录下发现文件；同级的其他原始数据根目录既不是输入，也不是备用路径。
 
-## Raw family
+## 原始数据家族
 
-A raw family is a provider/table identity with one source-owner contract. Families
-that cannot be proven to satisfy an active adapter remain raw-only.
+原始数据家族由供应商/表标识定义，并且只有一份来源责任合同。
+无法证明满足活动适配器要求的家族继续仅保留原始数据。
 
-## Exact duplicate
+## 完全重复
 
-An exact duplicate has identical bytes. Canonical staging keeps one copy and
-records the discarded source names and content hash in its sidecar provenance.
+完全重复表示字节完全相同。规范暂存时只保留一份，并在附属元数据的来源记录中
+保存被丢弃的来源文件名及内容哈希。
 
-## Same-table replacement
+## 同表替换
 
-When a newer export is selected for the same provider/table identity, it is the
-active raw candidate. Coverage and structural differences remain sidecar evidence;
-the bytes are not rewritten to repair the export.
+同一供应商/表标识选择了更新的导出文件后，该文件成为活动原始输入候选。
+覆盖范围和结构差异仍作为附属元数据中的证据；不得为了修复导出而改写其字节。
 
-## KEEP_RAW_ONLY and unclassified
+## KEEP_RAW_ONLY 与 unclassified
 
-`KEEP_RAW_ONLY` means the bytes are retained but excluded from active producer
-materialization until an owner contract can prove their semantics. `unclassified`
-is reserved for files whose table identity cannot be established without guessing.
+`KEEP_RAW_ONLY` 表示保留原始字节，但在责任合同证明其语义之前，不允许活动生产器
+进行物化。`unclassified` 仅用于无法在不猜测的情况下确定表标识的文件。
 
-## Canonical sidecar
+## 规范附属元数据
 
-Each retained CSV has one deterministic UTF-8 `.metadata.json` sidecar containing
-schema, counts, dates, hash, provenance, and readiness facts. It is operational
-metadata, not a second dataset truth.
+每个保留的 CSV 都有一份确定性的 UTF-8 `.metadata.json` 附属文件，记录结构、
+计数、日期、哈希、来源和就绪事实。它是操作元数据，不是第二份数据集真值。
 
-## Formal readiness
+## 正式就绪
 
-Formal readiness requires an owner, a real production consumer, persisted output,
-and the applicable semantic and evidence checks. The standalone fee input is a
-user-designated accepted R0 input for the current QRP research purpose, and
-formal execution/net NAV may consume it. Independent external verification of
-the ChatGPT-compiled source remains incomplete, but that is not an
-implementation or execution blocker.
+正式就绪要求具备责任模块、真实生产消费者、持久化输出，以及适用的语义和证据检查。
+独立费率输入是用户指定的、针对当前 QRP 研究目的已接受的 R0 输入，正式执行/净 NAV
+可以消费它。对 ChatGPT 汇编来源的独立外部核验仍未完成，但这不是实现或执行阻塞项。

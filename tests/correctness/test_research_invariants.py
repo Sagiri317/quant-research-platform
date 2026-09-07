@@ -50,7 +50,6 @@ from quant_research_platform.research.protocols.a_share import (
     protocol,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.sources.choice.interim import readiness
 from quant_research_platform.sources.csmar.interim import interim_catalog
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
@@ -347,27 +346,133 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
         {
             "timestamp": [date for date in dates for _asset in ("a", "b")],
             "alpha_score": [-0.25, 0.25] * 6,
-            "forward_return_1d": [0.01, 0.03] * 6,
+            "holding_return": [0.01, 0.03] * 6,
         }
     )
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
+    )
+
+    calendar = pd.bdate_range("2024-01-01", periods=8)
+    intervals = alpha_calibration_intervals(calendar, "daily")
     calibrated = calibrate_expected_alpha(
         frame,
-        schedule="daily",
+        as_of=calendar[-1],
+        scheduled_intervals=intervals,
         minimum_valid_dates=6,
     )
     assert calibrated.benchmark_only is False
     assert calibrated.valid_rebalance_dates == 6
-    assert calibrated.expected_alpha.iloc[1] > calibrated.expected_alpha.iloc[0]
-    assert calibrated.slope_standard_error > 0.0
-    assert calibrated.slope_ci_low < calibrated.slope < calibrated.slope_ci_high
+    assert calibrated.slope > 0.0
+    assert calibrated.slope_standard_error == pytest.approx(0.0, abs=1e-14)
+    assert calibrated.slope_ci_low == pytest.approx(calibrated.slope)
+    assert calibrated.slope_ci_high == pytest.approx(calibrated.slope)
     assert 0.0 <= calibrated.slope_pvalue <= 1.0
     inverse = calibrate_expected_alpha(
-        frame.assign(forward_return_1d=-frame["forward_return_1d"]),
-        schedule="daily",
+        frame.assign(holding_return=-frame["holding_return"]),
+        as_of=calendar[-1],
+        scheduled_intervals=intervals,
         minimum_valid_dates=6,
     )
     assert inverse.benchmark_only is True
-    assert inverse.expected_alpha.eq(0.0).all()
+    assert inverse.slope < 0.0
+
+
+def test_calibration_weighted_cluster_reference_and_true_mature_coverage():
+    import statsmodels.api as sm
+    from statsmodels.stats.sandwich_covariance import cov_cluster
+
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
+    )
+
+    sessions = pd.bdate_range("2023-01-02", "2023-02-20")
+    intervals = alpha_calibration_intervals(sessions, "weekly-last-trading-day")
+    dates = intervals.timestamp.iloc[:6]
+    frame = pd.DataFrame(
+        [
+            {
+                "timestamp": timestamp,
+                "alpha_score": x,
+                "holding_return": 0.02
+                + (0.05 + 0.003 * g) * x
+                + 0.002 * g
+                + 0.001 * ((g + i) % 3 - 1),
+            }
+            for g, timestamp in enumerate(dates)
+            for i, x in enumerate((-1.0, 0.0, 1.0))
+        ]
+    )
+    result = calibrate_expected_alpha(
+        frame, as_of=sessions[-1], scheduled_intervals=intervals
+    )
+    x = sm.add_constant(frame.alpha_score)
+    weights = np.full(len(frame), 1 / 18)
+    fit = sm.WLS(frame.holding_return, x, weights=weights).fit()
+    # Same uncorrected date-cluster sandwich as production; no df policy change.
+    covariance = cov_cluster(fit, frame.timestamp, use_correction=False)
+    assert result.slope_standard_error == pytest.approx(
+        np.sqrt(covariance[1, 1]), rel=1e-12
+    )
+    assert result.weighted_r2 == pytest.approx(fit.rsquared, rel=1e-12)
+    assert result.scheduled_rebalance_dates == 6
+    missing = calibrate_expected_alpha(
+        frame.loc[frame.timestamp.ne(dates.iloc[1])],
+        as_of=sessions[-1],
+        scheduled_intervals=intervals,
+    )
+    assert missing.scheduled_rebalance_dates == 6 and missing.valid_rebalance_dates == 5
+    assert missing.coverage == pytest.approx(5 / 6) and missing.benchmark_only
+    stale = calibrate_expected_alpha(
+        frame, as_of=pd.Timestamp("2024-03-01"), scheduled_intervals=intervals
+    )
+    assert stale.valid_rebalance_dates == 0 and stale.scheduled_rebalance_dates == 0
+    assert stale.benchmark_only
+
+
+def test_calibration_intervals_use_adjacent_execution_opens_across_holidays():
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
+    )
+
+    sessions = pd.bdate_range("2024-01-02", "2024-01-23").difference(
+        pd.to_datetime(["2024-01-12", "2024-01-15"])
+    )
+    weekly = alpha_calibration_intervals(sessions, "weekly-last-trading-day")
+    first = weekly.iloc[0]
+    assert first.timestamp == pd.Timestamp("2024-01-05")
+    assert first.entry_at == pd.Timestamp("2024-01-08")
+    assert first.available_at == pd.Timestamp("2024-01-16")
+    frame = pd.DataFrame(
+        {
+            "timestamp": [first.timestamp] * 2,
+            "alpha_score": [-1.0, 1.0],
+            "holding_return": [0.01, 0.03],
+        }
+    )
+    before = calibrate_expected_alpha(
+        frame,
+        as_of=pd.Timestamp("2024-01-15"),
+        scheduled_intervals=weekly,
+        minimum_valid_dates=1,
+    )
+    after = calibrate_expected_alpha(
+        frame,
+        as_of=pd.Timestamp("2024-01-16"),
+        scheduled_intervals=weekly,
+        minimum_valid_dates=1,
+    )
+    assert before.valid_rebalance_dates == 0
+    assert after.valid_rebalance_dates == 1
+    monthly = alpha_calibration_intervals(
+        pd.bdate_range("2024-01-02", "2024-03-05").difference(
+            pd.to_datetime(["2024-03-01"])
+        ),
+        "monthly-last-trading-day",
+    )
+    assert monthly.iloc[0].timestamp == pd.Timestamp("2024-01-31")
+    assert monthly.iloc[0].entry_at == pd.Timestamp("2024-02-01")
+    assert monthly.iloc[0].available_at == pd.Timestamp("2024-03-04")
 
 
 def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
@@ -480,7 +585,6 @@ def test_future_execution_and_disclosure_facts_do_not_rewrite_past_facts() -> No
     )
 
     assert materialize_pit_fundamentals(observations, events)["value"].isna().all()
-    assert readiness().status == "BLOCKED_EXTERNAL_DATA"
 
 
 def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
@@ -567,8 +671,18 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
 
 
 def test_fundamental_value_factors_use_panel_total_cap() -> None:
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.research.factors.engine import (
+        calculate_factors_for_panel,
+        factor_panel_input_columns,
+    )
+    from quant_research_platform.research.factors.fundamental.definitions import (
+        FUNDAMENTAL_FACTORS,
+    )
+
     frame = pd.DataFrame(
         {
+            "market_id": "a_share",
             "asset_id": ["asset", "asset"],
             "timestamp": pd.to_datetime(["2024-01-01", "2024-01-02"]),
             "total_assets": [100.0, 120.0],
@@ -594,11 +708,43 @@ def test_fundamental_value_factors_use_panel_total_cap() -> None:
             "total_market_cap": [200.0, 220.0],
         }
     )
-    result = calculate_fundamental_factors(
-        frame, factor_columns=("earnings_yield", "book_to_market")
-    )
+    result = calculate_fundamental_factors(frame)
     assert result["earnings_yield"].tolist() == pytest.approx([0.035, 8 / 220])
     assert result["book_to_market"].tolist() == pytest.approx([0.3, 72 / 220])
+    expected = [
+        0.035,
+        0.3,
+        0.15,
+        0.045,
+        7 / 55,
+        8 / 90,
+        10 / 90,
+        1 / 3,
+        0.1,
+        -1 / 90,
+        0.25,
+        0.2,
+        1 / 90,
+        0.2,
+        4 / 90,
+        0.4,
+        0.16,
+        0.1,
+        0.06,
+    ]
+    assert result.loc[0, list(FUNDAMENTAL_FACTORS)].tolist() == pytest.approx(expected)
+    definitions = tuple(
+        definition
+        for definition in research_profile().factors.list()
+        if definition.family == "fundamental"
+    )
+    projected = calculate_factors_for_panel(
+        frame.loc[:, factor_panel_input_columns(definitions)],
+        definitions=definitions,
+    )
+    assert projected.loc[0, list(FUNDAMENTAL_FACTORS)].tolist() == pytest.approx(
+        expected
+    )
 
 
 def test_missing_raw_identity_blocks_dataset_build(tmp_path) -> None:
@@ -697,3 +843,39 @@ def test_missing_raw_identity_blocks_dataset_build(tmp_path) -> None:
             item["reason"] == "raw_content_identity_unavailable"
             for item in result["blockers"]
         )
+
+
+def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
+    import statsmodels.api as sm
+
+    from quant_research_platform.research.portfolios.risk import FactorRiskState
+    from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+
+    rng = np.random.default_rng(913)
+    count = 100
+    cross = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2023-01-03"),
+            "asset_id": [f"asset_{i:03d}" for i in range(count)],
+            "industry_level1_code": ["A01"] * 50 + ["B01"] * 50,
+            "float_market_cap": np.geomspace(100.0, 1e8, count),
+            "asset_return": rng.normal(scale=0.03, size=count),
+            "eligible": True,
+            **{column: rng.normal(size=count) for column in RISK_STYLE_COLUMNS},
+        }
+    )
+    fit = FactorRiskState(style_columns=RISK_STYLE_COLUMNS).fit_return_session(
+        cross, require_complete=True
+    )
+    assert fit is not None
+    expected = sm.WLS(
+        fit.asset_returns,
+        fit.exposures,
+        weights=np.sqrt(
+            cross.set_index("asset_id").float_market_cap.reindex(fit.exposures.index)
+        ),
+    ).fit()
+    np.testing.assert_allclose(
+        fit.factor_returns, expected.params, rtol=1e-11, atol=1e-13
+    )
+    np.testing.assert_allclose(fit.residuals, expected.resid, rtol=1e-11, atol=1e-13)

@@ -29,14 +29,14 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research._memory import (
-    _selected_frame_payload_bytes,
-    iter_complete_time_sized_frames,
-)
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
 )
 from quant_research_platform.research.models.fitting import prediction_callable
+from quant_research_platform.runtime.dataframes import (
+    _selected_frame_payload_bytes,
+    iter_complete_time_sized_frames,
+)
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     OwnedValue,
@@ -123,12 +123,14 @@ def build_prediction_result_from_frames(
         raise ValueError("invalid_model_metadata")
     rank_inputs_allow_missing = facts.input_kind == "rank_ensemble_inputs"
     reject_filter_input_columns(input_columns)
-    required = set((*spec.primary_key, *input_columns))
+    coordinates = ("quarter_id",) if spec.prediction_mode == "a_share_oos" else ()
+    required = set((*spec.primary_key, *input_columns, *coordinates))
     _validate_oos_split(spec)
     work_columns = tuple(
         dict.fromkeys(
             (
                 *spec.primary_key,
+                *coordinates,
                 *input_columns,
                 *required_filter_columns(spec.sample_filter_mode),
             )
@@ -282,7 +284,15 @@ def _iter_prediction_output_frames(
     build_state: _PredictionBuildState,
     rank_inputs_allow_missing: bool = False,
 ) -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
-    usable_columns = tuple(dict.fromkeys((*spec.primary_key, *input_columns)))
+    usable_columns = tuple(
+        dict.fromkeys(
+            (
+                *spec.primary_key,
+                *input_columns,
+                *(("quarter_id",) if spec.prediction_mode == "a_share_oos" else ()),
+            )
+        )
+    )
     with closing_iterator(iter(frames)) as active_frames:
         for chunk in active_frames:
             with _filter_mode_scope(
@@ -357,6 +367,7 @@ def _iter_prediction_output_frames(
                     output = test_frame.loc[:, list(spec.primary_key)].copy()
                     raw_prediction = predictor(test_frame)
                     if spec.prediction_mode == "a_share_oos":
+                        output["quarter_id"] = test_frame["quarter_id"]
                         output["model_id"] = spec.model_id
                         output[RAW_PREDICTION_COLUMN] = raw_prediction
                         timestamps = strict_timestamp_series(
@@ -369,12 +380,12 @@ def _iter_prediction_output_frames(
                                 index=output.index,
                                 dtype="float64",
                             )
-                            .groupby(timestamps, sort=False)
+                            .groupby([timestamps, output["family_id"]], sort=False)
                             .rank(method="average")
                         )
-                        counts = timestamps.groupby(timestamps, sort=False).transform(
-                            "size"
-                        )
+                        counts = timestamps.groupby(
+                            [timestamps, output["family_id"]], sort=False
+                        ).transform("size")
                         output[ALPHA_SCORE_COLUMN] = (
                             ranks - (counts + 1.0) / 2.0
                         ) / counts

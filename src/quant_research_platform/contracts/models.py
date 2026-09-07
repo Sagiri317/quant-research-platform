@@ -68,6 +68,7 @@ A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID = "qrp-a-share-quarterly-model-artifa
 _PARALLEL_MODEL_ALGORITHMS = frozenset(
     algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
 )
+DEFAULT_MODEL_THREAD_COUNT = 1
 
 
 def _model_algorithm_facts(algorithm: str) -> _ModelAlgorithmFacts:
@@ -143,8 +144,8 @@ def _resolved_model_hyperparameters_match(
 
     try:
         expected = dict(hyperparameters)
-        if algorithm in _PARALLEL_MODEL_ALGORITHMS and "n_jobs" in expected:
-            requested = expected["n_jobs"]
+        if algorithm in _PARALLEL_MODEL_ALGORITHMS:
+            requested = expected.get("n_jobs", DEFAULT_MODEL_THREAD_COUNT)
             actual = resolved_hyperparameters.get("n_jobs")
             if (
                 type(requested) is not int
@@ -288,16 +289,13 @@ def validate_model_metadata_core(
         "model_selection",
     }
     if quarterly:
-        allowed |= {"fit_cutoff", "rank_parameters"}
+        allowed = (allowed - {"model_selection"}) | {"fit_cutoff", "rank_parameters"}
     if set(metadata).difference(allowed):
         raise ValueError("invalid_model_metadata")
     if quarterly and type(metadata.get("fit_cutoff")) is not str:
         raise ValueError("invalid_model_metadata")
     if quarterly and (
-        type(metadata.get("random_seed")) is not int
-        or metadata["random_seed"] < 0
-        or type(metadata.get("model_selection")) is not dict
-        or "candidate_family_ids" not in metadata["model_selection"]
+        type(metadata.get("random_seed")) is not int or metadata["random_seed"] < 0
     ):
         raise ValueError("invalid_model_metadata")
     if metadata["sample_weight_protocol"] != "equal_date_total_equal_sum_n_train":
@@ -665,81 +663,32 @@ def validate_a_share_model_selection_metadata(value: object) -> None:
     families = value["families"]
     if type(families) is not list or len(families) != len(family_ids):
         raise ValueError("invalid_model_metadata")
-    observed_family_ids: list[str] = []
-    validation_rows_by_family: list[int] = []
+    observed_family_ids = []
     for family in families:
         if type(family) is not dict or set(family) != {
             "family_id",
             "config_tie_break_order",
             "selected_config_id",
-            "trials",
-            "validation_rows",
-            "selection_metric_value",
-            "selection_metric_reason",
+            "trial_ledger_semantic_identity",
         }:
             raise ValueError("invalid_model_metadata")
         family_id = family["family_id"]
-        if type(family_id) is not str or family_id not in family_ids:
+        trial_ids = family["config_tie_break_order"]
+        identity = family["trial_ledger_semantic_identity"]
+        if (
+            family_id not in family_ids
+            or type(trial_ids) is not list
+            or not trial_ids
+            or any(type(item) is not str or not item for item in trial_ids)
+            or len(set(trial_ids)) != len(trial_ids)
+            or family["selected_config_id"] not in trial_ids
+            or type(identity) is not str
+            or len(identity) != 64
+            or any(character not in "0123456789abcdef" for character in identity)
+        ):
             raise ValueError("invalid_model_metadata")
         observed_family_ids.append(family_id)
-        trials = family["trials"]
-        if type(trials) is not list or not trials:
-            raise ValueError("invalid_model_metadata")
-        trial_ids = []
-        for trial in trials:
-            _validate_model_selection_trial_record(
-                trial,
-                require_facts=True,
-                require_derived_seed=True,
-            )
-            trial_ids.append(trial["model_id"])
-        if (
-            type(family["config_tie_break_order"]) is not list
-            or any(
-                type(item) is not str or not item
-                for item in family["config_tie_break_order"]
-            )
-            or len(set(family["config_tie_break_order"]))
-            != len(family["config_tie_break_order"])
-            or set(family["config_tie_break_order"]) != set(trial_ids)
-            or family["selected_config_id"] not in trial_ids
-            or type(family["validation_rows"]) is not int
-            or family["validation_rows"] < 1
-        ):
-            raise ValueError("invalid_model_metadata")
-        validation_rows_by_family.append(family["validation_rows"])
-        selected_trial = next(
-            trial
-            for trial in trials
-            if trial["model_id"] == family["selected_config_id"]
-        )
-        if (
-            family["validation_rows"] != selected_trial["validation_rows"]
-            or family["selection_metric_value"] != selected_trial["validation_rankic"]
-            or family["selection_metric_reason"]
-            != selected_trial["validation_rankic_reason"]
-        ):
-            raise ValueError("invalid_model_metadata")
-        metric_value = family["selection_metric_value"]
-        metric_reason = family["selection_metric_reason"]
-        if metric_reason is not None and (
-            type(metric_reason) is not str
-            or metric_reason not in CORRELATION_SUMMARY_REASON_CODES
-        ):
-            raise ValueError("invalid_model_metadata")
-        if metric_value is None:
-            if metric_reason is None:
-                raise ValueError("invalid_model_metadata")
-        elif (
-            type(metric_value) not in {int, float}
-            or not np.isfinite(float(metric_value))
-            or abs(float(metric_value)) > 1.0 + 1e-12
-            or metric_reason is not None
-        ):
-            raise ValueError("invalid_model_metadata")
     if observed_family_ids != family_ids:
-        raise ValueError("invalid_model_metadata")
-    if len(set(validation_rows_by_family)) != 1:
         raise ValueError("invalid_model_metadata")
     selected_family = next(
         family
@@ -792,8 +741,10 @@ def _validate_model_selection_trial_record(
                 raise ValueError("invalid_model_metadata")
         elif reason is not None:
             raise ValueError("invalid_model_metadata")
-    if type(trial["validation_mse"]) not in {int, float} or not np.isfinite(
-        float(trial["validation_mse"])
+    if (
+        type(trial["validation_mse"]) not in {int, float}
+        or not np.isfinite(float(trial["validation_mse"]))
+        or trial["validation_mse"] < 0
     ):
         raise ValueError("invalid_model_metadata")
     facts = set(trial).intersection(_MODEL_SELECTION_TRIAL_FACT_KEYS)
@@ -820,3 +771,36 @@ def _validate_model_selection_trial_record(
         type(trial["random_seed"]) is not int or trial["random_seed"] < 0
     ):
         raise ValueError("invalid_model_metadata")
+
+
+def model_spec_payload(spec: object) -> dict[str, object]:
+    return {
+        "model_id": spec.model_id,
+        "model_algorithm": spec.model_algorithm,
+        "input_factor_columns": list(spec.input_factor_columns),
+        "input_feature_columns": list(spec.input_feature_columns),
+        "label_column": spec.label_column,
+        "sample_filter_mode": spec.sample_filter_mode,
+        "hyperparameters": _thaw_model_hyperparameters(spec.hyperparameters),
+        "random_seed": spec.random_seed,
+        "max_train_rows": spec.max_train_rows,
+    }
+
+
+def validate_completed_model_trial_metrics(
+    model_id: str, metrics: Mapping[str, object]
+) -> None:
+    """Validate model metrics at model/report persisted-trial boundaries."""
+    if set(metrics) != (_MODEL_SELECTION_TRIAL_METRIC_KEYS - {"model_id"}) | {
+        "n_train"
+    }:
+        raise ValueError("invalid_model_trial_metrics")
+    trial = dict(metrics)
+    n_train = trial.pop("n_train")
+    if type(n_train) is not int or n_train <= 0:
+        raise ValueError("invalid_model_trial_metrics")
+    trial["model_id"] = model_id
+    _validate_model_selection_trial_record(trial, require_facts=False)
+
+
+CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID = "qrp-crypto-fold-model-artifact"

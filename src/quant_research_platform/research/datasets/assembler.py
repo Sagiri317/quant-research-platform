@@ -217,8 +217,13 @@ def _iter_joined_processed_chunks(
                 "research.assembly.sort",
                 sort_index_bytes + sort_index_bytes,
             ):
+                physical_order = (
+                    "timestamp",
+                    *(key for key in dataset_spec.primary_key if key != "timestamp"),
+                )
                 output = chunk.sort_values(
-                    list(dataset_spec.primary_key),
+                    list(physical_order),
+                    kind="mergesort",
                     ignore_index=True,
                 )
             output_bytes = pandas_frame_payload_bytes(output)

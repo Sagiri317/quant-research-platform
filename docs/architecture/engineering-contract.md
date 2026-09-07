@@ -1,39 +1,58 @@
 # 工程合同
 
-本文只保存长期工程不变量；当前 branch 和验证结果来自当前 Git 状态与本轮任务。
+本文只保存长期工程不变量；当前分支和验证结果来自当前 Git 状态与本轮任务。
 
 ## 当前合同
 
-QRP 使用 single active contract。Public machine contract、owner behavior、持久化 grammar 与 dependency direction 定义当前事实；被替换入口直接删除，不保留 alias、shim、parallel reader、parallel implementation 或仅用于证明的 framework。
+QRP 只使用一套活动合同。公开机器合同、责任模块行为、持久化语法与依赖方向定义当前事实；
+被替换的入口直接删除，不保留别名、兼容层、并行读取器、平行实现或仅用于证明的框架。
 
-`pyproject.toml` 定义 runtime/dev/build dependency 与 Python 版本，`environment.yml` 提供同等或更严格的 conda 环境。新增依赖、public API/CLI 或 framework 需要明确批准。
+`pyproject.toml` 定义运行时、开发、构建依赖与 Python 版本，`environment.yml`
+提供同等或更严格的 conda 环境。新增依赖、公开 API/CLI 或框架需要明确批准。
 
 ## 资源生命周期
 
-每个顶层 resource-bearing operation 在首次数据规模 read/decode/allocation 前只 admission 一次：host-local data-scale lock 保护一个 process-local active root；该 root 只捕获一次 OS available0，并固定 operation planning target（默认约为 `available0 * 70%`，与有效显式 cap 取较小者）和 root identity。70% 与派生出的 `memory_budget_bytes` 都是软规划参考，不是进程 RSS、真实 allocation 或逻辑 working set 的数学硬线。Lease ledger 用整数 bytes 只表达 owner 的保守粗估，以支持相加、转移和有界批次规划，不承诺字节级精确。只有粗估表明无法维持相对安全或 explicit cap 明确限制时才稳定失败；轻微估算/观测 overshoot 不在 70% 的精确点自动判死。Lease ledger 与 lexical lease state 随 owner 生命周期可变；borrowed baseline、native workspace 与验收 RSS 不重复计费。
+每个顶层、承载资源的操作在首次数据规模读取/解码/分配前只准入一次：主机本地数据规模锁
+保护进程内唯一的活动根；该根只捕获一次操作系统可用内存 available0，并固定操作规划目标
+（默认约为 `available0 * 70%`，与有效显式上限取较小者）和根标识。70% 与派生出的
+`memory_budget_bytes` 都是软规划参考，不是进程 RSS、真实分配或逻辑工作集的数学硬线。
+租约账本以整数 bytes 表达各责任模块的保守粗估，以支持相加、转移和有界批次规划，
+不承诺字节级精确。只有粗估表明无法维持相对安全或显式上限明确限制时才稳定失败；
+轻微估算或观测超出不会在 70% 的精确点自动判死。租约账本与词法作用域内的租约状态
+随责任模块生命周期变化；借用基线、原生工作区与验收 RSS 不重复计费。
 
-Nested owner 继承相同 root identity；different-policy nesting/parallel root fail closed。Lease 以 lexical owner context 管理，跨 producer/consumer 边界转移同一 logical owner，不重复计费；owner context 退出时释放资源。主要 workflow stage 按顺序执行，前一 stage 释放 transient state 后，后一 stage 复用同一个 operation budget；只为当前 stage 中真正同时存活的 allocation 准入。所有数据规模 allocation 在保守准入后进行并保持有界，聚合持久化输出可以超过 RAM budget 而 exact 完成。
+嵌套责任模块继承相同的根标识；不同策略的嵌套或并行资源根必须明确拒绝。
+租约由责任模块的词法上下文管理，在生产者/消费者边界转移同一逻辑归属，不重复计费；
+责任上下文退出时释放资源。主要工作流阶段按顺序执行，前一阶段释放临时状态后，
+后一阶段复用同一个操作预算；只为当前阶段中真正同时存活的分配准入。
+所有数据规模分配都在保守准入后发生并保持有界，聚合持久化输出可以超过 RAM 预算而精确完成。
 
-全部 raw、decoded、Arrow/Pandas、copy/index/sort/join、reducer/planner/model/native、output/writer/readback/spill/overlap state 共用该有界 budget；新 payload/workspace/output 只有一个 logical owner，准入不足则按 owner 语义 shrink、release、spill 或 fail closed。不建立 universal deep-size framework。
+全部原始、解码、Arrow/Pandas、复制/索引/排序/连接、归约/规划/模型/原生计算、
+输出/写入/读回/溢写/重叠状态共用该有界预算；新载荷、工作区或输出只有一个逻辑归属，
+准入不足时按责任模块语义缩小、释放、溢写或明确失败。不建立通用深度大小计算框架。
 
-约 80% 是粗粒度的工程安全包络，不是逐字节硬线；小幅、稳定且可解释的 overshoot 由验收记录为风险供用户判断，不建立第二套分段阈值或更高的 magic threshold。仓库外 fresh-child 的 RSS/CPU/I/O 只用于校准和验收，不能成为 runtime 规划权威。
+约 80% 是粗粒度工程安全包络，不是逐字节硬线；小幅、稳定且可解释的超出应由验收记录为风险，
+供用户判断，不建立第二套分段阈值或更高的魔法阈值。仓库外全新子进程的 RSS/CPU/I/O
+只用于校准和验收，不能成为运行时规划权威。
 
-## Owner、identity 与发布
+## 责任模块、标识与发布
 
-- Storage 拥有唯一 physical traversal/session、持久化 schema/dtype/PK、fingerprint、exact compare 和 staged publication。
-- Fingerprint 只 quick reject；只有 quiescent exact compare 可以产生 `MATCH`。
-- Research/Compute/Reports 构建结果或内容，不写文件；Storage 与 Artifacts 是物理写入 owner。
-- Publication 必须 atomic 并保留 old-good；partial-run truth 不得被成功摘要覆盖。
-- Cleanup 只处理 owner-qualified resources；active `BaseException` primary 不被 metrics、cleanup 或 secondary failure 覆盖。
-- QRP-owned JSON 使用 strict UTF-8、top-level object、exact `schema_id`、duplicate-key/nonfinite rejection 与 deterministic write。
+- 存储层拥有唯一物理遍历/会话、持久化结构/dtype/PK、指纹、精确比较及暂存发布职责。
+- 指纹只作快速拒绝；只有静止状态下的精确比较可以产生 `MATCH`。
+- 研究、计算和报告层构建结果或内容，不写文件；存储层与产物层负责物理写入。
+- 发布必须原子完成并保留原有已验证产物；部分运行的真实状态不得被成功摘要覆盖。
+- 清理只处理责任归属明确的资源；活动的主 `BaseException` 不得被指标、清理或次级失败覆盖。
+- QRP 自有 JSON 使用严格 UTF-8、顶层对象、精确 `schema_id`，拒绝重复键和非有限数，并确定性写入。
 
 ## 私有数据安全
 
-LOCAL_ONLY 与 REVIEW_SAFE 分离。REVIEW_SAFE 内容不得包含私有行、secret、vendor raw marker、本地绝对路径、股票代码样本或 raw traceback。
+LOCAL_ONLY 与 REVIEW_SAFE 分离。REVIEW_SAFE 内容不得包含私有行、秘密、供应商原始标记、
+本地绝对路径、股票代码样本或原始异常回溯。
 
 ## 直接验证
 
-状态只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`，并绑定实际命令、范围与结果。环境名从 `environment.yml` 动态读取。
+状态只使用 `PASS`、`FAIL`、`NOT_RUN`、`BLOCKED`，并绑定实际命令、范围与结果。
+环境名从 `environment.yml` 动态读取。
 
 ```text
 git diff --check
@@ -44,4 +63,6 @@ conda run -n <env> python -m build --no-isolation --sdist --outdir <sdist-run>
 conda run -n <env> python -m build --no-isolation --wheel --outdir <wheel-run>
 ```
 
-Package acceptance 从仓库外 clean export 开始：先构建 fresh sdist，再从解出的 sdist 构建 wheel，在仓库外 isolated environment 安装，最后从 empty CWD 做 `qrp`、`qrp-private`、API 与代表性 workflow smoke。editable checkout 或直接从源码路径导入不算通过。
+包验收从仓库外干净导出开始：先构建全新 sdist，再从解出的 sdist 构建 wheel，
+在仓库外隔离环境安装，最后从空工作目录运行 `qrp`、`qrp-private`、API 与代表性工作流冒烟检查。
+可编辑安装的检出目录或直接从源码路径导入不算通过。

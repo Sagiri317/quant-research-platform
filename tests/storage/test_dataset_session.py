@@ -652,6 +652,23 @@ def test_dataset_global_nullable_integer_plan_is_chunk_order_independent(
     assert manifests[0]["logical_dtype_hash"] == manifests[1]["logical_dtype_hash"]
 
 
+def test_chunked_reader_preserves_declared_object_dtype_like_materialized(
+    tmp_path: Path,
+) -> None:
+    from quant_research_platform.storage.datasets import DatasetReadMode
+
+    frame = make_default_dataset_frame()
+    frame["value"] = pd.Series(range(len(frame)), dtype=object)
+    root = make_dataset_artifact_root(tmp_path, "object_numeric")
+    write_dataset(root, frame, spec=make_processed_dataset_spec("object_numeric"))
+    materialized = read_dataset(root)
+    chunked = pd.concat(
+        list(read_dataset(root, mode=DatasetReadMode.CHUNKED)), ignore_index=True
+    )
+    assert materialized["value"].dtype == object
+    pd.testing.assert_frame_equal(chunked, materialized)
+
+
 def test_all_empty_logical_dtype_plan_is_chunk_order_independent(
     tmp_path: Path,
 ) -> None:

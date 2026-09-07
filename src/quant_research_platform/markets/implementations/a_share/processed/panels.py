@@ -38,24 +38,25 @@ def compute_market_panel(
     industry_versions: pd.DataFrame | None = None,
     no_limit_history: pd.DataFrame | None = None,
     special_treatment_history: pd.DataFrame | None = None,
+    session_window: pd.DatetimeIndex | None = None,
+    asset_market_types: pd.Series | None = None,
+    suspension_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build lifecycle × open-session facts with suspension rows retained."""
 
     bars = _canonical_bars(market_bars)
-    if bars.empty:
+    if bars.empty and asset_market_types is None:
         return bars
     sessions = unified_trading_sessions(trading_calendar)
-    if sessions.empty:
-        raise ValueError("a_share_trading_calendar_empty")
-    holiday_fill_dates = bars.loc[bars["filling_flag"].eq(2), "timestamp"]
-    if bool(holiday_fill_dates.isin(sessions).any()):
-        raise ValueError("holiday_fill_conflicts_with_open_session")
+    validate_market_bar_calendar(bars, sessions)
     bars = bars.loc[bars["filling_flag"].ne(2)].copy()
-    if bars.empty:
+    if bars.empty and asset_market_types is None:
         return bars
-    session_window = sessions[
-        (sessions >= bars["timestamp"].min()) & (sessions <= bars["timestamp"].max())
-    ]
+    if session_window is None:
+        session_window = sessions[
+            (sessions >= bars["timestamp"].min())
+            & (sessions <= bars["timestamp"].max())
+        ]
     if session_window.empty:
         return bars.iloc[0:0].copy()
     stocks = _canonical_stock_master(stock_master)
@@ -64,6 +65,7 @@ def compute_market_panel(
         bars,
         stocks,
         session_window,
+        asset_market_types=asset_market_types,
     )
     if dense.empty:
         return dense
@@ -76,7 +78,10 @@ def compute_market_panel(
     )
     dense = _apply_no_limit_exceptions(dense, no_limit_history)
     dense = _apply_special_treatment(dense, special_treatment_history)
+    if suspension_history is not None and not suspension_history.empty:
+        dense = pd.concat([suspension_history, dense], ignore_index=True)
     dense = _apply_suspension_semantics(dense)
+    dense = dense.loc[dense["timestamp"].isin(session_window)].copy()
     delisting_sentinel = pd.Timestamp.max.normalize()
     dense["delisting_date"] = dense["delisting_date"].where(
         dense["delisting_date"] != delisting_sentinel
@@ -89,8 +94,18 @@ def compute_market_panel(
         market_type_column="market_type",
     )
     return dense.sort_values(
-        ["market_id", "asset_id", "timestamp"], kind="mergesort"
+        ["timestamp", "market_id", "asset_id"], kind="mergesort"
     ).reset_index(drop=True)
+
+
+def validate_market_bar_calendar(
+    bars: pd.DataFrame, sessions: pd.DatetimeIndex
+) -> None:
+    if sessions.empty:
+        raise ValueError("a_share_trading_calendar_empty")
+    holiday_fill_dates = bars.loc[bars["filling_flag"].eq(2), "timestamp"]
+    if bool(holiday_fill_dates.isin(sessions).any()):
+        raise ValueError("holiday_fill_conflicts_with_open_session")
 
 
 def _canonical_bars(frame: pd.DataFrame) -> pd.DataFrame:
@@ -241,8 +256,14 @@ def _dense_lifecycle_panel(
     bars: pd.DataFrame,
     stocks: pd.DataFrame,
     sessions: pd.DatetimeIndex,
+    *,
+    asset_market_types: pd.Series | None = None,
 ) -> pd.DataFrame:
-    assets = tuple(sorted(set(bars["asset_id"])))
+    if asset_market_types is None:
+        asset_market_types = bars.drop_duplicates("asset_id").set_index("asset_id")[
+            "market_type"
+        ]
+    assets = tuple(sorted(asset_market_types.index))
     rows: list[pd.DataFrame] = []
     for asset_id in assets:
         stock = stocks.loc[stocks["asset_id"].eq(asset_id)]
@@ -262,7 +283,7 @@ def _dense_lifecycle_panel(
             continue
         base = pd.DataFrame({"asset_id": asset_id, "timestamp": dates})
         raw = bars.loc[bars["asset_id"].eq(asset_id)]
-        base["market_type"] = raw["market_type"].iloc[0]
+        base["market_type"] = asset_market_types.loc[asset_id]
         base = base.merge(
             raw.drop(
                 columns=[
@@ -795,8 +816,10 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
         free_shares = result.loc[positions, "float_market_cap"].div(
             result.loc[positions, "close"].where(result.loc[positions, "close"].gt(0.0))
         )
-        result.loc[positions, "turnover"] = result.loc[positions, "volume"].div(
-            free_shares.where(free_shares.gt(0.0))
+        result.loc[positions, "turnover"] = (
+            result.loc[positions, "volume"]
+            .div(free_shares.where(free_shares.gt(0.0)))
+            .astype("float64")
         )
         result.loc[positions, "turnover"] = result.loc[positions, "turnover"].where(
             result.loc[positions, "is_trading"], 0.0

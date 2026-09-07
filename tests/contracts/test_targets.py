@@ -1,16 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.targets import (
     PlanDecision,
     ProducerBinding,
     ProducerKind,
+    ResearchRunRecord,
+    ResearchRunTargetResult,
     RunStatus,
     TargetPlan,
     TargetResult,
     TargetSpec,
     TargetStatus,
+    unmeasured_operation_evidence,
 )
 
 
@@ -126,3 +132,41 @@ def test_status_vocabulary_has_no_readiness_or_persisted_stale_state() -> None:
         "BLOCKED",
         "FAILED",
     }
+
+
+def test_research_run_record_requires_real_terminals_and_protocol_request_match() -> (
+    None
+):
+    protocol = {
+        "scenario_id": "scenario",
+        "access_window": "development",
+    }
+    target = ResearchRunTargetResult(
+        target_id="target",
+        producer_kind=ProducerKind.MODEL,
+        status=TargetStatus.BUILT,
+        instance_identity="a" * 64,
+        schema_identity="b" * 64,
+        artifact_root="data/artifacts/market/target",
+    )
+    record = ResearchRunRecord(
+        operation_evidence=unmeasured_operation_evidence("fixture_record"),
+        run_id="run_1",
+        profile_id="profile",
+        scenario_id="scenario",
+        protocol=protocol,
+        protocol_identity=canonical_json_hash(protocol),
+        research_window={
+            "start": "2019-01-01",
+            "end": "2019-12-31",
+            "access": "development",
+        },
+        software_identity="c" * 64,
+        terminal_targets=("target",),
+        target_results=(target,),
+        status=RunStatus.COMPLETE,
+    )
+    with pytest.raises(ValueError, match="research_run_terminal_targets_invalid"):
+        replace(record, terminal_targets=(), target_results=())
+    with pytest.raises(ValueError, match="research_run_protocol_request_mismatch"):
+        replace(record, scenario_id="different")

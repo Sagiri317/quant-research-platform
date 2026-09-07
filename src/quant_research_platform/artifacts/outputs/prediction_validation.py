@@ -14,6 +14,7 @@ from quant_research_platform.artifacts.outputs.common_validation import (
 )
 from quant_research_platform.contracts.models import (
     A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+    CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
     ModelSpec,
     validate_model_metadata_core,
 )
@@ -30,6 +31,8 @@ _MODEL_ARTIFACT_LINEAGE_KEYS = frozenset(
         "model_artifact_id",
         "model_artifact_identity",
         "model_artifact_schema",
+        "quarterly_models",
+        "champion_by_quarter",
     }
 )
 _PREDICTION_METADATA_KEYS = frozenset(
@@ -93,6 +96,8 @@ def validate_model_metadata_shape(metadata: dict[str, object]) -> dict[str, obje
 
 
 def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, object]:
+    if metadata.get("model_artifact_schema") == CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID:
+        return _validate_crypto_lineage(metadata)
     if set(metadata) != _MODEL_ARTIFACT_LINEAGE_KEYS:
         raise ValueError("invalid_model_metadata")
     model_artifact_id = require_metadata_string(
@@ -113,7 +118,77 @@ def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, o
         raise ValueError("invalid_model_metadata")
     if metadata["model_artifact_schema"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID:
         raise ValueError("invalid_model_metadata")
+    models = metadata["quarterly_models"]
+    champions = metadata["champion_by_quarter"]
+    if type(models) is not list or not models or type(champions) is not dict:
+        raise ValueError("invalid_model_metadata")
+    seen = set()
+    families = {}
+    for model in models:
+        if type(model) is not dict or set(model) != {
+            "quarter_id",
+            "family_id",
+            "model_id",
+            "prediction_window",
+        }:
+            raise ValueError("invalid_model_metadata")
+        quarter, family = model["quarter_id"], model["family_id"]
+        if (
+            type(quarter) is not str
+            or str(pd.Period(quarter, freq="Q")) != quarter
+            or (quarter, family) in seen
+        ):
+            raise ValueError("invalid_model_metadata")
+        validate_run_id(family)
+        validate_run_id(model["model_id"])
+        window = model["prediction_window"]
+        if (
+            type(window) is not dict
+            or set(window) != {"start", "end"}
+            or any(
+                str(pd.Period(window[bound], freq="Q")) != quarter
+                for bound in ("start", "end")
+            )
+        ):
+            raise ValueError("invalid_model_metadata")
+        seen.add((quarter, family))
+        families.setdefault(quarter, []).append(family)
+    if (
+        set(champions) != set(families)
+        or any(
+            champions[quarter] not in members for quarter, members in families.items()
+        )
+        or any(
+            members != next(iter(families.values())) for members in families.values()
+        )
+    ):
+        raise ValueError("invalid_model_metadata")
     return metadata
+
+
+def validate_family_prediction_frame(
+    frame: pd.DataFrame, model_metadata: dict[str, object]
+) -> None:
+    """Match every persisted family/config coordinate to frozen model facts."""
+    if frame.empty:
+        return
+    models = {
+        (item["quarter_id"], item["family_id"]): item
+        for item in model_metadata["quarterly_models"]
+    }
+    for (quarter, family), group in frame.groupby(
+        ["quarter_id", "family_id"], sort=False, dropna=False
+    ):
+        model = models.get((quarter, family))
+        if model is None or not group["model_id"].eq(model["model_id"]).all():
+            raise ValueError("prediction_family_model_misaligned")
+        times = pd.to_datetime(group["timestamp"], errors="raise")
+        if (
+            not times.dt.to_period("Q").astype(str).eq(quarter).all()
+            or times.min() < pd.Timestamp(model["prediction_window"]["start"])
+            or times.max() > pd.Timestamp(model["prediction_window"]["end"])
+        ):
+            raise ValueError("prediction_family_window_misaligned")
 
 
 def validate_prediction_output_metadata_shape(
@@ -138,7 +213,7 @@ def validate_prediction_output_metadata_shape(
         require_metadata_string(
             metadata, "train_end", "output_manifest_metadata_invalid"
         )
-    elif metadata["prediction_mode"] != "a_share_oos":
+    elif metadata["prediction_mode"] not in {"a_share_oos", "crypto_oos"}:
         raise ValueError("output_manifest_metadata_invalid")
     if (
         metadata["prediction_mode"] not in PREDICTION_MODES
@@ -226,7 +301,12 @@ def validate_prediction_output_metadata_shape(
                 random_seed=model_metadata["random_seed"],
                 max_train_rows=model_metadata["max_train_rows"],
             )
-        elif model_metadata["model_artifact_id"] != metadata["model_id"]:
+        elif (
+            model_metadata["model_id"]
+            if model_metadata["model_artifact_schema"]
+            == CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID
+            else model_metadata["model_artifact_id"]
+        ) != metadata["model_id"]:
             raise ValueError("model_metadata_inconsistent")
         spec = PredictionSpec(
             prediction_id=metadata["prediction_id"],
@@ -321,7 +401,7 @@ def validate_prediction_metadata_shape(
     require_metadata_string(metadata, "test_start", "invalid_prediction_metadata")
     if metadata["train_end"] is not None:
         require_metadata_string(metadata, "train_end", "invalid_prediction_metadata")
-    elif metadata["prediction_mode"] != "a_share_oos":
+    elif metadata["prediction_mode"] not in {"a_share_oos", "crypto_oos"}:
         raise ValueError("invalid_prediction_metadata")
     if metadata["requested_test_end"] is not None:
         require_metadata_string(
@@ -371,7 +451,12 @@ def validate_model_metadata_consistency(
     spec: PredictionSpec,
 ) -> None:
     if "model_artifact_id" in metadata:
-        if metadata["model_artifact_id"] != spec.model_id:
+        expected_model = (
+            metadata["model_id"]
+            if metadata["model_artifact_schema"] == CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID
+            else metadata["model_artifact_id"]
+        )
+        if expected_model != spec.model_id:
             raise ValueError("model_metadata_inconsistent")
         return
     input_count = require_non_negative_metadata_int(
@@ -511,7 +596,13 @@ def validate_model_prediction_metadata_consistency(
     prediction_metadata: dict[str, object],
 ) -> None:
     if "model_artifact_id" in model_metadata:
-        if prediction_metadata["prediction_mode"] != "a_share_oos":
+        expected_mode = (
+            "crypto_oos"
+            if model_metadata["model_artifact_schema"]
+            == CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID
+            else "a_share_oos"
+        )
+        if prediction_metadata["prediction_mode"] != expected_mode:
             raise ValueError("prediction_metadata_inconsistent")
         return
     if model_metadata["input_columns"] != prediction_metadata["input_columns"]:
@@ -532,3 +623,68 @@ def model_metadata_with_effective_prediction_end(
         **model_metadata,
         "oos_end": prediction_metadata["effective_test_end"],
     }
+
+
+def _validate_crypto_lineage(metadata):
+    if set(metadata) != {
+        "model_artifact_id",
+        "model_artifact_identity",
+        "model_artifact_schema",
+        "model_id",
+        "asset_ids",
+        "fold_models",
+    }:
+        raise ValueError("invalid_model_metadata")
+    validate_run_id(metadata["model_artifact_id"])
+    validate_run_id(metadata["model_id"])
+    identity = metadata["model_artifact_identity"]
+    if (
+        type(identity) is not str
+        or len(identity) != 64
+        or any(char not in "0123456789abcdef" for char in identity)
+    ):
+        raise ValueError("invalid_model_metadata")
+    require_metadata_string_list(metadata, "asset_ids", "invalid_model_metadata")
+    folds = metadata["fold_models"]
+    if type(folds) is not list or not folds:
+        raise ValueError("invalid_model_metadata")
+    seen = set()
+    previous = None
+    for fold in folds:
+        if type(fold) is not dict or set(fold) != {
+            "fold_id",
+            "prediction_window",
+            "training_asset_ids",
+            "evaluation_asset_ids",
+        }:
+            raise ValueError("invalid_model_metadata")
+        validate_run_id(fold["fold_id"])
+        if fold["fold_id"] in seen:
+            raise ValueError("invalid_model_metadata")
+        seen.add(fold["fold_id"])
+        start, end = (
+            pd.Timestamp(fold["prediction_window"][key]) for key in ("start", "end")
+        )
+        if start > end or (previous is not None and start <= previous):
+            raise ValueError("invalid_model_metadata")
+        previous = end
+        for key in ("training_asset_ids", "evaluation_asset_ids"):
+            require_metadata_string_list(
+                fold, key, "invalid_model_metadata", allow_empty=True
+            )
+    return metadata
+
+
+def validate_crypto_prediction_frame(frame, model_metadata):
+    if frame.empty:
+        return
+    times = pd.to_datetime(frame["timestamp"], errors="raise")
+    valid = pd.Series(False, index=frame.index)
+    for fold in model_metadata["fold_models"]:
+        scope = fold["evaluation_asset_ids"] or model_metadata["asset_ids"]
+        valid |= times.between(
+            pd.Timestamp(fold["prediction_window"]["start"]),
+            pd.Timestamp(fold["prediction_window"]["end"]),
+        ) & frame.asset_id.isin(scope)
+    if not valid.all():
+        raise ValueError("crypto_prediction_fold_scope_misaligned")

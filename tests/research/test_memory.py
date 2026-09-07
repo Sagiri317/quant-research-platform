@@ -7,8 +7,8 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-import quant_research_platform.research._memory as memory_owner
-from quant_research_platform.research._memory import (
+import quant_research_platform.runtime.dataframes as memory_owner
+from quant_research_platform.runtime.dataframes import (
     iter_complete_session_frames,
     iter_complete_time_sized_frames,
 )

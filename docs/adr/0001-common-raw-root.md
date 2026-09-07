@@ -1,43 +1,35 @@
-# ADR 0001: common raw root with source-owned namespaces
+# ADR 0001：共用原始数据根目录与来源专属命名空间
 
-## Context
+## 背景
 
-Provider exports were previously addressed as separate caller roots. That
-layout could not express reference data alongside CSMAR and Binance data.
+此前，供应商导出由调用方通过各自独立的根目录寻址。
+这种布局无法同时表达与 CSMAR、Binance 数据并存的参考数据。
 
-## Decision
+## 决定
 
-Use `data/raw` as the common raw root. Each interim source receives only its
-source-owned namespace, `data/raw/<source_id>`, and recursively validates the
-requested provider files from their observed filename and header. No alternate
-root detection or second raw truth is part of the interface.
+使用 `data/raw` 作为共用原始数据根目录。每个中间层来源只接收其专属命名空间
+`data/raw/<source_id>`，并根据实际文件名和表头递归校验请求的供应商文件。
+接口不包含备用根目录探测或第二份原始数据真值。
 
-Retain each exact byte sequence once during canonical staging and record duplicate
-source provenance in the retained file's sidecar. Keep unknown or unproven files
-under a named raw-only family when their table identity is proven; reserve
-`unclassified` for files whose identity cannot be established without guessing.
-Do not infer a contract from a folder name.
+规范暂存时，每组完全相同的字节只保留一次，并在保留文件的附属元数据中记录重复
+来源。当表标识已获证明时，将尚不满足使用要求的文件保留在具名的仅原始数据家族下；
+`unclassified` 则仅用于无法在不猜测的情况下确定表标识的文件。
+不得从文件夹名称推断合同。
 
-The raw cutover uses same-parent owner-qualified staging and old-good names. A
-readback failure restores the old names. Residual old-good data is evidence for
-manual recovery, not an input selected by production code.
+原始数据切换采用同父目录、责任归属明确的暂存和原有已验证产物名称。
+读回失败时恢复旧名称。残留的原有已验证数据是人工恢复证据，不是生产代码会选择的输入。
 
-The standalone A-share fee CSV remains the one fee reference source. Its sidecar
-retains exact checksum, size, row-count, and field facts; the designated input is
-accepted for the current QRP research purpose and no normalized raw duplicate is
-created here.
+独立的 A 股费率 CSV 继续作为唯一费率参考来源。其附属元数据保留精确校验和、
+大小、行数和字段事实；该指定输入已被接受用于当前 QRP 研究目的，
+此处不创建规范化的原始数据副本。
 
-## Status
+## 状态
 
-Accepted for the current local raw layout.
+已接受，用于当前本地原始数据布局。
 
-## Consequences
+## 影响
 
-- Source identity and materialization receive one common root and use the same
-  source-owned namespace.
-- Table families retain separate owners, and unproven families cannot silently
-  enter research materialization.
-- Sidecars preserve checksum and quality facts without becoming a second raw
-  manifest or registry.
-- New raw acquisition must be staged and read back before replacing the active
-  root.
+- 来源标识计算和物化接收同一个共用根目录，并使用相同的来源专属命名空间。
+- 各表家族保留各自责任模块；未经证明的家族不得静默进入研究物化。
+- 附属元数据保留校验和及质量事实，但不成为第二份原始清单或注册表。
+- 新原始数据必须先暂存并读回核验，之后才能替换活动根目录。

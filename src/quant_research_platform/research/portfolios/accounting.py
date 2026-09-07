@@ -11,11 +11,22 @@ import pandas as pd
 from scipy.stats import t as student_t
 
 from quant_research_platform.contracts.portfolios import (
+    CONTINUOUS_EXECUTION_COLUMNS,
     PORTFOLIO_BLOCK_REASONS,
+    PORTFOLIO_CASH_ASSET_ID,
+    PORTFOLIO_LEDGER_COST_COLUMNS,
+    ExecutedTrade,
     ExecutionAssumptions,
+    FundingEvent,
+    PortfolioCapital,
+    PortfolioCashFlow,
+    PortfolioDiagnostic,
+    PortfolioLedgerBatch,
+    PortfolioTargetBlocked,
+    PortfolioValuation,
     TradeCostComponents,
 )
-from quant_research_platform.research.portfolios.schedules import rebalance_dates
+from quant_research_platform.research.portfolios.schedules import is_rebalance_session
 
 _LEDGER_COLUMNS = (
     "execution_date",
@@ -31,13 +42,300 @@ _LEDGER_COLUMNS = (
     "slippage_cost",
     "impact_cost",
 )
-_COST_COLUMNS = (
-    "commission_cost",
-    "stamp_duty_cost",
-    "transfer_fee_cost",
-    "slippage_cost",
-    "impact_cost",
-)
+
+
+def continuous_ledger_batch(
+    frame: pd.DataFrame, sequence: int, *, end_timestamp: pd.Timestamp
+) -> PortfolioLedgerBatch:
+    """Project the continuous execution transition into canonical economic facts."""
+    if tuple(frame.columns) != CONTINUOUS_EXECUTION_COLUMNS:
+        raise ValueError("portfolio_ledger_schema_invalid")
+    if frame.map(lambda value: isinstance(value, (bool, np.bool_))).any().any():
+        raise ValueError("portfolio_ledger_numeric_invalid")
+    trades: list[ExecutedTrade] = []
+    cashflows: list[PortfolioCashFlow] = []
+    valuations: list[PortfolioValuation] = []
+    diagnostics: list[PortfolioDiagnostic] = []
+    economic_columns = {
+        "decision_timestamp",
+        "execution_date",
+        "asset_id",
+        "pre_trade_notional",
+        "executed_delta_notional",
+        "post_trade_notional",
+        "end_notional",
+        "holding_return",
+        *PORTFOLIO_LEDGER_COST_COLUMNS,
+    }
+    for row in frame.to_dict("records"):
+        asset = str(row["asset_id"])
+        timestamp = int(pd.Timestamp(row["execution_date"]).value)
+        fill_id = None
+        delta = float(row["executed_delta_notional"])
+        if asset != PORTFOLIO_CASH_ASSET_ID and delta:
+            fill_id = f"{sequence}:{asset}"
+            trades.append(
+                ExecutedTrade(fill_id, fill_id, timestamp, asset, delta, delta)
+            )
+            cashflows.append(
+                PortfolioCashFlow(
+                    f"{fill_id}:principal",
+                    timestamp,
+                    asset,
+                    fill_id,
+                    "principal",
+                    -delta,
+                )
+            )
+        for cost in PORTFOLIO_LEDGER_COST_COLUMNS:
+            amount = float(row[cost])
+            if amount:
+                if fill_id is None:
+                    raise ValueError("portfolio_ledger_phantom_cost_invalid")
+                cashflows.append(
+                    PortfolioCashFlow(
+                        f"{fill_id}:{cost}",
+                        timestamp,
+                        asset,
+                        fill_id,
+                        cost,
+                        -amount,
+                    )
+                )
+        for phase, column in (
+            ("before", "pre_trade_notional"),
+            ("after", "post_trade_notional"),
+            ("end", "end_notional"),
+        ):
+            value = float(row[column])
+            quantity = float(row["post_trade_notional"]) if phase == "end" else value
+            mark = 1.0 + float(row["holding_return"]) if phase == "end" else 1.0
+            valuations.append(
+                PortfolioValuation(
+                    int(end_timestamp.value) if phase == "end" else timestamp,
+                    asset,
+                    phase,
+                    quantity,
+                    value,
+                    mark,
+                )
+            )
+        diagnostics.append(
+            PortfolioDiagnostic(
+                asset,
+                fill_id,
+                "decision_timestamp",
+                text=pd.Timestamp(row["decision_timestamp"]).isoformat(),
+            )
+        )
+        for name, value in row.items():
+            if name in economic_columns or pd.isna(value):
+                continue
+            diagnostics.append(
+                PortfolioDiagnostic(
+                    asset,
+                    fill_id,
+                    name,
+                    number=float(value) if not isinstance(value, str) else None,
+                    text=value if isinstance(value, str) else None,
+                )
+            )
+    return PortfolioLedgerBatch(
+        sequence, tuple(trades), tuple(cashflows), tuple(valuations), tuple(diagnostics)
+    )
+
+
+class PortfolioEconomics:
+    """Bounded linear-perpetual state shared by maker and taker execution."""
+
+    def __init__(
+        self,
+        capital: PortfolioCapital,
+        asset_id: str,
+        emit: Callable[[PortfolioLedgerBatch], None] | None,
+    ) -> None:
+        if capital.valuation_method != "linear_perpetual" or not asset_id:
+            raise ValueError("portfolio_valuation_method_invalid")
+        self.capital = capital
+        self.asset_id = asset_id
+        self.emit = emit
+        self.quantity = 0.0
+        self.cost_basis = 0.0
+        self.cash = capital.initial_capital
+        self.cost_cashflows = 0.0
+        self.funding_cashflows = 0.0
+        self.sequence = 0
+        self.fill_count = 0
+        self.last_timestamp = 0
+        self.last_mark: float | None = None
+
+    def _values(
+        self, timestamp: int, phase: str, mark: float | None
+    ) -> tuple[PortfolioValuation, ...]:
+        cash = PortfolioValuation(
+            timestamp, PORTFOLIO_CASH_ASSET_ID, phase, self.cash, self.cash
+        )
+        if mark is None:
+            return (cash,)
+        return (
+            PortfolioValuation(
+                timestamp,
+                self.asset_id,
+                phase,
+                self.quantity,
+                self.quantity * mark - self.cost_basis,
+                mark,
+                self.cost_basis,
+            ),
+            cash,
+        )
+
+    def fill(
+        self,
+        *,
+        timestamp_ns: int,
+        order_id: str,
+        quantity: float,
+        price: float,
+        mark_price: float,
+        fee: float,
+    ) -> str:
+        if (
+            not np.isfinite([quantity, price, mark_price, fee]).all()
+            or not quantity
+            or min(price, mark_price) <= 0
+        ):
+            raise ValueError("portfolio_execution_fill_invalid")
+        before = self._values(timestamp_ns, "before", mark_price)
+        self.fill_count += 1
+        fill_id = f"fill:{self.fill_count}"
+        trade = ExecutedTrade(
+            fill_id, order_id, timestamp_ns, self.asset_id, quantity, quantity * price
+        )
+        realized = 0.0
+        if self.quantity and self.quantity * quantity < 0:
+            closed = min(abs(self.quantity), abs(quantity))
+            realized = (
+                closed
+                * np.sign(self.quantity)
+                * (price - self.cost_basis / self.quantity)
+            )
+            remaining = self.quantity + quantity
+            self.cost_basis = remaining * (
+                self.cost_basis / self.quantity
+                if remaining * self.quantity > 0
+                else price
+            )
+        else:
+            self.cost_basis += quantity * price
+        self.quantity += quantity
+        self.cash += realized - fee
+        self.cost_cashflows -= fee
+        cashflows = (
+            PortfolioCashFlow(
+                f"{fill_id}:settlement",
+                timestamp_ns,
+                self.asset_id,
+                fill_id,
+                "realized_pnl",
+                float(realized),
+            ),
+            PortfolioCashFlow(
+                f"{fill_id}:fee",
+                timestamp_ns,
+                self.asset_id,
+                fill_id,
+                "commission_cost",
+                -fee,
+            ),
+        )
+        self._emit((trade,), cashflows, before, timestamp_ns, mark_price)
+        return fill_id
+
+    def funding(self, event: FundingEvent) -> None:
+        if self.quantity == 0:
+            return
+        if event.rate is None or event.mark_price is None:
+            raise PortfolioTargetBlocked("portfolio_required_funding_missing")
+        before = self._values(event.timestamp_ns, "before", event.mark_price)
+        amount = -self.quantity * event.mark_price * event.rate
+        self.cash += amount
+        self.funding_cashflows += amount
+        self._emit(
+            (),
+            (
+                PortfolioCashFlow(
+                    f"funding:{event.timestamp_ns}",
+                    event.timestamp_ns,
+                    self.asset_id,
+                    None,
+                    "funding",
+                    amount,
+                ),
+            ),
+            before,
+            event.timestamp_ns,
+            event.mark_price,
+        )
+
+    def mark(
+        self,
+        timestamp_ns: int,
+        mark_price: float | None,
+        *,
+        diagnostics: tuple[PortfolioDiagnostic, ...] = (),
+    ) -> dict[str, float]:
+        if (mark_price is None and self.quantity != 0.0) or (
+            mark_price is not None and (not np.isfinite(mark_price) or mark_price <= 0)
+        ):
+            raise ValueError("portfolio_valuation_mark_invalid")
+        before = self._values(timestamp_ns, "before", mark_price)
+        self._emit((), (), before, timestamp_ns, mark_price, diagnostics)
+        nav = sum(row.value for row in before)
+        net = nav - self.capital.initial_capital
+        return {
+            "gross_pnl": net - self.cost_cashflows - self.funding_cashflows,
+            "net_pnl": net,
+            "nav": nav,
+            "capital_return": net / self.capital.initial_capital,
+            "fees": -self.cost_cashflows,
+            "funding": self.funding_cashflows,
+        }
+
+    def diagnostic(self, fill: dict[str, object]) -> None:
+        fill_id = str(fill["fill_id"])
+        diagnostics = tuple(
+            PortfolioDiagnostic(
+                self.asset_id,
+                fill_id,
+                name,
+                number=float(value) if type(value) in {int, float} else None,
+                text=value if isinstance(value, str) else None,
+            )
+            for name, value in fill.items()
+            if name not in {"fill_id", "fill_price", "fill_qty", "notional", "fee"}
+            and (value is None or type(value) in {int, float, str})
+        )
+        before = self._values(self.last_timestamp, "before", self.last_mark)
+        self._emit((), (), before, self.last_timestamp, self.last_mark, diagnostics)
+
+    def _emit(self, trades, cashflows, before, timestamp, mark, diagnostics=()) -> None:
+        batch = PortfolioLedgerBatch(
+            self.sequence,
+            trades,
+            cashflows,
+            (
+                *before,
+                *self._values(timestamp, "after", mark),
+                *self._values(timestamp, "end", mark),
+            ),
+            diagnostics,
+        )
+        self.sequence += 1
+        self.last_timestamp = timestamp
+        self.last_mark = mark
+        if self.emit is not None:
+            self.emit(batch)
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,7 +380,7 @@ class ExecutionAccounting:
                 "target_notional",
                 "executed_delta_notional",
                 "post_trade_notional",
-                *_COST_COLUMNS,
+                *PORTFOLIO_LEDGER_COST_COLUMNS,
             ),
         ]
         if (
@@ -108,7 +406,7 @@ class ExecutionAccounting:
             .any()
         ):
             raise ValueError("execution_ledger_notional_invalid")
-        if (numeric.loc[:, list(_COST_COLUMNS)] < 0.0).any().any():
+        if (numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)] < 0.0).any().any():
             raise ValueError("execution_ledger_cost_invalid")
         nav_before = _finite_positive(self._nav_before, "execution_nav_invalid")
         tolerance = _scaled_tolerance(nav_before)
@@ -121,7 +419,8 @@ class ExecutionAccounting:
         ).any() or (executed.abs() > desired.abs() + tolerance).any():
             raise ValueError("execution_ledger_direction_invalid")
         if (
-            numeric.loc[:, list(_COST_COLUMNS)].gt(0.0).any(axis=1) & executed.eq(0.0)
+            numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].gt(0.0).any(axis=1)
+            & executed.eq(0.0)
         ).any():
             raise ValueError("execution_ledger_phantom_cost_invalid")
         if not np.allclose(
@@ -139,7 +438,9 @@ class ExecutionAccounting:
             raise ValueError("execution_ledger_reason_invalid")
         pre_cash = _finite_nonnegative(self._pre_trade_cash, "execution_cash_invalid")
         post_cash = _finite_nonnegative(self._post_trade_cash, "execution_cash_invalid")
-        total_cost = float(numeric.loc[:, list(_COST_COLUMNS)].sum().sum())
+        total_cost = float(
+            numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum()
+        )
         nav_after = float(numeric["post_trade_notional"].sum() + post_cash)
         if not np.isclose(
             numeric["pre_trade_notional"].sum() + pre_cash,
@@ -228,7 +529,9 @@ class ExecutionAccounting:
 
     @property
     def total_cost(self) -> float:
-        return float(self._asset_ledger.loc[:, list(_COST_COLUMNS)].sum().sum())
+        return float(
+            self._asset_ledger.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum()
+        )
 
     @property
     def target_turnover(self) -> float:
@@ -266,7 +569,6 @@ class ExecutionAccounting:
 class AlphaCalibration:
     slope: float
     intercept: float
-    expected_alpha: pd.Series
     slope_standard_error: float
     slope_t_statistic: float
     slope_pvalue: float
@@ -279,12 +581,31 @@ class AlphaCalibration:
     benchmark_only: bool
 
 
+def alpha_calibration_intervals(
+    sessions: pd.DatetimeIndex, schedule: str
+) -> pd.DataFrame:
+    """Pair adjacent planned execution opens using the actual trading calendar."""
+    positions = [
+        index
+        for index in range(len(sessions) - 1)
+        if is_rebalance_session(sessions[index], sessions[index + 1], schedule)
+    ]
+    return pd.DataFrame(
+        {
+            "timestamp": sessions[positions[:-1]],
+            "entry_at": sessions[np.asarray(positions[:-1], dtype=int) + 1],
+            "available_at": sessions[np.asarray(positions[1:], dtype=int) + 1],
+        }
+    )
+
+
 def calibrate_expected_alpha(
     frame: pd.DataFrame,
     *,
     alpha_column: str = "alpha_score",
-    return_column: str = "forward_return_1d",
-    schedule: str = "weekly-last-trading-day",
+    return_column: str = "holding_return",
+    as_of: pd.Timestamp,
+    scheduled_intervals: pd.DataFrame,
     minimum_coverage: float = 0.8,
     minimum_valid_dates: int = 6,
 ) -> AlphaCalibration:
@@ -302,46 +623,48 @@ def calibrate_expected_alpha(
     ):
         raise ValueError("alpha_calibration_configuration_invalid")
     dates = pd.to_datetime(frame["timestamp"], errors="raise").dt.normalize()
-    scheduled = pd.DatetimeIndex(dates.drop_duplicates()).sort_values()
-    if schedule not in {
-        "daily",
-        "weekly-last-trading-day",
-        "monthly-last-trading-day",
+    cutoff = pd.Timestamp(as_of).normalize()
+    if pd.isna(cutoff) or set(scheduled_intervals) != {
+        "timestamp",
+        "entry_at",
+        "available_at",
     }:
         raise ValueError("alpha_calibration_schedule_invalid")
-    scheduled = rebalance_dates(scheduled, schedule)
-    if not scheduled.empty:
-        scheduled = scheduled[scheduled >= scheduled.max() - pd.DateOffset(months=12)]
+    intervals = scheduled_intervals.apply(pd.to_datetime, errors="raise")
+    if (
+        intervals.isna().any().any()
+        or intervals.timestamp.duplicated().any()
+        or not (
+            intervals.timestamp.lt(intervals.entry_at)
+            & intervals.entry_at.lt(intervals.available_at)
+        ).all()
+    ):
+        raise ValueError("alpha_calibration_schedule_invalid")
+    scheduled = pd.DatetimeIndex(
+        intervals.loc[
+            intervals.timestamp.ge(cutoff - pd.DateOffset(months=12))
+            & intervals.available_at.le(cutoff),
+            "timestamp",
+        ]
+    )
     alpha = pd.to_numeric(frame[alpha_column], errors="raise").astype("float64")
     returns = pd.to_numeric(frame[return_column], errors="raise").astype("float64")
     valid = alpha.notna() & returns.notna() & np.isfinite(alpha) & np.isfinite(returns)
     valid_dates = dates.loc[valid].isin(scheduled)
     date_count = 0 if scheduled.empty else int(dates.loc[valid & valid_dates].nunique())
-    enough_coverage = date_count >= minimum_valid_dates and (
-        date_count / max(1, len(scheduled)) >= minimum_coverage
-    )
+    coverage = date_count / max(1, len(scheduled))
+    enough_coverage = date_count >= minimum_valid_dates and coverage >= minimum_coverage
     if not enough_coverage:
-        empty_inference = (
-            0.0,
-            0.0,
-            1.0,
-            0.0,
-            0.0,
-            0.0,
-            0.0,
-            date_count / max(1, len(scheduled)),
-        )
         return AlphaCalibration(
             slope=0.0,
             intercept=0.0,
-            expected_alpha=pd.Series(0.0, index=frame.index, dtype="float64"),
-            slope_standard_error=empty_inference[0],
-            slope_t_statistic=empty_inference[1],
-            slope_pvalue=empty_inference[2],
-            slope_ci_low=empty_inference[3],
-            slope_ci_high=empty_inference[4],
-            weighted_r2=empty_inference[5],
-            coverage=empty_inference[6],
+            slope_standard_error=0.0,
+            slope_t_statistic=0.0,
+            slope_pvalue=1.0,
+            slope_ci_low=0.0,
+            slope_ci_high=0.0,
+            weighted_r2=0.0,
+            coverage=coverage,
             valid_rebalance_dates=date_count,
             scheduled_rebalance_dates=len(scheduled),
             benchmark_only=True,
@@ -361,19 +684,15 @@ def calibrate_expected_alpha(
     slope = float(coefficients[1])
     intercept = float(coefficients[0])
     benchmark_only = slope <= 0.0
-    expected = pd.Series(0.0, index=frame.index, dtype="float64")
-    if not benchmark_only:
-        expected.loc[valid] = slope * alpha.loc[valid]
     bread = np.zeros((2, 2), dtype="float64")
     cluster_scores = []
-    weighted_actual = target * np.sqrt(
-        weights,
-    )
+    actual = returns.loc[selected].to_numpy(dtype="float64")
+    residual = actual - design @ coefficients
     selected_dates = dates.loc[selected].to_numpy()
     _, cluster_codes = np.unique(selected_dates, return_inverse=True)
     for cluster in np.unique(cluster_codes):
         rows = np.flatnonzero(cluster_codes == cluster)
-        score = design[rows].T @ (weighted_actual[rows] - fit[rows] @ coefficients)
+        score = design[rows].T @ (weights[rows] * residual[rows])
         cluster_scores.append(score)
         bread += design[rows].T @ (weights[rows, None] * design[rows])
     meat = sum(score[:, None] @ score[None, :] for score in cluster_scores)
@@ -392,25 +711,23 @@ def calibrate_expected_alpha(
         pvalue = 1.0 if slope == 0.0 else 0.0
         ci_low = ci_high = slope
         t_statistic = statistic
-    fitted = fit @ coefficients
-    residual = weighted_actual - fitted
-    denominator = float(np.dot(weighted_actual, weighted_actual))
+    centered = actual - np.average(actual, weights=weights)
+    denominator = float(np.dot(weights, centered * centered))
     weighted_r2 = (
-        1.0 - float(np.dot(residual, residual)) / denominator
+        1.0 - float(np.dot(weights, residual * residual)) / denominator
         if denominator > 0.0
         else 0.0
     )
     return AlphaCalibration(
         slope=slope,
         intercept=intercept,
-        expected_alpha=expected,
         slope_standard_error=standard_error,
         slope_t_statistic=float(t_statistic),
         slope_pvalue=pvalue,
         slope_ci_low=float(ci_low),
         slope_ci_high=float(ci_high),
         weighted_r2=float(weighted_r2),
-        coverage=date_count / max(1, len(scheduled)),
+        coverage=coverage,
         valid_rebalance_dates=date_count,
         scheduled_rebalance_dates=len(scheduled),
         benchmark_only=benchmark_only,
@@ -508,6 +825,8 @@ def execute_continuous_target(
             cost=cost,
         )
     pre_trade_cash = nav_value - float((current * nav_value).sum())
+    if -tolerance <= pre_trade_cash < 0.0:
+        pre_trade_cash = 0.0
     sell_notional = float(-sell_delta.sum())
     cash_after_sells = pre_trade_cash + sell_notional - sell_cost_total
     if cash_after_sells < -tolerance:
@@ -619,7 +938,7 @@ def drift_continuous_holdings(
     cash_notional: float,
     asset_returns: pd.Series,
 ) -> tuple[pd.Series, float, float]:
-    """Apply open-to-open returns while preserving cash and producing no trade."""
+    """Mark continuous holdings by adjusted-price returns without a trade."""
 
     if set(holdings_notional.index) != set(asset_returns.index):
         raise ValueError("drift_inputs_invalid")
@@ -650,7 +969,7 @@ def _empty_ledger_row(
         "executed_delta_notional": 0.0,
         "post_trade_notional": float(pre_trade_notional),
         "reason": None,
-        **{column: 0.0 for column in _COST_COLUMNS},
+        **{column: 0.0 for column in PORTFOLIO_LEDGER_COST_COLUMNS},
     }
 
 
@@ -664,7 +983,7 @@ def _update_ledger_row(
     record["executed_delta_notional"] = float(executed_delta)
     record["reason"] = reason
     if cost is not None:
-        for column in _COST_COLUMNS:
+        for column in PORTFOLIO_LEDGER_COST_COLUMNS:
             record[column] = float(getattr(cost, column))
 
 
@@ -720,10 +1039,10 @@ def _asset_values(
     except (TypeError, ValueError) as exc:
         raise ValueError(error) from exc
     present = pd.Series(assets.isin(values.index), index=assets)
-    required_missing = (~present) & present.index.to_series().isin(required_assets)
+    required_missing = result.isna() & present.index.to_series().isin(required_assets)
     if required_missing.any():
-        raise ValueError(error)
-    present_values = result.loc[present]
+        raise ValueError(f"{error}:missing_required_assets")
+    present_values = result.loc[present & result.notna()]
     if (
         present_values.isna().any()
         or not np.isfinite(present_values.to_numpy()).all()
@@ -812,4 +1131,75 @@ def capacity_quantiles(
         "median": float(values.median()),
         "minimum": float(values.min()),
         "annual_p05": {str(year): float(value) for year, value in annual.items()},
+    }
+
+
+def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, object]:
+    """One actual holding interval; costs remain at its entry execution open."""
+    before = {
+        row.asset_id: row.value for row in batch.valuations if row.phase == "before"
+    }
+    after = {
+        row.asset_id: row.value for row in batch.valuations if row.phase == "after"
+    }
+    end = {row.asset_id: row.value for row in batch.valuations if row.phase == "end"}
+    starts = {row.timestamp_ns for row in batch.valuations if row.phase == "after"}
+    ends = {row.timestamp_ns for row in batch.valuations if row.phase == "end"}
+    if (
+        len(starts) != 1
+        or len(ends) != 1
+        or set(before) != set(after)
+        or set(after) != set(end)
+    ):
+        raise ValueError("portfolio_interval_valuation_invalid")
+    entry, endpoint = pd.Timestamp(next(iter(starts))), pd.Timestamp(next(iter(ends)))
+    b, a, e = (
+        float(sum(before.values())),
+        float(sum(after.values())),
+        float(sum(end.values())),
+    )
+    costs = -sum(
+        row.amount
+        for row in batch.cashflows
+        if row.kind in PORTFOLIO_LEDGER_COST_COLUMNS
+    )
+    other_flows = [
+        row
+        for row in batch.cashflows
+        if row.kind not in {*PORTFOLIO_LEDGER_COST_COLUMNS, "principal"}
+    ]
+    if other_flows or endpoint <= entry or b <= 0 or a <= 0 or e <= 0:
+        raise ValueError("portfolio_interval_economic_scope_invalid")
+    tolerance = _scaled_tolerance(b)
+    if not np.isclose(a, b - costs, rtol=0, atol=tolerance):
+        raise ValueError("portfolio_interval_cost_reconciliation_invalid")
+    diagnostics = {(row.asset_id, row.name): row for row in batch.diagnostics}
+    target = {asset: diagnostics[(asset, "target_notional")].number for asset in before}
+    decision = {
+        asset: diagnostics[(asset, "decision_delta_weight")].number for asset in before
+    }
+    if any(value is None for value in (*target.values(), *decision.values())):
+        raise ValueError("portfolio_interval_decision_facts_missing")
+    executed = {}
+    for trade in batch.trades:
+        executed[trade.asset_id] = executed.get(trade.asset_id, 0.0) + trade.notional
+    actual_turnover = (
+        0.5
+        * (sum(abs(value) for value in executed.values()) + abs(sum(executed.values())))
+        / b
+    )
+    return {
+        "entry_at": entry,
+        "end_at": endpoint,
+        "nav_before": b,
+        "nav_post": a,
+        "nav_end": e,
+        "gross_return": (e - a) / b,
+        "net_return": (e - b) / b,
+        "cost_drag": float(costs / b),
+        "target_turnover": 0.5 * sum(abs(value) for value in decision.values()),
+        "requested_turnover": 0.5
+        * sum(abs(target[asset] - before[asset]) for asset in before)
+        / b,
+        "realized_turnover": actual_turnover,
     }

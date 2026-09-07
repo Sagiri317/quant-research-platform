@@ -23,7 +23,6 @@ def test_csmar_source_accepts_provider_excel_like_stock_code_forms() -> None:
     result = field_mappings.normalize_provider_stock_code_series(values)
 
     assert result.tolist() == ["000001"] * 5
-    assert field_mappings.normalize_stock_code(values).tolist() == result.tolist()
 
 
 @pytest.mark.parametrize(

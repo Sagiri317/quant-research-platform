@@ -13,6 +13,7 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.manifests import read_bounded_qrp_json
 from quant_research_platform.workflows import research
 
 app = typer.Typer(add_completion=False)
@@ -32,9 +33,11 @@ app.add_typer(report_app, name="report")
 
 
 @catalog_app.command("factors")
-def catalog_factors() -> None:
+def catalog_factors(
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
+) -> None:
     typer.echo("factor_id,market_id,factor_set,definition_version")
-    for item in queries.list_factors(research_profile()).items:
+    for item in queries.list_factors(research_profile(profile)).items:
         typer.echo(
             f"{item.factor_id},{item.market_id},{item.factor_set},"
             f"{item.definition_version}"
@@ -42,9 +45,11 @@ def catalog_factors() -> None:
 
 
 @catalog_app.command("labels")
-def catalog_labels() -> None:
+def catalog_labels(
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
+) -> None:
     typer.echo("label_id,market_id,horizon,definition_version")
-    for item in queries.list_labels(research_profile()).items:
+    for item in queries.list_labels(research_profile(profile)).items:
         typer.echo(
             f"{item.label_id},{item.market_id},{item.horizon},{item.definition_version}"
         )
@@ -53,11 +58,12 @@ def catalog_labels() -> None:
 @research_datasets_app.command("requirements")
 def research_dataset_requirements(
     dataset_id: str = typer.Argument(..., help="Research dataset id."),
+    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
 ) -> None:
     try:
         result = queries.describe_research_dataset_requirements(
             dataset_id,
-            research_profile(),
+            research_profile(profile),
         )
     except Exception as exc:
         typer.echo(str(exc), err=True)
@@ -95,6 +101,7 @@ def dataset_build(
     profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     start_date: str = typer.Option(..., "--start-date"),  # noqa: B008
     end_date: str = typer.Option(..., "--end-date"),  # noqa: B008
+    raw_root: Path | None = typer.Option(None, "--raw-root"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
@@ -103,6 +110,7 @@ def dataset_build(
         profile=research_profile(profile),
         layout=StorageLayout(project_root=project_root),
         dataset_id=dataset_id,
+        raw_root=raw_root,
         start_date=start_date,
         end_date=end_date,
         plan=plan,
@@ -118,6 +126,8 @@ def research_run(
     start_date: str = typer.Option(..., "--start-date"),  # noqa: B008
     end_date: str = typer.Option(..., "--end-date"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
+    research_plan: Path | None = typer.Option(None, "--research-plan"),  # noqa: B008
+    raw_root: Path | None = typer.Option(None, "--raw-root"),  # noqa: B008
     holdout: bool = typer.Option(False, "--holdout"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
@@ -126,6 +136,10 @@ def research_run(
         selected_profile = research_profile(profile)
         result = research.research_run(
             profile=selected_profile,
+            research_plan=None
+            if research_plan is None
+            else read_bounded_qrp_json(research_plan)[1],
+            raw_root=raw_root,
             layout=StorageLayout(project_root=project_root),
             scenario_id=(
                 scenario_id
@@ -141,7 +155,7 @@ def research_run(
             plan=plan,
             rebuild=rebuild,
         )
-    except PermissionError as exc:
+    except (PermissionError, ValueError) as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
     _echo_result(result)
@@ -149,26 +163,17 @@ def research_run(
 
 @report_app.command("build")
 def report_build(
-    scenario_id: str | None = typer.Option(None, "--scenario-id"),  # noqa: B008
+    run_id: str = typer.Option(..., "--run-id"),  # noqa: B008
     profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
-    rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
     selected_profile = research_profile(profile)
     result = research.report_build(
         profile=selected_profile,
         layout=StorageLayout(project_root=project_root),
-        scenario_id=(
-            scenario_id
-            or (
-                "pv_all"
-                if selected_profile.profile_id == A_SHARE_PROFILE_ID
-                else selected_profile.research_datasets.list()[0].data_id
-            )
-        ),
+        run_id=run_id,
         plan=plan,
-        rebuild=rebuild,
     )
     _echo_result(result)
 
@@ -177,11 +182,13 @@ def report_build(
 def status(
     profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
+    run_id: str | None = typer.Option(None, "--run-id"),  # noqa: B008
 ) -> None:
     _echo_result(
         research.status(
             profile=research_profile(profile),
             layout=StorageLayout(project_root=project_root),
+            run_id=run_id,
         )
     )
 
@@ -191,12 +198,14 @@ def inspect(
     dataset_id: str = typer.Argument(...),  # noqa: B008
     profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
+    run_id: str | None = typer.Option(None, "--run-id"),  # noqa: B008
 ) -> None:
     _echo_result(
         research.inspect(
             profile=research_profile(profile),
             layout=StorageLayout(project_root=project_root),
             dataset_id=dataset_id,
+            run_id=run_id,
         )
     )
 

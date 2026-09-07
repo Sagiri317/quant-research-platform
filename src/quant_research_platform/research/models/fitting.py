@@ -31,10 +31,6 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research._memory import (
-    _selected_frame_payload_bytes,
-    iter_complete_time_sized_frames,
-)
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
 )
@@ -47,6 +43,10 @@ from quant_research_platform.research.models.scaler import (
     ModelMatrixScaler,
     ScaledPredictor,
     equal_date_sample_weights,
+)
+from quant_research_platform.runtime.dataframes import (
+    _selected_frame_payload_bytes,
+    iter_complete_time_sized_frames,
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,

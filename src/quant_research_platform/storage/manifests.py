@@ -33,6 +33,7 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    native_filesystem_path,
     open_filesystem_file,
     require_artifact_root,
     require_unaliased_path,
@@ -148,7 +149,9 @@ def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
     manifest_path = root / "_manifest" / "manifest.json"
     require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
     require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
-    if not spec_path.is_file() or not manifest_path.is_file():
+    if not os.path.isfile(native_filesystem_path(spec_path)) or not os.path.isfile(
+        native_filesystem_path(manifest_path)
+    ):
         raise FileNotFoundError("dataset_manifest_evidence_missing")
     spec = read_qrp_json(
         spec_path,

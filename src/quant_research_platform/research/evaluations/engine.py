@@ -31,13 +31,13 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.research._memory import (
-    _selected_frame_payload_bytes,
-    iter_complete_time_sized_frames,
-)
 from quant_research_platform.research.signals.materialization import (
     _signal_normalization_working_bytes,
     normalize_signal_frame,
+)
+from quant_research_platform.runtime.dataframes import (
+    _selected_frame_payload_bytes,
+    iter_complete_time_sized_frames,
 )
 from quant_research_platform.runtime.resources import (
     MemoryLease,

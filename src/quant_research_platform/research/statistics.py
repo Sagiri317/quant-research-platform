@@ -104,10 +104,11 @@ class SharpeInference:
     observed_sharpe: float
     benchmark_sharpe: float
     psr: float
-    deflated_reference_sharpe: float
-    dsr: float
+    deflated_reference_sharpe: float | None
+    dsr: float | None
     observation_count: int
     trial_count: int
+    dsr_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,14 @@ class FamaMacBethResult:
     white_p_values: pd.Series
     white_reasons: pd.Series
     period_count: int
+
+
+@dataclass(frozen=True)
+class FamaMacBethPeriodResult:
+    coefficients: pd.Series
+    white_p_value: float | None
+    white_reason: str | None
+    observation_count: int
 
 
 def aligned_candidate_matrix(
@@ -191,6 +200,12 @@ def hac_mean(
         cov_type="HAC", cov_kwds={"maxlags": max_lags}
     )
     interval = fit.conf_int(alpha=1.0 - confidence)[0]
+    outputs = np.array(
+        [fit.params[0], fit.bse[0], fit.tvalues[0], fit.pvalues[0], *interval],
+        dtype="float64",
+    )
+    if not bool(np.isfinite(outputs).all()):
+        raise ValueError("hac_inference_undefined")
     return MeanInference(
         mean=float(fit.params[0]),
         standard_error=float(fit.bse[0]),
@@ -253,14 +268,15 @@ def spa_reality_check(
 ) -> SpaResult:
     _validate_bootstrap_configuration(block_size, repetitions, seed)
     aligned = _loss_inputs(benchmark_losses, model_losses)
-    if aligned.status == "UNDEFINED":
+    reason = aligned.reason or _loss_differential_reason(aligned.values, pairwise=False)
+    if reason is not None:
         return SpaResult(
             None,
             None,
             None,
             aligned.observation_count,
             "UNDEFINED",
-            aligned.reason,
+            reason,
         )
     benchmark = aligned.values[:, 0]
     models = pd.DataFrame(
@@ -277,6 +293,17 @@ def spa_reality_check(
     )
     test.compute()
     values = test.pvalues
+    if not _positive_finite_variances(test._loss_diff_var) or not _valid_p_values(
+        values.to_numpy()
+    ):
+        return SpaResult(
+            None,
+            None,
+            None,
+            aligned.observation_count,
+            "UNDEFINED",
+            "loss_differential_variance_undefined",
+        )
     return SpaResult(
         lower_p_value=float(values["lower"]),
         consistent_p_value=float(values["consistent"]),
@@ -299,8 +326,9 @@ def stepm_superior_models(
     _validate_bootstrap_configuration(block_size, repetitions, seed)
     _validate_alpha(alpha)
     aligned = _loss_inputs(benchmark_losses, model_losses)
-    if aligned.status == "UNDEFINED":
-        return StepMResult((), aligned.observation_count, "UNDEFINED", aligned.reason)
+    reason = aligned.reason or _loss_differential_reason(aligned.values, pairwise=False)
+    if reason is not None:
+        return StepMResult((), aligned.observation_count, "UNDEFINED", reason)
     benchmark = aligned.values[:, 0]
     models = pd.DataFrame(
         aligned.values[:, 1:],
@@ -316,6 +344,15 @@ def stepm_superior_models(
         seed=seed,
     )
     test.compute()
+    if not _positive_finite_variances(test.spa._loss_diff_var) or not _valid_p_values(
+        test.spa.pvalues.to_numpy()
+    ):
+        return StepMResult(
+            (),
+            aligned.observation_count,
+            "UNDEFINED",
+            "loss_differential_variance_undefined",
+        )
     return StepMResult(
         tuple(str(value) for value in test.superior_models),
         aligned.observation_count,
@@ -335,9 +372,10 @@ def model_confidence_set(
     _validate_bootstrap_configuration(block_size, repetitions, seed)
     _validate_alpha(alpha)
     aligned = aligned_candidate_matrix(losses)
-    if aligned.status != "DEFINED":
+    reason = aligned.reason or _loss_differential_reason(aligned.values, pairwise=True)
+    if reason is not None:
         return ModelConfidenceSetResult(
-            None, (), (), aligned.observation_count, "UNDEFINED", aligned.reason
+            None, (), (), aligned.observation_count, "UNDEFINED", reason
         )
     frame = pd.DataFrame(
         aligned.values, index=aligned.index, columns=aligned.candidate_ids
@@ -349,7 +387,33 @@ def model_confidence_set(
         block_size=block_size,
         seed=seed,
     )
-    test.compute()
+    try:
+        test.compute()
+    except IndexError:
+        # arch MCS-R divides by pairwise bootstrap variances before elimination.
+        if _positive_finite_variances(
+            test._variances[~np.eye(frame.shape[1], dtype=bool)]
+        ):
+            raise
+        return ModelConfidenceSetResult(
+            None,
+            (),
+            (),
+            aligned.observation_count,
+            "UNDEFINED",
+            "pairwise_loss_variance_undefined",
+        )
+    if not _positive_finite_variances(
+        test._variances[~np.eye(frame.shape[1], dtype=bool)]
+    ) or not _valid_p_values(test.pvalues.to_numpy()):
+        return ModelConfidenceSetResult(
+            None,
+            (),
+            (),
+            aligned.observation_count,
+            "UNDEFINED",
+            "pairwise_loss_variance_undefined",
+        )
     return ModelConfidenceSetResult(
         test.pvalues.copy(),
         tuple(str(value) for value in test.included),
@@ -360,6 +424,32 @@ def model_confidence_set(
     )
 
 
+def _loss_differential_reason(values: np.ndarray, *, pairwise: bool) -> str | None:
+    if values.shape[1] < 2:
+        return "insufficient_candidate_count"
+    scale = float(np.max(np.abs(values)))
+    pairs = (
+        combinations(range(values.shape[1]), 2)
+        if pairwise
+        else ((0, index) for index in range(1, values.shape[1]))
+    )
+    for left, right in pairs:
+        difference = values[:, left] - values[:, right]
+        if float(np.ptp(difference)) <= np.finfo("float64").eps * scale:
+            return "constant_loss_differential"
+    return None
+
+
+def _positive_finite_variances(values: np.ndarray) -> bool:
+    return bool(np.isfinite(values).all() and (values > 0).all())
+
+
+def _valid_p_values(values: np.ndarray) -> bool:
+    return bool(
+        np.isfinite(values).all() and (values >= 0).all() and (values <= 1).all()
+    )
+
+
 def probabilistic_and_deflated_sharpe(
     returns: object,
     *,
@@ -367,7 +457,9 @@ def probabilistic_and_deflated_sharpe(
     trial_sharpes: object,
 ) -> SharpeInference:
     data = _finite_vector(returns, minimum=4)
-    trials = _finite_vector(trial_sharpes, minimum=2)
+    trials = np.asarray(trial_sharpes, dtype="float64")
+    if trials.ndim != 1 or len(trials) < 2:
+        raise ValueError("finite_vector_required")
     if type(benchmark_sharpe) is not float or not np.isfinite(benchmark_sharpe):
         raise ValueError("sharpe_benchmark_invalid")
     standard_deviation = float(np.std(data, ddof=1))
@@ -384,9 +476,7 @@ def probabilistic_and_deflated_sharpe(
     if variance <= 0.0:
         raise ValueError("sharpe_variance_invalid")
     scale = variance**0.5
-    trial_scale = float(np.std(trials, ddof=1))
-    if trial_scale == 0.0:
-        raise ValueError("trial_sharpe_dispersion_undefined")
+    trial_scale = float(np.std(trials, ddof=1)) if np.isfinite(trials).all() else np.nan
     trial_count = len(trials)
     reference = trial_scale * (
         (1.0 - np.euler_gamma) * norm.ppf(1.0 - 1.0 / trial_count)
@@ -396,10 +486,19 @@ def probabilistic_and_deflated_sharpe(
         observed_sharpe=observed,
         benchmark_sharpe=float(benchmark_sharpe),
         psr=float(norm.cdf((observed - benchmark_sharpe) / scale)),
-        deflated_reference_sharpe=float(reference),
-        dsr=float(norm.cdf((observed - reference) / scale)),
+        deflated_reference_sharpe=float(reference)
+        if np.isfinite(trial_scale) and trial_scale > 0
+        else None,
+        dsr=float(norm.cdf((observed - reference) / scale))
+        if trial_scale > 0.0
+        else None,
         observation_count=len(data),
         trial_count=trial_count,
+        dsr_reason=None
+        if trial_scale > 0.0
+        else "trial_sharpe_dispersion_undefined"
+        if np.isfinite(trial_scale)
+        else "candidate_sharpe_undefined",
     )
 
 
@@ -492,38 +591,20 @@ def fama_macbeth(
     white_p_values: list[float] = []
     white_reasons: list[str | None] = []
     for period, group in frame.groupby("timestamp", sort=True):
-        y = pd.to_numeric(group[return_column], errors="raise").astype("float64")
-        x = sm.add_constant(
-            group.loc[:, factor_columns]
-            .apply(pd.to_numeric, errors="raise")
-            .astype("float64"),
-            has_constant="add",
+        period_result = fama_macbeth_period(
+            group,
+            return_column=return_column,
+            factor_columns=factor_columns,
+            weight_column=weight_column,
         )
-        if (
-            len(group) <= x.shape[1]
-            or not bool(np.isfinite(y).all())
-            or not bool(np.isfinite(x.to_numpy()).all())
-        ):
-            raise ValueError("fama_macbeth_period_insufficient")
-        if weight_column is None:
-            fit = sm.OLS(y, x).fit()
-        else:
-            weights = pd.to_numeric(group[weight_column], errors="raise").astype(
-                "float64"
-            )
-            if bool((weights <= 0.0).any()) or not bool(np.isfinite(weights).all()):
-                raise ValueError("fama_macbeth_weights_invalid")
-            fit = sm.WLS(y, x, weights=weights).fit()
-        coefficients.append(fit.params)
+        coefficients.append(period_result.coefficients)
         periods.append(period)
-        try:
-            white_p_value = float(het_white(fit.resid, x)[1])
-        except (AssertionError, ValueError):
-            white_p_value = float("nan")
-        white_p_values.append(white_p_value)
-        white_reasons.append(
-            None if np.isfinite(white_p_value) else "white_test_undefined"
+        white_p_values.append(
+            period_result.white_p_value
+            if period_result.white_p_value is not None
+            else float("nan")
         )
+        white_reasons.append(period_result.white_reason)
     period_coefficients = pd.DataFrame(
         coefficients, index=pd.Index(periods, name="timestamp")
     )
@@ -557,6 +638,225 @@ def fama_macbeth(
         ),
         period_count=len(period_coefficients),
     )
+
+
+def fama_macbeth_period(
+    frame: pd.DataFrame,
+    *,
+    return_column: str,
+    factor_columns: tuple[str, ...],
+    weight_column: str | None = None,
+) -> FamaMacBethPeriodResult:
+    required = {"timestamp", "asset_id", return_column, *factor_columns}
+    if weight_column is not None:
+        required.add(weight_column)
+    if (
+        not isinstance(frame, pd.DataFrame)
+        or not required.issubset(frame.columns)
+        or not factor_columns
+        or len(set(factor_columns)) != len(factor_columns)
+    ):
+        raise ValueError("fama_macbeth_columns_invalid")
+    timestamps = strict_timestamp_series(
+        frame["timestamp"], error="fama_macbeth_timestamp_invalid"
+    )
+    assets = strict_hashable_key_series(
+        frame["asset_id"], error="fama_macbeth_asset_id_invalid"
+    )
+    if timestamps.nunique() != 1 or assets.duplicated().any():
+        raise ValueError("fama_macbeth_primary_key_duplicate")
+    columns = [return_column, *factor_columns]
+    if weight_column is not None:
+        columns.append(weight_column)
+    numeric = (
+        frame.loc[:, columns].apply(pd.to_numeric, errors="raise").astype("float64")
+    )
+    complete = numeric.notna().all(axis=1)
+    numeric = numeric.loc[complete]
+    y = numeric[return_column]
+    x = sm.add_constant(numeric.loc[:, factor_columns], has_constant="add")
+    if (
+        len(numeric) <= x.shape[1]
+        or not bool(np.isfinite(numeric.to_numpy()).all())
+        or np.linalg.matrix_rank(x.to_numpy(dtype="float64")) != x.shape[1]
+    ):
+        raise ValueError("fama_macbeth_period_insufficient")
+    if weight_column is None:
+        fit = sm.OLS(y, x).fit()
+    else:
+        weights = numeric[weight_column]
+        if bool((weights <= 0.0).any()):
+            raise ValueError("fama_macbeth_weights_invalid")
+        fit = sm.WLS(y, x, weights=weights).fit()
+    try:
+        white_p_value = float(het_white(fit.resid, x)[1])
+        if not np.isfinite(white_p_value):
+            white_p_value = None
+    except (AssertionError, ValueError):
+        white_p_value = None
+    return FamaMacBethPeriodResult(
+        coefficients=fit.params.copy(),
+        white_p_value=white_p_value,
+        white_reason=None if white_p_value is not None else "white_test_undefined",
+        observation_count=len(numeric),
+    )
+
+
+def cross_sectional_rank_ic(
+    frame: pd.DataFrame,
+    *,
+    value_columns: tuple[str, ...],
+    label_column: str,
+) -> pd.DataFrame:
+    """Return per-date cross-sectional Spearman correlations."""
+
+    required = {"timestamp", "asset_id", label_column, *value_columns}
+    if not isinstance(frame, pd.DataFrame) or not required.issubset(frame.columns):
+        raise ValueError("rank_ic_columns_invalid")
+    if not value_columns or len(set(value_columns)) != len(value_columns):
+        raise ValueError("rank_ic_columns_invalid")
+    selected = frame.loc[
+        :, ["timestamp", "asset_id", label_column, *value_columns]
+    ].copy()
+    selected["timestamp"] = strict_timestamp_series(
+        selected["timestamp"], error="rank_ic_timestamp_invalid"
+    )
+    selected["asset_id"] = strict_hashable_key_series(
+        selected["asset_id"], error="rank_ic_asset_id_invalid"
+    )
+    if bool(selected.duplicated(["timestamp", "asset_id"]).any()):
+        raise ValueError("rank_ic_primary_key_duplicate")
+    for column in (label_column, *value_columns):
+        selected[column] = pd.to_numeric(selected[column], errors="raise").astype(
+            "float64"
+        )
+    records: list[dict[str, object]] = []
+    for timestamp, group in selected.groupby("timestamp", sort=True):
+        record: dict[str, object] = {"timestamp": timestamp}
+        for column in value_columns:
+            valid = group[[column, label_column]].dropna()
+            values = valid[column].to_numpy(dtype="float64")
+            labels = valid[label_column].to_numpy(dtype="float64")
+            record[column] = (
+                float(pd.Series(values).corr(pd.Series(labels), method="spearman"))
+                if len(valid) >= 2 and np.std(values) > 0.0 and np.std(labels) > 0.0
+                else np.nan
+            )
+        records.append(record)
+    return pd.DataFrame.from_records(
+        records,
+        columns=["timestamp", *value_columns],
+    )
+
+
+def time_series_inference_summary(
+    frame: pd.DataFrame,
+    *,
+    identity_column: str,
+    max_lags: int,
+    fdr_method: Literal["BH", "BY"] | None,
+    fdr_alpha: float,
+    fdr_family_size: int | None = None,
+) -> pd.DataFrame:
+    """Summarize complete time-series columns with HAC inference and one FDR family."""
+
+    if not isinstance(frame, pd.DataFrame) or identity_column not in frame.columns:
+        raise ValueError("time_series_inference_columns_invalid")
+    value_columns = tuple(
+        column for column in frame.columns if column != identity_column
+    )
+    if not value_columns:
+        return pd.DataFrame()
+    family_size = len(value_columns) if fdr_family_size is None else fdr_family_size
+    if type(family_size) is not int or family_size < len(value_columns):
+        raise ValueError("fdr_family_size_invalid")
+    strict_timestamp_series(
+        frame[identity_column], error="time_series_inference_timestamp_invalid"
+    )
+    rows: list[dict[str, object]] = []
+    for column in value_columns:
+        values = pd.to_numeric(frame[column], errors="raise").astype("float64")
+        valid = values.notna() & np.isfinite(values)
+        count = int(valid.sum())
+        if count <= max_lags:
+            rows.append(
+                {
+                    identity_column: column,
+                    "observation_count": count,
+                    "status": "UNDEFINED",
+                    "reason": "hac_lag_exceeds_observations",
+                    "mean": np.nan,
+                    "standard_error": np.nan,
+                    "t_statistic": np.nan,
+                    "p_value": np.nan,
+                    "ci_lower": np.nan,
+                    "ci_upper": np.nan,
+                }
+            )
+            continue
+        try:
+            result = hac_mean(values.loc[valid], max_lags=max_lags)
+        except ValueError as exc:
+            if str(exc) != "hac_inference_undefined":
+                raise
+            rows.append(
+                {
+                    identity_column: column,
+                    "observation_count": count,
+                    "status": "UNDEFINED",
+                    "reason": "hac_inference_undefined",
+                    "mean": np.nan,
+                    "standard_error": np.nan,
+                    "t_statistic": np.nan,
+                    "p_value": np.nan,
+                    "ci_lower": np.nan,
+                    "ci_upper": np.nan,
+                }
+            )
+            continue
+        rows.append(
+            {
+                identity_column: column,
+                "observation_count": count,
+                "status": "DEFINED",
+                "reason": None,
+                "mean": result.mean,
+                "standard_error": result.standard_error,
+                "t_statistic": result.t_statistic,
+                "p_value": result.p_value,
+                "ci_lower": result.confidence_interval[0],
+                "ci_upper": result.confidence_interval[1],
+            }
+        )
+    result = pd.DataFrame(rows)
+    defined = result["status"].eq("DEFINED")
+    if fdr_method is None:
+        result["fdr_method"] = None
+        result["fdr_alpha"] = np.nan
+        result["fdr_adjusted_p_value"] = np.nan
+    elif bool(defined.any()):
+        observed = result.loc[defined, "p_value"].to_numpy(dtype="float64")
+        conservative_work = np.concatenate(
+            (observed, np.ones(family_size - len(observed), dtype="float64"))
+        )
+        adjusted = fdr_adjust(
+            conservative_work,
+            method=fdr_method,
+            alpha=fdr_alpha,
+        )
+        result["fdr_method"] = fdr_method
+        result["fdr_alpha"] = fdr_alpha
+        result["fdr_adjusted_p_value"] = np.nan
+        result.loc[defined, "fdr_adjusted_p_value"] = adjusted.adjusted_p_values[
+            : len(observed)
+        ]
+        result.loc[~defined, "fdr_method"] = fdr_method
+        result.loc[~defined, "fdr_alpha"] = fdr_alpha
+    else:
+        result["fdr_method"] = fdr_method
+        result["fdr_alpha"] = fdr_alpha
+        result["fdr_adjusted_p_value"] = np.nan
+    return result
 
 
 def _finite_vector(values: object, *, minimum: int) -> np.ndarray:

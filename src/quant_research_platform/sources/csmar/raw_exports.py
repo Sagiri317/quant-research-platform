@@ -72,6 +72,8 @@ STRING_CODE_DTYPES = {
     "TradingDate": str,
     "Idxtrd01": str,
     "Idxtrd09": str,
+    "Enddt": str,
+    "Constdnme": str,
     "Idxinfo01": str,
     "Idxinfo11": str,
     "Idxinfo02": str,
@@ -1047,7 +1049,7 @@ def _raw_frame_owner_known_bytes(
     if not rows or header is None:
         return 0
     pointer_bytes = struct.calcsize("P")
-    cells = sum(len(row) for row in rows)
+    cells = len(rows) * len(header)
     pending_backing_bytes = len(rows) * pointer_bytes + cells * pointer_bytes
     frame_reference_bytes = (len(header) + cells) * pointer_bytes
     numeric_decode_bytes = cells * 16

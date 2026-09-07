@@ -1,53 +1,74 @@
-from __future__ import annotations
+from types import SimpleNamespace
 
-import time
+import pytest
 
-from quant_research_platform.runtime.execution_metrics import ExecutionMetricsRecorder
-
-
-def test_execution_metrics_records_duration_rows_and_throughput() -> None:
-    recorder = ExecutionMetricsRecorder()
-
-    with recorder.record("build_processed", logical_layer="processed") as record:
-        record.output_rows = 3
-        record.file_count = 1
-        record.file_size_bytes = 123
-        time.sleep(0.001)
-
-    payload = recorder.payload(run_id="s8")
-    runtime_record = recorder.records[0]
-    record = payload["records"][0]
-
-    assert payload["run_id"] == "s8"
-    assert payload["summary"] == {"step_count": 1}
-    assert record["step_name"] == "build_processed"
-    assert record["duration_seconds"] >= 0
-    assert record["output_rows"] == 3
-    assert record["file_count"] == 1
-    assert record["file_size_bytes"] == 123
-    assert record["rows_per_second"] is not None
-    assert runtime_record.status == "success"
+from quant_research_platform.runtime.execution_metrics import record_run_observations
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
 
-def test_execution_metrics_records_failure_status_and_error_code() -> None:
-    recorder = ExecutionMetricsRecorder()
+def test_runtime_observations_sample_boundaries_and_mark_unavailable_io(monkeypatch):
+    import quant_research_platform.runtime.execution_metrics as owner
 
-    try:
-        with recorder.record("build_factor_price_volume"):
-            raise RuntimeError("synthetic failure")
-    except RuntimeError:
-        pass
+    class Process:
+        def memory_info(self):
+            return SimpleNamespace(rss=4096)
 
-    record = recorder.payload()["records"][0]
-    assert record["status"] == "fail"
-    assert record["error_code"] == "RuntimeError"
-    assert record["duration_seconds"] >= 0
+        def cpu_times(self):
+            return (1.0, 0.5)
+
+        def num_threads(self):
+            return 2
+
+        def children(self, recursive):
+            assert recursive
+            return []
+
+        def io_counters(self):
+            raise AttributeError("io_not_supported")
+
+    monkeypatch.setattr(owner.psutil, "Process", Process)
+    monkeypatch.delenv("NUMEXPR_NUM_THREADS", raising=False)
+    evidence = {}
+    with runtime_resource_policy_scope() as policy:
+        with record_run_observations(policy, evidence) as sample:
+            with policy.lease("fixture.payload", 1024):
+                sample()
+        assert policy.used_memory_bytes == 0
+    assert evidence["sample_count"] == 3
+    assert evidence["metrics"]["sampled_peak_reserved_bytes"] == {
+        "status": "DEFINED",
+        "value": 1024,
+    }
+    assert evidence["metrics"]["sampled_peak_rss_bytes"] == {
+        "status": "DEFINED",
+        "value": 4096,
+    }
+    for name in ("read_bytes", "write_bytes"):
+        assert evidence["metrics"][name]["status"] == "UNDEFINED"
+        assert "value" not in evidence["metrics"][name]
+    assert evidence["status"] == "UNDEFINED"
+    assert evidence["environment"]["native_thread_env"]["NUMEXPR_NUM_THREADS"] == {
+        "status": "UNDEFINED",
+        "reason": "environment_variable_unset",
+    }
 
 
-def test_execution_metrics_marks_missing_rows() -> None:
-    recorder = ExecutionMetricsRecorder()
-    with recorder.record("manual_comparison"):
-        pass
+def test_runtime_observation_finalization_keeps_primary(monkeypatch):
+    import quant_research_platform.runtime.execution_metrics as owner
 
-    record = recorder.payload()["records"][0]
-    assert record["unavailable_reason"] == "row_counts_unavailable"
+    primary = KeyboardInterrupt("primary")
+    times = iter((0.0, 0.1))
+    monkeypatch.setattr(owner, "perf_counter", lambda: next(times))
+    evidence = {}
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(KeyboardInterrupt) as raised:
+            with record_run_observations(policy, evidence):
+                raise primary
+        assert raised.value is primary
+        assert any(
+            "observation finalization also failed" in note for note in primary.__notes__
+        )
+        assert policy.used_memory_bytes == 0
+    from quant_research_platform.contracts.targets import _operation_evidence
+
+    assert _operation_evidence(evidence)["reason"] == "operation_incomplete"

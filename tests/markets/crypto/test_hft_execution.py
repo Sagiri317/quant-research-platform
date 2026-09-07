@@ -11,12 +11,15 @@ from quant_research_platform.contracts.order_book import (
     TradeEvent,
     price_to_tick,
 )
+from quant_research_platform.contracts.portfolios import (
+    FundingForecast,
+    PortfolioCapital,
+)
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
     _Metrics,
     _PendingMarkouts,
-    taker_cost_sensitivity,
 )
 from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_maker as _simulate_maker,
@@ -24,15 +27,20 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_taker as _simulate_taker,
 )
-from quant_research_platform.markets.implementations.crypto.execution import (
-    taker_latency_sweep as _taker_latency_sweep,
+from quant_research_platform.research.portfolios.diagnostics import (
+    fixed_turnover_cost_sensitivity,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
-from tests.helpers.binance_hft import _coverage, _quote, with_test_resource_policy
+from tests.helpers.binance_hft import (
+    KNOWN_NO_FUNDING,
+    _coverage,
+    _quote,
+    with_test_resource_policy,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 
 
@@ -108,13 +116,13 @@ def _taker_config(*, latency_ms: int = 0, order_quantity: float = 1.0) -> TakerC
         position_size=2.0,
         latency_ms=latency_ms,
         taker_fee_bps=1.0,
-        threshold_bps=0.0,
         markout_horizon_ms=100,
     )
 
 
 def _maker_config() -> MakerConfig:
     return MakerConfig(
+        latency_ms=0,
         order_quantity=1.0,
         max_position=2.0,
         maker_fee_bps=-1.0,
@@ -126,7 +134,6 @@ def _maker_config() -> MakerConfig:
 
 simulate_taker = with_test_resource_policy(_simulate_taker)
 simulate_maker = with_test_resource_policy(_simulate_maker)
-taker_latency_sweep = with_test_resource_policy(_taker_latency_sweep)
 
 
 def test_market_event_first_trade_failure_releases_first_book_and_children() -> None:
@@ -184,12 +191,17 @@ def test_market_event_first_trade_failure_releases_first_book_and_children() -> 
 def test_taker_uses_latest_actual_state_at_effective_time() -> None:
     fills = []
     diagnostics = simulate_taker(
-        [_state(5), _state(15, bid_tick=1005, ask_tick=1015)],
+        [_state(0), _state(5), _state(15, bid_tick=1005, ask_tick=1015)],
         [{"timestamp_ms": 0, "prediction": 0.02, "segment_id": "s1"}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(latency_ms=10),
-        observed_coverage={"s1": _coverage(5, 15)},
+        observed_coverage={"s1": _coverage(0, 15)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert fills[0]["decision_time_ms"] == 0
@@ -344,10 +356,17 @@ def test_execution_rejects_fill_before_explicit_cap_is_crossed() -> None:
             _simulate_taker(
                 [_state(0)],
                 [{"timestamp_ms": 0, "prediction": 0.02}],
+                funding_forecasts=KNOWN_NO_FUNDING,
+                prediction_horizon_ms=500,
                 prediction_column="prediction",
                 config=_taker_config(),
                 observed_coverage={"s1": _coverage(0, 1)},
                 resource_policy=policy,
+                capital=PortfolioCapital(
+                    "synthetic", 1000.0, "USDT", "linear_perpetual"
+                ),
+                asset_id="btc_usdt",
+                funding_events=(),
             )
 
     assert policy.used_memory_bytes == 0
@@ -366,11 +385,18 @@ def test_failing_fill_observer_is_not_replayed_during_cleanup() -> None:
             _simulate_taker(
                 [_state(0), _state(200)],
                 [{"timestamp_ms": 0, "prediction": 0.02}],
+                funding_forecasts=KNOWN_NO_FUNDING,
+                prediction_horizon_ms=500,
                 prediction_column="prediction",
                 config=_taker_config(),
                 observed_coverage={"s1": _coverage(0, 300)},
                 resource_policy=policy,
                 on_fill=fail,
+                capital=PortfolioCapital(
+                    "synthetic", 1000.0, "USDT", "linear_perpetual"
+                ),
+                asset_id="btc_usdt",
+                funding_events=(),
             )
 
     assert calls == [1]
@@ -381,16 +407,22 @@ def test_taker_walks_known_l2_and_reports_partial_coverage_honestly() -> None:
     fills = []
     diagnostics = simulate_taker(
         [
+            _state(0),
             _state(
-                0,
+                5,
                 ask_levels=((1005, 0.4), (1010, 0.6)),
-            )
+            ),
         ],
         [{"timestamp_ms": 0, "prediction": 0.02}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
-        config=_taker_config(order_quantity=1.5),
-        observed_coverage={"s1": _coverage(0, 1)},
+        config=_taker_config(latency_ms=10, order_quantity=1.5),
+        observed_coverage={"s1": _coverage(0, 11)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert len(fills) == 1
@@ -409,15 +441,20 @@ def test_taker_does_not_fill_after_coverage_or_explicit_boundary() -> None:
     diagnostics = simulate_taker(
         [_state(0), _boundary(50)],
         [{"timestamp_ms": 100, "prediction": 0.02}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"s1": _coverage(0, 49)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert fills == []
     assert diagnostics["filled_orders"] == 0
-    assert diagnostics["gross_pnl_usd"] == 0.0
+    assert diagnostics["gross_pnl"] == 0.0
 
 
 def test_taker_terminal_pnl_is_unknown_after_book_boundary() -> None:
@@ -425,24 +462,34 @@ def test_taker_terminal_pnl_is_unknown_after_book_boundary() -> None:
     diagnostics = simulate_taker(
         [_state(0), _boundary(50)],
         [{"timestamp_ms": 0, "prediction": 0.02}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"s1": _coverage(0, 50)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert len(fills) == 1
-    assert diagnostics["gross_pnl_usd"] is None
-    assert diagnostics["net_pnl_usd"] is None
+    assert diagnostics["gross_pnl"] is None
+    assert diagnostics["net_pnl"] is None
 
 
 def test_taker_markout_does_not_use_state_past_observed_coverage() -> None:
     diagnostics = simulate_taker(
         [_state(0), _state(200, bid_tick=1005, ask_tick=1015)],
         [{"timestamp_ms": 0, "prediction": 0.02}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"s1": _coverage(0, 100)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert diagnostics["average_markout_bps"] is None
@@ -458,14 +505,19 @@ def test_taker_markout_uses_latest_state_as_of_target() -> None:
             _state(200, bid_tick=1095, ask_tick=1105),
         ],
         [{"timestamp_ms": 0, "prediction": 0.1}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"s1": _coverage(0, 300)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert diagnostics["markout_undefined_fill_events"] == 0
-    assert fills[0]["markout_usd_per_unit"] == pytest.approx(0.5)
+    assert fills[0]["markout_per_unit"] == pytest.approx(0.5)
 
 
 def test_taker_target_position_does_not_accumulate_repeated_signal() -> None:
@@ -476,9 +528,14 @@ def test_taker_target_position_does_not_accumulate_repeated_signal() -> None:
             {"timestamp_ms": 100, "prediction": 0.02},
             {"timestamp_ms": 200, "prediction": 0.02},
         ],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
-        config=TakerConfig(2.0, 2.0, 0, 0.0, 0.0, 100),
+        config=TakerConfig(2.0, 2.0, 0, 0.0, 100),
         observed_coverage={"s1": _coverage(0, 200)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert diagnostics["created_orders"] == 1
@@ -498,6 +555,9 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
         observed_coverage={"s1": _coverage(0, 201)},
         trade_coverage={"trade-connection-1": _coverage(0, 201)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert [fill["fill_qty"] for fill in fills] == [0.5, 0.5]
@@ -505,9 +565,9 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
     assert diagnostics["filled_orders"] == 1
     assert diagnostics["average_filled_order_lifetime_ms"] == 100.0
     assert diagnostics["average_markout_bps"] is not None
-    assert diagnostics["fees_usd"] < 0
-    assert diagnostics["spread_capture_pnl_usd"] > 0
-    assert diagnostics["inventory_revaluation_pnl_usd"] is not None
+    assert diagnostics["fees"] < 0
+    assert diagnostics["spread_capture_pnl"] > 0
+    assert diagnostics["inventory_revaluation_pnl"] is not None
 
 
 def test_maker_trade_through_fills_and_boundary_blocks_stale_trade() -> None:
@@ -523,12 +583,15 @@ def test_maker_trade_through_fills_and_boundary_blocks_stale_trade() -> None:
         observed_coverage={"s1": _coverage(0, 74)},
         trade_coverage={"trade-connection-1": _coverage(0, 101)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert len(fills) == 1
     assert fills[0]["fill_reason"] == "trade_through"
     assert diagnostics["trade_through_fill_events"] == 1
-    assert diagnostics["gross_pnl_usd"] is None
+    assert diagnostics["gross_pnl"] is None
 
 
 def test_maker_terminal_pnl_is_unknown_after_uncovered_state() -> None:
@@ -541,11 +604,14 @@ def test_maker_terminal_pnl_is_unknown_after_uncovered_state() -> None:
         observed_coverage={"s1": _coverage(0, 75)},
         trade_coverage={"trade-connection-1": _coverage(0, 101)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert len(fills) == 1
-    assert diagnostics["gross_pnl_usd"] is None
-    assert diagnostics["net_pnl_usd"] is None
+    assert diagnostics["gross_pnl"] is None
+    assert diagnostics["net_pnl"] is None
 
 
 def test_maker_terminal_pnl_preserves_flat_realized_cash_after_boundary() -> None:
@@ -561,36 +627,28 @@ def test_maker_terminal_pnl_preserves_flat_realized_cash_after_boundary() -> Non
         observed_coverage={"s1": _coverage(0, 75)},
         trade_coverage={"trade-connection-1": _coverage(0, 101)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert len(fills) == 2
-    assert diagnostics["gross_pnl_usd"] == pytest.approx(1.0)
-    assert diagnostics["net_pnl_usd"] == pytest.approx(1.02)
-
-
-def test_latency_sweep_has_exact_requested_scenarios() -> None:
-    result = taker_latency_sweep(
-        lambda: [_state(0), _state(100), _state(200)],
-        lambda: [{"timestamp_ms": 0, "prediction": 0.02}],
-        prediction_column="prediction",
-        config=_taker_config(),
-        latency_scenarios_ms=(0, 100, 200),
-        observed_coverage={"s1": _coverage(0, 200)},
-    )
-
-    assert [item["latency_ms"] for item in result] == [0, 100, 200]
+    assert diagnostics["gross_pnl"] == pytest.approx(1.0)
+    assert diagnostics["net_pnl"] == pytest.approx(1.02)
 
 
 def test_cost_sensitivity_reprices_actual_turnover_and_net_pnl() -> None:
-    result = taker_cost_sensitivity(
-        {"turnover_usd": 10_000.0, "net_pnl_usd": 5.0, "taker_fee_bps": 1.0},
+    result = fixed_turnover_cost_sensitivity(
+        turnover=10_000.0,
+        net_pnl=5.0,
+        base_fee_bps=1.0,
         fee_scenarios_bps=(1.0, 2.0),
         additional_spread_scenarios_bps=(0.0, 1.0),
     )
 
-    assert [row["net_pnl_usd"] for row in result] == pytest.approx([5.0, 4.0, 4.0, 3.0])
+    assert [row["net_pnl"] for row in result] == pytest.approx([5.0, 4.0, 4.0, 3.0])
     assert {row["method"] for row in result} == {
-        "constant_turnover_additive_sensitivity"
+        "constant_actual_turnover_additive_sensitivity"
     }
 
 
@@ -602,11 +660,254 @@ def test_taker_long_stream_retains_no_fill_or_equity_dataframe() -> None:
     diagnostics = simulate_taker(
         [_state(0), _state(19_999)],
         decisions(),
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"s1": _coverage(0, 19_999)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert diagnostics["fill_events"] == 0
     assert diagnostics["equity_rows"] == 20_000
     assert not any("dataframe" in key.lower() for key in diagnostics)
+
+
+def test_taker_freezes_orders_across_overlapping_latency_and_future_book_changes():
+    from quant_research_platform.contracts.portfolios import FundingEvent
+
+    selections = []
+    fills_by_case = []
+    for future_quantity in (2.0, 0.25):
+        ledger = []
+        fills = []
+        policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+        with runtime_resource_policy_scope(policy):
+            result = _simulate_taker(
+                [
+                    _state(0),
+                    _state(25, ask_levels=((1100, future_quantity),)),
+                    _state(80),
+                ],
+                [{"timestamp_ms": stamp, "prediction": 0.02} for stamp in (0, 10, 20)],
+                funding_forecasts=KNOWN_NO_FUNDING,
+                prediction_column="prediction",
+                prediction_horizon_ms=100,
+                config=_taker_config(latency_ms=30),
+                observed_coverage={"s1": _coverage(0, 100)},
+                resource_policy=policy,
+                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                asset_id="btc_usdt",
+                funding_events=(),
+                on_fill=fills.append,
+                on_ledger=ledger.append,
+            )
+            assert policy.used_memory_bytes == 0
+        quantities = [
+            row.number
+            for batch in ledger
+            for row in batch.diagnostics
+            if row.name == "decision_requested_quantity"
+        ]
+        selections.append(quantities)
+        fills_by_case.append([row["fill_qty"] for row in fills])
+        assert result["created_orders"] == 2 and result["max_abs_position"] <= 2.0
+    assert selections == [[1.0, 1.0, 0.0], [1.0, 1.0, 0.0]]
+    assert fills_by_case == [[1.0, 1.0], [0.25, 0.25]]
+
+    # Funding settled while flat, before the frozen order becomes effective,
+    # does not enter that order's holding-period expected cost.
+    result = simulate_taker(
+        [_state(0), _state(100)],
+        [{"timestamp_ms": 0, "prediction": 0.02}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_column="prediction",
+        prediction_horizon_ms=100,
+        config=_taker_config(latency_ms=50),
+        observed_coverage={"s1": _coverage(0, 101)},
+        capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(FundingEvent(25_000_000, None, None),),
+    )
+    assert result["selection_status"] == "COMPLETE"
+    assert result["created_orders"] == 1 and result["funding"] == 0.0
+
+    # A forecast ending before funding does not force liquidation: its existing
+    # inventory still settles the later real cash flow. The next forecast has
+    # missing expected funding evidence and blocks selection, not actual accounting.
+    for rate in (0.001, -0.001):
+        ledger = []
+        result = simulate_taker(
+            [_state(0), _state(50), _state(100)],
+            [
+                {"timestamp_ms": 0, "prediction": 0.02},
+                {"timestamp_ms": 50, "prediction": 0.02},
+            ],
+            funding_forecasts=(
+                FundingForecast(0, 1_000_000_000, ((75_000_000, None),)),
+            ),
+            prediction_column="prediction",
+            prediction_horizon_ms=50,
+            config=_taker_config(),
+            observed_coverage={"s1": _coverage(0, 101)},
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            funding_events=(FundingEvent(75_000_000, rate, 100.0),),
+            on_ledger=ledger.append,
+        )
+        assert (
+            result["selection_status"] == "BLOCKED" and result["blocked_decisions"] == 1
+        )
+        assert result["funding"] == pytest.approx(-100 * rate)
+        assert result["net_pnl"] == pytest.approx(-0.5 - 0.01005 - 100 * rate)
+        assert any(
+            row.text == "portfolio_expected_funding_missing"
+            for batch in ledger
+            for row in batch.diagnostics
+        )
+
+
+def test_taker_depth_breakpoint_optimum_zero_and_unavailable_decision():
+    cases = [
+        (
+            [_state(0, ask_levels=((1005, 0.4), (1030, 10.0)))],
+            0,
+            0.02,
+            0,
+            0.4,
+            "positive_expected_net_gain",
+        ),
+        ([_state(0)], 0, 0.0, 0, 0.0, "no_positive_expected_net_gain"),
+        ([_state(5)], 0, 0.02, 10, 0.0, "decision_book_unavailable"),
+        ([_state(0)], 0, 0.02, 100, 0.0, "forecast_expired_before_execution"),
+    ]
+    for books, stamp, prediction, latency, quantity, reason in cases:
+        equity = []
+        fills = []
+        result = simulate_taker(
+            books,
+            [{"timestamp_ms": stamp, "prediction": prediction}],
+            funding_forecasts=KNOWN_NO_FUNDING,
+            prediction_column="prediction",
+            prediction_horizon_ms=100,
+            config=_taker_config(latency_ms=latency, order_quantity=2.0),
+            observed_coverage={"s1": _coverage(0, 200)},
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            funding_events=(),
+            on_fill=fills.append,
+            on_equity=equity.append,
+        )
+        assert equity[0]["requested_quantity"] == quantity
+        assert equity[0]["decision_reason"] == reason
+        assert result["selection_status"] == (
+            "UNDEFINED"
+            if reason
+            in {"decision_book_unavailable", "forecast_expired_before_execution"}
+            else "COMPLETE"
+        )
+        assert result["created_orders"] == int(quantity > 0)
+        if quantity:
+            assert fills[0]["requested_quantity"] == 0.4
+            assert fills[0]["expected_net_gain"] == pytest.approx(
+                0.4 * (102 - 100.5 - 0.01005)
+            )
+
+
+def test_taker_rejects_nonpositive_forecast_and_releases_pending_orders_on_primary():
+    for prediction in (-1.0, -2.0):
+        with pytest.raises(ValueError, match="hft_prediction_price_invalid"):
+            simulate_taker(
+                [_state(0)],
+                [{"timestamp_ms": 0, "prediction": prediction}],
+                funding_forecasts=KNOWN_NO_FUNDING,
+                prediction_column="prediction",
+                prediction_horizon_ms=100,
+                config=_taker_config(),
+                observed_coverage={"s1": _coverage(0, 100)},
+                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                asset_id="btc_usdt",
+                funding_events=(),
+            )
+    primary = KeyboardInterrupt("decision_primary")
+    closed = []
+    calls = []
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+
+        def books():
+            try:
+                for stamp in (0, 100):
+                    yield OwnedValue(_state(stamp), policy.lease("fixture.book", 4096))
+            finally:
+                closed.append(True)
+                raise OSError("book_close_secondary")
+
+        def emit(batch):
+            calls.append(batch.sequence)
+            if len(calls) == 2:
+                raise primary
+
+        with pytest.raises(KeyboardInterrupt) as raised:
+            _simulate_taker(
+                books(),
+                [{"timestamp_ms": stamp, "prediction": 0.02} for stamp in (0, 10)],
+                funding_forecasts=KNOWN_NO_FUNDING,
+                prediction_column="prediction",
+                prediction_horizon_ms=100,
+                config=_taker_config(latency_ms=30),
+                observed_coverage={"s1": _coverage(0, 101)},
+                resource_policy=policy,
+                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                asset_id="btc_usdt",
+                funding_events=(),
+                on_ledger=emit,
+            )
+        assert raised.value is primary and closed
+        assert policy.used_memory_bytes == 0
+
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=320 * 1024,
+    )
+    decisions_seen = []
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+            _simulate_taker(
+                [_state(0, ask_levels=((1005, 0.001),))],
+                [{"timestamp_ms": stamp, "prediction": 0.02} for stamp in range(400)],
+                funding_forecasts=KNOWN_NO_FUNDING,
+                prediction_column="prediction",
+                prediction_horizon_ms=1000,
+                config=_taker_config(latency_ms=500),
+                observed_coverage={"s1": _coverage(0, 1001)},
+                resource_policy=policy,
+                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                asset_id="btc_usdt",
+                funding_events=(),
+                on_ledger=lambda batch: decisions_seen.append(batch.sequence),
+            )
+        assert len(decisions_seen) > 2
+        assert policy.used_memory_bytes == 0
+
+
+def test_taker_terminal_mark_cannot_reuse_price_before_pending_effective_time():
+    result = simulate_taker(
+        [_state(0), _state(20)],
+        [
+            {"timestamp_ms": 0, "prediction": 0.02},
+            {"timestamp_ms": 20, "prediction": 0.02},
+        ],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_column="prediction",
+        prediction_horizon_ms=100,
+        config=_taker_config(latency_ms=10),
+        observed_coverage={"s1": _coverage(0, 25)},
+        capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+    )
+    assert result["filled_orders"] == 1 and result["unfilled_quantity"] == 1.0
+    assert result["net_pnl"] is None and result["nav"] is None

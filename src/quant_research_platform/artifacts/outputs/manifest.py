@@ -238,6 +238,7 @@ def evaluation_output_metadata(
         "evaluation_axis": spec.evaluation_axis,
         "signals": [_signal_payload(signal) for signal in spec.signals],
         "label_columns": list(spec.label_columns),
+        "label_availability_columns": dict(spec.label_availability_columns),
         "filter_mode": spec.filter_mode,
         "evaluation_diagnostics": _evaluation_diagnostics_payload(
             evaluation_diagnostics

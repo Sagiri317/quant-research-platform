@@ -10,11 +10,11 @@ import pandas as pd
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research._memory import _selected_frame_payload_bytes
 from quant_research_platform.research.filtering import (
     _filter_working_set_bound,
     apply_filter_mode,
 )
+from quant_research_platform.runtime.dataframes import _selected_frame_payload_bytes
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,

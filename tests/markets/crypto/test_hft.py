@@ -337,11 +337,18 @@ def test_maker_bid_sell_pressure_proxy_uses_future_observed_sell_flow() -> None:
 
     assert "maker_bid_sell_pressure_proxy_500ms" in labels
     assert set(column for column in labels if column.startswith("maker_bid_")) == {
-        "maker_bid_sell_pressure_proxy_500ms"
+        "maker_bid_sell_pressure_proxy_500ms",
+        "maker_bid_sell_pressure_proxy_500ms_available_at",
     }
     assert labels.loc[0, "maker_bid_sell_pressure_proxy_500ms"] == 1.0
     assert labels.loc[1, "maker_bid_sell_pressure_proxy_500ms"] == 0.75
     assert labels["maker_bid_sell_pressure_proxy_500ms"].iloc[-1:].isna().all()
+    available = labels["maker_bid_sell_pressure_proxy_500ms_available_at"]
+    assert available.iloc[:2].tolist() == [
+        pd.Timestamp("1970-01-01T00:00:00.500000"),
+        pd.Timestamp("1970-01-01T00:00:00.600000"),
+    ]
+    assert available.iloc[2:].isna().all()
 
 
 def test_factor_and_label_rows_reject_non_grid_gap_in_same_segment() -> None:

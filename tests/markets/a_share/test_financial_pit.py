@@ -95,6 +95,45 @@ def test_financial_versions_use_next_session_and_preserve_old_event() -> None:
     ]
 
 
+def test_weekend_revisions_use_the_latest_public_version_on_monday() -> None:
+    records = tuple(
+        {
+            "asset": "asset",
+            "period": "2019-12-31",
+            "corrected": day is not None,
+            "correction_date": pd.Timestamp(day) if day else pd.NaT,
+            "version": f"correction@{day}" if day else "original",
+            "value": value,
+        }
+        for day, value in ((None, 100.0), ("2020-02-01", 110.0), ("2020-02-02", 120.0))
+    )
+    interim = {
+        data_id: _financial_frame(data_id, records)
+        for data_id in FINANCIAL_VALUE_COLUMNS
+    }
+    disclosures = pd.DataFrame(
+        {
+            "asset_id": ["asset"],
+            "report_period": pd.to_datetime(["2019-12-31"]),
+            "first_disclosure_date": pd.to_datetime(["2020-01-30"]),
+        }
+    )
+    sessions = pd.DatetimeIndex(["2020-01-31", "2020-02-03", "2020-02-04"])
+    events = financial_events_from_interim(
+        interim, disclosures, trading_sessions=sessions
+    )
+    ttm = construct_ttm_events(events)
+    cashflow = ttm.loc[ttm.metric_id.eq("operating_cash_flow")]
+    assert cashflow.available_at.tolist() == list(sessions[:2])
+    assert cashflow.ttm_value.tolist() == [100.0, 120.0]
+    assert cashflow.version_identity.tolist() == ["original", "correction@2020-02-02"]
+    assert interim["financial_cashflow"].operating_cash_flow.tolist() == [
+        100.0,
+        110.0,
+        120.0,
+    ]
+
+
 def test_correction_after_observation_calendar_does_not_rewrite_past() -> None:
     records = (
         {
@@ -223,6 +262,88 @@ def test_pit_exposes_beginning_quarter_and_prior_year_same_period() -> None:
     assert row["prior_year_value"] == 20.0
     assert row["prior_fy_report_period"] == pd.Timestamp("2019-12-31")
     assert row["prior_fy_value"] == 40.0
+
+
+def test_old_period_revisions_update_dependencies_without_current_rollback() -> None:
+    events = pd.DataFrame(
+        {
+            "asset_id": ["asset"] * 6,
+            "metric_id": ["total_assets"] * 6,
+            "report_period": pd.to_datetime(
+                [
+                    "2019-06-30",
+                    "2019-12-31",
+                    "2020-06-30",
+                    "2019-12-31",
+                    "2019-06-30",
+                    "2020-06-30",
+                ]
+            ),
+            "available_at": pd.to_datetime(
+                [
+                    "2020-01-02",
+                    "2020-01-02",
+                    "2020-08-03",
+                    "2020-09-01",
+                    "2020-10-01",
+                    "2020-11-02",
+                ]
+            ),
+            "is_corrected": [False, False, False, True, True, True],
+            "version_identity": [
+                "original",
+                "original",
+                "original",
+                "correction@2020-09-01",
+                "correction@2020-10-01",
+                "correction@2020-11-02",
+            ],
+            "value": [50.0, 120.0, 80.0, 140.0, np.nan, np.nan],
+        }
+    )
+    observations = pd.DataFrame(
+        {
+            "asset_id": ["asset"] * 6,
+            "timestamp": pd.to_datetime(
+                [
+                    "2020-01-01",
+                    "2020-08-03",
+                    "2020-08-31",
+                    "2020-09-01",
+                    "2020-10-01",
+                    "2020-11-02",
+                ]
+            ),
+        }
+    )
+    before_late_revisions = materialize_pit_fundamentals(
+        observations.iloc[:3], events.iloc[:3]
+    )
+    result = materialize_pit_fundamentals(observations, events)
+    pd.testing.assert_frame_equal(
+        result.iloc[:3], before_late_revisions, check_dtype=False
+    )
+    assert pd.isna(result.iloc[0].report_period)
+    assert result.report_period.iloc[1:].eq(pd.Timestamp("2020-06-30")).all()
+    assert result.available_at.iloc[1:5].eq(pd.Timestamp("2020-08-03")).all()
+    assert result.version_identity.iloc[1:5].eq("original").all()
+    np.testing.assert_allclose(
+        result.value.to_numpy(dtype=float, na_value=np.nan),
+        [np.nan, 80, 80, 80, 80, np.nan],
+    )
+    np.testing.assert_allclose(
+        result.prior_year_value.to_numpy(dtype=float, na_value=np.nan),
+        [np.nan, 50, 50, 50, np.nan, np.nan],
+    )
+    pd.testing.assert_series_equal(
+        result.beginning_value, result.prior_year_value, check_names=False
+    )
+    assert result.prior_year_report_period.iloc[1:].eq(pd.Timestamp("2019-06-30")).all()
+    np.testing.assert_allclose(
+        result.prior_fy_value.to_numpy(dtype=float, na_value=np.nan),
+        [np.nan, 120, 120, 140, 140, 140],
+    )
+    assert result.iloc[-1].version_identity == "correction@2020-11-02"
 
 
 def test_financial_versions_fail_without_legal_disclosure_or_unique_identity() -> None:

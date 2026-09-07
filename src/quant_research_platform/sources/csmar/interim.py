@@ -39,7 +39,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.sources.csmar.field_mappings import (
     map_columns,
-    normalize_stock_code,
+    normalize_provider_stock_code_series,
 )
 from quant_research_platform.sources.csmar.fields import field_role
 from quant_research_platform.sources.csmar.ids import SOURCE_ID, market_bars_data_id
@@ -170,6 +170,7 @@ INDEX_RETURN_INTERIM_COLUMNS: tuple[str, ...] = (
     "timestamp",
     "trade_date",
     "index_name",
+    "open",
     "close",
     "period_return",
 )
@@ -640,7 +641,9 @@ def normalize_raw_frame(
 ) -> pd.DataFrame:
     mapped = map_columns(frame, _raw_dataset_for_interim(data_id))
     if "stock_code" in mapped.columns:
-        mapped["stock_code"] = normalize_stock_code(mapped["stock_code"])
+        mapped["stock_code"] = normalize_provider_stock_code_series(
+            mapped["stock_code"]
+        )
     if "index_code" in mapped.columns:
         mapped["index_code"] = strict_string_series(
             mapped["index_code"],
@@ -651,7 +654,7 @@ def normalize_raw_frame(
         return _normalize_trading_calendar_frame(mapped)
     if data_id == "index_membership":
         result = mapped
-        result["constituent_asset_id"] = normalize_stock_code(
+        result["constituent_asset_id"] = normalize_provider_stock_code_series(
             result["constituent_stock_code"]
         )
         for column in ("effective_date", "announcement_date"):
@@ -666,7 +669,7 @@ def normalize_raw_frame(
         return result.reset_index(drop=True)
     if data_id == "index_weights":
         result = mapped
-        result["constituent_asset_id"] = normalize_stock_code(
+        result["constituent_asset_id"] = normalize_provider_stock_code_series(
             result["constituent_stock_code"]
         )
         result["effective_date"] = strict_timestamp_series(
@@ -857,6 +860,9 @@ def normalize_raw_frame(
         return result
     if data_id == "index_market":
         result = mapped
+        result["open"] = strict_finite_numeric_series(
+            result["open"], error="invalid_index_open", allow_null=True
+        )
         result["trade_date"] = strict_timestamp_series(
             result["trade_date"], error="invalid_index_return_date"
         ).dt.normalize()
@@ -942,7 +948,9 @@ def normalize_raw_frame(
         return _normalize_state_change_frame(mapped, data_id)
     if data_id == "analyst_forecast":
         result = mapped
-        result["source_asset_id"] = normalize_stock_code(result["stock_code"])
+        result["source_asset_id"] = normalize_provider_stock_code_series(
+            result["stock_code"]
+        )
         result["declare_date"] = strict_timestamp_series(
             result["declare_date"], error="invalid_analyst_declare_date"
         ).dt.normalize()
@@ -1509,22 +1517,6 @@ def _iter_pruned_interim_frames(
                                     owner="source.csmar.interim.pending",
                                 )
                                 raise
-                        if data_id not in SOURCE_REFERENCE_DATA_IDS:
-                            lease.shrink_to(chunk_bytes + pruned_bytes + 64 * 1024)
-                        del report, candidate
-                        owned_output = OwnedValue(pruned, lease)
-                        del pruned
-                        del owned, chunk
-                        pending_frame = None
-                        if pending_lease is not None and pending_lease is not lease:
-                            pending_lease.close()
-                        pending_lease = None
-                        pending_frame = next_pending_frame
-                        pending_lease = next_pending_lease
-                        pending_bound = next_pending_bound
-                        pending_span = next_pending_span
-                        yield owned_output
-                        del owned_output
                         if source_owned:
                             try:
                                 upstream_bound = chunks.send(None)
@@ -1534,6 +1526,22 @@ def _iter_pruned_interim_frames(
                                 type(upstream_bound) is not int or upstream_bound <= 0
                             ):
                                 raise ValueError("invalid_csmar_raw_bound")
+                        del report, candidate
+                        del owned, chunk
+                        pending_frame = None
+                        if pending_lease is not None and pending_lease is not lease:
+                            pending_lease.close()
+                        pending_lease = None
+                        pending_frame = next_pending_frame
+                        pending_lease = next_pending_lease
+                        pending_bound = next_pending_bound
+                        pending_span = next_pending_span
+                        if data_id not in SOURCE_REFERENCE_DATA_IDS:
+                            lease.shrink_to(pruned_bytes + 64 * 1024)
+                        owned_output = OwnedValue(pruned, lease)
+                        del pruned
+                        yield owned_output
+                        del owned_output
                         lease = None
                         emitted = True
                         break

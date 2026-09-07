@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from quant_research_platform.contracts.portfolios import FundingForecast
 from quant_research_platform.markets.implementations.crypto.hft import (
     iter_panel_frames,
 )
@@ -19,6 +20,114 @@ from quant_research_platform.sources.binance.ids import (
     RESEARCH_SYMBOLS,
 )
 from tests.helpers.runtime_resources import capture_test_policy
+
+# Synthetic event fixtures explicitly declare this known no-funding interval.
+KNOWN_NO_FUNDING = (FundingForecast(0, 1_000_000_000_000, ()),)
+
+
+def hft_research_plan():
+    """Explicit plan paired with the 90-step, two-asset recorder fixture."""
+
+    def window(start, end):
+        return {"start": f"1970-01-01T00:00:{start}", "end": f"1970-01-01T00:00:{end}"}
+
+    return {
+        "folds": [
+            {
+                "fold_id": "fold_1",
+                "train": window("00", "02"),
+                "validation": window("02.100000", "03.500000"),
+                "development_test": window("04", "05"),
+            },
+            {
+                "fold_id": "fold_2",
+                "train": window("01", "04"),
+                "validation": window("04.100000", "06"),
+                "development_test": window("06.500000", "08.500000"),
+            },
+        ],
+        "final_holdout": window("08.600000", "09"),
+        "initial_capital": 1000.0,
+        "valuation_currency": "USDT",
+        "exposure_limits": {
+            asset: {"max_order_quantity": 1.0, "max_position_quantity": 2.0}
+            for asset in ("btc_usdt", "eth_usdt")
+        },
+        "execution": {
+            "taker_fee_bps": 1.0,
+            "latency_ms": 10,
+            "markout_horizon_ms": 500,
+            "latency_scenarios_ms": [0, 100, 200],
+            "fee_scenarios_bps": [0.5, 1.0, 2.0],
+            "additional_spread_scenarios_bps": [0.0, 1.0, 2.0],
+            "maker": {
+                "maker_fee_bps": -1.0,
+                "latency_ms": 10,
+                "min_calibration_samples": 2,
+                "inventory_target": 0.0,
+                "inventory_skew": 0.0,
+            },
+        },
+    }
+
+
+def write_hft_funding_fixture(raw_root: Path) -> None:
+    """Explicit synthetic calendar, settlements, and separately known cash forecasts."""
+    from quant_research_platform.sources.binance.funding import (
+        FUNDING_COLUMNS,
+        FUNDING_SCHEMA_ID,
+    )
+    from quant_research_platform.storage.raw_snapshots import (
+        iter_csv_snapshot,
+        write_csv_snapshot,
+    )
+
+    with runtime_resource_policy_scope():
+        for symbol, mark in (("BTCUSDT", 100.0), ("ETHUSDT", 200.0)):
+            metadata = {
+                "schema_id": FUNDING_SCHEMA_ID,
+                "symbol": symbol,
+                "market_type": FUTURES_MARKET_TYPE,
+                "valuation_currency": "USDT",
+                "coverage": {
+                    "start_ns": 0,
+                    "end_ns": 10_000_000_000,
+                    "status": "COMPLETE",
+                },
+                "provenance": "synthetic_explicit_calendar_and_known_forecasts",
+            }
+            rows = (
+                ("settlement", 4_800_000_000, None, -0.02, mark, None),
+                ("settlement", 5_700_000_000, None, 0.001, mark, None),
+                ("settlement", 7_400_000_000, None, 0.02, mark, None),
+                (
+                    "forecast",
+                    0,
+                    12_000_000_000,
+                    None,
+                    None,
+                    [
+                        [4_800_000_000, mark * 0.02],
+                        [5_700_000_000, -mark * 0.001],
+                        [7_400_000_000, -mark * 0.02],
+                    ],
+                ),
+            )
+
+            def validate(root, metadata=metadata):
+                for _row in iter_csv_snapshot(
+                    root, expected_metadata=metadata, max_bytes=1024 * 1024
+                ):
+                    pass
+
+            write_csv_snapshot(
+                raw_root.parent / "funding" / symbol,
+                columns=FUNDING_COLUMNS,
+                rows=rows,
+                metadata=metadata,
+                max_bytes=1024 * 1024,
+                validate=validate,
+            )
 
 
 def with_test_resource_policy(function):  # noqa: ANN001, ANN201
@@ -73,7 +182,9 @@ def _row_timestamp_ms(row: dict[str, object]) -> int:
     return pd.Timestamp(row["timestamp"]).value // 1_000_000
 
 
-def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
+def write_binance_hft_run(
+    root: Path, *, count: int = 60, maker_liquidity: bool = False
+) -> dict:
     root.mkdir(parents=True)
     snapshot_rows = [
         _raw(
@@ -124,10 +235,10 @@ def write_binance_hft_run(root: Path, *, count: int = 60) -> dict:
                     "a": index,
                     "f": index,
                     "l": index,
-                    "p": ask,
-                    "q": "0.1",
-                    "nq": "0.1",
-                    "m": False,
+                    "p": bid if maker_liquidity and index % 2 else ask,
+                    "q": "3" if maker_liquidity else "0.1",
+                    "nq": "3" if maker_liquidity else "0.1",
+                    "m": bool(maker_liquidity and index % 2),
                 },
                 segment=False,
             )

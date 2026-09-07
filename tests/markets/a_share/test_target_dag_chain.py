@@ -191,7 +191,6 @@ def _synthetic_financial_frames() -> dict[str, pd.DataFrame]:
             {
                 "source_asset_id": [asset for asset, _period in rows],
                 "timestamp": [period for _asset, period in rows],
-                "stock_name": "synthetic",
                 "report_period": [period for _asset, period in rows],
                 "report_type": "A",
                 "is_corrected": [False] * len(rows),

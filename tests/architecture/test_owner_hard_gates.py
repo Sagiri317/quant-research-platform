@@ -31,15 +31,8 @@ def test_public_workflow_actions_have_one_owner_and_direct_callers() -> None:
     }
 
     cli_path = SOURCE_ROOT / "interfaces" / "cli" / "commands.py"
-    smoke_path = workflow_root / "smoke.py"
     assert _imports_research_workflow(cli_path)
-    assert _imports_research_workflow(smoke_path)
     assert _direct_workflow_calls(cli_path) == set(WORKFLOW_ACTIONS)
-    assert _direct_workflow_calls(smoke_path) == {
-        "dataset_build",
-        "research_run",
-        "report_build",
-    }
 
 
 def test_research_and_profile_owners_have_no_provider_traversal() -> None:

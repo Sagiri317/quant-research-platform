@@ -37,7 +37,7 @@ def move_path_no_replace(source: Path, target: Path) -> None:
     source = Path(source)
     target = Path(target)
     if os.name == "nt":
-        os.rename(source, target)
+        os.rename(_windows_extended_path(source), _windows_extended_path(target))
         return
     if not sys.platform.startswith("linux"):
         raise OSError(errno.ENOTSUP, "no-replace move is unsupported", target)
@@ -77,15 +77,15 @@ def remove_owned_scratch(
     | None = None,
 ) -> None:
     path = Path(path)
+    target: str | Path = _windows_extended_path(path) if os.name == "nt" else path
     try:
-        current = path.lstat()
+        current = os.lstat(target)
     except FileNotFoundError:
         return
     if stat.S_ISDIR(current.st_mode):
-        target: str | Path = _windows_extended_path(path) if os.name == "nt" else path
         shutil.rmtree(target, onexc=onexc)
     else:
-        path.unlink()
+        os.unlink(target)
 
 
 def open_owned_scratch_file(

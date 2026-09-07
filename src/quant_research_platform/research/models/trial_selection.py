@@ -29,6 +29,7 @@ from quant_research_platform.contracts.models import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.research.filtering import (
     _filter_working_set_bound,
     apply_filter_mode,
@@ -735,6 +736,7 @@ def select_prediction_model_spec(
     model_catalog,
     chunks,
     validation_input_columns: tuple[str, ...] | None = None,
+    trial_recorder: TrialRecorder | None = None,
 ):
     """Select one model spec from validation trials for model-owned callers."""
 
@@ -769,19 +771,6 @@ def select_prediction_model_spec(
             label_column=label_column,
             sample_filter_mode=candidate_spec.sample_filter_mode,
         )
-        owned_model = fitting._fit_model_result_owned_from_frames(  # noqa: SLF001
-            fitting.training_scope_chunks(
-                chunks(train_read_columns, input_columns=candidate_spec.input_columns),
-                asset_ids=prediction_spec.training_asset_ids,
-            ),
-            candidate_spec,
-            estimator=build_estimator_from_model_spec(candidate_spec),
-            fitting_cutoff=pd.Timestamp(prediction_spec.train_end),
-        )
-        model_result = (
-            owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
-        )
-        model_lease = owned_model.lease if isinstance(owned_model, OwnedValue) else None
         validation_read_columns = tuple(
             dict.fromkeys(
                 (
@@ -798,7 +787,30 @@ def select_prediction_model_spec(
         cleanup_owner = None
         cleanup_lease = None
         primary_error: BaseException | None = None
+        owned_model = model_result = model_lease = None
+        attempt = (
+            trial_recorder.begin(candidate_spec) if trial_recorder is not None else None
+        )
         try:
+            owned_model = fitting._fit_model_result_owned_from_frames(  # noqa: SLF001
+                fitting.training_scope_chunks(
+                    chunks(
+                        train_read_columns, input_columns=candidate_spec.input_columns
+                    ),
+                    asset_ids=prediction_spec.training_asset_ids,
+                ),
+                candidate_spec,
+                estimator=build_estimator_from_model_spec(candidate_spec),
+                fitting_cutoff=pd.Timestamp(prediction_spec.train_end),
+            )
+            model_result = (
+                owned_model.value
+                if isinstance(owned_model, OwnedValue)
+                else owned_model
+            )
+            model_lease = (
+                owned_model.lease if isinstance(owned_model, OwnedValue) else None
+            )
 
             def validation_source(
                 validation_columns: tuple[str, ...] = validation_read_columns,
@@ -840,9 +852,21 @@ def select_prediction_model_spec(
                     ),
                 }
             )
+            if trial_recorder is not None:
+                trial_recorder.finish(
+                    attempt, metrics=trial_metrics, model_metadata=model_result.metadata
+                )
             trial_metric_records.append(trial_metrics)
         except BaseException as exc:
             primary_error = exc
+            if trial_recorder is not None and attempt is not None:
+                try:
+                    trial_recorder.finish(attempt, error=exc)
+                except BaseException as record_error:
+                    exc.add_note(
+                        "trial failure record also failed: "
+                        f"{type(record_error).__name__}"
+                    )
             raise
         finally:
             cleanup_owner = owned_model if isinstance(owned_model, OwnedValue) else None
@@ -907,13 +931,20 @@ def iter_validation_prediction_chunks(
     validation_start: pd.Timestamp,
     validation_end: pd.Timestamp,
     usable_input_columns: tuple[str, ...] | None = None,
+    include_availability: bool = False,
+    extra_output_columns: tuple[str, ...] = (),
 ) -> Iterable[object]:
     predictor = prediction_callable(
         model_result.coefficients,
         candidate_spec.input_columns,
         model_result.prediction_model,
     )
-    output_columns = ("timestamp", "asset_id", candidate_spec.label_column)
+    output_columns = (
+        "timestamp",
+        "asset_id",
+        candidate_spec.label_column,
+        *extra_output_columns,
+    )
     policy = current_runtime_resource_policy()
     with closing_iterator(iter(chunks())) as source:
         for chunk in source:
@@ -969,6 +1000,10 @@ def iter_validation_prediction_chunks(
                     )
                     if not usable.empty:
                         output = usable.loc[:, list(output_columns)].copy()
+                        if include_availability:
+                            if availability_column is None:
+                                raise ValueError("label_availability_column_required")
+                            output["label_available_at"] = usable[availability_column]
                         output[prediction_spec.prediction_column] = predictor(usable)
                         if chunk_lease is not None:
                             output_bytes = pandas_frame_payload_bytes(output)

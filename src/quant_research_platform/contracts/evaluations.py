@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import date, datetime
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 import pandas as pd
@@ -58,6 +60,7 @@ class EvaluationSpec:
     research_dataset_id: str
     signals: tuple[_SignalSpec, ...]
     label_columns: tuple[str, ...]
+    label_availability_columns: Mapping[str, str] = field(default_factory=dict)
     evaluation_axis: EvaluationAxis = "cross_sectional"
     filter_mode: EvaluationFilterMode = "eligible"
     n_groups: int = 5
@@ -83,6 +86,20 @@ class EvaluationSpec:
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_signals(self.signals)
         _validate_column_tuple(self.label_columns, "label_columns")
+        availability = dict(self.label_availability_columns)
+        if any(
+            type(label) is not str
+            or label not in self.label_columns
+            or type(column) is not str
+            or not column
+            for label, column in availability.items()
+        ):
+            raise ValueError("label_availability_columns_invalid")
+        object.__setattr__(
+            self,
+            "label_availability_columns",
+            MappingProxyType(dict(sorted(availability.items()))),
+        )
         _validate_column_tuple(
             self.segment_columns,
             "segment_columns",

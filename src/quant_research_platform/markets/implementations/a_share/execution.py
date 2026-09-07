@@ -19,6 +19,7 @@ from quant_research_platform.contracts.validation import strict_bool_series
 _CHARGE_CODES = frozenset({"BROKER_COMMISSION", "STAMP_DUTY", "TRANSFER_FEE"})
 _ALL_FEE_CODES = _CHARGE_CODES | frozenset({"EXCHANGE_HANDLING_FEE", "REGULATORY_FEE"})
 _RULE_MARKETS = frozenset({"a_share", "shanghai", "shenzhen"})
+EXECUTION_LOOKAHEAD_SESSIONS = 1
 _RUNTIME_MARKETS = frozenset({"shanghai", "shenzhen"})
 _RUNTIME_SIDES = frozenset({"buy", "sell"})
 _BASES = frozenset({"amount", "face_value"})
@@ -350,9 +351,24 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
     result["one_word_limit_up"] = status.eq(1) & equal_price
     result["one_word_limit_down"] = status.eq(-1) & equal_price
     grouped = result.groupby("asset_id", sort=False)
-    next_trading = grouped["is_trading"].shift(-1).fillna(False).astype(bool)
-    next_up = grouped["one_word_limit_up"].shift(-1).fillna(False).astype(bool)
-    next_down = grouped["one_word_limit_down"].shift(-1).fillna(False).astype(bool)
+    next_trading = (
+        grouped["is_trading"]
+        .shift(-EXECUTION_LOOKAHEAD_SESSIONS)
+        .fillna(False)
+        .astype(bool)
+    )
+    next_up = (
+        grouped["one_word_limit_up"]
+        .shift(-EXECUTION_LOOKAHEAD_SESSIONS)
+        .fillna(False)
+        .astype(bool)
+    )
+    next_down = (
+        grouped["one_word_limit_down"]
+        .shift(-EXECUTION_LOOKAHEAD_SESSIONS)
+        .fillna(False)
+        .astype(bool)
+    )
     output = result.loc[:, ("market_id", "asset_id", "timestamp")].copy()
     output["can_enter"] = next_trading & ~next_up
     output["can_exit"] = next_trading & ~next_down

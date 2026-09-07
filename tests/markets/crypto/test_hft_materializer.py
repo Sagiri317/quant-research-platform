@@ -1,45 +1,21 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pandas as pd
+import pytest
 
-from quant_research_platform.artifacts.outputs import write_prediction_outputs
-from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_DATA_ID,
     HFT_LABEL_DATA_ID,
     HFT_PANEL_DATA_ID,
     HFT_RESEARCH_DATASET_ID,
 )
-from quant_research_platform.markets.implementations.crypto.processed.catalog import (
-    hft_processed_catalog,
-)
-from quant_research_platform.research.datasets.assembler import (
-    assemble_research_dataset,
-)
-from quant_research_platform.research.models.dependencies import (
-    preflight_model_dependency,
-)
-from quant_research_platform.research.predictions.runner import (
-    build_prediction_result_from_research_dataset,
-)
-from quant_research_platform.research.protocols.crypto_hft import (
-    HFT_MODEL_ALGORITHMS,
-    HFT_MULTI_ASSET_SCOPES,
-    build_hft_model_catalog,
-    build_hft_prediction_catalog,
-    build_hft_research_dataset_catalog,
-)
+from quant_research_platform.markets.implementations.crypto.processed import producer
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.sources.binance.replay import open_recorder_run
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
     read_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import crypto_hft_materialization
 from tests.helpers.binance_hft import write_binance_hft_run
 from tests.helpers.runtime_resources import capture_test_policy
 
@@ -68,7 +44,7 @@ def test_common_panel_alignment_ignores_asymmetric_frame_boundaries() -> None:
         eth_tail_consumed.append(True)
 
     output = list(
-        crypto_hft_materialization._common_symbol_panel_frames(
+        producer._common_symbol_panel_frames(
             {
                 "BTCUSDT": iter((frame("btc_usdt", (0,)), frame("btc_usdt", (1, 2)))),
                 "ETHUSDT": eth_frames(),
@@ -101,7 +77,7 @@ def test_common_panel_initial_empty_stream_still_drains_required_symbols() -> No
         yield  # pragma: no cover
 
     output = list(
-        crypto_hft_materialization._common_symbol_panel_frames(
+        producer._common_symbol_panel_frames(
             {"BTCUSDT": btc_frames(), "ETHUSDT": eth_frames()},
             columns=columns,
             batch_rows=2,
@@ -112,125 +88,207 @@ def test_common_panel_initial_empty_stream_still_drains_required_symbols() -> No
     assert exhausted == ["ETHUSDT", "BTCUSDT"]
 
 
-def test_hft_materialization_reuses_panel_and_standard_research_dataset(
-    tmp_path: Path,
-) -> None:
-    raw_root = tmp_path / "raw"
-    output_root = tmp_path / "output"
-    write_binance_hft_run(raw_root)
-    layout = StorageLayout(output_root)
-    policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
-    window = TimeWindow("1970-01-01T00:00:00", "1970-01-01T00:00:06")
-
-    with (
-        runtime_resource_policy_scope(policy),
-        open_recorder_run(
-            raw_root,
-            policy,
-        ) as run,
-    ):
-        inspections, stats_by_symbol = (
-            crypto_hft_materialization.materialize_hft_processed_data(
-                layout=layout,
-                run=run,
-                time_window=window,
-                resource_policy=policy,
-            )
-        )
-        assemble_research_dataset(
-            layout=layout,
-            dataset_catalog=build_hft_research_dataset_catalog(),
-            processed_catalog=hft_processed_catalog(),
-            dataset_id=HFT_RESEARCH_DATASET_ID,
-            time_window=window,
-            resource_policy=policy,
-        )
-        model_catalog = build_hft_model_catalog(
-            training_row_bound=inspections[HFT_PANEL_DATA_ID].row_count,
-        )
-        prediction_catalog = build_hft_prediction_catalog(
-            train_end="1970-01-01T00:00:03.900000",
-            test_start="1970-01-01T00:00:04",
-            test_end="1970-01-01T00:00:06",
-        )
-        prediction_bundles = {}
-        model_metadata = {}
-        for algorithm in HFT_MODEL_ALGORITHMS:
-            preflight_model_dependency(algorithm)
-        for prediction_spec in prediction_catalog.list():
-            result = build_prediction_result_from_research_dataset(
-                layout=layout,
-                dataset_catalog=build_hft_research_dataset_catalog(),
-                model_catalog=model_catalog,
-                prediction_catalog=prediction_catalog,
-                prediction_id=prediction_spec.prediction_id,
-                time_window=window,
-                resource_policy=policy,
-            )
-            model_metadata[prediction_spec.model_id] = result.model_metadata
-            try:
-                prediction_bundles[prediction_spec.model_id] = write_prediction_outputs(
-                    output_chunks=result.output_chunks,
-                    spec=result.spec,
-                    output_spec=OutputSpec(
-                        output_id=f"{prediction_spec.prediction_id}_output",
-                        output_definition_id="prediction_outputs",
-                        run_id=prediction_spec.prediction_id,
-                        market_id="crypto",
-                        run_type="prediction",
-                        scope=OutputScope.LOCAL_ONLY,
-                    ),
-                    layout=layout,
-                    model_metadata=result.model_metadata,
-                    prediction_metadata_factory=(result.prediction_metadata_factory),
-                    resource_policy=policy,
-                )
-            finally:
-                result.close()
-
-    assert inspections[HFT_PANEL_DATA_ID].row_count == 122
-    assert inspections[HFT_FACTOR_DATA_ID].row_count == 122
-    assert inspections[HFT_LABEL_DATA_ID].row_count == 122
-    assert stats_by_symbol["BTCUSDT"].emitted_states == 61
-    assert stats_by_symbol["ETHUSDT"].emitted_states == 61
-    assert (
-        inspections[HFT_PANEL_DATA_ID].manifest["source_artifact_identity"][
-            "artifact_id"
-        ]
-        == "workflow-run"
+def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
     )
-    assert set(
-        inspections[HFT_FACTOR_DATA_ID].manifest["input_dataset_identities"]
-    ) == {HFT_PANEL_DATA_ID}
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.workflows import research
 
-    research_root = layout.research_dataset_root("crypto", HFT_RESEARCH_DATASET_ID)
-    policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
-    with runtime_resource_policy_scope(policy):
-        research = read_dataset(
-            research_root,
+    raw_root = tmp_path / "raw"
+    write_binance_hft_run(raw_root)
+    layout = StorageLayout(tmp_path / "project")
+    profile = research_profile(CRYPTO_PROFILE_ID)
+    window = dict(start_date="1970-01-01T00:00:00", end_date="1970-01-01T00:00:06")
+    result = research.data_materialize(
+        profile=profile, layout=layout, raw_root=raw_root, **window
+    )
+    assert result["status"] == "COMPLETE", result["target_results"]
+    assert {row["target_id"] for row in result["target_results"]} == {
+        HFT_PANEL_DATA_ID,
+        HFT_FACTOR_DATA_ID,
+        HFT_LABEL_DATA_ID,
+    }
+    targets = {row["target_id"]: row for row in result["target_results"]}
+    panel_spec = profile.processed.get(HFT_PANEL_DATA_ID)
+    root = layout.instance_root(
+        layout.processed_data_root(
+            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+        ),
+        targets[HFT_PANEL_DATA_ID]["instance_identity"],
+    )
+    manifest = read_dataset_manifest_evidence(root)
+    assert manifest["row_count"] == 122
+    assert manifest["source_artifact_identity"]["artifact_id"] == "workflow-run"
+    assert set(manifest["producer_diagnostics"]["reconstruction"]) == {
+        "BTCUSDT",
+        "ETHUSDT",
+    }
+    assert all(
+        value["emitted_states"] == 61
+        for value in manifest["producer_diagnostics"]["reconstruction"].values()
+    )
+    again = research.data_materialize(
+        profile=profile, layout=layout, raw_root=raw_root, **window
+    )
+    assert all(row["status"] == "REUSED" for row in again["target_results"])
+    fractional = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        data_ids=(HFT_PANEL_DATA_ID,),
+        start_date="1970-01-01T00:00:00.100001",
+        end_date="1970-01-01T00:00:05.999999",
+    )
+    assert fractional["status"] == "COMPLETE"
+    fractional_root = layout.instance_root(
+        layout.processed_data_root(
+            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+        ),
+        fractional["target_results"][0]["instance_identity"],
+    )
+    with runtime_resource_policy_scope() as policy:
+        sampled = read_dataset(
+            fractional_root,
+            columns=("timestamp", "asset_id"),
             mode=DatasetReadMode.MATERIALIZED,
             resource_policy=policy,
         )
-
-    assert len(research) == 122
-    assert set(research["asset_id"]) == {"btc_usdt", "eth_usdt"}
-    assert "segment_id" in research
-    assert "ofi_100ms" in research
-    assert "future_mid_return_500ms" in research
-    assert set(prediction_bundles) == {model.model_id for model in model_catalog.list()}
-    assert all(path.is_dir() for path in prediction_bundles.values())
-    assert all(
-        metadata["max_train_rows"] == inspections[HFT_PANEL_DATA_ID].row_count
-        for metadata in model_metadata.values()
-    )
-    assert all(
-        metadata["rows_after_input_label_dropna"] <= metadata["max_train_rows"]
-        for metadata in model_metadata.values()
-    )
-    assert all("T" in metadata["train_end"] for metadata in model_metadata.values())
-    for mode, (_train_assets, evaluation_assets) in HFT_MULTI_ASSET_SCOPES.items():
-        model_id = f"crypto_hft_{mode}"
-        predictions = pd.read_parquet(
-            prediction_bundles[model_id] / "prediction.parquet"
+        assert sampled.timestamp.min() >= pd.Timestamp("1970-01-01T00:00:00.100001")
+        assert sampled.timestamp.max() <= pd.Timestamp("1970-01-01T00:00:05.999999")
+        assert not sampled.timestamp.eq(
+            pd.Timestamp("1970-01-01T00:00:00.100000")
+        ).any()
+        assert sampled.groupby("timestamp").asset_id.nunique().eq(2).all()
+        fractional_manifest = read_dataset_manifest_evidence(fractional_root)
+        assert fractional_manifest["row_count"] == len(sampled)
+        assert (
+            fractional_manifest["producer_diagnostics"]["observation_grid"]
+            == "common_btc_eth_observed_timestamps"
         )
-        assert set(predictions["asset_id"]) == set(evaluation_assets)
+        sampled = None
+        assert policy.used_memory_bytes == 0
+    built = research.dataset_build(
+        profile=profile,
+        layout=layout,
+        dataset_id=HFT_RESEARCH_DATASET_ID,
+        raw_root=raw_root,
+        **window,
+    )
+    assert built["status"] == "COMPLETE", built["target_results"]
+    assert [row["status"] for row in built["target_results"]].count("BUILT") == 1
+
+    from contextlib import contextmanager
+
+    from quant_research_platform.sources.binance.replay import ReconstructionStats
+
+    assert (
+        manifest["producer_diagnostics"]["observation_grid"]
+        == "common_btc_eth_observed_timestamps"
+    )
+    stats = {
+        symbol: ReconstructionStats.from_payload(value)
+        for symbol, value in manifest["producer_diagnostics"]["reconstruction"].items()
+    }
+    with runtime_resource_policy_scope() as policy:
+        panel = read_dataset(
+            root,
+            columns=("timestamp", "asset_id"),
+            mode=DatasetReadMode.MATERIALIZED,
+            resource_policy=policy,
+        )
+        assert len(panel) == manifest["row_count"] == 122
+        assert panel.groupby("timestamp").asset_id.nunique().eq(2).all()
+        assert set(panel.timestamp) == set(
+            pd.date_range("1970-01-01", periods=61, freq="100ms")
+        )
+        for values in stats.values():
+            assert any(
+                start <= 0 and stop > 6_000_000_000
+                for start, stop in values.coverage_segments.values()
+            )
+        panel = None
+        assert policy.used_memory_bytes == 0
+    from copy import deepcopy
+
+    from quant_research_platform.artifacts.research import read_research_run_record
+    from tests.workflows.test_research_dag import _crypto_plan_payload
+
+    plan = _crypto_plan_payload()
+    request = dict(
+        profile=profile,
+        layout=layout,
+        scenario_id=HFT_RESEARCH_DATASET_ID,
+        raw_root=raw_root,
+        start_date="1970-01-01T00:00:04",
+        end_date="1970-01-01T00:00:06",
+    )
+    first = research.research_run(
+        **{
+            **request,
+            "start_date": "1970-01-01T08:00:04+08:00",
+            "end_date": "1970-01-01T08:00:06+08:00",
+        },
+        research_plan=plan,
+    )
+    assert first["status"] == "BLOCKED"
+    first_record = read_research_run_record(layout.research_run_path(first["run_id"]))
+    changed = deepcopy(plan)
+    changed["initial_capital"] = 2000.0
+    changed["final_holdout"] = {
+        "start": "1970-01-01T00:00:08",
+        "end": "1970-01-01T00:00:09",
+    }
+    second = research.research_run(**request, research_plan=changed)
+    second_record = read_research_run_record(layout.research_run_path(second["run_id"]))
+    assert first_record.protocol_identity != second_record.protocol_identity
+    for run in (first, second):
+        data_results = {
+            item["target_id"]: item
+            for item in run["target_results"]
+            if item["target_id"] in targets
+        }
+        assert all(item["status"] == "REUSED" for item in data_results.values())
+        assert {
+            key: item["instance_identity"] for key, item in data_results.items()
+        } == {key: item["instance_identity"] for key, item in targets.items()}
+    assert first_record.protocol["research_plan"]["initial_capital"] == 1000.0
+    assert second_record.protocol["research_plan"]["initial_capital"] == 2000.0
+    assert "research_plan" not in profile.protocol().manifest()
+    primary = KeyboardInterrupt("raw_exit_verification")
+    real_open = profile.producer_bindings[HFT_PANEL_DATA_ID].producer.keywords[
+        "open_run"
+    ]
+
+    @contextmanager
+    def failing_exit(*args, **kwargs):
+        with real_open(*args, **kwargs) as opened:
+            yield opened
+            raise primary
+
+    policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        from dataclasses import replace
+        from functools import partial
+
+        binding = profile.producer_bindings[HFT_PANEL_DATA_ID]
+        failure_profile = replace(
+            profile,
+            producer_bindings={
+                **profile.producer_bindings,
+                HFT_PANEL_DATA_ID: replace(
+                    binding, producer=partial(binding.producer, open_run=failing_exit)
+                ),
+            },
+        )
+        with pytest.raises(KeyboardInterrupt) as raised:
+            research.data_materialize(
+                profile=failure_profile,
+                layout=layout,
+                raw_root=raw_root,
+                rebuild=True,
+                **window,
+            )
+        assert raised.value is primary and policy.used_memory_bytes == 0
+    assert read_dataset_manifest_evidence(root) == manifest

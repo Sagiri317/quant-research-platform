@@ -11,7 +11,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +57,7 @@ from quant_research_platform.sources.binance.validation import (
 )
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
+    native_filesystem_path,
     require_unaliased_path,
 )
 
@@ -136,6 +137,36 @@ class ReconstructionStats:
     emitted_states: int = 0
     non_monotonic_timestamps: int = 0
     coverage_segments: dict[str, tuple[int, int]] = field(default_factory=dict)
+
+    @classmethod
+    def from_payload(cls, value):
+        if type(value) is not dict or set(value) != {item.name for item in fields(cls)}:
+            raise ValueError("binance_reconstruction_diagnostics_invalid")
+        if any(
+            type(count) is not int or count < 0
+            for key, count in value.items()
+            if key != "coverage_segments"
+        ):
+            raise ValueError("binance_reconstruction_diagnostics_invalid")
+        coverage = value["coverage_segments"]
+        if type(coverage) is not dict or any(
+            type(key) is not str
+            or not key
+            or type(bounds) is not list
+            or len(bounds) != 2
+            or any(type(bound) is not int for bound in bounds)
+            or not 0 <= bounds[0] < bounds[1]
+            for key, bounds in coverage.items()
+        ):
+            raise ValueError("binance_reconstruction_diagnostics_invalid")
+        return cls(
+            **{
+                **value,
+                "coverage_segments": {
+                    key: tuple(bounds) for key, bounds in coverage.items()
+                },
+            }
+        )
 
 
 @dataclass(frozen=True)
@@ -1818,3 +1849,15 @@ def iter_agg_trades(
                     error="binance_replay_trade_side_invalid",
                 ),
             )
+
+
+def recorder_source_identity(root: Path, _target_id: str) -> str | None:
+    """Bind existing recorder truth without creating a synthetic interim dataset."""
+    root = require_unaliased_path(root, error="binance_replay_file_path_invalid")
+    if not os.path.exists(native_filesystem_path(root)):
+        return None
+    try:
+        with open_recorder_run(root) as run:
+            return canonical_json_hash(run.source_identity)
+    except FileNotFoundError:
+        return None

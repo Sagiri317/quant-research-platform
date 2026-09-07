@@ -14,9 +14,6 @@ from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.models import (
-    A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-)
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
@@ -202,7 +199,9 @@ def build_prediction_result_from_persisted_model(
     ):
         raise ValueError("persisted_model_prediction_window_uncovered")
     selected_periods = tuple(
-        pd.Period(item["prediction_window"]["start"], freq="Q") for item in selected
+        dict.fromkeys(
+            pd.Period(item["prediction_window"]["start"], freq="Q") for item in selected
+        )
     )
     if any(
         current != previous + 1
@@ -220,106 +219,122 @@ def build_prediction_result_from_persisted_model(
             for column in item["model_metadata"]["input_columns"]
         )
     )
-    state = _QuarterlyPredictionState(selected_input_columns)
+    state = _PredictionMetadataState(selected_input_columns)
 
     def output_chunks() -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
-        for item in selected:
-            metadata = dict(item["model_metadata"])
-            q_start_value = max(
-                pd.Timestamp(item["prediction_window"]["start"]),
-                requested_start,
-            )
-            q_end_value = min(
-                pd.Timestamp(item["prediction_window"]["end"]),
-                requested_end,
-            )
-            if q_start_value > q_end_value:
-                continue
-            q_start = q_start_value.date().isoformat()
-            q_end = q_end_value.date().isoformat()
-            q_model_id = item["model_id"]
-            q_input_columns = tuple(metadata["input_columns"])
-            if not q_input_columns:
-                raise ValueError("persisted_model_input_columns_missing")
-            read_columns = tuple(
-                dict.fromkeys(
-                    (
-                        *dataset_spec.primary_key,
-                        *q_input_columns,
-                        *required_filter_columns(prediction_spec.sample_filter_mode),
+        with runtime_resource_policy_scope(resource_policy) as policy:
+            for item in selected:
+                metadata = dict(item["model_metadata"])
+                q_start_value = max(
+                    pd.Timestamp(item["prediction_window"]["start"]),
+                    requested_start,
+                )
+                q_end_value = min(
+                    pd.Timestamp(item["prediction_window"]["end"]),
+                    requested_end,
+                )
+                if q_start_value > q_end_value:
+                    continue
+                q_start = q_start_value.date().isoformat()
+                q_end = q_end_value.date().isoformat()
+                q_model_id = item["model_id"]
+                q_input_columns = tuple(metadata["input_columns"])
+                if not q_input_columns:
+                    raise ValueError("persisted_model_input_columns_missing")
+                read_columns = tuple(
+                    dict.fromkeys(
+                        (
+                            *dataset_spec.primary_key,
+                            *q_input_columns,
+                            *required_filter_columns(
+                                prediction_spec.sample_filter_mode
+                            ),
+                        )
                     )
                 )
-            )
 
-            def chunks(
-                *,
-                _q_start=q_start,
-                _q_end=q_end,
-                _read_columns=read_columns,
-                _q_input_columns=q_input_columns,
-            ) -> Iterable[pd.DataFrame]:
-                yield from iter_validated_research_input_chunks(
-                    iter_research_dataset_chunks(
-                        layout,
-                        market_id=dataset_spec.market_id,
-                        dataset_id=dataset_spec.data_id,
-                        time_window=TimeWindow(_q_start, _q_end),
-                        columns=_read_columns,
-                    ),
-                    dataset_spec=dataset_spec,
-                    input_columns=_q_input_columns,
-                )
+                def chunks(
+                    *,
+                    _q_start=q_start,
+                    _q_end=q_end,
+                    _read_columns=read_columns,
+                    _q_input_columns=q_input_columns,
+                    _family=item["family_id"],
+                    _quarter=item["quarter_id"],
+                ) -> Iterable[pd.DataFrame]:
+                    if {"family_id", "quarter_id"}.intersection(_read_columns):
+                        raise ValueError("prediction_input_coordinate_collision")
+                    for frame in iter_validated_research_input_chunks(
+                        iter_research_dataset_chunks(
+                            layout,
+                            market_id=dataset_spec.market_id,
+                            dataset_id=dataset_spec.data_id,
+                            time_window=TimeWindow(_q_start, _q_end),
+                            columns=_read_columns,
+                        ),
+                        dataset_spec=dataset_spec,
+                        input_columns=_q_input_columns,
+                    ):
+                        with policy.lease(
+                            "research.prediction.family_coordinates",
+                            max(1, len(frame) * 512 + 65536),
+                        ):
+                            frame["family_id"] = _family
+                            frame["quarter_id"] = _quarter
+                            try:
+                                yield frame
+                            finally:
+                                del frame["family_id"]
+                                del frame["quarter_id"]
 
-            q_spec = replace(
-                prediction_spec,
-                prediction_id=f"{prediction_spec.prediction_id}_{item['quarter_id'].lower()}",
-                model_id=q_model_id,
-                train_end=None,
-                test_start=q_start,
-                test_end=q_end,
-                candidate_model_ids=(),
-                model_selection_validation_start=None,
-                model_selection_validation_end=None,
-            )
-            q_metadata = dict(metadata)
-            q_metadata.pop("model_selection", None)
-            q_metadata.pop("fit_cutoff", None)
-            q_metadata.pop("rank_parameters", None)
-            with read_quarterly_predictor(
-                persisted_model,
-                item["quarter_id"],
-                resource_policy=resource_policy,
-            ) as predictor:
-                q_result = build_prediction_result_from_frames(
-                    chunks(),
-                    q_spec,
-                    np.empty(0, dtype="float64"),
-                    q_input_columns,
-                    prediction_model=predictor,
-                    model_metadata=q_metadata,
-                    resource_policy=resource_policy,
+                q_spec = replace(
+                    prediction_spec,
+                    prediction_id=f"{prediction_spec.prediction_id}_{item['quarter_id'].lower()}",
+                    model_id=q_model_id,
+                    train_end=None,
+                    test_start=q_start,
+                    test_end=q_end,
+                    candidate_model_ids=(),
+                    model_selection_validation_start=None,
+                    model_selection_validation_end=None,
                 )
-                try:
-                    yield from q_result.output_chunks
-                    state.add(q_result.prediction_metadata_factory())
-                finally:
-                    q_result.close()
+                q_metadata = dict(metadata)
+                q_metadata.pop("fit_cutoff", None)
+                q_metadata.pop("rank_parameters", None)
+                with read_quarterly_predictor(
+                    persisted_model,
+                    item["quarter_id"],
+                    item["family_id"],
+                    resource_policy=policy,
+                ) as predictor:
+                    q_result = build_prediction_result_from_frames(
+                        chunks(),
+                        q_spec,
+                        np.empty(0, dtype="float64"),
+                        q_input_columns,
+                        prediction_model=predictor,
+                        model_metadata=q_metadata,
+                        resource_policy=policy,
+                    )
+                    try:
+                        yield from q_result.output_chunks
+                        state.add(q_result.prediction_metadata_factory())
+                    finally:
+                        q_result.close()
 
     source = output_chunks()
     return PredictionResult(
         spec=prediction_spec,
         output_chunks=source,
-        model_metadata={
-            "model_artifact_id": persisted_model.model_id,
-            "model_artifact_identity": persisted_model.envelope["instance_identity"],
-            "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-        },
+        model_metadata=persisted_model.prediction_lineage(
+            TimeWindow(requested_start, requested_end)
+        ),
         prediction_metadata_factory=lambda: state.metadata(prediction_spec),
         _close=source.close,
     )
 
 
-class _QuarterlyPredictionState:
+class _PredictionMetadataState:
     def __init__(self, input_columns: tuple[str, ...]) -> None:
         self.input_columns = input_columns
         self._metadata: list[dict[str, object]] = []
@@ -355,7 +370,9 @@ class _QuarterlyPredictionState:
             "train_end": spec.train_end,
             "test_start": spec.test_start,
             "requested_test_end": spec.test_end,
-            "effective_test_end": effective_end.date().isoformat(),
+            "effective_test_end": effective_end.date().isoformat()
+            if spec.prediction_mode == "a_share_oos"
+            else effective_end.isoformat(),
             "is_oos": spec.is_oos,
             "is_final_oos_window": spec.is_final_oos_window,
             "input_columns": list(self.input_columns),
@@ -492,3 +509,107 @@ def _validate_prediction_window_order(spec) -> None:
     test_end = pd.Timestamp(spec.test_end) if spec.test_end is not None else None
     if test_end is not None and test_end < test_start:
         raise ValueError("prediction_test_end_must_not_precede_test_start")
+
+
+def build_crypto_predictions(
+    *, layout, dataset_catalog, persisted_model, time_window, resource_policy
+):
+    from quant_research_platform.contracts.predictions import PredictionSpec
+    from quant_research_platform.research.models.persisted import (
+        read_crypto_model_member,
+    )
+
+    dataset_id = persisted_model.envelope["semantic_metadata"]["target_contract"][
+        "protocol"
+    ]["scenario_id"]
+    dataset = dataset_catalog.get(dataset_id)
+    model_ids = tuple(
+        dict.fromkeys(entry["model_id"] for entry in persisted_model.models)
+    )
+    for model_id in model_ids:
+        entries = tuple(
+            entry for entry in persisted_model.models if entry["model_id"] == model_id
+        )
+        inputs = tuple(entries[0]["model_metadata"]["input_columns"])
+        spec = PredictionSpec(
+            prediction_id=f"{model_id}_prediction",
+            model_id=model_id,
+            research_dataset_id=dataset_id,
+            prediction_mode="crypto_oos",
+            train_end=None,
+            test_start=pd.Timestamp(time_window.start).isoformat(),
+            test_end=pd.Timestamp(time_window.end).isoformat(),
+            training_asset_ids=tuple(entries[0]["training_asset_ids"]),
+            evaluation_asset_ids=tuple(entries[0]["evaluation_asset_ids"]),
+        )
+        state = _PredictionMetadataState(inputs)
+
+        def output_chunks(entries=entries, spec=spec, state=state, inputs=inputs):
+            for entry in entries:
+                window = TimeWindow(
+                    max(
+                        pd.Timestamp(entry["prediction_window"]["start"]),
+                        pd.Timestamp(time_window.start),
+                    ),
+                    min(
+                        pd.Timestamp(entry["prediction_window"]["end"]),
+                        pd.Timestamp(time_window.end),
+                    ),
+                )
+                columns = tuple(
+                    dict.fromkeys(
+                        (
+                            *dataset.primary_key,
+                            *inputs,
+                            *required_filter_columns(spec.sample_filter_mode),
+                        )
+                    )
+                )
+                source = iter_validated_research_input_chunks(
+                    iter_research_dataset_chunks(
+                        layout,
+                        market_id=dataset.market_id,
+                        dataset_id=dataset_id,
+                        time_window=window,
+                        columns=columns,
+                    ),
+                    dataset_spec=dataset,
+                    input_columns=inputs,
+                )
+                folded = replace(
+                    spec,
+                    prediction_mode="minimal_oos",
+                    train_end=entry["validation_window"]["end"],
+                    test_start=pd.Timestamp(window.start).isoformat(),
+                    test_end=pd.Timestamp(window.end).isoformat(),
+                )
+                with read_crypto_model_member(
+                    persisted_model, entry, resource_policy=resource_policy
+                ) as payload:
+                    result = None
+                    try:
+                        result = build_prediction_result_from_frames(
+                            source,
+                            folded,
+                            payload[0],
+                            inputs,
+                            prediction_model=payload[1],
+                            model_metadata=dict(entry["model_metadata"]),
+                            resource_policy=resource_policy,
+                        )
+                        with result:
+                            yield from result.output_chunks
+                            state.add(result.prediction_metadata_factory())
+                    finally:
+                        result = payload = None
+            if len(state._metadata) != len(entries):
+                raise ValueError("crypto_prediction_fold_coverage_invalid")
+
+        source = output_chunks()
+        yield PredictionResult(
+            spec,
+            source,
+            persisted_model.prediction_lineage(model_id),
+            lambda state=state, spec=spec: state.metadata(spec),
+            source.close,
+        )

@@ -493,7 +493,9 @@ def test_research_join_clears_transient_chunk_before_next_bound(
 ) -> None:
     policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
     holder = {
-        "frame": pd.DataFrame({"id": [1], "value": [1.0]}),
+        "frame": pd.DataFrame(
+            {"timestamp": [pd.Timestamp("2024-01-02")], "id": [1], "value": [1.0]}
+        ),
     }
     frame_ref = weakref.ref(holder["frame"])
     monkeypatch.setattr(
@@ -518,7 +520,7 @@ def test_research_join_clears_transient_chunk_before_next_bound(
     )
 
     chunks = assembler_module._iter_joined_processed_chunks(
-        dataset_spec=SimpleNamespace(primary_key=("id",)),
+        dataset_spec=SimpleNamespace(primary_key=("timestamp", "id")),
         processed_catalog=SimpleNamespace(get=lambda _key: object()),
         sessions={"one": SimpleNamespace(retained_memory_bytes=0)},
         time_window=object(),

@@ -34,6 +34,7 @@ from quant_research_platform.contracts.features import (
 )
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.json_codec import (
+    bounded_qrp_json_object_snapshot,
     bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
@@ -51,6 +52,7 @@ _DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset(
     {
         "input_dataset_identities",
         "source_artifact_identity",
+        "producer_diagnostics",
         COMMON_MANIFEST_METADATA_KEY,
     }
 )
@@ -190,6 +192,10 @@ def merge_dataset_instance_metadata(
             metadata[key] = _validate_input_dataset_identities_metadata(value)
         elif key == "source_artifact_identity":
             metadata[key] = _validate_source_artifact_identity(value)
+        elif key == "producer_diagnostics":
+            metadata[key] = bounded_qrp_json_object_snapshot(
+                value, max_bytes=1024 * 1024
+            )
         elif key == COMMON_MANIFEST_METADATA_KEY:
             metadata[key] = validate_business_manifest_envelope(value)
     result.update(metadata)
@@ -299,6 +305,10 @@ def validate_dataset_manifest_instance_metadata(
         )
     if "source_artifact_identity" in manifest:
         _validate_source_artifact_identity(manifest["source_artifact_identity"])
+    if "producer_diagnostics" in manifest:
+        bounded_qrp_json_object_snapshot(
+            manifest["producer_diagnostics"], max_bytes=1024 * 1024
+        )
     if COMMON_MANIFEST_METADATA_KEY in manifest:
         envelope = validate_business_manifest_envelope(
             manifest[COMMON_MANIFEST_METADATA_KEY]
@@ -843,6 +853,7 @@ def pandas_dtype_overrides_from_logical_payload(
             "nullable_float",
             "string",
             "datetime",
+            "object",
         }:
             result[name] = pd.api.types.pandas_dtype(descriptor["dtype"])
     return result

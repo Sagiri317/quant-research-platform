@@ -11,6 +11,7 @@ from quant_research_platform.contracts.order_book import (
     BookState,
     TradeEvent,
 )
+from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
@@ -30,6 +31,7 @@ from quant_research_platform.research.protocols.crypto_hft import (
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from tests.helpers.binance_hft import (
+    KNOWN_NO_FUNDING,
     _coverage,
     _panel_rows,
     _quote,
@@ -129,6 +131,7 @@ def _trade(
 
 def _maker_config() -> MakerConfig:
     return MakerConfig(
+        latency_ms=0,
         order_quantity=1.0,
         max_position=2.0,
         maker_fee_bps=0.0,
@@ -144,7 +147,6 @@ def _taker_config(*, latency_ms: int = 0) -> TakerConfig:
         position_size=1.0,
         latency_ms=latency_ms,
         taker_fee_bps=0.0,
-        threshold_bps=0.0,
         markout_horizon_ms=100,
     )
 
@@ -196,10 +198,15 @@ def test_unobserved_state_is_hidden_from_panel_and_taker() -> None:
     diagnostics = simulate_taker(
         [state],
         [{"timestamp_ms": 50, "prediction": 0.1}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert diagnostics["filled_orders"] == 0
     assert fills == []
@@ -227,10 +234,15 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
     diagnostics = simulate_taker(
         [just_after_boundary],
         [{"timestamp_ms": 100, "prediction": 1.0}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage=coverage,
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert diagnostics["filled_orders"] == 0
     assert fills == []
@@ -242,6 +254,9 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
         config=_maker_config(),
         observed_coverage=coverage,
         trade_coverage=trade_coverage,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert maker["created_orders"] == 0
 
@@ -336,11 +351,12 @@ def test_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
 
 
 def test_maker_uses_local_observation_order_for_same_time_events() -> None:
+    book_first_fills, trade_first_fills = [], []
     initial = _state(0, capture_seq=1, receive_monotonic_ns=1)
     changed = _state(
         100,
         bid_tick=994,
-        ask_tick=1006,
+        ask_tick=1008,
         capture_seq=2,
         receive_monotonic_ns=20,
     )
@@ -353,7 +369,7 @@ def test_maker_uses_local_observation_order_for_same_time_events() -> None:
     trade_first_book = _state(
         100,
         bid_tick=994,
-        ask_tick=1006,
+        ask_tick=1008,
         capture_seq=3,
         receive_monotonic_ns=30,
     )
@@ -371,6 +387,10 @@ def test_maker_uses_local_observation_order_for_same_time_events() -> None:
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 200)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+        on_fill=book_first_fills.append,
     )
     trade_first_result = simulate_maker(
         [initial, trade_first_book],
@@ -379,11 +399,20 @@ def test_maker_uses_local_observation_order_for_same_time_events() -> None:
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 200)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+        on_fill=trade_first_fills.append,
     )
 
-    assert book_first["filled_orders"] == 0
+    assert book_first["filled_orders"] == 1
     assert trade_first_result["filled_orders"] == 1
-    assert book_first["same_timestamp_policy"] == "local_observation_order"
+    assert book_first_fills[0]["spread_capture_per_unit"] == pytest.approx(0.6)
+    assert trade_first_fills[0]["spread_capture_per_unit"] == pytest.approx(0.5)
+    assert (
+        book_first["same_timestamp_policy"]
+        == "local_observation_order_then_delayed_commands"
+    )
 
 
 def test_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> None:
@@ -407,6 +436,9 @@ def test_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> None
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 200)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert result["filled_orders"] == 0
 
@@ -419,6 +451,9 @@ def test_zero_visible_trade_through_cannot_fill_a_maker_order() -> None:
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 200)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert result["filled_orders"] == 0
 
@@ -434,6 +469,9 @@ def test_zero_visible_trade_through_does_not_advance_queue() -> None:
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 200)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert result["filled_orders"] == 0
 
@@ -448,6 +486,9 @@ def test_trade_through_consumes_full_remaining_order_not_visible_quantity() -> N
         observed_coverage={"book-1": (0, 200_000_000)},
         trade_coverage={"trade-connection-1": (0, 200_000_000)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert result["fill_quantity"] == 1.0
     assert fills[0]["fill_qty"] == 1.0
@@ -461,6 +502,9 @@ def test_maker_max_abs_position_updates_on_terminal_fill() -> None:
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200_000_000)},
         trade_coverage={"trade-connection-1": (0, 200_000_000)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert result["max_abs_position"] == 1.0
 
@@ -478,6 +522,9 @@ def test_maker_order_expires_at_first_missing_trade_coverage_boundary() -> None:
         observed_coverage={"book-1": (0, 200_000_000)},
         trade_coverage={"trade-connection-1": (0, 75_000_000)},
         on_fill=fills.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert fills == []
     assert result["average_order_lifetime_ms"] == 75.0
@@ -493,6 +540,9 @@ def test_maker_terminal_order_uses_coverage_validity_end() -> None:
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 75)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert result["average_order_lifetime_ms"] == 75.0
@@ -506,6 +556,9 @@ def test_maker_requires_matching_book_and_trade_schedule_identity() -> None:
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 200)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert result["created_orders"] == 0
 
@@ -515,31 +568,42 @@ def test_book_state_lease_and_taker_timing_and_terminal_mark() -> None:
     equities: list[dict[str, object]] = []
     simulate_taker(
         [
+            _state(0),
             _state(5, event_time_ms=1, transaction_time_ms=1),
             _state(20, bid_tick=1005, ask_tick=1015),
         ],
         [{"timestamp_ms": 0, "prediction": 0.1}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(latency_ms=10),
         observed_coverage={"book-1": _coverage(0, 20)},
         on_fill=fills.append,
         on_equity=equities.append,
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
 
     assert fills[0]["decision_time_ms"] == 0
     assert fills[0]["effective_time_ms"] == 10
     assert fills[0]["state_observed_time_ms"] == 5
     assert fills[0]["timestamp_ms"] == 10
-    assert equities[0]["timestamp_ms"] == 10
+    assert equities[0]["timestamp_ms"] == 0
 
     terminal = simulate_taker(
         [_state(0), _state(100, bid_tick=1005, ask_tick=1015)],
         [{"timestamp_ms": 0, "prediction": 0.1}],
+        funding_forecasts=KNOWN_NO_FUNDING,
+        prediction_horizon_ms=500,
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"book-1": _coverage(0, 101)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
-    assert math.isclose(terminal["gross_pnl_usd"], 0.5)
+    assert math.isclose(terminal["gross_pnl"], 0.5)
 
 
 def test_same_price_book_decrease_without_trade_does_not_deplete_queue() -> None:
@@ -553,6 +617,9 @@ def test_same_price_book_decrease_without_trade_does_not_deplete_queue() -> None
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 200)},
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
     )
     assert result["filled_orders"] == 0
 
@@ -567,6 +634,9 @@ def test_maker_quote_schedule_has_no_prediction_surface() -> None:
             config=_maker_config(),
             observed_coverage={"book-1": _coverage(0, 100)},
             trade_coverage={"trade-connection-1": _coverage(0, 100)},
+            capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            funding_events=(),
         )
 
 

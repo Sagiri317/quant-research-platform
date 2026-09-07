@@ -88,9 +88,11 @@ def _artifact_frames_reservation(
     frames: Iterable[tuple[pd.DataFrame, tuple[str, ...]]],
     *,
     owned_lease: MemoryLease | None = None,
+    borrowed_input: bool = False,
 ) -> ExitStack:
     bound = sum(
         _artifact_frame_bound(frame, key_columns=key_columns)
+        - (pandas_frame_payload_bytes(frame) if borrowed_input else 0)
         for frame, key_columns in frames
     )
     stack = ExitStack()
@@ -136,6 +138,8 @@ def write_parquet_chunks(
     key_columns: tuple[str, ...],
     compression: str,
     date_only: bool = False,
+    borrowed_input: bool = False,
+    validate_frame=None,
 ) -> _PredictionOutputWriteSummary:
     final_path = Path(path)
     reject_if_exists(final_path)
@@ -178,6 +182,7 @@ def write_parquet_chunks(
                             first_frame,
                             key_columns=key_columns,
                             owned_lease=first_lease,
+                            borrowed_input=borrowed_input,
                         )
                     )
                     handle = scratch_owner.open_owned_scratch_file(temp_path)
@@ -210,6 +215,7 @@ def write_parquet_chunks(
                                                         frame,
                                                         key_columns=key_columns,
                                                         owned_lease=frame_lease,
+                                                        borrowed_input=borrowed_input,
                                                     )
                                                 )
                                             selected = _prediction_output_chunk_frame(
@@ -219,6 +225,8 @@ def write_parquet_chunks(
                                             )
                                             if selected.empty:
                                                 continue
+                                            if validate_frame is not None:
+                                                validate_frame(selected)
                                             timestamps = strict_timestamp_series(
                                                 selected["timestamp"],
                                                 error="prediction_metadata_inconsistent",
@@ -285,9 +293,14 @@ def write_parquet_chunks(
                                             )
                                             row_count += len(selected)
                                     finally:
+                                        frame = selected = table = persisted = (
+                                            timestamps
+                                        ) = None
+                                        item = None
                                         if is_first:
                                             first_frame_state.close()
                                             del first_frame
+                                            first_item = None
                         except BaseException as primary:
                             if writer is not None:
                                 try:
@@ -382,7 +395,9 @@ def _prediction_output_chunk_frame(
                 selected["alpha_score"],
                 error="invalid_prediction_alpha_scores",
             )
-            alpha_mean = alpha.groupby(selected["timestamp"], sort=False).mean()
+            alpha_mean = alpha.groupby(
+                [selected["timestamp"], selected["family_id"]], sort=False
+            ).mean()
             if bool(alpha_mean.abs().gt(1e-12).any()):
                 raise ValueError("invalid_prediction_alpha_scores")
     return selected
@@ -493,6 +508,7 @@ def _artifact_frame_reservation(
     *,
     key_columns: tuple[str, ...] = (),
     owned_lease: MemoryLease | None = None,
+    borrowed_input: bool = False,
 ) -> ExitStack:
     if frame is None:
         if owned_lease is not None:
@@ -501,6 +517,7 @@ def _artifact_frame_reservation(
     return _artifact_frames_reservation(
         ((frame, key_columns),),
         owned_lease=owned_lease,
+        borrowed_input=borrowed_input,
     )
 
 

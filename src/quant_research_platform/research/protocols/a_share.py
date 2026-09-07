@@ -226,6 +226,21 @@ class AShareProtocol:
             else (*PV_FULL, *FUND_FULL, *EXP_FULL)
         )
 
+    @property
+    def core_factor_columns(self) -> tuple[str, ...]:
+        if self.scenario_id == "pv_all":
+            return PV_CORE
+        if self.scenario_id == "fusion_nf_core":
+            return (*PV_CORE, *FUND_CORE)
+        return (*PV_CORE, *FUND_CORE, *EXP_FULL)
+
+    @property
+    def factor_fdr_families(self) -> dict[str, list[str]]:
+        families = {"price_volume": list(PV_FULL)}
+        if self.scenario_id != "pv_all":
+            families["fundamental"] = list(FUND_FULL)
+        return families
+
     def manifest(self) -> dict[str, object]:
         return {
             "protocol_id": self.protocol_id,
@@ -252,6 +267,7 @@ class AShareProtocol:
             "factor_columns": list(self.factor_columns),
             "label_horizons": list(LABEL_HORIZONS),
             "primary_label": PRIMARY_LABEL_COLUMN,
+            "primary_label_available_at": forward_return_available_at_column(20),
             "model_target": MODEL_TARGET_COLUMN,
             "model_ladder": list(MODEL_LADDER),
             "selection_tie_break": list(SELECTION_TIE_BREAK),
@@ -272,8 +288,23 @@ class AShareProtocol:
                 "zscore",
             ],
             "root_seed": self.root_seed,
+            "benchmark_total_return_indices": {"csi500": "H00905", "csi1000": "H00852"},
+            "holding_attribution": {
+                "exposures_at": "decision_close_t",
+                "returns": "execution_open_s_to_endpoint_open_e",
+                "contribution_weights": "post_trade_notional_over_before_nav",
+                "display_exposures": "post_trade_notional_over_post_nav",
+                "reference_basket": (
+                    "decision_known_benchmark_weights_drifted_to_entry_open"
+                ),
+                "factor_fit_statistical_weights": "sqrt_prior_float_market_cap",
+                "residual_unexplained": (
+                    "stock_residual_difference_plus_reference_minus_official_return"
+                ),
+            },
             "execution_assumptions": {
                 "initial_nav": EXECUTION_ASSUMPTIONS.initial_nav,
+                "valuation_currency": "CNY",
                 "slippage_bps": EXECUTION_ASSUMPTIONS.slippage_bps,
                 "impact_bps": EXECUTION_ASSUMPTIONS.impact_bps,
                 "adv_participation": EXECUTION_ASSUMPTIONS.adv_participation,
@@ -301,6 +332,8 @@ class AShareProtocol:
                 "fdr_robustness": "BY_5pct",
                 "cscv_blocks": 10,
                 "cscv_combinations": 252,
+                "factor_fdr_families": self.factor_fdr_families,
+                "fama_macbeth_core_factors": list(self.core_factor_columns),
             },
             "portfolio_candidates": list(PORTFOLIO_CANDIDATES),
             "risk_styles": list(RISK_STYLE_COLUMNS),
@@ -308,14 +341,12 @@ class AShareProtocol:
         }
 
     def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
-        if action not in {"research run", "report build"}:
+        if action != "research run":
             return ()
         dataset = self.scenario_id
         evaluation = f"{dataset}_evaluation"
         model_selection = self.model_selection_target_id
-        ew_model = self.ew_rank_model_target_id
         predictions = self.persisted_prediction_target_id
-        ew_predictions = self.ew_rank_prediction_target_id
         statistics = f"{dataset}_statistics"
         portfolio_candidates = self.portfolio_candidates()
         portfolios = tuple(
@@ -328,6 +359,7 @@ class AShareProtocol:
                     candidate.trading_calendar_target_id,
                     candidate.fee_schedule_target_id,
                     candidate.market_panel_target_id,
+                    *candidate.risk_context_target_ids,
                     *(
                         (candidate.benchmark_weights_target_id,)
                         if candidate.benchmark_weights_target_id
@@ -350,37 +382,32 @@ class AShareProtocol:
                 producer_id=model_selection,
             ),
             TargetSpec(
-                ew_model,
-                dependencies=(dataset,),
-                producer_id=ew_model,
-            ),
-            TargetSpec(
                 predictions,
                 dependencies=(dataset, model_selection),
                 producer_id=predictions,
             ),
             TargetSpec(
-                ew_predictions,
-                dependencies=(dataset, ew_model),
-                producer_id=ew_predictions,
+                statistics,
+                dependencies=(predictions, model_selection, dataset),
+                producer_id=statistics,
             ),
-            TargetSpec(statistics, dependencies=(predictions,)),
             *portfolios,
             TargetSpec(
-                self._research_terminal_target,
+                f"{dataset}_portfolio_statistics",
                 dependencies=(
-                    evaluation,
-                    statistics,
-                    *(target.target_id for target in portfolios),
+                    *(item.target_id for item in portfolios),
+                    dataset,
+                    "market_panel_1d",
+                    "trading_calendar",
+                    "benchmark_weights",
+                    "index_market",
+                    *dict.fromkeys(
+                        target_id
+                        for candidate in portfolio_candidates
+                        for target_id in candidate.risk_context_target_ids
+                    ),
                 ),
-            ),
-            TargetSpec(
-                self._report_artifact_target,
-                dependencies=(self._research_terminal_target,),
-            ),
-            TargetSpec(
-                self._report_terminal_target,
-                dependencies=(self._report_artifact_target,),
+                producer_id=f"{dataset}_portfolio_statistics",
             ),
         )
 
@@ -389,24 +416,14 @@ class AShareProtocol:
         return f"{self.scenario_id}_model_selection_refit"
 
     @property
-    def ew_rank_model_target_id(self) -> str:
-        return f"{self.scenario_id}_ew_rank_model"
-
-    @property
     def persisted_prediction_target_id(self) -> str:
         return f"{self.scenario_id}_persisted_predictions"
-
-    @property
-    def ew_rank_prediction_target_id(self) -> str:
-        return f"{self.scenario_id}_ew_rank_predictions"
 
     def model_ids_for_target(self, target_id: str) -> tuple[str, ...]:
         if target_id == self.model_selection_target_id:
             model_ids = tuple(
                 f"{self.scenario_id}_{algorithm}" for algorithm in MODEL_FAMILY_ORDER
             )
-        elif target_id == self.ew_rank_model_target_id:
-            model_ids = (f"{self.scenario_id}_equal_weight_rank_ensemble",)
         else:
             raise ValueError("unknown_a_share_model_target")
         return model_ids
@@ -421,7 +438,8 @@ class AShareProtocol:
             PortfolioCandidateSpec(
                 candidate_id="ew_rank_top20_equal_weight",
                 construction="top20_equal_weight",
-                prediction_target_id=self.ew_rank_prediction_target_id,
+                prediction_target_id=prediction,
+                prediction_selector=f"{self.scenario_id}_equal_weight_rank_ensemble",
                 top_quantile=0.2,
                 rebalance_schedule="weekly-last-trading-day",
                 benchmark_id=None,
@@ -436,6 +454,7 @@ class AShareProtocol:
                 candidate_id="champion_top20_equal_weight",
                 construction="top20_equal_weight",
                 prediction_target_id=prediction,
+                prediction_selector="champion",
                 top_quantile=0.2,
                 rebalance_schedule="weekly-last-trading-day",
                 benchmark_id=None,
@@ -450,6 +469,7 @@ class AShareProtocol:
                 candidate_id="champion_top20_float_cap",
                 construction="top20_float_cap",
                 prediction_target_id=prediction,
+                prediction_selector="champion",
                 top_quantile=0.2,
                 rebalance_schedule="weekly-last-trading-day",
                 benchmark_id=None,
@@ -464,11 +484,13 @@ class AShareProtocol:
                 candidate_id="champion_csi500_enhanced",
                 construction="benchmark_enhanced",
                 prediction_target_id=prediction,
+                prediction_selector="champion",
                 top_quantile=None,
                 rebalance_schedule="weekly-last-trading-day",
                 benchmark_id="csi500",
                 benchmark_weights_target_id="benchmark_weights",
                 risk_style_columns=RISK_STYLE_COLUMNS,
+                risk_context_target_ids=(PRICE_VOLUME_DATA_ID, "fundamental_factors"),
                 research_dataset_id=self.scenario_id,
                 market_panel_target_id=MARKET_PANEL_ID,
                 execution_mask_target_id="execution_mask",
@@ -479,11 +501,13 @@ class AShareProtocol:
                 candidate_id="champion_csi1000_enhanced",
                 construction="benchmark_enhanced",
                 prediction_target_id=prediction,
+                prediction_selector="champion",
                 top_quantile=None,
                 rebalance_schedule="weekly-last-trading-day",
                 benchmark_id="csi1000",
                 benchmark_weights_target_id="benchmark_weights",
                 risk_style_columns=RISK_STYLE_COLUMNS,
+                risk_context_target_ids=(PRICE_VOLUME_DATA_ID, "fundamental_factors"),
                 research_dataset_id=self.scenario_id,
                 market_panel_target_id=MARKET_PANEL_ID,
                 execution_mask_target_id="execution_mask",
@@ -505,24 +529,18 @@ class AShareProtocol:
         if action == "dataset build":
             return (self.scenario_id,)
         if action == "research run":
-            return (self._research_terminal_target,)
-        if action == "report build":
-            return (self._report_terminal_target,)
+            return (
+                f"{self.scenario_id}_evaluation",
+                f"{self.scenario_id}_statistics",
+                f"{self.scenario_id}_portfolio_statistics",
+                *(
+                    f"{self.scenario_id}_{candidate.candidate_id}_ledger"
+                    for candidate in self.portfolio_candidates()
+                ),
+            )
         if action == "data materialize":
             return ()
         raise ValueError("unknown_a_share_action")
-
-    @property
-    def _research_terminal_target(self) -> str:
-        return f"{self.scenario_id}_research"
-
-    @property
-    def _report_artifact_target(self) -> str:
-        return f"{self.scenario_id}_report_artifact"
-
-    @property
-    def _report_terminal_target(self) -> str:
-        return f"{self.scenario_id}_report"
 
 
 def model_folds(
@@ -789,6 +807,9 @@ def evaluation_catalog() -> EvaluationCatalog:
                 for column in protocol(selected).factor_columns
             ),
             label_columns=(PRIMARY_LABEL_COLUMN,),
+            label_availability_columns={
+                PRIMARY_LABEL_COLUMN: forward_return_available_at_column(20)
+            },
             n_groups=5,
         )
         for selected in SCENARIO_IDS

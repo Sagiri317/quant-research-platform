@@ -70,7 +70,7 @@ class ScaledPredictor:
         )
 
     def __getattr__(self, name: str) -> object:
-        return getattr(self.estimator, name)
+        return getattr(object.__getattribute__(self, "estimator"), name)
 
 
 @dataclass(frozen=True)

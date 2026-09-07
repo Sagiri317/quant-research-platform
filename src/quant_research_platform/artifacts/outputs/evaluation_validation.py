@@ -95,6 +95,7 @@ _EVALUATION_OUTPUT_METADATA_KEYS = frozenset(
         "evaluation_axis",
         "signals",
         "label_columns",
+        "label_availability_columns",
         "filter_mode",
         "evaluation_diagnostics",
     }
@@ -137,6 +138,12 @@ def validate_evaluation_output_metadata_shape(
     label_columns = require_metadata_string_list(
         metadata, "label_columns", "output_manifest_metadata_invalid"
     )
+    label_availability_columns = metadata["label_availability_columns"]
+    if type(label_availability_columns) is not dict or any(
+        type(label) is not str or type(column) is not str
+        for label, column in label_availability_columns.items()
+    ):
+        raise ValueError("output_manifest_metadata_invalid")
     signals = require_signal_metadata_list(
         metadata, "signals", "output_manifest_metadata_invalid"
     )
@@ -236,6 +243,7 @@ def validate_evaluation_output_metadata_shape(
             research_dataset_id=metadata["research_dataset_id"],
             signals=signals,
             label_columns=tuple(label_columns),
+            label_availability_columns=label_availability_columns,
             evaluation_axis=metadata["evaluation_axis"],
             filter_mode=metadata["filter_mode"],
             n_groups=evaluation_diagnostics.n_groups,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import subprocess
 from contextlib import contextmanager
@@ -55,20 +56,35 @@ def _open_inventory_for_failure(data_root: Path, scratch_parent: Path):
         )
 
 
-def test_shared_path_move_is_fail_if_destination_exists(tmp_path: Path) -> None:
+@pytest.mark.parametrize("long_path", (False, True))
+def test_shared_path_move_is_fail_if_destination_exists(
+    tmp_path: Path, long_path
+) -> None:
     shared = __import__(
         "quant_research_platform.storage._scratch_ownership", fromlist=["*"]
     )
-    source = tmp_path / "source"
-    destination = tmp_path / "destination"
-    source.write_text("source", encoding="utf-8")
-    destination.write_text("destination", encoding="utf-8")
+    parent = tmp_path
+
+    def native(path):
+        return Path(shared._windows_extended_path(path)) if os.name == "nt" else path
+
+    if long_path:
+        parent = parent / ("nested" * 20) / ("nested" * 20)
+        native(parent).mkdir(parents=True)
+    source = parent / "source"
+    destination = parent / "destination"
+    native(source).write_text("source", encoding="utf-8")
+    native(destination).write_text("destination", encoding="utf-8")
 
     with pytest.raises(FileExistsError):
         shared.move_path_no_replace(source, destination)
 
-    assert source.read_text(encoding="utf-8") == "source"
-    assert destination.read_text(encoding="utf-8") == "destination"
+    assert native(source).read_text(encoding="utf-8") == "source"
+    assert native(destination).read_text(encoding="utf-8") == "destination"
+    moved = parent / "moved"
+    shared.move_path_no_replace(source, moved)
+    assert native(moved).read_text(encoding="utf-8") == "source"
+    assert not native(source).exists()
 
 
 def test_write_and_scratch_owners_reject_aliased_parent_before_access(
@@ -583,29 +599,15 @@ def test_inventory_exit_propagates_cleanup_failure_without_primary(
 
 def _patch_open_session_metadata_preflight(
     monkeypatch: pytest.MonkeyPatch,
+    root: Path,
 ) -> tuple[dict[str, str], dict[str, str]]:
     spec = {"schema_id": "qrp-dataset-spec"}
     manifest = {"schema_id": "qrp-dataset-manifest"}
-    monkeypatch.setattr(dataset_reading, "require_artifact_root", Path)
-    monkeypatch.setattr(
-        dataset_reading,
-        "require_unaliased_path",
-        lambda path, **_kwargs: Path(path),
-    )
-    monkeypatch.setattr(Path, "is_file", lambda _self: True)
-    monkeypatch.setattr(Path, "is_dir", lambda _self: True)
-    monkeypatch.setattr(
-        dataset_reading,
-        "dataset_file_identity",
-        lambda _path: identity.DatasetFileIdentity(1, 2, 2, 3),
-    )
-    monkeypatch.setattr(
-        dataset_reading,
-        "read_bounded_qrp_json",
-        lambda path, **_kwargs: (
-            b"{}",
-            spec if Path(path).name == "spec.json" else manifest,
-        ),
+    (root / "data").mkdir(parents=True)
+    (root / "_manifest").mkdir()
+    (root / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+    (root / "_manifest" / "manifest.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
     )
     monkeypatch.setattr(
         dataset_reading,
@@ -632,6 +634,7 @@ def _patch_open_session_metadata_preflight(
 
 def test_open_session_construction_cleanup_preserves_primary(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
     policy = capture_test_policy(
@@ -651,12 +654,12 @@ def test_open_session_construction_cleanup_preserves_primary(
         def close(self) -> None:
             raise RuntimeError("close_failed")
 
-    _patch_open_session_metadata_preflight(monkeypatch)
+    _patch_open_session_metadata_preflight(monkeypatch, tmp_path / "dataset")
     monkeypatch.setattr(dataset_reading, "DatasetSessionInventory", Inventory)
 
     with pytest.raises(GeneratorExit):
         with dataset_reading.open_dataset_session(
-            Path("dataset"),
+            tmp_path / "dataset",
             columns=None,
             time_window=None,
             resource_policy=policy,
@@ -666,12 +669,13 @@ def test_open_session_construction_cleanup_preserves_primary(
 
 def test_open_session_build_rejection_closes_lease_inside_same_root(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
-    candidate = Path("dataset/data/part-000.parquet")
+    candidate = tmp_path / "dataset/data/part-000.parquet"
 
     class Inventory:
         retained_memory_bytes = 1024
@@ -695,7 +699,7 @@ def test_open_session_build_rejection_closes_lease_inside_same_root(
         def close(self) -> None:
             return None
 
-    _patch_open_session_metadata_preflight(monkeypatch)
+    _patch_open_session_metadata_preflight(monkeypatch, tmp_path / "dataset")
     monkeypatch.setattr(dataset_reading, "DatasetSessionInventory", Inventory)
     monkeypatch.setattr(
         dataset_reading,
@@ -716,7 +720,7 @@ def test_open_session_build_rejection_closes_lease_inside_same_root(
     with runtime_resource_policy_scope(policy):
         with pytest.raises(ValueError, match="session_build_failed"):
             with dataset_reading.open_dataset_session(
-                Path("dataset"),
+                tmp_path / "dataset",
                 columns=None,
                 time_window=None,
                 resource_policy=policy,
@@ -727,6 +731,7 @@ def test_open_session_build_rejection_closes_lease_inside_same_root(
 
 def test_session_from_inventory_build_rejection_closes_lease_inside_same_root(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
@@ -737,7 +742,7 @@ def test_session_from_inventory_build_rejection_closes_lease_inside_same_root(
         def verify_filesystem(self, _spec: object) -> None:
             return None
 
-    _patch_open_session_metadata_preflight(monkeypatch)
+    _patch_open_session_metadata_preflight(monkeypatch, tmp_path / "dataset")
     monkeypatch.setattr(
         dataset_reading,
         "_build_dataset_session",
@@ -747,7 +752,7 @@ def test_session_from_inventory_build_rejection_closes_lease_inside_same_root(
     with runtime_resource_policy_scope(policy):
         with pytest.raises(ValueError, match="session_build_failed"):
             dataset_reading.dataset_session_from_inventory(
-                Path("dataset"),
+                tmp_path / "dataset",
                 inventory=Inventory(),  # type: ignore[arg-type]
                 columns=None,
                 time_window=None,
@@ -758,13 +763,14 @@ def test_session_from_inventory_build_rejection_closes_lease_inside_same_root(
 
 def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
     )
     events: list[str] = []
-    candidate = Path("dataset/data/year=2026/part-000.parquet")
+    candidate = tmp_path / "dataset/data/year=2026/part-000.parquet"
 
     def record(event: str) -> None:
         assert current_runtime_resource_policy() is policy
@@ -835,14 +841,14 @@ def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
         record("build")
         return Session(kwargs["inventory"], kwargs["session_lease"])  # type: ignore[arg-type]
 
-    _patch_open_session_metadata_preflight(monkeypatch)
+    _patch_open_session_metadata_preflight(monkeypatch, tmp_path / "dataset")
     monkeypatch.setattr(dataset_reading, "DatasetSessionInventory", Inventory)
     monkeypatch.setattr(dataset_reading, "inspect_dataset_part", inspect)
     monkeypatch.setattr(dataset_reading, "prune_paths_for_time_window", prune)
     monkeypatch.setattr(dataset_reading, "_build_dataset_session", build)
 
     with dataset_reading.open_dataset_session(
-        Path("dataset"),
+        tmp_path / "dataset",
         columns=None,
         time_window=None,
         resource_policy=policy,
@@ -866,6 +872,7 @@ def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
 
 def test_open_session_policy_entry_failure_precedes_inventory_construction(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
@@ -885,13 +892,13 @@ def test_open_session_policy_entry_failure_precedes_inventory_construction(
         raise primary
         yield
 
-    _patch_open_session_metadata_preflight(monkeypatch)
+    _patch_open_session_metadata_preflight(monkeypatch, tmp_path / "dataset")
     monkeypatch.setattr(dataset_reading, "DatasetSessionInventory", Inventory)
     monkeypatch.setattr(dataset_reading, "runtime_resource_policy_scope", failing_scope)
 
     with pytest.raises(RuntimeError) as raised:
         with dataset_reading.open_dataset_session(
-            Path("dataset"),
+            tmp_path / "dataset",
             columns=None,
             time_window=None,
             resource_policy=policy,

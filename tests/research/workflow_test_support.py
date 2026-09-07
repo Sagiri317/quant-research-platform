@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import numpy as np
 import pandas as pd
@@ -10,8 +11,14 @@ import pandas as pd
 from quant_research_platform.artifacts.outputs.prediction import (
     write_prediction_outputs,
 )
-from quant_research_platform.contracts.experiments import ExperimentFold
+from quant_research_platform.contracts.experiments import (
+    ExperimentFold,
+    ExperimentPlan,
+    TrialRecord,
+    trial_ledger_semantic_identity,
+)
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.models.fitting import ModelFitResult
@@ -20,6 +27,7 @@ from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
     RankEnsemblePredictor,
 )
+from quant_research_platform.storage.experiments import append_trial_record
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -73,11 +81,6 @@ def _metadata(
         "scaler": None,
         "feature_importance": {column: 1.0 for column in columns},
         "fit_cutoff": "2018-12-31",
-        "model_selection": _selection_metadata(
-            family_id=algorithm,
-            model_id=model_id,
-            columns=columns,
-        ),
     }
     if rank_parameters is not None:
         result["rank_parameters"] = rank_parameters
@@ -91,23 +94,6 @@ def _selection_metadata(
     columns: tuple[str, ...],
 ) -> dict[str, object]:
     del columns
-    trial = {
-        "model_id": model_id,
-        "validation_rows": 2,
-        "validation_ic": 0.1,
-        "validation_rankic": 0.2,
-        "validation_ic_reason": None,
-        "validation_rankic_reason": None,
-        "validation_mse": 1.0,
-        "resolved_hyperparameters": {},
-        "random_seed": 11,
-        "n_train": 2,
-        "dependency_status": {
-            "status": "available",
-            "package": "internal",
-            "version": "test",
-        },
-    }
     return {
         "status": "selected",
         "selection_metric": "validation_rankic",
@@ -123,10 +109,7 @@ def _selection_metadata(
                 "family_id": family_id,
                 "config_tie_break_order": [model_id],
                 "selected_config_id": model_id,
-                "trials": [trial],
-                "validation_rows": 2,
-                "selection_metric_value": 0.2,
-                "selection_metric_reason": None,
+                "trial_ledger_semantic_identity": "0" * 64,
             }
         ],
     }
@@ -143,9 +126,87 @@ def _fold(quarter: int) -> ExperimentFold:
     )
 
 
+def _trial_reference(
+    layout: StorageLayout,
+    fold: ExperimentFold,
+    *,
+    family_id: str,
+    model_id: str,
+    target_id: str = "model-artifact",
+    dataset_id: str = "fixture",
+    data_identity: str = "d" * 64,
+    protocol: dict[str, object] | None = None,
+    rankic: float = 0.2,
+) -> dict[str, str]:
+    plan = ExperimentPlan(
+        experiment_id=f"experiment_{uuid4().hex}",
+        market_id=MarketId("a_share"),
+        research_dataset_id=dataset_id,
+        target_id=target_id,
+        candidate_family_id=family_id,
+        data_snapshot_id=data_identity,
+        input_lineage=(data_identity,),
+        research_protocol_identity=canonical_json_hash(
+            {"fixture": True} if protocol is None else protocol
+        ),
+        folds=(fold,),
+        final_holdout=TimeWindow(
+            f"{pd.Timestamp(fold.development_test.end).year + 1}-01-01",
+            f"{pd.Timestamp(fold.development_test.end).year + 1}-12-31",
+        ),
+        selection_metric="validation_rankic",
+        selection_direction="maximize",
+        candidate_ids=(model_id,),
+        trial_budget=1,
+        random_seed=11,
+        tie_break_order=(model_id,),
+        backend_versions={"internal": "test"},
+        thread_settings={"native_threads": 1},
+    )
+    record = TrialRecord(
+        event_id=f"event_{uuid4().hex}",
+        run_id="run_fixture",
+        attempt_index=1,
+        experiment_id=plan.experiment_id,
+        protocol_hash=plan.protocol_hash,
+        candidate_family_id=family_id,
+        candidate_id=model_id,
+        trial_id=f"trial_{uuid4().hex}",
+        fold_id=fold.fold_id,
+        market_id="a_share",
+        research_dataset_id=dataset_id,
+        target_id=target_id,
+        horizon_id="label",
+        common_coverage_id=data_identity,
+        random_seed=11,
+        status="completed",
+        validation_metrics={
+            "validation_rankic": rankic,
+            "validation_ic": 0.1,
+            "validation_mse": 1.0,
+            "validation_rows": 2,
+            "n_train": 2,
+            "validation_rankic_reason": None,
+            "validation_ic_reason": None,
+        },
+        backend_versions=plan.backend_versions,
+        thread_settings=plan.thread_settings,
+    )
+    append_trial_record(
+        layout.trial_ledger_root(record.run_id, plan.experiment_id), plan, record
+    )
+    return {
+        "run_id": record.run_id,
+        "experiment_id": plan.experiment_id,
+        "protocol_hash": plan.protocol_hash,
+        "semantic_identity": trial_ledger_semantic_identity(plan, (record,)),
+    }
+
+
 def _quarterly_result(
     quarter: int,
     *,
+    trial_layout: StorageLayout,
     model_id: str,
     columns: tuple[str, ...],
     predictor: object | None = None,
@@ -158,14 +219,27 @@ def _quarterly_result(
         if isinstance(model, RankEnsemblePredictor)
         else "linear_regression"
     )
+    metadata = _metadata(columns, algorithm=algorithm, model_id=model_id)
+    reference = _trial_reference(
+        trial_layout, _fold(quarter), family_id=algorithm, model_id=model_id
+    )
+    selection = _selection_metadata(
+        family_id=algorithm, model_id=model_id, columns=columns
+    )
+    selection["families"][0]["trial_ledger_semantic_identity"] = reference[
+        "semantic_identity"
+    ]
     return QuarterlyModelResult(
         quarter=_fold(quarter),
         model_id=model_id,
         model_result=ModelFitResult(
             coefficients=np.zeros(len(columns) + 1),
-            metadata=_metadata(columns, algorithm=algorithm, model_id=model_id),
+            metadata=metadata,
             prediction_model=model,
         ),
+        family_id=algorithm,
+        selection_metadata=selection,
+        trial_ledgers=(reference,),
     )
 
 

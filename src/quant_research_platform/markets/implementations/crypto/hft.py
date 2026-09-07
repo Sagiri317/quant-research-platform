@@ -711,6 +711,14 @@ def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFr
         values = future / mid - 1.0
         output[f"future_mid_return_{horizon}ms"] = values
         output[f"future_mid_direction_{horizon}ms"] = np.sign(values)
+        available = (
+            pd.to_datetime(frame["timestamp_ms"], unit="ms")
+            .groupby(segment_groups, sort=False)
+            .shift(-(horizon // HFT_GRID_MS))
+            .where(values.notna())
+        )
+        for kind in ("return", "direction"):
+            output[f"future_mid_{kind}_{horizon}ms_available_at"] = available
     if HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS in horizons:
         best_bid_quantity = pd.Series(
             _finite_column(
@@ -741,4 +749,10 @@ def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFr
         output[HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN] = (
             future_sell_volume / best_bid_quantity
         ).clip(lower=0.0, upper=1.0)
+        output[f"{HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN}_available_at"] = (
+            pd.to_datetime(frame["timestamp_ms"], unit="ms")
+            .groupby(segment_groups, sort=False)
+            .shift(-steps)
+            .where(future_sell_volume.notna())
+        )
     return output

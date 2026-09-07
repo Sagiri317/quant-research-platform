@@ -7,270 +7,13 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-import quant_research_platform.workflows.crypto_hft as crypto_hft
-from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.markets.implementations.crypto.execution import (
-    MakerConfig,
-    TakerConfig,
-)
 from quant_research_platform.markets.implementations.crypto.ids import (
-    HFT_FACTOR_DATA_ID,
-    HFT_LABEL_DATA_ID,
-    HFT_PANEL_DATA_ID,
     HFT_RESEARCH_DATASET_ID,
 )
 from quant_research_platform.research.predictions import alignment
-from quant_research_platform.research.protocols.crypto_hft import (
-    HFT_FACTOR_COLUMNS,
-    HFT_LABEL_COLUMNS,
-    HFT_MULTI_ASSET_SCOPES,
-)
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.sources.binance.replay import ReconstructionStats
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows.crypto_hft import run_crypto_hft_experiment
-from tests.helpers.binance_hft import write_binance_hft_run
-from tests.helpers.runtime_resources import capture_test_policy
-
-
-def _taker_config() -> TakerConfig:
-    return TakerConfig(1.0, 1.0, 10, 1.0, 0.0, 500)
-
-
-def _maker_config() -> MakerConfig:
-    return MakerConfig(1.0, 2.0, -1.0, 0.0, 0.0, 500)
-
-
-def test_crypto_research_status_requires_every_symbol_reconstruction() -> None:
-    clean = ReconstructionStats(
-        valid_segments=1, coverage_segments={"segment-1": (0, 1)}
-    )
-    invalid_eth = ReconstructionStats(
-        invalid_segments=1, coverage_segments={"segment-1": (0, 1)}
-    )
-
-    assert (
-        crypto_hft._aggregate_research_status(
-            "PASS", {"BTCUSDT": clean, "ETHUSDT": clean}
-        )
-        == "PASS"
-    )
-    assert (
-        crypto_hft._aggregate_research_status(
-            "PASS", {"BTCUSDT": clean, "ETHUSDT": invalid_eth}
-        )
-        == "PARTIAL"
-    )
-    assert (
-        crypto_hft._aggregate_research_status("PASS", {"BTCUSDT": clean}) == "PARTIAL"
-    )
-    assert (
-        crypto_hft._aggregate_research_status(
-            "PASS", {"BTCUSDT": ReconstructionStats(), "ETHUSDT": clean}
-        )
-        == "PARTIAL"
-    )
-
-
-def test_crypto_hft_workflow_closes_standard_chain_and_execution(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    raw_root = tmp_path / "raw"
-    output_root = tmp_path / "output"
-    write_binance_hft_run(raw_root)
-    real_simulate_maker = crypto_hft.simulate_maker
-    captured_schedule: list[dict[str, object]] = []
-
-    def capture_schedule(book_events, trades, quote_schedule, **kwargs):  # noqa: ANN001
-        schedule = list(quote_schedule)
-        captured_schedule.extend(schedule)
-        return real_simulate_maker(book_events, trades, schedule, **kwargs)
-
-    monkeypatch.setattr(crypto_hft, "simulate_maker", capture_schedule)
-
-    report = run_crypto_hft_experiment(
-        output_root=output_root,
-        raw_root=raw_root,
-        start_ms=0,
-        end_ms=6_000,
-        taker_config=_taker_config(),
-        maker_config=_maker_config(),
-        explicit_cap_bytes=256 * 1024**2,
-    )
-
-    assert report["status"] == "PASS"
-    assert report["run_id"] == "workflow-run"
-    reconstruction_by_symbol = report["data_quality"]["reconstruction_by_symbol"]
-    assert set(reconstruction_by_symbol) == {"BTCUSDT", "ETHUSDT"}
-    assert report["data_quality"]["invalid_segments"] == sum(
-        item["invalid_segments"] for item in reconstruction_by_symbol.values()
-    )
-    assert all(item["coverage_segments"] for item in reconstruction_by_symbol.values())
-    assert report["lineage"]["source_artifact_identity"]["artifact_id"] == (
-        "workflow-run"
-    )
-    assert report["lineage"]["panel"] == HFT_PANEL_DATA_ID
-    assert report["lineage"]["factor"] == HFT_FACTOR_DATA_ID
-    assert report["lineage"]["label"] == HFT_LABEL_DATA_ID
-    assert report["lineage"]["research_dataset"] == HFT_RESEARCH_DATASET_ID
-    assert report["lineage"]["evaluation"] == "crypto_hft_microstructure_evaluation"
-    assert report["evaluation_status"] == "PASS"
-    assert report["evaluation"]["valid_ic_count"] > 0
-    assert report["evaluation"]["run_id"] == "workflow-run"
-    assert report["evaluation"]["evaluation_id"] == (
-        "crypto_hft_microstructure_evaluation"
-    )
-    assert report["evaluation"]["evaluation_axis"] == "cross_sectional"
-    assert report["evaluation"]["primary_key"] == [
-        "market_id",
-        "asset_id",
-        "timestamp",
-    ]
-    assert report["evaluation"]["requested_window"] == {
-        "start": "1970-01-01T00:00:00",
-        "end": "1970-01-01T00:00:06",
-    }
-    assert report["evaluation"]["observed_window"] == {
-        "start": "1970-01-01T00:00:00",
-        "end": "1970-01-01T00:00:06",
-    }
-    evaluation_root = output_root / report["evaluation"]["path"]
-    evaluation_manifest = json.loads(
-        (evaluation_root / "manifest.json").read_text(encoding="utf-8")
-    )
-    assert evaluation_manifest["output_definition_id"] == "evaluation_outputs"
-    assert evaluation_manifest["output_id"] == "crypto_hft_microstructure_evaluation"
-    assert evaluation_manifest["run_id"] == "workflow-run"
-    assert evaluation_manifest["metadata"]["evaluation_axis"] == "cross_sectional"
-    assert evaluation_manifest["metadata"]["research_dataset_id"] == (
-        HFT_RESEARCH_DATASET_ID
-    )
-    assert evaluation_manifest["metadata"]["evaluation_diagnostics"]["rows_input"] > 0
-    evaluation_diagnostics = evaluation_manifest["metadata"]["evaluation_diagnostics"]
-    assert evaluation_diagnostics["min_timestamp"] == "1970-01-01T00:00:00"
-    assert evaluation_diagnostics["max_timestamp"] == "1970-01-01T00:00:06"
-    evaluation_metrics = pd.read_parquet(evaluation_root / "metrics.parquet")
-    evaluation_summary = pd.read_parquet(evaluation_root / "ic_summary.parquet")
-    assert len(evaluation_metrics) == (
-        len(HFT_FACTOR_COLUMNS) * len(HFT_LABEL_COLUMNS) * 61
-    )
-    assert evaluation_metrics["n_obs"].max() > 1
-    assert evaluation_metrics["ic"].notna().any()
-    assert evaluation_metrics["rankic"].notna().any()
-    assert evaluation_summary["valid_ic_count"].sum() > 0
-    assert evaluation_summary["valid_rankic_count"].sum() > 0
-    evaluation_markdown = (evaluation_root / "summary.md").read_text(encoding="utf-8")
-    assert "evaluation_axis: `cross_sectional`" in evaluation_markdown
-    assert set(report["models"]["prediction_outputs"]) == {
-        "crypto_hft_lightgbm_regressor",
-        "crypto_hft_linear_regression",
-        "crypto_hft_xgboost_regressor",
-        "crypto_hft_maker_bid_sell_pressure_proxy",
-        *(f"crypto_hft_{mode}" for mode in HFT_MULTI_ASSET_SCOPES),
-    }
-    for output_id in report["models"]["prediction_outputs"].values():
-        prediction_manifest = json.loads(
-            (output_root / "outputs" / output_id / "manifest.json").read_text(
-                encoding="utf-8"
-            )
-        )
-        assert prediction_manifest["run_id"] == "workflow-run"
-    assert report["execution"]["taker_model_id"] == "crypto_hft_linear_regression"
-    assert report["execution"]["maker_policy_id"] == (
-        "public_l2_sell_pressure_proxy_gated_maker"
-    )
-    assert report["execution"]["maker_prediction_used"] is True
-    assert report["execution"]["maker_model_id"] == (
-        "crypto_hft_maker_bid_sell_pressure_proxy"
-    )
-    assert set(report["execution"]["taker_models"]) == {
-        "crypto_hft_lightgbm_regressor",
-        "crypto_hft_linear_regression",
-        "crypto_hft_xgboost_regressor",
-    }
-    assert set(report["models"]["oos_evaluation"]) == set(
-        report["models"]["prediction_outputs"]
-    )
-    execution_artifact = json.loads(
-        (output_root / report["execution"]["path"]).read_text(encoding="utf-8")
-    )
-    assert execution_artifact["taker_model_id"] == "crypto_hft_linear_regression"
-    assert execution_artifact["maker_policy_id"] == (
-        "public_l2_sell_pressure_proxy_gated_maker"
-    )
-    assert execution_artifact["maker_prediction_used"] is True
-    assert "maker_baseline" in execution_artifact
-    assert set(execution_artifact["taker_models"]) == {
-        "crypto_hft_lightgbm_regressor",
-        "crypto_hft_linear_regression",
-        "crypto_hft_xgboost_regressor",
-    }
-    assert "model_id" not in execution_artifact
-    assert report["execution"]["taker"]["latency_fidelity"] == (
-        "full_l2_observed_event"
-    )
-    assert report["execution"]["maker"]["queue_model"] == ("estimated_queue_ahead")
-    assert report["resource"]["captured_available_memory_bytes"] > 0
-    assert report["resource"]["memory_budget_bytes"] > 0
-    assert report["resource"]["planning_headroom_bytes"] >= 0
-    assert report["resource"]["explicit_memory_cap_bytes"] == 256 * 1024**2
-    assert report["resource"]["memory_budget_bytes"] <= 256 * 1024**2
-    assert (
-        report["resource"]["sampled_peak_reserved_bytes"]
-        <= report["resource"]["memory_budget_bytes"]
-    )
-    assert report["resource"]["wall_seconds"] > 0
-    assert report["resource"]["threads"] >= 1
-    assert (output_root / "report.json").is_file()
-    assert evaluation_root.is_dir()
-    assert (output_root / report["execution"]["path"]).is_file()
-    layout = StorageLayout(output_root)
-    assert layout.research_dataset_root(
-        "crypto",
-        HFT_RESEARCH_DATASET_ID,
-    ).is_dir()
-    assert captured_schedule
-    assert captured_schedule[0]["timestamp_ms"] == 4_000
-    assert captured_schedule[-1]["timestamp_ms"] == 6_000
-    assert all(
-        {
-            "timestamp_ms",
-            "asset_id",
-            "segment_id",
-            "book_segment_id",
-            "trade_connection_id",
-        }.issubset(row)
-        and "prediction_score" not in row
-        for row in captured_schedule
-    )
-    assert not list(tmp_path.glob(".a-*"))
-
-
-def test_crypto_hft_workflow_identity_failure_publishes_nothing(
-    tmp_path: Path,
-) -> None:
-    raw_root = tmp_path / "raw"
-    output_root = tmp_path / "output"
-    write_binance_hft_run(raw_root)
-    raw_file = next(
-        path
-        for path in raw_root.rglob("*.jsonl.gz")
-        if path.name == "BTCUSDT_usd_s_m_futures_depth.jsonl.gz"
-    )
-    raw_file.write_bytes(raw_file.read_bytes() + b"tampered")
-
-    with pytest.raises(ValueError, match="file_identity_mismatch"):
-        run_crypto_hft_experiment(
-            output_root=output_root,
-            raw_root=raw_root,
-            start_ms=0,
-            end_ms=6_000,
-            taker_config=_taker_config(),
-            maker_config=_maker_config(),
-        )
-
-    assert not output_root.exists()
+from tests.helpers.binance_hft import hft_research_plan
 
 
 class _PredictionLookup:
@@ -302,33 +45,26 @@ class _PredictionLookup:
         return len(set(self.values).difference(self.matched)), 0
 
 
-class _DatasetSession:
-    def __init__(self, frame: pd.DataFrame) -> None:
-        self.frame = frame
-
-    def __enter__(self) -> _DatasetSession:
-        return self
-
-    def __exit__(self, *_args: object) -> None:
-        return None
-
-    def verify(self) -> None:
-        return None
-
-
 def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    timestamps = pd.to_datetime(
+    monkeypatch,
+):
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.markets.implementations.crypto import portfolio
+    from quant_research_platform.research.protocols.crypto_hft import (
+        build_hft_research_dataset_catalog,
+    )
+
+    times = pd.to_datetime(
         [
-            "1970-01-01T00:00:00.100000000",
-            "1970-01-01T00:00:00.200000000",
-            "1970-01-01T00:00:00.300000000",
+            "1970-01-01T00:00:00.100",
+            "1970-01-01T00:00:00.200",
+            "1970-01-01T00:00:00.300",
         ]
     )
     frame = pd.DataFrame(
         {
-            "timestamp": timestamps,
+            "market_id": ["crypto"] * 3,
+            "timestamp": times,
             "asset_id": ["btc_usdt"] * 3,
             "segment_id": ["book-1:trade-1"] * 3,
             "book_segment_id": ["book-1"] * 3,
@@ -337,97 +73,425 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
             "eligible": [True, True, False],
         }
     )
-    spec = PredictionSpec(
-        prediction_id="hft_prediction",
-        model_id="hft_model",
-        research_dataset_id="hft_dataset",
-        train_end="1970-01-01T00:00:00.000000000",
-        test_start="1970-01-01T00:00:00.100000000",
-        test_end="1970-01-01T00:00:00.300000000",
-    )
     manifest = {
         "metadata": {
-            "model_metadata": {
+            "prediction_metadata": {
                 "input_columns": ["ofi_100ms"],
                 "sample_filter_mode": "eligible",
             }
         }
     }
-    valid_key = (timestamps[0], "btc_usdt")
 
     @contextmanager
-    def fake_bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
+    def bundle(*_args, **_kwargs):
         yield manifest, lookup
 
-    monkeypatch.setattr(crypto_hft, "read_prediction_output_bundle", fake_bundle)
     monkeypatch.setattr(
-        crypto_hft,
-        "open_dataset_session",
-        lambda *_args, **_kwargs: _DatasetSession(frame),
+        portfolio,
+        "iter_research_dataset_chunks",
+        lambda *_args, **_kwargs: iter((frame,)),
     )
-    monkeypatch.setattr(
-        crypto_hft,
-        "iter_dataset_chunks",
-        lambda session, **_kwargs: iter((session.frame,)),
-    )
-    dispatches: list[object] = []
+    dispatches = []
 
-    def dispatch(*args, prediction_source, **kwargs):  # noqa: ANN002, ANN003
+    def dispatch(*args, prediction_source, **kwargs):
         dispatches.append(prediction_source)
         yield from alignment._iter_prediction_joined_chunks(
-            *args,
-            prediction_source=prediction_source,
-            **kwargs,
+            *args, prediction_source=prediction_source, **kwargs
         )
 
-    monkeypatch.setattr(
-        crypto_hft,
-        "_iter_prediction_joined_chunks",
-        dispatch,
-        raising=False,
-    )
-    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    monkeypatch.setattr(portfolio, "_iter_prediction_joined_chunks", dispatch)
+    window = TimeWindow("1970-01-01T00:00:00.100", "1970-01-01T00:00:00.300")
+    with runtime_resource_policy_scope() as policy:
 
-    with runtime_resource_policy_scope(policy):
+        def rows():
+            return list(
+                portfolio._prediction_rows(
+                    layout=StorageLayout(Path("fixture")),
+                    dataset=build_hft_research_dataset_catalog().get(
+                        HFT_RESEARCH_DATASET_ID
+                    ),
+                    windows=(("fold", window),),
+                    model_id="model",
+                    asset_id="btc_usdt",
+                    protocol_manifest={
+                        "model_scopes": {
+                            "model": {"evaluation_asset_ids": ["btc_usdt"]}
+                        }
+                    },
+                    resource_policy=policy,
+                    read_prediction_bundle=bundle,
+                    output_window=window,
+                )
+            )
+
         lookup = _PredictionLookup({})
         with pytest.raises(ValueError, match="missing_required_prediction_keys"):
-            list(
-                crypto_hft._prediction_decisions(
-                    research_root=Path("research"),
-                    prediction_root=Path("prediction"),
-                    output_id="output",
-                    prediction_spec=spec,
-                    expected_run_id="workflow-run",
-                    resource_policy=policy,
-                )
-            )
-
-        lookup = _PredictionLookup({valid_key: 0.5})
-        decisions = list(
-            crypto_hft._prediction_decisions(
-                research_root=Path("research"),
-                prediction_root=Path("prediction"),
-                output_id="output",
-                prediction_spec=spec,
-                expected_run_id="workflow-run",
-                resource_policy=policy,
-            )
+            rows()
+        lookup = _PredictionLookup({(times[0], "btc_usdt"): 0.5})
+        actual = rows()
+        assert [row["prediction_score"] for row in actual] == [0.5, None, None]
+        lookup = _PredictionLookup(
+            {(times[0], "btc_usdt"): 0.5, (times[2], "btc_usdt"): 0.7}
         )
-    assert len(decisions) == 1
-    assert decisions[0]["prediction_score"] == 0.5
-
-    extra_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    lookup = _PredictionLookup({valid_key: 0.5, (timestamps[2], "btc_usdt"): 0.7})
-    with runtime_resource_policy_scope(extra_policy):
         with pytest.raises(ValueError, match="misaligned_persisted_prediction_keys"):
-            list(
-                crypto_hft._prediction_decisions(
-                    research_root=Path("research"),
-                    prediction_root=Path("prediction"),
-                    output_id="output",
-                    prediction_spec=spec,
-                    expected_run_id="workflow-run",
-                    resource_policy=extra_policy,
-                )
+            rows()
+        assert len(dispatches) == 3 and policy.used_memory_bytes == 0
+
+
+def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
+    )
+    from quant_research_platform.research.models.persisted import (
+        read_crypto_model_artifact,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_RESEARCH_DATASET_ID,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows import research
+    from tests.helpers.research_acceptance import run_crypto_acceptance
+
+    layout = StorageLayout(tmp_path / "project")
+    raw = layout.project_root / "raw/recorder"
+    profile = research_profile(CRYPTO_PROFILE_ID)
+    plan = hft_research_plan()
+    result, report = run_crypto_acceptance(layout.project_root)
+    targets = {item["target_id"]: item for item in result["target_results"]}
+    model_id = f"{HFT_RESEARCH_DATASET_ID}_models"
+    prediction_id = f"{HFT_RESEARCH_DATASET_ID}_predictions"
+    evaluation_ids = tuple(spec.evaluation_id for spec in profile.evaluations.list())
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
+        maker_candidates,
+        taker_candidates,
+    )
+
+    calibration_target = f"{HFT_RESEARCH_DATASET_ID}_maker_calibration"
+    statistics_target = f"{HFT_RESEARCH_DATASET_ID}_portfolio_statistics"
+    root = layout.instance_root(
+        layout.semantic_artifact_root("crypto", model_id),
+        targets[model_id]["instance_identity"],
+    )
+    saved = read_crypto_model_artifact(
+        root,
+        expected_identity=targets[model_id]["instance_identity"],
+        trial_layout=layout,
+    )
+
+    import numpy as np
+
+    from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
+    from quant_research_platform.research.models import fitting
+    from quant_research_platform.storage.datasets.reading import (
+        DatasetReadMode,
+        read_dataset,
+    )
+
+    dataset_root = layout.instance_root(
+        layout.research_dataset_root("crypto", HFT_RESEARCH_DATASET_ID),
+        targets[HFT_RESEARCH_DATASET_ID]["instance_identity"],
+    )
+    prediction_root = layout.instance_root(
+        layout.semantic_artifact_root("crypto", prediction_id),
+        targets[prediction_id]["instance_identity"],
+    )
+    with runtime_resource_policy_scope() as policy:
+        frame = read_dataset(
+            dataset_root, mode=DatasetReadMode.MATERIALIZED, resource_policy=policy
+        )
+        oos = frame.timestamp.between(
+            pd.Timestamp("1970-01-01T00:00:04"), pd.Timestamp("1970-01-01T00:00:05")
+        ) | frame.timestamp.between(
+            pd.Timestamp("1970-01-01T00:00:06.500000"),
+            pd.Timestamp("1970-01-01T00:00:08.500000"),
+        )
+        for spec in profile.models.list():
+            entries = [
+                entry for entry in saved.models if entry["model_id"] == spec.model_id
+            ]
+            expected = frame.loc[oos & frame.eligible].dropna(
+                subset=list(spec.input_columns)
             )
-    assert len(dispatches) == 3
+            assets = entries[0]["evaluation_asset_ids"]
+            if assets:
+                expected = expected.loc[expected.asset_id.isin(assets)]
+            output_id = f"{spec.model_id}_prediction"
+            with read_prediction_output_bundle(
+                prediction_root / "outputs" / output_id,
+                expected_output_id=output_id,
+                expected_run_id=f"run_{output_id}",
+            ) as (manifest, lookup):
+                assert manifest["metadata"][
+                    "model_metadata"
+                ] == saved.prediction_lineage(spec.model_id)
+                assert lookup.row_count == len(expected)
+                with lookup.values_for_frame(expected, mark_matched=True) as (
+                    values,
+                    found,
+                ):
+                    assert all(found) and np.isfinite(values).all()
+                assert lookup.coverage_counts() == (0, 0)
+        assert (
+            frame.loc[
+                frame.timestamp.eq(pd.Timestamp("1970-01-01T00:00:08.500000")),
+                "future_mid_return_500ms",
+            ]
+            .isna()
+            .all()
+        )
+        from tests.research.crypto_evaluation_test_support import (
+            check_crypto_evaluation_readback,
+        )
+
+        check_crypto_evaluation_readback(
+            layout=layout,
+            profile=profile,
+            targets=targets,
+            frame=frame,
+            plan=plan,
+            prediction_root=prediction_root,
+        )
+        frame = expected = None
+        assert policy.used_memory_bytes == 0
+    before = tuple(
+        sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
+    )
+
+    def no_fit(*args, **kwargs):
+        raise AssertionError("REUSE must not fit")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
+        reused = research.research_run(
+            profile=profile,
+            layout=layout,
+            scenario_id=HFT_RESEARCH_DATASET_ID,
+            start_date="1970-01-01T00:00:04",
+            end_date="1970-01-01T00:00:08.500000",
+            raw_root=raw,
+            research_plan=plan,
+        )
+    observed = {item["target_id"]: item for item in reused["target_results"]}
+    assert observed[model_id]["status"] == observed[prediction_id]["status"] == "REUSED"
+    assert all(observed[target]["status"] == "REUSED" for target in evaluation_ids)
+    assert all(
+        observed[candidate.target_id]["status"] == "REUSED"
+        for candidate in (*taker_candidates(), *maker_candidates())
+    )
+    assert observed[calibration_target]["status"] == "REUSED"
+    assert observed[statistics_target]["status"] == "REUSED"
+    from tests.interfaces.published_research_test_support import (
+        check_published_evidence_views,
+    )
+
+    check_published_evidence_views(
+        layout=layout,
+        profile=profile,
+        run_id=result["run_id"],
+        other_run_id=reused["run_id"],
+        report_identity=report["target_result"]["instance_identity"],
+        monkeypatch=monkeypatch,
+    )
+    missing_execution = research.research_run(
+        profile=profile,
+        layout=layout,
+        scenario_id=HFT_RESEARCH_DATASET_ID,
+        start_date="1970-01-01T00:00:04",
+        end_date="1970-01-01T00:00:08.500000",
+        raw_root=raw,
+        research_plan={key: value for key, value in plan.items() if key != "execution"},
+        plan=True,
+    )
+    missing_targets = {row["target_id"]: row for row in missing_execution["targets"]}
+    assert all(
+        missing_targets[target]["decision"] != "BLOCKED"
+        for target in (model_id, prediction_id, *evaluation_ids)
+    )
+    assert all(
+        missing_targets[candidate.target_id]["blocker"]
+        == "crypto_execution_plan_missing"
+        for candidate in taker_candidates()
+    )
+    eth_metadata = raw.parent / "funding/ETHUSDT/response.metadata.json"
+    saved_metadata = eth_metadata.read_bytes()
+    eth_metadata.unlink()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
+            missing_eth = research.research_run(
+                profile=profile,
+                layout=layout,
+                scenario_id=HFT_RESEARCH_DATASET_ID,
+                start_date="1970-01-01T00:00:04",
+                end_date="1970-01-01T00:00:08.500000",
+                raw_root=raw,
+                research_plan=plan,
+            )
+        missing_targets = {
+            row["target_id"]: row for row in missing_eth["target_results"]
+        }
+        assert all(
+            missing_targets[target]["status"] == "REUSED"
+            for target in (model_id, prediction_id, *evaluation_ids)
+        )
+        for candidate in taker_candidates():
+            assert missing_targets[candidate.target_id]["status"] == (
+                "BLOCKED" if candidate.asset_id == "eth_usdt" else "REUSED"
+            )
+    finally:
+        eth_metadata.write_bytes(saved_metadata)
+    btc_metadata = raw.parent / "funding/BTCUSDT/response.metadata.json"
+    saved_metadata = btc_metadata.read_bytes()
+    incomplete = json.loads(saved_metadata)
+    incomplete["metadata"]["coverage"]["end_ns"] = 8_000_000_000
+    btc_metadata.write_text(json.dumps(incomplete), encoding="utf-8")
+    old_good = {
+        candidate.target_id: (
+            layout.instance_root(
+                layout.semantic_artifact_root("crypto", candidate.target_id),
+                targets[candidate.target_id]["instance_identity"],
+            )
+            / "manifest.json"
+        ).read_bytes()
+        for candidate in taker_candidates()
+    }
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
+            incomplete_run = research.research_run(
+                profile=profile,
+                layout=layout,
+                scenario_id=HFT_RESEARCH_DATASET_ID,
+                start_date="1970-01-01T00:00:04",
+                end_date="1970-01-01T00:00:08.500000",
+                raw_root=raw,
+                research_plan=plan,
+            )
+        incomplete_targets = {
+            row["target_id"]: row for row in incomplete_run["target_results"]
+        }
+        assert all(
+            incomplete_targets[target]["status"] == "REUSED"
+            for target in (model_id, prediction_id, *evaluation_ids)
+        )
+        with runtime_resource_policy_scope() as policy:
+            for candidate in taker_candidates():
+                incomplete_result = incomplete_targets[candidate.target_id]
+                assert incomplete_result["status"] == (
+                    "BLOCKED" if candidate.asset_id == "btc_usdt" else "REUSED"
+                )
+                if candidate.asset_id == "btc_usdt":
+                    assert (
+                        incomplete_result["reason"]
+                        == "binance_funding_coverage_incomplete"
+                    )
+                old_identity = targets[candidate.target_id]["instance_identity"]
+                old_root = layout.instance_root(
+                    layout.semantic_artifact_root("crypto", candidate.target_id),
+                    old_identity,
+                )
+                assert (old_root / "manifest.json").read_bytes() == old_good[
+                    candidate.target_id
+                ]
+                read_portfolio_ledger_artifact(old_root, expected_identity=old_identity)
+            assert policy.used_memory_bytes == 0
+    finally:
+        btc_metadata.write_bytes(saved_metadata)
+    from tests.research.crypto_report_test_support import check_crypto_report_lifecycle
+
+    check_crypto_report_lifecycle(
+        layout=layout,
+        profile=profile,
+        complete_run=result,
+        reused_run=reused,
+        blocked_run=incomplete_run,
+        targets=targets,
+        monkeypatch=monkeypatch,
+    )
+    assert (
+        tuple(
+            sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
+        )
+        == before
+    )
+    from tests.research.crypto_model_test_support import (
+        check_crypto_fold_boundaries,
+        check_crypto_model_staging,
+        check_crypto_prediction_staging,
+    )
+
+    check_crypto_fold_boundaries(
+        layout=layout,
+        dataset_root=dataset_root,
+        profile=profile,
+        saved=saved,
+        monkeypatch=monkeypatch,
+    )
+    check_crypto_model_staging(layout=layout, profile=profile, saved=saved)
+    check_crypto_prediction_staging(
+        layout=layout, prediction_root=prediction_root, saved=saved
+    )
+    from tests.research.crypto_evaluation_test_support import (
+        check_crypto_evaluation_input_boundaries,
+        check_crypto_evaluation_old_good,
+    )
+
+    check_crypto_evaluation_input_boundaries(
+        layout=layout,
+        profile=profile,
+        targets=targets,
+        dataset_root=dataset_root,
+        prediction_root=prediction_root,
+        plan=plan,
+        monkeypatch=monkeypatch,
+    )
+    check_crypto_evaluation_old_good(
+        layout=layout,
+        profile=profile,
+        targets=targets,
+        raw=raw,
+        plan=plan,
+    )
+    insufficient_plan = {
+        **plan,
+        "execution": {
+            **plan["execution"],
+            "maker": {**plan["execution"]["maker"], "min_calibration_samples": 100000},
+        },
+    }
+    insufficient = research.research_run(
+        profile=profile,
+        layout=layout,
+        scenario_id=HFT_RESEARCH_DATASET_ID,
+        start_date="1970-01-01T00:00:04",
+        end_date="1970-01-01T00:00:08.500000",
+        raw_root=raw,
+        research_plan=insufficient_plan,
+    )
+    insufficient_targets = {
+        row["target_id"]: row for row in insufficient["target_results"]
+    }
+    assert insufficient["status"] == "BLOCKED"
+    assert insufficient_targets[calibration_target]["status"] == "BUILT"
+    assert insufficient_targets[maker_candidates()[1].target_id]["reason"] == (
+        "maker_calibration_insufficient_samples"
+    )
+    assert insufficient_targets[statistics_target]["status"] == "BLOCKED"
+    assert all(
+        insufficient_targets[candidate.target_id]["status"] in {"BUILT", "REUSED"}
+        for candidate in (*taker_candidates(), maker_candidates()[0])
+    )
+    assert all(
+        insufficient_targets[target]["status"] == "BUILT"
+        for target in (model_id, prediction_id, *evaluation_ids)
+    )
+    assert (
+        insufficient_targets[model_id]["instance_identity"]
+        != targets[model_id]["instance_identity"]
+    )

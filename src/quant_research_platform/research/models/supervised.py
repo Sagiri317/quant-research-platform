@@ -8,6 +8,7 @@ import quant_research_platform.research.models.dependencies as dependencies
 import quant_research_platform.research.models.estimators as estimators
 from quant_research_platform.contracts.models import (
     _PARALLEL_MODEL_ALGORITHMS,
+    DEFAULT_MODEL_THREAD_COUNT,
     ModelSpec,
     _model_algorithm_facts,
     _resolved_model_thread_count,
@@ -61,8 +62,8 @@ def resolved_model_hyperparameters(spec: ModelSpec) -> dict[str, object]:
 
 def model_thread_count(spec: ModelSpec) -> int:
     if spec.model_algorithm not in _PARALLEL_MODEL_ALGORITHMS:
-        return 1
+        return DEFAULT_MODEL_THREAD_COUNT
     params = resolved_model_hyperparameters(spec)
     if "n_jobs" not in params:
-        return 1
+        return DEFAULT_MODEL_THREAD_COUNT
     return int(params["n_jobs"])

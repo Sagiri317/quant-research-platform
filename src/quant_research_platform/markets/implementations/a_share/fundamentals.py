@@ -169,6 +169,10 @@ def financial_events_from_interim(
         if bool((positions >= len(sessions)).any()):
             raise ValueError("financial_availability_next_session_missing")
         frame["available_at"] = sessions.take(positions)
+        # Different public dates can share the same next trading session.
+        frame = frame.sort_values("disclosure_date", kind="mergesort").drop_duplicates(
+            ["asset_id", "report_period", "available_at"], keep="last"
+        )
         melted = frame.melt(
             id_vars=(
                 "asset_id",
@@ -441,109 +445,88 @@ def materialize_pit_fundamentals(
         ["asset_id", "metric_id", "report_period", "available_at"], keep=False
     ).any():
         raise ValueError("pit_revision_order_ambiguous")
-    records: list[dict[str, object]] = []
+    frames: list[pd.DataFrame] = []
+    observation_positions = left.groupby("asset_id", sort=False).indices
     for (asset_id, metric_id), stream in right.groupby(
         ["asset_id", "metric_id"], sort=False
     ):
         stream = stream.sort_values(
             ["available_at", "report_period", "version_identity"],
             kind="mergesort",
-        )
-        asset_observations = left.loc[left["asset_id"].eq(asset_id)].sort_values(
-            "timestamp", kind="mergesort"
-        )
-        for observation in asset_observations.itertuples(index=False):
-            legal = stream.loc[stream["available_at"].le(observation.timestamp)]
-            if legal.empty:
-                current = beginning = prior_year = prior_fy = None
-            else:
-                latest_period = legal["report_period"].max()
-                current = _latest_legal_event_row(
-                    legal, report_period=latest_period
-                ).iloc[-1]
-                beginning_period = _beginning_report_period(latest_period)
-                beginning = (
-                    _latest_legal_event_row(legal, report_period=beginning_period).iloc[
-                        -1
-                    ]
-                    if beginning_period is not None
-                    and bool(legal["report_period"].eq(beginning_period).any())
-                    else None
-                )
-                prior_year_period = _prior_year_report_period(latest_period)
-                prior_year = (
-                    _latest_legal_event_row(
-                        legal, report_period=prior_year_period
-                    ).iloc[-1]
-                    if prior_year_period is not None
-                    and bool(legal["report_period"].eq(prior_year_period).any())
-                    else None
-                )
-                prior_fy_period = _prior_fy_report_period(latest_period)
-                prior_fy = (
-                    _latest_legal_event_row(legal, report_period=prior_fy_period).iloc[
-                        -1
-                    ]
-                    if bool(legal["report_period"].eq(prior_fy_period).any())
-                    else None
-                )
-            records.append(
-                {
-                    "asset_id": asset_id,
-                    "timestamp": observation.timestamp,
-                    "metric_id": metric_id,
-                    "report_period": pd.NaT
-                    if current is None
-                    else current["report_period"],
-                    "available_at": pd.NaT
-                    if current is None
-                    else current["available_at"],
-                    "version_identity": pd.NA
-                    if current is None
-                    else current["version_identity"],
-                    "is_corrected": pd.NA
-                    if current is None
-                    else current["is_corrected"],
-                    "value": np.nan if current is None else current["value"],
-                    "beginning_report_period": pd.NaT
-                    if beginning is None
-                    else beginning["report_period"],
-                    "beginning_value": (
-                        np.nan if beginning is None else beginning["value"]
-                    ),
-                    "prior_year_report_period": pd.NaT
-                    if prior_year is None
-                    else prior_year["report_period"],
-                    "prior_year_value": (
-                        np.nan if prior_year is None else prior_year["value"]
-                    ),
-                    "prior_fy_report_period": pd.NaT
-                    if prior_fy is None
-                    else prior_fy["report_period"],
-                    "prior_fy_value": (
-                        np.nan if prior_fy is None else prior_fy["value"]
-                    ),
-                }
+        ).reset_index(drop=True)
+        asset_observations = left.iloc[
+            observation_positions.get(asset_id, np.empty(0, dtype=np.intp))
+        ].sort_values("timestamp", kind="mergesort")
+        timestamps = asset_observations["timestamp"].to_numpy()
+        availability = stream["available_at"].to_numpy()
+        periods = stream["report_period"].to_numpy()
+        # A late revision of an older report must not roll back the current period.
+        current_at_event = np.maximum.accumulate(
+            np.where(
+                periods == np.maximum.accumulate(periods),
+                np.arange(len(stream)),
+                -1,
             )
+        )
+        last_legal = np.searchsorted(availability, timestamps, side="right") - 1
+        current_positions = np.where(
+            last_legal >= 0,
+            current_at_event[np.maximum(last_legal, 0)],
+            -1,
+        )
+        current = stream.reindex(current_positions).reset_index(drop=True)
+        current_values = current["value"].to_numpy(dtype=object, copy=True)
+        current_values[current_positions < 0] = np.nan
+        corrected = current["is_corrected"].to_numpy(dtype=object, copy=True)
+        corrected[current_positions < 0] = pd.NA
+        frame = pd.DataFrame(
+            {
+                "asset_id": asset_id,
+                "timestamp": timestamps,
+                "metric_id": metric_id,
+                "report_period": current["report_period"].to_numpy(),
+                "available_at": current["available_at"].to_numpy(),
+                "version_identity": current["version_identity"].to_numpy(),
+                "is_corrected": corrected,
+                "value": current_values,
+            }
+        )
+        period_positions = stream.groupby("report_period", sort=False).indices
+        current_periods = current["report_period"].to_numpy()
+        legal_periods = current["report_period"].dropna().unique()
+        for prefix, preceding_period in (
+            ("prior_year", _prior_year_report_period),
+            ("prior_fy", _prior_fy_report_period),
+        ):
+            dependency_positions = np.full(len(timestamps), -1, dtype=np.intp)
+            for period in legal_periods:
+                positions = period_positions.get(preceding_period(pd.Timestamp(period)))
+                if positions is None:
+                    continue
+                selected = current_periods == period
+                legal = (
+                    np.searchsorted(
+                        availability[positions], timestamps[selected], side="right"
+                    )
+                    - 1
+                )
+                dependency_positions[selected] = np.where(
+                    legal >= 0, positions[np.maximum(legal, 0)], -1
+                )
+            dependency = stream.reindex(dependency_positions)
+            values = dependency["value"].to_numpy(dtype=object, copy=True)
+            values[dependency_positions < 0] = np.nan
+            frame[f"{prefix}_report_period"] = dependency["report_period"].to_numpy()
+            frame[f"{prefix}_value"] = values
+        frame.insert(8, "beginning_report_period", frame["prior_year_report_period"])
+        frame.insert(9, "beginning_value", frame["prior_year_value"])
+        frames.append(frame)
     return (
-        pd.DataFrame.from_records(records)
+        pd.concat(frames, ignore_index=True)
+        .infer_objects()
         .sort_values(["asset_id", "timestamp", "metric_id"], kind="mergesort")
         .reset_index(drop=True)
     )
-
-
-def _latest_legal_event_row(
-    events: pd.DataFrame,
-    *,
-    report_period: pd.Timestamp,
-) -> pd.DataFrame:
-    return events.loc[events["report_period"].eq(report_period)].sort_values(
-        ["available_at", "version_identity"], kind="mergesort"
-    )
-
-
-def _beginning_report_period(report_period: pd.Timestamp) -> pd.Timestamp | None:
-    return _prior_year_report_period(report_period)
 
 
 def _prior_year_report_period(report_period: pd.Timestamp) -> pd.Timestamp | None:

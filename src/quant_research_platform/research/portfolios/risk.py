@@ -185,6 +185,150 @@ def preprocess_risk_styles(
     return result
 
 
+@dataclass(frozen=True)
+class FactorReturnFit:
+    exposures: pd.DataFrame
+    factor_returns: pd.Series
+    residuals: pd.Series
+    asset_returns: pd.Series
+
+
+@dataclass(frozen=True)
+class HoldingFactorInputs:
+    decision_at: pd.Timestamp
+    entry_at: pd.Timestamp
+    end_at: pd.Timestamp
+    fitted: FactorReturnFit | None
+    decision_close: pd.Series
+    entry_open: pd.Series
+    benchmark_weights: pd.DataFrame
+    reason: str | None = None
+
+
+def holding_attribution(
+    inputs: HoldingFactorInputs,
+    *,
+    after_notionals: pd.Series,
+    nav_before: float,
+    nav_post: float,
+    benchmark_id: str | None,
+    benchmark_return: float | None,
+    holding_returns: pd.Series,
+) -> tuple[dict[str, float | None], dict[str, str], pd.Series]:
+    """Ex-post relative-factor decomposition with an explicit replication gap."""
+    components = (
+        "benchmark",
+        "industry",
+        "style",
+        "stock_residual_difference",
+        "benchmark_replication_gap",
+        "residual_unexplained",
+    )
+    values = dict.fromkeys(components)
+    reasons = {}
+    values["benchmark"] = 0.0 if benchmark_id is None else benchmark_return
+    fitted = inputs.fitted
+    if fitted is None:
+        reasons.update(
+            {
+                name: inputs.reason or "holding_factor_fit_unidentified"
+                for name in components
+                if name != "benchmark"
+            }
+        )
+        return values, reasons, pd.Series(dtype="float64")
+    held = after_notionals.loc[after_notionals.ne(0.0)]
+    if not set(held.index).issubset(fitted.exposures.index):
+        reasons.update(
+            {
+                name: "holding_exposures_incomplete"
+                for name in components
+                if name != "benchmark"
+            }
+        )
+        return values, reasons, pd.Series(dtype="float64")
+    if not np.allclose(
+        holding_returns.reindex(held.index),
+        fitted.asset_returns.reindex(held.index),
+        rtol=1e-12,
+        atol=1e-12,
+    ):
+        raise ValueError("holding_return_ledger_mismatch")
+    weights = held.div(nav_before).reindex(fitted.exposures.index, fill_value=0.0)
+    realized = fitted.exposures.mul(
+        held.div(nav_post).reindex(fitted.exposures.index, fill_value=0.0), axis=0
+    ).sum()
+    reference = pd.Series(0.0, index=fitted.exposures.index)
+    if benchmark_id is not None:
+        snapshot = inputs.benchmark_weights.loc[
+            inputs.benchmark_weights.benchmark_id.eq(benchmark_id)
+        ].set_index("asset_id")["weight"]
+        if snapshot.index.has_duplicates:
+            raise ValueError("attribution_benchmark_keys_invalid")
+        complete = (
+            not snapshot.empty
+            and np.isfinite(snapshot).all()
+            and snapshot.gt(0).all()
+            and np.isclose(snapshot.sum(), 1.0, rtol=0, atol=1e-8)
+            and set(snapshot.index).issubset(fitted.exposures.index)
+        )
+        prices = pd.concat(
+            [
+                inputs.decision_close.reindex(snapshot.index),
+                inputs.entry_open.reindex(snapshot.index),
+            ],
+            axis=1,
+        )
+        if (
+            not complete
+            or prices.isna().any().any()
+            or not np.isfinite(prices).all().all()
+            or not prices.gt(0).all().all()
+        ):
+            reasons.update(
+                {
+                    name: "attribution_reference_basket_incomplete"
+                    for name in components
+                    if name != "benchmark"
+                }
+            )
+            return values, reasons, realized
+        drifted = snapshot * prices.iloc[:, 1] / prices.iloc[:, 0]
+        reference = drifted.div(drifted.sum()).reindex(
+            fitted.exposures.index, fill_value=0.0
+        )
+    relative = weights - reference
+    contributions = fitted.exposures.mul(relative, axis=0).sum() * fitted.factor_returns
+    values["industry"] = float(
+        contributions.loc[contributions.index.str.startswith("industry_")].sum()
+    )
+    values["style"] = float(
+        contributions.loc[~contributions.index.str.startswith("industry_")].sum()
+    )
+    values["stock_residual_difference"] = float(relative.dot(fitted.residuals))
+    if values["benchmark"] is None:
+        reasons["benchmark"] = reasons["benchmark_replication_gap"] = reasons[
+            "residual_unexplained"
+        ] = "benchmark_total_return_open_missing"
+    else:
+        values["benchmark_replication_gap"] = float(
+            reference.dot(fitted.asset_returns) - values["benchmark"]
+        )
+        values["residual_unexplained"] = (
+            values["stock_residual_difference"] + values["benchmark_replication_gap"]
+        )
+        expected_gross = float(
+            held.mul(holding_returns.reindex(held.index)).sum() / nav_before
+        )
+        actual_gross = sum(
+            values[name]
+            for name in ("benchmark", "industry", "style", "residual_unexplained")
+        )
+        if not np.isclose(expected_gross, actual_gross, rtol=1e-11, atol=1e-12):
+            raise ValueError("holding_attribution_reconciliation_invalid")
+    return values, reasons, realized
+
+
 class FactorRiskState:
     """Incremental, exposure-lagged factor-risk estimator."""
 
@@ -206,30 +350,62 @@ class FactorRiskState:
         self._factor_rows: list[dict[str, object]] = []
         self._residuals: dict[str, array] = {}
 
-    def observe_return_session(self, cross: pd.DataFrame) -> None:
+    def prepare_exposures(self, cross: pd.DataFrame) -> pd.DataFrame:
         required = {
             "timestamp",
             "asset_id",
-            "asset_return",
             "industry_level1_code",
             self.weight_column,
             *self.style_columns,
         }
         if not isinstance(cross, pd.DataFrame) or not required.issubset(cross.columns):
             raise ValueError("factor_risk_columns_invalid")
-        frame = cross.loc[:, list(required)].copy()
-        if "eligible" in cross.columns:
+        frame = cross.loc[
+            :,
+            list(required)
+            + (["eligible"] if "eligible" in cross else [])
+            + (["asset_return"] if "asset_return" in cross else []),
+        ].copy()
+        if "eligible" in frame:
             if (
-                not pd.api.types.is_bool_dtype(cross["eligible"])
-                or cross["eligible"].isna().any()
+                not pd.api.types.is_bool_dtype(frame.eligible)
+                or frame.eligible.isna().any()
             ):
                 raise ValueError("factor_risk_eligibility_invalid")
-            frame = frame.loc[cross["eligible"]]
-        frame["asset_id"] = frame["asset_id"].astype("string")
-        for column in ("asset_return", self.weight_column, *self.style_columns):
+            frame = frame.loc[frame.eligible].copy()
+        frame["asset_id"] = frame.asset_id.astype("string")
+        for column in (self.weight_column, *self.style_columns):
             frame[column] = pd.to_numeric(frame[column], errors="raise").astype(
                 "float64"
             )
+        return (
+            frame.dropna(subset=list(required))
+            .loc[
+                lambda item: (
+                    item[self.weight_column].gt(0)
+                    & item.industry_level1_code.astype(str).ne("")
+                )
+            ]
+            .copy()
+        )
+
+    def fit_return_session(
+        self, cross: pd.DataFrame, *, require_complete: bool = False
+    ) -> FactorReturnFit | None:
+        if "asset_return" not in cross:
+            raise ValueError("factor_risk_columns_invalid")
+        frame = self.prepare_exposures(cross)
+        frame["asset_return"] = pd.to_numeric(
+            frame.asset_return, errors="raise"
+        ).astype("float64")
+        if require_complete and (
+            frame.asset_return.isna().any() or not np.isfinite(frame.asset_return).all()
+        ):
+            raise ValueError("holding_returns_incomplete")
+        if frame.empty:
+            return None
+        if frame.asset_id.duplicated().any() or frame.timestamp.nunique() != 1:
+            raise ValueError("factor_return_cross_section_keys_invalid")
         frame = frame.dropna().loc[lambda item: item[self.weight_column].gt(0.0)]
         if frame.empty:
             return
@@ -256,7 +432,7 @@ class FactorRiskState:
             return
         if np.linalg.matrix_rank(design) != p:
             return
-        weights = frame[self.weight_column].to_numpy(dtype="float64")
+        weights = np.sqrt(frame[self.weight_column].to_numpy(dtype="float64"))
         root_weights = np.sqrt(weights)
         returns = frame["asset_return"].to_numpy(dtype="float64")
         coefficients = np.linalg.lstsq(
@@ -265,7 +441,23 @@ class FactorRiskState:
             rcond=None,
         )[0]
         residuals = returns - design @ coefficients
-        timestamp = pd.Timestamp(frame["timestamp"].iloc[0])
+        assets = pd.Index(frame["asset_id"].astype(str), name="asset_id")
+        return FactorReturnFit(
+            pd.DataFrame(design, index=assets, columns=exposure_columns),
+            pd.Series(coefficients, index=exposure_columns),
+            pd.Series(residuals, index=assets),
+            pd.Series(returns, index=assets),
+        )
+
+    def observe_return_session(self, cross: pd.DataFrame) -> None:
+        fitted = self.fit_return_session(cross)
+        if fitted is None:
+            return
+        frame = fitted.exposures.reset_index()
+        exposure_columns = tuple(fitted.factor_returns.index)
+        coefficients = fitted.factor_returns.to_numpy()
+        residuals = fitted.residuals.to_numpy()
+        timestamp = pd.Timestamp(cross["timestamp"].iloc[0])
         row: dict[str, object] = {"timestamp": timestamp}
         row.update(
             zip(

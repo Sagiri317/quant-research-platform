@@ -9,6 +9,7 @@ from types import MappingProxyType
 
 from quant_research_platform.contracts.data import ProcessedDataKind
 from quant_research_platform.contracts.ids import MarketId, SourceId
+from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.storage.identity import validate_instance_identity
 
 
@@ -68,6 +69,15 @@ class StorageLayout:
 
     def semantic_artifact_root(self, market_id: MarketId, artifact_id: str) -> Path:
         return self.project_root / "data/artifacts" / str(market_id) / artifact_id
+
+    def research_run_path(self, run_id: str) -> Path:
+        return (
+            self.project_root / "data/runs/research" / f"{validate_run_id(run_id)}.json"
+        )
+
+    def trial_ledger_root(self, run_id: str, experiment_id: str | None = None) -> Path:
+        root = self.project_root / "data/runs/trials" / validate_run_id(run_id)
+        return root if experiment_id is None else root / validate_run_id(experiment_id)
 
     def instance_root(self, logical_root: Path, instance_identity: str) -> Path:
         return (

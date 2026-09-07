@@ -31,11 +31,22 @@ _WEIGHT_COLUMNS = (
 )
 
 
-def normalize_benchmark_weight_snapshots(
+def iter_benchmark_weight_snapshots(index_info_interim, weight_frames):
+    """Validate complete dates and require both benchmarks across the input window."""
+    observed = set()
+    for frame in weight_frames:
+        normalized = _normalize_benchmark_weight_snapshots(index_info_interim, frame)
+        observed.update(normalized["benchmark_id"])
+        yield normalized
+        del normalized, frame
+    if observed != APPROVED_BENCHMARK_IDS:
+        raise ValueError("a_share_benchmark_coverage_incomplete")
+
+
+def _normalize_benchmark_weight_snapshots(
     index_info_interim: pd.DataFrame,
     weight_interim: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Normalize the two formal benchmark codes into exact snapshots."""
 
     if (
         type(index_info_interim) is not pd.DataFrame
@@ -97,15 +108,13 @@ def normalize_benchmark_weight_snapshots(
     key = ["benchmark_id", "asset_id", "timestamp"]
     if bool(weights.duplicated(key, keep=False).any()):
         raise ValueError("a_share_benchmark_weight_key_duplicate")
-    if set(weights["benchmark_id"]) != APPROVED_BENCHMARK_IDS:
-        raise ValueError("a_share_benchmark_coverage_incomplete")
     totals = weights.groupby(["benchmark_id", "timestamp"])["weight"].sum()
     if not bool(np.isclose(totals.to_numpy(), 1.0, atol=1e-6, rtol=0.0).all()):
         raise ValueError("a_share_benchmark_weight_sum_invalid")
     return (
         weights.assign(market_id="a_share")
         .loc[:, list(_WEIGHT_COLUMNS)]
-        .sort_values(["benchmark_id", "asset_id", "timestamp"], kind="mergesort")
+        .sort_values(["timestamp", "benchmark_id", "asset_id"], kind="mergesort")
         .reset_index(drop=True)
     )
 

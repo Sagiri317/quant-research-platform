@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.artifacts.research import read_research_run_record
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.models import ModelCatalog
@@ -26,7 +27,9 @@ from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import (
     ProducerBinding,
     ProducerKind,
+    ResearchRunTargetResult,
     TargetSpec,
+    TargetStatus,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import (
@@ -44,11 +47,10 @@ from quant_research_platform.storage.manifests import (
     read_manifest,
 )
 from quant_research_platform.workflows import research
-from quant_research_platform.workflows.smoke import run_research_synthetic_smoke
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 
 
-def test_a_share_formal_quarterly_model_and_prediction_chain(
+def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -230,12 +232,18 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
         end_date="2019-06-30",
     )
     targets = {item["target_id"]: item for item in result["target_results"]}
-    assert result["status"] == "BLOCKED"
+    assert result["status"] == "FAILED"
+    assert targets["pv_all_statistics"] == {
+        "target_id": "pv_all_statistics",
+        "status": "FAILED",
+        "reason": "statistics_build_failed:statistics_fdr_family_factors_missing",
+        "instance_identity": None,
+    }
     assert targets["pv_all_evaluation"]["status"] == "BUILT"
     assert targets["pv_all_model_selection_refit"]["status"] == "BUILT"
-    assert targets["pv_all_ew_rank_model"]["status"] == "BUILT"
+    assert "pv_all_ew_rank_model" not in targets
     assert targets["pv_all_persisted_predictions"]["status"] == "BUILT"
-    assert targets["pv_all_ew_rank_predictions"]["status"] == "BUILT"
+    assert "pv_all_ew_rank_predictions" not in targets
     model_root = (
         StorageLayout(project_root=tmp_path).semantic_artifact_root(
             "a_share", "pv_all_model_selection_refit"
@@ -243,36 +251,35 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
         / "instances"
         / targets["pv_all_model_selection_refit"]["instance_identity"]
     )
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        read_prediction_output_bundle,
+    )
+    from quant_research_platform.research.models.persisted import (
+        read_quarterly_model_artifact,
+    )
+
     model_payload = json.loads((model_root / "model.json").read_text(encoding="utf-8"))
-    assert set(model_payload) == {"schema_id", "model_id", "quarterly_models"}
-    assert len(model_payload["quarterly_models"]) == 2
-    assert [item["quarter_id"] for item in model_payload["quarterly_models"]] == [
-        "2019Q1",
-        "2019Q2",
-    ]
-    for item in model_payload["quarterly_models"]:
+    assert set(model_payload) == {"schema_id", "model_id", "quarters"}
+    assert model_payload["quarters"] == ["2019Q1", "2019Q2"]
+    artifact = read_quarterly_model_artifact(
+        model_root, trial_layout=StorageLayout(tmp_path)
+    )
+    assert len(artifact.quarterly_models) == 16
+    assert set(item["family_id"] for item in artifact.quarterly_models) == set(
+        protocol_family_ids := tuple(
+            f"pv_all_{algorithm}" for algorithm in a_share.MODEL_FAMILY_ORDER
+        )
+    )
+    for item in artifact.quarterly_models:
         metadata = item["model_metadata"]
         assert type(metadata["random_seed"]) is int
+        assert "model_selection" not in metadata
         assert not {"test_start", "test_end", "oos_start", "oos_end"}.intersection(
             metadata
         )
-    ew_model_root = (
-        StorageLayout(project_root=tmp_path).semantic_artifact_root(
-            "a_share", "pv_all_ew_rank_model"
-        )
-        / "instances"
-        / targets["pv_all_ew_rank_model"]["instance_identity"]
-    )
-    ew_model_payload = json.loads(
-        (ew_model_root / "model.json").read_text(encoding="utf-8")
-    )
     assert all(
-        item["model_metadata"]["model_selection"]["candidate_family_ids"]
-        == ["pv_all_equal_weight_rank_ensemble"]
-        and item["model_metadata"]["model_selection"]["tie_break_order"]
-        == ["pv_all_equal_weight_rank_ensemble"]
-        and len(item["model_metadata"]["rank_parameters"]["directions"]) == 1
-        for item in ew_model_payload["quarterly_models"]
+        tuple(item["candidate_family_ids"]) == protocol_family_ids
+        for item in artifact.quarterly_selections.values()
     )
     assert model_read_windows
     assert all(
@@ -291,19 +298,78 @@ def test_a_share_formal_quarterly_model_and_prediction_chain(
     prediction_manifest = read_manifest(prediction_root / "manifest.json")
     assert prediction_manifest["metadata"]["prediction_mode"] == "a_share_oos"
     assert prediction_manifest["metadata"]["prediction_column"] == "raw_prediction"
-    ew_prediction_root = (
-        StorageLayout(project_root=tmp_path).semantic_artifact_root(
-            "a_share", "pv_all_ew_rank_predictions"
-        )
-        / "instances"
-        / targets["pv_all_ew_rank_predictions"]["instance_identity"]
-        / "outputs"
-        / "pv_all_ew_rank_predictions"
+    keys = dataset_frame.loc[
+        dataset_frame.timestamp.between("2019-01-01", "2019-06-30"),
+        ["timestamp", "asset_id"],
+    ]
+    for selector in ("champion", "pv_all_equal_weight_rank_ensemble"):
+        with read_prediction_output_bundle(
+            prediction_root,
+            expected_output_id="pv_all_persisted_predictions",
+            family_selection=selector,
+        ) as (_manifest, lookup):
+            with lookup.values_for_frame(keys, mark_matched=True) as (values, found):
+                assert all(found)
+                assert len(values) == len(keys)
+            assert lookup.coverage_counts() == (0, 0)
+    assert prediction_manifest["metadata"]["primary_key"] == [
+        "timestamp",
+        "asset_id",
+        "family_id",
+    ]
+    assert prediction_manifest["metadata"]["prediction_metadata"][
+        "prediction_rows"
+    ] == 8 * len(keys)
+    layout = StorageLayout(tmp_path)
+    first_record = read_research_run_record(layout.research_run_path(result["run_id"]))
+    assert first_record.trial_ledgers
+    model_before = (model_root / "manifest.json").read_bytes()
+    reused = research.research_run(
+        profile=profile,
+        layout=layout,
+        scenario_id="pv_all",
+        start_date="2019-01-01",
+        end_date="2019-06-30",
     )
-    ew_prediction_manifest = read_manifest(ew_prediction_root / "manifest.json")
+    reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
+    assert not reused_record.trial_ledgers
     assert (
-        ew_prediction_manifest["metadata"]["model_metadata"]["model_artifact_id"]
-        == "pv_all_ew_rank_model"
+        next(
+            item
+            for item in reused["target_results"]
+            if item["target_id"] == "pv_all_model_selection_refit"
+        )["status"]
+        == "REUSED"
+    )
+    rebuilt = research.research_run(
+        profile=profile,
+        layout=layout,
+        scenario_id="pv_all",
+        start_date="2019-01-01",
+        end_date="2019-06-30",
+        rebuild=True,
+    )
+    rebuild_record = read_research_run_record(
+        layout.research_run_path(rebuilt["run_id"])
+    )
+    assert rebuild_record.trial_ledgers
+    assert {item["run_id"] for item in rebuild_record.trial_ledgers} == {
+        rebuilt["run_id"]
+    }
+    assert (model_root / "manifest.json").read_bytes() == model_before
+    comparisons = {
+        item["target_id"]: item["comparison_status"]
+        for item in rebuilt["rebuild_evidence"]
+    }
+    assert comparisons["pv_all_model_selection_refit"] == "MATCH"
+    assert comparisons["pv_all_persisted_predictions"] == "MATCH"
+    assert (
+        next(
+            item
+            for item in rebuilt["target_results"]
+            if item["target_id"] == "pv_all_statistics"
+        )["reason"]
+        == "statistics_build_failed:statistics_fdr_family_factors_missing"
     )
 
 
@@ -312,8 +378,11 @@ def test_model_failure_blocks_real_semantic_descendant(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     base = research_profile()
+    model_calls = 0
 
     def fail_model(**_kwargs: object) -> object:
+        nonlocal model_calls
+        model_calls += 1
         raise ValueError("mandatory_trial_failed")
 
     profile = replace(
@@ -323,43 +392,26 @@ def test_model_failure_blocks_real_semantic_descendant(
             "model": ProducerBinding(ProducerKind.MODEL, fail_model),
         },
     )
-    model_target = "pv_all_ew_rank_model"
+    model_target = "pv_all_model_selection_refit"
+    terminals = base.protocol(scenario_id="pv_all").terminal_targets("research run")
     target_specs = (
         TargetSpec(model_target, producer_id="model"),
-        TargetSpec("terminal", dependencies=(model_target,)),
+        *(
+            TargetSpec(target_id, dependencies=(model_target,), producer_id=target_id)
+            for target_id in terminals
+        ),
     )
-    plans = {
-        "targets": [
-            {
-                "target_id": target_id,
-                "decision": "BUILD",
-                "requested_identity": "a" * 64,
-                "matching_instance_identity": None,
-                "upstream_identities": {},
-            }
-            for target_id in (model_target, "terminal")
-        ]
-    }
     monkeypatch.setattr(
         research,
         "_target_specs",
         lambda *_args, **_kwargs: target_specs,
     )
-    monkeypatch.setattr(
-        research,
-        "_plan_targets",
-        lambda **_kwargs: plans,
-    )
-    monkeypatch.setattr(
-        research,
-        "_scenario_from_terminal",
-        lambda *_args, **_kwargs: "pv_all",
-    )
 
     result = research._execute_action(  # noqa: SLF001
         profile=profile,
+        run_id="run_failure",
         action="research run",
-        terminal_targets=("terminal",),
+        terminal_targets=terminals,
         layout=StorageLayout(project_root=tmp_path),
         time_window=TimeWindow("2019-01-01", "2019-03-31"),
         raw_root=tmp_path / "raw",
@@ -372,14 +424,16 @@ def test_model_failure_blocks_real_semantic_descendant(
         },
     )
     results = {item["target_id"]: item for item in result["target_results"]}
+    assert model_calls == 1
     assert results[model_target]["status"] == "FAILED"
     assert "mandatory_trial_failed" in results[model_target]["reason"]
-    assert results["terminal"] == {
-        "target_id": "terminal",
-        "status": "BLOCKED",
-        "reason": f"dependency_blocked: {model_target}",
-        "instance_identity": None,
-    }
+    for target_id in terminals:
+        assert results[target_id] == {
+            "target_id": target_id,
+            "status": "BLOCKED",
+            "reason": f"dependency_blocked: {model_target}",
+            "instance_identity": None,
+        }
     assert result["status"] == "FAILED"
 
 
@@ -428,7 +482,33 @@ def test_target_graph_rejects_cycles_and_unknown_dependencies() -> None:
         research.resolve_target_graph((TargetSpec("a", ("missing",)),), ("a",))
 
 
-def test_crypto_plan_is_blocked_when_generic_producers_are_unbound(
+@pytest.mark.parametrize(
+    ("target_id", "artifact_root"),
+    (
+        (
+            r"x\..\..\..\..\escaped",
+            r"data/artifacts/a_share/x\..\..\..\..\escaped",
+        ),
+        ("x", r"C:\data\artifacts\a_share\x"),
+        ("x", r"\\server\share\x"),
+    ),
+)
+def test_research_run_reference_rejects_windows_path_escape(
+    target_id: str,
+    artifact_root: str,
+) -> None:
+    with pytest.raises(ValueError, match="research_run_artifact_root_invalid"):
+        ResearchRunTargetResult(
+            target_id=target_id,
+            producer_kind=ProducerKind.MODEL,
+            status=TargetStatus.BUILT,
+            instance_identity="a" * 64,
+            schema_identity="b" * 64,
+            artifact_root=artifact_root,
+        )
+
+
+def test_crypto_dataset_plan_reports_missing_raw_after_data_producers_are_bound(
     tmp_path: Path,
 ) -> None:
     profile = research_profile(CRYPTO_PROFILE_ID)
@@ -439,11 +519,17 @@ def test_crypto_plan_is_blocked_when_generic_producers_are_unbound(
         action="dataset build",
         terminal_targets=(dataset_id,),
         layout=StorageLayout(project_root=tmp_path),
+        research_window={
+            "start": "1970-01-01T00:00:00",
+            "end": "1970-01-01T00:00:06",
+            "access": "development",
+        },
     )
 
     assert plan["status"] == "BLOCKED"
     assert any(
-        item["reason"] == "capability_not_implemented" for item in plan["blockers"]
+        item["reason"] == "raw_content_identity_unavailable"
+        for item in plan["blockers"]
     )
 
 
@@ -452,7 +538,16 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
     a_share_specs = {
         spec.target_id: spec for spec in a_share.target_specs("research run")
     }
-    assert a_share.terminal_targets("research run") == ("pv_all_research",)
+    assert a_share.terminal_targets("research run") == (
+        "pv_all_evaluation",
+        "pv_all_statistics",
+        "pv_all_portfolio_statistics",
+        "pv_all_ew_rank_top20_equal_weight_ledger",
+        "pv_all_champion_top20_equal_weight_ledger",
+        "pv_all_champion_top20_float_cap_ledger",
+        "pv_all_champion_csi500_enhanced_ledger",
+        "pv_all_champion_csi1000_enhanced_ledger",
+    )
     assert a_share_specs["pv_all_evaluation"].dependencies == ("pv_all",)
     assert a_share_specs["pv_all_evaluation"].producer_id == "pv_all_evaluation"
     assert a_share_specs["pv_all_model_selection_refit"].dependencies == ("pv_all",)
@@ -468,13 +563,10 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
         a_share_specs["pv_all_persisted_predictions"].producer_id
         == "pv_all_persisted_predictions"
     )
-    assert a_share_specs["pv_all_ew_rank_model"].dependencies == ("pv_all",)
-    assert a_share_specs["pv_all_ew_rank_predictions"].dependencies == (
-        "pv_all",
-        "pv_all_ew_rank_model",
-    )
+    assert "pv_all_ew_rank_model" not in a_share_specs
+    assert "pv_all_ew_rank_predictions" not in a_share_specs
     assert a_share_specs["pv_all_ew_rank_top20_equal_weight_ledger"].dependencies == (
-        "pv_all_ew_rank_predictions",
+        "pv_all_persisted_predictions",
         "pv_all",
         "execution_mask",
         "trading_calendar",
@@ -502,18 +594,23 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
     )
     assert a_share_specs["pv_all_statistics"].dependencies == (
         "pv_all_persisted_predictions",
+        "pv_all_model_selection_refit",
+        "pv_all",
+    )
+    assert a_share_specs["pv_all_statistics"].producer_id == "pv_all_statistics"
+    assert (
+        research_profile().producer_bindings["pv_all_statistics"].kind
+        is ProducerKind.STATISTIC
     )
     ledger_ids = tuple(
         target_id for target_id in a_share_specs if target_id.endswith("_ledger")
     )
     assert len(ledger_ids) == 5
-    assert set(a_share_specs["pv_all_research"].dependencies) == {
-        "pv_all_evaluation",
-        "pv_all_statistics",
-        *ledger_ids,
-    }
-    assert a_share_specs["pv_all_report"].dependencies == ("pv_all_report_artifact",)
-
+    assert a_share.target_specs("report build") == ()
+    assert (
+        research_profile().producer_bindings["pv_all_report_artifact"].kind
+        is ProducerKind.REPORT
+    )
     candidates = a_share.portfolio_candidates()
     assert [candidate.construction for candidate in candidates] == [
         "top20_equal_weight",
@@ -522,6 +619,15 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
         "benchmark_enhanced",
         "benchmark_enhanced",
     ]
+    for candidate in candidates:
+        dependencies = a_share_specs[
+            f"pv_all_{candidate.candidate_id}_ledger"
+        ].dependencies
+        assert ("fundamental_factors" in dependencies) == (
+            candidate.construction == "benchmark_enhanced"
+        )
+        if candidate.construction == "benchmark_enhanced":
+            assert "price_volume_facts" in dependencies
     assert [
         a_share_specs[f"pv_all_{candidate.candidate_id}_ledger"].producer_id
         for candidate in candidates
@@ -538,14 +644,38 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
     crypto_specs = {
         spec.target_id: spec for spec in crypto.target_specs("research run")
     }
-    assert {
-        "binance_futures_hft_research_100ms_maker_execution_diagnostics",
-        "binance_futures_hft_research_100ms_taker_execution_diagnostics",
-    }.issubset(crypto_specs)
-    assert crypto_specs["binance_futures_hft_research_100ms_artifact"].dependencies == (
-        "binance_futures_hft_research_100ms_maker_execution_diagnostics",
-        "binance_futures_hft_research_100ms_taker_execution_diagnostics",
+    ledger_ids = tuple(
+        candidate.target_id for candidate in crypto.portfolio_candidates()
     )
+    assert len(ledger_ids) == 14
+    assert (
+        crypto_specs[
+            "binance_futures_hft_research_100ms_portfolio_statistics"
+        ].dependencies
+        == ledger_ids
+    )
+    assert all(
+        crypto_profile.producer_bindings[target].kind is ProducerKind.PORTFOLIO
+        for target in ledger_ids
+    )
+    assert crypto.target_specs("report build") == ()
+    assert (
+        crypto_profile.producer_bindings[
+            "binance_futures_hft_research_100ms_report_artifact"
+        ].kind
+        is ProducerKind.REPORT
+    )
+
+
+def test_generic_planner_rejects_retired_implicit_report_path(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="report_run_id_required"):
+        research.plan_targets(
+            profile=research_profile(),
+            action="report build",
+            terminal_targets=("pv_all_report_artifact",),
+            layout=StorageLayout(project_root=tmp_path),
+            scenario_id="pv_all",
+        )
 
 
 def test_declared_processed_dependencies_are_not_removed_from_the_plan(
@@ -1718,19 +1848,9 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
         end_date="2019-12-31",
         plan=True,
     )
-    report_plan = research.report_build(
-        profile=profile,
-        layout=layout,
-        scenario_id="pv_all",
-        plan=True,
-    )
-
     assert research_plan["status"] == "BLOCKED"
-    assert report_plan["status"] == "BLOCKED"
-    assert all(
-        target["decision"] != "REUSE"
-        for target in (*research_plan["targets"], *report_plan["targets"])
-    )
+    assert not (tmp_path / "data" / "runs").exists()
+    assert all(target["decision"] != "REUSE" for target in research_plan["targets"])
 
     research_result = research.research_run(
         profile=profile,
@@ -1739,15 +1859,41 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
         start_date="2019-01-01",
         end_date="2019-12-31",
     )
+    run_id = research_result["run_id"]
+    report_plan = research.report_build(
+        profile=profile,
+        layout=layout,
+        run_id=run_id,
+        plan=True,
+    )
+    assert research_result["status"] == "BLOCKED"
+    assert report_plan["status"] == "BLOCKED"
+    assert report_plan["target"]["decision"] == "BUILD"
     report_result = research.report_build(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
+        run_id=run_id,
     )
-    assert research_result["status"] == "BLOCKED"
     assert report_result["status"] == "BLOCKED"
-    assert "report" not in research_result
-    assert "report" not in report_result
+    assert report_result["source_run_status"] == "BLOCKED"
+    assert report_result["target_result"]["status"] == "BUILT"
+    assert report_result["report"]["report_status"] == "BLOCKED"
+
+    record = read_research_run_record(layout.research_run_path(run_id))
+    assert record.status.value == "BLOCKED"
+    assert record.run_id == run_id
+    with pytest.raises(ValueError, match="research_run_profile_mismatch"):
+        research.report_build(
+            profile=replace(profile, profile_id="different_profile"),
+            layout=layout,
+            run_id=run_id,
+        )
+    with pytest.raises(ValueError, match="invalid_run_id"):
+        research.report_build(
+            profile=profile,
+            layout=layout,
+            run_id="../outside",
+        )
 
     rebuild = research.dataset_build(
         profile=profile,
@@ -1759,6 +1905,59 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     )
     assert rebuild["status"] == "BLOCKED"
     assert all("reason" in item for item in rebuild["target_results"])
+
+
+def test_research_run_records_unexpected_failure_without_masking_primary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = research_profile()
+    layout = StorageLayout(project_root=tmp_path)
+    import quant_research_platform.runtime.execution_metrics as observations
+
+    actual_clock = observations.perf_counter
+    times = iter((0.0, 0.1))
+    monkeypatch.setattr(observations, "perf_counter", lambda: next(times))
+
+    primary = RuntimeError("SYNTHETIC_ROW_VALUE_X")
+
+    def interrupt(**_kwargs: object) -> dict[str, object]:
+        raise primary
+
+    monkeypatch.setattr(research, "_plan_targets", interrupt)
+    with pytest.raises(RuntimeError) as raised:
+        research.research_run(
+            profile=profile,
+            layout=layout,
+            scenario_id="pv_all",
+            start_date="2019-01-01",
+            end_date="2019-12-31",
+        )
+    assert raised.value is primary
+    records = tuple((tmp_path / "data/runs/research").glob("*.json"))
+    assert len(records) == 1
+    record = read_research_run_record(records[0])
+    assert record.status.value == "FAILED"
+    assert record.failure_reason == "research_run_failed:runtimeerror"
+    assert record.operation_evidence["reason"] == "operation_incomplete"
+    assert record.operation_evidence["sample_count"] == 1
+    assert "SYNTHETIC_ROW_VALUE_X" not in records[0].read_text(encoding="utf-8")
+    monkeypatch.setattr(observations, "perf_counter", actual_clock)
+
+    monkeypatch.setattr(
+        research,
+        "write_research_run_record",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("secondary")),
+    )
+    with pytest.raises(RuntimeError) as secondary_raised:
+        research.research_run(
+            profile=profile,
+            layout=StorageLayout(project_root=tmp_path / "secondary"),
+            scenario_id="pv_all",
+            start_date="2019-01-01",
+            end_date="2019-12-31",
+        )
+    assert secondary_raised.value is primary
 
 
 def test_inspect_and_status_never_treat_a_directory_as_a_complete_target(
@@ -1778,43 +1977,118 @@ def test_inspect_and_status_never_treat_a_directory_as_a_complete_target(
 
     assert inspected["status"] == "BLOCKED"
     assert inspected["blocker"] == "dataset_instances_missing"
-    assert status["status"] == "BLOCKED"
+    assert status == {"profile_id": profile.profile_id, "runs": []}
     assert not (root / "spec.json").exists()
     assert not (root / "_manifest").exists()
 
 
-def test_a_share_synthetic_chain_uses_the_single_resolver(tmp_path: Path) -> None:
-    result = run_research_synthetic_smoke(tmp_path)
+def _crypto_plan_payload():
+    return {
+        "folds": [
+            {
+                "fold_id": "fold_1",
+                "train": {"start": "1970-01-01T00:00:00", "end": "1970-01-01T00:00:01"},
+                "validation": {
+                    "start": "1970-01-01T00:00:01.100000",
+                    "end": "1970-01-01T00:00:03",
+                },
+                "development_test": {
+                    "start": "1970-01-01T00:00:04",
+                    "end": "1970-01-01T00:00:06",
+                },
+            }
+        ],
+        "final_holdout": {"start": "1970-01-01T00:00:07", "end": "1970-01-01T00:00:08"},
+        "initial_capital": 1000.0,
+        "valuation_currency": "USDT",
+        "exposure_limits": {
+            asset: {"max_order_quantity": 1.0, "max_position_quantity": 2.0}
+            for asset in ("btc_usdt", "eth_usdt")
+        },
+    }
 
-    assert result["status"] == "BLOCKED"
-    assert result["dataset_status"] == "COMPLETE"
-    assert result["dataset_repeat_status"] == "COMPLETE"
-    assert result["dataset_target_status"] == "BUILT"
-    assert result["dataset_repeat_target_status"] == "REUSED"
-    assert result["dataset_rebuild_status"] == "COMPLETE"
-    assert result["dataset_rebuild_target_status"] == "BUILT"
-    assert result["dataset_rebuild_evidence_count"] > 0
-    assert result["source_producer_calls_on_repeat"] == 0
-    assert result["source_producer_calls_on_rebuild"] > 0
-    assert not tuple((tmp_path / ".run").glob(".r-*"))
-    assert result["research_status"] == "BLOCKED"
-    assert result["report_status"] == "BLOCKED"
 
-    inspection = research.inspect(
-        profile=research_profile(),
-        layout=StorageLayout(project_root=tmp_path),
-        dataset_id="pv_all",
+def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path):
+    from typer.testing import CliRunner
+
+    from quant_research_platform.interfaces.cli.commands import app
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
     )
-    assert inspection["instances"]
-    assert inspection["status"] == "BLOCKED"
-    assert inspection["blocker"] == "request_identity_required"
-
-    instance_root = next(
-        StorageLayout(project_root=tmp_path)
-        .research_dataset_root("a_share", "pv_all")
-        .glob("instances/*")
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_RESEARCH_DATASET_ID,
     )
-    manifest = read_dataset_manifest_evidence(instance_root)
-    envelope = manifest["common_manifest"]
-    assert envelope["research_window"]["access"] == "not_applicable"
-    assert envelope["semantic_metadata"] == {}
+
+    profile = research_profile(CRYPTO_PROFILE_ID)
+    request = dict(
+        profile=profile,
+        layout=StorageLayout(tmp_path),
+        scenario_id=HFT_RESEARCH_DATASET_ID,
+        start_date="1970-01-01T00:00:04",
+        end_date="1970-01-01T00:00:06",
+        plan=True,
+    )
+    with pytest.raises(ValueError, match="crypto_research_plan_required"):
+        research.research_run(**request)
+    payload = _crypto_plan_payload()
+    bound = profile.protocol(research_plan=payload)
+    frozen = bound.manifest()
+    payload["initial_capital"] = 9999.0
+    payload["exposure_limits"]["btc_usdt"]["max_position_quantity"] = 999.0
+    assert bound.manifest() == frozen
+    assert frozen["holdout_status"] == "HOLDOUT_LOCKED"
+    for field in (
+        "folds",
+        "final_holdout",
+        "initial_capital",
+        "valuation_currency",
+        "exposure_limits",
+    ):
+        bad = _crypto_plan_payload()
+        del bad[field]
+        with pytest.raises(ValueError, match="crypto_research_plan_fields_invalid"):
+            research.research_run(**request, research_plan=bad)
+    bad = _crypto_plan_payload()
+    bad["raw_root"] = "private/provider"
+    with pytest.raises(ValueError, match="crypto_research_plan_fields_invalid"):
+        research.research_run(**request, research_plan=bad)
+    bad = _crypto_plan_payload()
+    bad["folds"][0]["validation"]["end"] = "1970-01-01T00:00:01.200000"
+    with pytest.raises(ValueError, match="crypto_research_plan_label_window_too_short"):
+        research.research_run(**request, research_plan=bad)
+    with pytest.raises(PermissionError, match="holdout_frozen"):
+        research.research_run(
+            **request, research_plan=_crypto_plan_payload(), holdout=True
+        )
+    valid = _crypto_plan_payload()
+    for fold in valid["folds"]:
+        for role in ("train", "validation", "development_test"):
+            fold[role] = {key: value + "Z" for key, value in fold[role].items()}
+    valid["final_holdout"] = {
+        key: value + "Z" for key, value in valid["final_holdout"].items()
+    }
+    plan_file = tmp_path / "plan.json"
+    plan_file.write_text(json.dumps(valid), encoding="utf-8")
+    args = [
+        "research",
+        "run",
+        "--profile",
+        CRYPTO_PROFILE_ID,
+        "--start-date",
+        request["start_date"] + "Z",
+        "--end-date",
+        request["end_date"] + "Z",
+        "--project-root",
+        str(tmp_path),
+        "--plan",
+    ]
+    missing = CliRunner().invoke(app, args)
+    assert missing.exit_code == 2 and "crypto_research_plan_required" in missing.output
+    result = CliRunner().invoke(app, [*args, "--research-plan", str(plan_file)])
+    assert result.exit_code == 0, result.output
+    published = json.loads(result.output)
+    assert published["protocol"]["research_plan"] == _crypto_plan_payload()
+    assert published["protocol"]["holdout_status"] == "HOLDOUT_LOCKED"
+    assert published["status"] == "BLOCKED"
+    assert "research_plan" not in profile.protocol().manifest()

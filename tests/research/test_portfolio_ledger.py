@@ -672,20 +672,21 @@ def test_zero_adv_is_legal_zero_fill_and_missing_adv_only_blocks_demand() -> Non
     assert set(zero.asset_ledger["reason"]) == {"adv_capacity"}
     assert zero.total_cost == 0.0
 
-    no_trade = execute_continuous_target(
-        pd.Series({"a": 1.0}),
-        pd.Series({"a": 1.0}),
-        nav=100.0,
-        average_daily_volume=pd.Series(dtype="float64"),
-        can_enter=pd.Series({"a": True}),
-        can_exit=pd.Series({"a": True}),
-        execution_date=date(2023, 8, 28),
-        assumptions=_assumptions(),
-        cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai"}),
-        cost_source_identity="0" * 64,
-    )
-    assert no_trade.asset_ledger["executed_delta_notional"].eq(0.0).all()
-    assert no_trade.asset_ledger["asset_id"].tolist() == ["a"]
+    for missing_adv in (pd.Series(dtype="float64"), pd.Series({"a": float("nan")})):
+        no_trade = execute_continuous_target(
+            pd.Series({"a": 1.0}),
+            pd.Series({"a": 1.0}),
+            nav=100.0,
+            average_daily_volume=missing_adv,
+            can_enter=pd.Series({"a": True}),
+            can_exit=pd.Series({"a": True}),
+            execution_date=date(2023, 8, 28),
+            assumptions=_assumptions(),
+            cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai"}),
+            cost_source_identity="0" * 64,
+        )
+        assert no_trade.asset_ledger["executed_delta_notional"].eq(0.0).all()
+        assert no_trade.asset_ledger["asset_id"].tolist() == ["a"]
     with pytest.raises(ValueError, match="execution_adv_invalid"):
         execute_continuous_target(
             pd.Series({"a": 1.0}),

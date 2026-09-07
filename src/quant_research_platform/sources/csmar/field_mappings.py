@@ -605,12 +605,6 @@ def normalize_provider_stock_code_series(
     return pd.Series(result, index=pd.Series(values).index, dtype="object")
 
 
-def normalize_stock_code(series: pd.Series) -> pd.Series:
-    """Normalize provider stock codes to six-character strings."""
-
-    return normalize_provider_stock_code_series(series)
-
-
 def _normalize_provider_stock_code_value(value: object, *, error: str) -> str:
     if isinstance(value, bool):
         raise ValueError(error)

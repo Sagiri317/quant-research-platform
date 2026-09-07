@@ -25,7 +25,10 @@ from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     remove_owned_scratch,
 )
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    native_filesystem_path,
+    require_unaliased_path,
+)
 
 _DISK_RESERVE_BATCH_BYTES = 1024**2
 EXACT_KEY_SQLITE_PAGE_BYTES = 1024
@@ -96,7 +99,9 @@ class ExactPrimaryKeyIndex:
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
-        self._scratch_parent.mkdir(parents=True, exist_ok=True)
+        Path(native_filesystem_path(self._scratch_parent)).mkdir(
+            parents=True, exist_ok=True
+        )
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
@@ -113,14 +118,14 @@ class ExactPrimaryKeyIndex:
         claimed_temporary = False
         connection: sqlite3.Connection | None = None
         try:
-            os.mkdir(temporary_directory)
+            os.mkdir(native_filesystem_path(temporary_directory))
             claimed_temporary = True
             self._temporary_directory = temporary_directory
             require_unaliased_path(
                 temporary_directory,
                 error="invalid_storage_scratch_path",
             )
-            connection = sqlite3.connect(self.database_path)
+            connection = sqlite3.connect(native_filesystem_path(self.database_path))
             connection.execute(f"PRAGMA page_size={EXACT_KEY_SQLITE_PAGE_BYTES}")
             sqlite_page_limit = (
                 _EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES // EXACT_KEY_SQLITE_PAGE_BYTES

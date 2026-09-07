@@ -1,134 +1,145 @@
-"""Execution metrics helpers for local verification runs."""
+"""Target-boundary observations for immutable local research-run records."""
 
-from __future__ import annotations
-
-from collections.abc import Iterator
+import os
+import platform
+import sys
 from contextlib import contextmanager
-from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import sha256
+from math import isfinite
+from time import perf_counter
+
+import psutil
+
+from quant_research_platform.contracts.targets import unmeasured_operation_evidence
 
 
-@dataclass
-class ExecutionStepMetric:
-    step_name: str
-    logical_layer: str | None = None
-    dataset_id: str | None = None
-    start_time: str | None = None
-    end_time: str | None = None
-    duration_seconds: float | None = None
-    input_rows: int | None = None
-    output_rows: int | None = None
-    file_count: int | None = None
-    file_size_bytes: int | None = None
-    partitions: int | None = None
-    rows_per_second: float | None = None
-    status: str = "success"
-    error_code: str | None = None
-    unavailable_reason: str | None = None
+@contextmanager
+def record_run_observations(policy, sink):
+    process = psutil.Process()
+    started = perf_counter()
+    first = {}
+    last = {}
+    peaks = {}
+    unavailable = {}
+    samples = 0
+    hostname = platform.node()
+    environment = {
+        "created_at_utc": datetime.now(UTC).isoformat(),
+        "platform": platform.platform(),
+        "host_id": {
+            "status": "DEFINED",
+            "value": sha256(hostname.encode("utf-8")).hexdigest(),
+        }
+        if hostname
+        else {"status": "UNDEFINED", "reason": "hostname_unavailable"},
+        "native_thread_env": {
+            key: {"status": "DEFINED", "value": os.environ[key]}
+            if key in os.environ
+            else {"status": "UNDEFINED", "reason": "environment_variable_unset"}
+            for key in (
+                "OPENBLAS_NUM_THREADS",
+                "OMP_NUM_THREADS",
+                "MKL_NUM_THREADS",
+                "NUMEXPR_NUM_THREADS",
+            )
+        },
+    }
 
-    def to_payload(self) -> dict[str, object]:
+    def read(name, getter):
+        try:
+            value = getter()
+            if type(value) not in {int, float} or not isfinite(value) or value < 0:
+                raise ValueError("invalid_process_counter")
+            return value
+        except (psutil.Error, OSError, AttributeError, ValueError) as error:
+            unavailable[name] = type(error).__name__.lower()
+            return None
+
+    def sample():
+        nonlocal samples
+        current = {
+            "rss": read("rss", lambda: process.memory_info().rss),
+            "cpu": read("cpu", lambda: sum(process.cpu_times()[:2])),
+            "read": read("read", lambda: process.io_counters().read_bytes),
+            "write": read("write", lambda: process.io_counters().write_bytes),
+            "threads": read("threads", process.num_threads),
+            "children": read("children", lambda: len(process.children(recursive=True))),
+            "reserved": policy.used_memory_bytes,
+        }
+        if not samples:
+            first.update(current)
+        last.update(current)
+        samples += 1
+        for name, value in current.items():
+            if value is not None:
+                peaks[name] = max(peaks.get(name, value), value)
+
+    def payload(*, complete):
+        def metric(source, value):
+            if source in unavailable or value is None:
+                return {
+                    "status": "UNDEFINED",
+                    "reason": unavailable.get(source, "counter_unavailable"),
+                }
+            return {"status": "DEFINED", "value": value}
+
+        def delta(name):
+            return (
+                None
+                if first[name] is None or last[name] is None
+                else last[name] - first[name]
+            )
+
+        metrics = {
+            "wall_seconds": {"status": "DEFINED", "value": perf_counter() - started},
+            "cpu_seconds": metric("cpu", delta("cpu")),
+            "rss0_bytes": metric("rss", first["rss"]),
+            "sampled_peak_rss_bytes": metric("rss", peaks.get("rss")),
+            "sampled_peak_reserved_bytes": metric("reserved", peaks["reserved"]),
+            "read_bytes": metric("read", delta("read")),
+            "write_bytes": metric("write", delta("write")),
+            "sampled_peak_process_threads": metric("threads", peaks.get("threads")),
+            "sampled_peak_child_processes": metric("children", peaks.get("children")),
+        }
+        reason = (
+            "operation_incomplete"
+            if not complete
+            else "observation_unavailable"
+            if unavailable
+            else ""
+        )
         return {
-            "step_name": self.step_name,
-            "logical_layer": self.logical_layer,
-            "dataset_id": self.dataset_id,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "duration_seconds": self.duration_seconds,
-            "input_rows": self.input_rows,
-            "output_rows": self.output_rows,
-            "file_count": self.file_count,
-            "file_size_bytes": self.file_size_bytes,
-            "partitions": self.partitions,
-            "rows_per_second": self.rows_per_second,
-            "status": self.status,
-            "error_code": self.error_code,
-            "unavailable_reason": self.unavailable_reason,
+            "schema_id": "qrp-run-observations",
+            "status": "UNDEFINED" if reason else "DEFINED",
+            "reason": reason,
+            "sampling": "target_boundaries_not_full_process_peaks",
+            "sample_count": samples,
+            "planning": {
+                key: value
+                for key, value in policy.to_payload().items()
+                if value is not None
+            },
+            "metrics": metrics,
+            "environment": environment,
         }
 
-
-class ExecutionMetricsRecorder:
-    def __init__(self) -> None:
-        self.records: list[ExecutionStepMetric] = []
-
-    @contextmanager
-    def record(
-        self,
-        step_name: str,
-        *,
-        logical_layer: str | None = None,
-        dataset_id: str | None = None,
-    ) -> Iterator[ExecutionStepMetric]:
-        started = datetime.now(UTC)
-        item = ExecutionStepMetric(
-            step_name=step_name,
-            logical_layer=logical_layer,
-            dataset_id=dataset_id,
-            start_time=_format_time(started),
-        )
+    sink.clear()
+    sink.update(unmeasured_operation_evidence("observation_initialization_incomplete"))
+    sample()
+    sink.update(payload(complete=False))
+    try:
+        yield sample
+    finally:
+        primary = sys.exception()
         try:
-            yield item
-        except Exception as exc:
-            item.status = "fail"
-            item.error_code = exc.__class__.__name__
-            raise
-        finally:
-            ended = datetime.now(UTC)
-            item.end_time = _format_time(ended)
-            item.duration_seconds = round(
-                max(0.0, (ended - started).total_seconds()),
-                6,
+            sample()
+            finalized = payload(complete=True)
+            sink.clear()
+            sink.update(finalized)
+        except BaseException as error:
+            if primary is None:
+                raise
+            primary.add_note(
+                f"run observation finalization also failed: {type(error).__name__}"
             )
-            rows = item.output_rows if item.output_rows is not None else item.input_rows
-            if rows is not None and item.duration_seconds is not None:
-                divisor = item.duration_seconds or 1e-9
-                item.rows_per_second = round(float(rows) / divisor, 6)
-            if item.input_rows is None and item.output_rows is None:
-                item.unavailable_reason = "row_counts_unavailable"
-            self.records.append(item)
-
-    def payload(self, *, run_id: str | None = None) -> dict[str, object]:
-        return _payload(
-            self.records,
-            run_id=run_id,
-        )
-
-
-def _payload(
-    records: list[ExecutionStepMetric],
-    *,
-    run_id: str | None,
-) -> dict[str, object]:
-    total = _total_duration_seconds(records)
-    payload = {
-        "total_duration_seconds": round(total, 6),
-        "summary": {
-            "step_count": len(records),
-        },
-        "records": [record.to_payload() for record in records],
-    }
-    if run_id is not None:
-        payload["run_id"] = run_id
-    return payload
-
-
-def _total_duration_seconds(records: list[ExecutionStepMetric]) -> float:
-    processed_child_steps = {
-        "build_market_panel",
-        "build_context",
-        "build_universe",
-        "build_masks",
-        "build_factor_price_volume",
-        "build_label_forward_returns",
-    }
-    has_processed_parent = any(
-        record.step_name == "processed_generation" for record in records
-    )
-    return sum(
-        record.duration_seconds or 0.0
-        for record in records
-        if not (has_processed_parent and record.step_name in processed_child_steps)
-    )
-
-
-def _format_time(value: datetime) -> str:
-    return value.replace(microsecond=0).isoformat().replace("+00:00", "Z")

@@ -19,6 +19,7 @@ from quant_research_platform.research.statistics import (
     stationary_block_length,
     stationary_bootstrap_mean_ci,
     stepm_superior_models,
+    time_series_inference_summary,
 )
 
 
@@ -64,6 +65,38 @@ def test_hac_and_fdr_delegate_to_statsmodels(method: str, owner_method: str) -> 
     np.testing.assert_allclose(adjusted.adjusted_p_values, expected[1])
     with pytest.raises(ValueError, match="^alpha_invalid$"):
         fdr_adjust([0.1], method="BH", alpha=-1.0)
+
+
+def test_fdr_uses_fixed_family_size_without_persisting_missing_hypotheses() -> None:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=3),
+            "observed": [0.1, 0.2, 0.3],
+            "missing": [np.nan, np.nan, np.nan],
+        }
+    )
+
+    result = time_series_inference_summary(
+        frame,
+        identity_column="timestamp",
+        max_lags=1,
+        fdr_method="BH",
+        fdr_alpha=0.05,
+        fdr_family_size=25,
+    )
+    observed = result.loc[result["timestamp"].eq("observed")].iloc[0]
+    missing = result.loc[result["timestamp"].eq("missing")].iloc[0]
+
+    assert observed["fdr_adjusted_p_value"] == pytest.approx(
+        multipletests(
+            [observed["p_value"], *([1.0] * 24)],
+            alpha=0.05,
+            method="fdr_bh",
+        )[1][0]
+    )
+    assert missing["status"] == "UNDEFINED"
+    assert pd.isna(missing["p_value"])
+    assert pd.isna(missing["fdr_adjusted_p_value"])
 
 
 def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
@@ -131,25 +164,27 @@ def test_psr_dsr_fixed_oracle() -> None:
 
 
 def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
-    benchmark = np.array([0.5, 0.4, 0.6, 0.7, 0.5, 0.6, 0.8, 0.7] * 2)
+    rng = np.random.default_rng(17)
+    benchmark = rng.normal(0.0, 0.01, 64)
     models = pd.DataFrame(
         {
-            "better": benchmark - 0.2,
-            "same": benchmark,
-            "worse": benchmark + 0.2,
+            "a": benchmark + rng.normal(0.001, 0.003, 64),
+            "b": benchmark + rng.normal(-0.001, 0.004, 64),
         }
     )
 
-    spa = spa_reality_check(benchmark, models, block_size=2, repetitions=49, seed=3)
-    superior = stepm_superior_models(
-        benchmark, models, block_size=2, repetitions=49, seed=3
+    spa = spa_reality_check(
+        benchmark, models, block_size=20, repetitions=10000, seed=17
     )
-    mcs = model_confidence_set(models, block_size=2, repetitions=49, seed=3)
-    direct_spa = SPA(benchmark, models, block_size=2, reps=49, seed=3)
+    superior = stepm_superior_models(
+        benchmark, models, block_size=20, repetitions=10000, seed=17
+    )
+    mcs = model_confidence_set(models, block_size=20, repetitions=10000, seed=17)
+    direct_spa = SPA(benchmark, models, block_size=20, reps=10000, seed=17)
     direct_spa.compute()
-    direct_stepm = StepM(benchmark, models, block_size=2, reps=49, seed=3)
+    direct_stepm = StepM(benchmark, models, block_size=20, reps=10000, seed=17)
     direct_stepm.compute()
-    direct_mcs = MCS(models, size=0.05, block_size=2, reps=49, seed=3)
+    direct_mcs = MCS(models, size=0.05, block_size=20, reps=10000, seed=17)
     direct_mcs.compute()
 
     assert (
@@ -163,6 +198,57 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
     assert mcs.included == tuple(direct_mcs.included)
     assert mcs.excluded == tuple(direct_mcs.excluded)
     pd.testing.assert_frame_equal(mcs.p_values, direct_mcs.pvalues)
+
+    scaled = spa_reality_check(
+        benchmark * 1e-20, models * 1e-20, block_size=20, repetitions=10000, seed=17
+    )
+    assert scaled.status == "DEFINED"
+    assert scaled.consistent_p_value == pytest.approx(spa.consistent_p_value)
+
+    baseline = np.sin(np.arange(64)) / 100.0
+    for candidates in (
+        pd.DataFrame({"identical_a": baseline, "identical_b": baseline}),
+        pd.DataFrame(
+            {
+                "identical": baseline,
+                "dominated": baseline + 0.05 + np.cos(np.arange(64)) * 0.001,
+            }
+        ),
+    ):
+        observed = spa_reality_check(
+            baseline, candidates, block_size=20, repetitions=10000, seed=17
+        )
+        step = stepm_superior_models(
+            baseline, candidates, block_size=20, repetitions=10000, seed=17
+        )
+        mcs_degenerate = model_confidence_set(
+            pd.concat((pd.Series(baseline, name="benchmark"), candidates), axis=1),
+            block_size=20,
+            repetitions=10000,
+            seed=17,
+        )
+        assert observed.status == step.status == mcs_degenerate.status == "UNDEFINED"
+        assert (
+            observed.reason
+            == step.reason
+            == mcs_degenerate.reason
+            == "constant_loss_differential"
+        )
+        assert observed.consistent_p_value is None and mcs_degenerate.p_values is None
+        assert observed.observation_count == 64
+    duplicated_challengers = models.assign(duplicate=models["a"])
+    assert (
+        spa_reality_check(
+            benchmark, duplicated_challengers, block_size=20, repetitions=10000, seed=17
+        ).status
+        == "DEFINED"
+    )
+    assert (
+        model_confidence_set(
+            duplicated_challengers, block_size=20, repetitions=10000, seed=17
+        ).status
+        == "UNDEFINED"
+    )
 
 
 def test_multiple_comparison_rejects_disjoint_time_indexes() -> None:
