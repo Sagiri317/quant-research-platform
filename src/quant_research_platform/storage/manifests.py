@@ -87,33 +87,35 @@ def read_bounded_qrp_json_directory(
     )
     if not candidate.is_dir():
         raise ValueError("dataset_metadata_directory_invalid")
-    try:
-        before = os.stat(candidate, follow_symlinks=False)
+
+    def member_names() -> tuple[str, ...]:
         names: list[str] = []
-        with os.scandir(candidate) as entries:
-            for entry in entries:
-                if len(names) >= max_members:
-                    raise ValueError("dataset_metadata_member_limit_exceeded")
-                if (
-                    not entry.is_file(follow_symlinks=False)
-                    or Path(entry.name).suffix != ".json"
-                    or Path(entry.name).name != entry.name
-                ):
-                    raise ValueError("dataset_metadata_directory_member_invalid")
-                names.append(entry.name)
-        after = os.stat(candidate, follow_symlinks=False)
-    except OSError as exc:
-        raise ValueError("dataset_metadata_directory_invalid") from exc
-    if _directory_identity(before) != _directory_identity(after):
-        raise ValueError("dataset_metadata_directory_identity_changed")
-    result = tuple(
-        (name, read_bounded_qrp_json(candidate / name)[1]) for name in sorted(names)
-    )
+        try:
+            with os.scandir(native_filesystem_path(candidate)) as entries:
+                for entry in entries:
+                    if len(names) >= max_members:
+                        raise ValueError("dataset_metadata_member_limit_exceeded")
+                    if (
+                        not entry.is_file(follow_symlinks=False)
+                        or Path(entry.name).suffix != ".json"
+                        or Path(entry.name).name != entry.name
+                    ):
+                        raise ValueError("dataset_metadata_directory_member_invalid")
+                    names.append(entry.name)
+            after = os.stat(native_filesystem_path(candidate), follow_symlinks=False)
+        except OSError as exc:
+            raise ValueError("dataset_metadata_directory_invalid") from exc
+        if _directory_identity(before) != _directory_identity(after):
+            raise ValueError("dataset_metadata_directory_identity_changed")
+        return tuple(sorted(names))
+
     try:
-        final = os.stat(candidate, follow_symlinks=False)
+        before = os.stat(native_filesystem_path(candidate), follow_symlinks=False)
     except OSError as exc:
         raise ValueError("dataset_metadata_directory_invalid") from exc
-    if _directory_identity(before) != _directory_identity(final):
+    names = member_names()
+    result = tuple((name, read_bounded_qrp_json(candidate / name)[1]) for name in names)
+    if member_names() != names:
         raise ValueError("dataset_metadata_directory_identity_changed")
     return result
 

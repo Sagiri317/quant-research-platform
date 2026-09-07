@@ -124,9 +124,11 @@ def test_identity_rejects_empty_package_and_inconsistent_typed_identity(
         type(identity)(identity.payload, "0" * 64)
 
 
+@pytest.mark.parametrize("fixed_directory_identity", (False, True))
 def test_identity_rejects_file_or_root_mutation_during_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    fixed_directory_identity: bool,
 ) -> None:
     package_root = tmp_path / "package"
     package_root.mkdir()
@@ -134,6 +136,13 @@ def test_identity_rejects_file_or_root_mutation_during_read(
     module_path.write_bytes(b"module")
     complete = {distribution: "1.0" for distribution in NUMERICAL_MODEL_DISTRIBUTIONS}
     real_open = Path.open
+    if fixed_directory_identity:
+        from quant_research_platform.storage import software_identity
+
+        stable = software_identity._directory_identity(package_root)
+        monkeypatch.setattr(
+            software_identity, "_directory_identity", lambda _path: stable
+        )
 
     def changing_open(path: Path, *args: object, **kwargs: object):  # noqa: ANN202
         if path == module_path:
@@ -162,3 +171,19 @@ def test_identity_rejects_file_or_root_mutation_during_read(
             package_root=package_root,
             dependency_versions=complete,
         )
+
+
+def test_package_inventory_and_read_support_native_long_paths(tmp_path: Path) -> None:
+    from quant_research_platform.storage.identity import (
+        native_filesystem_path,
+        open_filesystem_file,
+    )
+
+    short = tmp_path / "short"
+    long = tmp_path / ("long" * 35) / ("nested" * 20)
+    for root in (short, long):
+        Path(native_filesystem_path(root)).mkdir(parents=True)
+        with open_filesystem_file(root / "module.py", "wb") as handle:
+            handle.write(b"synthetic = 1\n")
+    assert len(str(long / "module.py")) > 260
+    assert _identity(short).identity_hash == _identity(long).identity_hash

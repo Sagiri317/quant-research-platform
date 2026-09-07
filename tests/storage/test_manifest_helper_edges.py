@@ -168,3 +168,41 @@ def test_internal_manifest_keeps_provider_schema_field_names(tmp_path: Path) -> 
     path = tmp_path / "schema.json"
     manifests.write_internal_artifact_manifest(path, payload)
     assert manifests.read_manifest(path) == payload
+
+
+@pytest.mark.parametrize("max_members", (1, 4))
+def test_json_directory_rechecks_members_with_constant_directory_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, max_members: int
+) -> None:
+    (tmp_path / "a.json").write_text('{"schema_id":"synthetic"}', encoding="utf-8")
+    stable = manifests._directory_identity(tmp_path.stat())
+    monkeypatch.setattr(manifests, "_directory_identity", lambda _stat: stable)
+    original = manifests.read_bounded_qrp_json
+    reads = []
+
+    def read(path, **kwargs):
+        reads.append(path.name)
+        (tmp_path / "b.json").write_text('{"schema_id":"synthetic"}', encoding="utf-8")
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(manifests, "read_bounded_qrp_json", read)
+    with pytest.raises(
+        ValueError,
+        match="dataset_metadata_(directory_identity_changed|member_limit_exceeded)",
+    ):
+        manifests.read_bounded_qrp_json_directory(tmp_path, max_members=max_members)
+    assert reads == ["a.json"]
+
+
+def test_json_directory_limit_precedes_content_reads(tmp_path: Path, monkeypatch):
+    for name in ("a", "b"):
+        (tmp_path / f"{name}.json").write_text(
+            '{"schema_id":"synthetic"}', encoding="utf-8"
+        )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("content_read_before_member_limit")
+
+    monkeypatch.setattr(manifests, "read_bounded_qrp_json", forbidden)
+    with pytest.raises(ValueError, match="dataset_metadata_member_limit_exceeded"):
+        manifests.read_bounded_qrp_json_directory(tmp_path, max_members=1)

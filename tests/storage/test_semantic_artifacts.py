@@ -378,3 +378,57 @@ def test_inventory_limit_failure_preserves_published_artifact_and_parent(tmp_pat
         assert policy.used_memory_bytes == 0
     assert set(root.parent.iterdir()) == before
     assert {path.name: path.read_bytes() for path in root.iterdir()} == old_good
+
+
+@pytest.mark.parametrize("operation", ("discovery", "publication"))
+def test_constant_directory_identity_cannot_hide_added_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
+) -> None:
+    import quant_research_platform.storage.semantic_artifacts as storage
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    root = _write_artifact(tmp_path)
+    old_good = {path.name: path.read_bytes() for path in root.iterdir()}
+    before = set(root.parent.iterdir())
+    original_identity = storage._directory_identity
+    observed, calls = {}, {}
+
+    def identity(path):
+        if path not in observed:
+            observed[path] = original_identity(path)
+        calls[path] = calls.get(path, 0) + 1
+        if operation == "publication" and calls[path] == 2:
+            (path / "late.bin").write_bytes(b"late")
+        return observed[path]
+
+    monkeypatch.setattr(storage, "_directory_identity", identity)
+    with runtime_resource_policy_scope() as policy:
+        if operation == "discovery":
+            original_read = storage.read_semantic_artifact
+
+            def read(path, **kwargs):
+                (root.parent / "late").write_bytes(b"late")
+                return original_read(path, **kwargs)
+
+            monkeypatch.setattr(storage, "read_semantic_artifact", read)
+            with pytest.raises(
+                ValueError, match="semantic_artifact_instance_identity_changed"
+            ):
+                storage.discover_semantic_artifact_instances(tmp_path / "model")
+        else:
+            fields = _envelope().payload()
+            del fields["instance_identity"], fields["status"]
+            fields["semantic_metadata"] = {"candidate": True}
+            candidate = build_business_manifest_envelope(**fields)
+
+            def writer(staging):
+                (staging / "empty").mkdir()
+                (staging / "data.bin").write_bytes(b"data")
+
+            with pytest.raises(
+                ValueError, match="semantic_artifact_member_set_changed"
+            ):
+                storage.write_semantic_artifact(tmp_path / "model", candidate, writer)
+            assert set(root.parent.iterdir()) == before
+        assert policy.used_memory_bytes == 0
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == old_good

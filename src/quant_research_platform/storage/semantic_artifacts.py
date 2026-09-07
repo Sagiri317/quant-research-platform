@@ -299,21 +299,26 @@ def discover_semantic_artifact_instances(
     require_unaliased_path(instances_root, error="semantic_artifact_root_invalid")
     if not instances_root.exists():
         return ()
-    try:
-        before = _directory_identity(instances_root)
+    before = _directory_identity(instances_root)
+
+    def instance_names() -> tuple[str, ...]:
         names: list[str] = []
-        with os.scandir(instances_root) as entries:
-            for entry in entries:
-                if len(names) >= max_instances:
-                    raise ValueError("semantic_artifact_instance_limit_exceeded")
-                names.append(entry.name)
+        try:
+            with os.scandir(native_filesystem_path(instances_root)) as entries:
+                for entry in entries:
+                    if len(names) >= max_instances:
+                        raise ValueError("semantic_artifact_instance_limit_exceeded")
+                    names.append(entry.name)
+        except OSError as exc:
+            raise ValueError("semantic_artifact_root_invalid") from exc
         if _directory_identity(instances_root) != before:
             raise ValueError("semantic_artifact_instance_identity_changed")
-    except OSError as exc:
-        raise ValueError("semantic_artifact_root_invalid") from exc
+        return tuple(sorted(names))
+
+    names = instance_names()
 
     result: list[Path] = []
-    for name in sorted(names):
+    for name in names:
         try:
             validate_instance_identity(name)
         except ValueError as exc:
@@ -323,7 +328,7 @@ def discover_semantic_artifact_instances(
             raise ValueError("semantic_artifact_instance_child_invalid")
         read_semantic_artifact(entry, expected_identity=name)
         result.append(entry)
-    if _directory_identity(instances_root) != before:
+    if instance_names() != names:
         raise ValueError("semantic_artifact_instance_identity_changed")
     return tuple(result)
 
@@ -339,6 +344,26 @@ def _directory_identity(path: Path) -> tuple[int, int, int, int]:
 
 
 def _member_inventory(root: Path) -> tuple[dict[str, object], ...]:
+    members: list[dict[str, object]] = []
+
+    def record(relative: str, child: Path) -> None:
+        members.append(_member_record(relative, child))
+
+    _visit_member_paths(root, record)
+    remaining = {str(member["path"]) for member in members}
+
+    def verify(relative: str, _child: Path) -> None:
+        if relative not in remaining:
+            raise ValueError("semantic_artifact_member_set_changed")
+        remaining.remove(relative)
+
+    _visit_member_paths(root, verify)
+    if remaining:
+        raise ValueError("semantic_artifact_member_set_changed")
+    return tuple(sorted(members, key=lambda item: str(item["path"])))
+
+
+def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
     root = require_unaliased_path(
         Path(root),
         error="semantic_artifact_root_invalid",
@@ -348,7 +373,7 @@ def _member_inventory(root: Path) -> tuple[dict[str, object], ...]:
     except ValueError as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
     pending = []
-    members: list[dict[str, object]] = []
+    member_count = 0
     try:
         try:
             pending.append(
@@ -385,9 +410,10 @@ def _member_inventory(root: Path) -> tuple[dict[str, object], ...]:
                 elif entry.is_file(follow_symlinks=False):
                     if not prefix and entry.name == "manifest.json":
                         continue
-                    if len(members) >= MAX_SEMANTIC_ARTIFACT_MEMBERS:
+                    if member_count >= MAX_SEMANTIC_ARTIFACT_MEMBERS:
                         raise ValueError("semantic_artifact_member_limit_exceeded")
-                    members.append(_member_record(relative, child))
+                    member_count += 1
+                    visit(relative, child)
                 else:
                     raise ValueError("semantic_artifact_member_invalid")
         except BaseException as primary:
@@ -403,7 +429,6 @@ def _member_inventory(root: Path) -> tuple[dict[str, object], ...]:
             raise
     except OSError as exc:
         raise ValueError("semantic_artifact_member_invalid") from exc
-    return tuple(sorted(members, key=lambda item: str(item["path"])))
 
 
 def _member_record(relative: str, path: Path) -> dict[str, object]:

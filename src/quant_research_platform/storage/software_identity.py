@@ -12,7 +12,11 @@ from pathlib import Path
 from types import MappingProxyType
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    native_filesystem_path,
+    open_filesystem_file,
+    require_unaliased_path,
+)
 
 NUMERICAL_MODEL_DISTRIBUTIONS = (
     "arch",
@@ -88,6 +92,30 @@ def _package_content_hash(root: Path) -> str:
         Path(root),
         error="production_package_root_invalid",
     )
+    files, directories = _package_inventory(root)
+
+    if not files:
+        raise ValueError("production_package_empty")
+    digest = hashlib.sha256()
+    for relative, path, expected_identity in files:
+        relative_bytes = relative.encode("utf-8")
+        try:
+            digest.update(len(relative_bytes).to_bytes(8, "big"))
+            digest.update(relative_bytes)
+            digest.update(expected_identity[2].to_bytes(8, "big"))
+            with open_filesystem_file(path) as handle:
+                while content := handle.read(1024 * 1024):
+                    digest.update(content)
+        except OSError as exc:
+            raise ValueError("production_package_file_unreadable") from exc
+        if _file_identity(path) != expected_identity:
+            raise ValueError("production_package_identity_changed")
+    if _package_inventory(root) != (files, directories):
+        raise ValueError("production_package_identity_changed")
+    return digest.hexdigest()
+
+
+def _package_inventory(root: Path):
     root_before = _directory_identity(root)
     files: list[tuple[str, Path, tuple[int, int, int, int]]] = []
     directories: dict[Path, tuple[int, int, int, int]] = {root: root_before}
@@ -95,9 +123,9 @@ def _package_content_hash(root: Path) -> str:
     while pending:
         directory, relative_parent = pending.pop()
         try:
-            with os.scandir(directory) as entries:
+            with os.scandir(native_filesystem_path(directory)) as entries:
                 for entry in entries:
-                    entry_path = Path(entry.path)
+                    entry_path = directory / entry.name
                     if entry.is_symlink():
                         raise ValueError("production_package_alias")
                     relative = (
@@ -126,33 +154,15 @@ def _package_content_hash(root: Path) -> str:
         if _directory_identity(directory) != directories[directory]:
             raise ValueError("production_package_identity_changed")
 
-    if not files:
-        raise ValueError("production_package_empty")
-    digest = hashlib.sha256()
-    for relative, path, expected_identity in sorted(files, key=lambda item: item[0]):
-        relative_bytes = relative.encode("utf-8")
-        try:
-            digest.update(len(relative_bytes).to_bytes(8, "big"))
-            digest.update(relative_bytes)
-            digest.update(expected_identity[2].to_bytes(8, "big"))
-            with path.open("rb") as handle:
-                while content := handle.read(1024 * 1024):
-                    digest.update(content)
-        except OSError as exc:
-            raise ValueError("production_package_file_unreadable") from exc
-        if _file_identity(path) != expected_identity:
-            raise ValueError("production_package_identity_changed")
     for directory, expected_identity in directories.items():
         if _directory_identity(directory) != expected_identity:
             raise ValueError("production_package_identity_changed")
-    if _directory_identity(root) != root_before:
-        raise ValueError("production_package_identity_changed")
-    return digest.hexdigest()
+    return tuple(sorted(files, key=lambda item: item[0])), directories
 
 
 def _file_identity(path: Path) -> tuple[int, int, int, int]:
     try:
-        value = path.lstat()
+        value = os.stat(native_filesystem_path(path), follow_symlinks=False)
     except OSError as exc:
         raise ValueError("production_package_file_unreadable") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
@@ -162,7 +172,7 @@ def _file_identity(path: Path) -> tuple[int, int, int, int]:
 
 def _directory_identity(path: Path) -> tuple[int, int, int, int]:
     try:
-        value = path.lstat()
+        value = os.stat(native_filesystem_path(path), follow_symlinks=False)
     except OSError as exc:
         raise ValueError("production_package_root_invalid") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):

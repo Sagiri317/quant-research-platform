@@ -152,15 +152,27 @@ def test_dataset_writer_rejects_common_manifest_cross_binding(
     assert not instance_root.exists()
 
 
+@pytest.mark.parametrize("fixed_directory_identity", (False, True))
 def test_discovery_rejects_instances_directory_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    fixed_directory_identity: bool,
 ) -> None:
     spec = make_processed_dataset_spec("demo")
     logical_root = make_dataset_artifact_root(tmp_path, "demo")
     valid = _write_instance(logical_root, spec, _envelope(spec, seed=1))
     instances_root = logical_root / "instances"
     read_manifest = dataset_instances.read_dataset_manifest_evidence
+    if fixed_directory_identity:
+        original = dataset_instances._directory_identity
+        observed = {}
+
+        def identity(path, error):
+            if path not in observed:
+                observed[path] = original(path, error)
+            return observed[path]
+
+        monkeypatch.setattr(dataset_instances, "_directory_identity", identity)
 
     def mutate_directory(entry: Path) -> dict[str, object]:
         (instances_root / "late").write_bytes(b"late")

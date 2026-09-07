@@ -13,6 +13,7 @@ from quant_research_platform.storage.datasets.schema import (
     COMMON_MANIFEST_METADATA_KEY,
 )
 from quant_research_platform.storage.identity import (
+    native_filesystem_path,
     require_unaliased_path,
     validate_instance_identity,
 )
@@ -80,10 +81,7 @@ def discover_dataset_instances(
         ):
             raise ValueError("dataset_instance_identity_changed")
         result.append(entry)
-    if (
-        _directory_identity(instances_root, "dataset_instance_root_invalid")
-        != instances_identity
-    ):
+    if _instance_names(instances_root, max_instances, instances_identity) != names:
         raise ValueError("dataset_instance_identity_changed")
     if _directory_identity(root, "dataset_instance_root_invalid") != root_identity:
         raise ValueError("dataset_instance_identity_changed")
@@ -97,7 +95,7 @@ def _instance_names(
 ) -> tuple[str, ...]:
     names: list[str] = []
     try:
-        with os.scandir(instances_root) as entries:
+        with os.scandir(native_filesystem_path(instances_root)) as entries:
             for entry in entries:
                 if len(names) >= max_instances:
                     raise ValueError("dataset_instance_limit_exceeded")
@@ -114,7 +112,7 @@ def _instance_names(
 
 def _directory_identity(path: Path, error: str) -> tuple[int, int, int, int]:
     try:
-        value = path.lstat()
+        value = os.stat(native_filesystem_path(path), follow_symlinks=False)
     except OSError as exc:
         raise ValueError(error) from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
