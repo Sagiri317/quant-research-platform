@@ -50,6 +50,7 @@ addopts = [
 ]
 markers = [
   "guardrails: tests that enforce approved safety and scope boundaries",
+  "complete_chain: full-scale source-to-report acceptance required on the fresh installed package",
 ]
 
 [tool.ruff]

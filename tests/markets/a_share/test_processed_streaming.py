@@ -248,7 +248,7 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
                     staged_validator=verify,
                 )
             actual = read_dataset(root, resource_policy=policy)
-            pd.testing.assert_frame_equal(actual, eager[data_id])
+            pd.testing.assert_frame_equal(actual, eager[data_id], check_exact=True)
             assert len(tuple((root / "data").rglob("*.parquet"))) > 1
             chunks = list(
                 iter_complete_session_frames(
@@ -260,7 +260,7 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
                 )
             )
             pd.testing.assert_frame_equal(
-                pd.concat(chunks, ignore_index=True), eager[data_id]
+                pd.concat(chunks, ignore_index=True), eager[data_id], check_exact=True
             )
             assert policy.used_memory_bytes == 0
             assert all(not lease.active for _reference, lease in issued_inputs)

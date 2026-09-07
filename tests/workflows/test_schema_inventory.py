@@ -10,16 +10,23 @@ from types import SimpleNamespace
 
 import pandas as pd
 import pytest
+from typer.testing import CliRunner
 
 import quant_research_platform.runtime.resources as runtime_resources
+from quant_research_platform.contracts.business_manifest import (
+    build_business_manifest_envelope,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
     DataGrain,
+    InterimDataSpec,
     ProcessedDataKind,
     ProcessedDataSpec,
 )
+from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.workflows import (
     validate_schema_inventory_summary,
 )
@@ -31,6 +38,8 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import write_dataset
+from quant_research_platform.storage.datasets.schema import data_spec_payload
+from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows.diagnostics import schema_inventory
 from tests.helpers.runtime_resources import capture_test_policy
 
@@ -45,6 +54,130 @@ def _collect_inventory(
         important_null_count_columns=important_null_count_columns,
     ) as items:
         return {"schema_id": "qrp-schema-inventory", "datasets": list(items)}
+
+
+def test_schema_inventory_keeps_all_current_roots_and_instances(tmp_path: Path) -> None:
+    layout = StorageLayout(tmp_path)
+    common = {
+        "data_id": "inventory_current",
+        "frequency": DataFrequency.DAILY,
+        "grain": DataGrain.ASSET_TIMESTAMP,
+        "column_roles": {
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.FACTOR,
+            "label": ColumnRole.LABEL,
+        },
+        "primary_key": ("market_id", "asset_id", "timestamp"),
+        "partition_columns": ("year",),
+    }
+    specs = (
+        (
+            InterimDataSpec(source_id="fixture", **common),
+            layout.interim_data_root("fixture", common["data_id"]),
+            "interim",
+            "interim",
+        ),
+        (
+            ProcessedDataSpec(
+                market_id="a_share", kind=ProcessedDataKind.FACTOR, **common
+            ),
+            layout.processed_data_root("a_share", "factor", common["data_id"]),
+            "processed",
+            "factor",
+        ),
+        (
+            ResearchDatasetSpec(
+                market_id="a_share",
+                input_data_ids=("panel",),
+                base_input_data_id="panel",
+                factor_columns=("value",),
+                label_columns=("label",),
+                **common,
+            ),
+            layout.research_dataset_root("a_share", common["data_id"]),
+            "research",
+            "research_dataset",
+        ),
+    )
+    expected = {}
+    for spec, logical_root, layer, kind in specs:
+        for rows in (1, 2, 3):
+            envelope = build_business_manifest_envelope(
+                logical_artifact_id=spec.data_id,
+                schema_identity=canonical_json_hash(data_spec_payload(spec)),
+                protocol_or_spec_identity="a" * 64,
+                software_identity="b" * 64,
+                research_window={
+                    "start": "2024-01-01",
+                    "end": "2024-12-31",
+                    "access": "development",
+                },
+                upstream_identities={},
+                semantic_metadata={"root_seed": rows},
+            )
+            root = (
+                logical_root
+                if rows == 1
+                else layout.instance_root(logical_root, envelope.instance_identity)
+            )
+            frame = pd.DataFrame(
+                {
+                    "market_id": ["a_share"] * rows,
+                    "asset_id": [f"asset_{index}" for index in range(rows)],
+                    "timestamp": pd.date_range("2024-01-01", periods=rows),
+                    "value": [1.0] + [float("nan")] * (rows - 1),
+                    "label": [0.5] * rows,
+                }
+            )
+            write_dataset(
+                root,
+                frame,
+                spec=spec,
+                instance_metadata=None if rows == 1 else {"common_manifest": envelope},
+            )
+            expected[root.relative_to(tmp_path).as_posix()] = (layer, kind, rows)
+    output = tmp_path / "inventory.json"
+    with runtime_resource_policy_scope() as policy:
+        schema_inventory.write_schema_inventory(
+            tmp_path,
+            output,
+            important_null_count_columns=("value",),
+            resource_policy=policy,
+        )
+        assert policy.used_memory_bytes == 0
+        summary = schema_inventory.summarize_schema_inventory(
+            tmp_path, resource_policy=policy
+        )
+        assert summary["dataset_count"] == 9
+        assert summary["total_row_count"] == 18
+        assert policy.used_memory_bytes == 0
+    items = json.loads(output.read_text(encoding="utf-8"))["datasets"]
+    assert [item["logical_relative_root"] for item in items] == sorted(expected)
+    for item in items:
+        layer, kind, rows = expected[item["logical_relative_root"]]
+        assert (
+            item["artifact_id"],
+            item["layer"],
+            item["kind"],
+            item["row_count"],
+        ) == (common["data_id"], layer, kind, rows)
+        assert item["duplicate_primary_key_count"] == 0
+        assert item["selected_important_column_null_counts"] == {"value": rows - 1}
+        invalid = deepcopy(item)
+        invalid["logical_relative_root"] = (
+            str(item["logical_relative_root"]) + "/instances/not-an-identity"
+        )
+        with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
+            schema_inventory._validate_schema_inventory_item(invalid)
+    cli_output = tmp_path / "cli-inventory.json"
+    result = CliRunner().invoke(
+        private_cli.app, ["--project-root", str(tmp_path), "--output", str(cli_output)]
+    )
+    assert result.exit_code == 0, result.output
+    cli_items = json.loads(cli_output.read_text(encoding="utf-8"))["datasets"]
+    assert [item["logical_relative_root"] for item in cli_items] == sorted(expected)
 
 
 @pytest.mark.skipif(

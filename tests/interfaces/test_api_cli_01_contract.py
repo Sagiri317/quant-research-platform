@@ -100,7 +100,8 @@ def test_openapi_has_closed_current_response_models() -> None:
     }
 
 
-def test_cli_exposes_only_current_research_surface() -> None:
+def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
     command = get_command(app)
     assert set(command.commands) == {
         "catalog",

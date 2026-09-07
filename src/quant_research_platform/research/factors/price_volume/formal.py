@@ -7,6 +7,10 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_timestamp_series,
@@ -19,6 +23,7 @@ def calculate_formal_price_volume_factors(
     panel: pd.DataFrame,
     *,
     factor_columns: Iterable[str] | None = None,
+    output_window: TimeWindow | None = None,
 ) -> pd.DataFrame:
     """Calculate PV25 using complete market-session windows only."""
 
@@ -36,21 +41,35 @@ def calculate_formal_price_volume_factors(
     if result.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("formal_price_volume_key_duplicate")
     output: dict[str, list[float]] = {factor: [] for factor in requested}
-    for _asset_id, group in (
-        panel.assign(timestamp=result["timestamp"])
-        .sort_values(["asset_id", "timestamp"], kind="mergesort")
-        .groupby("asset_id", sort=False)
-    ):
+    bounds = (
+        None if output_window is None else time_window_timestamp_interval(output_window)
+    )
+    ordered = panel.assign(timestamp=result["timestamp"]).sort_values(
+        ["asset_id", "timestamp"], kind="mergesort"
+    )
+    for _asset_id, group in ordered.groupby("asset_id", sort=False):
         values = _group_values(group)
-        calculated = _calculate_group(values)
+        start, stop = 0, len(group)
+        if bounds is not None:
+            lower, upper, closed = bounds
+            start = int(group["timestamp"].searchsorted(lower, side="left"))
+            stop = int(
+                group["timestamp"].searchsorted(
+                    upper, side="right" if closed else "left"
+                )
+            )
+        calculated = _calculate_group(values, start=start, stop=stop)
         for factor in requested:
             output[factor].extend(calculated[factor])
-    ordered = (
-        panel.assign(timestamp=result["timestamp"])
-        .sort_values(["asset_id", "timestamp"], kind="mergesort")
-        .loc[:, ("asset_id", "timestamp")]
-        .reset_index(drop=True)
-    )
+    ordered = ordered.loc[:, ("asset_id", "timestamp")]
+    if bounds is not None:
+        lower, upper, closed = bounds
+        timestamps = ordered["timestamp"]
+        ordered = ordered.loc[
+            timestamps.ge(lower)
+            & (timestamps.le(upper) if closed else timestamps.lt(upper))
+        ]
+    ordered = ordered.reset_index(drop=True)
     for factor in requested:
         ordered[factor] = output[factor]
     return ordered
@@ -80,7 +99,9 @@ def _group_values(group: pd.DataFrame) -> dict[str, np.ndarray]:
     }
 
 
-def _calculate_group(values: dict[str, np.ndarray]) -> dict[str, list[float]]:
+def _calculate_group(
+    values: dict[str, np.ndarray], *, start: int, stop: int
+) -> dict[str, list[float]]:
     n = len(values["adj_close"])
     price = values["adj_close"]
     returns = values["period_return"]
@@ -106,7 +127,7 @@ def _calculate_group(values: dict[str, np.ndarray]) -> dict[str, list[float]]:
         factor: np.full(n, np.nan, dtype="float64")
         for factor in FORMAL_PRICE_VOLUME_FACTORS
     }
-    for index in range(n):
+    for index in range(start, stop):
         if index >= 1:
             result["reversal_1d"][index] = _return(
                 price[index], price[index - 1], negative=True
@@ -149,7 +170,7 @@ def _calculate_group(values: dict[str, np.ndarray]) -> dict[str, list[float]]:
             returns, amount, index, 20
         )
         result["log_float_market_cap"][index] = _log(float_cap[index])
-    return {factor: values.tolist() for factor, values in result.items()}
+    return {factor: values[start:stop].tolist() for factor, values in result.items()}
 
 
 def _window(values: np.ndarray, index: int, size: int) -> np.ndarray | None:

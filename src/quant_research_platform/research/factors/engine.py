@@ -7,7 +7,10 @@ from collections.abc import Mapping, Sequence
 import pandas as pd
 
 from quant_research_platform.contracts.factors import FactorDefinition
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 
 from .expectations.calculations import build_expectations_features
 from .fundamental.calculations import calculate_fundamental_factors
@@ -20,15 +23,24 @@ def calculate_factors_for_panel(
     panel_frame: pd.DataFrame,
     *,
     definitions: Sequence[FactorDefinition],
+    output_window: TimeWindow | None = None,
 ) -> pd.DataFrame:
     requested = tuple(definitions)
     _require_factor_input_columns(panel_frame, requested)
     families = tuple(dict.fromkeys(definition.family for definition in requested))
+    output_source = panel_frame
+    if output_window is not None:
+        start, end, closed = time_window_timestamp_interval(output_window)
+        timestamps = pd.to_datetime(panel_frame["timestamp"])
+        output_source = panel_frame.loc[
+            timestamps.ge(start)
+            & (timestamps.le(end) if closed else timestamps.lt(end))
+        ]
     if not requested:
-        return panel_frame.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+        return output_source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
     if families == ("fundamental",):
         return _with_keys(
-            panel_frame,
+            output_source,
             calculate_fundamental_factors(
                 panel_frame,
                 factor_columns=tuple(
@@ -39,7 +51,7 @@ def calculate_factors_for_panel(
         )
     if families == ("expectations",):
         return _with_keys(
-            panel_frame,
+            output_source,
             build_expectations_features(
                 panel_frame,
                 panel_frame,
@@ -54,9 +66,10 @@ def calculate_factors_for_panel(
     calculated = calculate_price_volume_factors(
         panel_frame,
         factor_columns=tuple(definition.output_column for definition in requested),
+        output_window=output_window,
     )
     return _with_keys(
-        panel_frame,
+        output_source,
         calculated,
         output_columns=tuple(definition.output_column for definition in requested),
     )

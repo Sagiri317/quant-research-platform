@@ -598,6 +598,9 @@ def _compute_processed_frame(
         calculated = factor_engine.calculate_factors_for_panel(
             input_frame,
             definitions=definitions,
+            output_window=None
+            if panel_sessions is None
+            else TimeWindow(panel_sessions[0], panel_sessions[-1]),
         )
         if "has_legal_fundamental_pit" in spec.required_columns:
             calculated = calculated.merge(

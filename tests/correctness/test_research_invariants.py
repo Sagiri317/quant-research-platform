@@ -327,16 +327,24 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
     changed = base.copy()
     changed.loc[changed["timestamp"] >= sessions[220], "adj_close"] *= 3.0
     changed.loc[changed["timestamp"] >= sessions[220], "period_return"] = 0.2
-    first = calculate_formal_price_volume_factors(
-        base, factor_columns=("reversal_20d", "volatility_20d")
-    )
-    second = calculate_formal_price_volume_factors(
-        changed, factor_columns=("reversal_20d", "volatility_20d")
-    )
+    first = calculate_formal_price_volume_factors(base)
+    second = calculate_formal_price_volume_factors(changed)
     assert second.loc[
         219, ["reversal_20d", "volatility_20d"]
     ].tolist() == pytest.approx(
         first.loc[219, ["reversal_20d", "volatility_20d"]].tolist()
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+
+    window = TimeWindow(sessions[200].date(), sessions[219].date())
+    selected = calculate_formal_price_volume_factors(base, output_window=window)
+    pd.testing.assert_frame_equal(
+        selected, first.iloc[200:220].reset_index(drop=True), check_exact=True
+    )
+    pd.testing.assert_frame_equal(
+        selected,
+        calculate_formal_price_volume_factors(changed, output_window=window),
+        check_exact=True,
     )
 
 

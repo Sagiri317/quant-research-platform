@@ -7,6 +7,10 @@ from collections.abc import Iterable
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 from .columns import FORMAL_PRICE_VOLUME_FACTORS, price_volume_window_column
@@ -45,6 +49,7 @@ def calculate_price_volume_factors(
     prev_close_column: str = "prev_close",
     float_market_cap_column: str = "float_market_cap",
     total_market_cap_column: str = "total_market_cap",
+    output_window: TimeWindow | None = None,
 ) -> pd.DataFrame:
     """Add requested price-volume factors without future data."""
 
@@ -53,6 +58,7 @@ def calculate_price_volume_factors(
         return calculate_formal_price_volume_factors(
             panel,
             factor_columns=requested,
+            output_window=output_window,
         )
     unsupported = unsupported_price_volume_factors(requested)
     if unsupported:
@@ -476,6 +482,13 @@ def calculate_price_volume_factors(
     output_columns = [column for column in requested if column in result.columns]
     for column in output_columns:
         result[column] = finite_or_nan(result[column])
+    if output_window is not None:
+        start, end, closed = time_window_timestamp_interval(output_window)
+        timestamps = pd.to_datetime(result[date_column])
+        result = result.loc[
+            timestamps.ge(start)
+            & (timestamps.le(end) if closed else timestamps.lt(end))
+        ]
     return result
 
 

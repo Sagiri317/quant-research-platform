@@ -28,6 +28,7 @@ from quant_research_platform.storage.atomic import atomic_write_chunks
 from quant_research_platform.storage.datasets.inspection import (
     _inspect_dataset_session_owned,
 )
+from quant_research_platform.storage.datasets.paths import _matches_artifact_path
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_chunks,
@@ -591,17 +592,21 @@ def _aggregate_dataset_stats(
 
 
 def _logical_identifiers(logical_root: str) -> tuple[str, str, str, str]:
-    parts = logical_root.split("/")
+    parts = tuple(logical_root.split("/"))
     if len(parts) < 2 or parts[0] != "data" or any(not part for part in parts):
         raise ValueError("invalid_inventory_root")
     layer = parts[1]
-    if layer == "interim" and len(parts) == 4:
-        return layer, parts[2], "interim", parts[3]
-    if layer == "processed" and len(parts) == 5:
-        return layer, parts[2], parts[3], parts[4]
-    if layer == "research" and len(parts) == 4:
-        return layer, parts[2], "research_dataset", parts[3]
-    raise ValueError("invalid_inventory_root")
+    if layer in {"interim", "research"} and len(parts) >= 4:
+        kind = "interim" if layer == "interim" else "research_dataset"
+        prefix, artifact_id = parts[:3], parts[3]
+    elif layer == "processed" and len(parts) >= 5:
+        kind = parts[3]
+        prefix, artifact_id = parts[:4], parts[4]
+    else:
+        raise ValueError("invalid_inventory_root")
+    if not _matches_artifact_path(parts, prefix, artifact_id):
+        raise ValueError("invalid_inventory_root")
+    return layer, parts[2], kind, artifact_id
 
 
 def _infer_primary_key(columns: tuple[str, ...]) -> tuple[str, ...]:
