@@ -72,7 +72,6 @@ def _discovered_paths(data_root: Path, *, spec: dict[str, object]) -> list[Path]
         runtime_resource_policy_scope(policy),
         DatasetSessionInventory(
             data_root=data_root,
-            scratch_parent=data_root.parent,
             resource_policy=policy,
         ) as inventory,
     ):
@@ -80,7 +79,13 @@ def _discovered_paths(data_root: Path, *, spec: dict[str, object]) -> list[Path]
         return list(inventory.iter_candidate_paths())
 
 
-def test_dataset_inventory_lease_admits_shrinks_and_closes(tmp_path: Path) -> None:
+def test_dataset_inventory_lease_admits_shrinks_and_closes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.inventory.gettempdir",
+        lambda: str(tmp_path),
+    )
     data_root = tmp_path / "data"
     data_root.mkdir()
     low_policy = capture_test_policy(
@@ -92,7 +97,6 @@ def test_dataset_inventory_lease_admits_shrinks_and_closes(tmp_path: Path) -> No
         with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
             DatasetSessionInventory(
                 data_root=data_root,
-                scratch_parent=tmp_path,
                 resource_policy=low_policy,
             )
     assert not list(tmp_path.glob(".i-*"))
@@ -104,7 +108,6 @@ def test_dataset_inventory_lease_admits_shrinks_and_closes(tmp_path: Path) -> No
     with runtime_resource_policy_scope(policy):
         inventory = DatasetSessionInventory(
             data_root=data_root,
-            scratch_parent=tmp_path,
             resource_policy=policy,
         )
         assert policy.used_memory_bytes == 1024
@@ -133,7 +136,6 @@ def test_dataset_inventory_rejection_releases_same_root_lease(
         with pytest.raises(ValueError, match="invalid_storage_scratch_path"):
             DatasetSessionInventory(
                 data_root=data_root,
-                scratch_parent=tmp_path,
                 resource_policy=policy,
             )
         assert policy.used_memory_bytes == 0
@@ -143,6 +145,10 @@ def test_dataset_inventory_failure_and_primary_cleanup_release_lease(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.inventory.gettempdir",
+        lambda: str(tmp_path),
+    )
     data_root = tmp_path / "data"
     data_root.mkdir()
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
@@ -159,7 +165,6 @@ def test_dataset_inventory_failure_and_primary_cleanup_release_lease(
             with pytest.raises(RuntimeError, match="sqlite_start_failed"):
                 DatasetSessionInventory(
                     data_root=data_root,
-                    scratch_parent=tmp_path,
                     resource_policy=policy,
                 )
         assert policy.used_memory_bytes == 0
@@ -167,7 +172,6 @@ def test_dataset_inventory_failure_and_primary_cleanup_release_lease(
         with pytest.raises(KeyboardInterrupt):
             with DatasetSessionInventory(
                 data_root=data_root,
-                scratch_parent=tmp_path,
                 resource_policy=policy,
             ):
                 raise KeyboardInterrupt
@@ -200,7 +204,6 @@ def test_exact_key_index_classifies_typed_exact_duplicates_and_conflicts(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         keep_positions, duplicate_count = index.classify_comparison_table(
             table,
@@ -264,7 +267,6 @@ def test_exact_key_classifier_batches_sql_and_returns_compact_positions(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         statements: list[str] = []
         assert index._connection is not None
@@ -298,7 +300,6 @@ def test_exact_key_classifier_uses_one_sorter_free_staging_transaction(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         index.classify_comparison_table(
             pa.table({"asset_id": ["existing"], "value": [1]}),
@@ -360,7 +361,6 @@ def test_exact_key_classifier_preflights_compact_positions_before_mutation(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         with pytest.raises(
             ValueError,
@@ -400,7 +400,6 @@ def test_exact_key_classifier_validates_grammar_before_position_admission(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         with pytest.raises(ValueError, match=error):
             index.classify_comparison_table(
@@ -430,7 +429,6 @@ def test_exact_key_classifier_gates_disk_overlap_before_exact_mutation(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         with pytest.raises(OSError, match="disk_headroom_exhausted"):
             index.classify_comparison_table(
@@ -457,7 +455,6 @@ def test_exact_key_classifier_renews_disk_gate_for_secondary_index_before_mutati
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         reserves: list[int] = []
 
@@ -495,7 +492,6 @@ def test_exact_key_classifier_gates_exact_insert_physical_growth_before_mutation
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         reserves: list[int] = []
 
@@ -529,7 +525,6 @@ def test_exact_key_classifier_batches_large_duplicate_group(tmp_path: Path) -> N
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         statements: list[str] = []
         assert index._connection is not None
@@ -559,7 +554,6 @@ def test_exact_key_classifier_requires_positive_non_bool_payload_target(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         with pytest.raises(
             ValueError,
@@ -1044,7 +1038,6 @@ def test_exact_key_index_stores_primary_keys_once_and_category_values_only(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         index.add_table(pa.table({"asset_id": ["a", "b"]}))
         assert index._connection is not None
@@ -1069,6 +1062,9 @@ def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
+    monkeypatch.setattr(
         key_tracking.sqlite3,
         "connect",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
@@ -1078,7 +1074,6 @@ def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
         ExactPrimaryKeyIndex(
             primary_key=("asset_id",),
             timestamp_columns=(),
-            scratch_parent=tmp_path,
         ).__enter__()
 
     assert tuple(tmp_path.iterdir()) == ()
@@ -1088,6 +1083,10 @@ def test_exact_key_index_preserves_open_failure_when_close_also_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
+
     class FailingConnection:
         def execute(self, _statement: str) -> None:
             raise RuntimeError("index_initialization_failed")
@@ -1105,7 +1104,6 @@ def test_exact_key_index_preserves_open_failure_when_close_also_fails(
         ExactPrimaryKeyIndex(
             primary_key=("asset_id",),
             timestamp_columns=(),
-            scratch_parent=tmp_path,
         ).__enter__()
 
     assert tuple(tmp_path.iterdir()) == ()
@@ -1132,7 +1130,6 @@ def test_exact_key_index_compares_persisted_row_values(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         assert (
             index.add_comparison_table(
@@ -1245,7 +1242,6 @@ def test_nested_float_primary_key_zero_keeps_bit_identity(
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         assert index.add_table(table, namespace="writer") == 0
         index.add_comparison_table(
@@ -1291,7 +1287,6 @@ def test_nested_primary_key_nonfinite_rejects_but_nested_value_allows(
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         with pytest.raises(ValueError, match="dataset_primary_key|null|invalid"):
             index.add_table(pa.Table.from_arrays([nested], names=("key",)))
@@ -1299,7 +1294,6 @@ def test_nested_primary_key_nonfinite_rejects_but_nested_value_allows(
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         assert (
             index.add_comparison_table(
@@ -1320,7 +1314,6 @@ def test_exact_comparison_payload_target_has_an_exact_encoded_boundary(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         _, key_payload, value_payload = next(
             index._prepared_comparison_rows(
@@ -1358,7 +1351,6 @@ def test_exact_comparison_primary_key_only_projection_has_empty_value(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         assert (
             index.add_comparison_table(
@@ -1405,7 +1397,6 @@ def test_exact_comparison_nested_payload_stops_at_remaining_target(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         with pytest.raises(
             ValueError,
@@ -1435,7 +1426,6 @@ def test_exact_comparison_python_allocation_diagnostic_uses_one_bounded_row_buff
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         _, key_payload, value_payload = next(
             index._prepared_comparison_rows(
@@ -1520,7 +1510,6 @@ def test_exact_variable_width_columns_share_the_row_payload_target(
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         _, key_payload, value_payload = next(
             index._prepared_comparison_rows(
@@ -1639,7 +1628,6 @@ def test_exact_key_index_close_failure_does_not_replace_primary(
     index = ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     )
     with pytest.raises(RuntimeError, match="primary_failure"):
         with index:
@@ -1678,11 +1666,9 @@ def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
         ExactPrimaryKeyIndex(
             primary_key=spec.primary_key,
             timestamp_columns=("timestamp",),
-            scratch_parent=tmp_path,
         ) as tracker,
         DatasetSessionInventory(
             data_root=Path("data"),
-            scratch_parent=tmp_path,
             resource_policy=policy,
         ) as inventory,
     ):
@@ -1724,7 +1710,6 @@ def test_exact_index_preserves_decimal_values_beyond_context_precision(
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
         key_schema=schema,
     ) as index:
         assert index.add_table(pa.table({"key": [first]})) == 0
@@ -1733,7 +1718,11 @@ def test_exact_index_preserves_decimal_values_beyond_context_precision(
 
 def test_exact_index_preserves_unclaimed_key_scratch_directory(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
     unclaimed = tmp_path / ".k-user-cache"
     unclaimed.mkdir()
     sentinel = unclaimed / "sentinel.txt"
@@ -1742,7 +1731,6 @@ def test_exact_index_preserves_unclaimed_key_scratch_directory(
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ):
         pass
 
@@ -1757,11 +1745,9 @@ def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
         ExactPrimaryKeyIndex(
             primary_key=spec.primary_key,
             timestamp_columns=("timestamp",),
-            scratch_parent=tmp_path,
         ) as tracker,
         DatasetSessionInventory(
             data_root=Path("data"),
-            scratch_parent=tmp_path,
             resource_policy=policy,
         ) as inventory,
     ):

@@ -720,7 +720,12 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         assert policy.used_memory_bytes == 0
 
 
-def test_csmar_source_identity_uses_only_one_recursive_root(tmp_path: Path) -> None:
+def test_csmar_source_identity_uses_only_one_recursive_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
     primary = tmp_path / "raw"
     nested = primary / "calendar" / "history"
     sibling = tmp_path / "sibling-root"
@@ -762,7 +767,12 @@ def test_csmar_source_identity_uses_only_one_recursive_root(tmp_path: Path) -> N
 
 def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir",
+        lambda: str(tmp_path.parent),
+    )
     calendar = tmp_path / (
         "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
     )
@@ -1005,7 +1015,12 @@ def test_financial_correction_date_order_is_validated() -> None:
 
 def test_csmar_identity_rejects_requested_bad_schema_and_cleans_scratch(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir",
+        lambda: str(tmp_path.parent),
+    )
     requested = tmp_path / (
         "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
     )

@@ -346,7 +346,6 @@ def materialize_interim_data(
                 index = ExactPrimaryKeyIndex(
                     primary_key=("relative_path",),
                     timestamp_columns=(),
-                    scratch_parent=artifact_root.parent,
                 )
                 with (
                     policy.lease(

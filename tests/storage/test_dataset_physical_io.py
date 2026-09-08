@@ -122,7 +122,6 @@ def test_exact_key_decimal_zero_and_numpy_scalar_identity(
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
         key_schema=pa.schema([pa.field("key", pa.decimal128(18, 4))]),
     ) as decimals:
         assert decimals.add_frame(pd.DataFrame({"key": [Decimal("-0.0000")]})) == 0
@@ -130,7 +129,6 @@ def test_exact_key_decimal_zero_and_numpy_scalar_identity(
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
         key_schema=pa.schema([pa.field("key", pa.int64())]),
     ) as integers:
         assert integers.add_frame(pd.DataFrame({"key": [np.int64(7)]})) == 0

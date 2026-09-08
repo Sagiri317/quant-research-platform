@@ -52,7 +52,11 @@ def test_writer_rejects_inconsistent_ordered_categorical_domains(
 
 def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(index_root)
+    )
     module_spec = importlib.util.find_spec("quant_research_platform.storage.exact_keys")
     assert module_spec is not None, "storage exact key index module is missing"
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
@@ -61,7 +65,6 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     index = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id", "timestamp"),
         timestamp_columns=("timestamp",),
-        scratch_parent=index_root,
     )
     first = pd.DataFrame(
         {
@@ -90,7 +93,6 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     numeric = module.ExactPrimaryKeyIndex(
         primary_key=("numeric_key",),
         timestamp_columns=(),
-        scratch_parent=index_root,
     )
     with numeric:
         assert numeric.add_frame(pd.DataFrame({"numeric_key": [-0.0]})) == 0
@@ -100,7 +102,6 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     exceptional = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=index_root,
     )
     with pytest.raises(RuntimeError, match="stop"):
         with exceptional:
@@ -114,11 +115,13 @@ def test_exact_key_index_cleans_scratch_when_sqlite_connect_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     index = module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     )
 
     def fail_connect(*_args, **_kwargs):
@@ -140,7 +143,6 @@ def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk(
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         assert index.add_frame(pd.DataFrame({"key": ["a", "a", "b"]})) == 1
         assert index.add_frame(pd.DataFrame({"key": ["b"]})) == 1
@@ -154,7 +156,6 @@ def test_exact_key_index_spills_sqlite_temp_state_to_disk(
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         assert index._connection is not None
         temp_store = int(index._connection.execute("PRAGMA temp_store").fetchone()[0])
@@ -176,7 +177,6 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
         key_schema=pa.schema([pa.field("key", pa.float64())]),
     ) as numeric:
         assert numeric.add_frame(pd.DataFrame({"key": [Decimal("1.0")]})) == 0
@@ -196,7 +196,6 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=("key",),
-        scratch_parent=tmp_path,
         key_schema=pa.schema([pa.field("key", pa.timestamp("ns"))]),
     ) as timestamps:
         assert timestamps.add_frame(pd.DataFrame({"key": [date(2026, 1, 1)]})) == 0
@@ -205,7 +204,6 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
         key_schema=pa.schema([pa.field("key", pa.string())]),
     ) as strings:
         assert strings.add_frame(pd.DataFrame({"key": ["é"]})) == 0
@@ -222,7 +220,6 @@ def test_exact_primary_key_accepts_timestamp_outside_nanosecond_range(
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
         key_schema=pa.schema([pa.field("key", timestamp_type)]),
     ) as timestamps:
         assert timestamps.add_table(table) == 0

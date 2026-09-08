@@ -482,7 +482,9 @@ def _asof_industry(
         return panel
     if industry_versions is not None:
         history = history.loc[
-            _valid_industry_history_rows(history, industry_versions)
+            _industry_version_active_mask(
+                history["industry_standard_id"], history["timestamp"], industry_versions
+            )
         ].copy()
         if history.empty:
             return panel
@@ -543,29 +545,6 @@ def _canonical_industry_standard(values: pd.Series) -> pd.Series:
     return result.replace(INDUSTRY_STANDARD_BY_PROVIDER_ID)
 
 
-def _valid_industry_history_rows(
-    history: pd.DataFrame,
-    versions: pd.DataFrame,
-) -> pd.Series:
-    right = _canonical_industry_versions(
-        versions, set(history["industry_standard_id"].dropna())
-    )
-    if right.empty:
-        return pd.Series(False, index=history.index, dtype=bool)
-    valid = pd.Series(False, index=history.index, dtype=bool)
-    for index, row in history.loc[:, ["industry_standard_id", "timestamp"]].iterrows():
-        active = right.loc[
-            right["industry_standard_id"].eq(row["industry_standard_id"])
-            & right["implement_date"].le(row["timestamp"])
-            & (
-                right["abandon_date"].isna()
-                | right["abandon_date"].gt(row["timestamp"])
-            )
-        ]
-        valid.loc[index] = len(active) == 1
-    return valid
-
-
 def _canonical_industry_versions(
     versions: pd.DataFrame,
     standards: set[str],
@@ -608,41 +587,42 @@ def _industry_version_active_mask(
         allow_null=True,
     ).replace(INDUSTRY_STANDARD_BY_PROVIDER_ID)
     right = _canonical_industry_versions(versions, set(canonical_standards.dropna()))
-    valid = pd.Series(False, index=standards.index, dtype=bool)
     event_values = timestamps if event_timestamps is None else event_timestamps
-    for index, standard, timestamp, event_timestamp in zip(
-        standards.index,
-        canonical_standards,
-        timestamps,
-        event_values,
-        strict=True,
-    ):
-        if pd.isna(standard) or pd.isna(timestamp) or pd.isna(event_timestamp):
-            continue
-        active_at_observation = right.loc[
-            right["industry_standard_id"].eq(standard)
-            & right["implement_date"].le(timestamp)
-            & (right["abandon_date"].isna() | right["abandon_date"].gt(timestamp))
-        ]
-        active_at_event = right.loc[
-            right["industry_standard_id"].eq(standard)
-            & right["implement_date"].le(event_timestamp)
-            & (right["abandon_date"].isna() | right["abandon_date"].gt(event_timestamp))
-        ]
-        if len(active_at_event) != 1 or len(active_at_observation) != 1:
-            continue
-        event_version = active_at_event.iloc[0]
-        observation_version = active_at_observation.iloc[0]
-        valid.loc[index] = event_version["implement_date"] == observation_version[
-            "implement_date"
-        ] and (
-            (
-                pd.isna(event_version["abandon_date"])
-                and pd.isna(observation_version["abandon_date"])
-            )
-            or event_version["abandon_date"] == observation_version["abandon_date"]
+    size = len(standards)
+    if len(timestamps) != size or len(event_values) != size:
+        raise ValueError("industry_version_input_length_mismatch")
+    observation_count = np.zeros(size, dtype=np.intp)
+    event_count = np.zeros(size, dtype=np.intp)
+    same_version = np.zeros(size, dtype=bool)
+    for version in right.itertuples(index=False):
+        selected = canonical_standards.eq(version.industry_standard_id).to_numpy(
+            dtype=bool, na_value=False
         )
-    return valid
+        observed = selected & timestamps.ge(version.implement_date).to_numpy(
+            dtype=bool, na_value=False
+        )
+        if not pd.isna(version.abandon_date):
+            observed &= timestamps.lt(version.abandon_date).to_numpy(
+                dtype=bool, na_value=False
+            )
+        if event_timestamps is None:
+            event = observed
+        else:
+            event = selected & event_values.ge(version.implement_date).to_numpy(
+                dtype=bool, na_value=False
+            )
+            if not pd.isna(version.abandon_date):
+                event &= event_values.lt(version.abandon_date).to_numpy(
+                    dtype=bool, na_value=False
+                )
+        observation_count += observed
+        event_count += event
+        same_version |= observed & event
+    return pd.Series(
+        (observation_count == 1) & (event_count == 1) & same_version,
+        index=standards.index,
+        dtype=bool,
+    )
 
 
 def _resolve_industry_hierarchy(

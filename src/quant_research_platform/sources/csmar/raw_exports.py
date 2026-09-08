@@ -1102,7 +1102,6 @@ def dataset_files_with_identity_by_id(
                         index = ExactPrimaryKeyIndex(
                             primary_key=("dataset_path",),
                             timestamp_columns=(),
-                            scratch_parent=root.parent,
                         )
                         index_owner.enter_context(
                             policy.lease(

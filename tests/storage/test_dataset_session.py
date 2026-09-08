@@ -603,7 +603,6 @@ def test_exact_primary_key_index_supports_nested_arrow_key_identity(
     with dataset_writing.ExactPrimaryKeyIndex(
         primary_key=("key",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         assert index.add_table(table) == 0
         assert index.add_table(table) == 2

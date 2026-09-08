@@ -168,6 +168,22 @@ def test_binance_raw_reader_maps_capture_to_open_disappearance(
         tuple(_iter_test_raw_envelopes(path))
 
 
+def _rewrite_with_changed_identity(path: Path, replacement: Path) -> None:
+    before = path.stat()
+    path.write_text(replacement.read_text(encoding="utf-8"), encoding="utf-8")
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
+    after = path.stat()
+    assert after.st_mtime_ns != before.st_mtime_ns
+    assert (after.st_dev, after.st_ino, after.st_size) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_size,
+    )
+    assert raw_exports.dataset_file_identity_from_stat(
+        after
+    ) != raw_exports.dataset_file_identity_from_stat(before)
+
+
 def test_binance_raw_reader_rejects_open_handle_mutation_during_consumption(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -182,7 +198,7 @@ def test_binance_raw_reader_rejects_open_handle_mutation_during_consumption(
     def replace_before_read(handle, buffer):  # noqa: ANN001
         nonlocal replaced
         if not replaced:
-            path.write_text(replacement.read_text(encoding="utf-8"), encoding="utf-8")
+            _rewrite_with_changed_identity(path, replacement)
             replaced = True
         return original_next_record_length(handle, buffer)
 
@@ -202,7 +218,7 @@ def test_binance_raw_reader_rejects_open_handle_mutation_after_output(
     reader = _iter_test_raw_envelopes(path)
 
     assert next(reader)["data_kind"] == "klines"
-    path.write_text(replacement.read_text(encoding="utf-8"), encoding="utf-8")
+    _rewrite_with_changed_identity(path, replacement)
 
     with pytest.raises(ValueError, match="binance_raw_export_identity_changed"):
         next(reader)
@@ -246,7 +262,7 @@ def test_binance_raw_reader_preserves_primary_when_final_identity_fails(
     primary = KeyboardInterrupt("primary")
 
     def fail_after_mutation(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        path.write_text(replacement.read_text(encoding="utf-8"), encoding="utf-8")
+        _rewrite_with_changed_identity(path, replacement)
         raise primary
 
     monkeypatch.setattr(raw_exports, "_validate_envelope", fail_after_mutation)

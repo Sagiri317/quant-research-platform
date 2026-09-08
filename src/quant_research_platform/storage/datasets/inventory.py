@@ -8,6 +8,7 @@ import sqlite3
 import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
+from tempfile import gettempdir
 from typing import Any
 from uuid import uuid4
 
@@ -103,11 +104,10 @@ class DatasetSessionInventory:
         self,
         *,
         data_root: Path,
-        scratch_parent: Path,
         resource_policy: RuntimeResourcePolicy,
     ) -> None:
         self.data_root = Path(data_root)
-        self._scratch_parent = Path(scratch_parent)
+        self._scratch_parent = Path(gettempdir())
         self._temporary_directory: Path | None = None
         self._connection: sqlite3.Connection | None = None
         self._next_selection_id = 0
@@ -137,7 +137,7 @@ class DatasetSessionInventory:
             temporary_directory = self._scratch_parent / owned_scratch_name(
                 _PREFIX, uuid4().hex[:8]
             )
-            os.mkdir(native_filesystem_path(temporary_directory))
+            os.mkdir(native_filesystem_path(temporary_directory), mode=0o700)
             claimed_temporary = True
             self._temporary_directory = temporary_directory
             require_unaliased_path(

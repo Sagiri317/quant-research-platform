@@ -80,12 +80,11 @@ def test_content_hash_close_preserves_primary_and_closes_file(
         raw.close()
 
 
-def _open_inventory_for_failure(data_root: Path, scratch_parent: Path):
+def _open_inventory_for_failure(data_root: Path):
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with runtime_resource_policy_scope(policy):
         return inventory_owner.DatasetSessionInventory(
             data_root=data_root,
-            scratch_parent=scratch_parent,
             resource_policy=policy,
         )
 
@@ -125,7 +124,10 @@ def test_shared_path_move_is_fail_if_destination_exists(
 
 def test_write_and_scratch_owners_reject_aliased_parent_before_access(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(key_owner, "gettempdir", lambda: str(alias))
+    monkeypatch.setattr(inventory_owner, "gettempdir", lambda: str(alias))
     target = tmp_path / "target"
     target.mkdir()
     alias = tmp_path / "alias"
@@ -143,9 +145,8 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
         lambda: key_owner.ExactPrimaryKeyIndex(
             primary_key=("value",),
             timestamp_columns=(),
-            scratch_parent=alias,
         ).__enter__(),
-        lambda: _open_inventory_for_failure(tmp_path / "data", alias),
+        lambda: _open_inventory_for_failure(tmp_path / "data"),
     )
 
     for operation in operations:
@@ -162,15 +163,11 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
             lambda scratch: key_owner.ExactPrimaryKeyIndex(
                 primary_key=("value",),
                 timestamp_columns=(),
-                scratch_parent=scratch,
             ).__enter__(),
         ),
         (
             inventory_owner,
-            lambda scratch: _open_inventory_for_failure(
-                scratch.parent / "data",
-                scratch,
-            ),
+            lambda scratch: _open_inventory_for_failure(scratch.parent / "data"),
         ),
     ),
     ids=["exact-primary-key-index", "dataset-session-inventory"],
@@ -181,6 +178,7 @@ def test_scratch_owner_cleans_retained_temp_after_post_create_gate_failure(
     owner_module: object,
     open_owner,
 ) -> None:
+    monkeypatch.setattr(owner_module, "gettempdir", lambda: str(scratch))
     scratch = tmp_path / "scratch"
     created: list[Path] = []
     gate_failure = KeyboardInterrupt("post_create_gate")
@@ -217,15 +215,11 @@ def test_scratch_owner_cleans_retained_temp_after_post_create_gate_failure(
             lambda scratch: key_owner.ExactPrimaryKeyIndex(
                 primary_key=("value",),
                 timestamp_columns=(),
-                scratch_parent=scratch,
             ).__enter__(),
         ),
         (
             inventory_owner,
-            lambda scratch: _open_inventory_for_failure(
-                scratch.parent / "data",
-                scratch,
-            ),
+            lambda scratch: _open_inventory_for_failure(scratch.parent / "data"),
         ),
     ),
     ids=("exact-primary-key-index", "dataset-session-inventory"),
@@ -238,6 +232,7 @@ def test_scratch_owner_cleans_when_database_constructor_raises(
     open_owner,
     primary_type: type[BaseException],
 ) -> None:
+    monkeypatch.setattr(owner_module, "gettempdir", lambda: str(scratch))
     scratch = tmp_path / "scratch"
     primary = primary_type("constructor_primary")
     database_paths: list[Path] = []
@@ -603,7 +598,6 @@ def _inventory_with_failing_connection(
     with runtime_resource_policy_scope(policy):
         with inventory_owner.DatasetSessionInventory(
             data_root=tmp_path / "data",
-            scratch_parent=tmp_path / "scratch",
             resource_policy=policy,
         ) as inventory:
             connection = inventory._connection

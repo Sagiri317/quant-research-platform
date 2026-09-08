@@ -13,6 +13,7 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from tempfile import gettempdir
 from types import TracebackType
 from uuid import uuid4
 
@@ -66,12 +67,11 @@ class ExactPrimaryKeyIndex:
         *,
         primary_key: Sequence[str],
         timestamp_columns: Sequence[str],
-        scratch_parent: Path,
         key_schema: pa.Schema | None = None,
     ) -> None:
         self._primary_key = tuple(str(column) for column in primary_key)
         self._timestamp_columns = frozenset(str(column) for column in timestamp_columns)
-        self._scratch_parent = Path(scratch_parent)
+        self._scratch_parent = Path(gettempdir())
         self._key_schema = key_schema
         self._sqlite_cache_kib = EXACT_KEY_SQLITE_CACHE_BYTES // 1024
         self._temporary_directory: Path | None = None
@@ -118,7 +118,7 @@ class ExactPrimaryKeyIndex:
         claimed_temporary = False
         connection: sqlite3.Connection | None = None
         try:
-            os.mkdir(native_filesystem_path(temporary_directory))
+            os.mkdir(native_filesystem_path(temporary_directory), mode=0o700)
             claimed_temporary = True
             self._temporary_directory = temporary_directory
             require_unaliased_path(

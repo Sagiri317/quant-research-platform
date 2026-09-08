@@ -71,9 +71,7 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
     if not root.exists():
         return None
     namespace = f"binance-raw-{raw_kind}"
-    index = ExactPrimaryKeyIndex(
-        primary_key=("relative_path",), timestamp_columns=(), scratch_parent=root.parent
-    )
+    index = ExactPrimaryKeyIndex(primary_key=("relative_path",), timestamp_columns=())
     with (
         _raw_path_session(root) as verify_root,
         policy.lease("source.binance.raw.identity.index", index.retained_memory_bytes),

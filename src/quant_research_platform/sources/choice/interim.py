@@ -266,7 +266,6 @@ def _raw_index(raw_root, financial, policy):
     index = ExactPrimaryKeyIndex(
         primary_key=("source_coordinate",),
         timestamp_columns=(),
-        scratch_parent=raw_root.parent,
     )
     with policy.lease("source.choice.index", index.retained_memory_bytes), index:
 

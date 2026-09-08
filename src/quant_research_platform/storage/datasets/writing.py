@@ -516,13 +516,11 @@ def _write_dataset_body(
             with (
                 DatasetSessionInventory(
                     data_root=temp_root / "data",
-                    scratch_parent=temp_root,
                     resource_policy=resource_policy,
                 ) as inventory,
                 ExactPrimaryKeyIndex(
                     primary_key=spec.primary_key,
                     timestamp_columns=timestamp_columns,
-                    scratch_parent=temp_root,
                 ) as key_tracker,
             ):
                 accumulator = _write_contents(

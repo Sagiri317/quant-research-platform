@@ -7,7 +7,6 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, dataclass, fields
 from itertools import groupby
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
 import pandas as pd
 import pyarrow as pa
@@ -345,12 +344,10 @@ def _iter_batches(
             )
         else:
             continuity_lease = None
-        scratch = stack.enter_context(TemporaryDirectory(prefix="qrp-ledger-"))
         key_index = stack.enter_context(
             ExactPrimaryKeyIndex(
                 primary_key=("fill_id",),
                 timestamp_columns=(),
-                scratch_parent=Path(scratch),
             )
         )
         readers = {

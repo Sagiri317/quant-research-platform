@@ -9,6 +9,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 )
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
     _apply_suspension_semantics,
+    _industry_version_active_mask,
     compute_market_panel,
 )
 from quant_research_platform.research.labels.engine import calculate_labels_for_panel
@@ -48,7 +49,8 @@ def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
     assert actual.loc[1, "period_return"] == 0.07
     assert actual.loc[2, "adj_close"] == actual.loc[2, "adj_open"] == 110.0
     raw = actual.loc[2, ["close", "open", "high", "low"]]
-    assert raw.eq(10.0).all() if has_raw_history else raw.isna().all()
+    # The missing trading quote resets raw prices without resetting adjusted prices.
+    assert raw.isna().all()
 
 
 def test_market_panel_keeps_suspension_and_excludes_holiday_fill() -> None:
@@ -567,3 +569,78 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy() -> None:
         .all()
         .all()
     )
+
+
+def test_industry_version_mask_preserves_interval_and_positional_boundaries():
+    versions = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012", "P0207", "CAPCO", "CSRC2012", "P0221"],
+            "implement_date": pd.to_datetime(
+                ["2010-01-01", "2012-01-01", "2023-01-01", "2011-06-01", "2020-01-01"]
+            ),
+            "abandon_date": pd.to_datetime(
+                ["2012-01-01", "2014-01-01", None, "2011-09-01", "2020-01-01"]
+            ),
+        }
+    )
+    cases = (
+        (" P0207 ", "2010-01-01", "2010-01-01", True, True),
+        ("CSRC2012", "2009-12-31", "2010-01-01", False, False),
+        ("CSRC2012", "2011-12-31", "2010-01-01", True, True),
+        ("P0207", "2012-01-01", "2011-12-31", False, True),
+        ("P0207", "2012-01-01", "2012-01-01", True, True),
+        ("CSRC2012", "2014-01-01", "2013-12-31", False, False),
+        ("CSRC2012", "2011-06-01", "2011-05-31", False, False),
+        ("CSRC2012", "2011-09-01", "2011-06-01", False, True),
+        ("CSRC2012", "2011-09-01", "2011-09-01", True, True),
+        ("P0221", "2023-01-01", "2023-01-01", True, True),
+        ("CAPCO", "2050-01-01", "2023-01-01", True, True),
+        ("CAPCO", "2020-01-01", "2020-01-01", False, False),
+        ("UNKNOWN", "2023-01-01", "2023-01-01", False, False),
+        (None, "2023-01-01", "2023-01-01", False, False),
+        ("CSRC2012", None, "2010-01-01", False, False),
+        ("CSRC2012", "2010-01-01", None, False, True),
+    )
+    index = pd.Index(np.arange(len(cases)) * 3 + 1, name="source_row")
+    standards = pd.Series([row[0] for row in cases], index=index)
+    timestamps = pd.Series(pd.to_datetime([row[1] for row in cases]), index=index[::-1])
+    events = pd.Series(pd.to_datetime([row[2] for row in cases]), index=index + 1000)
+    before = [
+        value.copy(deep=True) for value in (standards, timestamps, events, versions)
+    ]
+    actual = _industry_version_active_mask(
+        standards, timestamps, versions, event_timestamps=events
+    )
+    pd.testing.assert_series_equal(
+        actual, pd.Series([row[3] for row in cases], index=index, dtype=bool)
+    )
+    pd.testing.assert_series_equal(
+        _industry_version_active_mask(standards, timestamps, versions),
+        pd.Series([row[4] for row in cases], index=index, dtype=bool),
+    )
+    pd.testing.assert_series_equal(
+        _industry_version_active_mask(
+            standards, timestamps, versions.iloc[:0], event_timestamps=events
+        ),
+        pd.Series(False, index=index, dtype=bool),
+    )
+    pd.testing.assert_series_equal(
+        _industry_version_active_mask(
+            standards.iloc[:0],
+            timestamps.iloc[:0],
+            versions,
+            event_timestamps=events.iloc[:0],
+        ),
+        pd.Series(False, index=index[:0], dtype=bool),
+    )
+    with pytest.raises(ValueError):
+        _industry_version_active_mask(standards, timestamps.iloc[:-1], versions)
+    with pytest.raises(ValueError):
+        _industry_version_active_mask(
+            standards, timestamps, versions, event_timestamps=events.iloc[:-1]
+        )
+    for original, current in zip(
+        before[:3], (standards, timestamps, events), strict=True
+    ):
+        pd.testing.assert_series_equal(original, current)
+    pd.testing.assert_frame_equal(before[3], versions)

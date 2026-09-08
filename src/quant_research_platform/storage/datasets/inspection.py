@@ -269,7 +269,6 @@ def _inspection_runtime_metadata(
     with ExactPrimaryKeyIndex(
         primary_key=primary_key,
         timestamp_columns=timestamp_columns,
-        scratch_parent=context.root.parent,
         key_schema=dataset_primary_key_schema(context, primary_key),
     ) as key_index:
         observer = DatasetSummaryObserver(

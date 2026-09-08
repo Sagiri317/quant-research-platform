@@ -915,7 +915,6 @@ def open_dataset_session(
                 raise ValueError("manifest_runtime_metadata_missing")
             inventory = DatasetSessionInventory(
                 data_root=data_root,
-                scratch_parent=root.parent,
                 resource_policy=issued_policy,
             )
             inventory.discover(spec_payload)

@@ -6,7 +6,7 @@ import stat
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from itertools import groupby, islice
+from itertools import chain, groupby, islice
 from pathlib import Path
 from types import MappingProxyType
 
@@ -598,7 +598,6 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
     index = ExactPrimaryKeyIndex(
         primary_key=("dataset_path",),
         timestamp_columns=(),
-        scratch_parent=root.parent,
     )
     with (
         policy.lease(
@@ -1187,7 +1186,6 @@ def _iter_interim_frames(
     overrides: dict[str, dict[str, object]] | None,
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
-    scratch_parent: Path | None = None,
     verify_members: Callable[[], None] | None = None,
     source_row_counts: dict[str, int] | None = None,
     producer_diagnostics: dict[str, object] | None = None,
@@ -1199,8 +1197,6 @@ def _iter_interim_frames(
         raw_dataset = _raw_dataset_for_interim(data_id)
         inputs = iter(input_files)
         with closing_iterator(inputs):
-            selected_scratch_parent = scratch_parent
-            prepared_inputs: Iterable[Path | tuple[Path, DatasetFileIdentity]] = inputs
             try:
                 first_input = next(inputs)
             except StopIteration:
@@ -1211,25 +1207,7 @@ def _iter_interim_frames(
                 )
                 first_input = None
             if first_input is not None:
-                first_path = _input_file_path(first_input)
-                if selected_scratch_parent is None:
-                    selected_scratch_parent = first_path.parent
-                    source_parent = require_unaliased_path(
-                        first_path.parent,
-                        error="csmar_interim_source_volume_mismatch",
-                    )
-                    source_metadata = source_parent.lstat()
-                    if not stat.S_ISDIR(source_metadata.st_mode):
-                        raise ValueError("csmar_interim_source_volume_mismatch")
-                    source_device = source_metadata.st_dev
-                else:
-                    source_device = None
-                prepared_inputs = _iter_source_inputs(
-                    first_input,
-                    inputs,
-                    source_device=source_device,
-                )
-            if selected_scratch_parent is not None:
+                prepared_inputs = _iter_source_inputs(first_input, inputs)
                 policy = current_runtime_resource_policy()
                 if policy is None:
                     raise RuntimeError("runtime_resource_policy_not_active")
@@ -1239,7 +1217,6 @@ def _iter_interim_frames(
                     timestamp_columns=tuple(
                         column for column in spec.primary_key if column == "timestamp"
                     ),
-                    scratch_parent=selected_scratch_parent,
                 )
                 with (
                     policy.lease(
@@ -1334,7 +1311,6 @@ def _materialize_interim_data(
     identity_index = ExactPrimaryKeyIndex(
         primary_key=("dataset_path",),
         timestamp_columns=(),
-        scratch_parent=source_raw_root.parent,
     )
     with (
         resource_policy.lease(
@@ -1419,7 +1395,6 @@ def _materialize_interim_data(
                     overrides=overrides,
                     chunksize=chunksize,
                     pruning_reports=pruning_reports,
-                    scratch_parent=artifact_root.parent,
                     verify_members=verify_members,
                     source_row_counts=source_row_counts,
                     producer_diagnostics=diagnostics,
@@ -1890,23 +1865,18 @@ def _input_file_path(
 def _iter_source_inputs(
     first: Path | tuple[Path, DatasetFileIdentity],
     remaining: Iterator[Path | tuple[Path, DatasetFileIdentity]],
-    *,
-    source_device: int | None,
 ) -> Iterator[Path | tuple[Path, DatasetFileIdentity]]:
-    yield first
-    for value in remaining:
+    for value in chain((first,), remaining):
         parent = require_unaliased_path(
             _input_file_path(value).parent,
-            error="csmar_interim_source_volume_mismatch",
+            error="csmar_interim_source_parent_invalid",
         )
         try:
             metadata = parent.lstat()
         except OSError as exc:
-            raise ValueError("csmar_interim_source_volume_mismatch") from exc
-        if source_device is not None and (
-            not stat.S_ISDIR(metadata.st_mode) or metadata.st_dev != source_device
-        ):
-            raise ValueError("csmar_interim_source_volume_mismatch")
+            raise ValueError("csmar_interim_source_parent_invalid") from exc
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError("csmar_interim_source_parent_invalid")
         yield value
 
 

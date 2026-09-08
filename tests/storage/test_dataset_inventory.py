@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import weakref
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 
 import quant_research_platform.runtime.resources as runtime_resources
@@ -239,7 +240,13 @@ def test_chunked_explicit_inactive_policy_preflights_before_admission(
     assert events == ["preflight", "admission", "cleanup", "release"]
 
 
-def test_chunked_session_inventory_is_removed_on_early_close(tmp_path: Path) -> None:
+def test_chunked_session_inventory_is_removed_on_early_close(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.inventory.gettempdir",
+        lambda: str(tmp_path),
+    )
     root = make_dataset_artifact_root(tmp_path, "inventory_early_close")
     write_dataset(
         root,
@@ -248,19 +255,24 @@ def test_chunked_session_inventory_is_removed_on_early_close(tmp_path: Path) -> 
     )
     chunks = read_dataset(root, mode=DatasetReadMode.CHUNKED)
     next(chunks)
-    assert list(root.parent.glob(".i-*"))
+    assert list(tmp_path.glob(".i-*"))
     chunks.close()  # type: ignore[attr-defined]
-    assert not list(root.parent.glob(".i-*"))
+    assert not list(tmp_path.glob(".i-*"))
 
 
-def test_dataset_inventory_cleanup_removes_sqlite_sidecars(tmp_path: Path) -> None:
+def test_dataset_inventory_cleanup_removes_sqlite_sidecars(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.inventory.gettempdir",
+        lambda: str(tmp_path),
+    )
     data_root = tmp_path / "data"
     data_root.mkdir()
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with runtime_resource_policy_scope(policy):
         inventory = dataset_inventory.DatasetSessionInventory(
             data_root=data_root,
-            scratch_parent=tmp_path,
             resource_policy=policy,
         )
         scratch = inventory.scratch_path
@@ -279,6 +291,10 @@ def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.inventory.gettempdir",
+        lambda: str(tmp_path),
+    )
     data_root = tmp_path / "data"
     data_root.mkdir()
     low_policy = capture_test_policy(
@@ -291,7 +307,6 @@ def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
     ):
         dataset_inventory.DatasetSessionInventory(
             data_root=data_root,
-            scratch_parent=tmp_path,
             resource_policy=low_policy,
         )
     assert not list(tmp_path.glob(".i-*"))
@@ -314,7 +329,7 @@ def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
             time_window=None,
         ):
             pass
-    assert not list(root.parent.glob(".i-*"))
+    assert not list(tmp_path.glob(".i-*"))
 
 
 def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) -> None:
@@ -388,7 +403,6 @@ def test_dataset_inventory_selected_count_is_selection_index_driven(
         runtime_resource_policy_scope(policy),
         dataset_inventory.DatasetSessionInventory(
             data_root=tmp_path / "data",
-            scratch_parent=tmp_path,
             resource_policy=policy,
         ) as inventory,
     ):
@@ -479,7 +493,6 @@ def test_dataset_inventory_does_not_claim_all_free_disk_at_startup(
         runtime_resource_policy_scope(policy),
         dataset_inventory.DatasetSessionInventory(
             data_root=tmp_path / "data",
-            scratch_parent=tmp_path,
             resource_policy=policy,
         ) as inventory,
     ):
@@ -513,7 +526,6 @@ def test_exact_key_index_does_not_claim_all_free_disk_at_startup(
     with dataset_key_tracking.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         assert index._connection is not None
         page_limit = index._connection.execute("PRAGMA main.max_page_count").fetchone()[
@@ -542,7 +554,6 @@ def test_exact_key_index_admits_combined_main_and_temp_growth(
     with dataset_key_tracking.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
         timestamp_columns=(),
-        scratch_parent=tmp_path,
     ) as index:
         index._admit_physical_write(4096)
 
@@ -602,6 +613,10 @@ def test_dataset_inventory_insert_disk_failure_cleans_scratch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.inventory.gettempdir",
+        lambda: str(tmp_path),
+    )
     root = make_dataset_artifact_root(tmp_path, "inventory_disk_failure")
     write_dataset(
         root,
@@ -632,13 +647,18 @@ def test_dataset_inventory_insert_disk_failure_cleans_scratch(
             pass
 
     assert reserve_calls == 2
-    assert not list(root.parent.glob(".i-*"))
+    assert not list(tmp_path.glob(".i-*"))
 
 
 def test_dataset_inventory_init_failure_closes_local_connection_and_scratch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(
+        "quant_research_platform.storage.datasets.inventory.gettempdir",
+        lambda: str(tmp_path),
+    )
+
     class FailingConnection:
         closed = False
 
@@ -660,7 +680,6 @@ def test_dataset_inventory_init_failure_closes_local_connection_and_scratch(
     ):
         dataset_inventory.DatasetSessionInventory(
             data_root=data_root,
-            scratch_parent=tmp_path,
             resource_policy=policy,
         )
 
@@ -1171,3 +1190,102 @@ def test_writer_releases_previous_publication_before_requesting_next(
         spec=make_processed_dataset_spec(name),
         resource_policy=policy,
     )
+
+
+@pytest.mark.parametrize("kind", ("keys", "inventory"))
+@pytest.mark.parametrize("failure", ("none", "startup", "write"))
+def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
+    tmp_path, monkeypatch, kind, failure
+):
+    artifact = tmp_path / "artifact-volume"
+    data = artifact / "data"
+    data.mkdir(parents=True)
+    sentinel = artifact / "old-good"
+    sentinel.write_bytes(b"old-good")
+    part = data / "part-00000.parquet"
+    pq.write_table(pa.table({"key": ["a"]}), part)
+    temporary_root = tmp_path / "temporary-volume"
+    temporary_root.mkdir()
+    owner = dataset_key_tracking if kind == "keys" else dataset_inventory
+    monkeypatch.setattr(owner, "gettempdir", lambda: str(temporary_root))
+    native_connect = owner.sqlite3.connect
+    opened = []
+
+    def connect(path, *args, **kwargs):
+        opened.append(Path(path))
+        return native_connect(path, *args, **kwargs)
+
+    monkeypatch.setattr(owner.sqlite3, "connect", connect)
+    blocked = failure == "startup"
+    probed = []
+
+    def disk_usage(path):
+        current = Path(path).resolve()
+        probed.append(current)
+        assert current in {temporary_root.resolve(), artifact.resolve()}
+        return SimpleNamespace(
+            free=0 if current == artifact.resolve() or blocked else 1024**3
+        )
+
+    monkeypatch.setattr(runtime_resources.shutil, "disk_usage", disk_usage)
+    policy = capture_test_policy(available_memory_bytes=4 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with ExitStack() as leases:
+            if kind == "keys":
+                leases.enter_context(
+                    policy.lease(
+                        "test.sqlite.cache",
+                        dataset_key_tracking.EXACT_KEY_SQLITE_CACHE_BYTES,
+                    )
+                )
+
+            def open_owner():
+                if kind == "keys":
+                    return dataset_key_tracking.ExactPrimaryKeyIndex(
+                        primary_key=("key",), timestamp_columns=()
+                    )
+                return dataset_inventory.DatasetSessionInventory(
+                    data_root=data, resource_policy=policy
+                )
+
+            if failure == "startup":
+                with pytest.raises(RuntimeError, match="insufficient_free_disk"):
+                    with open_owner():
+                        pytest.fail("SQLite opened before temporary-volume admission")
+                assert not opened
+            else:
+                with open_owner() as index:
+                    scratch = (
+                        index.database_path.parent
+                        if kind == "keys"
+                        else index.scratch_path
+                    )
+                    assert scratch.parent == temporary_root
+                    assert not scratch.is_relative_to(artifact)
+                    if os.name == "posix":
+                        assert scratch.stat().st_mode & 0o777 == 0o700
+                    blocked = failure == "write"
+
+                    def write():
+                        if kind == "keys":
+                            return index.add_table(pa.table({"key": ["a"]}))
+                        return index.discover({"partition_columns": []})
+
+                    if blocked:
+                        with pytest.raises(
+                            RuntimeError, match="insufficient_free_disk"
+                        ):
+                            write()
+                    else:
+                        write()
+                    count = (
+                        index.identity_payload_count(namespace="dataset")
+                        if kind == "keys"
+                        else index.path_count(selected=False)
+                    )
+                    assert count == (0 if blocked else 1)
+                assert not scratch.exists()
+        assert policy.used_memory_bytes == 0
+    assert probed and set(probed) == {temporary_root.resolve()}
+    assert sentinel.read_bytes() == b"old-good"
+    assert list(temporary_root.iterdir()) == []

@@ -135,7 +135,6 @@ def write_parquet_chunks(
                                 for column in key_columns
                                 if column == "timestamp"
                             ),
-                            scratch_parent=temp_path.parent,
                         ) as key_index,
                     ):
                         first_pending = True

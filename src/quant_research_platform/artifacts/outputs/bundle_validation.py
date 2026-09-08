@@ -304,7 +304,6 @@ def read_prediction_output_bundle(
                 timestamp_columns=tuple(
                     column for column in primary_key if column == "timestamp"
                 ),
-                scratch_parent=prediction_path.parent.parent,
             )
             stack.enter_context(
                 policy.lease(

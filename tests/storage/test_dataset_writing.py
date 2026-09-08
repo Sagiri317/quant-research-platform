@@ -911,10 +911,15 @@ def test_write_dataset_rejects_keys_equal_after_arrow_conversion(
         )
 
 
-def test_writer_key_index_scratch_is_inside_staged_dataset_root(
+def test_writer_key_index_uses_private_temporary_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    scratch_root = tmp_path / "sqlite-temp"
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir",
+        lambda: str(scratch_root),
+    )
     observed_database_paths: list[Path] = []
     original_tracker = dataset_writing.ExactPrimaryKeyIndex
 
@@ -934,8 +939,7 @@ def test_writer_key_index_scratch_is_inside_staged_dataset_root(
 
     assert observed_database_paths
     assert all(
-        path.is_relative_to(root.parent)
-        and path.parts[len(root.parent.parts)].startswith(".a-")
+        path.parent.parent == scratch_root and path.parent.name.startswith(".k-")
         for path in observed_database_paths
     )
     assert not any(path.exists() for path in observed_database_paths)
