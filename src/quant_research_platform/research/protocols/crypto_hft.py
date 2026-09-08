@@ -538,14 +538,14 @@ class CryptoProtocol:
                 {
                     "quote_horizon_ms": HFT_MODEL_HORIZON_MS,
                     "quote_policy": (
-                        "maximize_old_remaining_quantity_and_lifetime_keep"
-                        "_or_delayed_queue_reset_cancel_replace_or_zero"
+                        "maximize_absolute_expected_gain_of_active_and_pending_schedule"
+                        "_keep_or_delayed_queue_reset_replace_or_zero_quantity_cancel"
                         if candidate.calibrated
                         else "keep_same_price_and_remaining_quantity_without_renewal"
                         "_else_delayed_cancel_replace"
                     ),
                     "calibration": (
-                        "side_only_paired_validation_fill_and_forecast_error"
+                        "side_only_paired_validation_event_paths_and_forecast_error"
                     ),
                     "order_type": "post_only_limit",
                 }

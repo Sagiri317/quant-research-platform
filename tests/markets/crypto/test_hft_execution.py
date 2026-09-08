@@ -3,7 +3,6 @@ from __future__ import annotations
 import math
 from dataclasses import replace
 
-import numpy as np
 import pandas as pd
 import pytest
 
@@ -48,13 +47,22 @@ from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
+    from tests.markets.crypto.calibration_test_support import calibration_from_paths
+
     fills = []
     with runtime_resource_policy_scope() as policy:
-        calibration = execution.MakerCalibration(
-            np.array([1.0]),
-            np.array([0.0]),
-            np.array([[0.0, 400_000_000.0, 1.0]]),
-            resource_policy=policy,
+        calibration = calibration_from_paths(
+            [
+                (
+                    [_state(0)],
+                    [
+                        _trade(400, price="99.5", quantity="3", maker_buyer=True),
+                        _trade(401, price="100.5", quantity="2", maker_buyer=False),
+                    ],
+                )
+            ],
+            [0.0],
+            policy,
         )
         try:
             result = _simulate_maker(

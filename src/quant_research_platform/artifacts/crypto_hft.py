@@ -314,12 +314,14 @@ def produce_crypto_report(
                     else "UNDEFINED",
                     "identity": reference.instance_identity,
                     "summary": _report_rows(frame, report_lease),
-                    "method": "paired_fill_quantity_and_forecast_error_by_side",
+                    "method": (
+                        "paired_validation_event_paths_and_forecast_error_by_side"
+                    ),
                     "quote_order_type": "post_only_limit",
                     "outcome_clock": "original_decision_plus_500ms",
                     "sample_tables": [
                         "crypto_maker_samples.parquet",
-                        "crypto_maker_fills.parquet",
+                        "crypto_maker_events.parquet",
                     ],
                 }
         except (OSError, KeyError, TypeError, ValueError):

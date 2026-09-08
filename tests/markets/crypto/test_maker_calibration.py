@@ -1,6 +1,5 @@
 from dataclasses import replace
 
-import numpy as np
 import pytest
 
 from quant_research_platform.contracts.portfolios import (
@@ -9,79 +8,418 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerCalibration,
+    _maker_new_order,
     replay_maker_calibration,
     simulate_maker,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.helpers.binance_hft import _quote
 from tests.helpers.runtime_resources import capture_test_policy
+from tests.markets.crypto.calibration_test_support import (
+    calibration_from_paths,
+    calibration_inputs,
+)
 from tests.markets.crypto.test_hft_execution import _maker_config, _state, _trade
+
+
+def _run_calibrated(paths, errors, *, books, trades, quotes, latency):
+    fills, batches = [], []
+    with runtime_resource_policy_scope() as policy:
+        model = calibration_from_paths(paths, errors, policy)
+        try:
+            result = simulate_maker(
+                books,
+                trades,
+                [
+                    {
+                        **_quote(stamp, book_segment_id="s1"),
+                        "fold_id": "fold",
+                        "price_prediction": prediction,
+                        "proxy_prediction": gate,
+                    }
+                    for stamp, prediction, gate in quotes
+                ],
+                config=replace(
+                    _maker_config(),
+                    max_position=3.0,
+                    maker_fee_bps=0.0,
+                    latency_ms=latency,
+                ),
+                observed_coverage={"s1": (0, 2_000_000_000)},
+                trade_coverage={"trade-connection-1": (0, 2_000_000_000)},
+                resource_policy=policy,
+                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_forecasts=(FundingForecast(0, 2_000_000_000, ()),),
+                calibrations={"fold": {"buy": model, "sell": model}},
+                on_ledger=batches.append,
+                on_fill=fills.append,
+            )
+        finally:
+            model.close()
+        assert policy.used_memory_bytes == 0
+    gains = [
+        row.number
+        for batch in batches
+        for row in batch.diagnostics
+        if row.name == "maker_buy_expected_net_gain"
+    ]
+    return result, fills, gains, batches
+
+
+def test_action_quantity_stays_inside_limit_after_float_fill_accumulation():
+    state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
+    trades = [_trade(1, price="99.5", quantity="1", maker_buyer=True)]
+    trades.extend(
+        _trade(10 * index, price="99.5", quantity=str(quantity), maker_buyer=True)
+        for index, quantity in enumerate(
+            (0.01, 0.01, 0.05, 0.01, 0.07, 0.06, 0.01, 0.01, 0.07), start=1
+        )
+    )
+    inputs = calibration_inputs([([state], trades)], [0.0])
+    new_order = _maker_new_order(
+        0,
+        "buy",
+        0.3,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config(),
+        {"s1": (0, 1000000000)},
+        {"trade-connection-1": (0, 1000000000)},
+    )
+    with runtime_resource_policy_scope() as policy:
+        model = MakerCalibration(*inputs, resource_policy=policy)
+        try:
+            keep, quantity, gain = model.select(
+                state=state,
+                decision_ns=0,
+                new_order=new_order,
+                active_order=None,
+                commands=(),
+                lifetime_ns=500000000,
+                prediction=0.0,
+                fee_bps=0.0,
+                funding=[],
+            )
+            assert not keep and quantity == new_order.remaining
+            assert gain == pytest.approx(0.15)
+        finally:
+            model.close()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("cap", [64 * 1024, 32 * 1024**2])
+def test_query_admits_deep_book_temporaries_before_materialization(monkeypatch, cap):
+    state = _state(
+        0,
+        bid_levels=tuple((1000000 - index, 1.0) for index in range(4096)),
+        ask_levels=tuple((1000010 + index, 1.0) for index in range(4096)),
+    )
+    inputs = calibration_inputs(
+        [([state], [_trade(100, price="100000", quantity="2", maker_buyer=True)])],
+        [0.0],
+    )
+    new_order = _maker_new_order(
+        0,
+        "buy",
+        1.0,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config(),
+        {"s1": (0, 1000000000)},
+        {"trade-connection-1": (0, 1000000000)},
+    )
+    materialized = []
+    with runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy:
+        model = MakerCalibration(*inputs, resource_policy=policy)
+        original = model._book
+
+        def observed_book(event_id):
+            materialized.append(event_id)
+            return original(event_id)
+
+        monkeypatch.setattr(model, "_book", observed_book)
+        query = dict(
+            state=state,
+            decision_ns=0,
+            new_order=new_order,
+            active_order=None,
+            commands=(),
+            lifetime_ns=500000000,
+            prediction=0.0,
+            fee_bps=0.0,
+            funding=[],
+        )
+        try:
+            if cap == 64 * 1024:
+                with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                    model.select(**query)
+                assert not materialized
+            else:
+                keep, quantity, gain = model.select(**query)
+                assert not keep and quantity == 1.0 and gain == pytest.approx(0.5)
+                assert materialized
+        finally:
+            model.close()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("depletion,kept", [(10, True), (1, False)])
+def test_actual_maker_keep_uses_depleted_queue_and_paired_residuals(depletion, kept):
+    def book(stamp):
+        return _state(stamp, bid_levels=((995, 10.0), (990, 3.0)))
+
+    paths = [
+        (
+            [book(0)],
+            [_trade(100, price="99.5", quantity=str(quantity), maker_buyer=True)],
+        )
+        for quantity in (5, 11)
+    ]
+    result, fills, gains, batches = _run_calibrated(
+        paths,
+        [0.0, -0.02],
+        books=[book(stamp) for stamp in (0, 100, 200, 500, 1000)],
+        trades=[
+            _trade(50, price="99.5", quantity=str(depletion), maker_buyer=True),
+            _trade(200, price="99.5", quantity="1", maker_buyer=True),
+        ],
+        quotes=[(0, 0.03, 1.0), (100, 0.0055, 1.0)],
+        latency=0,
+    )
+    assert result["created_orders"] == 1
+    assert [fill["order_id"] for fill in fills] == ([1] if kept else [])
+    assert gains == pytest.approx([0.75, 0.05 if kept else 0.0])
+    expected_reason = (
+        "keep_existing_schedule_without_renewal"
+        if kept
+        else "cancel_maximizes_expected_net_gain"
+    )
+    assert any(
+        row.text == expected_reason for batch in batches for row in batch.diagnostics
+    )
+
+
+def test_actual_maker_keeps_legal_nonbest_old_price_in_relative_tick_space():
+    def book(stamp, moved=False):
+        bid = 990 if moved else 995
+        return _state(
+            stamp,
+            bid_tick=bid,
+            ask_tick=bid + 10,
+            bid_levels=((bid, 10.0), (bid - 5, 3.0)),
+        )
+
+    paths = [
+        (
+            [book(0)],
+            [_trade(100, price="99.5", quantity=str(quantity), maker_buyer=True)],
+        )
+        for quantity in (5, 11)
+    ]
+    result, fills, gains, _batches = _run_calibrated(
+        paths,
+        [0.0, -0.02],
+        books=[book(0), book(100, True), book(200, True), book(1000, True)],
+        trades=[
+            _trade(50, price="99.5", quantity="10", maker_buyer=True),
+            _trade(200, price="99.0", quantity="1", maker_buyer=True),
+        ],
+        quotes=[(0, 0.03, 1.0), (100, 0.015, 1.0)],
+        latency=0,
+    )
+    assert result["created_orders"] == 1
+    assert [
+        (fill["order_id"], fill["fill_price"], fill["fill_reason"]) for fill in fills
+    ] == [(1, 99.5, "trade_through")]
+    assert gains == pytest.approx([0.75, 0.4975])
+
+
+def test_actual_maker_replace_gain_includes_old_fill_before_cancel_latency():
+    def book(stamp):
+        return _state(stamp, bid_levels=((995, 1.0), (990, 3.0)))
+
+    paths = [
+        (
+            [book(0)],
+            [
+                _trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)
+                for stamp, quantity in ((50, "1"), (200, "2"))
+            ],
+        )
+    ]
+    result, fills, gains, _batches = _run_calibrated(
+        paths,
+        [0.0],
+        books=[book(stamp) for stamp in (0, 100, 200, 300, 400, 1000)],
+        trades=[
+            _trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)
+            for stamp, quantity in ((150, "1"), (250, "1"), (400, "2"))
+        ],
+        quotes=[(0, 0.03, 1.0), (200, 0.005505, 1.0)],
+        latency=100,
+    )
+    assert result["created_orders"] == 2
+    assert [(fill["order_id"], fill["timestamp_ms"]) for fill in fills] == [
+        (1, 250),
+        (2, 400),
+    ]
+    assert gains == pytest.approx([3.5, 2.101])
+
+
+def test_actual_maker_negative_keep_beats_more_negative_delayed_cancel():
+    def book(stamp):
+        return _state(stamp, bid_levels=((995, 10.0), (990, 3.0)))
+
+    paths = [
+        (
+            [book(0)],
+            [
+                _trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)
+                for stamp, quantity in ((50, "1"), (400, "11"))
+            ],
+        ),
+        ([book(0)], [_trade(200, price="99.5", quantity="1", maker_buyer=True)]),
+    ]
+    result, fills, gains, batches = _run_calibrated(
+        paths,
+        [-0.02, 0.01],
+        books=[book(stamp) for stamp in (0, 100, 200, 250, 1000)],
+        trades=[
+            _trade(150, price="99.5", quantity="10", maker_buyer=True),
+            _trade(250, price="99.5", quantity="1", maker_buyer=True),
+        ],
+        quotes=[(0, 0.03, 1.0), (200, -0.005, 1.0)],
+        latency=100,
+    )
+    assert result["created_orders"] == 1
+    assert [fill["order_id"] for fill in fills] == [1]
+    assert gains == pytest.approx([0.75, -0.5])
+    assert any(
+        row.text == "keep_existing_schedule_without_renewal"
+        for batch in batches
+        for row in batch.diagnostics
+    )
+
+
+def test_actual_maker_keeps_cashflows_of_all_queued_commands():
+    def book(stamp):
+        return _state(stamp, bid_levels=((995, 10.0), (990, 3.0)))
+
+    paths = [
+        (
+            [book(0)],
+            [
+                _trade(stamp, price="99.5", quantity="11", maker_buyer=True)
+                for stamp in (120, 300)
+            ],
+        )
+    ]
+    result, fills, gains, _batches = _run_calibrated(
+        paths,
+        [0.0],
+        books=[book(stamp) for stamp in (0, 50, 100, 200, 250, 300, 400, 1000)],
+        trades=[
+            _trade(stamp, price="99.5", quantity="11", maker_buyer=True)
+            for stamp in (220, 400)
+        ],
+        quotes=[(0, 0.01, 1.0), (50, 0.01, 0.0), (100, 0.01, 1.0)],
+        latency=200,
+    )
+    assert result["created_orders"] == 2
+    assert [(fill["order_id"], fill["timestamp_ms"]) for fill in fills] == [
+        (1, 220),
+        (2, 400),
+    ]
+    assert gains == pytest.approx([1.5, 0.0, 3.0])
 
 
 def test_many_known_funding_offsets_complete_under_one_small_query_budget():
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2, explicit_cap_bytes=64 * 1024
     )
+    state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
+    paths = [
+        ([state], [_trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)])
+        for stamp, quantity in ((10, "2"), (20, "1.5"))
+    ]
     with runtime_resource_policy_scope(policy):
-        model = MakerCalibration(
-            np.array([1.0, 0.5]),
-            np.array([-0.002, 0.003]),
-            np.array([[0.0, 10_000_000.0, 1.0], [1.0, 20_000_000.0, 0.5]]),
-            resource_policy=policy,
+        model = calibration_from_paths(paths, [-0.002, 0.003], policy)
+        new_order = _maker_new_order(
+            0,
+            "buy",
+            1.0,
+            state,
+            _quote(0, book_segment_id="s1"),
+            _maker_config(),
+            {"s1": (0, 1000000000)},
+            {"trade-connection-1": (0, 1000000000)},
         )
         try:
             for index in range(2048):
-                elapsed = (5_000_000, 15_000_000, 25_000_000)[index % 3] + index
-                quantity, gain = model.select(
-                    limit=1.0,
-                    side="buy",
-                    mid=100.0,
-                    price=100.0,
-                    prediction=0.0,
+                elapsed = (5000000, 15000000, 25000000)[index % 3] + index
+                keep, quantity, gain = model.select(
+                    state=state,
+                    decision_ns=0,
+                    new_order=new_order,
+                    active_order=None,
+                    commands=(),
+                    lifetime_ns=500000000,
+                    prediction=-0.005,
                     fee_bps=1.0,
-                    lifetime_ns=500_000_000,
                     funding=[(elapsed, 0.02)],
                 )
-                assert quantity == 0.5
-                assert gain == pytest.approx((0.02, 0.025, 0.03)[index % 3])
+                assert not keep and quantity == 0.5
+                assert gain == pytest.approx((0.020025, 0.025025, 0.030025)[index % 3])
         finally:
             model.close()
         assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("include_zero", (False, True))
-def test_paired_fill_error_curve_has_interior_optimum_and_keeps_zero_samples(
+def test_paired_event_response_has_interior_optimum_and_keeps_zero_samples(
     include_zero,
 ):
-    quantities = np.array([1.0, 0.5, 0.0] if include_zero else [1.0, 0.5])
-    errors = np.array([-0.002, 0.003, 10.0] if include_zero else [-0.002, 0.003])
-    fills = np.array([[0.0, 10_000_000.0, 1.0], [1.0, 20_000_000.0, 0.5]])
+    state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
+    paths = [
+        ([state], [_trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)])
+        for stamp, quantity in ((10, "2"), (20, "1.5"))
+    ]
+    errors = [-0.002, 0.003]
+    if include_zero:
+        paths.append(([state], []))
+        errors.append(10.0)
     with runtime_resource_policy_scope() as policy:
-        model = MakerCalibration(quantities, errors, fills, resource_policy=policy)
+        model = calibration_from_paths(paths, errors, policy)
+        new_order = _maker_new_order(
+            0,
+            "buy",
+            1.0,
+            state,
+            _quote(0, book_segment_id="s1"),
+            _maker_config(),
+            {"s1": (0, 1000000000)},
+            {"trade-connection-1": (0, 1000000000)},
+        )
+        query = dict(
+            state=state,
+            decision_ns=0,
+            new_order=new_order,
+            active_order=None,
+            commands=(),
+            lifetime_ns=500000000,
+            prediction=-0.005,
+            fee_bps=1.0,
+        )
         try:
-            quantity, gain = model.select(
-                limit=1.0,
-                side="buy",
-                mid=100.0,
-                price=100.0,
-                prediction=0.0,
-                fee_bps=1.0,
-                lifetime_ns=500_000_000,
-                funding=[],
+            keep, quantity, gain = model.select(**query, funding=[])
+            assert not keep and quantity == 0.5
+            assert gain == pytest.approx(0.04005 / len(paths))
+            keep, funded_quantity, _gain = model.select(
+                **query, funding=[(15000000, 1.0)]
             )
-            assert quantity == 0.5
-            assert gain == pytest.approx(0.04 / len(quantities))
-            funded_quantity, _gain = model.select(
-                limit=1.0,
-                side="buy",
-                mid=100.0,
-                price=100.0,
-                prediction=0.0,
-                fee_bps=1.0,
-                lifetime_ns=500_000_000,
-                funding=[(15_000_000, 1.0)],
-            )
-            assert funded_quantity == 1.0
+            assert not keep and funded_quantity == 1.0
         finally:
             model.close()
         assert policy.used_memory_bytes == 0
@@ -104,9 +442,10 @@ def test_delayed_post_only_rejection_preserves_decision_quantity_and_zero_sample
         books = [
             _state(0),
             _state(5, bid_tick=980, ask_tick=990) if crossing else _state(5),
+            _state(30),
             _state(500, bid_tick=998, ask_tick=1008),
         ]
-        batches, observations = [], []
+        batches, observations, events = [], [], []
         with runtime_resource_policy_scope() as policy:
             result = simulate_maker(
                 books,
@@ -132,7 +471,10 @@ def test_delayed_post_only_rejection_preserves_decision_quantity_and_zero_sample
                 cutoff_ns=500_000_000,
                 resource_policy=policy,
                 on_sample=lambda observations=observations, **sample: (
-                    observations.append({**sample, "fills": tuple(sample["fills"])})
+                    observations.append(sample)
+                ),
+                on_event=lambda event_id, event, events=events: events.append(
+                    (event_id, event.observed_time_ns)
                 ),
             )
             assert policy.used_memory_bytes == 0
@@ -146,6 +488,10 @@ def test_delayed_post_only_rejection_preserves_decision_quantity_and_zero_sample
         )
         buy = next(sample for sample in observations if sample["side"] == "buy")
         assert buy["filled"] == (0.0 if crossing else 1.0)
+        assert any(
+            stamp == 30000000 and buy["event_start"] <= event_id < buy["event_end"]
+            for event_id, stamp in events
+        )
         assert result["post_only_rejections"] == int(crossing)
         if crossing:
             assert buy["terminal_reason"] == "post_only_crossing_rejected"
@@ -194,15 +540,22 @@ def test_calibrated_maker_compares_old_expiry_with_real_cancel_replace(
     )
     fills, batches = [], []
     with runtime_resource_policy_scope() as policy:
-        model = MakerCalibration(
-            np.array([1.0, 0.5] if keep_wins else [1.0]),
-            np.array([-0.0021, -0.0071] if keep_wins else [0.0]),
-            np.array(
-                [[0.0, 100_000_000.0, 1.0], [1.0, 400_000_000.0, 0.5]]
+        paths = [
+            (
+                [_state(0)],
+                [
+                    _trade(stamp, price="99.5", quantity=buy, maker_buyer=True),
+                    _trade(stamp + 1, price="100.5", quantity=sell, maker_buyer=False),
+                ],
+            )
+            for stamp, buy, sell in (
+                ((100, "3", "2"), (400, "2.5", "1.5"))
                 if keep_wins
-                else [[0.0, 400_000_000.0, 1.0]]
-            ),
-            resource_policy=policy,
+                else ((400, "3", "2"),)
+            )
+        ]
+        model = calibration_from_paths(
+            paths, [-0.0021, -0.0071] if keep_wins else [0.0], policy
         )
         try:
             result = simulate_maker(

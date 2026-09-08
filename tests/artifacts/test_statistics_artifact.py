@@ -99,6 +99,230 @@ def envelope():
     )
 
 
+@pytest.fixture
+def maker_calibration_tables():
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        replay_maker_calibration,
+    )
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _maker_config,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_RESEARCH_DATASET_ID,
+        protocol,
+    )
+    from tests.helpers.binance_hft import _quote, hft_research_plan
+    from tests.markets.crypto.calibration_test_support import maker_event_rows
+    from tests.markets.crypto.test_hft_execution import _state, _trade
+
+    plan = hft_research_plan()
+    samples, events = [], []
+
+    def on_sample(**sample):
+        samples.append(
+            {
+                "fold_id": "fold_1",
+                "side": sample["side"],
+                "sample_id": sample["sample_id"],
+                "decision_at": sample["decision_ns"],
+                "prediction_end": sample["prediction_end_ns"],
+                "label_available_at": sample["available_ns"],
+                "price_prediction": sample["prediction"],
+                "observed_return": sample["observed_return"],
+                "forecast_error": sample["observed_return"] - sample["prediction"],
+                "filled_quantity": sample["filled"],
+                "quote_quantity": sample["quote_quantity"],
+                "terminal_reason": sample["terminal_reason"],
+                "book_segment_id": sample["book_segment_id"],
+                "trade_connection_id": sample["trade_connection_id"],
+                "initial_book_event_id": sample["initial_book_event_id"],
+                "event_start": sample["event_start"],
+                "event_end": sample["event_end"],
+            }
+        )
+
+    def on_event(*, event_id, event):
+        events.extend(
+            {"fold_id": "fold_1", **row} for row in maker_event_rows(event_id, event)
+        )
+
+    with runtime_resource_policy_scope() as policy:
+        replay_maker_calibration(
+            [_state(stamp) for stamp in (2100, 2150, 2650, 2700)],
+            [
+                _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
+                for stamp in (2180, 2400)
+            ],
+            [
+                {
+                    **_quote(stamp, book_segment_id="s1"),
+                    "price_prediction": 0.0,
+                    "price_label": 0.0,
+                    "proxy_prediction": 1.0,
+                    "label_available_at_ns": (stamp + 500) * 1000000,
+                }
+                for stamp in (2100, 2200)
+            ],
+            config=_maker_config(plan, "btc_usdt", calibration=True),
+            observed_coverage={"s1": (2100000000, 2800000000)},
+            trade_coverage={"trade-connection-1": (2100000000, 2800000000)},
+            cutoff_ns=3500000000,
+            resource_policy=policy,
+            on_sample=on_sample,
+            on_event=on_event,
+        )
+        assert policy.used_memory_bytes == 0
+    frames = {
+        "crypto_maker_samples": pd.DataFrame(
+            samples,
+            columns=statistics.STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"],
+        ),
+        "crypto_maker_events": pd.DataFrame(
+            events,
+            columns=statistics.STATISTICS_TABLE_COLUMNS["crypto_maker_events.parquet"],
+        ),
+        "crypto_maker_calibration": pd.DataFrame(
+            [
+                {
+                    "fold_id": "fold_1",
+                    "side": side,
+                    "sample_count": 2,
+                    "zero_fill_count": 0 if side == "buy" else 2,
+                    "post_only_rejection_count": 0,
+                    "excluded_decisions": 0,
+                    "minimum_samples": 2,
+                    "status": "DEFINED",
+                    "reason": "",
+                }
+                for side in ("buy", "sell")
+            ],
+            columns=statistics.STATISTICS_TABLE_COLUMNS[
+                "crypto_maker_calibration.parquet"
+            ],
+        ),
+    }
+    for column in ("decision_at", "prediction_end", "label_available_at"):
+        frames["crypto_maker_samples"][column] = pd.to_datetime(
+            frames["crypto_maker_samples"][column], unit="ns"
+        )
+    frames["crypto_maker_events"]["event_at"] = pd.to_datetime(
+        frames["crypto_maker_events"]["event_at"], unit="ns"
+    )
+    assert frames["crypto_maker_events"].event_id.nunique() == 5
+    assert len(frames["crypto_maker_samples"]) == 4
+    assert frames["crypto_maker_samples"].loc[
+        lambda frame: frame.side.eq("buy"), "filled_quantity"
+    ].tolist() == [1.0, 1.0]
+    manifest = protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan).manifest()
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=f"{HFT_RESEARCH_DATASET_ID}_maker_calibration",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01T00:00:04",
+            "end": "1970-01-01T00:00:05",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"target_contract": {"protocol": manifest}},
+    )
+    return frames, envelope
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "truncate",
+        "immature",
+        "coordinate",
+        "book_zero",
+        "level_order",
+        "reference",
+        "pair",
+    ],
+)
+def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
+    tmp_path, maker_calibration_tables, mutation
+):
+    tables, envelope = maker_calibration_tables
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact_record,
+    )
+
+    with runtime_resource_policy_scope() as policy:
+        root = statistics.write_statistics_artifact(
+            tmp_path / "valid",
+            envelope=envelope,
+            tables=tables,
+            table_group="crypto_maker_calibration",
+        )
+        original = read_semantic_artifact_record(root)
+        artifact = statistics.read_statistics_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        for member in statistics.STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
+            with artifact.table(member) as actual:
+                pd.testing.assert_frame_equal(
+                    actual, tables[member.removesuffix(".parquet")]
+                )
+        assert "crypto_maker_fills.parquet" not in artifact._members
+        if mutation is None:
+            assert policy.used_memory_bytes == 0
+            return
+        if mutation == "truncate":
+            tables["crypto_maker_events"] = (
+                tables["crypto_maker_events"]
+                .loc[lambda frame: frame.event_id.lt(4)]
+                .copy()
+            )
+        elif mutation == "immature":
+            tables["crypto_maker_samples"].loc[0, "label_available_at"] = pd.Timestamp(
+                "1970-01-01T00:00:04"
+            )
+        elif mutation == "coordinate":
+            tables["crypto_maker_samples"].loc[0, "initial_book_event_id"] = 2
+        elif mutation == "book_zero":
+            tables["crypto_maker_events"].loc[0, "quantity"] = 0.0
+        elif mutation == "level_order":
+            tables["crypto_maker_events"].loc[1, "price_tick"] = 1000
+        elif mutation == "reference":
+            tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
+        else:
+            tables["crypto_maker_samples"].loc[1, "price_prediction"] = 0.001
+            tables["crypto_maker_samples"].loc[1, "forecast_error"] = -0.001
+        with pytest.raises(ValueError, match="crypto_calibration_"):
+            statistics.write_statistics_artifact(
+                tmp_path / "rejected",
+                envelope=envelope,
+                tables=tables,
+                table_group="crypto_maker_calibration",
+            )
+        assert not (tmp_path / "rejected").exists()
+
+        def write_corruption(staging):
+            for name, frame in tables.items():
+                pq.write_table(
+                    pa.Table.from_pandas(
+                        frame,
+                        schema=statistics._ARROW_SCHEMAS[f"{name}.parquet"],
+                        preserve_index=False,
+                    ),
+                    native_filesystem_path(staging / f"{name}.parquet"),
+                )
+
+        bad = write_semantic_artifact(
+            tmp_path / "corrupted", envelope, write_corruption
+        )
+        with pytest.raises(ValueError, match="crypto_calibration_"):
+            statistics.read_statistics_artifact(
+                bad, expected_identity=envelope.instance_identity
+            )
+        assert read_semantic_artifact_record(root) == original
+        assert policy.used_memory_bytes == 0
+
+
 @pytest.mark.parametrize("member", statistics.STATISTICS_TABLE_GROUPS["research"])
 @pytest.mark.parametrize("mutation", ["status", "reason", "count", "undefined"])
 def test_research_table_rejects_invalid_values_at_write_and_read(

@@ -9,8 +9,9 @@ from array import array
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import numpy as np
@@ -45,7 +46,6 @@ from quant_research_platform.research.protocols.crypto_hft import HFT_MODEL_HORI
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
-    _close_lease_preserving_primary,
     require_free_disk_headroom,
 )
 
@@ -1310,6 +1310,38 @@ def _maker_trade_fill(order, trade):
     ), "same_price_depletion"
 
 
+def _maker_next_time(event_time, command_time):
+    return (
+        event_time
+        if command_time is None
+        else command_time
+        if event_time is None
+        else min(event_time, command_time)
+    )
+
+
+def _maker_expired_orders(active, timestamp):
+    for side, order in tuple(active.items()):
+        if order.valid_until_ns <= timestamp:
+            active.pop(side)
+            yield order
+
+
+def _maker_apply_command(active, command, state, observed_coverage, trade_coverage):
+    timestamp, side, new_order = command
+    old_order = active.pop(side, None)
+    reason = None
+    if new_order is not None:
+        reason = (
+            "quote_expired_before_activation"
+            if new_order.valid_until_ns <= timestamp
+            else _maker_join(new_order, state, observed_coverage, trade_coverage)
+        )
+        if reason is None:
+            active[side] = new_order
+    return old_order, reason
+
+
 def _maker_new_order(
     order_id, side, quantity, state, row, config, observed_coverage, trade_coverage
 ):
@@ -1335,103 +1367,314 @@ def _maker_new_order(
 
 
 class MakerCalibration:
-    """Frozen paired responses with only the full-horizon curve retained."""
+    """Borrow one shared validation tape; replay executable quote actions."""
 
-    def __init__(self, quantities, errors, fills, *, resource_policy):
-        self.quantities = quantities
-        self.errors = errors
-        self.fills = fills
+    def __init__(self, samples, events, event_offsets, *, resource_policy):
+        self.samples = samples
+        self.events = events
+        self.event_offsets = event_offsets
         self.policy = resource_policy
-        self.complete_curve = None
-        self.lease = resource_policy.lease(
-            "crypto.maker.calibration.curve",
-            max(1, len(quantities) * 96 + len(fills) * 40),
+        self.maximum_book_rows = max(
+            int(stop) - int(start)
+            for start, stop in zip(event_offsets[:-1], event_offsets[1:], strict=True)
         )
-        try:
-            self.complete_curve = self._compress(quantities)
-            self.lease.shrink_to(
-                max(1, sum(value.nbytes for value in self.complete_curve))
-            )
-        except BaseException:
-            self.complete_curve = None
-            _close_lease_preserving_primary(
-                self.lease, owner="crypto.maker.calibration.curve"
-            )
-            raise
 
     def close(self):
-        self.complete_curve = None
-        self.quantities = self.errors = self.fills = None
-        self.lease.close()
+        self.samples = self.events = self.event_offsets = None
+
+    def _book(self, event_id):
+        start, stop = self.event_offsets[event_id : event_id + 2]
+        return SimpleNamespace(
+            segment_id=self.events["context_id"][start],
+            bids=tuple(
+                (
+                    int(self.events["price_tick"][index]),
+                    float(self.events["quantity"][index]),
+                )
+                for index in range(start, stop)
+                if self.events["side"][index] == "buy"
+            ),
+            asks=tuple(
+                (
+                    int(self.events["price_tick"][index]),
+                    float(self.events["quantity"][index]),
+                )
+                for index in range(start, stop)
+                if self.events["side"][index] == "sell"
+            ),
+        )
+
+    def _response(
+        self,
+        sample,
+        *,
+        state,
+        decision_ns,
+        new_order,
+        active_order,
+        commands,
+        lifetime_ns,
+        replace_quantity,
+    ):
+        side = new_order.side
+        start = int(self.samples["decision_at"][sample])
+        end = start + lifetime_ns
+        initial = self._book(int(self.samples["initial_book_event_id"][sample]))
+        origin = (initial.bids if side == "buy" else initial.asks)[0][0]
+        del initial
+        current_origin = (state.bids if side == "buy" else state.asks)[0][0]
+        book_context = self.samples["book_segment_id"][sample]
+        trade_context = self.samples["trade_connection_id"][sample]
+
+        def mapped(order):
+            return replace(
+                order,
+                price_tick=int(origin + order.price_tick - current_origin),
+                segment_id=book_context
+                if order.segment_id == new_order.segment_id
+                else order.segment_id,
+                trade_connection_id=trade_context
+                if order.trade_connection_id == new_order.trade_connection_id
+                else order.trade_connection_id,
+                created_time_ns=start + order.created_time_ns - decision_ns,
+                effective_at_ns=start + order.effective_at_ns - decision_ns,
+                valid_until_ns=start + order.valid_until_ns - decision_ns,
+            )
+
+        active = {} if active_order is None else {side: mapped(active_order)}
+        pending = deque(
+            (
+                start + stamp - decision_ns,
+                command_side,
+                None if order is None else mapped(order),
+            )
+            for stamp, command_side, order in commands
+        )
+        candidate = None
+        candidate_reason = None
+        if replace_quantity is not None:
+            candidate = mapped(new_order) if replace_quantity > 0 else None
+            if candidate is not None:
+                candidate.remaining = replace_quantity
+            pending.append(
+                (start + new_order.effective_at_ns - decision_ns, side, candidate)
+            )
+        observed = {
+            book_context: (
+                start,
+                start + HFT_MODEL_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND,
+            )
+        }
+        traded = {trade_context: observed[book_context]}
+        current_state = SimpleNamespace(
+            segment_id=book_context,
+            bids=tuple(
+                (int(origin + tick - current_origin), quantity)
+                for tick, quantity in state.bids
+            ),
+            asks=tuple(
+                (int(origin + tick - current_origin), quantity)
+                for tick, quantity in state.asks
+            ),
+        )
+        index = int(self.samples["event_start"][sample])
+        stop = int(self.samples["event_end"][sample])
+        while index < stop or pending:
+            position = int(self.event_offsets[index]) if index < stop else None
+            event_time = (
+                int(self.events["event_at"][position]) if position is not None else None
+            )
+            command_time = pending[0][0] if pending else None
+            stamp = _maker_next_time(event_time, command_time)
+            if stamp >= end:
+                break
+            for _expired in _maker_expired_orders(active, stamp):
+                if _expired is candidate:
+                    candidate_reason = "expired"
+            if event_time == stamp:
+                kind = self.events["event_kind"][position]
+                if kind == "boundary":
+                    if candidate is not None and candidate_reason is None:
+                        candidate_reason = "book_boundary"
+                    active.clear()
+                    pending.clear()
+                    current_state = None
+                elif kind == "book":
+                    next_state = self._book(index)
+                    if (
+                        current_state is not None
+                        and next_state.segment_id != current_state.segment_id
+                    ):
+                        if candidate is not None and candidate_reason is None:
+                            candidate_reason = "book_boundary"
+                        active.clear()
+                        pending.clear()
+                    current_state = next_state
+                else:
+                    order = active.get(side)
+                    if (
+                        order is not None
+                        and current_state is not None
+                        and order.segment_id == current_state.segment_id
+                    ):
+                        trade = SimpleNamespace(
+                            visible_quantity=float(self.events["quantity"][position]),
+                            connection_id=self.events["context_id"][position],
+                            price_tick=int(self.events["price_tick"][position]),
+                            buyer_is_maker=self.events["side"][position] == "buy",
+                        )
+                        quantity, _reason = _maker_trade_fill(order, trade)
+                        if quantity > 0:
+                            price = tick_to_price(
+                                int(current_origin + order.price_tick - origin),
+                                new_order.tick_size,
+                            )
+                            yield stamp - start, quantity, price, order is candidate
+                            order.remaining -= quantity
+                            if order.remaining <= 0:
+                                active.pop(side)
+                                if order is candidate:
+                                    candidate_reason = "filled"
+                index += 1
+                continue
+            command = pending.popleft()
+            _old, reason = _maker_apply_command(
+                active, command, current_state, observed, traded
+            )
+            if command[2] is candidate and reason is not None:
+                candidate_reason = reason
+        return candidate_reason or "expired"
 
     def _compress(self, quantities):
         values, inverse, counts = np.unique(
             quantities, return_inverse=True, return_counts=True
         )
-        errors = np.bincount(inverse, weights=self.errors, minlength=len(values))
-        return values, counts, errors
-
-    def _curve(self, lifetime_ns):
-        if lifetime_ns >= HFT_MODEL_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND:
-            return self.complete_curve
-        quantities = np.zeros(len(self.quantities))
-        selected = self.fills[:, 1] < lifetime_ns
-        np.maximum.at(
-            quantities,
-            self.fills[selected, 0].astype(np.int64),
-            self.fills[selected, 2],
+        errors = np.bincount(
+            inverse, weights=self.samples["forecast_error"], minlength=len(values)
         )
-        return self._compress(quantities)
+        return values, counts, errors
 
     def select(
         self,
         *,
-        limit,
-        side,
-        mid,
-        price,
+        state,
+        decision_ns,
+        new_order,
+        active_order,
+        commands,
+        lifetime_ns,
         prediction,
         fee_bps,
-        lifetime_ns,
         funding,
-        fixed_quantity=None,
     ):
+        samples = len(self.samples["sample_id"])
+        visits = sum(
+            int(stop) - int(start)
+            for start, stop in zip(
+                self.samples["event_start"], self.samples["event_end"], strict=True
+            )
+        )
         with self.policy.lease(
             "crypto.maker.calibration.query",
-            max(1, (len(self.quantities) + len(self.fills)) * 256),
-        ):
-            # Every truncated response breakpoint is already a cumulative fill size.
-            choices = (
-                np.array([0.0, fixed_quantity])
-                if fixed_quantity is not None
-                else np.unique(
-                    np.concatenate(([0.0, limit], self.quantities, self.fills[:, 2]))
+            max(
+                65536,
+                256
+                * (
+                    samples
+                    + visits
+                    + 2 * self.maximum_book_rows
+                    + len(state.bids)
+                    + len(state.asks)
                 )
-            )
-            choices = choices[(choices >= 0.0) & (choices <= limit)]
-            sign = 1.0 if side == "buy" else -1.0
+                + 2048 * (len(commands) + 1),
+            ),
+        ):
+            sign = 1.0 if new_order.side == "buy" else -1.0
+            mid = _mid(state)
             forecast = _positive(
                 mid * (1.0 + prediction), "hft_prediction_price_invalid"
             )
-            edge = sign * (forecast - price) - price * fee_bps / 10_000.0
+            limit = new_order.remaining
+            quantities = np.zeros(samples)
+            fill_samples, fill_times, fill_quantities = (
+                array("q"),
+                array("q"),
+                array("d"),
+            )
+            keep_gain = cancel_gain = 0.0
+            for sample in range(samples):
+                error = self.samples["forecast_error"][sample]
+                for replacement in (None, limit):
+                    cumulative = 0.0
+                    for elapsed, quantity, price, is_new in self._response(
+                        sample,
+                        state=state,
+                        decision_ns=decision_ns,
+                        new_order=new_order,
+                        active_order=active_order,
+                        commands=commands,
+                        lifetime_ns=lifetime_ns,
+                        replace_quantity=replacement,
+                    ):
+                        if is_new:
+                            cumulative += quantity
+                            fill_samples.append(sample)
+                            fill_times.append(elapsed)
+                            fill_quantities.append(cumulative)
+                        else:
+                            gain = quantity * (
+                                sign * (forecast - price)
+                                - price * fee_bps / 10000.0
+                                + sign * mid * error
+                            )
+                            gain += (
+                                quantity
+                                * sign
+                                * sum(
+                                    cash for stamp, cash in funding if elapsed < stamp
+                                )
+                            )
+                            if replacement is None:
+                                keep_gain += gain
+                            else:
+                                cancel_gain += gain
+                    if replacement is not None:
+                        quantities[sample] = cumulative
+            indexes = np.frombuffer(fill_samples, dtype=np.int64)
+            times = np.frombuffer(fill_times, dtype=np.int64)
+            cumulative = np.frombuffer(fill_quantities, dtype=np.float64)
+            choices = np.unique(np.concatenate(([0.0, limit], cumulative)))
+            choices = choices[(choices >= 0.0) & (choices <= limit)]
+            price = tick_to_price(new_order.price_tick, new_order.tick_size)
+            edge = sign * (forecast - price) - price * fee_bps / 10000.0
 
             def response(curve, weights):
-                filled, _count, _errors = curve
+                filled = curve[0]
                 weighted = np.concatenate(([0.0], np.cumsum(filled * weights)))
-                total = np.concatenate(([0.0], np.cumsum(weights)))
-                indexes = np.searchsorted(filled, choices, side="right")
-                return weighted[indexes] + choices * (total[-1] - total[indexes])
+                totals = np.concatenate(([0.0], np.cumsum(weights)))
+                positions = np.searchsorted(filled, choices, side="right")
+                return weighted[positions] + choices * (totals[-1] - totals[positions])
 
-            curve = self._curve(lifetime_ns)
+            curve = self._compress(quantities)
             gains = response(curve, curve[1] * edge + sign * mid * curve[2])
-            del curve
             for elapsed, cash in funding:
-                curve = self._curve(min(lifetime_ns, elapsed))
+                funded = np.zeros(samples)
+                selected = times < elapsed
+                np.maximum.at(funded, indexes[selected], cumulative[selected])
+                curve = self._compress(funded)
                 gains += sign * cash * response(curve, curve[1])
-                del curve
-            gains /= len(self.quantities)
-            index = int(np.argmax(gains))
-            return float(choices[index]), float(gains[index])
+            gains = (gains + cancel_gain) / samples
+            selected = int(np.argmax(gains))
+            keep_gain /= samples
+            keep = (
+                bool(active_order is not None or commands)
+                and keep_gain >= gains[selected]
+            )
+            return (
+                keep,
+                (0.0 if keep else float(choices[selected])),
+                (float(keep_gain) if keep else float(gains[selected])),
+            )
 
 
 def replay_maker_calibration(
@@ -1445,14 +1688,15 @@ def replay_maker_calibration(
     cutoff_ns,
     resource_policy,
     on_sample,
+    on_event,
 ):
-    """Replay independent validation quotes with the same passive fill primitives."""
+    """Capture one shared mature validation tape and independent reference quotes."""
     events = iter(_market_events(book_events, trades))
     rows = iter(_checked_quote_schedule(decisions))
-    latest_state = latest_owned = next_event = None
+    latest_state = latest_owned = next_event = latest_book_id = None
     samples = []
     counts = {"buy": 0, "sell": 0}
-    excluded = 0
+    excluded = event_count = 0
     with (
         closing_iterator(events),
         closing_iterator(rows),
@@ -1469,7 +1713,14 @@ def replay_maker_calibration(
         cleanup.callback(cleanup_books)
         next_event = next(events, None)
 
-        def finish(sample, reason):
+        def record(event):
+            nonlocal event_count
+            index = event_count
+            on_event(event_id=index, event=event)
+            event_count += 1
+            return index
+
+        def finish(sample):
             order = sample["order"]
             on_sample(
                 side=order.side,
@@ -1481,27 +1732,28 @@ def replay_maker_calibration(
                 observed_return=sample["observed_return"],
                 filled=config.order_quantity - order.remaining,
                 quote_quantity=config.order_quantity,
-                terminal_reason=reason,
-                fills=sample["fills"],
+                terminal_reason=sample["terminal_reason"] or "expired",
+                book_segment_id=order.segment_id,
+                trade_connection_id=order.trade_connection_id,
+                initial_book_event_id=sample["initial_book_event_id"],
+                event_start=sample["event_start"],
+                event_end=event_count,
             )
             samples.remove(sample)
 
-        def release_completed():
-            lease.shrink_to(
-                max(1, sum(2048 + len(sample["fills"]) * 16 for sample in samples))
-            )
+        def invalidate_references():
+            for sample in samples:
+                if sample["terminal_reason"] is None:
+                    sample["terminal_reason"] = "book_boundary"
 
         def process_until(target):
-            nonlocal latest_state, latest_owned, next_event
+            nonlocal latest_state, latest_owned, latest_book_id, next_event
             while True:
                 timers = [
                     min(
                         sample["order"].valid_until_ns,
-                        sample["cancel_at"]
-                        if sample["cancel_at"] is not None
-                        else sample["order"].valid_until_ns,
                         sample["order"].effective_at_ns
-                        if not sample["activated"]
+                        if not sample["attempted"] and sample["terminal_reason"] is None
                         else sample["order"].valid_until_ns,
                     )
                     for sample in samples
@@ -1515,64 +1767,60 @@ def replay_maker_calibration(
                     break
                 for sample in tuple(samples):
                     if sample["order"].valid_until_ns <= due:
-                        finish(sample, "expired")
+                        finish(sample)
                 if event_time == due:
                     event = next_event[1]
                     if isinstance(event, BookBoundary):
-                        for sample in tuple(samples):
-                            finish(sample, "book_boundary")
+                        if samples:
+                            record(event)
+                        invalidate_references()
                         if latest_owned is not None:
                             latest_owned.release(owner="crypto.maker.calibration.book")
-                        latest_owned = latest_state = None
+                        latest_owned = latest_state = latest_book_id = None
                     elif isinstance(event, TradeEvent):
-                        for sample in tuple(samples):
+                        if samples:
+                            record(event)
+                        for sample in samples:
                             order = sample["order"]
                             if (
                                 not sample["activated"]
+                                or sample["terminal_reason"] is not None
                                 or latest_state is None
                                 or latest_state.segment_id != order.segment_id
                             ):
                                 continue
                             quantity, _reason = _maker_trade_fill(order, event)
-                            if quantity > 0:
-                                lease.grow(64)
-                                order.remaining -= quantity
-                                sample["fills"].extend(
-                                    (
-                                        float(due - order.created_time_ns),
-                                        config.order_quantity - order.remaining,
-                                    )
-                                )
-                                if order.remaining <= 0:
-                                    finish(sample, "filled")
+                            order.remaining -= quantity
+                            if order.remaining <= 0:
+                                sample["terminal_reason"] = "filled"
                     else:
                         state = _book_value(event)
                         if (
                             latest_state is not None
                             and state.segment_id != latest_state.segment_id
                         ):
-                            for sample in tuple(samples):
-                                finish(sample, "book_boundary")
+                            invalidate_references()
                         if latest_owned is not None:
                             latest_owned.release(owner="crypto.maker.calibration.book")
                         latest_owned = event if isinstance(event, OwnedValue) else None
                         latest_state = state
+                        latest_book_id = record(state) if samples else None
                     next_event = next(events, None)
-                    release_completed()
-                    continue
-                for sample in tuple(samples):
-                    order = sample["order"]
-                    if sample["cancel_at"] is not None and sample["cancel_at"] <= due:
-                        finish(sample, "replaced")
-                    elif not sample["activated"] and order.effective_at_ns <= due:
-                        reason = _maker_join(
-                            order, latest_state, observed_coverage, trade_coverage
-                        )
-                        if reason is None:
-                            sample["activated"] = True
-                        else:
-                            finish(sample, reason)
-                release_completed()
+                else:
+                    for sample in samples:
+                        order = sample["order"]
+                        if (
+                            not sample["attempted"]
+                            and sample["terminal_reason"] is None
+                            and order.effective_at_ns <= due
+                        ):
+                            sample["attempted"] = True
+                            reason = _maker_join(
+                                order, latest_state, observed_coverage, trade_coverage
+                            )
+                            sample["activated"] = reason is None
+                            sample["terminal_reason"] = reason
+                lease.shrink_to(max(1, len(samples) * 2048))
 
         try:
             for row in rows:
@@ -1589,34 +1837,11 @@ def replay_maker_calibration(
                     and _covered(trade_coverage, row["trade_connection_id"], timestamp)
                     and _covered(trade_coverage, row["trade_connection_id"], end)
                 )
-                gate = row["proxy_prediction"] >= 0.5
-                for sample in samples:
-                    order = sample["order"]
-                    desired = (
-                        None
-                        if not valid
-                        else (
-                            latest_state.bids
-                            if order.side == "buy"
-                            else latest_state.asks
-                        )[0][0]
-                    )
-                    if (
-                        not gate
-                        or desired != order.price_tick
-                        or order.remaining != config.order_quantity
-                    ):
-                        cancellation = (
-                            timestamp + config.latency_ms * _NANOSECONDS_PER_MILLISECOND
-                        )
-                        sample["cancel_at"] = (
-                            cancellation
-                            if sample["cancel_at"] is None
-                            else min(sample["cancel_at"], cancellation)
-                        )
-                if not valid or not gate:
+                if not valid or row["proxy_prediction"] < 0.5:
                     excluded += 1
                     continue
+                if latest_book_id is None:
+                    latest_book_id = record(latest_state)
                 for side in ("buy", "sell"):
                     lease.grow(2048)
                     order = _maker_new_order(
@@ -1637,8 +1862,10 @@ def replay_maker_calibration(
                             "observed_return": row["price_label"],
                             "available_ns": row["label_available_at_ns"],
                             "activated": False,
-                            "cancel_at": None,
-                            "fills": array("d"),
+                            "attempted": False,
+                            "terminal_reason": None,
+                            "initial_book_event_id": latest_book_id,
+                            "event_start": event_count,
                         }
                     )
                     counts[side] += 1
@@ -1858,10 +2085,8 @@ def simulate_maker(
             update_command_lease()
 
         def expire_active(timestamp):
-            for side, order in tuple(active.items()):
-                if order.valid_until_ns <= timestamp:
-                    active.pop(side)
-                    finish_order(order, order.valid_until_ns, cancelled=True)
+            for order in _maker_expired_orders(active, timestamp):
+                finish_order(order, order.valid_until_ns, cancelled=True)
 
         def observed_mark(timestamp):
             return (
@@ -1978,13 +2203,7 @@ def simulate_maker(
             ):
                 event_time = next_event[0][0] if next_event is not None else None
                 command_time = commands[0][0] if commands else None
-                stamp = (
-                    event_time
-                    if command_time is None
-                    else command_time
-                    if event_time is None
-                    else min(event_time, command_time)
-                )
+                stamp = _maker_next_time(event_time, command_time)
                 if stamp > target:
                     break
                 apply_funding(stamp)
@@ -1999,21 +2218,15 @@ def simulate_maker(
                         process_book(item)
                     next_event = next(events, None)
                     continue
-                _effective, side, new_order = commands.popleft()
-                old = active.pop(side, None)
+                command = commands.popleft()
+                _effective, side, new_order = command
+                old, reason = _maker_apply_command(
+                    active, command, latest_state, observed_coverage, trade_coverage
+                )
                 if old is not None:
                     finish_order(old, stamp, cancelled=True)
                 if new_order is not None:
-                    reason = (
-                        "quote_expired_before_activation"
-                        if new_order.valid_until_ns <= stamp
-                        else _maker_join(
-                            new_order, latest_state, observed_coverage, trade_coverage
-                        )
-                    )
-                    if reason is None:
-                        active[side] = new_order
-                    else:
+                    if reason is not None:
                         finish_order(
                             new_order,
                             min(stamp, new_order.valid_until_ns),
@@ -2203,48 +2416,28 @@ def simulate_maker(
 
                     def choose(
                         limit,
-                        side=side,
                         sign=sign,
-                        lifetime=lifetime,
                         allowed=allowed,
-                        row=row,
-                        mid=mid,
-                        desired_price=desired_price,
-                        funding=funding,
-                        fixed_quantity=None,
                     ):
                         if not allowed:
                             return 0.0, 0.0
                         limit = min(config.order_quantity, limit)
-                        if calibrations is None:
-                            skew = (
-                                economics.quantity - config.inventory_target
-                            ) / config.max_position
-                            return min(
-                                limit,
-                                config.order_quantity
-                                * max(0.0, 1.0 - sign * config.inventory_skew * skew),
-                            ), None
-                        return calibrations[row["fold_id"]][side].select(
-                            limit=limit,
-                            side=side,
-                            mid=mid,
-                            price=tick_to_price(desired_price, latest_state.tick_size),
-                            prediction=row["price_prediction"],
-                            fee_bps=config.maker_fee_bps,
-                            lifetime_ns=lifetime,
-                            funding=funding,
-                            fixed_quantity=fixed_quantity,
-                        )
+                        skew = (
+                            economics.quantity - config.inventory_target
+                        ) / config.max_position
+                        return min(
+                            limit,
+                            config.order_quantity
+                            * max(0.0, 1.0 - sign * config.inventory_skew * skew),
+                        ), None
 
                     quantity, gain = (
                         choose(headroom) if calibrations is None else (0.0, 0.0)
                     )
-                    pending_side = [
-                        order
-                        for _time, command_side, order in commands
-                        if command_side == side
+                    side_commands = [
+                        command for command in commands if command[1] == side
                     ]
+                    pending_side = [order for _time, _side, order in side_commands]
                     current = pending_side[-1] if pending_side else active.get(side)
                     reserved = sum(
                         order.remaining for order in pending_side if order is not None
@@ -2261,29 +2454,36 @@ def simulate_maker(
                         and current.valid_until_ns > decision_time_ns
                     )
                     if calibrations is not None:
-                        keep_quantity = keep_gain = 0.0
-                        if current is not None and current.price_tick == desired_price:
-                            remaining_lifetime = min(
-                                lifetime, current.valid_until_ns - decision_time_ns
+                        if valid and gate and funding_known and lifetime > 0:
+                            proposed = _maker_new_order(
+                                0,
+                                side,
+                                min(
+                                    config.order_quantity, max(0.0, headroom - reserved)
+                                )
+                                if allowed
+                                else 0.0,
+                                latest_state,
+                                row,
+                                config,
+                                observed_coverage,
+                                trade_coverage,
                             )
-                            keep_quantity, keep_gain = choose(
-                                headroom,
-                                lifetime=remaining_lifetime,
-                                allowed=(
-                                    valid
-                                    and gate
-                                    and funding_known
-                                    and max(
-                                        0, current.effective_at_ns - decision_time_ns
-                                    )
-                                    < remaining_lifetime
-                                ),
-                                fixed_quantity=current.remaining,
+                            keep, quantity, gain = calibrations[row["fold_id"]][
+                                side
+                            ].select(
+                                state=latest_state,
+                                decision_ns=decision_time_ns,
+                                new_order=proposed,
+                                active_order=active.get(side),
+                                commands=side_commands,
+                                lifetime_ns=lifetime,
+                                prediction=row["price_prediction"],
+                                fee_bps=config.maker_fee_bps,
+                                funding=funding,
                             )
-                        quantity, gain = choose(max(0.0, headroom - reserved))
-                        keep = keep_gain > 0 and keep_gain >= gain
-                        if keep:
-                            quantity, gain = keep_quantity, keep_gain
+                            if keep and current is not None:
+                                quantity = current.remaining
                     if not keep:
                         if calibrations is None:
                             quantity, gain = choose(max(0.0, headroom - reserved))
@@ -2314,10 +2514,14 @@ def simulate_maker(
                         if not gate
                         else "portfolio_expected_funding_missing"
                         if not funding_known
+                        else "keep_existing_schedule_without_renewal"
+                        if keep and calibrations is not None
                         else "keep_queue_without_renewal"
                         if keep
-                        else "positive_expected_net_gain"
+                        else "cancel_replace_maximizes_expected_net_gain"
                         if quantity and calibrations is not None
+                        else "cancel_maximizes_expected_net_gain"
+                        if calibrations is not None and current is not None
                         else "fixed_quote_diagnostic"
                         if quantity
                         else "no_positive_expected_net_gain"

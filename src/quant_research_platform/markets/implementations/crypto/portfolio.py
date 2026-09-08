@@ -8,7 +8,9 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_COLUMNS
 from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.order_book import BookBoundary, TradeEvent
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioTargetBlocked,
@@ -367,44 +369,37 @@ def produce_maker_calibration(
         trial_layout=layout,
     )
     selected_folds = {fold for fold, _window in execution_windows(plan, time_window)}
-    sample_columns = (
-        "fold_id",
-        "side",
-        "sample_id",
-        "decision_at",
-        "prediction_end",
-        "label_available_at",
-        "price_prediction",
-        "observed_return",
-        "forecast_error",
-        "filled_quantity",
-        "quote_quantity",
-        "terminal_reason",
-    )
-    fill_columns = (
-        "fold_id",
-        "side",
-        "sample_id",
-        "fill_index",
-        "elapsed_ns",
-        "cumulative_quantity",
-    )
+    sample_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
+    event_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_events.parquet"]
     integers = {
         "sample_id",
         "decision_at",
         "prediction_end",
         "label_available_at",
-        "fill_index",
-        "elapsed_ns",
+        "initial_book_event_id",
+        "event_start",
+        "event_end",
+        "event_id",
+        "event_at",
+        "level_index",
+        "price_tick",
     }
-    strings = {"fold_id", "side", "terminal_reason"}
+    strings = {
+        "fold_id",
+        "side",
+        "terminal_reason",
+        "book_segment_id",
+        "trade_connection_id",
+        "event_kind",
+        "context_id",
+    }
     samples = {
         column: [] if column in strings else array("q" if column in integers else "d")
         for column in sample_columns
     }
-    fills = {
+    events = {
         column: [] if column in strings else array("q" if column in integers else "d")
-        for column in fill_columns
+        for column in event_columns
     }
     summaries = []
     lease = resource_policy.lease("crypto.maker.calibration.samples", 65536)
@@ -438,12 +433,15 @@ def produce_maker_calibration(
                     filled,
                     quote_quantity,
                     terminal_reason,
-                    fills: array,
+                    book_segment_id,
+                    trade_connection_id,
+                    initial_book_event_id,
+                    event_start,
+                    event_end,
                     fold_id=fold["fold_id"],
                     counts=counts,
-                    fill_buffers=fills,
                 ):
-                    lease.grow(512 + len(fills) * 64)
+                    lease.grow(512)
                     values = (
                         fold_id,
                         side,
@@ -457,25 +455,59 @@ def produce_maker_calibration(
                         filled,
                         quote_quantity,
                         terminal_reason,
+                        book_segment_id,
+                        trade_connection_id,
+                        initial_book_event_id,
+                        event_start,
+                        event_end,
                     )
                     for column, value in zip(sample_columns, values, strict=True):
                         samples[column].append(value)
-                    for index in range(0, len(fills), 2):
-                        values = (
-                            fold_id,
-                            side,
-                            sample_id,
-                            index // 2,
-                            int(fills[index]),
-                            fills[index + 1],
-                        )
-                        for column, value in zip(fill_columns, values, strict=True):
-                            fill_buffers[column].append(value)
                     counts[side][0] += 1
                     counts[side][1] += int(filled == 0)
                     counts[side][2] += int(
                         terminal_reason == "post_only_crossing_rejected"
                     )
+
+                def observe_event(*, event_id, event, fold_id=fold["fold_id"]):
+                    if isinstance(event, TradeEvent):
+                        kind, context = "trade", event.connection_id
+                        rows = (
+                            (
+                                "buy" if event.buyer_is_maker else "sell",
+                                0,
+                                event.price_tick,
+                                event.visible_quantity,
+                            ),
+                        )
+                    elif isinstance(event, BookBoundary):
+                        kind, context = "boundary", event.segment_id
+                        rows = (("", 0, 0, 0.0),)
+                    else:
+                        kind, context = "book", event.segment_id
+                        rows = (
+                            (side, index, tick, quantity)
+                            for side, levels in (
+                                ("buy", event.bids),
+                                ("sell", event.asks),
+                            )
+                            for index, (tick, quantity) in enumerate(levels)
+                        )
+                    for side, level, tick, quantity in rows:
+                        lease.grow(512)
+                        values = (
+                            fold_id,
+                            event_id,
+                            event.observed_time_ns,
+                            kind,
+                            context,
+                            side,
+                            level,
+                            tick,
+                            quantity,
+                        )
+                        for column, value in zip(event_columns, values, strict=True):
+                            events[column].append(value)
 
                 cutoff = pd.Timestamp(fold["validation"]["end"]).value
                 result = replay_maker_calibration(
@@ -493,6 +525,7 @@ def produce_maker_calibration(
                     cutoff_ns=cutoff,
                     resource_policy=resource_policy,
                     on_sample=observe,
+                    on_event=observe_event,
                 )
                 minimum = plan["execution"]["maker"]["min_calibration_samples"]
                 for side, (count, zero, rejected) in counts.items():
@@ -524,6 +557,7 @@ def produce_maker_calibration(
                         "decision_at",
                         "prediction_end",
                         "label_available_at",
+                        "event_at",
                     }:
                         value = value.view("datetime64[ns]")
                 values[column] = value
@@ -531,10 +565,10 @@ def produce_maker_calibration(
 
         tables = {
             "crypto_maker_samples": frame(samples, sample_columns),
-            "crypto_maker_fills": frame(fills, fill_columns),
+            "crypto_maker_events": frame(events, event_columns),
             "crypto_maker_calibration": pd.DataFrame.from_records(summaries),
         }
-        samples = fills = summaries = None
+        samples = events = summaries = None
         lease.shrink_to(
             max(1, sum(pandas_frame_payload_bytes(table) for table in tables.values()))
         )
@@ -591,8 +625,8 @@ def produce_maker_ledger(
                 samples = reads.enter_context(
                     artifact.table("crypto_maker_samples.parquet")
                 )
-                fills = reads.enter_context(
-                    artifact.table("crypto_maker_fills.parquet")
+                events = reads.enter_context(
+                    artifact.table("crypto_maker_events.parquet")
                 )
                 summary = reads.enter_context(
                     artifact.table("crypto_maker_calibration.parquet")
@@ -604,33 +638,77 @@ def produce_maker_ledger(
                 state = resources.enter_context(
                     resource_policy.lease(
                         "crypto.maker.calibration.state",
-                        max(1, 256 * (len(samples) + len(fills))),
+                        max(
+                            1,
+                            4
+                            * (
+                                pandas_frame_payload_bytes(samples)
+                                + pandas_frame_payload_bytes(events)
+                            ),
+                        ),
                     )
                 )
                 retained = 0
                 for fold_id, _window in windows:
                     calibrations[fold_id] = {}
+                    event_part = events.loc[events.fold_id.eq(fold_id)]
+                    event_data = {
+                        column: event_part[column].to_numpy(copy=True)
+                        for column in (
+                            "event_id",
+                            "event_at",
+                            "event_kind",
+                            "context_id",
+                            "side",
+                            "level_index",
+                            "price_tick",
+                            "quantity",
+                        )
+                    }
+                    event_data["event_at"] = event_data["event_at"].view(np.int64)
+                    offsets = np.concatenate(
+                        (
+                            np.flatnonzero(
+                                np.r_[True, np.diff(event_data["event_id"]) != 0]
+                            ),
+                            [len(event_part)],
+                        )
+                    )
+                    retained += pandas_frame_payload_bytes(event_part) + offsets.nbytes
                     for side in ("buy", "sell"):
                         part = samples.loc[
                             samples.fold_id.eq(fold_id) & samples.side.eq(side),
-                            ["sample_id", "filled_quantity", "forecast_error"],
+                            [
+                                "sample_id",
+                                "forecast_error",
+                                "decision_at",
+                                "initial_book_event_id",
+                                "event_start",
+                                "event_end",
+                                "book_segment_id",
+                                "trade_connection_id",
+                            ],
                         ].sort_values("sample_id")
-                        path = fills.loc[
-                            fills.fold_id.eq(fold_id) & fills.side.eq(side),
-                            ["sample_id", "elapsed_ns", "cumulative_quantity"],
-                        ]
-                        quantities = part.filled_quantity.to_numpy(copy=True)
-                        errors = part.forecast_error.to_numpy(copy=True)
-                        paths = path.to_numpy(dtype=np.float64, copy=True)
+                        sample_data = {
+                            column: part[column].to_numpy(copy=True)
+                            for column in part.columns
+                        }
+                        sample_data["decision_at"] = sample_data["decision_at"].view(
+                            np.int64
+                        )
                         calibration = MakerCalibration(
-                            quantities, errors, paths, resource_policy=resource_policy
+                            sample_data,
+                            event_data,
+                            offsets,
+                            resource_policy=resource_policy,
                         )
                         resources.callback(calibration.close)
                         calibrations[fold_id][side] = calibration
-                        retained += quantities.nbytes + errors.nbytes + paths.nbytes
-                        del part, path, quantities, errors, paths
+                        retained += pandas_frame_payload_bytes(part)
+                        del part, sample_data
+                    del event_part, event_data, offsets
                 state.shrink_to(max(1, retained))
-                samples = fills = summary = None
+                samples = events = summary = None
 
         def quotes():
             if candidate.calibrated:
