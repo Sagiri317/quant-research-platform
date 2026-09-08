@@ -138,6 +138,84 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
         assert len(dispatches) == 3 and policy.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize("selected_folds", [22, 21, 1])
+def test_crypto_member_limit_precedes_training_for_selected_window(
+    tmp_path, selected_folds
+):
+    from copy import deepcopy
+    from datetime import datetime, timedelta
+
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.models import (
+        CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
+    )
+    from quant_research_platform.research.models.persisted import (
+        write_crypto_model_artifact,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import protocol
+
+    plan = hft_research_plan()
+    template = deepcopy(plan["folds"][0])
+    plan["folds"] = []
+    for index in range(22):
+        fold = deepcopy(template)
+        fold["fold_id"] = f"fold_{index + 1}"
+        for window in ("train", "validation", "development_test"):
+            fold[window] = {
+                bound: (
+                    datetime.fromisoformat(value) + timedelta(seconds=10 * index)
+                ).isoformat()
+                for bound, value in fold[window].items()
+            }
+        plan["folds"].append(fold)
+    plan["final_holdout"] = {
+        "start": "1970-01-01T00:03:36",
+        "end": "1970-01-01T00:03:37",
+    }
+    manifest = protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan).manifest()
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=f"{HFT_RESEARCH_DATASET_ID}_models",
+        schema_identity=canonical_json_hash(
+            {"schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID}
+        ),
+        protocol_or_spec_identity=canonical_json_hash(manifest),
+        software_identity="0" * 64,
+        research_window={
+            "start": plan["folds"][0]["development_test"]["start"],
+            "end": plan["folds"][selected_folds - 1]["development_test"]["end"],
+            "access": "development",
+        },
+        upstream_identities={HFT_RESEARCH_DATASET_ID: "1" * 64},
+        semantic_metadata={"target_contract": {"protocol": manifest}},
+    )
+    calls = []
+
+    def model_results(*, on_validation):
+        calls.append(True)
+        raise RuntimeError("training_entry_sentinel")
+
+    rejected = selected_folds == 22
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(
+            ValueError if rejected else RuntimeError,
+            match="semantic_artifact_member_limit_exceeded"
+            if rejected
+            else "training_entry_sentinel",
+        ):
+            write_crypto_model_artifact(
+                tmp_path / "models",
+                envelope=envelope,
+                model_results=model_results,
+                trial_layout=None,
+            )
+        assert len(calls) == (0 if rejected else 1)
+        assert policy.used_memory_bytes == 0
+    assert not tuple((tmp_path / "models" / "instances").glob("*"))
+
+
 def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     tmp_path, monkeypatch
 ):
@@ -159,7 +237,52 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     raw = layout.project_root / "raw/recorder"
     profile = research_profile(CRYPTO_PROFILE_ID)
     plan = hft_research_plan()
-    result, report = run_crypto_acceptance(layout.project_root)
+    validation_rows = {}
+    write_models = research.write_crypto_model_artifact
+    from quant_research_platform.research.models import persisted
+    from quant_research_platform.storage.parquet import (
+        _parquet_row_group_footer_upper_bound,
+    )
+
+    table_write_state = persisted._artifact_table_write_state
+    expected_footer = 0
+    multirow_callbacks = []
+
+    def one_row_groups(table, *, previous_metadata, retained_memory):
+        nonlocal expected_footer
+        if previous_metadata is None:
+            expected_footer = 0
+        assert retained_memory[1] == expected_footer
+        converted, state, _batch_rows, retained = table_write_state(
+            table, previous_metadata=previous_metadata, retained_memory=retained_memory
+        )
+        expected_footer += table.num_rows * _parquet_row_group_footer_upper_bound(
+            converted.schema, rows=0
+        )
+        multirow_callbacks.append(table.num_rows)
+        return converted, state, 1, retained
+
+    def write_fragmented_validation(*args, model_results, **kwargs):
+        def fragmented_results(*, on_validation):
+            def write_rows(fold, spec, frame):
+                key = (fold.fold_id, spec.model_id)
+                validation_rows.setdefault(key, []).append(
+                    frame.rename(columns={spec.label_column: "label"}).copy()
+                )
+                for index in range(0, len(frame), 3):
+                    on_validation(fold, spec, frame.iloc[index : index + 3])
+
+            return model_results(on_validation=write_rows)
+
+        return write_models(*args, model_results=fragmented_results, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            research, "write_crypto_model_artifact", write_fragmented_validation
+        )
+        patch.setattr(persisted, "_artifact_table_write_state", one_row_groups)
+        result, report = run_crypto_acceptance(layout.project_root)
+    assert max(multirow_callbacks) == 3
     targets = {item["target_id"]: item for item in result["target_results"]}
     model_id = f"{HFT_RESEARCH_DATASET_ID}_models"
     prediction_id = f"{HFT_RESEARCH_DATASET_ID}_predictions"
@@ -183,6 +306,41 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         expected_identity=targets[model_id]["instance_identity"],
         trial_layout=layout,
     )
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.research.models.persisted import (
+        _crypto_validation_chunks,
+    )
+    from quant_research_platform.storage.identity import native_filesystem_path
+
+    with runtime_resource_policy_scope() as policy:
+        for entry in saved.models:
+            key = (entry["fold_id"], entry["model_id"])
+            relative = entry["validation_prediction_path"]
+            assert "validation_prediction_parts" not in entry
+            if key not in validation_rows:
+                assert relative is None
+                continue
+            expected_validation = pd.concat(validation_rows[key], ignore_index=True)
+            expected_validation["label_available_at"] = expected_validation[
+                "label_available_at"
+            ].astype("datetime64[ns]")
+            actual_validation = pd.concat(
+                _crypto_validation_chunks(root, saved.member_records, entry),
+                ignore_index=True,
+            )
+            pd.testing.assert_frame_equal(
+                actual_validation, expected_validation.loc[:, actual_validation.columns]
+            )
+            assert len(expected_validation) > 1
+            with pq.ParquetFile(native_filesystem_path(root / relative)) as parquet:
+                assert parquet.metadata.num_row_groups == len(expected_validation)
+            assert (
+                sum(member["path"] == relative for member in saved.member_records) == 1
+            )
+        assert len(validation_rows) == 4
+        assert policy.used_memory_bytes == 0
+    validation_rows.clear()
 
     import numpy as np
 

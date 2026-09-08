@@ -356,6 +356,112 @@ def check_crypto_model_staging(*, layout, profile, saved):
             del probe, wrong, raw, manifest, changed, member
         assert policy.used_memory_bytes == 0
         assert read_semantic_artifact_record(saved.instance_root) == original
+        validation_entry = next(
+            entry for entry in saved.models if entry["validation_prediction_path"]
+        )
+        validation_fold = next(
+            fold
+            for fold in protocol.research_plan.folds
+            if fold.fold_id == validation_entry["fold_id"]
+        )
+        validation_spec = profile.models.get(validation_entry["model_id"])
+        validation = pd.concat(
+            persisted._crypto_validation_chunks(
+                saved.instance_root, saved.member_records, validation_entry
+            ),
+            ignore_index=True,
+        ).rename(columns={"label": validation_spec.label_column})
+        for failure in ("disk", "primary"):
+            primary = KeyboardInterrupt("validation_training_primary")
+            opened = []
+            closed = []
+
+            def observed_results(*, on_validation, primary=primary):
+                on_validation(validation_fold, validation_spec, validation.iloc[:1])
+                raise primary
+
+            writer_type = persisted.pq.ParquetWriter
+
+            class ClosingWriter:
+                def __init__(
+                    self, *args, opened=opened, writer_type=writer_type, **kwargs
+                ):
+                    opened.append(args[0])
+                    self.writer = writer_type(*args, **kwargs)
+
+                def write_table(self, *args, **kwargs):
+                    return self.writer.write_table(*args, **kwargs)
+
+                def add_key_value_metadata(self, *args, **kwargs):
+                    return self.writer.add_key_value_metadata(*args, **kwargs)
+
+                def close(self, closed=closed):
+                    self.writer.close()
+                    closed.append(True)
+                    raise RuntimeError("validation_close_secondary")
+
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setattr(persisted.pq, "ParquetWriter", ClosingWriter)
+                if failure == "disk":
+                    disk_admission = persisted.require_free_disk_headroom
+
+                    def reject_validation_disk(
+                        path, disk_admission=disk_admission, **kwargs
+                    ):
+                        if Path(path).name == "validation":
+                            raise RuntimeError("validation_disk_admission")
+                        return disk_admission(path, **kwargs)
+
+                    patch.setattr(
+                        persisted, "require_free_disk_headroom", reject_validation_disk
+                    )
+                with pytest.raises(
+                    RuntimeError if failure == "disk" else KeyboardInterrupt,
+                    match=(
+                        "validation_disk_admission"
+                        if failure == "disk"
+                        else "validation_training_primary"
+                    ),
+                ) as raised:
+                    write_crypto_model_artifact(
+                        logical_root,
+                        envelope=build_business_manifest_envelope(
+                            **{
+                                key: (
+                                    dict(
+                                        saved.envelope[key],
+                                        start="1970-01-01T00:00:04.000005",
+                                    )
+                                    if key == "research_window"
+                                    else saved.envelope[key]
+                                )
+                                for key in (
+                                    "logical_artifact_id",
+                                    "schema_identity",
+                                    "protocol_or_spec_identity",
+                                    "software_identity",
+                                    "research_window",
+                                    "upstream_identities",
+                                    "semantic_metadata",
+                                )
+                            }
+                        ),
+                        model_results=observed_results,
+                        trial_layout=layout,
+                    )
+                if failure == "disk":
+                    assert not opened and not closed
+                else:
+                    assert raised.value is primary
+                    assert len(opened) == len(closed) == 1
+                    assert any("close" in note for note in primary.__notes__)
+            assert policy.used_memory_bytes == 0
+            assert read_semantic_artifact_record(saved.instance_root) == original
+            assert {
+                p.name for p in saved.instance_root.parent.iterdir()
+            } == previous_instances
+            assert not tuple(logical_root.glob(".*staging*"))
+        validation = None
         for index, failure in enumerate(("seed", "missing_fold", "disk", "primary")):
             envelope = build_business_manifest_envelope(
                 **{

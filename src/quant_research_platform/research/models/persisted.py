@@ -8,14 +8,20 @@ import re
 import stat
 import sys
 from collections.abc import Callable, Iterable
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.parquet as pq
 
+from quant_research_platform.artifacts.outputs.parquet import (
+    _artifact_frame_reservation,
+    _artifact_table_write_state,
+    _artifact_writer_fixed_reservation,
+)
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
 )
@@ -41,7 +47,6 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
@@ -49,7 +54,6 @@ from quant_research_platform.storage._scratch_ownership import handle_preserving
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
-from quant_research_platform.storage.datasets.writing import write_parquet_file
 from quant_research_platform.storage.experiments import (
     read_model_trial_ledger_reference,
 )
@@ -63,10 +67,15 @@ from quant_research_platform.storage.manifests import (
     write_internal_artifact_manifest,
 )
 from quant_research_platform.storage.parquet import (
+    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _opened_parquet,
+    _parquet_row_group_footer_upper_bound,
+    _parquet_row_group_size,
+    _table_parquet_page_working_set_bytes,
     dataset_file_identity,
 )
 from quant_research_platform.storage.semantic_artifacts import (
+    MAX_SEMANTIC_ARTIFACT_MEMBERS,
     read_semantic_artifact_operational_metadata,
     read_semantic_artifact_record,
     verify_semantic_artifact_member,
@@ -854,41 +863,115 @@ class PersistedCryptoModelArtifact:
 
 
 def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_layout):
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_MAKER_CALIBRATION_MODEL_IDS,
+    )
+
+    _protocol, folds, model_ids = _crypto_model_scope(envelope.payload())
+    validation_count = len(set(model_ids).intersection(HFT_MAKER_CALIBRATION_MODEL_IDS))
+    if (
+        1 + len(folds) * (len(model_ids) + 1 + validation_count)
+        > MAX_SEMANTIC_ARTIFACT_MEMBERS
+    ):
+        raise ValueError("semantic_artifact_member_limit_exceeded")
     operational = {"model_trial_ledgers": []}
 
     def write(staging):
         folders = {}
-        validation_parts = {}
+        validation_owner = ExitStack()
+        validation_writer = None
+        validation_resources = None
+        retained = (0, 0)
+        metadata = None
 
         def write_validation(fold, spec, frame):
-            paths = validation_parts.setdefault((fold.fold_id, spec.model_id), [])
-            relative = (
-                f"models/{fold.fold_id}/validation/{spec.model_id}/"
-                f"part-{len(paths):06d}.parquet"
-            )
-            policy = current_runtime_resource_policy()
-            with policy.lease(
-                "research.model.validation.persist",
-                max(1, 3 * pandas_frame_payload_bytes(frame)),
-            ):
-                table = pa.Table.from_pandas(
-                    frame.rename(columns={spec.label_column: "label"}),
-                    schema=_CRYPTO_VALIDATION_SCHEMA,
-                    preserve_index=False,
+            nonlocal validation_writer, validation_resources, retained, metadata
+            path = staging / f"models/{fold.fold_id}/validation/{spec.model_id}.parquet"
+            if validation_writer is None:
+                validation_resources = validation_owner.enter_context(ExitStack())
+                writers = validation_owner.enter_context(ExitStack())
+                validation_resources.enter_context(
+                    _artifact_writer_fixed_reservation(writer_count=1, index_bytes=0)
                 )
-                write_parquet_file(
-                    table, Path(native_filesystem_path(staging / relative))
+                Path(native_filesystem_path(path.parent)).mkdir(
+                    parents=True, exist_ok=True
                 )
-                del table
-            paths.append(relative)
+                retained = (
+                    (_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES, 0)
+                    if current_runtime_resource_policy() is not None
+                    else (0, 0)
+                )
+                metadata = None
+            with _artifact_frame_reservation(frame, borrowed_input=True):
+                table = persisted = None
+                try:
+                    table = pa.Table.from_pandas(
+                        frame.rename(columns={spec.label_column: "label"}),
+                        schema=_CRYPTO_VALIDATION_SCHEMA,
+                        preserve_index=False,
+                    )
+                    persisted, state, batch_rows, retained = (
+                        _artifact_table_write_state(
+                            table, previous_metadata=metadata, retained_memory=retained
+                        )
+                    )
+                    validation_resources.enter_context(state)
+                    policy = current_runtime_resource_policy()
+                    group_rows = _parquet_row_group_size(persisted.num_rows)
+                    extra_groups = (
+                        persisted.num_rows + batch_rows - 1
+                    ) // batch_rows - (
+                        persisted.num_rows + group_rows - 1
+                    ) // group_rows
+                    if policy is not None and extra_groups:
+                        extra_footer = (
+                            extra_groups
+                            * _parquet_row_group_footer_upper_bound(
+                                persisted.schema, rows=0
+                            )
+                        )
+                        validation_resources.enter_context(
+                            policy.lease("artifacts.parquet.native", extra_footer)
+                        )
+                        retained = retained[0], retained[1] + extra_footer
+                    metadata = dict(persisted.schema.metadata or {})
+                    require_free_disk_headroom(
+                        path.parent,
+                        reserve_bytes=_table_parquet_page_working_set_bytes(
+                            persisted, rows=persisted.num_rows
+                        )
+                        + retained[1],
+                    )
+                    if validation_writer is None:
+                        validation_writer = writers.enter_context(
+                            handle_preserving_primary(
+                                pq.ParquetWriter(
+                                    native_filesystem_path(path),
+                                    _CRYPTO_VALIDATION_SCHEMA,
+                                    compression="zstd",
+                                    use_dictionary=False,
+                                    write_statistics=False,
+                                )
+                            )
+                        )
+                    validation_writer.write_table(persisted, row_group_size=batch_rows)
+                    validation_writer.add_key_value_metadata(metadata)
+                finally:
+                    table = persisted = None
 
-        with closing_iterator(
-            iter(model_results(on_validation=write_validation))
-        ) as source:
+        with (
+            validation_owner,
+            closing_iterator(
+                iter(model_results(on_validation=write_validation))
+            ) as source,
+        ):
             for owned in source:
                 owned.lease.transfer("research.model.crypto.persist")
                 member = owned.value
                 try:
+                    validation_owner.close()
+                    validation_writer = validation_resources = metadata = None
+                    retained = (0, 0)
                     fold = member.fold
                     fold_root = staging / "models" / fold.fold_id
                     fold_root.mkdir(parents=True, exist_ok=True)
@@ -912,8 +995,10 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
                         "trial_semantic_identity": member.trial_reference[
                             "semantic_identity"
                         ],
-                        "validation_prediction_parts": validation_parts.get(
-                            (fold.fold_id, member.spec.model_id), []
+                        "validation_prediction_path": (
+                            f"models/{fold.fold_id}/validation/{member.spec.model_id}.parquet"
+                            if member.spec.model_id in HFT_MAKER_CALIBRATION_MODEL_IDS
+                            else None
                         ),
                     }
                     folders.setdefault(fold.fold_id, []).append(entry)
@@ -975,11 +1060,7 @@ def read_crypto_model_artifact(root, *, expected_identity=None, trial_layout=Non
     return _validate_crypto_model_payload(root, envelope, members, refs, trial_layout)
 
 
-def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
-    from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_MAKER_CALIBRATION_MODEL_IDS,
-        build_hft_prediction_catalog,
-    )
+def _crypto_model_scope(envelope):
     from quant_research_platform.research.protocols.crypto_hft import (
         protocol as crypto_protocol,
     )
@@ -999,6 +1080,17 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
         and fold.development_test.start <= window.end
     ]
     model_ids = protocol.model_ids_for_target(envelope["logical_artifact_id"])
+    return protocol, folds, model_ids
+
+
+def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_MAKER_CALIBRATION_MODEL_IDS,
+        build_hft_prediction_catalog,
+    )
+
+    contract = envelope["semantic_metadata"]["target_contract"]
+    protocol, folds, model_ids = _crypto_model_scope(envelope)
     payload = read_manifest(root / "model.json")
     if payload != {
         "schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
@@ -1098,27 +1190,28 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
             ):
                 raise ValueError("crypto_model_refit_window_invalid")
             required.add(f"models/{fold.fold_id}/{entry['model_id']}.pkl")
-            paths = entry["validation_prediction_parts"]
-            if (
-                type(paths) is not list
-                or paths
-                != [
-                    f"models/{fold.fold_id}/validation/{entry['model_id']}/"
-                    f"part-{index:06d}.parquet"
-                    for index in range(len(paths))
-                ]
-                or bool(paths) != (entry["model_id"] in HFT_MAKER_CALIBRATION_MODEL_IDS)
-                or not set(paths).issubset({member["path"] for member in members})
+            path = entry["validation_prediction_path"]
+            expected_path = (
+                f"models/{fold.fold_id}/validation/{entry['model_id']}.parquet"
+                if entry["model_id"] in HFT_MAKER_CALIBRATION_MODEL_IDS
+                else None
+            )
+            if path != expected_path or (
+                path is not None and path not in {member["path"] for member in members}
             ):
-                raise ValueError("crypto_model_validation_parts_invalid")
-            required.update(paths)
+                raise ValueError("crypto_model_validation_path_invalid")
+            if path is not None:
+                required.add(path)
             count = 0
             with closing_iterator(
                 _crypto_validation_chunks(root, members, entry)
             ) as chunks:
                 for frame in chunks:
                     count += len(frame)
-            if paths and count != records[0].validation_metrics["validation_rows"]:
+            if (
+                path is not None
+                and count != records[0].validation_metrics["validation_rows"]
+            ):
                 raise ValueError("crypto_model_validation_count_invalid")
             models.append(entry)
     if {member["path"] for member in members} != required:
@@ -1137,59 +1230,57 @@ def _crypto_validation_chunks(root, members, entry):
     start, end = (
         pd.Timestamp(entry["validation_window"][key]) for key in ("start", "end")
     )
-    for relative in entry["validation_prediction_parts"]:
-        member = next(item for item in members if item["path"] == relative)
-        path = root / relative
-        identity = dataset_file_identity(path)
-        verify_semantic_artifact_member(root, relative_path=relative, expected=member)
-        with _opened_parquet(path, expected_identity=identity) as (parquet, _identity):
-            if parquet.schema_arrow.remove_metadata() != _CRYPTO_VALIDATION_SCHEMA:
-                raise ValueError("crypto_model_validation_schema_invalid")
-        chunks = iter_declared_parquet_member_batches(
-            path,
-            target_chunk_bytes=256 * 1024,
-            expected_identity=identity,
-        )
-        with closing_iterator(chunks):
-            for frame in chunks:
-                if (
-                    frame.empty
-                    or frame[
-                        [
-                            "timestamp",
-                            "asset_id",
-                            "label",
-                            "prediction_score",
-                            "label_available_at",
-                        ]
+    relative = entry["validation_prediction_path"]
+    if relative is None:
+        return
+    member = next(item for item in members if item["path"] == relative)
+    path = root / relative
+    identity = dataset_file_identity(path)
+    verify_semantic_artifact_member(root, relative_path=relative, expected=member)
+    with _opened_parquet(path, expected_identity=identity) as (parquet, _identity):
+        if parquet.schema_arrow.remove_metadata() != _CRYPTO_VALIDATION_SCHEMA:
+            raise ValueError("crypto_model_validation_schema_invalid")
+    chunks = iter_declared_parquet_member_batches(
+        path,
+        target_chunk_bytes=256 * 1024,
+        expected_identity=identity,
+    )
+    with closing_iterator(chunks):
+        for frame in chunks:
+            if (
+                frame.empty
+                or frame[
+                    [
+                        "timestamp",
+                        "asset_id",
+                        "label",
+                        "prediction_score",
+                        "label_available_at",
                     ]
-                    .isna()
-                    .any()
-                    .any()
-                    or not np.isfinite(
-                        frame[["label", "prediction_score"]].to_numpy()
-                    ).all()
-                ):
-                    raise ValueError("crypto_model_validation_values_invalid")
-                if not (
-                    frame.timestamp.between(start, end).all()
-                    and (frame.label_available_at <= end).all()
-                    and (
-                        frame.label_available_at
-                        >= frame.timestamp
-                        + pd.Timedelta(milliseconds=HFT_MODEL_HORIZON_MS)
-                    ).all()
-                    and frame.asset_id.isin(assets).all()
-                ):
-                    raise ValueError("crypto_model_validation_window_invalid")
-                for row in frame.itertuples(index=False):
-                    if (
-                        row.asset_id in previous
-                        and row.timestamp <= previous[row.asset_id]
-                    ):
-                        raise ValueError("crypto_model_validation_key_invalid")
-                    previous[row.asset_id] = row.timestamp
-                yield frame
+                ]
+                .isna()
+                .any()
+                .any()
+                or not np.isfinite(
+                    frame[["label", "prediction_score"]].to_numpy()
+                ).all()
+            ):
+                raise ValueError("crypto_model_validation_values_invalid")
+            if not (
+                frame.timestamp.between(start, end).all()
+                and (frame.label_available_at <= end).all()
+                and (
+                    frame.label_available_at
+                    >= frame.timestamp + pd.Timedelta(milliseconds=HFT_MODEL_HORIZON_MS)
+                ).all()
+                and frame.asset_id.isin(assets).all()
+            ):
+                raise ValueError("crypto_model_validation_window_invalid")
+            for row in frame.itertuples(index=False):
+                if row.asset_id in previous and row.timestamp <= previous[row.asset_id]:
+                    raise ValueError("crypto_model_validation_key_invalid")
+                previous[row.asset_id] = row.timestamp
+            yield frame
 
 
 @contextmanager
