@@ -763,7 +763,7 @@ def test_portfolio_ledger_frame_lease_covers_validation_and_write(
     )
     active = False
     observed = {"validated": False, "written": False}
-    real_reservation = ledger_artifact._artifact_frame_reservation
+    real_reservation = ledger_artifact._parquet_frame_reservation
     real_validate = ledger_artifact.validate_portfolio_transition
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
@@ -799,7 +799,7 @@ def test_portfolio_ledger_frame_lease_covers_validation_and_write(
         def close(self):  # noqa: ANN201
             return self._writer.close()
 
-    monkeypatch.setattr(ledger_artifact, "_artifact_frame_reservation", reservation)
+    monkeypatch.setattr(ledger_artifact, "_parquet_frame_reservation", reservation)
     monkeypatch.setattr(ledger_artifact, "validate_portfolio_transition", validate)
     monkeypatch.setattr(ledger_artifact.pq, "ParquetWriter", ObservedWriter)
     with runtime_resource_policy_scope(policy):
@@ -825,7 +825,7 @@ def test_portfolio_ledger_small_row_groups_preserve_complete_transitions(
         target_cash=0.0,
         post_cash=0.0,
     )
-    real_table_state = ledger_artifact._artifact_table_write_state
+    real_table_state = ledger_artifact._parquet_table_write_state
 
     def one_row_physical_batches(*args, **kwargs):  # noqa: ANN002, ANN003
         persisted, state, _batch_rows, retained = real_table_state(*args, **kwargs)
@@ -833,7 +833,7 @@ def test_portfolio_ledger_small_row_groups_preserve_complete_transitions(
 
     monkeypatch.setattr(
         ledger_artifact,
-        "_artifact_table_write_state",
+        "_parquet_table_write_state",
         one_row_physical_batches,
     )
     policy = capture_test_policy(

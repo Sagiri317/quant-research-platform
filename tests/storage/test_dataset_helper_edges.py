@@ -2392,7 +2392,11 @@ def test_directory_scan_processes_first_entry_before_enumerating_siblings(
     monkeypatch.setattr(
         os,
         "scandir",
-        lambda path: Entries(path) if Path(path).name == root.name else scan(path),
+        lambda path: (
+            Entries(path)
+            if not isinstance(path, int) and Path(path).name == root.name
+            else scan(path)
+        ),
     )
     if owner == "dataset":
         validate = DatasetSessionInventory._validated_coordinates

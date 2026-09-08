@@ -419,7 +419,10 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         ) as report_lease,
     ):
         evidence = load_a_share_run_evidence(
-            layout=StorageLayout(tmp_path), record=record, report_lease=report_lease
+            layout=StorageLayout(tmp_path),
+            record=record,
+            report_lease=report_lease,
+            quarterly_selections={},
         )
         report = build_a_share_report(record=record, evidence=evidence)
         assert {

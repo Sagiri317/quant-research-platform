@@ -13,11 +13,6 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from quant_research_platform.artifacts.outputs.parquet import (
-    _artifact_frame_reservation,
-    _artifact_table_write_state,
-    _artifact_writer_fixed_reservation,
-)
 from quant_research_platform.contracts.business_manifest import BusinessManifestEnvelope
 from quant_research_platform.contracts.portfolios import (
     ExecutedTrade,
@@ -37,6 +32,9 @@ from quant_research_platform.storage.exact_keys import (
 from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
+    _parquet_frame_reservation,
+    _parquet_table_write_state,
+    _parquet_writer_fixed_reservation,
     iter_dataset_part_batches,
     record_batch_decoded_working_set_bounds,
 )
@@ -149,7 +147,7 @@ def write_portfolio_ledger_artifact(
                 else None
             )
             resources.enter_context(
-                _artifact_writer_fixed_reservation(writer_count=4, index_bytes=0)
+                _parquet_writer_fixed_reservation(writer_count=4, index_bytes=0)
             )
             writers = {
                 name: stack.enter_context(
@@ -179,12 +177,12 @@ def write_portfolio_ledger_artifact(
                 frame = pd.DataFrame.from_records(
                     records, columns=PORTFOLIO_LEDGER_TABLE_COLUMNS[name]
                 )
-                with _artifact_frame_reservation(frame):
+                with _parquet_frame_reservation(frame):
                     table = pa.Table.from_pandas(
                         frame, schema=_SCHEMAS[name], preserve_index=False
                     )
                     persisted, state, batch_rows, retained[name] = (
-                        _artifact_table_write_state(
+                        _parquet_table_write_state(
                             table,
                             previous_metadata=metadata[name],
                             retained_memory=retained[name],

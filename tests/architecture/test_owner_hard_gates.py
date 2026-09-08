@@ -172,6 +172,8 @@ def test_tracked_surfaces_have_no_retired_naming() -> None:
         if _contains_retired_token(relative_path.as_posix()):
             violations.append(f"{relative_path}:path")
         path = repository_root / relative_path
+        if path.suffix == ".parquet":
+            continue
         text = path.read_text(encoding="utf-8")
         if _contains_retired_token(text):
             violations.append(f"{relative_path}:text")
@@ -207,7 +209,11 @@ def test_csmar_source_surface_has_one_root_without_retired_sibling_api() -> None
     )
     violations = []
     for relative_path in sorted(paths):
-        text = (repository_root / relative_path).read_text(encoding="utf-8")
+        text = (
+            ""
+            if relative_path.suffix == ".parquet"
+            else (repository_root / relative_path).read_text(encoding="utf-8")
+        )
         for token in retired_surface_tokens:
             if (
                 token.casefold() in text.casefold()

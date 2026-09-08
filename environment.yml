@@ -26,7 +26,7 @@ dependencies:
   - matplotlib-base>=3.11,<4
   - nbconvert>=7.17,<8
   - ipykernel>=7.3,<8
-  - pyzmq=27.0.2=py313hdb570cd_1
+  - pyzmq=27.0.2
   - websockets>=16,<17
   - xgboost>=3,<4
   - lightgbm>=4.6,<5

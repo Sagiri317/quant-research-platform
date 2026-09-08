@@ -5,12 +5,13 @@ from __future__ import annotations
 import math
 import os
 import sys
-from collections.abc import Callable, Generator, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -21,8 +22,13 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
+    _close_lease_preserving_primary,
     current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+    require_free_disk_headroom,
 )
+from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -919,8 +925,7 @@ def _maximum_projected_page_decode_bytes(
     if maximum_page_rows <= 0:
         return 0
     return (
-        projected_buffer_bytes
-        + min(maximum_page_rows, batch_rows) * maximum_row_bytes
+        projected_buffer_bytes + min(maximum_page_rows, batch_rows) * maximum_row_bytes
     )
 
 
@@ -1241,8 +1246,7 @@ def _projected_parquet_leaf_positions(
 ) -> tuple[int, ...]:
     schema = parquet_file.schema
     paths = tuple(
-        schema.column(index).path
-        for index in range(parquet_file.metadata.num_columns)
+        schema.column(index).path for index in range(parquet_file.metadata.num_columns)
     )
     positions: list[int] = []
     for column in columns:
@@ -1437,3 +1441,234 @@ def _membership_max_scalar_bytes(value: PreparedMembershipValues) -> int:
     if not isinstance(value, PreparedMembershipValues):
         raise TypeError("prepared_membership_values_required")
     return value.max_scalar_bytes
+
+
+def _parquet_frame_bound(
+    frame: pd.DataFrame,
+    *,
+    key_columns: tuple[str, ...],
+) -> int:
+    payload_bytes = pandas_frame_payload_bytes(frame)
+    row_count = len(frame)
+    column_count = len(frame.columns)
+    index_bytes = int(frame.index.memory_usage(deep=True))
+    arrow_bytes = payload_bytes + row_count * 9 * column_count
+    timestamp_bytes = index_bytes + 9 * row_count if "timestamp" in key_columns else 0
+    key_mask_bytes = index_bytes + row_count if key_columns else 0
+    return payload_bytes + arrow_bytes + timestamp_bytes + key_mask_bytes
+
+
+def _parquet_frames_reservation(
+    frames: Iterable[tuple[pd.DataFrame, tuple[str, ...]]],
+    *,
+    owned_lease: MemoryLease | None = None,
+    borrowed_input: bool = False,
+) -> ExitStack:
+    bound = sum(
+        _parquet_frame_bound(frame, key_columns=key_columns)
+        - (pandas_frame_payload_bytes(frame) if borrowed_input else 0)
+        for frame, key_columns in frames
+    )
+    stack = ExitStack()
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        if owned_lease is not None:
+            raise RuntimeError("runtime_resource_policy_not_active")
+        return stack
+    try:
+        if owned_lease is None:
+            stack.enter_context(policy.lease("storage.parquet.payload", bound))
+        else:
+            if owned_lease._root is not policy or not owned_lease.active:
+                raise RuntimeError("runtime_memory_lease_transfer_mismatch")
+            owned_lease.transfer("storage.parquet.payload")
+            if bound > owned_lease.reserved_bytes:
+                owned_lease.grow(bound - owned_lease.reserved_bytes)
+            elif bound < owned_lease.reserved_bytes:
+                owned_lease.shrink_to(bound)
+            stack.callback(
+                _close_lease_preserving_primary,
+                owned_lease,
+                owner="storage.parquet.payload",
+            )
+    except BaseException as primary:
+        if owned_lease is not None and owned_lease.active:
+            try:
+                owned_lease.close()
+            except BaseException as cleanup_error:
+                primary.add_note(
+                    "artifact output lease release also failed: "
+                    f"{type(cleanup_error).__name__}"
+                )
+        raise
+    return stack
+
+
+def _parquet_writer_fixed_reservation(
+    *,
+    writer_count: int,
+    index_bytes: int,
+) -> ExitStack:
+    stack = ExitStack()
+    policy = current_runtime_resource_policy()
+    if policy is not None:
+        stack.enter_context(
+            policy.lease(
+                "storage.parquet.fixed",
+                index_bytes + writer_count * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+            )
+        )
+        if policy.operation_headroom_bytes <= 0:
+            stack.close()
+            raise MemoryError("runtime_memory_budget_exceeded")
+    return stack
+
+
+def _parquet_frame_reservation(
+    frame: pd.DataFrame | None,
+    *,
+    key_columns: tuple[str, ...] = (),
+    owned_lease: MemoryLease | None = None,
+    borrowed_input: bool = False,
+) -> ExitStack:
+    if frame is None:
+        if owned_lease is not None:
+            raise TypeError("invalid_artifact_output_frame")
+        return ExitStack()
+    return _parquet_frames_reservation(
+        ((frame, key_columns),),
+        owned_lease=owned_lease,
+        borrowed_input=borrowed_input,
+    )
+
+
+def _parquet_table_write_state(
+    table: pa.Table,
+    *,
+    previous_metadata: dict[bytes, bytes] | None = None,
+    retained_memory: tuple[int, int] = (0, 0),
+) -> tuple[pa.Table, ExitStack, int, tuple[int, int]]:
+    persisted = table_with_decoded_row_bounds(
+        table,
+        previous_metadata=previous_metadata,
+    )
+    stack = ExitStack()
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        return persisted, stack, max(1, persisted.num_rows), (0, 0)
+    retained_page_bytes, retained_footer_bytes = retained_memory
+    retained_bytes = retained_page_bytes + retained_footer_bytes
+    footer_increment = _parquet_row_group_footer_upper_bound(
+        persisted.schema,
+        rows=persisted.num_rows,
+    )
+    page_headroom = (
+        policy.operation_headroom_bytes + retained_page_bytes - footer_increment
+    )
+    minimum_rows = 0 if persisted.num_rows == 0 else 1
+    minimum_bytes = _table_parquet_page_working_set_bytes(
+        persisted,
+        rows=minimum_rows,
+    )
+    if minimum_bytes > page_headroom:
+        raise MemoryError("runtime_memory_budget_exceeded")
+    batch_rows = max(1, persisted.num_rows)
+    working_bytes = minimum_bytes
+    low = 1
+    high = _parquet_row_group_size(persisted.num_rows)
+    while low <= high:
+        candidate = (low + high) // 2
+        candidate_bytes = _table_parquet_page_working_set_bytes(
+            persisted,
+            rows=candidate,
+        )
+        if candidate_bytes <= page_headroom:
+            batch_rows = candidate
+            working_bytes = candidate_bytes
+            low = candidate + 1
+        else:
+            high = candidate - 1
+    next_memory = (
+        max(retained_page_bytes, working_bytes),
+        retained_footer_bytes + footer_increment,
+    )
+    next_retained = sum(next_memory)
+    stack.enter_context(
+        policy.lease(
+            "storage.parquet.native",
+            next_retained - retained_bytes,
+        )
+    )
+    return persisted, stack, batch_rows, next_memory
+
+
+@contextmanager
+def parquet_table_writer(handle, *, parent: Path, compression: str, schema=None):
+    """Own one native stream, its page/footer reservations and primary failure."""
+    with (
+        handle_preserving_primary(ExitStack()) as state,
+        handle_preserving_primary(ExitStack()) as native,
+    ):
+        state.enter_context(
+            _parquet_writer_fixed_reservation(writer_count=1, index_bytes=0)
+        )
+        policy = current_runtime_resource_policy()
+        retained = (
+            (_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES, 0) if policy is not None else (0, 0)
+        )
+        metadata = None
+        writer = None
+
+        def write_table(table):
+            nonlocal retained, metadata, writer
+            persisted = None
+            try:
+                persisted, reservation, batch_rows, retained = (
+                    _parquet_table_write_state(
+                        table, previous_metadata=metadata, retained_memory=retained
+                    )
+                )
+                state.enter_context(reservation)
+                group_rows = _parquet_row_group_size(persisted.num_rows)
+                extra_groups = (persisted.num_rows + batch_rows - 1) // batch_rows - (
+                    persisted.num_rows + group_rows - 1
+                ) // group_rows
+                if policy is not None and extra_groups:
+                    extra_footer = extra_groups * _parquet_row_group_footer_upper_bound(
+                        persisted.schema, rows=0
+                    )
+                    state.enter_context(
+                        policy.lease("storage.parquet.native", extra_footer)
+                    )
+                    retained = retained[0], retained[1] + extra_footer
+                metadata = dict(persisted.schema.metadata or {})
+                require_free_disk_headroom(
+                    parent,
+                    reserve_bytes=_table_parquet_page_working_set_bytes(
+                        persisted, rows=persisted.num_rows
+                    )
+                    + retained[1],
+                )
+                if writer is None:
+                    writer = native.enter_context(
+                        handle_preserving_primary(
+                            pq.ParquetWriter(
+                                handle,
+                                persisted.schema if schema is None else schema,
+                                compression=compression,
+                                write_batch_size=batch_rows,
+                                max_rows_per_page=batch_rows,
+                                use_dictionary=False,
+                                write_statistics=False,
+                                write_page_index=False,
+                                write_page_checksum=False,
+                            )
+                        )
+                    )
+                writer.write_table(persisted, row_group_size=batch_rows)
+            finally:
+                persisted = None
+
+        yield write_table
+        if writer is not None:
+            writer.add_key_value_metadata(metadata)

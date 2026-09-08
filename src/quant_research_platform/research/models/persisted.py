@@ -15,13 +15,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
-from quant_research_platform.artifacts.outputs.parquet import (
-    _artifact_frame_reservation,
-    _artifact_table_write_state,
-    _artifact_writer_fixed_reservation,
-)
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
 )
@@ -46,7 +40,6 @@ from quant_research_platform.research.protocols.a_share import quarter_id_for_fo
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
-    current_runtime_resource_policy,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
@@ -67,12 +60,10 @@ from quant_research_platform.storage.manifests import (
     write_internal_artifact_manifest,
 )
 from quant_research_platform.storage.parquet import (
-    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _opened_parquet,
-    _parquet_row_group_footer_upper_bound,
-    _parquet_row_group_size,
-    _table_parquet_page_working_set_bytes,
+    _parquet_frame_reservation,
     dataset_file_identity,
+    parquet_table_writer,
 )
 from quant_research_platform.storage.semantic_artifacts import (
     MAX_SEMANTIC_ARTIFACT_MEMBERS,
@@ -880,87 +871,42 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
         folders = {}
         validation_owner = ExitStack()
         validation_writer = None
-        validation_resources = None
-        retained = (0, 0)
-        metadata = None
 
         def write_validation(fold, spec, frame):
-            nonlocal validation_writer, validation_resources, retained, metadata
-            path = staging / f"models/{fold.fold_id}/validation/{spec.model_id}.parquet"
+            nonlocal validation_writer
             if validation_writer is None:
-                validation_resources = validation_owner.enter_context(ExitStack())
-                writers = validation_owner.enter_context(ExitStack())
-                validation_resources.enter_context(
-                    _artifact_writer_fixed_reservation(writer_count=1, index_bytes=0)
+                path = (
+                    staging
+                    / f"models/{fold.fold_id}/validation/{spec.model_id}.parquet"
                 )
                 Path(native_filesystem_path(path.parent)).mkdir(
                     parents=True, exist_ok=True
                 )
-                retained = (
-                    (_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES, 0)
-                    if current_runtime_resource_policy() is not None
-                    else (0, 0)
+                handle = validation_owner.enter_context(
+                    handle_preserving_primary(open_filesystem_file(path, "xb"))
                 )
-                metadata = None
-            with _artifact_frame_reservation(frame, borrowed_input=True):
-                table = persisted = None
+                validation_writer = validation_owner.enter_context(
+                    parquet_table_writer(
+                        handle,
+                        parent=path.parent,
+                        compression="zstd",
+                        schema=_CRYPTO_VALIDATION_SCHEMA,
+                    )
+                )
+            with _parquet_frame_reservation(frame, borrowed_input=True):
+                table = None
                 try:
                     table = pa.Table.from_pandas(
                         frame.rename(columns={spec.label_column: "label"}),
                         schema=_CRYPTO_VALIDATION_SCHEMA,
                         preserve_index=False,
                     )
-                    persisted, state, batch_rows, retained = (
-                        _artifact_table_write_state(
-                            table, previous_metadata=metadata, retained_memory=retained
-                        )
-                    )
-                    validation_resources.enter_context(state)
-                    policy = current_runtime_resource_policy()
-                    group_rows = _parquet_row_group_size(persisted.num_rows)
-                    extra_groups = (
-                        persisted.num_rows + batch_rows - 1
-                    ) // batch_rows - (
-                        persisted.num_rows + group_rows - 1
-                    ) // group_rows
-                    if policy is not None and extra_groups:
-                        extra_footer = (
-                            extra_groups
-                            * _parquet_row_group_footer_upper_bound(
-                                persisted.schema, rows=0
-                            )
-                        )
-                        validation_resources.enter_context(
-                            policy.lease("artifacts.parquet.native", extra_footer)
-                        )
-                        retained = retained[0], retained[1] + extra_footer
-                    metadata = dict(persisted.schema.metadata or {})
-                    require_free_disk_headroom(
-                        path.parent,
-                        reserve_bytes=_table_parquet_page_working_set_bytes(
-                            persisted, rows=persisted.num_rows
-                        )
-                        + retained[1],
-                    )
-                    if validation_writer is None:
-                        validation_writer = writers.enter_context(
-                            handle_preserving_primary(
-                                pq.ParquetWriter(
-                                    native_filesystem_path(path),
-                                    _CRYPTO_VALIDATION_SCHEMA,
-                                    compression="zstd",
-                                    use_dictionary=False,
-                                    write_statistics=False,
-                                )
-                            )
-                        )
-                    validation_writer.write_table(persisted, row_group_size=batch_rows)
-                    validation_writer.add_key_value_metadata(metadata)
+                    validation_writer(table)
                 finally:
-                    table = persisted = None
+                    table = None
 
         with (
-            validation_owner,
+            handle_preserving_primary(validation_owner),
             closing_iterator(
                 iter(model_results(on_validation=write_validation))
             ) as source,
@@ -970,8 +916,7 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
                 member = owned.value
                 try:
                     validation_owner.close()
-                    validation_writer = validation_resources = metadata = None
-                    retained = (0, 0)
+                    validation_writer = None
                     fold = member.fold
                     fold_root = staging / "models" / fold.fold_id
                     fold_root.mkdir(parents=True, exist_ok=True)

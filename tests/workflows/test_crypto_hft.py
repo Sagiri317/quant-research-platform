@@ -239,12 +239,12 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     plan = hft_research_plan()
     validation_rows = {}
     write_models = research.write_crypto_model_artifact
-    from quant_research_platform.research.models import persisted
+    from quant_research_platform.storage import parquet as parquet_storage
     from quant_research_platform.storage.parquet import (
         _parquet_row_group_footer_upper_bound,
     )
 
-    table_write_state = persisted._artifact_table_write_state
+    table_write_state = parquet_storage._parquet_table_write_state
     expected_footer = 0
     multirow_callbacks = []
 
@@ -274,13 +274,16 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
 
             return model_results(on_validation=write_rows)
 
-        return write_models(*args, model_results=fragmented_results, **kwargs)
+        with monkeypatch.context() as writing_patch:
+            writing_patch.setattr(
+                parquet_storage, "_parquet_table_write_state", one_row_groups
+            )
+            return write_models(*args, model_results=fragmented_results, **kwargs)
 
     with monkeypatch.context() as patch:
         patch.setattr(
             research, "write_crypto_model_artifact", write_fragmented_validation
         )
-        patch.setattr(persisted, "_artifact_table_write_state", one_row_groups)
         result, report = run_crypto_acceptance(layout.project_root)
     assert max(multirow_callbacks) == 3
     targets = {item["target_id"]: item for item in result["target_results"]}

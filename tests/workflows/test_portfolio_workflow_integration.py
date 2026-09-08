@@ -1738,7 +1738,10 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         policy.lease("report.partial", 1) as report_lease,
     ):
         partial_report = produce_a_share_report(
-            layout=layout, record=partial, report_lease=report_lease
+            layout=layout,
+            record=partial,
+            report_lease=report_lease,
+            quarterly_selections=model.quarterly_selections,
         )
     assert partial_report["report_status"] == "BLOCKED"
     retained = partial_report["sections"]["portfolio"]["results"]

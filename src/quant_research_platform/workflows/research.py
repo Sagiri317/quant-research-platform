@@ -31,6 +31,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.artifacts.research import (
+    _instance_root,
     _validate_reference,
     read_research_report_artifact,
     read_research_run_record,
@@ -92,6 +93,9 @@ from quant_research_platform.contracts.time import (
     TimeWindow,
     is_intraday_time_window,
     time_value_isoformat,
+)
+from quant_research_platform.markets.implementations.crypto.portfolio import (
+    validate_maker_calibration,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.profiles.research import ResearchProfile
@@ -1807,6 +1811,9 @@ def _build_semantic_target(
                     envelope=envelope,
                     tables=owned_tables.value,
                     table_group=group,
+                    validate_tables=validate_maker_calibration
+                    if group == "crypto_maker_calibration"
+                    else None,
                 )
             finally:
                 owned_tables.release(owner="research.crypto.statistics.output")
@@ -2215,7 +2222,29 @@ def _build_report_from_run(
     binding = profile.producer_bindings.get(report_target)
     if binding is None or binding.kind is not ProducerKind.REPORT:
         raise ValueError("report_producer_binding_missing")
-    payload = binding.producer(layout=layout, record=record, report_lease=report_lease)
+    report_inputs = {}
+    if str(profile.market_id) == "a_share":
+        selections = {}
+        for result in record.target_results:
+            if result.producer_kind is not ProducerKind.MODEL or result.status in {
+                TargetStatus.BLOCKED,
+                TargetStatus.FAILED,
+            }:
+                continue
+            try:
+                _validate_reference(layout, result)
+            except (FileNotFoundError, OSError, ValueError):
+                continue
+            persisted = read_quarterly_model_artifact(
+                _instance_root(layout, result),
+                expected_identity=result.instance_identity,
+                trial_layout=layout,
+            )
+            selections = persisted.quarterly_selections
+        report_inputs["quarterly_selections"] = selections
+    payload = binding.producer(
+        layout=layout, record=record, report_lease=report_lease, **report_inputs
+    )
     report_lease.grow(report_payload_working_set(payload))
     report_status = RunStatus(payload["report_status"])
     source_run_identity = canonical_json_hash(record.payload())
@@ -2479,6 +2508,11 @@ def _validate_semantic_target_root(
         read_statistics_artifact(
             root,
             expected_identity=expected_identity,
+            validate_tables=validate_maker_calibration
+            if protocol.protocol_id == "crypto_hft"
+            and protocol.statistics_table_group(spec.target_id)
+            == "crypto_maker_calibration"
+            else None,
         )
         return
     if binding.kind is ProducerKind.PORTFOLIO:

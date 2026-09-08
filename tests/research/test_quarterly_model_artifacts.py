@@ -206,7 +206,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
         assert any(
             item["model_metadata"]["scaler"] is not None for item in payload["models"]
         )
-        from quant_research_platform.contracts import models as model_contract
+        from quant_research_platform.research.models import supervised
         from quant_research_platform.research.models.persisted import (
             read_quarterly_predictor,
         )
@@ -238,7 +238,11 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
                 elif algorithm == "random_forest_regressor":
                     with pytest.MonkeyPatch.context() as patch:
                         patch.setattr(
-                            model_contract.psutil, "cpu_count", lambda **_kwargs: None
+                            supervised,
+                            "model_cpu_capacity",
+                            lambda: pytest.fail(
+                                "persisted model validation rediscovered host capacity"
+                            ),
                         )
                         fitting.validate_model_state(actual, entry["model_metadata"])
                     assert (

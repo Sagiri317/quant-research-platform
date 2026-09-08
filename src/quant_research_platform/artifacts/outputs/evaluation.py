@@ -26,10 +26,6 @@ from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
 )
 from quant_research_platform.artifacts.outputs.parquet import (
-    _artifact_frames_reservation,
-    _artifact_table_write_state,
-    _artifact_writer_fixed_reservation,
-    _parquet_row_group_size,
     write_parquet,
 )
 from quant_research_platform.contracts.evaluations import (
@@ -59,6 +55,10 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
+    _parquet_frames_reservation,
+    _parquet_row_group_size,
+    _parquet_table_write_state,
+    _parquet_writer_fixed_reservation,
 )
 
 _EVALUATION_PENDING_TABLE_LIMIT = 64
@@ -242,7 +242,7 @@ def _write_evaluation_artifact_chunks(
         try:
             table = pa.concat_tables(tables)
             persisted, table_state, batch_rows, next_memory = (
-                _artifact_table_write_state(
+                _parquet_table_write_state(
                     table,
                     previous_metadata=decoded_metadata.get(name),
                     retained_memory=writer_memory.get(name, (0, 0)),
@@ -327,7 +327,7 @@ def _write_evaluation_artifact_chunks(
             temp_root,
             reserve_bytes=2 * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
         )
-        fixed_state = _artifact_writer_fixed_reservation(
+        fixed_state = _parquet_writer_fixed_reservation(
             writer_count=2,
             index_bytes=0,
         )
@@ -426,7 +426,7 @@ def _write_evaluation_artifact_chunks(
                     or filter_definition_value != chunk_filter_definition
                 ):
                     raise ValueError("evaluation_diagnostics_inconsistent")
-                with _artifact_frames_reservation(
+                with _parquet_frames_reservation(
                     ((metrics, ()), (grouped, ())),
                     owned_lease=owned_lease,
                 ):

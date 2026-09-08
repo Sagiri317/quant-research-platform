@@ -40,9 +40,6 @@ from quant_research_platform.contracts.targets import (
 )
 from quant_research_platform.reports import a_share, crypto_hft, diagnostic_status
 from quant_research_platform.reports.a_share import build_a_share_report
-from quant_research_platform.research.models.persisted import (
-    read_quarterly_model_artifact,
-)
 from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
 from quant_research_platform.storage.datasets.schema import (
     COMMON_MANIFEST_METADATA_KEY,
@@ -121,7 +118,11 @@ def read_research_run_record(
 
 
 def load_a_share_run_evidence(
-    *, layout: StorageLayout, record: ResearchRunRecord, report_lease
+    *,
+    layout: StorageLayout,
+    record: ResearchRunRecord,
+    report_lease,
+    quarterly_selections,
 ) -> dict[str, object]:
     references = {result.target_id: result for result in record.target_results}
     issues: list[dict[str, str]] = [
@@ -230,7 +231,6 @@ def load_a_share_run_evidence(
             / evaluation_ref.target_id
         )
         coverage["evaluation"] = output["metadata"]["evaluation_diagnostics"]
-    selections = {}
     for target in record.target_results:
         if target.producer_kind is not ProducerKind.MODEL:
             continue
@@ -240,12 +240,6 @@ def load_a_share_run_evidence(
         operational = read_semantic_artifact_operational_metadata(
             _instance_root(layout, model_ref)
         )
-        persisted = read_quarterly_model_artifact(
-            _instance_root(layout, model_ref),
-            expected_identity=model_ref.instance_identity,
-            trial_layout=layout,
-        )
-        selections = persisted.quarterly_selections
         for item in operational.get("model_trial_ledgers", []):
             trial_refs[(item["run_id"], item["experiment_id"])] = item
     trial_counts = Counter()
@@ -490,7 +484,7 @@ def load_a_share_run_evidence(
             target_id: result.instance_identity for target_id, result in loaded.items()
         },
         "coverage": coverage,
-        "quarterly_selections": selections,
+        "quarterly_selections": quarterly_selections,
         "statistics": statistics,
         "portfolio_statistics": portfolio_statistics,
         "model_trials": {
@@ -505,12 +499,19 @@ def load_a_share_run_evidence(
 
 
 def produce_a_share_report(
-    *, layout: StorageLayout, record: ResearchRunRecord, report_lease
+    *,
+    layout: StorageLayout,
+    record: ResearchRunRecord,
+    report_lease,
+    quarterly_selections,
 ) -> dict[str, object]:
     return build_a_share_report(
         record=record,
         evidence=load_a_share_run_evidence(
-            layout=layout, record=record, report_lease=report_lease
+            layout=layout,
+            record=record,
+            report_lease=report_lease,
+            quarterly_selections=quarterly_selections,
         ),
     )
 

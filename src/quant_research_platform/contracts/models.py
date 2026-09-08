@@ -9,7 +9,6 @@ from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
-import psutil
 
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_SUMMARY_REASON_CODES,
@@ -161,17 +160,16 @@ def _resolved_model_hyperparameters_match(
     return resolved_hyperparameters == expected
 
 
-def _resolved_model_thread_count(value: object) -> int:
+def _resolved_model_thread_count(
+    value: object, *, physical_cores: int, available_cores: int
+) -> int:
     if type(value) is not int or value == 0:
         raise ValueError("invalid_model_thread_count")
-    physical = psutil.cpu_count(logical=False)
-    if type(physical) is not int or physical <= 0:
-        raise RuntimeError("physical_core_count_unavailable")
-    resolved = value if value > 0 else physical + 1 + value
+    if value > physical_cores:
+        raise ValueError("model_threads_exceed_physical_cores")
+    resolved = min(value, available_cores) if value > 0 else available_cores + 1 + value
     if resolved <= 0:
         raise ValueError("invalid_model_thread_count")
-    if resolved > physical:
-        raise ValueError("model_threads_exceed_physical_cores")
     return resolved
 
 

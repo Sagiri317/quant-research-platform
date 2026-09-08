@@ -247,6 +247,9 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
     tmp_path, maker_calibration_tables, mutation
 ):
     tables, envelope = maker_calibration_tables
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        validate_maker_calibration,
+    )
     from quant_research_platform.storage.semantic_artifacts import (
         read_semantic_artifact_record,
     )
@@ -257,10 +260,13 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
             envelope=envelope,
             tables=tables,
             table_group="crypto_maker_calibration",
+            validate_tables=validate_maker_calibration,
         )
         original = read_semantic_artifact_record(root)
         artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
+            root,
+            expected_identity=envelope.instance_identity,
+            validate_tables=validate_maker_calibration,
         )
         for member in statistics.STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
             with artifact.table(member) as actual:
@@ -269,6 +275,26 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
                 )
         assert "crypto_maker_fills.parquet" not in artifact._members
         if mutation is None:
+            for missing_validator in (None, object()):
+                with pytest.raises(
+                    ValueError, match="statistics_business_validator_required"
+                ):
+                    statistics.write_statistics_artifact(
+                        tmp_path / "missing-validator",
+                        envelope=envelope,
+                        tables=tables,
+                        table_group="crypto_maker_calibration",
+                        validate_tables=missing_validator,
+                    )
+                with pytest.raises(
+                    ValueError, match="statistics_business_validator_required"
+                ):
+                    statistics.read_statistics_artifact(
+                        root,
+                        expected_identity=envelope.instance_identity,
+                        validate_tables=missing_validator,
+                    )
+            assert not (tmp_path / "missing-validator").exists()
             assert policy.used_memory_bytes == 0
             return
         if mutation == "truncate":
@@ -298,6 +324,7 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
                 envelope=envelope,
                 tables=tables,
                 table_group="crypto_maker_calibration",
+                validate_tables=validate_maker_calibration,
             )
         assert not (tmp_path / "rejected").exists()
 
@@ -317,7 +344,9 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
         )
         with pytest.raises(ValueError, match="crypto_calibration_"):
             statistics.read_statistics_artifact(
-                bad, expected_identity=envelope.instance_identity
+                bad,
+                expected_identity=envelope.instance_identity,
+                validate_tables=validate_maker_calibration,
             )
         assert read_semantic_artifact_record(root) == original
         assert policy.used_memory_bytes == 0
@@ -595,7 +624,7 @@ def test_statistics_plain_dictionary_reader_admits_expansion_before_read(
 
 def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatch):
     primary = KeyboardInterrupt("write_interrupted")
-    original = statistics._artifact_table_write_state
+    original = statistics._parquet_table_write_state
 
     def cleanup_failure():
         raise RuntimeError("release_failed")
@@ -608,7 +637,7 @@ def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatc
     def interrupt(*args, **kwargs):
         raise primary
 
-    monkeypatch.setattr(statistics, "_artifact_table_write_state", native_state)
+    monkeypatch.setattr(statistics, "_parquet_table_write_state", native_state)
     monkeypatch.setattr(statistics.pq, "write_table", interrupt)
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     with runtime_resource_policy_scope(policy):

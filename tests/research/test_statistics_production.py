@@ -447,7 +447,10 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         ) as report_lease,
     ):
         evidence = load_a_share_run_evidence(
-            layout=layout, record=record, report_lease=report_lease
+            layout=layout,
+            record=record,
+            report_lease=report_lease,
+            quarterly_selections={},
         )
         report = build_a_share_report(record=record, evidence=evidence)
         projected = deepcopy(evidence)

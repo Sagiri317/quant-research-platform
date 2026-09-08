@@ -309,6 +309,7 @@ def _crypto_profile() -> ResearchProfile:
         produce_maker_calibration,
         produce_maker_ledger,
         produce_taker_ledger,
+        validate_maker_calibration,
     )
     from quant_research_platform.markets.implementations.crypto.processed import (
         catalog as crypto_catalog,
@@ -380,6 +381,7 @@ def _crypto_profile() -> ResearchProfile:
                     read_model_artifact=read_crypto_model_artifact,
                     expected_symbols=RESEARCH_SYMBOLS,
                     read_reconstruction=ReconstructionStats.from_payload,
+                    validate_maker_calibration=validate_maker_calibration,
                 ),
             ),
             f"{scenario}_portfolio_statistics": ProducerBinding(

@@ -107,6 +107,13 @@ PIT 适用性按已证明的数据范围与内容判断，数据质量和后续�
 
 新增公开 API/CLI、依赖、框架、连接器或部署能力需要明确批准。
 
+Linux 按标准 `/sys/fs/cgroup` 下实际成员及可见父层的 cgroup v2 额度，
+以宿主可用内存与有限 `memory.max - memory.current` 的较小值捕获一次资源基线；
+没有 cgroup v2 时使用宿主模式，不宣称识别可见层级之外的限制。
+模型 CPU 发现由 runtime 负责，结合物理核、affinity 和 CPU bandwidth quota 限制线程，
+合同层只解析线程参数；读取持久化模型保留已保存参数，不重新发现当前主机容量。
+Windows 保留原有宿主资源与文件锁行为。
+
 ## 直接验证
 
 环境名以 `environment.yml` 的 `name` 为准：

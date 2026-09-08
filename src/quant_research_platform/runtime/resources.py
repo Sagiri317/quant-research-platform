@@ -466,11 +466,78 @@ def _machine_lock_path() -> Path:
     return Path(tempfile.gettempdir()) / f".qrp-data-scale-{user_hash}.lock"
 
 
+def _cgroup_v2_directories() -> Iterator[Path]:
+    if sys.platform != "linux":
+        return
+    root = Path("/sys/fs/cgroup")
+    if not (root / "cgroup.controllers").exists():
+        return
+    membership = Path("/proc/self/cgroup").read_text(encoding="ascii").splitlines()
+    unified = [line[3:] for line in membership if line.startswith("0::")]
+    if len(unified) != 1 or not unified[0].startswith("/"):
+        raise ValueError("invalid_cgroup_membership")
+    relative = Path(unified[0].lstrip("/"))
+    if ".." in relative.parts:
+        raise ValueError("invalid_cgroup_membership")
+    directory = root / relative
+    if not directory.is_dir():
+        raise RuntimeError("cgroup_membership_not_visible")
+    while True:
+        yield directory
+        if directory == root:
+            break
+        directory = directory.parent
+
+
+def model_cpu_capacity() -> tuple[int, int]:
+    """Discover physical cores and the usable affinity/bandwidth capacity."""
+    import psutil
+
+    physical = psutil.cpu_count(logical=False)
+    if type(physical) is not int or physical <= 0:
+        raise RuntimeError("physical_core_count_unavailable")
+    available = physical
+    try:
+        if sys.platform == "linux":
+            available = min(available, len(os.sched_getaffinity(0)))
+        for directory in _cgroup_v2_directories():
+            maximum = directory / "cpu.max"
+            if not maximum.exists():
+                continue
+            quota, period = maximum.read_text(encoding="ascii").split()
+            period_us = _exact_positive_int(
+                int(period), error="invalid_cgroup_cpu_period"
+            )
+            if quota != "max":
+                quota_us = _exact_positive_int(
+                    int(quota), error="invalid_cgroup_cpu_quota"
+                )
+                available = min(available, max(1, quota_us // period_us))
+        available = _exact_positive_int(available, error="invalid_runtime_cpu_capacity")
+    except (OSError, ValueError, RuntimeError):
+        raise RuntimeError("runtime_cpu_capacity_discovery_failed") from None
+    return physical, available
+
+
 def _available_memory_bytes() -> int:
     try:
         import psutil  # type: ignore[import-not-found]
 
         available = psutil.virtual_memory().available
+        for directory in _cgroup_v2_directories():
+            limit_path = directory / "memory.max"
+            if not limit_path.exists():
+                continue
+            limit = limit_path.read_text(encoding="ascii").strip()
+            if limit != "max":
+                maximum = _exact_positive_int(
+                    int(limit), error="invalid_cgroup_memory_limit"
+                )
+                current = _exact_nonnegative_int(
+                    int((directory / "memory.current").read_text(encoding="ascii")),
+                    error="invalid_cgroup_memory_usage",
+                )
+                available = min(available, max(0, maximum - current))
     except Exception:
         raise RuntimeError("runtime_available_memory_discovery_failed") from None
     return _exact_positive_int(

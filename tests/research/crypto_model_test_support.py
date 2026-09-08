@@ -306,6 +306,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
         protocol as crypto_protocol,
     )
     from quant_research_platform.runtime import resources
+    from quant_research_platform.storage import parquet as parquet_storage
     from quant_research_platform.storage.identity import native_filesystem_path
     from quant_research_platform.storage.semantic_artifacts import (
         read_semantic_artifact_operational_metadata,
@@ -380,7 +381,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 on_validation(validation_fold, validation_spec, validation.iloc[:1])
                 raise primary
 
-            writer_type = persisted.pq.ParquetWriter
+            writer_type = parquet_storage.pq.ParquetWriter
 
             class ClosingWriter:
                 def __init__(
@@ -401,9 +402,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
                     raise RuntimeError("validation_close_secondary")
 
             with pytest.MonkeyPatch.context() as patch:
-                patch.setattr(persisted.pq, "ParquetWriter", ClosingWriter)
+                patch.setattr(parquet_storage.pq, "ParquetWriter", ClosingWriter)
                 if failure == "disk":
-                    disk_admission = persisted.require_free_disk_headroom
+                    disk_admission = parquet_storage.require_free_disk_headroom
 
                     def reject_validation_disk(
                         path, disk_admission=disk_admission, **kwargs
@@ -413,7 +414,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
                         return disk_admission(path, **kwargs)
 
                     patch.setattr(
-                        persisted, "require_free_disk_headroom", reject_validation_disk
+                        parquet_storage,
+                        "require_free_disk_headroom",
+                        reject_validation_disk,
                     )
                 with pytest.raises(
                     RuntimeError if failure == "disk" else KeyboardInterrupt,

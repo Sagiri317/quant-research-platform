@@ -58,6 +58,7 @@ def produce_crypto_report(
     report_lease,
     expected_symbols,
     read_reconstruction,
+    validate_maker_calibration,
 ):
     protocol = record.payload()["protocol"]
     issues, references = [], {}
@@ -306,6 +307,7 @@ def produce_crypto_report(
             artifact = read_statistics_artifact(
                 _instance_root(layout, reference),
                 expected_identity=reference.instance_identity,
+                validate_tables=validate_maker_calibration,
             )
             with artifact.table("crypto_maker_calibration.parquet") as frame:
                 calibration = {
