@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterable, Mapping
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, Rounded
+from types import MappingProxyType
 from typing import Any, NoReturn
 
 import pandas as pd
@@ -186,7 +187,7 @@ def bounded_qrp_json_object_snapshot(
     *,
     max_bytes: int,
 ) -> dict[str, Any]:
-    """Copy one native JSON object without crossing its rendered-size bound."""
+    """Copy one JSON object, including frozen containers, within its size bound."""
 
     if type(max_bytes) is not int or max_bytes < 0:
         raise ValueError("qrp_json_max_bytes_invalid")
@@ -212,20 +213,21 @@ def bounded_qrp_json_object_snapshot(
                 )
             )
             return item
-        if type(item) not in {list, dict}:
+        if type(item) not in {list, tuple, dict, MappingProxyType}:
             raise ValueError("qrp_json_unsupported_value")
         identity = id(item)
         if identity in active:
             raise ValueError("qrp_json_cycle")
         active.add(identity)
         claim(2)
-        result: list[Any] | dict[str, Any] = [] if type(item) is list else {}
+        sequence = type(item) in {list, tuple}
+        result: list[Any] | dict[str, Any] = [] if sequence else {}
         try:
-            for index, entry in enumerate(item if type(item) is list else item.items()):
+            for index, entry in enumerate(item if sequence else item.items()):
                 if index:
                     claim(1)
                 claim(1 + _JSON_INDENT * (depth + 1))
-                if type(item) is list:
+                if sequence:
                     assert isinstance(result, list)
                     result.append(snapshot(entry, depth=depth + 1))
                     continue
@@ -783,7 +785,7 @@ def _require_bounded_json_preflight(
 ) -> int:
     """Reject an over-limit payload before copying its native containers."""
 
-    if type(value) is not dict:
+    if type(value) not in {dict, MappingProxyType}:
         raise ValueError("qrp_json_top_level_object_required")
     return _require_bounded_json_value_preflight(
         value,
@@ -851,7 +853,7 @@ def _require_bounded_json_value_preflight(
             claim(len(repr(item)))
         elif type(item) is str:
             claim_text(item)
-        elif type(item) is list:
+        elif type(item) in {list, tuple}:
             identity = id(item)
             if identity in active:
                 raise ValueError("qrp_json_cycle")
@@ -862,7 +864,7 @@ def _require_bounded_json_value_preflight(
                     visit(child, depth=depth + 1)
             finally:
                 active.remove(identity)
-        elif type(item) is dict:
+        elif type(item) in {dict, MappingProxyType}:
             identity = id(item)
             if identity in active:
                 raise ValueError("qrp_json_cycle")

@@ -534,3 +534,34 @@ def test_data_spec_validates_schema_version_before_snapshotting_roles() -> None:
             partition_columns=(),
             schema_version="unsupported",
         )
+
+
+def test_bounded_snapshot_accepts_only_exact_frozen_containers():
+    from collections import UserDict
+
+    native = {"nested": [{"names": ["a", "b"]}]}
+    frozen = MappingProxyType({"nested": (MappingProxyType({"names": ("a", "b")}),)})
+    result = json_owner.bounded_qrp_json_object_snapshot(frozen, max_bytes=1024)
+    assert result == native
+    result["nested"][0]["names"].append("c")
+    assert frozen["nested"][0]["names"] == ("a", "b")
+    for invalid in (UserDict({"x": 1}), {1, 2}, range(3), object()):
+        with pytest.raises(ValueError, match="qrp_json_unsupported_value"):
+            json_owner.bounded_qrp_json_object_snapshot(
+                {"value": invalid}, max_bytes=1024
+            )
+    cycle = []
+    cyclic = MappingProxyType({"cycle": (cycle,)})
+    cycle.append(cyclic)
+    with pytest.raises(ValueError, match="qrp_json_cycle"):
+        json_owner.bounded_qrp_json_object_snapshot(cyclic, max_bytes=4096)
+    deep = "leaf"
+    for _ in range(65):
+        deep = (deep,)
+    with pytest.raises(ValueError, match="qrp_json_recursion_limit"):
+        json_owner.bounded_qrp_json_object_snapshot({"deep": deep}, max_bytes=100_000)
+    with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes"):
+        json_owner.bounded_qrp_json_object_snapshot(
+            MappingProxyType({"large": ("x" * 10_000,)}), max_bytes=64
+        )
+    assert json_owner.canonical_json_hash([1]) != json_owner.canonical_json_hash((1,))

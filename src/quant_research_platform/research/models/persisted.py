@@ -1204,8 +1204,7 @@ def read_crypto_model_member(artifact, entry, *, resource_policy):
     ) as owned:
         value = owned.value
         try:
-            if not callable(getattr(value, "predict", None)):
-                raise ValueError("model_artifact_model_invalid")
+            validate_model_state(value, entry["model_metadata"])
             yield value
         finally:
             value = None

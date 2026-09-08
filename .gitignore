@@ -37,6 +37,8 @@ data/raw/
 data/interim/
 data/processed/
 data/research/
+data/artifacts/
+data/runs/
 data/reference_docs/
 secrets.*
 credentials.*

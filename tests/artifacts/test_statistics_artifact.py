@@ -121,12 +121,17 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
     _assert_rejected_at_write_and_read(tmp_path, tables, envelope, member)
 
 
-def _assert_rejected_at_write_and_read(tmp_path, tables, envelope, member):
+def _assert_rejected_at_write_and_read(
+    tmp_path, tables, envelope, member, *, table_group="research"
+):
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     with runtime_resource_policy_scope(policy):
         with pytest.raises(ValueError, match="statistics_table_"):
             statistics.write_statistics_artifact(
-                tmp_path / "rejected", envelope=envelope, tables=tables
+                tmp_path / "rejected",
+                envelope=envelope,
+                tables=tables,
+                table_group=table_group,
             )
         assert policy.used_memory_bytes == 0
 
@@ -347,4 +352,115 @@ def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatc
             )
         assert caught.value is primary
         assert any("release also failed" in note for note in primary.__notes__)
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.fixture
+def crypto_tables():
+    row = dict(
+        candidate_id="candidate",
+        kind="oos",
+        fold_id="fold_1",
+        metric_id="net_pnl",
+        start_at=pd.Timestamp("2023-01-02"),
+        end_at=pd.Timestamp("2023-01-03"),
+        start_nav=100.0,
+        end_nav=110.0,
+        gross_pnl=10.0,
+        net_pnl=10.0,
+        fees=0.0,
+        funding=0.0,
+        turnover=100.0,
+        fill_events=1,
+        net_return=0.1,
+        benchmark_return=0.0,
+        status="DEFINED",
+        reason="",
+        value=0.2,
+        observation_count=1,
+        text="",
+        fee_bps=1.0,
+        additional_spread_bps=0.0,
+        cost_delta=0.0,
+        method="fixed_turnover_rescaling",
+    )
+    result = {
+        member.removesuffix(".parquet"): pd.DataFrame(
+            [
+                {
+                    column: row[column]
+                    for column in statistics.STATISTICS_TABLE_COLUMNS[member]
+                }
+            ]
+        )
+        for member in statistics.STATISTICS_TABLE_GROUPS["crypto_portfolio"]
+    }
+    result["crypto_execution_diagnostics"].loc[0, ["value", "text"]] = [
+        float("nan"),
+        "estimated_queue_ahead",
+    ]
+    return result
+
+
+@pytest.mark.parametrize(
+    "member",
+    (
+        "crypto_portfolio_daily.parquet",
+        "crypto_portfolio_statistics.parquet",
+        "crypto_execution_diagnostics.parquet",
+    ),
+)
+@pytest.mark.parametrize(
+    "mutation", ("defined_null", "undefined_value", "reason", "status")
+)
+def test_crypto_status_measurements_are_rejected_at_write_and_read(
+    tmp_path, crypto_tables, envelope, member, mutation
+):
+    frame = crypto_tables[member.removesuffix(".parquet")]
+    if mutation == "defined_null":
+        frame.loc[
+            0, "net_return" if member == "crypto_portfolio_daily.parquet" else "value"
+        ] = float("nan")
+        if "text" in frame:
+            frame.loc[0, "text"] = ""
+    elif mutation == "undefined_value":
+        frame.loc[0, ["status", "reason"]] = ["UNDEFINED", "missing_measurement"]
+    elif mutation == "reason":
+        frame.loc[0, "reason"] = "contradicts_defined_status"
+    else:
+        frame.loc[0, "status"] = "UNKNOWN"
+    _assert_rejected_at_write_and_read(
+        tmp_path, crypto_tables, envelope, member, table_group="crypto_portfolio"
+    )
+
+
+def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
+    tmp_path, crypto_tables, envelope
+):
+    daily = crypto_tables["crypto_portfolio_daily"]
+    daily.loc[0, ["end_nav", "net_return", "status", "reason"]] = [
+        float("nan"),
+        float("nan"),
+        "UNDEFINED",
+        "utc_boundary_valuation_missing",
+    ]
+    with runtime_resource_policy_scope() as policy:
+        root = statistics.write_statistics_artifact(
+            tmp_path / "crypto",
+            envelope=envelope,
+            tables=crypto_tables,
+            table_group="crypto_portfolio",
+        )
+        artifact = statistics.read_statistics_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        with artifact.table("crypto_execution_diagnostics.parquet") as frame:
+            assert frame.loc[0, "status"] == "DEFINED"
+            assert pd.isna(frame.loc[0, "value"])
+            assert frame.loc[0, "text"] == "estimated_queue_ahead"
+        with artifact.table("crypto_portfolio_daily.parquet") as frame:
+            assert frame.loc[0, "status"] == "UNDEFINED"
+            assert pd.isna(frame.loc[0, "net_return"])
+            assert frame.loc[0, "start_nav"] == 100.0
+            assert frame.loc[0, "benchmark_return"] == 0.0
         assert policy.used_memory_bytes == 0

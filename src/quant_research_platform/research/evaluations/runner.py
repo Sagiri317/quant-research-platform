@@ -213,53 +213,53 @@ def build_evaluation_result_from_research_dataset(
     )
     effective_groups = spec.n_groups if n_groups is None else n_groups
     operation = ExitStack()
-    policy = operation.enter_context(runtime_resource_policy_scope(resource_policy))
-    chunks = operation.enter_context(
-        closing_iterator(
-            iter_research_dataset_chunks(
-                layout,
-                market_id=dataset_spec.market_id,
-                dataset_id=dataset_spec.data_id,
-                time_window=time_window,
-                columns=read_columns,
-                access_window=access_window,
+    try:
+        policy = operation.enter_context(runtime_resource_policy_scope(resource_policy))
+        chunks = operation.enter_context(
+            closing_iterator(
+                iter_research_dataset_chunks(
+                    layout,
+                    market_id=dataset_spec.market_id,
+                    dataset_id=dataset_spec.data_id,
+                    time_window=time_window,
+                    columns=read_columns,
+                    access_window=access_window,
+                )
             )
         )
-    )
 
-    def validated_chunks():
-        for chunk in chunks:
-            validate_evaluation_input(
-                chunk,
-                dataset_spec,
-                signals=spec.signals,
-                label_columns=spec.label_columns,
-            )
-            if not spec.label_availability_columns:
-                yield chunk
-                continue
-            if time_window is None:
-                raise ValueError("evaluation_fitting_cutoff_required")
-            with policy.lease(
-                "research.evaluation.label_maturity",
-                max(
-                    1,
-                    (len(spec.label_availability_columns) + 2)
-                    * pandas_frame_payload_bytes(chunk),
-                ),
-            ):
-                prepared = chunk.copy()
-                for label, availability in spec.label_availability_columns.items():
-                    legal = legal_training_rows(
-                        chunk,
-                        fitting_cutoff=time_window.end,
-                        availability_column=availability,
-                        target_column=label,
-                    )
-                    prepared.loc[~prepared.index.isin(legal.index), label] = pd.NA
-                yield prepared
+        def validated_chunks():
+            for chunk in chunks:
+                validate_evaluation_input(
+                    chunk,
+                    dataset_spec,
+                    signals=spec.signals,
+                    label_columns=spec.label_columns,
+                )
+                if not spec.label_availability_columns:
+                    yield chunk
+                    continue
+                if time_window is None:
+                    raise ValueError("evaluation_fitting_cutoff_required")
+                with policy.lease(
+                    "research.evaluation.label_maturity",
+                    max(
+                        1,
+                        (len(spec.label_availability_columns) + 2)
+                        * pandas_frame_payload_bytes(chunk),
+                    ),
+                ):
+                    prepared = chunk.copy()
+                    for label, availability in spec.label_availability_columns.items():
+                        legal = legal_training_rows(
+                            chunk,
+                            fitting_cutoff=time_window.end,
+                            availability_column=availability,
+                            target_column=label,
+                        )
+                        prepared.loc[~prepared.index.isin(legal.index), label] = pd.NA
+                    yield prepared
 
-    try:
         result = build_evaluation_result_from_frames(
             validated_chunks(),
             spec=spec,

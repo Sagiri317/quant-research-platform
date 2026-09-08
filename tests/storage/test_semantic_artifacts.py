@@ -432,3 +432,50 @@ def test_constant_directory_identity_cannot_hide_added_member(
             assert set(root.parent.iterdir()) == before
         assert policy.used_memory_bytes == 0
     assert {path.name: path.read_bytes() for path in root.iterdir()} == old_good
+
+
+@pytest.mark.parametrize("mutation", ("earlier_member", "member_set", "manifest"))
+def test_comparison_rechecks_the_complete_round_before_match(
+    tmp_path, monkeypatch, mutation
+):
+    import inspect
+
+    import quant_research_platform.storage.semantic_artifacts as storage
+
+    def writer(root):
+        (root / "a.bin").write_bytes(b"AAAA")
+        (root / "b.bin").write_bytes(b"BBBB")
+
+    left = storage.write_semantic_artifact(tmp_path / "left", _envelope(), writer)
+    right = storage.write_semantic_artifact(tmp_path / "right", _envelope(), writer)
+    old_good = {path.name: path.read_bytes() for path in left.iterdir()}
+    original = storage.open_filesystem_file
+    injected = []
+
+    def opening(path, *args, **kwargs):
+        if (
+            not injected
+            and path == left / "b.bin"
+            and inspect.currentframe().f_back.f_code.co_name
+            == "compare_semantic_artifacts"
+        ):
+            injected.append(True)
+            if mutation == "member_set":
+                (right / "late.bin").write_bytes(b"late")
+            else:
+                target = right / (
+                    "a.bin" if mutation == "earlier_member" else "manifest.json"
+                )
+                replacement = tmp_path / "replacement"
+                replacement.write_bytes(
+                    b"CCCC"
+                    if mutation == "earlier_member"
+                    else target.read_bytes() + b" "
+                )
+                replacement.replace(target)
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(storage, "open_filesystem_file", opening)
+    assert storage.compare_semantic_artifacts(left, right).status == "INSPECTION_FAILED"
+    assert injected == [True]
+    assert {path.name: path.read_bytes() for path in left.iterdir()} == old_good

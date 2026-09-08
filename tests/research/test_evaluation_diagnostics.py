@@ -586,3 +586,61 @@ def test_evaluation_writer_roundtrips_long_windows_path(tmp_path):
         assert metrics.n_obs.tolist() == [2]
         assert metrics.ic.iloc[0] == pytest.approx(1.0)
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("cleanup_fails", (False, True))
+def test_evaluation_initialization_error_releases_operation_with_traceback_retained(
+    tmp_path, monkeypatch, cleanup_fails
+):
+    from contextlib import ExitStack
+
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.research.evaluations import runner
+    from quant_research_platform.runtime.resources import (
+        current_runtime_resource_policy,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    if cleanup_fails:
+
+        class ClosingFailure(ExitStack):
+            def close(self):
+                super().close()
+                raise RuntimeError("secondary_close")
+
+        monkeypatch.setattr(runner, "ExitStack", ClosingFailure)
+    profile = research_profile()
+    retained = None
+    try:
+        with pytest.raises(
+            PermissionError, match="research_dataset_access_window_forbidden"
+        ) as caught:
+            runner.build_evaluation_result_from_research_dataset(
+                layout=StorageLayout(tmp_path),
+                dataset_catalog=profile.research_datasets,
+                evaluation_catalog=profile.evaluations,
+                evaluation_id=profile.evaluations.list()[0].evaluation_id,
+                time_window=TimeWindow("2024-01-02", "2024-01-03"),
+            )
+        retained = caught.value
+        assert retained.__traceback__ is not None
+        assert current_runtime_resource_policy() is None
+        if cleanup_fails:
+            assert any(
+                "evaluation operation cleanup also failed" in note
+                for note in retained.__notes__
+            )
+        with runtime_resource_policy_scope() as policy:
+            assert policy.used_memory_bytes == 0
+    finally:
+        if current_runtime_resource_policy() is not None and retained is not None:
+            trace = retained.__traceback__
+            while trace is not None:
+                if (
+                    trace.tb_frame.f_code.co_name
+                    == "build_evaluation_result_from_research_dataset"
+                ):
+                    trace.tb_frame.f_locals["operation"].close()
+                    break
+                trace = trace.tb_next

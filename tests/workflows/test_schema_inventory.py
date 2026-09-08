@@ -764,3 +764,57 @@ def test_schema_inventory_summary_uses_streaming_production_owner(
     assert summary["total_row_count"] == 3
     assert len(summary["schema_hash"]) == 64
     assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "time_column", ("timestamp", "report_period", "effective_date")
+)
+@pytest.mark.parametrize("cancel", (False, True))
+def test_inventory_uses_declared_time_and_closes_early_context(
+    tmp_path, time_column, cancel
+):
+    spec = InterimDataSpec(
+        data_id="declared_time",
+        source_id="fixture",
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "asset_id": ColumnRole.KEY,
+            time_column: ColumnRole.TIMESTAMP,
+            "value": ColumnRole.CONTEXT,
+        },
+        primary_key=("asset_id", time_column),
+        partition_columns=("year",),
+    )
+    layout = StorageLayout(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a", "b", "c"],
+            time_column: pd.to_datetime(["2022-12-31", "2023-01-03", "2023-01-04"]),
+            "value": [1.0, 2.0, 3.0],
+        }
+    )
+    write_dataset(layout.interim_data_root("fixture", spec.data_id), frame, spec=spec)
+    primary = KeyboardInterrupt("inventory_consumer_primary")
+    with runtime_resource_policy_scope() as policy:
+        items = None
+        try:
+            try:
+                with schema_inventory.iter_schema_inventory_items(
+                    tmp_path, resource_policy=policy
+                ) as items:
+                    item = next(items)
+                    assert item["row_count_by_year"] == {"2022": 1, "2023": 2}
+                    assert (
+                        schema_inventory._validate_schema_inventory_item(item) is item
+                    )
+                    assert policy.used_memory_bytes > 0
+                    if cancel:
+                        raise primary
+            except KeyboardInterrupt as error:
+                assert cancel and error is primary
+            assert policy.used_memory_bytes == 0
+            assert next(items, None) is None
+        finally:
+            if items is not None:
+                items.close()

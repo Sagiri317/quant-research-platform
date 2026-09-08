@@ -58,6 +58,10 @@ def compare_semantic_artifacts(
     trial_layout: StorageLayout | None = None,
 ) -> SemanticArtifactComparison:
     try:
+        identities = {
+            root / "manifest.json": _member_identity(root / "manifest.json")
+            for root in (old_root, candidate_root)
+        }
         old_envelope, old_members = _read_semantic_record(old_root)
         candidate_envelope, candidate_members = _read_semantic_record(candidate_root)
         if old_envelope != candidate_envelope:
@@ -96,6 +100,8 @@ def compare_semantic_artifacts(
                 _member_identity(old_path),
                 _member_identity(candidate_path),
             )
+            identities[old_path] = old_identity
+            identities[candidate_path] = candidate_identity
             if (
                 _member_record(member["path"], old_path) != member
                 or _member_record(member["path"], candidate_path) != member
@@ -130,6 +136,20 @@ def compare_semantic_artifacts(
                 _member_identity(old_path) != old_identity
                 or _member_identity(candidate_path) != candidate_identity
             ):
+                raise ValueError("semantic_artifact_member_identity_changed")
+        for root in (old_root, candidate_root):
+            remaining = set(old_paths)
+
+            def verify(relative: str, _path: Path, remaining=remaining) -> None:
+                if relative not in remaining:
+                    raise ValueError("semantic_artifact_member_set_changed")
+                remaining.remove(relative)
+
+            _visit_member_paths(root, verify)
+            if remaining:
+                raise ValueError("semantic_artifact_member_set_changed")
+        for path, expected_identity in identities.items():
+            if _member_identity(path) != expected_identity:
                 raise ValueError("semantic_artifact_member_identity_changed")
     except (OSError, ValueError):
         return SemanticArtifactComparison("INSPECTION_FAILED")

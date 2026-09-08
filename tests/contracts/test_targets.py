@@ -170,3 +170,75 @@ def test_research_run_record_requires_real_terminals_and_protocol_request_match(
         replace(record, terminal_targets=(), target_results=())
     with pytest.raises(ValueError, match="research_run_protocol_request_mismatch"):
         replace(record, scenario_id="different")
+
+
+def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_path):
+    import json
+
+    from quant_research_platform.artifacts.research import (
+        read_research_run_record,
+        write_research_run_record,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    protocol = {
+        "scenario_id": "scenario",
+        "access_window": "holdout",
+        "scope": {"assets": ["btc_usdt"]},
+    }
+    evidence = {
+        "qualification": "REUSE",
+        "prior_runs": [{"run_id": "prior", "identity": "d" * 64}],
+    }
+    operation = unmeasured_operation_evidence("fixture_record")
+    record = ResearchRunRecord(
+        run_id="run_immutable",
+        profile_id="profile",
+        scenario_id="scenario",
+        protocol=protocol,
+        protocol_identity=canonical_json_hash(protocol),
+        research_window={
+            "start": "2024-01-01",
+            "end": "2025-12-31",
+            "access": "holdout",
+        },
+        software_identity="c" * 64,
+        terminal_targets=("target",),
+        target_results=(
+            ResearchRunTargetResult(
+                target_id="target",
+                producer_kind=ProducerKind.MODEL,
+                status=TargetStatus.BUILT,
+                instance_identity="a" * 64,
+                schema_identity="b" * 64,
+                artifact_root="data/artifacts/market/target",
+            ),
+        ),
+        status=RunStatus.COMPLETE,
+        operation_evidence=operation,
+        holdout_evidence=evidence,
+    )
+    original = record.payload()
+    protocol["scope"]["assets"].append("eth_usdt")
+    evidence["prior_runs"].clear()
+    operation["environment"]["reason"] = "changed"
+    payload = record.payload()
+    payload["protocol"]["scope"]["assets"].append("other")
+    payload["holdout_evidence"]["prior_runs"].clear()
+    payload["operation_evidence"]["environment"]["reason"] = "changed"
+    assert record.payload() == original
+    assert canonical_json_hash(record.payload()["protocol"]) == record.protocol_identity
+    assert json.loads(json.dumps(record.payload())) == original
+    with pytest.raises(TypeError):
+        record.protocol["scope"]["other"] = "changed"
+    with pytest.raises(AttributeError):
+        record.protocol["scope"]["assets"].append("other")
+    with pytest.raises(TypeError):
+        record.holdout_evidence["prior_runs"][0]["identity"] = "e" * 64
+    with pytest.raises(TypeError):
+        record.operation_evidence["environment"]["reason"] = "changed"
+    assert replace(record).payload() == original
+    with runtime_resource_policy_scope() as policy:
+        path = write_research_run_record(tmp_path / f"{record.run_id}.json", record)
+        assert read_research_run_record(path).payload() == original
+        assert policy.used_memory_bytes == 0

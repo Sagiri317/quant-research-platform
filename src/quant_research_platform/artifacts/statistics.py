@@ -1047,6 +1047,39 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             or not result["common_date"].isin((0, 1)).all()
         ):
             raise ValueError("statistics_model_loss_invalid")
+    if member in {
+        "crypto_portfolio_daily.parquet",
+        "crypto_portfolio_statistics.parquet",
+        "crypto_execution_diagnostics.parquet",
+    }:
+        if not result.status.isin(("DEFINED", "UNDEFINED")).all():
+            raise ValueError("statistics_table_status_invalid")
+        defined = result.status.eq("DEFINED")
+        value_column = (
+            "net_return" if member == "crypto_portfolio_daily.parquet" else "value"
+        )
+        has_value = result[value_column].notna()
+        if member == "crypto_execution_diagnostics.parquet":
+            has_text = result.text.str.strip().ne("")
+            invalid_value = (defined & ~(has_value ^ has_text)) | (
+                ~defined & (has_value | has_text)
+            )
+        else:
+            invalid_value = defined.ne(has_value)
+        if (
+            invalid_value.any()
+            or result.loc[defined, "reason"].ne("").any()
+            or result.loc[~defined, "reason"].str.strip().eq("").any()
+        ):
+            raise ValueError("statistics_table_status_value_invalid")
+        if member == "crypto_portfolio_daily.parquet" and (
+            result.loc[defined, ["start_nav", "end_nav", "benchmark_return"]]
+            .isna()
+            .any()
+            .any()
+            or result.loc[defined, "start_nav"].le(0).any()
+        ):
+            raise ValueError("statistics_table_status_value_invalid")
     if member in _PORTFOLIO_COLUMNS:
         keys = {
             "portfolio_daily.parquet": ("candidate_id", "entry_at"),

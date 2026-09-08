@@ -29,6 +29,7 @@ REQUIRED_REPORT_SECTIONS = (
 def build_a_share_report(
     *, record: ResearchRunRecord, evidence: Mapping[str, object]
 ) -> dict[str, object]:
+    run_payload = record.payload()
     references = evidence.get("references")
     statistics = evidence.get("statistics")
     portfolios = evidence.get("portfolios")
@@ -108,10 +109,10 @@ def build_a_share_report(
         "development vs holdout": {
             "status": "DEFINED",
             "requested_access": record.research_window["access"],
-            "development_window": record.protocol.get("development_window"),
-            "holdout_window": record.protocol.get("holdout_window"),
-            "frozen_development": record.protocol.get("frozen_development"),
-            "evidence": dict(record.holdout_evidence),
+            "development_window": run_payload["protocol"].get("development_window"),
+            "holdout_window": run_payload["protocol"].get("holdout_window"),
+            "frozen_development": run_payload["protocol"].get("frozen_development"),
+            "evidence": run_payload["holdout_evidence"],
         },
         "robustness": statistics.get("robustness", [dict(statistics)])
         + portfolio_statistics.get("robustness", [dict(portfolio_statistics)]),
@@ -122,7 +123,7 @@ def build_a_share_report(
         },
     }
     sections["portfolio"]["nav_path"] = portfolio_statistics.get("nav_path", {})
-    sections["run observations"] = dict(record.operation_evidence)
+    sections["run observations"] = run_payload["operation_evidence"]
     for name in ("cost", "risk", "capacity", "attribution"):
         rows = sections[name]["results"]
         if rows:

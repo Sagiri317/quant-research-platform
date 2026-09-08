@@ -23,6 +23,7 @@ REQUIRED_REPORT_SECTIONS = (
 
 
 def build_crypto_research_report(*, record, evidence):
+    run_payload = record.payload()
     statistics = evidence["statistics"]
 
     def statistical_rows(table, predicate=None):
@@ -74,7 +75,7 @@ def build_crypto_research_report(*, record, evidence):
                 ),
             ),
             "daily_returns": statistical_rows("crypto_portfolio_daily"),
-            "policy": dict(record.protocol["portfolio_statistics"]),
+            "policy": run_payload["protocol"]["portfolio_statistics"],
             "inference_scope": (
                 "daily_economic_descriptives_no_spa_stepm_mcs_psr_dsr_pbo_matrix"
             ),
@@ -83,7 +84,7 @@ def build_crypto_research_report(*, record, evidence):
             "status": "DEFINED",
             "access_window": record.research_window["access"],
             "holdout_status": record.protocol["holdout_status"],
-            "holdout_window": dict(record.protocol["holdout_window"]),
+            "holdout_window": run_payload["protocol"]["holdout_window"],
         },
         "readiness/blockers": {
             "status": "DEFINED"
@@ -102,7 +103,7 @@ def build_crypto_research_report(*, record, evidence):
         "report_status": report_status(record.status, evidence["issues"]).value,
         "sections": {
             name: (
-                dict(record.operation_evidence)
+                run_payload["operation_evidence"]
                 if name == "run observations"
                 else sections[name]
             )

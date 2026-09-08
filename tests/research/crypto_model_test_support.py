@@ -285,7 +285,14 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
 
 
 def check_crypto_model_staging(*, layout, profile, saved):
+    import hashlib
+    import json
+    import pickle
+    import shutil
+    from pathlib import Path
     from types import SimpleNamespace
+
+    from sklearn.dummy import DummyRegressor
 
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
@@ -299,6 +306,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
         protocol as crypto_protocol,
     )
     from quant_research_platform.runtime import resources
+    from quant_research_platform.storage.identity import native_filesystem_path
     from quant_research_platform.storage.semantic_artifacts import (
         read_semantic_artifact_operational_metadata,
         read_semantic_artifact_record,
@@ -315,6 +323,39 @@ def check_crypto_model_staging(*, layout, profile, saved):
     logical_root = saved.instance_root.parent.parent
     previous_instances = {p.name for p in saved.instance_root.parent.iterdir()}
     with runtime_resource_policy_scope() as policy:
+        with policy.lease("test.crypto.model_corruption", 8 * 1024**2):
+            entry = saved.models[0]
+            columns = entry["model_metadata"]["input_columns"]
+            probe = pd.DataFrame(np.zeros((2, len(columns))), columns=columns)
+            wrong = DummyRegressor(strategy="constant", constant=0.125).fit(
+                probe, np.zeros(2)
+            )
+            copied = layout.project_root / "corrupt-model" / saved.instance_root.name
+            shutil.copytree(
+                native_filesystem_path(saved.instance_root),
+                native_filesystem_path(copied),
+            )
+            relative = f"models/{entry['fold_id']}/{entry['model_id']}.pkl"
+            raw = pickle.dumps(wrong, protocol=pickle.HIGHEST_PROTOCOL)
+            Path(native_filesystem_path(copied / relative)).write_bytes(raw)
+            manifest_path = Path(native_filesystem_path(copied / "manifest.json"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            member = next(row for row in manifest["members"] if row["path"] == relative)
+            member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            changed = persisted.read_crypto_model_artifact(
+                copied,
+                expected_identity=saved.envelope["instance_identity"],
+                trial_layout=layout,
+            )
+            with pytest.raises(ValueError, match="model_state_metadata_mismatch"):
+                with persisted.read_crypto_model_member(
+                    changed, changed.models[0], resource_policy=policy
+                ):
+                    pytest.fail("wrong predictor reached the consumer")
+            del probe, wrong, raw, manifest, changed, member
+        assert policy.used_memory_bytes == 0
+        assert read_semantic_artifact_record(saved.instance_root) == original
         for index, failure in enumerate(("seed", "missing_fold", "disk", "primary")):
             envelope = build_business_manifest_envelope(
                 **{

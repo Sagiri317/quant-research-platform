@@ -240,7 +240,7 @@ def load_a_share_run_evidence(
             statistics = _unavailable(issues, statistics_target)
 
     candidates = record.protocol.get("portfolio_candidates")
-    if type(candidates) is not list or any(
+    if type(candidates) is not tuple or any(
         type(item) is not str for item in candidates
     ):
         raise ValueError("research_run_protocol_portfolios_invalid")

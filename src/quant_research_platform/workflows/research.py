@@ -713,7 +713,7 @@ def _frozen_holdout_protocol(
         if (
             record.status is not RunStatus.COMPLETE
             or record.scenario_id != protocol.scenario_id
-            or dict(record.protocol) != protocol.manifest()
+            or record.payload()["protocol"] != protocol.manifest()
             or record.research_window["access"] != "development"
             or pd.Timestamp(record.research_window["end"])
             != pd.Timestamp(protocol.manifest()["development_window"]["end"])

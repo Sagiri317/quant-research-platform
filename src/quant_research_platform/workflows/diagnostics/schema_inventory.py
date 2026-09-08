@@ -106,7 +106,8 @@ def iter_schema_inventory_items(
                         ) from None
                     yield item
 
-        yield generate()
+        with closing_iterator(generate()) as items:
+            yield items
 
 
 def write_schema_inventory(
@@ -549,9 +550,9 @@ def _aggregate_dataset_stats(
             row_count += int(len(frame))
             for column in frame.columns:
                 dtypes.setdefault(str(column), str(frame[column].dtype))
-            if "timestamp" in frame.columns:
+            if session.timestamp_column is not None:
                 timestamps = strict_timestamp_series(
-                    frame["timestamp"],
+                    frame[session.timestamp_column],
                     error="schema_inventory_invalid_timestamp",
                 ).dropna()
                 if not timestamps.empty:
