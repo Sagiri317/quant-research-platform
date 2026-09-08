@@ -322,7 +322,13 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
     per_row = 14 * 1024 if events is not None else (2048 if definitions else 4096)
     asset_count = max(1, len(asset_types))
     block_sessions = max(
-        1, min(64, policy.operation_headroom_bytes // (3 * asset_count * per_row))
+        1,
+        min(
+            len(sessions),
+            (policy.operation_headroom_bytes - 1024**2) // (3 * asset_count * per_row)
+            - lookback
+            - lookahead,
+        ),
     )
     history = None
     with ExitStack() as history_owner:
@@ -435,7 +441,11 @@ def _benchmark_frames(source, session, policy, retained):
     )
     rows_per_day = max(1, 2 * len(assets))
     block_size = max(
-        1, min(64, policy.operation_headroom_bytes // (3 * rows_per_day * 4096))
+        1,
+        min(
+            len(sessions),
+            (policy.operation_headroom_bytes - 1024**2) // (3 * rows_per_day * 4096),
+        ),
     )
     bound = 1024**2 + rows_per_day * block_size * 4096
 

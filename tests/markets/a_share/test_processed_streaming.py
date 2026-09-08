@@ -160,9 +160,11 @@ def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):
         assert policy.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize("cap_mib", (8, 128))
 def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
     tmp_path,
     monkeypatch,
+    cap_mib,
 ):
     dates = pd.bdate_range("2020-01-02", periods=400)
     source = _synthetic_interim_frames(dates)
@@ -218,6 +220,7 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
     materialize = producer.materialize_dataset_session_owned
     issued_inputs = []
     pit_rows = []
+    slabs = {data_id: [] for data_id in target_ids}
 
     def materialize_owned(*args, **kwargs):
         owned = materialize(*args, **kwargs)
@@ -225,6 +228,7 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
         return owned
 
     def owned_compute(spec, **kwargs):
+        slabs[spec.data_id].append(len(kwargs["panel_sessions"]))
         payloads = {
             id(frame): frame
             for frame in (*kwargs["source"].values(), *kwargs["dependencies"].values())
@@ -242,7 +246,7 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
             pit_rows.append(len(kwargs["dependencies"]["market_panel_1d"]))
         return compute(spec, **kwargs)
 
-    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+    with runtime_resource_policy_scope(explicit_cap_bytes=cap_mib * 1024**2) as policy:
         for data_id, frame in source.items():
             spec = profile.interim.get(data_id)
             write_dataset(
@@ -305,7 +309,11 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
                 )
             actual = read_dataset(root, resource_policy=policy)
             pd.testing.assert_frame_equal(actual, eager[data_id], check_exact=True)
-            assert len(tuple((root / "data").rglob("*.parquet"))) > 1
+            if cap_mib == 8:
+                assert len(tuple((root / "data").rglob("*.parquet"))) > 1
+                assert len(slabs[data_id]) > 1
+            else:
+                assert max(slabs[data_id]) > 64
             chunks = list(
                 iter_complete_session_frames(
                     read_dataset(
@@ -320,7 +328,10 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
             )
             assert policy.used_memory_bytes == 0
             assert all(not lease.active for _reference, lease in issued_inputs)
-        assert max(pit_rows) <= 64 * 3
+        if cap_mib == 8:
+            assert max(pit_rows) < len(dates) * 3
+        else:
+            assert max(pit_rows) > 64 * 3
         mask = eager["execution_mask"]
         assert mask.loc[
             mask["asset_id"].eq("000001") & mask["timestamp"].eq(dates[63]), "can_enter"
@@ -555,22 +566,23 @@ def test_panel_calendar_rejects_missing_requested_trade_dates_including_endpoint
 def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     tmp_path, monkeypatch
 ):
-    dates = pd.bdate_range("2020-01-02", periods=66).as_unit("ns")
+    dates = pd.bdate_range("2020-01-02", periods=400).as_unit("ns")
     source = _synthetic_interim_frames(dates)
     bars = source["market_bars_1d"]
     asset = bars.source_asset_id.eq("000002")
     prices = ["open", "high", "low", "close", "adj_open", "adj_close"]
     bars.loc[asset & bars.timestamp.eq(dates[61]), prices] = 100.0
-    bars.loc[asset & bars.timestamp.eq(dates[63]), prices] = np.nan
-    bars.loc[asset & bars.timestamp.eq(dates[63]), "filling_flag"] = 1
-    bars.loc[asset & bars.timestamp.eq(dates[64]), prices] = 120.0
-    bars.loc[asset & bars.timestamp.eq(dates[64]), "period_return"] = 0.1
+    suspended = asset & bars.timestamp.between(dates[63], dates[-2])
+    bars.loc[suspended, prices] = np.nan
+    bars.loc[suspended, "filling_flag"] = 1
+    bars.loc[asset & bars.timestamp.eq(dates[-1]), prices] = 120.0
+    bars.loc[asset & bars.timestamp.eq(dates[-1]), "period_return"] = 0.1
     source["market_bars_1d"] = bars.loc[~(asset & bars.timestamp.eq(dates[62]))].copy()
     profile = research_profile()
     spec = profile.processed.get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+    with runtime_resource_policy_scope(explicit_cap_bytes=9 * 1024**2) as policy:
         for data_id in spec.source_input_data_ids:
             source_spec = profile.interim.get(data_id)
             write_dataset(
@@ -618,7 +630,8 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
             )
         actual = read_dataset(root, resource_policy=policy)
         pd.testing.assert_frame_equal(actual, expected, check_exact=True)
-        assert [len(slab) for slab in slabs] == [64, 2]
+        assert len(slabs) > 1
+        assert any(dates[62] < slab[0] < dates[-1] for slab in slabs[1:])
         rows = actual.loc[actual.asset_id.eq("000002")].set_index("timestamp")
         assert (
             rows.loc[
@@ -628,12 +641,14 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
             .isna()
             .all()
         )
-        assert rows.loc[dates[63], ["close", "adj_close"]].isna().all()
+        assert (
+            rows.loc[dates[63] : dates[-2], ["close", "adj_close"]].isna().all().all()
+        )
         assert (
             rows.loc[dates[63], ["period_return", "volume", "amount", "turnover"]]
             .eq(0.0)
             .all()
         )
-        assert rows.loc[dates[64], "period_return"] == 0.1
-        assert rows.loc[dates[64], "adj_close"] == 120.0
+        assert rows.loc[dates[-1], "period_return"] == 0.1
+        assert rows.loc[dates[-1], "adj_close"] == 120.0
         assert policy.used_memory_bytes == 0

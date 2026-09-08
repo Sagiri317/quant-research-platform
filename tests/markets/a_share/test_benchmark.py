@@ -83,6 +83,7 @@ def test_benchmark_filters_repeated_codes_and_exact_snapshots():
 
 def test_processed_benchmark_target_streams_exact_dates_and_requires_global_coverage(
     tmp_path,
+    monkeypatch,
 ):
     from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.runtime.dataframes import iter_complete_session_frames
@@ -93,6 +94,16 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
     )
     from quant_research_platform.storage.datasets.writing import write_dataset
 
+    slabs = []
+    read_frame = processed_producer._owned_frame
+
+    def observed_read(*args):
+        frame = read_frame(*args)
+        if "constituent_asset_id" in frame:
+            slabs.append(frame["timestamp"].nunique())
+        return frame
+
+    monkeypatch.setattr(processed_producer, "_owned_frame", observed_read)
     profile = research_profile()
     layout = StorageLayout(tmp_path)
     index_info, _ = _benchmark_facts()
@@ -112,7 +123,7 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
             for asset, weight in (("000001", 0.4), ("000002", 0.6))
         ]
     )
-    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+    with runtime_resource_policy_scope(explicit_cap_bytes=7 * 1024**2) as policy:
         for data_id, frame in (("index_info", index_info), ("index_weights", weights)):
             source_spec = profile.interim.get(data_id)
             frame = frame.reindex(columns=source_spec.required_columns)
@@ -145,8 +156,9 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
         expected = pd.concat(
             iter_benchmark_weight_snapshots(index_info, (weights,)), ignore_index=True
         )
-        pd.testing.assert_frame_equal(actual, expected)
+        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
         assert len(tuple((root / "data").rglob("*.parquet"))) > 1
+        assert len(slabs) > 1 and sum(slabs) == len(dates)
         streamed = list(
             iter_complete_session_frames(
                 read_dataset(
