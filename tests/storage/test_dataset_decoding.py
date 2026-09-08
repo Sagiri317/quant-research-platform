@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 
@@ -532,6 +533,7 @@ def test_declared_variable_width_member_decodes_multirow_batches(
 
 def test_dataset_file_batches_refresh_headroom_after_internal_release(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "retained-output.parquet"
     row_count = 8_192
@@ -543,6 +545,15 @@ def test_dataset_file_batches_refresh_headroom_after_internal_release(
     )
     target_chunk_bytes = 16 * 1024
     headroom_bytes = 300 * 1024
+    native_batches = pq.ParquetFile.iter_batches
+    pulled = []
+
+    def observed_batches(parquet, **kwargs):
+        for batch in native_batches(parquet, **kwargs):
+            pulled.append(batch.get_total_buffer_size())
+            yield batch
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed_batches)
     policy = _issued_test_policy(4 * 1024**2)
     context = SimpleNamespace(
         resource_policy=policy,
@@ -566,6 +577,7 @@ def test_dataset_file_batches_refresh_headroom_after_internal_release(
     )
     frames = tuple(frame for _, frame in output)
 
+    assert pulled and max(pulled) <= headroom_bytes
     assert len(frames) < row_count // 10
     pd.testing.assert_frame_equal(
         pd.concat(frames, ignore_index=True),
@@ -573,12 +585,21 @@ def test_dataset_file_batches_refresh_headroom_after_internal_release(
     )
 
 
+@pytest.mark.parametrize("use_dictionary", [False, True])
 def test_metadata_free_batches_advance_without_delivering_oversized_payload(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    use_dictionary: bool,
 ) -> None:
     path = tmp_path / "skewed-variable-width.parquet"
     values = ["x"] * 1023 + ["y" * 1024**2]
-    pq.write_table(pa.table({"value": values}), path)
+    pq.write_table(pa.table({"value": values}), path, use_dictionary=use_dictionary)
+    if use_dictionary:
+
+        def no_native_pull(*args, **kwargs):
+            pytest.fail("oversized dictionary reached the native decoder")
+
+        monkeypatch.setattr(pq.ParquetFile, "iter_batches", no_native_pull)
     delivered = []
     with pytest.raises(
         storage_errors.DatasetReadCapacityExceeded,
@@ -595,11 +616,18 @@ def test_metadata_free_batches_advance_without_delivering_oversized_payload(
             for batch in batches:
                 delivered.append((batch.num_rows, batch.get_total_buffer_size()))
 
-    assert 0 < sum(rows for rows, _bytes in delivered) < len(values)
+    if use_dictionary:
+        assert not delivered
+    else:
+        assert 0 < sum(rows for rows, _bytes in delivered) < len(values)
     assert all(size <= 64 * 1024 for _rows, size in delivered)
 
 
-def test_dictionary_expansion_is_rejected_before_batch_handoff(tmp_path, monkeypatch):
+@pytest.mark.parametrize("cap", [1024**2, 4 * 1024**2])
+@pytest.mark.parametrize("hint", [1, 32 * 1024 + 5])
+def test_dictionary_expansion_is_admitted_before_native_pull_and_bounded_completes(
+    tmp_path, monkeypatch, cap, hint
+):
     path = tmp_path / "dictionary-expansion.parquet"
     table = pa.table({"value": ["x" * (32 * 1024)] * 256}).replace_schema_metadata(
         {
@@ -607,19 +635,456 @@ def test_dictionary_expansion_is_rejected_before_batch_handoff(tmp_path, monkeyp
                 {
                     "schema_id": "qrp-dataset-part-decoded-row-bounds",
                     "columns": [
-                        {"name": "value", "per_row_bytes": 1, "fixed_bytes": 0}
+                        {"name": "value", "per_row_bytes": hint, "fixed_bytes": 0}
                     ],
                 }
             ).encode(),
             b"qrp.parquet-page-rows": b"1",
         }
     )
-    pq.write_table(
-        table, path, compression="zstd", use_dictionary=True, write_statistics=False
+    footer_bounds = table.schema.metadata[b"qrp.decoded-row-bounds"]
+    initial_bounds = json.loads(footer_bounds)
+    initial_bounds["columns"][0]["per_row_bytes"] = 1
+    table = table.replace_schema_metadata(
+        {
+            **table.schema.metadata,
+            b"qrp.decoded-row-bounds": json.dumps(initial_bounds).encode(),
+        }
     )
+    with pq.ParquetWriter(
+        path,
+        table.schema,
+        compression="zstd",
+        use_dictionary=True,
+        write_statistics=False,
+    ) as writer:
+        writer.write_table(table)
+        writer.add_key_value_metadata({b"qrp.decoded-row-bounds": footer_bounds})
     del table
     constructor = pq.ParquetFile
     pulled = []
+    opened = []
+
+    class ObservedParquet:
+        def __init__(self, *args, **kwargs):
+            opened.append(kwargs.get("read_dictionary"))
+            self.inner = constructor(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def iter_batches(self, **kwargs):
+            for batch in self.inner.iter_batches(**kwargs):
+                assert pa.types.is_dictionary(batch.column(0).type)
+                pulled.append(batch.get_total_buffer_size())
+                yield batch
+
+    monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
+    delivered = []
+    with runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy:
+        with closing_iterator(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=None,
+                target_chunk_bytes=128 * 1024,
+                operation_headroom_bytes=256 * 1024,
+            )
+        ) as batches:
+            if cap == 1024**2:
+                with pytest.raises((ValueError, MemoryError)):
+                    next(batches)
+                assert not opened and not pulled
+            else:
+                for batch in batches:
+                    assert (
+                        batch.schema.metadata[b"qrp.decoded-row-bounds"]
+                        == footer_bounds
+                    )
+                    assert batch.schema.remove_metadata() == pa.schema(
+                        [("value", pa.string())]
+                    )
+                    assert (
+                        batch.column(0).to_pylist()
+                        == ["x" * (32 * 1024)] * batch.num_rows
+                    )
+                    delivered.append((batch.num_rows, batch.get_total_buffer_size()))
+                assert sum(rows for rows, _size in delivered) == 256
+                assert max(size for _rows, size in delivered) <= 256 * 1024
+                assert opened == [None]
+                assert pulled and max(pulled) <= 256 * 1024
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "string",
+        "binary",
+        "large_string",
+        "large_binary",
+        "category",
+        "struct",
+        "list",
+        "large_list",
+        "fixed_list",
+        "map",
+    ],
+)
+def test_dictionary_decode_preserves_supported_logical_types_and_keys(tmp_path, kind):
+    payload = "x" * (32 * 1024)
+    values = [None if index % 23 == 0 else payload for index in range(256)]
+    if kind in ("string", "large_string"):
+        array = pa.array(
+            values, type=pa.string() if kind == "string" else pa.large_string()
+        )
+    elif kind in ("binary", "large_binary"):
+        array = pa.array(
+            [None if value is None else value.encode() for value in values],
+            type=pa.binary() if kind == "binary" else pa.large_binary(),
+        )
+    elif kind == "category":
+        array = pa.array(
+            pd.Categorical(values, categories=[payload, "unused"], ordered=True)
+        )
+    elif kind == "struct":
+        array = pa.array(
+            [None if value is None else {"text": value} for value in values],
+            type=pa.struct([("text", pa.string())]),
+        )
+    elif kind == "map":
+        array = pa.array(
+            [None if value is None else [("key", value)] for value in values],
+            type=pa.map_(pa.string(), pa.string()),
+        )
+    else:
+        data_type = (
+            pa.list_(pa.string(), 2)
+            if kind == "fixed_list"
+            else pa.large_list(pa.string())
+            if kind == "large_list"
+            else pa.list_(pa.string())
+        )
+        array = pa.array([[value, value] for value in values], type=data_type)
+    table = pa.table(
+        {
+            "id": pa.array(np.arange(256, dtype=np.int64) + 9007199254740992),
+            "time": pa.array(np.arange(256, dtype=np.int64), type=pa.timestamp("ns")),
+            "value": array,
+        }
+    )
+    path = tmp_path / "typed-dictionary.parquet"
+    pq.write_table(table, path, use_dictionary=True, row_group_size=128)
+    native = pq.read_table(path)
+    before = dataset_physical.dataset_file_identity(path)
+    delivered = 0
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        with closing_iterator(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=before,
+                target_chunk_bytes=64 * 1024,
+                operation_headroom_bytes=512 * 1024,
+            )
+        ) as batches:
+            for batch in batches:
+                pd.testing.assert_frame_equal(
+                    batch.to_pandas(),
+                    native.slice(delivered, batch.num_rows).to_pandas(),
+                )
+                assert batch.schema.remove_metadata() == native.schema.remove_metadata()
+                assert batch.get_total_buffer_size() <= 512 * 1024
+                delivered += batch.num_rows
+        assert policy.used_memory_bytes == 0
+    assert delivered == 256
+    assert dataset_physical.dataset_file_identity(path) == before
+
+
+@pytest.mark.parametrize(
+    "selection", ["row_group", "predicate", "empty", "projection", "oversized"]
+)
+def test_dictionary_physical_admission_uses_only_selected_rows_and_columns(
+    tmp_path, monkeypatch, selection
+):
+    path = tmp_path / "projected-dictionaries.parquet"
+    schema = pa.schema([("id", pa.int64()), ("value", pa.string())])
+    with pq.ParquetWriter(path, schema, use_dictionary=True) as writer:
+        writer.write_table(
+            pa.table({"id": list(range(4)), "value": ["small"] * 4}, schema=schema)
+        )
+        writer.write_table(
+            pa.table(
+                {
+                    "id": list(range(4, 132)),
+                    "value": [
+                        f"{index:04d}" + "x" * (16 * 1024) for index in range(128)
+                    ],
+                },
+                schema=schema,
+            )
+        )
+    constructor = pq.ParquetFile
+    pulls = []
+
+    class ObservedParquet:
+        def __init__(self, *args, **kwargs):
+            self.inner = constructor(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def iter_batches(self, **kwargs):
+            for batch in self.inner.iter_batches(**kwargs):
+                pulls.append(batch.num_rows)
+                yield batch
+
+    monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
+    options = {
+        "row_group": {"row_groups": (0,)},
+        "predicate": {"parquet_filters": [("id", "<", 4)]},
+        "empty": {"parquet_filters": [("id", ">", 1000)]},
+        "projection": {"columns": ("id",)},
+        "oversized": {"row_groups": (1,)},
+    }[selection]
+    delivered = []
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        with closing_iterator(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=None,
+                target_chunk_bytes=64 * 1024,
+                operation_headroom_bytes=256 * 1024,
+                **options,
+            )
+        ) as batches:
+            if selection == "oversized":
+                with pytest.raises(storage_errors.DatasetReadCapacityExceeded):
+                    next(batches)
+                assert not pulls
+            else:
+                for batch in batches:
+                    delivered.extend(batch.column("id").to_pylist())
+                expected = (
+                    []
+                    if selection == "empty"
+                    else list(range(132 if selection == "projection" else 4))
+                )
+                assert delivered == expected
+                if selection == "empty":
+                    assert not pulls
+        assert policy.used_memory_bytes == 0
+
+
+def test_large_dictionary_output_keeps_native_and_cast_workspaces_bounded(
+    tmp_path, monkeypatch
+):
+    rows = 65536
+    value = "x" * (32 * 1024)
+    array = pa.DictionaryArray.from_arrays(
+        pa.array(np.zeros(rows, dtype=np.int32)), pa.array([value])
+    )
+    path = tmp_path / "large-logical-output.parquet"
+    pq.write_table(
+        pa.table({"value": array}),
+        path,
+        use_dictionary=True,
+        store_schema=False,
+        write_statistics=False,
+    )
+    native_batches = pq.ParquetFile.iter_batches
+    pulls = []
+
+    def observed_batches(parquet, **kwargs):
+        for batch in native_batches(parquet, **kwargs):
+            pulls.append((batch.num_rows, batch.get_total_buffer_size()))
+            yield batch
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed_batches)
+    delivered = 0
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        with closing_iterator(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=dataset_physical.dataset_file_identity(path),
+                target_chunk_bytes=128 * 1024,
+                operation_headroom_bytes=256 * 1024,
+                source_batch_rows=16384,
+            )
+        ) as batches:
+            for batch in batches:
+                assert batch.schema.remove_metadata() == pa.schema(
+                    [("value", pa.string())]
+                )
+                assert pc.all(pc.equal(batch.column(0), pa.scalar(value))).as_py()
+                assert batch.get_total_buffer_size() <= 256 * 1024
+                delivered += batch.num_rows
+        assert policy.used_memory_bytes == 0
+    assert delivered == rows
+    assert pulls[0][0] == 1
+    assert 1 < max(count for count, _bytes in pulls) <= 16384
+    assert max(size for _count, size in pulls) <= 256 * 1024
+
+
+@pytest.mark.parametrize(
+    "groups,filters,expected_groups",
+    [
+        ((0,), None, (0,)),
+        ((1,), None, (1,)),
+        (None, None, (0, 1)),
+        ((1, 0), None, (1, 0)),
+        (None, [("value", "<", "x")], (0,)),
+        (None, [("value", ">=", "x")], (1,)),
+    ],
+)
+def test_mixed_row_group_encoding_only_changes_selected_native_layout(
+    monkeypatch, groups, filters, expected_groups
+):
+    path = Path(__file__).parent / "fixtures" / "mixed_dictionary_row_groups.parquet"
+    constructor = pq.ParquetFile
+    with constructor(path) as parquet:
+        assert parquet.metadata.row_group(0).column(0).encodings == ("PLAIN",)
+        assert parquet.metadata.row_group(1).column(0).encodings == (
+            "PLAIN_DICTIONARY",
+        )
+    layouts = []
+    constructors = []
+    pulls = []
+
+    class ObservedParquet:
+        def __init__(self, *args, **kwargs):
+            constructors.append(True)
+            self.inner = constructor(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def iter_batches(self, **kwargs):
+            layouts.append(
+                pa.types.is_dictionary(self.inner.schema_arrow.field("value").type)
+            )
+            for batch in self.inner.iter_batches(**kwargs):
+                pulls.append(batch.num_rows)
+                yield batch
+
+    monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
+    delivered = 0
+    expected = (
+        f"{index:08d}" * 16 if group == 0 else "x" * 128
+        for group in expected_groups
+        for index in range(2048)
+    )
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        with closing_iterator(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=dataset_physical.dataset_file_identity(path),
+                target_chunk_bytes=64 * 1024,
+                operation_headroom_bytes=256 * 1024,
+                row_groups=groups,
+                parquet_filters=filters,
+                source_batch_rows=257,
+            )
+        ) as batches:
+            for batch in batches:
+                assert batch.column(0).to_pylist() == [
+                    next(expected) for _index in range(batch.num_rows)
+                ]
+                assert batch.get_total_buffer_size() <= 256 * 1024
+                delivered += batch.num_rows
+        assert policy.used_memory_bytes == 0
+    assert delivered == 2048 * len(expected_groups)
+    assert layouts == [group == 1 for group in expected_groups]
+    assert len(constructors) == 1
+    assert max(pulls) <= 257
+
+
+@pytest.mark.parametrize("primary_failure", [False, True])
+def test_dictionary_reader_closes_same_handle_and_native_iterator(
+    tmp_path, monkeypatch, primary_failure
+):
+    path = tmp_path / "cancelled-dictionary.parquet"
+    pq.write_table(pa.table({"value": ["x" * (32 * 1024)] * 256}), path)
+    original_bytes = path.read_bytes()
+    open_file = dataset_physical.open_filesystem_file
+    constructor = pq.ParquetFile
+    handles = []
+    iterator_closed = []
+    reader_closed = []
+    primary = KeyboardInterrupt("dictionary_consumer_primary")
+
+    def observed_open(*args, **kwargs):
+        handle = open_file(*args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    class ObservedParquet:
+        def __init__(self, *args, **kwargs):
+            self.inner = constructor(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def iter_batches(self, **kwargs):
+            source = self.inner.iter_batches(**kwargs)
+            try:
+                yield from source
+            finally:
+                source.close()
+                iterator_closed.append(True)
+
+        def close(self):
+            encoded = pa.types.is_dictionary(
+                self.inner.schema_arrow.field("value").type
+            )
+            self.inner.close()
+            reader_closed.append(encoded)
+            if encoded and primary_failure:
+                raise RuntimeError("dictionary_close_secondary")
+
+    monkeypatch.setattr(dataset_physical, "open_filesystem_file", observed_open)
+    monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        batches = dataset_physical.iter_dataset_part_batches(
+            path,
+            expected_identity=None,
+            target_chunk_bytes=64 * 1024,
+            operation_headroom_bytes=256 * 1024,
+        )
+        first = next(batches)
+        assert first.num_rows > 0
+        first = None
+        if primary_failure:
+            with pytest.raises(KeyboardInterrupt) as raised:
+                batches.throw(primary)
+            assert raised.value is primary
+            assert any(
+                "parquet file close also failed" in note for note in primary.__notes__
+            )
+        else:
+            batches.close()
+        assert policy.used_memory_bytes == 0
+    assert len(handles) == 1 and handles[0].closed
+    assert iterator_closed == [True]
+    assert reader_closed == [True]
+    assert path.read_bytes() == original_bytes
+
+
+def test_single_nested_dictionary_row_is_rejected_before_compaction(
+    tmp_path, monkeypatch
+):
+    path = tmp_path / "large-nested-row.parquet"
+    pq.write_table(pa.table({"value": [["x" * (32 * 1024)] * 16]}), path)
+    constructor = pq.ParquetFile
+    pulled = []
+
+    class ObservedBatch:
+        def __init__(self, batch):
+            self.batch = batch
+
+        def __getattr__(self, name):
+            return getattr(self.batch, name)
+
+        def take(self, *args, **kwargs):
+            pytest.fail("nested compaction started before row admission")
 
     class ObservedParquet:
         def __init__(self, *args, **kwargs):
@@ -631,11 +1096,72 @@ def test_dictionary_expansion_is_rejected_before_batch_handoff(tmp_path, monkeyp
         def iter_batches(self, **kwargs):
             for batch in self.inner.iter_batches(**kwargs):
                 pulled.append(batch.get_total_buffer_size())
+                yield ObservedBatch(batch)
+
+    monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        with closing_iterator(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=None,
+                target_chunk_bytes=64 * 1024,
+                operation_headroom_bytes=256 * 1024,
+            )
+        ) as batches:
+            with pytest.raises(storage_errors.DatasetReadCapacityExceeded):
+                next(batches)
+        assert policy.used_memory_bytes == 0
+    assert len(pulled) == 1 and pulled[0] <= 256 * 1024
+
+
+@pytest.mark.parametrize("high_cardinality", [False, True])
+def test_numeric_dictionary_is_admitted_before_native_pull(
+    tmp_path, monkeypatch, high_cardinality
+):
+    rows = 131072
+    values = (
+        np.arange(rows, dtype=np.int64)
+        if high_cardinality
+        else np.zeros(rows, dtype=np.int64)
+    )
+    table = pa.table({"value": values}).replace_schema_metadata(
+        {
+            b"qrp.decoded-row-bounds": json.dumps(
+                {
+                    "schema_id": "qrp-dataset-part-decoded-row-bounds",
+                    "columns": [
+                        {"name": "value", "per_row_bytes": 1, "fixed_bytes": 0}
+                    ],
+                }
+            ).encode(),
+        }
+    )
+    path = tmp_path / "numeric-dictionary.parquet"
+    pq.write_table(
+        table,
+        path,
+        use_dictionary=True,
+        dictionary_pagesize_limit=4 * 1024**2,
+        write_statistics=False,
+    )
+    constructor = pq.ParquetFile
+    pulls = []
+
+    class ObservedParquet:
+        def __init__(self, *args, **kwargs):
+            self.inner = constructor(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def iter_batches(self, **kwargs):
+            for batch in self.inner.iter_batches(**kwargs):
+                pulls.append(batch.get_total_buffer_size())
                 yield batch
 
     monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-    with runtime_resource_policy_scope(policy):
+    delivered = 0
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
         with closing_iterator(
             dataset_physical.iter_dataset_part_batches(
                 path,
@@ -644,13 +1170,20 @@ def test_dictionary_expansion_is_rejected_before_batch_handoff(tmp_path, monkeyp
                 operation_headroom_bytes=256 * 1024,
             )
         ) as batches:
-            with pytest.raises(
-                storage_errors.DatasetReadCapacityExceeded,
-                match="dataset_working_set_exceeds_task_memory_budget",
-            ):
-                next(batches)
+            if high_cardinality:
+                with pytest.raises(storage_errors.DatasetReadCapacityExceeded):
+                    next(batches)
+                assert not pulls
+            else:
+                for batch in batches:
+                    assert np.array_equal(
+                        batch.column(0).to_numpy(),
+                        values[delivered : delivered + batch.num_rows],
+                    )
+                    delivered += batch.num_rows
+                assert delivered == rows
+                assert max(pulls) <= 256 * 1024
         assert policy.used_memory_bytes == 0
-    assert pulled and pulled[0] > 256 * 1024
 
 
 @pytest.mark.parametrize("boundary", ["soft", "captured", "explicit", "parent"])

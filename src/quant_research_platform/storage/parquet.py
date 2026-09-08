@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import os
 import sys
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +19,7 @@ from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
     render_qrp_json_object,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
 )
@@ -62,7 +63,7 @@ def inspect_dataset_part(
     expected_identity: DatasetFileIdentity | None = None,
 ) -> DatasetPartMetadata:
     with _opened_parquet(path, expected_identity=expected_identity) as opened:
-        parquet_file, identity = opened
+        parquet_file, identity, _handle = opened
         return _part_metadata(parquet_file, identity=identity)
 
 
@@ -97,7 +98,7 @@ def iter_dataset_part_batches(
     ):
         raise ValueError("invalid_source_batch_rows")
     with _opened_parquet(path, expected_identity=expected_identity) as opened:
-        parquet_file, identity = opened
+        parquet_file, identity, handle = opened
         policy = current_runtime_resource_policy()
 
         def current_capacity() -> int | None:
@@ -123,19 +124,18 @@ def iter_dataset_part_batches(
             tuple(metadata.schema.field(column) for column in selected_columns)
         except KeyError as exc:
             raise ValueError("dataset_column_not_found") from exc
+        logical_schema = pa.schema(
+            [metadata.schema.field(column) for column in selected_columns]
+        )
         selected_row_groups = (
             _matching_row_groups(parquet_file, parquet_filters)
             if row_groups is None
             else list(row_groups)
         )
+        if not selected_row_groups:
+            return
         previous_output_bytes = (
             [0] if _previous_output_bytes is None else _previous_output_bytes
-        )
-        initial_operation_headroom = current_capacity()
-        initial_physical_headroom = (
-            None
-            if initial_operation_headroom is None
-            else initial_operation_headroom - previous_output_bytes[0]
         )
         membership = any(operator == "in" for _, operator, _ in parquet_filters or ())
         membership_max_scalar_bytes = max(
@@ -146,153 +146,366 @@ def iter_dataset_part_batches(
             ),
             default=0,
         )
-        admitted_batch_rows = _target_batch_rows(
-            parquet_file,
-            columns=selected_columns,
-            row_groups=selected_row_groups,
-            target_chunk_bytes=target_chunk_bytes,
-            operation_headroom_bytes=initial_physical_headroom,
-            filtered=bool(parquet_filters),
-            membership=membership,
-            membership_max_scalar_bytes=membership_max_scalar_bytes,
-        )
-        batch_rows = (
-            admitted_batch_rows
-            if source_batch_rows is None
-            else min(source_batch_rows, admitted_batch_rows)
-        )
-        maximum_projected_row_bytes = _maximum_projected_row_bytes(
-            parquet_file,
-            selected_columns,
-        )
-        maximum_decode_fixed_bytes = _maximum_projected_decode_fixed_bytes(
-            parquet_file,
-            selected_columns,
-        )
-        maximum_page_decode_bytes = (
-            maximum_decode_fixed_bytes
-            + _maximum_projected_page_decode_bytes(
-                parquet_file,
-                selected_columns,
-                row_groups=selected_row_groups,
-                batch_rows=batch_rows,
-            )
-        )
-        raw_batches = iter(
-            parquet_file.iter_batches(
-                batch_size=batch_rows,
-                row_groups=selected_row_groups,
-                columns=list(selected_columns),
-                use_threads=False,
-            )
-        )
         footer_decoded_bounds = (parquet_file.metadata.metadata or {}).get(
             _DECODED_ROW_BOUNDS_KEY
         )
-        selected_source_rows = sum(
-            int(parquet_file.metadata.row_group(index).num_rows)
-            for index in selected_row_groups
-        )
-        pulled_source_rows = 0
-        while True:
-            if pulled_source_rows >= selected_source_rows:
-                break
-            next_batch_rows = min(
-                batch_rows,
-                selected_source_rows - pulled_source_rows,
+        file_metadata = parquet_file.metadata
+        current_dictionary_paths = ()
+        for row_group in selected_row_groups:
+            dictionary_paths = tuple(
+                parquet_file.schema.column(index).path
+                for index in _dictionary_encoded_column_positions(
+                    parquet_file, selected_columns, row_groups=[row_group]
+                )
+                if parquet_file.schema.column(index).physical_type == "BYTE_ARRAY"
             )
-            source_batch_bytes = next_batch_rows * maximum_projected_row_bytes
-            physical_pull_bytes = (
-                maximum_page_decode_bytes
-                + max(
-                    0,
+            if dictionary_paths != current_dictionary_paths:
+                parquet_file.reader.open(
+                    handle,
+                    metadata=file_metadata,
+                    read_dictionary=dictionary_paths,
+                    buffer_size=_PARQUET_READ_BUFFER_BYTES,
+                    pre_buffer=False,
+                    arrow_extensions_enabled=True,
+                )
+                current_dictionary_paths = dictionary_paths
+            decode_dictionary = any(
+                parquet_file.schema_arrow.field(column).type
+                != metadata.schema.field(column).type
+                for column in selected_columns
+            )
+            compact_nested = any(
+                parquet_file.schema_arrow.field(column).type
+                != metadata.schema.field(column).type
+                and not pa.types.is_dictionary(
+                    parquet_file.schema_arrow.field(column).type
+                )
+                for column in selected_columns
+            )
+            initial_operation_headroom = current_capacity()
+            initial_physical_headroom = (
+                None
+                if initial_operation_headroom is None
+                else initial_operation_headroom - previous_output_bytes[0]
+            )
+            admitted_batch_rows = _target_batch_rows(
+                parquet_file,
+                columns=selected_columns,
+                row_groups=[row_group],
+                target_chunk_bytes=target_chunk_bytes,
+                operation_headroom_bytes=initial_physical_headroom,
+                filtered=bool(parquet_filters) and not decode_dictionary,
+                membership=membership,
+                membership_max_scalar_bytes=membership_max_scalar_bytes,
+            )
+            maximum_batch_rows = (
+                admitted_batch_rows
+                if source_batch_rows is None
+                else min(source_batch_rows, admitted_batch_rows)
+            )
+            maximum_projected_row_bytes = _maximum_projected_row_bytes(
+                parquet_file, selected_columns, row_groups=[row_group]
+            )
+            maximum_decode_fixed_bytes = _maximum_projected_decode_fixed_bytes(
+                parquet_file, selected_columns, row_groups=[row_group]
+            )
+            plain_row_upper = (
+                _maximum_projected_row_bytes(
+                    parquet_file,
+                    selected_columns,
+                    row_groups=[row_group],
+                    output_schema=metadata.schema,
+                )
+                if decode_dictionary
+                else 0
+            )
+            decode_upper_bytes = plain_row_upper * (2 if compact_nested else 1) + 8 * (
+                len(selected_columns) + 1
+            )
+            if parquet_filters and decode_dictionary:
+                decode_upper_bytes += (
                     _filter_working_set_bytes(
-                        source_batch_bytes=source_batch_bytes,
-                        row_count=next_batch_rows,
+                        source_batch_bytes=plain_row_upper,
+                        row_count=1,
                         membership=membership,
                         membership_max_scalar_bytes=membership_max_scalar_bytes,
                     )
-                    - source_batch_bytes,
+                    - plain_row_upper
                 )
-                if parquet_filters
-                else max(
-                    maximum_page_decode_bytes,
-                    maximum_decode_fixed_bytes + source_batch_bytes,
-                )
+            minimum_decode_bytes = 0
+            batch_rows = 1 if decode_dictionary else maximum_batch_rows
+            selected_source_rows = int(
+                parquet_file.metadata.row_group(row_group).num_rows
             )
-            current_operation_headroom = current_capacity()
-            physical_headroom = (
-                None
-                if current_operation_headroom is None
-                else current_operation_headroom - previous_output_bytes[0]
-            )
-            if (
-                physical_headroom is not None
-                and physical_pull_bytes > physical_headroom
-            ):
-                raise DatasetReadCapacityExceeded(
-                    "dataset_working_set_exceeds_task_memory_budget"
+            pulled_source_rows = 0
+            with closing_iterator(
+                parquet_file.iter_batches(
+                    batch_size=batch_rows,
+                    row_groups=[row_group],
+                    columns=list(selected_columns),
+                    use_threads=False,
                 )
-            with ExitStack() as pull_reservation:
-                pull_lease = None
-                if policy is not None:
-                    policy.require_working_set(
-                        physical_pull_bytes,
-                        error="dataset_working_set_exceeds_task_memory_budget",
+            ) as raw_batches:
+                while True:
+                    if pulled_source_rows >= selected_source_rows:
+                        break
+                    current_operation_headroom = current_capacity()
+                    physical_headroom = (
+                        None
+                        if current_operation_headroom is None
+                        else current_operation_headroom - previous_output_bytes[0]
                     )
-                    pull_lease = pull_reservation.enter_context(
-                        policy.lease(
-                            "storage.parquet.read",
-                            physical_pull_bytes,
+                    if decode_dictionary and minimum_decode_bytes:
+                        native_capacity = (
+                            None
+                            if physical_headroom is None
+                            else physical_headroom - minimum_decode_bytes
+                        )
+                        minimum_native_bytes = (
+                            maximum_decode_fixed_bytes
+                            + _maximum_projected_page_decode_bytes(
+                                parquet_file,
+                                selected_columns,
+                                row_groups=[row_group],
+                                batch_rows=1,
+                            )
+                        )
+                        batch_rows = (
+                            1
+                            if native_capacity is not None
+                            and native_capacity < minimum_native_bytes
+                            else min(
+                                maximum_batch_rows,
+                                _target_batch_rows(
+                                    parquet_file,
+                                    columns=selected_columns,
+                                    row_groups=[row_group],
+                                    target_chunk_bytes=target_chunk_bytes,
+                                    operation_headroom_bytes=native_capacity,
+                                ),
+                            )
+                        )
+                    next_batch_rows = min(
+                        batch_rows,
+                        selected_source_rows - pulled_source_rows,
+                    )
+                    maximum_page_decode_bytes = (
+                        maximum_decode_fixed_bytes
+                        + _maximum_projected_page_decode_bytes(
+                            parquet_file,
+                            selected_columns,
+                            row_groups=[row_group],
+                            batch_rows=next_batch_rows,
                         )
                     )
-                try:
-                    raw_batch = next(raw_batches)
-                except StopIteration:
-                    break
-                actual_buffer_bytes = raw_batch.get_total_buffer_size()
-                actual_pull_bytes = actual_buffer_bytes + (
-                    _filter_working_set_bytes(
-                        source_batch_bytes=actual_buffer_bytes,
-                        row_count=raw_batch.num_rows,
-                        membership=membership,
-                        membership_max_scalar_bytes=membership_max_scalar_bytes,
+                    source_batch_bytes = next_batch_rows * maximum_projected_row_bytes
+                    physical_pull_bytes = (
+                        maximum_page_decode_bytes
+                        + max(
+                            0,
+                            _filter_working_set_bytes(
+                                source_batch_bytes=source_batch_bytes,
+                                row_count=next_batch_rows,
+                                membership=membership,
+                                membership_max_scalar_bytes=membership_max_scalar_bytes,
+                            )
+                            - source_batch_bytes,
+                        )
+                        if parquet_filters and not decode_dictionary
+                        else max(
+                            maximum_page_decode_bytes,
+                            maximum_decode_fixed_bytes + source_batch_bytes,
+                        )
                     )
-                    - actual_buffer_bytes
-                    if parquet_filters
-                    else 0
+                    if (
+                        physical_headroom is not None
+                        and physical_pull_bytes > physical_headroom
+                    ):
+                        raise DatasetReadCapacityExceeded(
+                            "dataset_working_set_exceeds_task_memory_budget"
+                        )
+                    with ExitStack() as pull_reservation:
+                        pull_lease = None
+                        if policy is not None:
+                            policy.require_working_set(
+                                physical_pull_bytes,
+                                error="dataset_working_set_exceeds_task_memory_budget",
+                            )
+                            pull_lease = pull_reservation.enter_context(
+                                policy.lease(
+                                    "storage.parquet.read",
+                                    physical_pull_bytes,
+                                )
+                            )
+                        try:
+                            if decode_dictionary:
+                                parquet_file.reader.set_batch_size(next_batch_rows)
+                            raw_batch = next(raw_batches)
+                        except StopIteration:
+                            break
+                        actual_buffer_bytes = raw_batch.get_total_buffer_size()
+                        actual_pull_bytes = actual_buffer_bytes + (
+                            _filter_working_set_bytes(
+                                source_batch_bytes=actual_buffer_bytes,
+                                row_count=raw_batch.num_rows,
+                                membership=membership,
+                                membership_max_scalar_bytes=membership_max_scalar_bytes,
+                            )
+                            - actual_buffer_bytes
+                            if parquet_filters and not decode_dictionary
+                            else 0
+                        )
+                        if (
+                            physical_headroom is not None
+                            and actual_pull_bytes > physical_headroom
+                        ):
+                            del raw_batch
+                            raise DatasetReadCapacityExceeded(
+                                "dataset_working_set_exceeds_task_memory_budget"
+                            )
+                        if (
+                            pull_lease is not None
+                            and actual_pull_bytes > pull_lease.reserved_bytes
+                        ):
+                            additional = actual_pull_bytes - pull_lease.reserved_bytes
+                            policy.require_working_set(
+                                additional,
+                                error="dataset_working_set_exceeds_task_memory_budget",
+                            )
+                            pull_lease.grow(additional)
+                        pulled_source_rows += raw_batch.num_rows
+                        if footer_decoded_bounds is not None:
+                            batch_metadata = dict(raw_batch.schema.metadata or {})
+                            batch_metadata[_DECODED_ROW_BOUNDS_KEY] = (
+                                footer_decoded_bounds
+                            )
+                            raw_batch = raw_batch.replace_schema_metadata(
+                                batch_metadata
+                            )
+                        if decode_dictionary:
+                            native_bytes = (
+                                pull_lease.reserved_bytes
+                                if pull_lease is not None
+                                else max(physical_pull_bytes, actual_pull_bytes)
+                            )
+                            with closing_iterator(
+                                _decoded_dictionary_batches(
+                                    raw_batch,
+                                    schema=logical_schema,
+                                    target_chunk_bytes=target_chunk_bytes,
+                                    operation_headroom_bytes=(
+                                        None
+                                        if physical_headroom is None
+                                        else physical_headroom - native_bytes
+                                    ),
+                                    filters=parquet_filters,
+                                    membership=membership,
+                                    membership_max_scalar_bytes=membership_max_scalar_bytes,
+                                )
+                            ) as decoded:
+                                observed_decode_bytes = yield from decoded
+                            minimum_decode_bytes = max(
+                                observed_decode_bytes, decode_upper_bytes
+                            )
+                            del raw_batch
+                            continue
+                        filtered = _filter_arrow_batch(
+                            raw_batch,
+                            parquet_filters,
+                            operation_headroom_bytes=physical_headroom,
+                        )
+                        del raw_batch
+                        yield filtered
+                        del filtered
+
+
+def _decoded_dictionary_batches(
+    batch: pa.RecordBatch,
+    *,
+    schema: pa.Schema,
+    target_chunk_bytes: int,
+    operation_headroom_bytes: int | None,
+    filters: list[tuple[str, str, Any]] | None,
+    membership: bool,
+    membership_max_scalar_bytes: int,
+) -> Generator[pa.RecordBatch, None, int]:
+    bounds = [
+        _column_decoded_row_bound(pa.chunked_array([column]), logical_type=field.type)
+        for column, field in zip(batch.columns, schema, strict=True)
+    ]
+    logical_row_bytes = sum(row for row, _fixed in bounds)
+    cast_bounds = [
+        bound
+        for column, field, bound in zip(batch.columns, schema, bounds, strict=True)
+        if column.type != field.type
+    ]
+    cast_fixed_bytes = sum(fixed for _row, fixed in cast_bounds)
+    new_row_bytes = sum(row for row, _fixed in cast_bounds)
+    compact_nested = any(
+        column.type != field.type and not pa.types.is_dictionary(column.type)
+        for column, field in zip(batch.columns, schema, strict=True)
+    )
+    if compact_nested:
+        # Nested Arrow casts visit the whole child array behind a sliced parent.
+        # Take first so only the admitted rows have children to decode.
+        new_row_bytes += 8 + sum(
+            _column_decoded_row_bound(
+                pa.chunked_array([column]), logical_type=column.type
+            )[0]
+            for column in batch.columns
+        )
+    if filters:
+        new_row_bytes += (
+            _filter_working_set_bytes(
+                source_batch_bytes=logical_row_bytes,
+                row_count=1,
+                membership=membership,
+                membership_max_scalar_bytes=membership_max_scalar_bytes,
+            )
+            - logical_row_bytes
+        )
+    target_rows = max(1, target_chunk_bytes // logical_row_bytes)
+    policy = current_runtime_resource_policy()
+    start = 0
+    while start < batch.num_rows:
+        capacity = operation_headroom_bytes
+        if policy is not None:
+            capacity = (
+                policy.working_set_headroom_bytes
+                if capacity is None
+                else min(capacity, policy.working_set_headroom_bytes)
+            )
+        rows = min(target_rows, batch.num_rows - start)
+        if capacity is not None:
+            rows = min(rows, (capacity - cast_fixed_bytes) // new_row_bytes)
+        if rows < 1:
+            raise DatasetReadCapacityExceeded(
+                "dataset_working_set_exceeds_task_memory_budget"
+            )
+        with ExitStack() as conversion:
+            if policy is not None:
+                conversion.enter_context(
+                    policy.lease(
+                        "storage.parquet.decode",
+                        cast_fixed_bytes + rows * new_row_bytes,
+                    )
                 )
-                if (
-                    physical_headroom is not None
-                    and actual_pull_bytes > physical_headroom
-                ):
-                    del raw_batch
-                    raise DatasetReadCapacityExceeded(
-                        "dataset_working_set_exceeds_task_memory_budget"
-                    )
-                if (
-                    pull_lease is not None
-                    and actual_pull_bytes > pull_lease.reserved_bytes
-                ):
-                    additional = actual_pull_bytes - pull_lease.reserved_bytes
-                    policy.require_working_set(
-                        additional,
-                        error="dataset_working_set_exceeds_task_memory_budget",
-                    )
-                    pull_lease.grow(additional)
-                pulled_source_rows += raw_batch.num_rows
+            compact = restored = filtered = None
+            try:
+                compact = (
+                    batch.take(pa.array(range(start, start + rows), type=pa.int64()))
+                    if compact_nested
+                    else batch.slice(start, rows)
+                )
+                restored = compact.cast(schema.with_metadata(batch.schema.metadata))
                 filtered = _filter_arrow_batch(
-                    raw_batch,
-                    parquet_filters,
-                    operation_headroom_bytes=physical_headroom,
+                    restored, filters, operation_headroom_bytes=capacity
                 )
-                del raw_batch
-                if footer_decoded_bounds is not None:
-                    batch_metadata = dict(filtered.schema.metadata or {})
-                    batch_metadata[_DECODED_ROW_BOUNDS_KEY] = footer_decoded_bounds
-                    filtered = filtered.replace_schema_metadata(batch_metadata)
                 yield filtered
-                del filtered
+            finally:
+                compact = restored = filtered = None
+        start += rows
+    return cast_fixed_bytes + new_row_bytes
 
 
 @contextmanager
@@ -300,7 +513,7 @@ def _opened_parquet(
     path: Path,
     *,
     expected_identity: DatasetFileIdentity | None,
-) -> Iterator[tuple[pq.ParquetFile, DatasetFileIdentity]]:
+) -> Iterator[tuple[pq.ParquetFile, DatasetFileIdentity, Any]]:
     resolved = Path(path)
     path_identity = dataset_file_identity(resolved)
     if expected_identity is not None and path_identity != expected_identity:
@@ -331,7 +544,7 @@ def _opened_parquet(
                 pre_buffer=False,
             )
             try:
-                yield parquet_file, before
+                yield parquet_file, before, handle
             finally:
                 primary = sys.exception()
                 if primary is not None:
@@ -422,7 +635,7 @@ def _part_metadata(
     identity: DatasetFileIdentity,
     require_logical_dtypes: bool = True,
 ) -> DatasetPartMetadata:
-    schema = parquet_file.schema_arrow
+    schema = parquet_file.schema.to_arrow_schema()
     metadata = schema.metadata or {}
     logical_dtype_payload = metadata.get(b"qrp.logical-dtypes")
     if logical_dtype_payload is None and require_logical_dtypes:
@@ -449,15 +662,18 @@ def _target_batch_rows(
     membership: bool = False,
     membership_max_scalar_bytes: int = 0,
 ) -> int:
-    maximum_row_bytes = _maximum_projected_row_bytes(parquet_file, columns)
     selected_row_groups = (
         list(range(parquet_file.metadata.num_row_groups))
         if row_groups is None
         else list(row_groups)
     )
+    maximum_row_bytes = _maximum_projected_row_bytes(
+        parquet_file, columns, row_groups=selected_row_groups
+    )
     fixed_decode_bytes = _maximum_projected_decode_fixed_bytes(
         parquet_file,
         columns,
+        row_groups=selected_row_groups,
     )
     target_rows = max(1, target_chunk_bytes // maximum_row_bytes)
     if operation_headroom_bytes is None:
@@ -507,48 +723,188 @@ def _target_batch_rows(
 def _maximum_projected_row_bytes(
     parquet_file: pq.ParquetFile,
     columns: tuple[str, ...],
+    *,
+    row_groups: list[int] | tuple[int, ...] | None = None,
+    output_schema: pa.Schema | None = None,
 ) -> int:
     decoded_bounds = _decoded_row_bounds(parquet_file)
-    maximum_row_bytes = 1
-    if decoded_bounds is not None:
-        try:
-            maximum_row_bytes = max(
-                1,
-                sum(decoded_bounds[column][0] for column in columns),
+    selected_groups = (
+        range(parquet_file.metadata.num_row_groups)
+        if row_groups is None
+        else row_groups
+    )
+    byte_dictionary_positions = {
+        index
+        for index in _dictionary_encoded_column_positions(
+            parquet_file, columns, row_groups=selected_groups
+        )
+        if parquet_file.schema.column(index).physical_type == "BYTE_ARRAY"
+    }
+    native_schema = (
+        parquet_file.schema_arrow if output_schema is None else output_schema
+    )
+    native_types = tuple(
+        leaf for field in native_schema for leaf in _arrow_leaf_types(field.type)
+    )
+    dictionary_positions = {
+        index
+        for index in _projected_parquet_leaf_positions(parquet_file, columns)
+        if pa.types.is_dictionary(native_types[index])
+    }
+    maximum_row_bytes = 0
+    for column in columns:
+        positions = _projected_parquet_leaf_positions(parquet_file, (column,))
+        encoded_positions = dictionary_positions.intersection(positions)
+        native_index_bytes = sum(
+            native_types[index].index_type.bit_width // 8 + 1
+            for index in encoded_positions
+        )
+        column_row_bytes = max(
+            native_index_bytes,
+            _column_decoded_row_bound(
+                pa.chunked_array([], type=native_schema.field(column).type)
+            )[0],
+        )
+        if decoded_bounds is not None and not encoded_positions:
+            column_row_bytes = max(column_row_bytes, decoded_bounds[column][0])
+        for row_group_index in selected_groups:
+            group = parquet_file.metadata.row_group(row_group_index)
+            if group.num_rows <= 0:
+                continue
+            group_dictionary_positions = set(
+                _dictionary_encoded_column_positions(
+                    parquet_file, (column,), row_groups=[row_group_index]
+                )
             )
-        except KeyError:
-            raise DatasetReadCapacityExceeded(
-                "dataset_decode_bound_metadata_invalid"
-            ) from None
-    positions = _projected_parquet_leaf_positions(parquet_file, columns)
-    for row_group_index in range(parquet_file.metadata.num_row_groups):
-        row_group = parquet_file.metadata.row_group(row_group_index)
-        if row_group.num_rows <= 0:
-            continue
-        projected_bytes = sum(
-            max(0, int(row_group.column(index).total_uncompressed_size))
-            for index in positions
-        )
-        maximum_row_bytes = max(
-            maximum_row_bytes,
-            (projected_bytes + int(row_group.num_rows) - 1) // int(row_group.num_rows),
-        )
-    return maximum_row_bytes
+            physical_bytes = sum(
+                int(group.column(index).total_uncompressed_size)
+                for index in positions
+                if index not in encoded_positions
+            )
+            plain_dictionary_bytes = sum(
+                int(group.column(index).total_uncompressed_size)
+                * (
+                    max(1, int(group.column(index).num_values))
+                    if parquet_file.schema.column(index).max_repetition_level
+                    else 1
+                )
+                + 9
+                for index in positions
+                if index in byte_dictionary_positions
+                and index in group_dictionary_positions
+                and index not in encoded_positions
+            )
+            column_row_bytes = max(
+                column_row_bytes,
+                native_index_bytes
+                + plain_dictionary_bytes
+                + (physical_bytes + group.num_rows - 1) // group.num_rows,
+            )
+        maximum_row_bytes += column_row_bytes
+    return max(1, maximum_row_bytes)
+
+
+def _arrow_leaf_types(data_type):
+    if data_type.num_fields:
+        for index in range(data_type.num_fields):
+            yield from _arrow_leaf_types(data_type.field(index).type)
+    else:
+        yield data_type
 
 
 def _maximum_projected_decode_fixed_bytes(
     parquet_file: pq.ParquetFile,
     columns: tuple[str, ...],
+    *,
+    row_groups: list[int] | tuple[int, ...] | None = None,
 ) -> int:
     decoded_bounds = _decoded_row_bounds(parquet_file)
-    if decoded_bounds is None:
-        return 0
+    selected_groups = (
+        range(parquet_file.metadata.num_row_groups)
+        if row_groups is None
+        else row_groups
+    )
+    dictionary_positions = _dictionary_encoded_column_positions(
+        parquet_file, columns, row_groups=selected_groups
+    )
+    native_types = tuple(
+        leaf
+        for field in parquet_file.schema_arrow
+        for leaf in _arrow_leaf_types(field.type)
+    )
+    native_dictionary_positions = {
+        index
+        for index in _projected_parquet_leaf_positions(parquet_file, columns)
+        if pa.types.is_dictionary(native_types[index])
+    }
+    dictionary_columns = {
+        name
+        for name in columns
+        if set(_projected_parquet_leaf_positions(parquet_file, (name,))).intersection(
+            (*dictionary_positions, *native_dictionary_positions)
+        )
+    }
+    physical_bounds = dict.fromkeys(columns, 0)
+    for row_group_index in selected_groups:
+        group = parquet_file.metadata.row_group(row_group_index)
+        group_bounds = dict.fromkeys(columns, 0)
+        for index in native_dictionary_positions.union(
+            _dictionary_encoded_column_positions(
+                parquet_file, columns, row_groups=[row_group_index]
+            )
+        ):
+            leaf = parquet_file.schema.column(index)
+            column = group.column(index)
+            # The chunk bounds its dictionary payload even when writer hints lie.
+            # Include Arrow offsets, validity, and dictionary-length inspection.
+            payload_factor = 4 if leaf.physical_type == "BYTE_ARRAY" else 2
+            bound = payload_factor * int(column.total_uncompressed_size)
+            if leaf.max_repetition_level:
+                bound += 16 * leaf.max_repetition_level * int(column.num_values)
+            name = next(
+                name
+                for name in columns
+                if leaf.path == name or leaf.path.startswith(f"{name}.")
+            )
+            group_bounds[name] += bound
+        for name in columns:
+            physical_bounds[name] = max(physical_bounds[name], group_bounds[name])
     try:
-        return sum(decoded_bounds[column][1] for column in columns)
+        return sum(
+            physical_bounds[column]
+            if column in dictionary_columns
+            else 0
+            if decoded_bounds is None
+            else decoded_bounds[column][1]
+            for column in columns
+        )
     except KeyError:
         raise DatasetReadCapacityExceeded(
             "dataset_decode_bound_metadata_invalid"
         ) from None
+
+
+def _dictionary_encoded_column_positions(
+    parquet_file: pq.ParquetFile,
+    columns: tuple[str, ...],
+    *,
+    row_groups: list[int] | tuple[int, ...] | range | None = None,
+) -> tuple[int, ...]:
+    selected_groups = (
+        range(parquet_file.metadata.num_row_groups)
+        if row_groups is None
+        else row_groups
+    )
+    return tuple(
+        index
+        for index in _projected_parquet_leaf_positions(parquet_file, columns)
+        if any(
+            {"RLE_DICTIONARY", "PLAIN_DICTIONARY"}.intersection(
+                parquet_file.metadata.row_group(group).column(index).encodings
+            )
+            for group in selected_groups
+        )
+    )
 
 
 def _maximum_projected_page_decode_bytes(
@@ -560,7 +916,9 @@ def _maximum_projected_page_decode_bytes(
 ) -> int:
     positions = _projected_parquet_leaf_positions(parquet_file, columns)
     page_rows = _physical_page_rows(parquet_file)
-    maximum_row_bytes = _maximum_projected_row_bytes(parquet_file, columns)
+    maximum_row_bytes = _maximum_projected_row_bytes(
+        parquet_file, columns, row_groups=row_groups
+    )
     maximum = 0
     for row_group_index in row_groups:
         row_group = parquet_file.metadata.row_group(row_group_index)
@@ -722,16 +1080,80 @@ def record_batch_decoded_working_set_bounds(
     )
 
 
-def _column_decoded_row_bound(column: pa.ChunkedArray) -> tuple[int, int]:
-    data_type = column.type
+def _column_decoded_row_bound(
+    column: pa.ChunkedArray, *, logical_type: pa.DataType | None = None
+) -> tuple[int, int]:
+    data_type = column.type if logical_type is None else logical_type
+    if pa.types.is_dictionary(column.type) and not pa.types.is_dictionary(data_type):
+        return _column_decoded_row_bound(
+            pa.chunked_array([chunk.dictionary for chunk in column.chunks]),
+            logical_type=data_type,
+        )
     if pa.types.is_dictionary(data_type):
         index_bytes = max(1, int(data_type.index_type.bit_width) // 8)
-        dictionary_bytes = sum(
-            int(chunk.dictionary.nbytes)
-            for chunk in column.chunks
-            if isinstance(chunk, pa.DictionaryArray)
+        dictionary_bytes = (
+            sum(
+                int(chunk.dictionary.nbytes)
+                for chunk in column.chunks
+                if isinstance(chunk, pa.DictionaryArray)
+            )
+            if logical_type is None
+            else 0
         )
         return index_bytes + 1, dictionary_bytes
+    if logical_type is not None and pa.types.is_struct(data_type):
+        bounds = [
+            _column_decoded_row_bound(
+                pa.chunked_array([chunk.field(index) for chunk in column.chunks]),
+                logical_type=field.type,
+            )
+            for index, field in enumerate(data_type)
+        ]
+        return 1 + sum(row for row, _fixed in bounds), sum(
+            fixed for _row, fixed in bounds
+        )
+    if logical_type is not None and (
+        pa.types.is_list(data_type)
+        or pa.types.is_large_list(data_type)
+        or pa.types.is_fixed_size_list(data_type)
+        or pa.types.is_map(data_type)
+    ):
+        fixed_list = pa.types.is_fixed_size_list(data_type)
+        offset_bytes = (
+            0 if fixed_list else 8 if pa.types.is_large_list(data_type) else 4
+        )
+        maximum_length = data_type.list_size if fixed_list else 0
+        if not fixed_list:
+            for chunk in column.chunks:
+                if len(chunk):
+                    lengths = pc.subtract(
+                        chunk.offsets.slice(1), chunk.offsets.slice(0, len(chunk))
+                    )
+                    maximum_length = max(maximum_length, int(pc.max(lengths).as_py()))
+        if pa.types.is_map(data_type):
+            bounds = [
+                _column_decoded_row_bound(
+                    pa.chunked_array(
+                        [getattr(chunk, member) for chunk in column.chunks]
+                    ),
+                    logical_type=child_type,
+                )
+                for member, child_type in (
+                    ("keys", data_type.key_type),
+                    ("items", data_type.item_type),
+                )
+            ]
+        else:
+            bounds = [
+                _column_decoded_row_bound(
+                    pa.chunked_array([chunk.values for chunk in column.chunks]),
+                    logical_type=data_type.value_type,
+                )
+            ]
+        return (
+            offset_bytes + 1 + maximum_length * sum(row for row, _fixed in bounds),
+            offset_bytes + sum(fixed for _row, fixed in bounds),
+        )
     if (
         pa.types.is_string(data_type)
         or pa.types.is_binary(data_type)

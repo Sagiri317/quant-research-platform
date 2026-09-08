@@ -324,7 +324,7 @@ def read_prediction_output_bundle(
             with _opened_parquet(
                 prediction_path,
                 expected_identity=prediction_identity,
-            ) as (parquet, _identity):
+            ) as (parquet, _identity, _handle):
                 expected_columns = prediction_output_columns(
                     prediction_mode,
                     prediction_column,

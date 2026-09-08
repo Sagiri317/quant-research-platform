@@ -1237,7 +1237,11 @@ def _crypto_validation_chunks(root, members, entry):
     path = root / relative
     identity = dataset_file_identity(path)
     verify_semantic_artifact_member(root, relative_path=relative, expected=member)
-    with _opened_parquet(path, expected_identity=identity) as (parquet, _identity):
+    with _opened_parquet(path, expected_identity=identity) as (
+        parquet,
+        _identity,
+        _handle,
+    ):
         if parquet.schema_arrow.remove_metadata() != _CRYPTO_VALIDATION_SCHEMA:
             raise ValueError("crypto_model_validation_schema_invalid")
     chunks = iter_declared_parquet_member_batches(

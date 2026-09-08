@@ -610,6 +610,7 @@ class StatisticsArtifact:
             with _opened_parquet(path, expected_identity=identity) as (
                 parquet,
                 _identity,
+                _handle,
             ):
                 if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
                     raise ValueError("statistics_table_schema_invalid")
@@ -752,7 +753,7 @@ def read_statistics_artifact(
             path = Path(instance_root) / member
             with _opened_parquet(
                 path, expected_identity=dataset_file_identity(path)
-            ) as (parquet, _identity):
+            ) as (parquet, _identity, _handle):
                 if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
                     raise ValueError("statistics_table_schema_invalid")
                 if (

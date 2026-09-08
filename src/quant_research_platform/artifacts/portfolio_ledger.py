@@ -303,6 +303,7 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
     with _opened_parquet(root / f"{name}.parquet", expected_identity=None) as (
         parquet,
         identity,
+        _handle,
     ):
         if not parquet.schema_arrow.remove_metadata().equals(_SCHEMAS[name]):
             raise ValueError("portfolio_ledger_schema_invalid")

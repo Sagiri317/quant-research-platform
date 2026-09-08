@@ -327,6 +327,48 @@ def test_reader_admits_complete_working_set_before_decode(
         assert reader_policy.used_memory_bytes == 0
 
 
+def test_statistics_plain_dictionary_reader_admits_expansion_before_read(
+    tmp_path, tables, envelope, monkeypatch
+):
+    tables["factor_diagnostics"] = pd.concat(
+        [tables["factor_diagnostics"]] * 256, ignore_index=True
+    )
+    tables["factor_diagnostics"]["factor_id"] = "x" * (32 * 1024)
+
+    def write_dictionary_members(staging):
+        for name, frame in tables.items():
+            member = f"{name}.parquet"
+            pq.write_table(
+                pa.Table.from_pandas(
+                    frame,
+                    schema=statistics._ARROW_SCHEMAS[member],
+                    preserve_index=False,
+                ),
+                native_filesystem_path(staging / member),
+                use_dictionary=True,
+                write_statistics=False,
+            )
+
+    root = write_semantic_artifact(
+        tmp_path / "dictionary-statistics", envelope, write_dictionary_members
+    )
+
+    def no_full_read(*args, **kwargs):
+        pytest.fail("plain dictionary expansion started before admission")
+
+    monkeypatch.setattr(pq.ParquetFile, "read", no_full_read)
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        artifact = statistics.read_statistics_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        with pytest.raises(
+            ValueError, match="statistics_table_exceeds_task_memory_budget"
+        ):
+            with artifact.table("factor_diagnostics.parquet"):
+                pytest.fail("oversized full table reached the consumer")
+        assert policy.used_memory_bytes == 0
+
+
 def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatch):
     primary = KeyboardInterrupt("write_interrupted")
     original = statistics._artifact_table_write_state

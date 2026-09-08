@@ -108,6 +108,90 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
             assert policy.used_memory_bytes == 0
 
 
+def test_prediction_plain_dictionary_reader_bounds_native_expansion(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    import pandas as pd
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.layout import StorageLayout
+
+    frame = make_price_volume_prediction_output_frame()
+    frame = frame.loc[frame.index.repeat(256)].reset_index(drop=True)
+    times = pd.Timestamp("2014-01-03") + pd.to_timedelta(range(256), unit="ns")
+    frame["timestamp"] = times
+    frame["asset_id"] = "x" * (32 * 1024)
+    frame["prediction_score"] = list(range(256))
+    spec = replace(
+        make_price_volume_prediction_spec(),
+        train_end="2014-01-02T00:00:00",
+        test_start=times[0].isoformat(),
+        test_end=times[-1].isoformat(),
+    )
+    model = dict(frame.attrs["model_metadata"])
+    model.update(
+        train_start="2014-01-02T00:00:00",
+        train_end=spec.train_end,
+        test_start=spec.test_start,
+        test_end=spec.test_end,
+        oos_start=spec.test_start,
+        oos_end=spec.test_end,
+    )
+    metadata = dict(frame.attrs["prediction_metadata"])
+    metadata.update(
+        train_end=spec.train_end,
+        rows_input=256,
+        rows_after_filter_mode=256,
+        rows_after_input_dropna=256,
+        prediction_rows=256,
+        test_start=spec.test_start,
+        requested_test_end=spec.test_end,
+        effective_test_end=spec.test_end,
+    )
+    with runtime_resource_policy_scope():
+        root = write_prediction_outputs(
+            spec=spec,
+            output_spec=make_prediction_report_spec(),
+            layout=StorageLayout(tmp_path),
+            output_chunks=(frame,),
+            model_metadata=model,
+            prediction_metadata_factory=lambda: metadata,
+        )
+    path = root / "prediction.parquet"
+    table = pq.read_table(path)
+    pq.write_table(table, path, use_dictionary=True, write_statistics=False)
+    table = None
+    native_batches = pq.ParquetFile.iter_batches
+    pulled = []
+
+    def observed_batches(parquet, **kwargs):
+        for batch in native_batches(parquet, **kwargs):
+            pulled.append(batch.get_total_buffer_size())
+            assert pulled[-1] <= 4 * 1024**2
+            yield batch
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed_batches)
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        with bundle_validation.read_prediction_output_bundle(
+            root, expected_output_id=spec.prediction_id
+        ) as (_manifest, lookup):
+            assert lookup.row_count == 256
+            with lookup.values_for_frame(frame.iloc[[0, 255]], mark_matched=False) as (
+                values,
+                found,
+            ):
+                assert list(found) == [1, 1]
+                assert list(values) == [0.0, 255.0]
+        assert policy.used_memory_bytes == 0
+    assert pulled and len(pulled) > 1
+
+
 def _write_bundle(root: Path) -> None:
     root.mkdir(parents=True)
     frame = make_price_volume_prediction_output_frame()
