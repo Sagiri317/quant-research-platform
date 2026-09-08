@@ -329,6 +329,9 @@ def neutralize_cross_section(
             if np.linalg.matrix_rank(matrix) != matrix.shape[1]:
                 continue
             target = values.loc[design.index].to_numpy(dtype="float64", copy=False)
+            if np.all(target == target[0]):
+                result.loc[design.index, factor] = 0.0
+                continue
             beta, *_ = np.linalg.lstsq(matrix, target, rcond=None)
             result.loc[design.index, factor] = target - matrix @ beta
     return result

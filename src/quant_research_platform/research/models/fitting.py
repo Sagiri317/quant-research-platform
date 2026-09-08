@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from math import ceil
 from numbers import Integral
 
 import numpy as np
@@ -1124,6 +1125,9 @@ def _model_state_upper_bound_bytes(
         tree_count = _positive_model_int(params.get("n_estimators"), default=100)
         depth = _positive_model_int(params.get("max_depth"), default=0)
         leaves = _bounded_tree_nodes(rows, depth=depth)
+        minimum_leaf_weight = params.get("min_weight_fraction_leaf", 0.0)
+        if minimum_leaf_weight > 1.0 / rows:
+            leaves = min(leaves, 2 * ceil(1.0 / minimum_leaf_weight) - 1)
     elif algorithm == "gradient_boosting_regressor":
         tree_count = _positive_model_int(params.get("n_estimators"), default=100)
         depth_value = params.get("max_depth")

@@ -275,3 +275,27 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
     assert result["eligible"].tolist() == [True, True, True]
     assert result["model_target"].iloc[:2].tolist() == pytest.approx([-1.0, 1.0])
     assert pd.isna(result.loc[2, "model_target"])
+
+
+@pytest.mark.parametrize("variation", (0.0, 1e-8))
+def test_neutralization_constant_has_no_artificial_alpha_and_keeps_small_variation(
+    variation,
+):
+    axis = np.arange(120, dtype="float64")
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-02"),
+            "eligible": True,
+            "industry_level1_code": ["A", "B"] * 60,
+            "log_float_market_cap": np.linspace(15.17, 24.81, 120),
+            "factor": 2.3 + variation * np.sin(axis),
+        }
+    )
+    actual = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    assert actual.feature_observed_factor.eq(1).all()
+    assert actual.feature_missing_factor.eq(0).all()
+    if variation == 0:
+        assert actual.feature_factor.eq(0.0).all()
+    else:
+        assert actual.feature_factor.std(ddof=0) == pytest.approx(1.0)
+        assert actual.feature_factor.nunique() > 100

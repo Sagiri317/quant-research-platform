@@ -1646,3 +1646,73 @@ def test_simple_producer_has_no_executable_output_without_two_lookahead_sessions
         pd.Timestamp("2023-01-09").date(),
         pd.Timestamp("2023-01-10").date(),
     }
+
+
+def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis():
+    from quant_research_platform.research.portfolios.risk import (
+        FactorRiskState,
+        preprocess_risk_styles,
+    )
+    from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+
+    axis = np.arange(121, dtype="float64")
+    assets = [f"asset_{index:03}" for index in range(121)]
+    cross = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-02"),
+            "asset_id": assets,
+            "industry_level1_code": ["A", "B"] * 60 + ["A"],
+            "float_market_cap": 10000 + axis,
+            "eligible": [True] * 120 + [False],
+            "asset_return": np.sin(axis) / 100,
+            **{
+                name: np.sin(axis / (index + 3)) + axis / 120
+                for index, name in enumerate(RISK_STYLE_COLUMNS)
+            },
+        }
+    )
+    state = FactorRiskState(
+        style_columns=RISK_STYLE_COLUMNS,
+        minimum_factor_dates=3,
+        minimum_specific_dates=3,
+    )
+    for day in pd.bdate_range("2020-01-02", periods=3):
+        state.observe_return_session(cross.assign(timestamp=day))
+    scheduled = pd.DataFrame(
+        {
+            name: pd.Series(dtype="datetime64[ns]")
+            for name in ("timestamp", "entry_at", "available_at")
+        }
+    )
+
+    def decide(frame):
+        return production._enhanced_decision(
+            benchmark_weights=pd.Series(1 / 120, index=assets[:120]),
+            alpha=pd.Series(0.0, index=assets),
+            factor_risk=state,
+            current_cross=frame,
+            calibration_rows=[],
+            calibration_intervals=scheduled,
+            as_of=pd.Timestamp("2020-01-08"),
+            risk_style_columns=RISK_STYLE_COLUMNS,
+        ).exposures.set_index("asset_id")
+
+    before = decide(cross)
+    changed = cross.copy()
+    changed.loc[~changed.eligible, list(RISK_STYLE_COLUMNS)] = 1000.0
+    after = decide(changed)
+    pd.testing.assert_frame_equal(
+        before.loc[assets[:120]], after.loc[assets[:120]], check_exact=True
+    )
+    assert set(after.index) == set(assets)
+    assert np.isfinite(
+        after.loc[assets[-1], list(RISK_STYLE_COLUMNS)].to_numpy(dtype=float)
+    ).all()
+    fitted_only = preprocess_risk_styles(
+        cross.loc[cross.eligible], style_columns=RISK_STYLE_COLUMNS
+    )
+    pd.testing.assert_frame_equal(
+        before.loc[assets[:120], list(RISK_STYLE_COLUMNS)].reset_index(drop=True),
+        fitted_only.loc[:, list(RISK_STYLE_COLUMNS)].reset_index(drop=True),
+        check_exact=True,
+    )

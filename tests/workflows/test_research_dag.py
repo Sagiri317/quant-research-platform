@@ -311,6 +311,32 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         / "pv_all_persisted_predictions"
     )
     prediction_manifest = read_manifest(prediction_root / "manifest.json")
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.contracts.predictions import (
+        A_SHARE_PREDICTION_PRIMARY_KEY,
+        RAW_PREDICTION_COLUMN,
+        prediction_output_columns,
+    )
+    from quant_research_platform.storage.identity import native_filesystem_path
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact,
+    )
+
+    declared = read_semantic_artifact(prediction_root.parent.parent)[
+        "semantic_metadata"
+    ]["target_contract"]["prediction_schema"]
+    assert declared["columns"] == list(
+        prediction_output_columns("a_share_oos", RAW_PREDICTION_COLUMN)
+    )
+    assert (
+        declared["columns"]
+        == pq.read_schema(
+            native_filesystem_path(prediction_root / "prediction.parquet")
+        ).names
+    )
+    assert declared["primary_key"] == list(A_SHARE_PREDICTION_PRIMARY_KEY)
+    assert declared["primary_key"] == prediction_manifest["metadata"]["primary_key"]
     assert prediction_manifest["metadata"]["prediction_mode"] == "a_share_oos"
     assert prediction_manifest["metadata"]["prediction_column"] == "raw_prediction"
     keys = dataset_frame.loc[

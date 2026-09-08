@@ -186,9 +186,17 @@ def preprocess_risk_styles(
         raise ValueError("risk_style_preprocessing_columns_invalid")
     result = frame.copy()
     timestamps = pd.to_datetime(result["timestamp"], errors="raise")
+    eligible = pd.Series(True, index=result.index)
+    if "eligible" in result:
+        if (
+            not pd.api.types.is_bool_dtype(result.eligible)
+            or result.eligible.isna().any()
+        ):
+            raise ValueError("factor_risk_eligibility_invalid")
+        eligible = result.eligible
     for column in style_columns:
         values = pd.to_numeric(result[column], errors="raise").astype("float64")
-        grouped = values.groupby(timestamps, sort=False)
+        grouped = values.where(eligible).groupby(timestamps, sort=False)
         median = grouped.transform("median")
         mad = grouped.transform(
             lambda values: (
@@ -199,8 +207,9 @@ def preprocess_risk_styles(
         )
         bound = 3.0 * 1.4826 * mad
         clipped = values.clip(lower=median - bound, upper=median + bound)
-        means = clipped.groupby(timestamps, sort=False).transform("mean")
-        scales = clipped.groupby(timestamps, sort=False).transform(
+        fitting_values = clipped.where(eligible)
+        means = fitting_values.groupby(timestamps, sort=False).transform("mean")
+        scales = fitting_values.groupby(timestamps, sort=False).transform(
             lambda values: (
                 float(np.sqrt(np.mean((values.dropna() - values.mean()) ** 2)))
                 if len(values.dropna())

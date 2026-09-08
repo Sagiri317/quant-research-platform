@@ -2403,3 +2403,39 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
             assert policy.used_memory_bytes == baseline
         assert not scratch.exists()
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "fraction,depth,expected_nodes", ((0.25, 6, 7), (0.0001, 2, 7), (1e-320, 3, 15))
+)
+def test_rf_state_bound_uses_declared_leaf_weight_without_losing_row_or_depth_limits(
+    fraction, depth, expected_nodes
+):
+    frame = pd.DataFrame({"x": np.arange(128, dtype="float64")})
+    spec = ModelSpec(
+        model_id="rf",
+        model_algorithm="random_forest_regressor",
+        input_factor_columns=("x",),
+        label_column="label",
+        hyperparameters={
+            "n_estimators": 3,
+            "max_depth": depth,
+            "min_weight_fraction_leaf": fraction,
+            "bootstrap": False,
+        },
+        random_seed=42,
+    )
+    estimator = build_estimator_from_model_spec(spec)
+    with runtime_resource_policy_scope() as policy:
+        with policy.lease("test.rf_state", 1024**2):
+            estimator.fit(
+                frame, np.sin(frame.x), sample_weight=np.linspace(1.0, 2.0, len(frame))
+            )
+            assert all(
+                tree.tree_.node_count <= expected_nodes
+                for tree in estimator.estimators_
+            )
+            assert fitting._model_state_upper_bound_bytes(
+                frame, spec, estimator=estimator
+            ) == 3 * (4096 + expected_nodes * 256)
+        assert policy.used_memory_bytes == 0

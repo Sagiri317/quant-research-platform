@@ -875,6 +875,8 @@ def execute_continuous_target(
             low, high = 0.0, 1.0
             for _ in range(80):
                 middle = (low + high) / 2.0
+                if middle == low or middle == high:
+                    break
                 middle_notional, middle_cost, _ = buy_spend(middle)
                 if middle_notional + middle_cost <= cash_after_sells:
                     low = middle

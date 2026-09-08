@@ -70,9 +70,11 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.predictions import (
+    A_SHARE_PREDICTION_PRIMARY_KEY,
     PREDICTION_PRIMARY_KEY,
     RAW_PREDICTION_COLUMN,
     PredictionSpec,
+    prediction_output_columns,
 )
 from quant_research_platform.contracts.targets import (
     PlanDecision,
@@ -2850,13 +2852,10 @@ def _semantic_target_payload(
             "research_dataset_id": protocol.scenario_id,
             "model_target_id": model_dependencies[0],
             "prediction_mode": "a_share_oos",
-            "columns": [
-                "timestamp",
-                "asset_id",
-                "model_id",
-                "raw_prediction",
-                "alpha_score",
-            ],
+            "columns": list(
+                prediction_output_columns("a_share_oos", RAW_PREDICTION_COLUMN)
+            ),
+            "primary_key": list(A_SHARE_PREDICTION_PRIMARY_KEY),
         }
         if protocol.protocol_id == "crypto_hft":
             payload["prediction_schema"] = {

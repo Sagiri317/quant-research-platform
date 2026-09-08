@@ -1059,3 +1059,43 @@ def test_simple_target_rejects_missing_eligible_signal(bad: float) -> None:
             pd.Series({"a": bad, "b": 2.0}),
             eligible=pd.Series({"a": True, "b": True}),
         )
+
+
+def test_cash_search_stops_at_float_stagnation_and_preserves_old_low_exactly():
+    assumptions = _assumptions()
+    when = date(2023, 8, 28)
+    actual_cost = _a_share_cost(_schedule(), {"a": "shanghai"})
+    low, high = 0.0, 1.0
+    for _ in range(80):
+        middle = (low + high) / 2.0
+        amount = 100.0 * middle
+        cost = actual_cost(when, "a", "buy", amount, 1000.0, assumptions)
+        if amount + cost.total_cost <= 100.0:
+            low = middle
+        else:
+            high = middle
+    expected_amount = 100.0 * low
+    expected_cost = actual_cost(when, "a", "buy", expected_amount, 1000.0, assumptions)
+    calls = []
+
+    def observed_cost(*args):
+        calls.append(args[3])
+        return actual_cost(*args)
+
+    result = execute_continuous_target(
+        pd.Series({"a": 0.0}),
+        pd.Series({"a": 1.0}),
+        nav=100.0,
+        average_daily_volume=pd.Series({"a": 1000.0}),
+        can_enter=pd.Series({"a": True}),
+        can_exit=pd.Series({"a": True}),
+        execution_date=when,
+        assumptions=assumptions,
+        cost_for_trade=observed_cost,
+        cost_source_identity="0" * 64,
+    )
+    assert result.asset_ledger.executed_delta_notional.item() == expected_amount
+    assert result.post_trade_cash == max(
+        0.0, 100.0 - expected_amount - expected_cost.total_cost
+    )
+    assert len(calls) <= np.finfo(float).nmant + 3
