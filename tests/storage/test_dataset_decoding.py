@@ -48,6 +48,100 @@ from tests.storage.low_level_fixtures import (
 )
 
 
+@pytest.mark.parametrize(
+    "filtered,headroom,admitted_rows",
+    (
+        (False, 4123, 3),
+        (False, 4122, 2),
+        (False, 4105, 1),
+        (False, 4104, 0),
+        (True, 4152, 3),
+        (True, 4151, 2),
+        (True, 4116, 1),
+        (True, 4115, 0),
+    ),
+)
+def test_plain_reader_derives_bounds_once_and_keeps_integer_admission(
+    tmp_path, monkeypatch, filtered, headroom, admitted_rows
+):
+    path = tmp_path / "plain-admission.parquet"
+    table = pa.table({"value": np.arange(4096, dtype=np.int64)})
+    pq.write_table(
+        table, path, use_dictionary=False, compression=None, row_group_size=2048
+    )
+    del table
+    identity = dataset_physical.dataset_file_identity(path)
+    calls = {}
+    for name in (
+        "_maximum_projected_row_bytes",
+        "_maximum_projected_decode_fixed_bytes",
+        "_physical_page_rows",
+    ):
+        original = getattr(dataset_physical, name)
+        calls[name] = 0
+
+        def observed(*args, _name=name, _original=original, **kwargs):
+            calls[_name] += 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(dataset_physical, name, observed)
+    native = pq.ParquetFile.iter_batches
+    pulls = []
+
+    def observed_batches(self, **kwargs):
+        pulls.append(kwargs["batch_size"])
+        yield from native(self, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed_batches)
+    sizes = []
+    delivered = 0
+    # The plain int64 bound is 9 bytes per row plus a 4096-byte read buffer.
+    # Filtering also keeps the copied rows and two rounded boolean buffers.
+    with runtime_resource_policy_scope(explicit_cap_bytes=8 * 1024**2) as policy:
+        with closing_iterator(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=identity,
+                target_chunk_bytes=90,
+                operation_headroom_bytes=headroom,
+                parquet_filters=[("value", ">=", 0)] if filtered else None,
+            )
+        ) as batches:
+            if not admitted_rows:
+                reason = (
+                    "dataset_filter_working_set_exceeds_task_memory_budget"
+                    if filtered
+                    else "dataset_working_set_exceeds_task_memory_budget"
+                )
+                with pytest.raises(
+                    storage_errors.DatasetReadCapacityExceeded, match=reason
+                ):
+                    next(batches)
+            else:
+                for batch in batches:
+                    assert batch.schema == pa.schema([("value", pa.int64())])
+                    np.testing.assert_array_equal(
+                        batch.column(0).to_numpy(),
+                        np.arange(
+                            delivered, delivered + batch.num_rows, dtype=np.int64
+                        ),
+                    )
+                    sizes.append(batch.num_rows)
+                    delivered += batch.num_rows
+                    del batch
+        assert policy.used_memory_bytes == 0
+    assert set(calls.values()) == {2 if admitted_rows else 1}
+    if admitted_rows:
+        assert pulls == [admitted_rows, admitted_rows]
+        complete, remainder = divmod(2048, admitted_rows)
+        expected = [admitted_rows] * complete + ([remainder] if remainder else [])
+        assert sizes == expected * 2
+        assert delivered == 4096
+    else:
+        assert not pulls
+    assert dataset_physical.dataset_file_identity(path) == identity
+
+
 def test_categorical_converter_rejects_nonnull_value_outside_declared_domain() -> None:
     batch = pa.record_batch([pa.array(["known", "unknown", None])], names=["value"])
 
