@@ -95,6 +95,7 @@ app = create_app(project_root=Path("YOUR_PROJECT"))
 [可复现演示 Notebook](notebooks/research-interview-demo.ipynb)
 使用 `quantlab313` kernel。填写项目、profile、运行及报告身份后从头执行；
 源码不含执行输出或本地路径，验证副本使用合成产物。
+Notebook 展示所选运行及报告，不把任意运行标成合成数据；合成验收的结论仅适用于其验证副本。
 它仅读取已有诊断和聚合 NAV：A-share 标注交易日和 CNY，Crypto 标注 UTC、
 USDT 与已记录 OOS/空档；事件 NAV 不替代 365 日频统计，日数不足仍为 `UNDEFINED`。
 如显式增大 `NAV_STRIDE`，仅改变图形采样，源点数与显示点数会同时列出。

@@ -397,32 +397,6 @@ def canonical_feature_pipeline(
     return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)
 
 
-def preprocess_risk_exposures(
-    frame: pd.DataFrame,
-    *,
-    style_columns: tuple[str, ...],
-    timestamp_column: str = "timestamp",
-) -> pd.DataFrame:
-    """Winsorize risk styles at 3 MAD then population-zscore by date."""
-
-    required = {timestamp_column, *style_columns}
-    if not required.issubset(frame.columns):
-        raise ValueError("risk_exposure_columns_invalid")
-    result = frame.copy()
-    for column in style_columns:
-        values = strict_finite_numeric_series(
-            result[column],
-            error=f"invalid_risk_exposure: {column}",
-            allow_null=True,
-        )
-        grouped = values.groupby(result[timestamp_column], sort=False)
-        clipped = _mad_winsorize(values, grouped)
-        result[column] = clipped.groupby(
-            result[timestamp_column], sort=False
-        ).transform(_stable_zscore)
-    return result
-
-
 def _zscore(
     values: pd.Series,
     grouped: pd.core.groupby.SeriesGroupBy,

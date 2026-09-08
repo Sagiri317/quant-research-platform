@@ -15,6 +15,11 @@ from quant_research_platform.artifacts.evidence import (
     write_json_evidence,
     write_markdown_evidence,
 )
+from quant_research_platform.artifacts.outputs import validate_output_bundle
+from quant_research_platform.artifacts.portfolio_ledger import (
+    read_portfolio_ledger_artifact,
+    summarize_portfolio_ledger,
+)
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
@@ -35,6 +40,9 @@ from quant_research_platform.contracts.targets import (
 )
 from quant_research_platform.reports import a_share, crypto_hft, diagnostic_status
 from quant_research_platform.reports.a_share import build_a_share_report
+from quant_research_platform.research.models.persisted import (
+    read_quarterly_model_artifact,
+)
 from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
 from quant_research_platform.storage.datasets.schema import (
     COMMON_MANIFEST_METADATA_KEY,
@@ -153,6 +161,76 @@ def load_a_share_run_evidence(
         (item["run_id"], item["experiment_id"]): dict(item)
         for item in record.trial_ledgers
     }
+    coverage = _unavailable(issues, scenario)
+    dataset_ref = loaded.get(scenario)
+    if dataset_ref is not None:
+        manifest = read_dataset_manifest_evidence(_instance_root(layout, dataset_ref))
+        coverage = {
+            "status": "DEFINED",
+            "dataset_identity": dataset_ref.instance_identity,
+            **{
+                key: manifest[key]
+                for key in (
+                    "row_count",
+                    "date_min",
+                    "date_max",
+                    "null_count_summary",
+                    "non_finite_count_summary",
+                    "duplicate_primary_key_count",
+                )
+            },
+            **{
+                f"{role}_nan_profile": {
+                    column: manifest[f"{role}_nan_profile"].get(column, 0)
+                    for column, declared_role in manifest["column_roles"].items()
+                    if declared_role == role and column in manifest["columns"]
+                }
+                for role in ("factor", "label")
+            },
+        }
+    pit_targets = []
+    for target_id in ("fundamental_pit", "fundamental_factors"):
+        if target_id not in references:
+            pit_targets.append(
+                {
+                    "target_id": target_id,
+                    "status": "UNDEFINED",
+                    "reason": "target_not_in_run",
+                }
+            )
+            continue
+        reference = load(target_id)
+        if reference is None:
+            pit_targets.append(
+                {"target_id": target_id, **_unavailable(issues, target_id)}
+            )
+            continue
+        manifest = read_dataset_manifest_evidence(_instance_root(layout, reference))
+        pit_targets.append(
+            {
+                "target_id": target_id,
+                "status": reference.status.value,
+                "identity": reference.instance_identity,
+                "upstream_identities": manifest[COMMON_MANIFEST_METADATA_KEY][
+                    "upstream_identities"
+                ],
+            }
+        )
+    coverage["pit"] = {
+        "scope": "published_run_references",
+        "raw_completeness": "UNDEFINED",
+        "reason": "raw_completeness_not_established_by_published_run",
+        "targets": pit_targets,
+    }
+    evaluation_ref = loaded.get(f"{scenario}_evaluation")
+    if evaluation_ref is not None:
+        output, _members = validate_output_bundle(
+            _instance_root(layout, evaluation_ref)
+            / "outputs"
+            / evaluation_ref.target_id
+        )
+        coverage["evaluation"] = output["metadata"]["evaluation_diagnostics"]
+    selections = {}
     for target in record.target_results:
         if target.producer_kind is not ProducerKind.MODEL:
             continue
@@ -162,6 +240,12 @@ def load_a_share_run_evidence(
         operational = read_semantic_artifact_operational_metadata(
             _instance_root(layout, model_ref)
         )
+        persisted = read_quarterly_model_artifact(
+            _instance_root(layout, model_ref),
+            expected_identity=model_ref.instance_identity,
+            trial_layout=layout,
+        )
+        selections = persisted.quarterly_selections
         for item in operational.get("model_trial_ledgers", []):
             trial_refs[(item["run_id"], item["experiment_id"])] = item
     trial_counts = Counter()
@@ -188,7 +272,7 @@ def load_a_share_run_evidence(
                 expected_identity=str(statistics_ref.instance_identity),
             )
             with ExitStack() as table_reads:
-                factors = robustness = comparison = reality_checks = None
+                factors = robustness = comparison = reality_checks = model_trials = None
                 try:
                     factors = table_reads.enter_context(
                         artifact.table("factor_diagnostics.parquet")
@@ -202,8 +286,12 @@ def load_a_share_run_evidence(
                     reality_checks = table_reads.enter_context(
                         artifact.table("model_reality_checks.parquet")
                     )
+                    model_trials = table_reads.enter_context(
+                        artifact.table("model_trials.parquet")
+                    )
                     reserve_report_frames(
-                        report_lease, (comparison, reality_checks, robustness)
+                        report_lease,
+                        (factors, model_trials, comparison, reality_checks, robustness),
                     )
                     statistics = {
                         "status": "DEFINED",
@@ -215,6 +303,12 @@ def load_a_share_run_evidence(
                         "factor_undefined_rows": int(
                             factors["status"].eq("UNDEFINED").sum()
                         ),
+                        "factor_diagnostics": factors.astype(object)
+                        .where(factors.notna(), None)
+                        .to_dict("records"),
+                        "model_trials": model_trials.astype(object)
+                        .where(model_trials.notna(), None)
+                        .to_dict("records"),
                         "model_comparison": comparison.astype(object)
                         .where(comparison.notna(), None)
                         .to_dict("records"),
@@ -232,7 +326,9 @@ def load_a_share_run_evidence(
                         ],
                     }
                 finally:
-                    factors = robustness = comparison = reality_checks = None
+                    factors = robustness = comparison = reality_checks = (
+                        model_trials
+                    ) = None
         except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
             issues.append(
                 _issue(statistics_target, "FAILED", "statistics_reference_invalid")
@@ -342,17 +438,6 @@ def load_a_share_run_evidence(
                             "terminal_timestamp": "end_at",
                         },
                     }
-                    for candidate in candidates:
-                        rows = performance.loc[performance.candidate_id.eq(candidate)]
-                        portfolios.append(
-                            dict(
-                                candidate_id=candidate,
-                                statistics_identity=portfolio_ref.instance_identity,
-                                metrics=rows.astype(object)
-                                .where(rows.notna(), None)
-                                .to_dict("records"),
-                            )
-                        )
                 finally:
                     performance = capacity = robustness = attribution = daily = (
                         merged
@@ -364,10 +449,48 @@ def load_a_share_run_evidence(
                 )
             )
             portfolio_statistics = _unavailable(issues, portfolio_target)
+    for candidate in candidates:
+        target_id = f"{scenario}_{candidate}_ledger"
+        ledger_ref = load(target_id)
+        metrics = [
+            row
+            for row in portfolio_statistics.get("performance", [])
+            if row["candidate_id"] == candidate
+        ]
+        if ledger_ref is None:
+            if metrics:
+                portfolios.append(
+                    {
+                        "candidate_id": candidate,
+                        "statistics_identity": portfolio_ref.instance_identity,
+                        "metrics": metrics,
+                    }
+                )
+            continue
+        try:
+            ledger = read_portfolio_ledger_artifact(
+                _instance_root(layout, ledger_ref),
+                expected_identity=ledger_ref.instance_identity,
+            )
+            portfolios.append(
+                {
+                    "candidate_id": candidate,
+                    "status": "DEFINED",
+                    "ledger_identity": ledger_ref.instance_identity,
+                    "economics": summarize_portfolio_ledger(ledger),
+                    "metrics": metrics,
+                }
+            )
+        except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
+            issues.append(
+                _issue(target_id, "FAILED", "portfolio_ledger_reference_invalid")
+            )
     return {
         "references": {
             target_id: result.instance_identity for target_id, result in loaded.items()
         },
+        "coverage": coverage,
+        "quarterly_selections": selections,
         "statistics": statistics,
         "portfolio_statistics": portfolio_statistics,
         "model_trials": {

@@ -519,12 +519,23 @@ class ResearchRunRecord:
         if window["access"] == "holdout" and not evidence:
             raise ValueError("research_run_holdout_evidence_invalid")
         if evidence:
+            if evidence.get("qualification") == "HOLDOUT_NOT_ACCESSED" and (
+                self.status is not RunStatus.BLOCKED
+                or self.trial_ledgers
+                or any(
+                    item.status is not TargetStatus.BLOCKED
+                    or item.instance_identity is not None
+                    for item in self.target_results
+                )
+            ):
+                raise ValueError("research_run_holdout_evidence_invalid")
             if (
                 window["access"] != "holdout"
                 or set(evidence) != {"qualification", "prior_runs"}
                 or evidence["qualification"]
                 not in {
                     "HOLDOUT_FIRST_EVIDENCE",
+                    "HOLDOUT_NOT_ACCESSED",
                     "REUSE",
                     "POST_HOLDOUT_CORRECTED",
                     "POST_HOLDOUT_ADDITIONAL_EVIDENCE",
@@ -546,7 +557,10 @@ class ResearchRunRecord:
             if (
                 len(prior_ids) != len(set(prior_ids))
                 or self.run_id in prior_ids
-                or (evidence["qualification"] == "HOLDOUT_FIRST_EVIDENCE")
+                or (
+                    evidence["qualification"]
+                    in {"HOLDOUT_FIRST_EVIDENCE", "HOLDOUT_NOT_ACCESSED"}
+                )
                 != (not prior_ids)
             ):
                 raise ValueError("research_run_holdout_evidence_invalid")

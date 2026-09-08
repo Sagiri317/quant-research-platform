@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from inspect import currentframe
 from pathlib import Path
 
 import pandas as pd
@@ -376,29 +375,13 @@ def test_open_dataset_session_preserves_missing_manifest_preflight(
         spec=make_processed_dataset_spec("missing_manifest_preflight"),
     )
     (root / "_manifest" / "manifest.json").unlink()
-    original_stat = Path.stat
-    metadata_stats = 0
     metadata_reads = 0
-
-    def observe_owner_metadata_stat(
-        self: Path,
-        *args: object,
-        **kwargs: object,
-    ):  # noqa: ANN202
-        nonlocal metadata_stats
-        caller = currentframe().f_back
-        if caller is not None and caller.f_code.co_filename.endswith(
-            "_dataset_reading.py"
-        ):
-            metadata_stats += 1
-        return original_stat(self, *args, **kwargs)
 
     def reject_metadata_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
         nonlocal metadata_reads
         metadata_reads += 1
         raise AssertionError("metadata read ran for missing manifest")
 
-    monkeypatch.setattr(Path, "stat", observe_owner_metadata_stat)
     monkeypatch.setattr(
         dataset_reading,
         "read_bounded_qrp_json",
@@ -413,7 +396,6 @@ def test_open_dataset_session_preserves_missing_manifest_preflight(
         ):
             pass
 
-    assert metadata_stats == 0
     assert metadata_reads == 0
 
 

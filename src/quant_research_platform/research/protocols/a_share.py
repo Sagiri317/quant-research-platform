@@ -596,6 +596,23 @@ def model_folds(
     return tuple(folds)
 
 
+def analysis_windows(
+    manifest: Mapping[str, object], requested: TimeWindow
+) -> tuple[TimeWindow, TimeWindow]:
+    """Resolve full-development factor history and out-of-sample model dates."""
+    if manifest["access_window"] != "development":
+        return requested, requested
+    development = TimeWindow(**manifest["development_window"])
+    factor_history = TimeWindow(
+        manifest["formal_dataset_window"]["start"], development.end
+    )
+    if pd.Timestamp(requested.end) == pd.Timestamp(development.end) and pd.Timestamp(
+        requested.start
+    ) in {pd.Timestamp(development.start), pd.Timestamp(factor_history.start)}:
+        return factor_history, development
+    return requested, requested
+
+
 def protocol(
     scenario_id: str,
     access_window: str = "development",

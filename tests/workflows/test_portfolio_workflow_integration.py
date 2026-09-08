@@ -682,12 +682,36 @@ def _prepare_model_artifacts(
         )
 
 
+@pytest.mark.parametrize(
+    "start,end,access,expected_start",
+    (
+        ("2019-01-01", "2023-12-31", "development", "2014-01-01"),
+        ("2023-12-01", "2023-12-31", "development", "2023-12-01"),
+        ("2024-01-01", "2025-12-31", "holdout", "2024-01-01"),
+    ),
+)
+def test_factor_and_model_windows_keep_separate_formal_boundaries(
+    start, end, access, expected_start
+):
+    protocol = a_share.protocol("pv_all", access_window=access)
+    requested = TimeWindow(start, end)
+    factor_window, model_window = a_share.analysis_windows(
+        protocol.manifest(), requested
+    )
+    assert factor_window == TimeWindow(expected_start, end)
+    assert model_window == requested
+    for target in ("pv_all_evaluation", "pv_all_statistics"):
+        assert (
+            research._a_share_target_window(protocol, target, requested)
+            == factor_window
+        )
+
+
 def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_path):
     from quant_research_platform.contracts.json_codec import canonical_json_hash
     from quant_research_platform.contracts.targets import (
         ResearchRunRecord,
         ResearchRunTargetResult,
-        TargetPlan,
         unmeasured_operation_evidence,
     )
 
@@ -741,27 +765,68 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_
         holdout_evidence={"qualification": "HOLDOUT_FIRST_EVIDENCE", "prior_runs": []},
     )
     research.write_research_run_record(layout.research_run_path(record.run_id), record)
-    references = {
-        target: TargetPlan(
-            target_id=target,
-            upstream_target_ids=(),
-            producer_id=target,
-            decision="REUSE",
-            requested_identity=identity,
-            matching_instance_identity=identity,
-            producer_kind=kind,
+    forged = record.payload()
+    forged["holdout_evidence"]["qualification"] = "HOLDOUT_NOT_ACCESSED"
+    import json
+
+    forged_path = layout.research_run_path("run_forged_not_accessed")
+    forged["run_id"] = "run_forged_not_accessed"
+    forged_path.write_text(json.dumps(forged), encoding="utf-8")
+    with pytest.raises(ValueError, match="research_run_record_invalid"):
+        read_research_run_record(forged_path)
+    forged_path.unlink()
+    with pytest.raises(ValueError, match="research_run_holdout_evidence_invalid"):
+        replace(
+            record,
+            status="BLOCKED",
+            holdout_evidence=forged["holdout_evidence"],
+            target_results=(
+                replace(
+                    results[0],
+                    status="BLOCKED",
+                    reason="dependency_blocked",
+                    instance_identity=None,
+                    schema_identity=None,
+                    artifact_root=None,
+                ),
+                *results[1:],
+            ),
         )
-        for target, kind, identity in facts
-    }
     arguments = dict(
         layout=layout,
         profile=profile,
         protocol=protocol,
         research_window=window,
         software_identity="f" * 64,
-        target_references=references,
+        target_results=results,
     )
     assert research._holdout_evidence(**arguments)["qualification"] == "REUSE"
+    for status in ("FAILED", "BLOCKED"):
+        partial_results = (
+            *results[:-1],
+            replace(
+                results[-1],
+                status=status,
+                reason="prediction_unavailable",
+                instance_identity=None,
+                schema_identity=None,
+                artifact_root=None,
+            ),
+        )
+        assert (
+            research._holdout_evidence(
+                **{**arguments, "target_results": partial_results}
+            )["qualification"]
+            != "REUSE"
+        )
+        partial = replace(record, status=status, target_results=partial_results)
+        partial_layout = StorageLayout(tmp_path / status.lower())
+        research.write_research_run_record(
+            partial_layout.research_run_path(partial.run_id), partial
+        )
+        prior = research._holdout_evidence(**{**arguments, "layout": partial_layout})
+        assert prior["qualification"] == "POST_HOLDOUT_CORRECTED"
+        assert [row["run_id"] for row in prior["prior_runs"]] == [partial.run_id]
     other_window = {"start": "2025-01-01", "end": "2025-03-31", "access": "holdout"}
     assert (
         research._holdout_evidence(**{**arguments, "research_window": other_window})[
@@ -776,20 +841,13 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_
             "run_id": "run_other_development",
         },
     )
-    changed_output = {
-        **references,
-        protocol.persisted_prediction_target_id: replace(
-            references[protocol.persisted_prediction_target_id],
-            requested_identity="1" * 64,
-            matching_instance_identity="1" * 64,
-        ),
-    }
+    changed_output = (*results[:-1], replace(results[-1], instance_identity="1" * 64))
     assert (
         research._holdout_evidence(
             **{
                 **arguments,
                 "protocol": new_protocol,
-                "target_references": changed_output,
+                "target_results": changed_output,
             }
         )["qualification"]
         == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
@@ -963,6 +1021,26 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         research.research_run(
             **{**request, "development_run_id": wrong_reference.run_id}, plan=True
         )
+    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+
+    def unavailable_alpha(*args, **kwargs):
+        raise PortfolioTargetBlocked("alpha_calibration_insufficient_observations")
+
+    with monkeypatch.context() as preflight:
+        preflight.setattr(research, "frozen_alpha_calibration", unavailable_alpha)
+        preflight.setattr(research, "_execute_action", forbidden)
+        planned_block = research.research_run(**request, plan=True)
+        assert planned_block["status"] == "BLOCKED" and "run_id" not in planned_block
+        blocked = research.research_run(**request)
+    blocked_record = read_research_run_record(
+        layout.research_run_path(blocked["run_id"])
+    )
+    assert blocked_record.status.value == "BLOCKED"
+    assert blocked_record.holdout_evidence["qualification"] == "HOLDOUT_NOT_ACCESSED"
+    assert all(item.status.value == "BLOCKED" for item in blocked_record.target_results)
+    assert (
+        blocked_record.protocol["frozen_development"]["run_id"] == development["run_id"]
+    )
     previous = len(captured)
     planned = research.research_run(**request, plan=True)
     assert_one_capture(previous)
@@ -1007,7 +1085,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         compare_semantic_artifacts,
     )
 
-    frozen = research._frozen_holdout_protocol(
+    frozen, blocker = research._frozen_holdout_protocol(
         profile,
         layout,
         profile.protocol("pv_all"),
@@ -1015,6 +1093,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         "2024-01-01",
         "2025-12-31",
     )
+    assert blocker is None
     target_layout = layout.with_target_roots(
         {
             item.target_id: layout.instance_root(
@@ -1608,6 +1687,65 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         expected_identity=report_identity,
     )
     assert set(report["sections"]) == set(REQUIRED_REPORT_SECTIONS)
+    coverage = report["sections"]["Data/Coverage"]
+    assert coverage["row_count"] > 0
+    assert coverage["evaluation"]["rows_input"] > 0
+    dataset_ref = next(
+        item for item in record.target_results if item.target_id == "pv_all"
+    )
+    manifest = research.read_dataset_manifest_evidence(
+        layout.instance_root(
+            layout.project_root / dataset_ref.artifact_root,
+            dataset_ref.instance_identity,
+        )
+    )
+    assert coverage["factor_nan_profile"] == {
+        column: manifest["factor_nan_profile"].get(column, 0)
+        for column in manifest["columns"]
+        if manifest["column_roles"][column] == "factor"
+    }
+    assert coverage["pit"]["raw_completeness"] == "UNDEFINED"
+    assert report["sections"]["factor diagnostics"]["results"]
+    assert report["sections"]["model selection"]["quarterly_selections"]
+    assert report["sections"]["model selection"]["configurations"]
+    blocked_ids = {
+        "fundamental_factors",
+        "pv_all_champion_csi500_enhanced_ledger",
+        "pv_all_champion_csi1000_enhanced_ledger",
+        "pv_all_portfolio_statistics",
+    }
+    partial = replace(
+        record,
+        status="BLOCKED",
+        target_results=tuple(
+            replace(
+                item,
+                status="BLOCKED",
+                reason="dependency_blocked",
+                instance_identity=None,
+                schema_identity=None,
+                artifact_root=None,
+            )
+            if item.target_id in blocked_ids
+            else item
+            for item in record.target_results
+        ),
+    )
+    from quant_research_platform.artifacts.research import produce_a_share_report
+
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("report.partial", 1) as report_lease,
+    ):
+        partial_report = produce_a_share_report(
+            layout=layout, record=partial, report_lease=report_lease
+        )
+    assert partial_report["report_status"] == "BLOCKED"
+    retained = partial_report["sections"]["portfolio"]["results"]
+    assert len(retained) == 3
+    assert all(
+        row["ledger_identity"] and row["economics"]["nav"] > 0 for row in retained
+    )
     capacity = report["sections"]["capacity"]
     assert capacity["status"] == "UNDEFINED"
     defined_capacity = [

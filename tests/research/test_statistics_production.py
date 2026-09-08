@@ -201,8 +201,10 @@ class _PredictionLookup:
         yield values, np.ones(len(frame), dtype=bool)
 
 
+@pytest.mark.parametrize("full_factor_history", (False, True))
 def test_family_comparison_production_matches_arch_on_persisted_common_date_losses(
     tmp_path: Path,
+    full_factor_history: bool,
 ):
     from arch.bootstrap import MCS, SPA, StepM
 
@@ -268,6 +270,15 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         filter_columns=("eligible",),
         context_columns=(),
     )
+    if full_factor_history:
+        historical = frame.iloc[: len(assets)].copy()
+        historical["timestamp"] = pd.Timestamp("2014-01-02")
+        historical["forward_return_20d_available_at"] = pd.Timestamp("2014-02-03")
+        frame = pd.concat((historical, frame), ignore_index=True)
+        protocol["development_window"] = {
+            "start": dates[0].date().isoformat(),
+            "end": cutoff.date().isoformat(),
+        }
     write_dataset(layout.research_dataset_root("a_share", "pv_all"), frame, spec=spec)
     model = _statistics_models(layout, spec, protocol, TimeWindow(dates[0], cutoff))
     envelope = build_business_manifest_envelope(
@@ -306,6 +317,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         artifact = read_statistics_artifact(
             root, expected_identity=envelope.instance_identity
         )
+        with artifact.table("factor_diagnostics.parquet") as factors:
+            assert factors.observation_count.eq(65 if full_factor_history else 64).all()
         with artifact.table("model_losses.parquet") as table:
             assert len(table) == 64 * 8
             assert table.common_date.eq(1).all()

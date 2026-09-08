@@ -106,6 +106,7 @@ from quant_research_platform.research.models.supervised import preflight_model_s
 from quant_research_platform.research.portfolios.production import (
     frozen_alpha_calibration,
 )
+from quant_research_platform.research.protocols.a_share import analysis_windows
 from quant_research_platform.runtime.execution_metrics import record_run_observations
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
@@ -588,26 +589,59 @@ def research_run(
         )
         preflight_model_specs(profile.models.get(model_id) for model_id in model_ids)
     with runtime_resource_policy_scope(None):
+        preflight_blocker = None
         if holdout:
             if protocol.protocol_id != "a_share_low_frequency":
                 raise PermissionError("holdout_frozen_development_identity_unavailable")
-            try:
-                protocol = _frozen_holdout_protocol(
-                    profile, layout, protocol, development_run_id, start_date, end_date
-                )
-            except PortfolioTargetBlocked as exc:
-                return {
-                    "stage": "research run",
-                    "plan": plan,
-                    "status": "BLOCKED",
-                    "blockers": [{"target_id": scenario_id, "reason": str(exc)}],
-                }
+            protocol, preflight_blocker = _frozen_holdout_protocol(
+                profile, layout, protocol, development_run_id, start_date, end_date
+            )
             profile = replace(profile, protocol=lambda **kwargs: protocol)
         else:
             if development_run_id is not None:
                 raise ValueError("development_run_id_requires_holdout")
             _require_development_window(protocol, start_date, end_date)
         terminals = tuple(protocol.terminal_targets("research run"))
+        if preflight_blocker is not None:
+            result = {
+                "stage": "research run",
+                "plan": plan,
+                "status": "BLOCKED",
+                "blockers": [
+                    {"target_id": target, "reason": preflight_blocker}
+                    for target in terminals
+                ],
+            }
+            if plan:
+                return result
+            run_id = f"run_{uuid4().hex}"
+            record = _research_run_record(
+                layout=layout,
+                run_id=run_id,
+                profile=profile,
+                protocol=protocol,
+                research_window=_research_window(
+                    protocol, None, start_date=start_date, end_date=end_date
+                ),
+                software_identity=production_software_identity(),
+                terminal_targets=terminals,
+                target_results=tuple(
+                    TargetResult(
+                        target_id=target,
+                        status=TargetStatus.BLOCKED,
+                        reason=preflight_blocker,
+                    )
+                    for target in terminals
+                ),
+                target_references={},
+                status=RunStatus.BLOCKED,
+                operation_evidence=unmeasured_operation_evidence(
+                    "holdout_preflight_blocked"
+                ),
+                holdout_not_accessed=True,
+            )
+            write_research_run_record(layout.research_run_path(run_id), record)
+            return {**result, "run_id": run_id}
         if plan:
             return plan_targets(
                 profile=profile,
@@ -700,7 +734,7 @@ def _frozen_holdout_protocol(
     development_run_id: str | None,
     start_date: str,
     end_date: str,
-) -> Any:
+) -> tuple[Any, str | None]:
     if development_run_id is None:
         raise PermissionError("holdout_frozen_development_identity_unavailable")
     requested = TimeWindow(start_date, end_date)
@@ -760,6 +794,7 @@ def _frozen_holdout_protocol(
         }
         calibration = None
         calibration_date = None
+        blocker = None
         sources = []
         for candidate in protocol.portfolio_candidates():
             if candidate.construction != "benchmark_enhanced":
@@ -772,9 +807,13 @@ def _frozen_holdout_protocol(
                 ),
                 expected_identity=source.instance_identity,
             )
-            current, observed_at = frozen_alpha_calibration(
-                artifact, cutoff=pd.Timestamp(record.research_window["end"])
-            )
+            try:
+                current, observed_at = frozen_alpha_calibration(
+                    artifact, cutoff=pd.Timestamp(record.research_window["end"])
+                )
+            except PortfolioTargetBlocked as exc:
+                blocker = str(exc)
+                break
             if calibration is not None and (
                 current != calibration or observed_at != calibration_date
             ):
@@ -788,7 +827,7 @@ def _frozen_holdout_protocol(
         access_window="holdout",
         frozen_development=frozen,
         frozen_alpha=calibration,
-    )
+    ), blocker
 
 
 def _require_development_window(protocol: Any, start_date: str, end_date: str) -> None:
@@ -1913,7 +1952,7 @@ def _build_semantic_target(
                 raise ValueError("prediction_target_root_missing")
             prediction_window = time_window
             if candidate.construction == "benchmark_enhanced":
-                prediction_window = _a_share_champion_window(
+                prediction_window = _a_share_target_window(
                     protocol,
                     candidate.prediction_target_id,
                     time_window,
@@ -2020,6 +2059,7 @@ def _research_run_record(
     status: RunStatus,
     operation_evidence: Mapping[str, object],
     failure_reason: str | None = None,
+    holdout_not_accessed: bool = False,
 ) -> ResearchRunRecord:
     references: list[ResearchRunTargetResult] = []
     for result in target_results:
@@ -2061,13 +2101,15 @@ def _research_run_record(
         status=status,
         operation_evidence=operation_evidence,
         failure_reason=failure_reason,
-        holdout_evidence=_holdout_evidence(
+        holdout_evidence={"qualification": "HOLDOUT_NOT_ACCESSED", "prior_runs": []}
+        if holdout_not_accessed
+        else _holdout_evidence(
             layout=layout,
             profile=profile,
             protocol=protocol,
             research_window=research_window,
             software_identity=software_identity.identity_hash,
-            target_references=target_references,
+            target_results=tuple(references),
         ),
     )
 
@@ -2079,7 +2121,7 @@ def _holdout_evidence(
     protocol: Any,
     research_window: Mapping[str, object],
     software_identity: str,
-    target_references: Mapping[str, TargetPlan],
+    target_results: tuple[ResearchRunTargetResult, ...],
 ) -> dict[str, object]:
     if (
         protocol.protocol_id != "a_share_low_frequency"
@@ -2089,6 +2131,12 @@ def _holdout_evidence(
     prior = []
     same_evidence = False
     same_inputs = False
+    produced = {
+        item.target_id: item
+        for item in target_results
+        if item.status in {TargetStatus.BUILT, TargetStatus.REUSED}
+    }
+    current = {key: item.instance_identity for key, item in produced.items()}
 
     def alpha_sources(frozen):
         return tuple(
@@ -2102,7 +2150,7 @@ def _holdout_evidence(
 
     evidence_targets = tuple(
         key
-        for key, item in target_references.items()
+        for key, item in produced.items()
         if item.producer_kind
         in {
             ProducerKind.INTERIM,
@@ -2117,33 +2165,32 @@ def _holdout_evidence(
             record.profile_id != profile.profile_id
             or record.scenario_id != protocol.scenario_id
             or record.research_window["access"] != "holdout"
+            or record.holdout_evidence.get("qualification") == "HOLDOUT_NOT_ACCESSED"
         ):
             continue
         prior.append(
             {"run_id": record.run_id, "identity": canonical_json_hash(record.payload())}
         )
-        old = {item.target_id: item.instance_identity for item in record.target_results}
+        old = {
+            item.target_id: item.instance_identity
+            for item in record.target_results
+            if item.status in {TargetStatus.BUILT, TargetStatus.REUSED}
+        }
         if (
             record.status is RunStatus.COMPLETE
-            and protocol.scenario_id in target_references
-            and protocol.model_selection_target_id in target_references
+            and protocol.scenario_id in current
+            and protocol.model_selection_target_id in current
             and record.software_identity == software_identity
-            and all(
-                key in target_references
-                and old.get(key) == target_references[key].requested_identity
-                for key in evidence_targets
-            )
+            and all(old.get(key) == current[key] for key in evidence_targets)
         ):
             if alpha_sources(record.protocol["frozen_development"]) == alpha_sources(
                 protocol.frozen_development
             ):
                 same_inputs = True
-                same_evidence |= dict(record.research_window) == dict(
-                    research_window
-                ) and old == {
-                    key: item.requested_identity
-                    for key, item in target_references.items()
-                }
+                same_evidence |= (
+                    dict(record.research_window) == dict(research_window)
+                    and old == current
+                )
     return {
         "qualification": "REUSE"
         if same_evidence
@@ -2961,10 +3008,10 @@ def _semantic_target_time_window(
     window = _target_time_window(action, protocol, data_spec, requested)
     if action != "research run" or data_spec is not None:
         return window
-    return _a_share_champion_window(protocol, target_spec.target_id, window)
+    return _a_share_target_window(protocol, target_spec.target_id, window)
 
 
-def _a_share_champion_window(
+def _a_share_target_window(
     protocol: Any,
     target_id: str,
     time_window: TimeWindow,
@@ -2973,6 +3020,11 @@ def _a_share_champion_window(
         return time_window
     if protocol.access_window == "holdout":
         return time_window
+    if target_id in {
+        f"{protocol.scenario_id}_evaluation",
+        f"{protocol.scenario_id}_statistics",
+    }:
+        return analysis_windows(protocol.manifest(), time_window)[0]
     champion_target_ids = {
         protocol.model_selection_target_id,
         protocol.persisted_prediction_target_id,

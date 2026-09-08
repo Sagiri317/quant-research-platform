@@ -422,6 +422,9 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             layout=StorageLayout(tmp_path), record=record, report_lease=report_lease
         )
         report = build_a_share_report(record=record, evidence=evidence)
+        assert {
+            row["candidate_id"] for row in report["sections"]["portfolio"]["results"]
+        } == {candidate.candidate_id for candidate in candidates}
         assert "artifact_status" in evidence["portfolio_statistics"], evidence[
             "portfolio_statistics"
         ]

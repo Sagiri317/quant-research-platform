@@ -14,6 +14,7 @@ from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.protocols.a_share import analysis_windows
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics import (
     cross_sectional_rank_ic,
@@ -105,10 +106,11 @@ def build_a_share_statistics_tables(
     core = tuple(core_factors)
     if any(factor not in factors for factor in core):
         raise ValueError("statistics_core_factors_missing")
+    factor_window, model_window = analysis_windows(protocol_manifest, time_window)
     model_entries = {
         (item["quarter_id"], item["family_id"]): item
         for item in persisted_model.prediction_models(
-            time_window, access_window=protocol_manifest["access_window"]
+            model_window, access_window=protocol_manifest["access_window"]
         )
     }
     family_ids = tuple(
@@ -136,7 +138,7 @@ def build_a_share_statistics_tables(
         )
     )
     calendar_days = (
-        pd.Timestamp(time_window.end) - pd.Timestamp(time_window.start)
+        pd.Timestamp(factor_window.end) - pd.Timestamp(factor_window.start)
     ).days + 1
     accumulator_bound = max(
         1,
@@ -156,7 +158,7 @@ def build_a_share_statistics_tables(
                 layout,
                 market_id=dataset_spec.market_id,
                 dataset_id=dataset_id,
-                time_window=time_window,
+                time_window=factor_window,
                 columns=read_columns,
                 access_window=protocol_manifest["access_window"],
             ),
@@ -179,85 +181,113 @@ def build_a_share_statistics_tables(
                     try:
                         mature = legal_training_rows(
                             session,
-                            fitting_cutoff=time_window.end,
+                            fitting_cutoff=factor_window.end,
                             availability_column=availability,
                             target_column=primary_label,
                         )
                         timestamp = pd.Timestamp(session["timestamp"].iloc[0])
-                        quarter_id = str(timestamp.to_period("Q"))
-                        source_quarter = model_entries[(quarter_id, family_ids[0])][
-                            "source_quarter"
-                        ]
-                        selection = persisted_model.quarterly_selections[source_quarter]
-                        for family_id in family_ids:
-                            entry = model_entries[(quarter_id, family_id)]
-                            metadata = entry["model_metadata"]
-                            inputs = metadata["input_columns"]
-                            rank_inputs = (
-                                _model_algorithm_facts(
-                                    metadata["model_algorithm"]
-                                ).input_kind
-                                == "rank_ensemble_inputs"
-                            )
-                            eligible = session["eligible"].eq(True)
-                            if not rank_inputs:
-                                eligible &= session.loc[:, inputs].notna().all(axis=1)
-                            keys = session.loc[
-                                eligible, ["timestamp", "asset_id"]
-                            ].copy()
-                            keys["family_id"] = family_id
-                            with prediction_lookup.values_for_frame(
-                                keys, mark_matched=True
-                            ) as (values, found):
-                                if not all(found):
-                                    raise ValueError("missing_required_prediction_keys")
-                                scores = pd.Series(
-                                    np.asarray(values, dtype="float64"),
-                                    index=keys.index,
+                        if (
+                            pd.Timestamp(model_window.start)
+                            <= timestamp
+                            <= pd.Timestamp(model_window.end)
+                        ):
+                            quarter_id = str(timestamp.to_period("Q"))
+                            source_quarter = model_entries[(quarter_id, family_ids[0])][
+                                "source_quarter"
+                            ]
+                            selection = persisted_model.quarterly_selections[
+                                source_quarter
+                            ]
+                            for family_id in family_ids:
+                                entry = model_entries[(quarter_id, family_id)]
+                                metadata = entry["model_metadata"]
+                                inputs = metadata["input_columns"]
+                                rank_inputs = (
+                                    _model_algorithm_facts(
+                                        metadata["model_algorithm"]
+                                    ).input_kind
+                                    == "rank_ensemble_inputs"
                                 )
-                            mature[family_id] = scores.reindex(mature.index)
-                        if mature.empty:
-                            continue
-                        mature[_PREDICTION_COLUMN] = mature[
-                            selection["selected_family_id"]
-                        ]
-                        rank = cross_sectional_rank_ic(
-                            mature,
-                            value_columns=(*factors, _PREDICTION_COLUMN, *family_ids),
-                            label_column=primary_label,
-                        )
-                        rank_records.extend(rank.to_dict("records"))
-                        daily = rank.iloc[0]
-                        common = bool(
-                            np.isfinite(
-                                daily.loc[list(family_ids)].to_numpy(dtype="float64")
-                            ).all()
-                        )
-                        for family_id in family_ids:
-                            value = daily[family_id]
-                            defined = bool(np.isfinite(value))
-                            loss_records.append(
-                                {
-                                    "timestamp": timestamp,
-                                    "access_window": protocol_manifest["access_window"],
-                                    "quarter_id": quarter_id,
-                                    "family_id": family_id,
-                                    "config_id": model_entries[(quarter_id, family_id)][
-                                        "model_id"
-                                    ],
-                                    "loss": -float(value) if defined else np.nan,
-                                    "observation_count": int(
-                                        mature[[family_id, primary_label]]
-                                        .dropna()
-                                        .shape[0]
-                                    ),
-                                    "status": "DEFINED" if defined else "UNDEFINED",
-                                    "reason": None
-                                    if defined
-                                    else "cross_sectional_rankic_undefined",
-                                    "common_date": int(common),
-                                }
+                                eligible = session["eligible"].eq(True)
+                                if not rank_inputs:
+                                    eligible &= (
+                                        session.loc[:, inputs].notna().all(axis=1)
+                                    )
+                                keys = session.loc[
+                                    eligible, ["timestamp", "asset_id"]
+                                ].copy()
+                                keys["family_id"] = family_id
+                                with prediction_lookup.values_for_frame(
+                                    keys, mark_matched=True
+                                ) as (values, found):
+                                    if not all(found):
+                                        raise ValueError(
+                                            "missing_required_prediction_keys"
+                                        )
+                                    scores = pd.Series(
+                                        np.asarray(values, dtype="float64"),
+                                        index=keys.index,
+                                    )
+                                mature[family_id] = scores.reindex(mature.index)
+                            if mature.empty:
+                                continue
+                            mature[_PREDICTION_COLUMN] = mature[
+                                selection["selected_family_id"]
+                            ]
+                            rank = cross_sectional_rank_ic(
+                                mature,
+                                value_columns=(
+                                    *factors,
+                                    _PREDICTION_COLUMN,
+                                    *family_ids,
+                                ),
+                                label_column=primary_label,
                             )
+                            rank_records.extend(rank.to_dict("records"))
+                            daily = rank.iloc[0]
+                            common = bool(
+                                np.isfinite(
+                                    daily.loc[list(family_ids)].to_numpy(
+                                        dtype="float64"
+                                    )
+                                ).all()
+                            )
+                            for family_id in family_ids:
+                                value = daily[family_id]
+                                defined = bool(np.isfinite(value))
+                                loss_records.append(
+                                    {
+                                        "timestamp": timestamp,
+                                        "access_window": protocol_manifest[
+                                            "access_window"
+                                        ],
+                                        "quarter_id": quarter_id,
+                                        "family_id": family_id,
+                                        "config_id": model_entries[
+                                            (quarter_id, family_id)
+                                        ]["model_id"],
+                                        "loss": -float(value) if defined else np.nan,
+                                        "observation_count": int(
+                                            mature[[family_id, primary_label]]
+                                            .dropna()
+                                            .shape[0]
+                                        ),
+                                        "status": "DEFINED" if defined else "UNDEFINED",
+                                        "reason": None
+                                        if defined
+                                        else "cross_sectional_rankic_undefined",
+                                        "common_date": int(common),
+                                    }
+                                )
+                        else:
+                            if mature.empty:
+                                continue
+                            rank = cross_sectional_rank_ic(
+                                mature,
+                                value_columns=factors,
+                                label_column=primary_label,
+                            )
+                            rank_records.extend(rank.to_dict("records"))
                         fmb_period_records.extend(
                             _fama_macbeth_period_records(
                                 mature,

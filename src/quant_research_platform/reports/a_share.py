@@ -53,6 +53,7 @@ def build_a_share_report(
             "row_count": statistics["factor_row_count"],
             "defined_rows": statistics["factor_defined_rows"],
             "undefined_rows": statistics["factor_undefined_rows"],
+            "results": statistics["factor_diagnostics"],
         }
         if statistics.get("status") == "DEFINED"
         else dict(statistics)
@@ -61,7 +62,7 @@ def build_a_share_report(
     if len(portfolio_rows) != len(portfolios):
         raise ValueError("a_share_report_evidence_invalid")
     sections = {
-        "Data/Coverage": _identity_section(references, scenario, "dataset_identity"),
+        "Data/Coverage": dict(evidence["coverage"]),
         "factor diagnostics": factor_section,
         "model selection": _identity_section(
             references,
@@ -140,7 +141,11 @@ def build_a_share_report(
     sections["model selection"]["trial_ledger"] = evidence.get(
         "model_trials", {"status": "UNDEFINED"}
     )
+    sections["model selection"]["quarterly_selections"] = evidence[
+        "quarterly_selections"
+    ]
     if statistics.get("status") == "DEFINED":
+        sections["model selection"]["configurations"] = statistics["model_trials"]
         sections["OOS prediction"]["family_comparison"] = statistics["model_comparison"]
         sections["OOS prediction"]["reality_checks"] = statistics[
             "model_reality_checks"
