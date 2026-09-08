@@ -187,8 +187,10 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
         assert policy.used_memory_bytes == 0
 
 
-def test_analyst_duplicate_report_key_is_rejected_across_chunks(tmp_path):
+def test_analyst_duplicate_report_key_is_folded_and_counted_across_chunks(tmp_path):
+    from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
     from tests.helpers.a_share_raw import _write_csmar
 
     layout = StorageLayout(tmp_path)
@@ -197,14 +199,20 @@ def test_analyst_duplicate_report_key_is_rejected_across_chunks(tmp_path):
     row = _analyst_rows()[0]
     _write_csmar(raw, "analyst_forecast", [row, row])
     with runtime_resource_policy_scope() as policy:
-        with pytest.raises(ValueError, match="duplicate"):
-            interim.materialize_interim_data(
-                layout=layout,
-                data_ids=("analyst_forecast",),
-                chunksize=1,
-                resource_policy=policy,
-            )
-        assert not layout.interim_data_root("csmar", "analyst_forecast").exists()
+        result = interim.materialize_interim_data(
+            layout=layout,
+            data_ids=("analyst_forecast",),
+            chunksize=1,
+            resource_policy=policy,
+        )
+        root = result.artifact_roots["analyst_forecast"]
+        assert len(read_dataset(root, resource_policy=policy)) == 1
+        assert (
+            read_dataset_manifest_evidence(root)["producer_diagnostics"][
+                "exact_duplicate_count"
+            ]
+            == 1
+        )
         assert policy.used_memory_bytes == 0
 
 
@@ -426,8 +434,9 @@ def _collect_raw_export(
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
+@pytest.mark.parametrize("memory_cap", (None, 16 * 1024**2))
 def test_index_weight_handoff_releases_raw_frame_before_persisting_normalized_rows(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, memory_cap
 ):
     import weakref
 
@@ -439,6 +448,7 @@ def test_index_weight_handoff_releases_raw_frame_before_persisting_normalized_ro
     layout = StorageLayout(tmp_path)
     root = layout.raw_source_root("csmar")
     root.mkdir(parents=True)
+    sessions = pd.bdate_range("2019-03-01", periods=21 if memory_cap is None else 63)
     _write_csmar(
         root,
         "index_weights",
@@ -450,8 +460,12 @@ def test_index_weight_handoff_releases_raw_frame_before_persisting_normalized_ro
                 "Constdnme": f"synthetic_{index:06}",
                 "Weight": 1.0,
             }
-            for benchmark in ("000852", "000905")
-            for timestamp in pd.bdate_range("2019-03-01", "2019-03-29")
+            for benchmark in (
+                ("000852", "000905")
+                if memory_cap is None
+                else ("000852", "000852", "000905")
+            )
+            for timestamp in sessions
             for index in range(1, 101)
         ),
     )
@@ -470,7 +484,7 @@ def test_index_weight_handoff_releases_raw_frame_before_persisting_normalized_ro
 
     monkeypatch.setattr(raw_exports, "_raw_frame", tracked_frame)
     monkeypatch.setattr(writing._WriteStats, "declared_frame", declared_frame)
-    with runtime_resource_policy_scope() as policy:
+    with runtime_resource_policy_scope(explicit_cap_bytes=memory_cap) as policy:
         result = interim.materialize_interim_data(
             layout=layout,
             data_ids=("index_weights",),
@@ -479,7 +493,7 @@ def test_index_weight_handoff_releases_raw_frame_before_persisting_normalized_ro
         saved = read_dataset(
             result.artifact_roots["index_weights"], resource_policy=policy
         )
-        assert len(saved) == 4200
+        assert len(saved) == 200 * len(sessions)
         assert (
             saved.groupby(["source_asset_id", "timestamp"]).weight.sum().eq(1.0).all()
         )
@@ -1247,4 +1261,227 @@ def test_legal_provider_width_uses_bounded_unquoted_fast_path(
                 next(records)
         finally:
             records.close()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "data_id", ("market_bars_1d", "analyst_forecast", "trading_calendar")
+)
+def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
+    tmp_path, data_id
+):
+    import hashlib
+
+    from quant_research_platform.storage.datasets.comparison import compare_datasets
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    if data_id == "analyst_forecast":
+        source = _analyst_rows()
+        source[0]["AnanmID"] = "张三,李四"
+        source[1]["Feps"] = ""
+    elif data_id == "trading_calendar":
+        source = [
+            {"Markettype": 1, "Clddt": day, "Daywk": weekday, "State": "O"}
+            for day, weekday in (("2020-01-02", 4), ("2020-01-03", 5))
+        ]
+    else:
+        row = dict.fromkeys(
+            raw_exports.RAW_TABLE_CONTRACTS[data_id].required_columns, 1.0
+        )
+        row.update(
+            Stkcd="000001", Markettype=1, Filling=0, Ahshrtrd_D=0.0, Ahvaltrd_D=0.0
+        )
+        source = [{**row, "Trddt": day} for day in ("2020-01-02", "2020-01-03")]
+    rows = [*reversed(source), dict(source[0])]
+    roots, frames, hashes = [], [], []
+    spec = interim.interim_catalog().get(data_id)
+    for size in (1, 2, 8):
+        layout = StorageLayout(tmp_path / str(size))
+        raw = layout.raw_source_root("csmar")
+        raw.mkdir(parents=True)
+        _write_csmar(raw, data_id, rows)
+        hashes.append(hashlib.sha256(next(raw.glob("*.csv")).read_bytes()).hexdigest())
+        with runtime_resource_policy_scope() as policy:
+            result = interim.materialize_interim_data(
+                layout=layout,
+                data_ids=(data_id,),
+                chunksize=size,
+                resource_policy=policy,
+            )
+            root = result.artifact_roots[data_id]
+            roots.append(root)
+            saved = read_dataset(root, resource_policy=policy)
+            frames.append(
+                saved.sort_values(list(spec.primary_key)).reset_index(drop=True)
+            )
+            metadata = read_dataset_manifest_evidence(root)["producer_diagnostics"]
+            assert metadata["exact_duplicate_count"] == 1
+            if data_id == "analyst_forecast":
+                counts = metadata["source_row_counts"]
+                assert counts["raw_rows"] == len(rows)
+                assert counts["excluded_missing_required_rows"] + len(saved) + metadata[
+                    "exact_duplicate_count"
+                ] == len(rows)
+                assert {"9007199254740992", "9007199254740993"}.issubset(
+                    saved.report_id
+                )
+                assert "张三,李四" in set(saved.analyst_ids.dropna())
+                assert saved.forecast_eps.isna().any()
+            assert str(saved.timestamp.dtype) == "datetime64[ns]"
+            assert not saved.duplicated(list(spec.primary_key)).any()
+            assert policy.used_memory_bytes == 0
+    assert len(set(hashes)) == 1
+    for frame in frames[1:]:
+        pd.testing.assert_frame_equal(frames[0], frame, check_exact=True)
+    with runtime_resource_policy_scope() as policy:
+        for root in roots[1:]:
+            assert (
+                compare_datasets(roots[0], root, resource_policy=policy).status
+                == "MATCH"
+            )
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("chunksize", (1, 2))
+def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chunksize):
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    raw.mkdir(parents=True)
+    first = _analyst_rows()[0]
+    _write_csmar(raw, "analyst_forecast", [first])
+    with runtime_resource_policy_scope() as policy:
+        original = interim.materialize_interim_data(
+            layout=layout, data_ids=("analyst_forecast",), resource_policy=policy
+        ).artifact_roots["analyst_forecast"]
+        old_good = {
+            path.relative_to(original): path.read_bytes()
+            for path in original.rglob("*")
+            if path.is_file()
+        }
+        _write_csmar(raw, "analyst_forecast", [first, {**first, "Feps": 999}])
+        candidate = layout.instance_root(original, "f" * 64)
+        with pytest.raises(
+            ValueError, match="conflicting_csmar_primary_key_duplicates"
+        ):
+            interim.materialize_interim_data(
+                layout=layout.with_target_roots({"analyst_forecast": candidate}),
+                data_ids=("analyst_forecast",),
+                chunksize=chunksize,
+                resource_policy=policy,
+            )
+        assert not candidate.exists()
+        assert {
+            path.relative_to(original): path.read_bytes()
+            for path in original.rglob("*")
+            if path.is_file()
+        } == old_good
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("cancel", (False, True))
+def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cleanup(
+    tmp_path, monkeypatch, cancel
+):
+    from quant_research_platform.runtime.resources import (
+        RuntimeResourcePolicy,
+        pandas_frame_payload_bytes,
+    )
+    from quant_research_platform.storage.datasets import writing
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    raw.mkdir(parents=True)
+    row = {
+        "Indexcd": "000852",
+        "Enddt": "2019-03-01",
+        "Stkcd": "000001",
+        "Constdnme": "synthetic",
+        "Weight": 1.0,
+    }
+    _write_csmar(
+        raw,
+        "index_weights",
+        [row, row, {**row, "Stkcd": "000002"}, {**row, "Stkcd": "000003"}],
+    )
+    transform = interim._transform_interim_chunk
+    observed = []
+    injected = []
+
+    def transform_with_one_capacity_failure(frame, **kwargs):
+        if not injected:
+            injected.append(True)
+            size = pandas_frame_payload_bytes(frame)
+            raise interim._InterimCapacityExceeded(2 * size, 2 * size)
+        observed.append(len(frame))
+        return transform(frame, **kwargs)
+
+    pending = []
+    create_lease = RuntimeResourcePolicy.lease
+
+    def record_pending(policy, owner, reserved_bytes):
+        lease = create_lease(policy, owner, reserved_bytes)
+        if owner == "source.csmar.interim.pending":
+            pending.append(lease)
+        return lease
+
+    primary = KeyboardInterrupt("pending_consumer_cancel")
+    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
+        original = interim.materialize_interim_data(
+            layout=layout,
+            data_ids=("index_weights",),
+            chunksize=2,
+            resource_policy=policy,
+        ).artifact_roots["index_weights"]
+        old_good = {
+            path.relative_to(original): path.read_bytes()
+            for path in original.rglob("*")
+            if path.is_file()
+        }
+        candidate = layout.instance_root(original, "e" * 64)
+        monkeypatch.setattr(
+            interim, "_transform_interim_chunk", transform_with_one_capacity_failure
+        )
+        monkeypatch.setattr(RuntimeResourcePolicy, "lease", record_pending)
+        if cancel:
+
+            def fail_consumer(_self, _frame, **_kwargs):
+                raise primary
+
+            monkeypatch.setattr(writing._WriteStats, "declared_frame", fail_consumer)
+        request = dict(
+            layout=layout.with_target_roots({"index_weights": candidate}),
+            data_ids=("index_weights",),
+            chunksize=2,
+            resource_policy=policy,
+        )
+        if cancel:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                interim.materialize_interim_data(**request)
+            assert caught.value is primary
+            assert not candidate.exists()
+        else:
+            interim.materialize_interim_data(**request)
+            saved = read_dataset(candidate, resource_policy=policy)
+            assert saved.constituent_asset_id.tolist() == ["000001", "000002", "000003"]
+            assert observed == [1, 1, 2]
+            assert (
+                read_dataset_manifest_evidence(candidate)["producer_diagnostics"][
+                    "exact_duplicate_count"
+                ]
+                == 1
+            )
+        assert pending and all(not lease.active for lease in pending)
+        assert {
+            relative: (original / relative).read_bytes() for relative in old_good
+        } == old_good
         assert policy.used_memory_bytes == 0

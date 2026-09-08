@@ -386,6 +386,7 @@ def test_binance_interim_materializer_writes_multiple_batches(
         spec,
         instance_metadata=None,
         resource_policy,
+        staged_validator,
     ):
         chunks = _collect_bound_first(data, resource_policy)
         chunk_lengths.extend(len(chunk) for chunk in chunks)
@@ -397,6 +398,7 @@ def test_binance_interim_materializer_writes_multiple_batches(
             spec=spec,
             instance_metadata=instance_metadata,
             resource_policy=resource_policy,
+            staged_validator=staged_validator,
         )
 
     monkeypatch.setattr(
@@ -1036,3 +1038,131 @@ def _depth_envelope(offset: int) -> dict[str, object]:
             "asks": [[str(100.2 + offset), "1.0"]],
         },
     }
+
+
+def test_binance_interim_targets_use_real_dag_identity_instances_and_intraday_window(
+    tmp_path,
+):
+    from typer.testing import CliRunner
+
+    from quant_research_platform.interfaces.cli.commands import app
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
+    )
+    from quant_research_platform.storage.datasets.reading import (
+        read_dataset as read_owned,
+    )
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from quant_research_platform.workflows import research
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("binance")
+    paths = {
+        "market_bars_1m": raw / "spot/klines/BTCUSDT/1m/2026-07-06.jsonl",
+        "aggregate_trades_tick": raw / "spot/agg_trades/BTCUSDT/2026-07-06.jsonl",
+        "depth_levels_tick": raw / "spot/depth/BTCUSDT/2026-07-06.jsonl",
+    }
+    for data_id, factory in (
+        ("market_bars_1m", _kline_envelope),
+        ("aggregate_trades_tick", _trade_envelope),
+        ("depth_levels_tick", _depth_envelope),
+    ):
+        for offset in (0, 1, 2):
+            _append_jsonl(paths[data_id], factory(offset))
+    start, end = "2026-07-06T00:00:30", "2026-07-06T00:01:30"
+    args = [
+        "data",
+        "materialize",
+        "--profile",
+        CRYPTO_PROFILE_ID,
+        "--project-root",
+        str(tmp_path),
+        "--start-date",
+        start,
+        "--end-date",
+        end,
+        "--plan",
+    ]
+    for data_id in paths:
+        args.extend(("--data-id", data_id))
+    planned = CliRunner().invoke(app, args)
+    assert planned.exit_code == 0, planned.output
+    plans = {row["target_id"]: row for row in json.loads(planned.output)["targets"]}
+    assert set(plans) == set(paths)
+    assert all(row["decision"] == "BUILD" for row in plans.values())
+    profile = research_profile(CRYPTO_PROFILE_ID)
+    request = dict(
+        profile=profile,
+        layout=layout,
+        raw_root=None,
+        data_ids=tuple(paths),
+        start_date=start,
+        end_date=end,
+    )
+    result = research.data_materialize(**request)
+    assert result["status"] == "COMPLETE"
+    with runtime_resource_policy_scope() as policy:
+        for row in result["target_results"]:
+            data_id = row["target_id"]
+            assert row["status"] == "BUILT"
+            assert row["instance_identity"] == plans[data_id]["requested_identity"]
+            logical = layout.interim_data_root("binance", data_id)
+            root = layout.instance_root(logical, row["instance_identity"])
+            assert not (logical / "spec.json").exists()
+            metadata = read_dataset_manifest_evidence(root)["common_manifest"]
+            assert metadata["research_window"]["start"] == start
+            assert metadata["research_window"]["end"] == end
+            assert metadata["semantic_metadata"][
+                "raw_content_identity"
+            ] == raw_exports.source_content_identity(raw, data_id)
+            frame = read_owned(root, resource_policy=policy)
+            assert len(frame) == (3 if data_id == "depth_levels_tick" else 1)
+            assert frame.timestamp.between(pd.Timestamp(start), pd.Timestamp(end)).all()
+        assert policy.used_memory_bytes == 0
+    reused = research.data_materialize(**request)
+    assert all(row["status"] == "REUSED" for row in reused["target_results"])
+    _append_jsonl(paths["aggregate_trades_tick"], _trade_envelope(3))
+    changed = research.data_materialize(**request, plan=True)
+    decisions = {row["target_id"]: row["decision"] for row in changed["targets"]}
+    assert decisions == {
+        "market_bars_1m": "REUSE",
+        "aggregate_trades_tick": "BUILD",
+        "depth_levels_tick": "REUSE",
+    }
+
+
+def test_binance_target_kind_mismatch_rejects_before_publication_and_keeps_old_good(
+    tmp_path,
+):
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("binance") / "spot/depth/BTCUSDT/2026-07-06.jsonl"
+    _append_jsonl(raw, _depth_envelope(0))
+    with runtime_resource_policy_scope() as policy:
+        old = materialize_interim_data(
+            layout=layout, data_ids=("depth_levels_tick",), resource_policy=policy
+        ).artifact_roots["depth_levels_tick"]
+        old_good = {
+            path.relative_to(old): path.read_bytes()
+            for path in old.rglob("*")
+            if path.is_file()
+        }
+        wrong = _trade_envelope(0)
+        wrong["payload"].update(
+            lastUpdateId=1, bids=[["100", "1"]], asks=[["101", "1"]]
+        )
+        raw.write_text(json.dumps(wrong) + "\n", encoding="utf-8")
+        candidate = layout.instance_root(old, "f" * 64)
+        with pytest.raises(ValueError, match="binance_raw_kind_mismatch"):
+            materialize_interim_data(
+                layout=layout.with_target_roots({"depth_levels_tick": candidate}),
+                data_ids=("depth_levels_tick",),
+                resource_policy=policy,
+            )
+        assert not candidate.exists()
+        assert {
+            path.relative_to(old): path.read_bytes()
+            for path in old.rglob("*")
+            if path.is_file()
+        } == old_good
+        assert policy.used_memory_bytes == 0

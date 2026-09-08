@@ -638,3 +638,85 @@ def _financial_frame(
             }
         )
     return pd.DataFrame(rows)
+
+
+@pytest.mark.parametrize("boundary", ("choice", "financial_events"))
+def test_first_disclosure_before_report_period_is_rejected_before_pit(boundary):
+    disclosure = pd.DataFrame(
+        {
+            "asset_id": ["asset"],
+            "report_period": pd.to_datetime(["2021-12-31"]),
+            "first_disclosure_date": pd.to_datetime(["2021-01-04"]),
+        }
+    )
+    records = (
+        {
+            "asset": "asset",
+            "period": "2021-12-31",
+            "corrected": False,
+            "correction_date": pd.NaT,
+            "version": "original",
+            "value": 123.0,
+        },
+    )
+    with pytest.raises(ValueError, match="financial_disclosure_before_report_period"):
+        if boundary == "choice":
+            normalize_first_disclosure_frame(disclosure)
+        else:
+            financial_events_from_interim(
+                {
+                    data_id: _financial_frame(data_id, records)
+                    for data_id in FINANCIAL_VALUE_COLUMNS
+                },
+                disclosure,
+                trading_sessions=pd.DatetimeIndex(["2021-01-04", "2021-01-05"]),
+            )
+    disclosure["first_disclosure_date"] = disclosure["report_period"]
+    normalized = normalize_first_disclosure_frame(disclosure)
+    events = financial_events_from_interim(
+        {
+            data_id: _financial_frame(data_id, records)
+            for data_id in FINANCIAL_VALUE_COLUMNS
+        },
+        normalized,
+        trading_sessions=pd.DatetimeIndex(["2021-12-31", "2022-01-04", "2022-01-05"]),
+    )
+    assert events["available_at"].eq(pd.Timestamp("2022-01-04")).all()
+    assert len(events) == sum(map(len, FINANCIAL_VALUE_COLUMNS.values()))
+
+
+def test_late_original_dependency_recomputes_newer_ttm_without_lookahead():
+    events = pd.DataFrame(
+        {
+            "asset_id": ["asset"] * 4,
+            "metric_id": ["operating_revenue"] * 4,
+            "report_period": pd.to_datetime(
+                ["2019-03-31", "2020-03-31", "2019-12-31", "2019-03-31"]
+            ),
+            "available_at": pd.to_datetime(
+                ["2019-04-25", "2020-04-21", "2020-04-27", "2020-05-04"]
+            ),
+            "is_corrected": [False, False, False, True],
+            "version_identity": [
+                "original",
+                "original",
+                "original",
+                "correction@2020-05-04",
+            ],
+            "value": [10.0, 30.0, 100.0, 12.0],
+        }
+    )
+    ttm = construct_ttm_events(events)
+    ttm["value"] = ttm["ttm_value"]
+    observed = materialize_pit_fundamentals(
+        pd.DataFrame(
+            {
+                "asset_id": ["asset"] * 3,
+                "timestamp": pd.to_datetime(["2020-04-22", "2020-04-28", "2020-05-05"]),
+            }
+        ),
+        ttm,
+    )
+    assert pd.isna(observed.loc[0, "value"])
+    assert observed.loc[1:, "value"].tolist() == [120.0, 118.0]
+    assert observed.loc[1:, "report_period"].eq(pd.Timestamp("2020-03-31")).all()

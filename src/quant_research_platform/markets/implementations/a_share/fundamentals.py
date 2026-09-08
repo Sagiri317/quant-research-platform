@@ -12,6 +12,7 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_string_series,
     strict_timestamp_series,
+    validate_financial_disclosure_chronology,
 )
 
 FINANCIAL_VALUE_COLUMNS = {
@@ -66,6 +67,9 @@ def financial_events_from_interim(
         disclosure[column] = strict_timestamp_series(
             disclosure[column], error="financial_disclosure_date_invalid"
         ).dt.normalize()
+    validate_financial_disclosure_chronology(
+        disclosure["report_period"], disclosure["first_disclosure_date"]
+    )
     if disclosure.duplicated(["asset_id", "report_period"], keep=False).any():
         raise ValueError("financial_disclosure_key_duplicate")
     sessions = pd.DatetimeIndex(trading_sessions).normalize().drop_duplicates()
@@ -279,7 +283,6 @@ def construct_ttm_events(
             )
         if metric_id not in FLOW_METRIC_IDS:
             continue
-        correction_rows = group.loc[group["is_corrected"]]
         for period in sorted(
             pd.Timestamp(value) for value in group["report_period"].drop_duplicates()
         ):
@@ -292,9 +295,9 @@ def construct_ttm_events(
                 dependencies.discard(None)
             target_rows = group.loc[group["report_period"].eq(period)]
             target_first_available = target_rows["available_at"].min()
-            cutoffs = correction_rows.loc[
-                correction_rows["report_period"].isin(dependencies)
-                & correction_rows["available_at"].gt(target_first_available),
+            cutoffs = group.loc[
+                group["report_period"].isin(dependencies)
+                & group["available_at"].gt(target_first_available),
                 "available_at",
             ].drop_duplicates()
             for cutoff in sorted(pd.Timestamp(value) for value in cutoffs):

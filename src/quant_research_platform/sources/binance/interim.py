@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -10,6 +10,9 @@ from typing import Any
 import pandas as pd
 
 from quant_research_platform.catalog.processed import InterimDataCatalog
+from quant_research_platform.contracts.business_manifest import (
+    validate_business_manifest_envelope,
+)
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
     DataFrequency,
@@ -38,6 +41,7 @@ from quant_research_platform.sources.binance.fields import field_role
 from quant_research_platform.sources.binance.raw_exports import (
     DATA_ID_BY_RAW_KIND,
     _index_raw_kind_files,
+    _indexed_raw_content_identity,
     _iter_indexed_raw_kind_files,
     _iter_raw_envelope_batches,
     _raw_path_session,
@@ -57,6 +61,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_integer,
     strict_symbol,
 )
+from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.layout import StorageLayout
@@ -196,6 +201,11 @@ def _iter_owned_interim_frames(
                                         "runtime_memory_lease_transfer_mismatch"
                                     )
                                 batch = owned.value
+                                if any(
+                                    DATA_ID_BY_RAW_KIND[row["data_kind"]] != data_id
+                                    for row in batch
+                                ):
+                                    raise ValueError("binance_raw_kind_mismatch")
                                 batch_bytes = (
                                     sum(max(1, len(str(item))) for item in batch) * 64
                                 )
@@ -309,6 +319,7 @@ def materialize_interim_data(
     data_ids: tuple[str, ...] = tuple(sorted(INTERIM_COLUMNS_BY_DATA_ID)),
     row_batch_size: int = RAW_ROW_BATCH_SIZE,
     resource_policy: RuntimeResourcePolicy | None = None,
+    instance_metadata: Mapping[str, object] | None = None,
 ) -> BinanceInterimImportResult:
     with runtime_resource_policy_scope(resource_policy) as policy:
         strict_positive_integer(
@@ -323,7 +334,9 @@ def materialize_interim_data(
         with _raw_path_session(source_raw_root) as verify_root:
             for data_id in requested_data_ids:
                 spec = catalog.get(data_id)
-                artifact_root = layout.interim_data_root(spec.source_id, spec.data_id)
+                artifact_root = layout.target_root(
+                    spec.data_id, layout.interim_data_root(spec.source_id, spec.data_id)
+                )
                 raw_kind = next(
                     kind
                     for kind, mapped_data_id in DATA_ID_BY_RAW_KIND.items()
@@ -351,6 +364,21 @@ def materialize_interim_data(
                     if expected_count == 0:
                         skipped.append(data_id)
                         continue
+                    source_identity = _indexed_raw_content_identity(
+                        source_raw_root, index=index, namespace=namespace
+                    )
+                    if (
+                        instance_metadata is not None
+                        and COMMON_MANIFEST_METADATA_KEY in instance_metadata
+                    ):
+                        envelope = validate_business_manifest_envelope(
+                            instance_metadata[COMMON_MANIFEST_METADATA_KEY]
+                        )
+                        if (
+                            envelope["semantic_metadata"]["raw_content_identity"]
+                            != source_identity
+                        ):
+                            raise ValueError("binance_raw_export_identity_changed")
 
                     def verify_snapshot(
                         *,
@@ -367,6 +395,23 @@ def materialize_interim_data(
                             namespace=namespace,
                             expected_count=expected_count,
                         )
+
+                    def verify_source(
+                        _receipt,
+                        expected=source_identity,
+                        verify_snapshot=verify_snapshot,
+                        index=index,
+                        namespace=namespace,
+                    ):
+                        verify_snapshot()
+                        if (
+                            _indexed_raw_content_identity(
+                                source_raw_root, index=index, namespace=namespace
+                            )
+                            != expected
+                        ):
+                            raise ValueError("binance_raw_export_identity_changed")
+                        verify_snapshot()
 
                     write_dataset(
                         artifact_root,
@@ -385,6 +430,8 @@ def materialize_interim_data(
                         ),
                         spec=spec,
                         resource_policy=policy,
+                        instance_metadata=instance_metadata,
+                        staged_validator=verify_source,
                     )
                 written[data_id] = artifact_root
         return BinanceInterimImportResult(

@@ -1696,3 +1696,130 @@ def test_same_run_replay_is_deterministic(tmp_path: Path) -> None:
         ]
         _close_owned_events(first)
         _close_owned_events(second)
+
+
+@pytest.mark.parametrize("mode", ("complete", "cancel", "same_owner_overlap"))
+def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
+    tmp_path, monkeypatch, mode
+):
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    root = tmp_path / "run"
+
+    def at_hour(record, hour):
+        record["receive_time"] = f"2026-08-27T0{hour}:00:00.123456Z"
+        record["observed_time_ns"] = pd.Timestamp(record["receive_time"]).value
+        return record
+
+    def trade(sequence, hour):
+        return at_hour(_agg_trade(sequence), hour)
+
+    def depth(sequence, hour):
+        return at_hour(
+            _futures_delta(
+                sequence,
+                sequence,
+                sequence,
+                previous=sequence - 1,
+                transaction_time=sequence,
+                segment_id="segment-1",
+            ),
+            hour,
+        )
+
+    manifest = _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "agg_trades",
+                "btcusdt@aggTrade",
+                [trade(1, 0), trade(5, 0)],
+            ),
+            (
+                FUTURES_MARKET_TYPE,
+                "depth",
+                "btcusdt@depth@100ms",
+                [depth(2, 0), depth(3, 0)],
+            ),
+        ],
+    )
+    for kind, stream, rows in (
+        (
+            "agg_trades",
+            "btcusdt@aggTrade",
+            [trade(4 if mode == "same_owner_overlap" else 6, 1), trade(8, 1)],
+        ),
+        ("depth", "btcusdt@depth@100ms", [depth(4, 1), depth(7, 1)]),
+    ):
+        item = _write_file(
+            tmp_path / "next_hour",
+            market_type=FUTURES_MARKET_TYPE,
+            data_kind=kind,
+            stream=stream,
+            rows=rows,
+        )
+        original = tmp_path / "next_hour" / item["path"]
+        item["path"] = item["path"].replace("hour=00", "hour=01")
+        target = root / item["path"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(original.read_bytes())
+        manifest["files"].append(item)
+    sidecar = root / "connection_intervals.jsonl.gz"
+    with gzip.open(sidecar, "rt", encoding="utf-8") as handle:
+        intervals = [json.loads(line) for line in handle]
+    with gzip.open(sidecar, "wt", encoding="utf-8") as handle:
+        for row in intervals:
+            row["closed_at"] = "2026-08-27T01:00:01.000000Z"
+            row["closed_monotonic_ns"] = 3_601_000_000_000
+            handle.write(json.dumps(row) + "\n")
+    raw = sidecar.read_bytes()
+    manifest["capture"]["connection_intervals"].update(
+        compressed_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()
+    )
+    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    real_open = Path.open
+    handles = []
+    high_water = 0
+
+    def tracked(path, *args, **kwargs):
+        nonlocal high_water
+        handle = real_open(path, *args, **kwargs)
+        if path.suffix == ".gz" and path.name != "connection_intervals.jsonl.gz":
+            handles.append(handle)
+            high_water = max(high_water, sum(not item.closed for item in handles))
+        return handle
+
+    monkeypatch.setattr(Path, "open", tracked)
+    with runtime_resource_policy_scope() as policy:
+        with replay.open_recorder_run(root, policy) as run:
+            baseline = policy.used_memory_bytes
+            if mode == "same_owner_overlap":
+                with pytest.raises(
+                    ValueError, match="binance_replay_file_capture_ranges_overlap"
+                ):
+                    list(run.iter_records())
+            else:
+                assert [
+                    row["capture_seq"]
+                    for row in run.iter_records(data_kinds=("agg_trades",))
+                ] == [1, 5, 6, 8]
+                assert [
+                    row["capture_seq"]
+                    for row in run.iter_records(data_kinds=("depth",))
+                ] == [2, 3, 4, 7]
+                if mode == "cancel":
+                    primary = KeyboardInterrupt("consumer_cancel")
+                    with pytest.raises(KeyboardInterrupt) as caught:
+                        with closing_iterator(run.iter_records()) as records:
+                            assert next(records)["capture_seq"] == 1
+                            raise primary
+                    assert caught.value is primary
+                else:
+                    assert [row["capture_seq"] for row in run.iter_records()] == list(
+                        range(1, 9)
+                    )
+            assert policy.used_memory_bytes == baseline
+            assert handles and all(handle.closed for handle in handles)
+        assert policy.used_memory_bytes == 0
+    assert high_water <= 2

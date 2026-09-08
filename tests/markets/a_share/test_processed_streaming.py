@@ -329,9 +329,7 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
         reopened = panel.loc[
             panel["asset_id"].eq("000002") & panel["timestamp"].eq(dates[191])
         ]
-        assert reopened["period_return"].item() == pytest.approx(
-            reopened["adj_close"].item() / 777.0 - 1.0
-        )
+        assert reopened["period_return"].item() == pytest.approx(0.01)
 
         references = []
         read = producer._owned_frame
@@ -483,3 +481,159 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
         assert saved["timestamp"].min() == dates[70]
     else:
         assert not tuple(root.rglob("manifest.json"))
+
+
+@pytest.mark.parametrize("missing", (0, 2, 4, "outside_request"))
+def test_panel_calendar_rejects_missing_requested_trade_dates_including_endpoints(
+    tmp_path, missing
+):
+    dates = pd.bdate_range(
+        "2020-01-02", periods=7 if missing == "outside_request" else 5
+    ).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    if missing == "outside_request":
+        requested = dates[1:-1]
+        source["trading_calendar"] = (
+            source["trading_calendar"]
+            .loc[source["trading_calendar"].calendar_date.isin(requested)]
+            .copy()
+        )
+    else:
+        requested = dates
+        source["trading_calendar"] = (
+            source["trading_calendar"]
+            .loc[source["trading_calendar"].calendar_date.ne(dates[missing])]
+            .copy()
+        )
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+        for data_id in spec.source_input_data_ids:
+            source_spec = profile.interim.get(data_id)
+            write_dataset(
+                layout.interim_data_root(source_spec.source_id, data_id),
+                source[data_id],
+                spec=source_spec,
+                resource_policy=policy,
+                borrowed_input=True,
+            )
+
+        def publish():
+            with producer.produce_a_share_processed_data(
+                spec,
+                layout=layout,
+                time_window=TimeWindow(requested[0], requested[-1]),
+                processed_catalog=profile.processed,
+                source_catalog=profile.interim,
+                resource_policy=policy,
+            ) as (frames, metadata, verify):
+                write_dataset(
+                    root,
+                    frames,
+                    spec=spec,
+                    resource_policy=policy,
+                    instance_metadata=metadata,
+                    staged_validator=verify,
+                )
+
+        if missing == "outside_request":
+            publish()
+            actual = read_dataset(root, resource_policy=policy)
+            assert len(actual) == 3 * len(requested)
+            assert actual.timestamp.isin(requested).all()
+        else:
+            with pytest.raises(
+                ValueError, match="market_bar_session_missing_from_calendar"
+            ):
+                publish()
+            assert not root.exists()
+        assert policy.used_memory_bytes == 0
+
+
+def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
+    tmp_path, monkeypatch
+):
+    dates = pd.bdate_range("2020-01-02", periods=66).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    bars = source["market_bars_1d"]
+    asset = bars.source_asset_id.eq("000002")
+    prices = ["open", "high", "low", "close", "adj_open", "adj_close"]
+    bars.loc[asset & bars.timestamp.eq(dates[61]), prices] = 100.0
+    bars.loc[asset & bars.timestamp.eq(dates[63]), prices] = np.nan
+    bars.loc[asset & bars.timestamp.eq(dates[63]), "filling_flag"] = 1
+    bars.loc[asset & bars.timestamp.eq(dates[64]), prices] = 120.0
+    bars.loc[asset & bars.timestamp.eq(dates[64]), "period_return"] = 0.1
+    source["market_bars_1d"] = bars.loc[~(asset & bars.timestamp.eq(dates[62]))].copy()
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+        for data_id in spec.source_input_data_ids:
+            source_spec = profile.interim.get(data_id)
+            write_dataset(
+                layout.interim_data_root(source_spec.source_id, data_id),
+                source[data_id],
+                spec=source_spec,
+                resource_policy=policy,
+                borrowed_input=True,
+            )
+        decoded = {
+            data_id: read_dataset(
+                layout.interim_data_root(
+                    profile.interim.get(data_id).source_id, data_id
+                ),
+                resource_policy=policy,
+            )
+            for data_id in spec.source_input_data_ids
+        }
+        compute = producer._compute_processed_frame
+        expected = compute(
+            spec, source=decoded, dependencies={}, trading_sessions=tuple(dates)
+        )
+        slabs = []
+
+        def observed(spec, **kwargs):
+            slabs.append(tuple(kwargs["panel_sessions"]))
+            return compute(spec, **kwargs)
+
+        monkeypatch.setattr(producer, "_compute_processed_frame", observed)
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+            resource_policy=policy,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                resource_policy=policy,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        actual = read_dataset(root, resource_policy=policy)
+        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+        assert [len(slab) for slab in slabs] == [64, 2]
+        rows = actual.loc[actual.asset_id.eq("000002")].set_index("timestamp")
+        assert (
+            rows.loc[
+                dates[62],
+                ["close", "adj_close", "period_return", "volume", "amount", "turnover"],
+            ]
+            .isna()
+            .all()
+        )
+        assert rows.loc[dates[63], ["close", "adj_close"]].isna().all()
+        assert (
+            rows.loc[dates[63], ["period_return", "volume", "amount", "turnover"]]
+            .eq(0.0)
+            .all()
+        )
+        assert rows.loc[dates[64], "period_return"] == 0.1
+        assert rows.loc[dates[64], "adj_close"] == 120.0
+        assert policy.used_memory_bytes == 0

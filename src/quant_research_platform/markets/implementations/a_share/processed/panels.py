@@ -48,7 +48,12 @@ def compute_market_panel(
     if bars.empty and asset_market_types is None:
         return bars
     sessions = unified_trading_sessions(trading_calendar)
-    validate_market_bar_calendar(bars, sessions)
+    calendar_bars = bars
+    if session_window is not None and not session_window.empty:
+        calendar_bars = bars.loc[
+            bars["timestamp"].between(session_window[0], session_window[-1])
+        ]
+    validate_market_bar_calendar(calendar_bars, sessions)
     bars = bars.loc[bars["filling_flag"].ne(2)].copy()
     if bars.empty and asset_market_types is None:
         return bars
@@ -106,6 +111,9 @@ def validate_market_bar_calendar(
     holiday_fill_dates = bars.loc[bars["filling_flag"].eq(2), "timestamp"]
     if bool(holiday_fill_dates.isin(sessions).any()):
         raise ValueError("holiday_fill_conflicts_with_open_session")
+    observed_sessions = bars.loc[bars["filling_flag"].isin((0, 1)), "timestamp"]
+    if not observed_sessions.isin(sessions).all():
+        raise ValueError("market_bar_session_missing_from_calendar")
 
 
 def _canonical_bars(frame: pd.DataFrame) -> pd.DataFrame:
@@ -779,34 +787,42 @@ def _apply_special_treatment(
 
 def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
     result = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").copy()
-    result["is_trading"] = result["filling_flag"].fillna(1).eq(0)
+    result["is_trading"] = result["filling_flag"].eq(0).fillna(False)
     for asset_id, positions in result.groupby("asset_id", sort=False).groups.items():
         _ = asset_id
         values = result.loc[positions]
         trading = result.loc[positions, "is_trading"]
+        suspended = values["filling_flag"].eq(1).fillna(False)
+        unknown = ~(trading | suspended)
         for close_column, price_columns in (
             ("close", ("close", "open", "high", "low")),
             ("adj_close", ("adj_close", "adj_open")),
         ):
-            last_close = values[close_column].where(trading).ffill()
+            missing_baseline = unknown | (trading & values[close_column].isna())
+            last_close = (
+                values[close_column]
+                .where(trading)
+                .groupby(missing_baseline.cumsum())
+                .ffill()
+            )
             for column in price_columns:
                 result.loc[positions, column] = values[column].where(
-                    trading | values[column].notna(), last_close
+                    ~suspended | values[column].notna(), last_close
                 )
         result.loc[positions, "period_return"] = result.loc[
             positions, "period_return"
-        ].where(result.loc[positions, "is_trading"], 0.0)
+        ].where(~suspended, 0.0)
         result.loc[positions, "volume"] = result.loc[positions, "volume"].where(
-            result.loc[positions, "is_trading"], 0.0
+            ~suspended, 0.0
         )
         result.loc[positions, "amount"] = result.loc[positions, "amount"].where(
-            result.loc[positions, "is_trading"], 0.0
+            ~suspended, 0.0
         )
         for column in ("after_hours_volume", "after_hours_amount"):
             if column not in result:
-                result[column] = 0.0
+                result[column] = np.nan
             result.loc[positions, column] = result.loc[positions, column].where(
-                result.loc[positions, "is_trading"], 0.0
+                ~suspended, 0.0
             )
         free_shares = result.loc[positions, "float_market_cap"].div(
             result.loc[positions, "close"].where(result.loc[positions, "close"].gt(0.0))
@@ -817,13 +833,10 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
             .astype("float64")
         )
         result.loc[positions, "turnover"] = result.loc[positions, "turnover"].where(
-            result.loc[positions, "is_trading"], 0.0
+            ~suspended, 0.0
         )
-        previous_trading = result.loc[positions, "is_trading"].shift(
-            1, fill_value=False
-        )
-        reopening = result.loc[positions, "is_trading"] & ~previous_trading
-        prior_close = result.loc[positions, "adj_close"].shift(1).ffill()
+        reopening = trading & suspended.shift(1, fill_value=False)
+        prior_close = result.loc[positions, "adj_close"].shift(1)
         reopening_return = result.loc[positions, "adj_close"].div(prior_close) - 1.0
         result.loc[positions, "period_return"] = result.loc[
             positions, "period_return"

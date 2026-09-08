@@ -488,22 +488,32 @@ class RecorderRun:
         ]
         if not selected:
             raise ValueError("binance_replay_requested_files_missing")
+
+        def owner_records(files):
+            for item in files:
+                with closing_iterator(
+                    _iter_raw_file(
+                        self.root,
+                        item,
+                        manifest=self.manifest,
+                        resource_policy=self.resource_policy,
+                        record_observer=_record_observer,
+                    )
+                ) as records:
+                    yield from records
+
         previous_capture_seq: int | None = None
         for group in _overlapping_capture_groups(selected):
+            by_owner: dict[tuple[str, str, str], list[_RunFile]] = {}
+            for item in group:
+                owner = tuple(
+                    item.metadata[key] for key in ("market", "data_kind", "stream")
+                )
+                by_owner.setdefault(owner, []).append(item)
             with ExitStack() as stack:
                 streams = [
-                    stack.enter_context(
-                        closing_iterator(
-                            _iter_raw_file(
-                                self.root,
-                                item,
-                                manifest=self.manifest,
-                                resource_policy=self.resource_policy,
-                                record_observer=_record_observer,
-                            )
-                        )
-                    )
-                    for item in group
+                    stack.enter_context(closing_iterator(owner_records(files)))
+                    for files in by_owner.values()
                 ]
                 records = stack.enter_context(
                     closing_iterator(
@@ -1046,7 +1056,7 @@ def _overlapping_capture_groups(files: list[_RunFile]) -> Iterator[list[_RunFile
     ordered = sorted(files, key=lambda item: item.metadata["capture_seq_min"])
     group: list[_RunFile] = []
     group_max = -1
-    owners: set[tuple[str, str, str]] = set()
+    owner_ends: dict[tuple[str, str, str], int] = {}
     for item in ordered:
         start = item.metadata["capture_seq_min"]
         owner = (
@@ -1057,11 +1067,10 @@ def _overlapping_capture_groups(files: list[_RunFile]) -> Iterator[list[_RunFile
         if group and start > group_max:
             yield group
             group = []
-            owners = set()
             group_max = -1
-        if owner in owners:
+        if start <= owner_ends.get(owner, -1):
             raise ValueError("binance_replay_file_capture_ranges_overlap")
-        owners.add(owner)
+        owner_ends[owner] = item.metadata["capture_seq_max"]
         group.append(item)
         group_max = max(group_max, item.metadata["capture_seq_max"])
     if group:

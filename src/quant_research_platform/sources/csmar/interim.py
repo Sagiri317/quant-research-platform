@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import stat
-import sys
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -102,7 +101,6 @@ DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
 TIME_RANGE_FILTER_DATA_IDS = {MARKET_BARS_DATA_ID}
 END_ONLY_FILTER_DATA_IDS = {"market_cap"}
 START_END_FILTER_DATA_IDS = {"adjustment"}
-SOURCE_REFERENCE_DATA_IDS = {"stock_master", "index_info"}
 SOURCE_ASSET_TIME_COLUMNS: tuple[str, ...] = (
     "source_asset_id",
     "timestamp",
@@ -532,13 +530,13 @@ def render_column_pruning_report(reports: list[dict[str, object]]) -> str:
         "",
     ]
     for report in reports:
-        if report.get("report_type") == "reference_duplicate_summary":
+        if report.get("report_type") == "source_duplicate_summary":
             lines.extend(
                 [
-                    f"## {report['data_id']} reference duplicate summary",
+                    f"## {report['data_id']} source duplicate summary",
                     "",
                     "- exact duplicate primary-key rows deduped: "
-                    f"{report['reference_exact_duplicate_count']}",
+                    f"{report['exact_duplicate_count']}",
                     "",
                 ]
             )
@@ -932,12 +930,6 @@ def normalize_raw_frame(
                 not in {"industry_code", "industry_standard_id", "industry_level"},
             ).astype("string")
         result = result.loc[:, INDUSTRY_CLASSIFICATION_SETS_COLUMNS]
-        key = ["industry_standard_id", "industry_code"]
-        if result.duplicated(key, keep=False).any():
-            duplicates = result.loc[result.duplicated(key, keep=False)]
-            if duplicates.drop_duplicates().duplicated(key, keep=False).any():
-                raise ValueError("industry_dictionary_key_duplicate")
-            result = result.drop_duplicates(key, keep="first")
         return result.reset_index(drop=True)
     if data_id == "industry_classification_versions":
         result = mapped
@@ -1198,6 +1190,7 @@ def _iter_interim_frames(
     scratch_parent: Path | None = None,
     verify_members: Callable[[], None] | None = None,
     source_row_counts: dict[str, int] | None = None,
+    producer_diagnostics: dict[str, object] | None = None,
 ) -> Iterator[object]:
     validated_overrides = {} if overrides is None else overrides
 
@@ -1208,60 +1201,65 @@ def _iter_interim_frames(
         with closing_iterator(inputs):
             selected_scratch_parent = scratch_parent
             prepared_inputs: Iterable[Path | tuple[Path, DatasetFileIdentity]] = inputs
-            if data_id in SOURCE_REFERENCE_DATA_IDS:
-                try:
-                    first_input = next(inputs)
-                except StopIteration:
-                    _append_reference_duplicate_summary(
-                        operation_reports,
-                        data_id,
-                        0,
-                    )
-                    first_input = None
-                if first_input is not None:
-                    first_path = _input_file_path(first_input)
-                    if selected_scratch_parent is None:
-                        selected_scratch_parent = first_path.parent
-                        source_parent = require_unaliased_path(
-                            first_path.parent,
-                            error="csmar_reference_source_volume_mismatch",
-                        )
-                        source_metadata = source_parent.lstat()
-                        if not stat.S_ISDIR(source_metadata.st_mode):
-                            raise ValueError("csmar_reference_source_volume_mismatch")
-                        source_device = source_metadata.st_dev
-                    else:
-                        source_device = None
-                    prepared_inputs = _iter_reference_inputs(
-                        first_input,
-                        inputs,
-                        source_device=source_device,
-                    )
-            if selected_scratch_parent is not None or data_id not in (
-                SOURCE_REFERENCE_DATA_IDS
-            ):
-                frames = _iter_pruned_interim_frames(
-                    data_id=data_id,
-                    raw_dataset=raw_dataset,
-                    input_files=prepared_inputs,
-                    start_date=start_date,
-                    end_date=end_date,
-                    overrides=validated_overrides,
-                    chunksize=chunksize,
-                    pruning_reports=operation_reports,
-                    source_row_counts=source_row_counts,
+            try:
+                first_input = next(inputs)
+            except StopIteration:
+                _append_duplicate_summary(
+                    operation_reports,
+                    data_id,
+                    0,
                 )
-                if data_id in SOURCE_REFERENCE_DATA_IDS:
-                    assert selected_scratch_parent is not None
-                    reference_frames = _iter_deduped_reference_frames(
-                        frames,
-                        data_id=data_id,
-                        pruning_reports=operation_reports,
-                        scratch_parent=selected_scratch_parent,
+                first_input = None
+            if first_input is not None:
+                first_path = _input_file_path(first_input)
+                if selected_scratch_parent is None:
+                    selected_scratch_parent = first_path.parent
+                    source_parent = require_unaliased_path(
+                        first_path.parent,
+                        error="csmar_interim_source_volume_mismatch",
                     )
-                    with closing_iterator(reference_frames):
-                        yield from reference_frames
+                    source_metadata = source_parent.lstat()
+                    if not stat.S_ISDIR(source_metadata.st_mode):
+                        raise ValueError("csmar_interim_source_volume_mismatch")
+                    source_device = source_metadata.st_dev
                 else:
+                    source_device = None
+                prepared_inputs = _iter_source_inputs(
+                    first_input,
+                    inputs,
+                    source_device=source_device,
+                )
+            if selected_scratch_parent is not None:
+                policy = current_runtime_resource_policy()
+                if policy is None:
+                    raise RuntimeError("runtime_resource_policy_not_active")
+                spec = interim_catalog().get(data_id)
+                index = ExactPrimaryKeyIndex(
+                    primary_key=spec.primary_key,
+                    timestamp_columns=tuple(
+                        column for column in spec.primary_key if column == "timestamp"
+                    ),
+                    scratch_parent=selected_scratch_parent,
+                )
+                with (
+                    policy.lease(
+                        "source.csmar.interim.index", index.retained_memory_bytes
+                    ),
+                    index,
+                ):
+                    frames = _iter_pruned_interim_frames(
+                        data_id=data_id,
+                        raw_dataset=raw_dataset,
+                        input_files=prepared_inputs,
+                        start_date=start_date,
+                        end_date=end_date,
+                        overrides=validated_overrides,
+                        chunksize=chunksize,
+                        pruning_reports=operation_reports,
+                        source_row_counts=source_row_counts,
+                        duplicate_index=index,
+                        producer_diagnostics=producer_diagnostics,
+                    )
                     with closing_iterator(frames):
                         yield from frames
             if verify_members is not None:
@@ -1406,13 +1404,13 @@ def _materialize_interim_data(
                     )
                 )
                 metadata = dict(instance_metadata or {})
+                diagnostics = dict(metadata.get("producer_diagnostics", {}))
+                diagnostics["exact_duplicate_count"] = 0
+                metadata["producer_diagnostics"] = diagnostics
                 source_row_counts = None
                 if data_id == "analyst_forecast":
                     source_row_counts = {}
-                    metadata["producer_diagnostics"] = {
-                        **metadata.get("producer_diagnostics", {}),
-                        "source_row_counts": source_row_counts,
-                    }
+                    diagnostics["source_row_counts"] = source_row_counts
                 frames = _iter_interim_frames(
                     data_id=data_id,
                     input_files=input_files,
@@ -1424,6 +1422,7 @@ def _materialize_interim_data(
                     scratch_parent=artifact_root.parent,
                     verify_members=verify_members,
                     source_row_counts=source_row_counts,
+                    producer_diagnostics=diagnostics,
                 )
                 with closing_iterator(frames):
                     try:
@@ -1460,19 +1459,16 @@ def _iter_pruned_interim_frames(
     overrides: Mapping[str, Mapping[str, object]],
     chunksize: int,
     pruning_reports: list[dict[str, object]] | None,
+    duplicate_index: ExactPrimaryKeyIndex,
+    producer_diagnostics: dict[str, object] | None,
     source_row_counts: dict[str, int] | None = None,
 ) -> Iterator[object]:
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
     local_reports: list[dict[str, object]] = []
-    primary_key = tuple(interim_catalog().get(data_id).primary_key)
-    ordering_key = (
-        ("source_asset_id", "timestamp")
-        if data_id == "industry_classification"
-        else primary_key
-    )
-    previous_key: tuple[object, ...] | None = None
+    primary_key = interim_catalog().get(data_id).primary_key
+    exact_duplicate_count = 0
     lease: MemoryLease | None = None
     for input in input_files:
         if isinstance(input, tuple):
@@ -1504,6 +1500,12 @@ def _iter_pruned_interim_frames(
                     if source_owned:
                         if lease is None:
                             lease = yield upstream_bound
+                        elif upstream_bound > lease.reserved_bytes:
+                            policy.require_working_set(
+                                upstream_bound - lease.reserved_bytes,
+                                error="csmar_interim_working_set_exceeds_task_memory_budget",
+                            )
+                            lease.grow(upstream_bound - lease.reserved_bytes)
                         try:
                             owned = chunks.send(lease)
                         except StopIteration:
@@ -1570,20 +1572,83 @@ def _iter_pruned_interim_frames(
                                 source_row_counts[key] = (
                                     source_row_counts.get(key, 0) + count
                                 )
+                        if report:
+                            _merge_pruning_report(local_reports, report)
+                        if not pruned.empty:
+                            frame_bytes = pandas_frame_payload_bytes(pruned)
+                            dedupe_bound = (
+                                chunk_bytes + _deduplication_working_set_bytes(pruned)
+                            )
+                            if dedupe_bound > lease.reserved_bytes:
+                                policy.require_working_set(
+                                    dedupe_bound - lease.reserved_bytes,
+                                    error="csmar_interim_working_set_exceeds_task_memory_budget",
+                                )
+                                lease.grow(dedupe_bound - lease.reserved_bytes)
+                            table = pa.Table.from_pandas(pruned, preserve_index=False)
+                            try:
+                                if table.nbytes > 2 * frame_bytes + 64 * 1024:
+                                    raise ValueError("csmar_interim_bound_invalid")
+                                positions, duplicate_count = (
+                                    duplicate_index.classify_comparison_table(
+                                        table,
+                                        namespace=data_id,
+                                        value_columns=tuple(
+                                            sorted(
+                                                column
+                                                for column in pruned
+                                                if column not in primary_key
+                                            )
+                                        ),
+                                        payload_target_bytes=max(
+                                            1,
+                                            lease.reserved_bytes
+                                            - chunk_bytes
+                                            - frame_bytes,
+                                        ),
+                                    )
+                                )
+                            except ValueError as error:
+                                if (
+                                    str(error)
+                                    == "conflicting_exact_primary_key_payload"
+                                ):
+                                    raise ValueError(
+                                        "conflicting_csmar_primary_key_duplicates: "
+                                        f"{data_id}"
+                                    ) from error
+                                raise
+                            finally:
+                                del table
+                            exact_duplicate_count += duplicate_count
+                            if producer_diagnostics is not None:
+                                producer_diagnostics["exact_duplicate_count"] = (
+                                    exact_duplicate_count
+                                )
+                            if not positions:
+                                del positions, pruned, report, candidate
+                                start = stop
+                                continue
+                            if len(positions) != len(pruned):
+                                selected = pruned.iloc[positions.view].reset_index(
+                                    drop=True
+                                )
+                                required = (
+                                    chunk_bytes
+                                    + frame_bytes
+                                    + pandas_frame_payload_bytes(selected)
+                                    + positions.retained_memory_bytes
+                                    + 64 * 1024
+                                )
+                                if required > lease.reserved_bytes:
+                                    raise ValueError("csmar_interim_bound_invalid")
+                                pruned = selected
+                                del selected
+                            del positions
                         if pruned.empty and data_id != "analyst_forecast":
                             del pruned, report, candidate
                             start = stop
                             continue
-                        if report:
-                            _merge_pruning_report(local_reports, report)
-                        if data_id != "analyst_forecast":
-                            first_key = tuple(pruned.iloc[0].loc[list(ordering_key)])
-                            if previous_key is not None and first_key < previous_key:
-                                raise ValueError("csmar_source_order_regression")
-                            previous_key = tuple(
-                                pruned.iloc[-1].loc[list(ordering_key)]
-                            )
-                        pruned_bytes = pandas_frame_payload_bytes(pruned)
                         next_pending_frame: pd.DataFrame | None = None
                         next_pending_lease: MemoryLease | None = None
                         next_pending_bound: int | None = None
@@ -1636,8 +1701,7 @@ def _iter_pruned_interim_frames(
                         pending_lease = next_pending_lease
                         pending_bound = next_pending_bound
                         pending_span = next_pending_span
-                        if data_id not in SOURCE_REFERENCE_DATA_IDS:
-                            lease.shrink_to(pruned_bytes + 64 * 1024)
+                        lease.shrink_to(pandas_frame_payload_bytes(pruned) + 64 * 1024)
                         owned_output = OwnedValue(pruned, lease)
                         del pruned
                         yield owned_output
@@ -1648,9 +1712,9 @@ def _iter_pruned_interim_frames(
                     if not emitted:
                         del owned, chunk
                         pending_frame = None
-                        if pending_lease is not None:
+                        if pending_lease is not None and pending_lease is not lease:
                             pending_lease.close()
-                            pending_lease = None
+                        pending_lease = None
                         pending_bound = None
                         pending_span = None
                         if source_owned:
@@ -1673,6 +1737,7 @@ def _iter_pruned_interim_frames(
                 pending_bound = None
                 pending_span = None
     if pruning_reports is not None:
+        _append_duplicate_summary(pruning_reports, data_id, exact_duplicate_count)
         for report in local_reports:
             _merge_pruning_report(pruning_reports, report)
 
@@ -1743,13 +1808,23 @@ def _transform_interim_chunk(
         overrides=overrides,
     )
     _require_interim_transform_headroom(
-        retained_previous_bytes + filtered_bytes + pandas_frame_payload_bytes(pruned),
+        retained_previous_bytes
+        + filtered_bytes
+        + _deduplication_working_set_bytes(pruned),
         policy.operation_headroom_bytes,
     )
     del filtered
     if source_row_counts is not None:
         report["source_row_counts"] = source_row_counts
     return pruned, report
+
+
+def _deduplication_working_set_bytes(frame: pd.DataFrame) -> int:
+    return (
+        3 * pandas_frame_payload_bytes(frame)
+        + len(frame) * array("Q").itemsize
+        + 64 * 1024
+    )
 
 
 def _require_interim_transform_headroom(required_bytes: int, budget_bytes: int) -> None:
@@ -1806,208 +1881,13 @@ def _merge_pruning_report(
     reports.append(report)
 
 
-def _iter_deduped_reference_frames(
-    frames: Iterator[object],
-    *,
-    data_id: str,
-    pruning_reports: list[dict[str, object]] | None,
-    scratch_parent: Path,
-) -> Iterator[object]:
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
-    spec = interim_catalog().get(data_id)
-    primary_key = tuple(spec.primary_key)
-    exact_duplicate_count = 0
-    completed = False
-    index = ExactPrimaryKeyIndex(
-        primary_key=primary_key,
-        timestamp_columns=tuple(
-            column for column in primary_key if column == "timestamp"
-        ),
-        scratch_parent=scratch_parent,
-    )
-    with runtime_resource_policy_scope(policy):
-        index_lease = policy.lease(
-            "source.csmar.reference.index",
-            index.retained_memory_bytes,
-        )
-        try:
-            with closing_iterator(frames), index:
-                try:
-                    source_bound = next(frames)
-                except StopIteration:
-                    source_bound = None
-                lease: MemoryLease | None = None
-                try:
-                    while source_bound is not None:
-                        if lease is None:
-                            lease = yield source_bound
-                        if lease is None:
-                            raise RuntimeError("invalid_csmar_reference_lease")
-                        owned: object | None = None
-                        try:
-                            owned = frames.send(lease)
-                        except StopIteration:
-                            completed = True
-                            break
-                        if not isinstance(owned, OwnedValue):
-                            raise TypeError("invalid_csmar_reference_owned_frame")
-                        if owned.lease is not lease:
-                            raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-                        source_frame = owned.value
-                        if type(source_frame) is not pd.DataFrame:
-                            raise TypeError("invalid_dataset_chunk")
-                        missing = [
-                            column
-                            for column in primary_key
-                            if column not in source_frame.columns
-                        ]
-                        if missing:
-                            raise ValueError(
-                                "missing_reference_primary_key_columns: "
-                                + ", ".join(missing)
-                            )
-                        source_frame_bytes = pandas_frame_payload_bytes(source_frame)
-                        if source_frame.empty:
-                            keep_positions = None
-                            duplicate_count = 0
-                        else:
-                            value_columns = tuple(
-                                sorted(
-                                    column
-                                    for column in source_frame.columns
-                                    if column not in primary_key
-                                )
-                            )
-                            position_bytes = len(source_frame) * array("Q").itemsize
-                            conservative_bound = (
-                                3 * source_frame_bytes + position_bytes + 64 * 1024
-                            )
-                            if conservative_bound > lease.reserved_bytes:
-                                del source_frame, owned
-                                raise ValueError("csmar_reference_bound_invalid")
-                            table = pa.Table.from_pandas(
-                                source_frame,
-                                preserve_index=False,
-                            )
-                            if table.nbytes > 2 * source_frame_bytes + 64 * 1024:
-                                del table, source_frame, owned
-                                raise ValueError("csmar_reference_bound_invalid")
-                            try:
-                                keep_positions, duplicate_count = (
-                                    index.classify_comparison_table(
-                                        table,
-                                        namespace=data_id,
-                                        value_columns=value_columns,
-                                        payload_target_bytes=max(
-                                            1,
-                                            lease.reserved_bytes - source_frame_bytes,
-                                        ),
-                                    )
-                                )
-                            except ValueError as exc:
-                                if str(exc) == "conflicting_exact_primary_key_payload":
-                                    raise ValueError(
-                                        "conflicting_reference_primary_key_duplicates: "
-                                        f"{data_id}"
-                                    ) from exc
-                                raise
-                            finally:
-                                del table
-                        exact_duplicate_count += duplicate_count
-                        if keep_positions:
-                            output = source_frame.iloc[keep_positions.view].reset_index(
-                                drop=True
-                            )
-                            output_bytes = pandas_frame_payload_bytes(output)
-                            actual_bound = (
-                                source_frame_bytes
-                                + output_bytes
-                                + keep_positions.retained_memory_bytes
-                                + 64 * 1024
-                            )
-                            if actual_bound > lease.reserved_bytes:
-                                del (
-                                    output,
-                                    keep_positions,
-                                    source_frame,
-                                    owned,
-                                )
-                                raise ValueError("csmar_reference_bound_invalid")
-                            lease.shrink_to(actual_bound)
-                            del keep_positions, source_frame, owned
-                            owned_output = OwnedValue(output, lease)
-                            del output
-                            yield owned_output
-                            del owned_output
-                            try:
-                                source_bound = frames.send(None)
-                            except StopIteration:
-                                source_bound = None
-                            lease = None
-                            if source_bound is not None and (
-                                type(source_bound) is not int or source_bound <= 0
-                            ):
-                                raise ValueError("invalid_csmar_reference_bound")
-                            continue
-                        empty_output = source_frame.iloc[:0]
-                        empty_output_bytes = pandas_frame_payload_bytes(empty_output)
-                        empty_bound = (
-                            source_frame_bytes
-                            + empty_output_bytes
-                            + keep_positions.retained_memory_bytes
-                            if keep_positions is not None
-                            else source_frame_bytes + empty_output_bytes
-                        )
-                        if empty_bound > lease.reserved_bytes:
-                            del empty_output, keep_positions, source_frame, owned
-                            raise ValueError("csmar_reference_bound_invalid")
-                        lease.shrink_to(empty_bound)
-                        del keep_positions, source_frame, owned
-                        owned_output = OwnedValue(empty_output, lease)
-                        del empty_output
-                        yield owned_output
-                        del owned_output
-                        try:
-                            source_bound = frames.send(None)
-                        except StopIteration:
-                            source_bound = None
-                        lease = None
-                        if source_bound is not None and (
-                            type(source_bound) is not int or source_bound <= 0
-                        ):
-                            raise ValueError("invalid_csmar_reference_bound")
-                        continue
-                finally:
-                    lease = None
-                completed = True
-        finally:
-            primary = sys.exception()
-            try:
-                index_lease.close()
-            except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "CSMAR reference index lease close also failed: "
-                    f"{type(close_error).__name__}"
-                )
-    if completed and pruning_reports is not None:
-        _append_reference_duplicate_summary(
-            pruning_reports,
-            data_id,
-            exact_duplicate_count,
-        )
-
-
 def _input_file_path(
     value: Path | tuple[Path, DatasetFileIdentity],
 ) -> Path:
     return Path(value[0] if isinstance(value, tuple) else value)
 
 
-def _iter_reference_inputs(
+def _iter_source_inputs(
     first: Path | tuple[Path, DatasetFileIdentity],
     remaining: Iterator[Path | tuple[Path, DatasetFileIdentity]],
     *,
@@ -2017,20 +1897,20 @@ def _iter_reference_inputs(
     for value in remaining:
         parent = require_unaliased_path(
             _input_file_path(value).parent,
-            error="csmar_reference_source_volume_mismatch",
+            error="csmar_interim_source_volume_mismatch",
         )
         try:
             metadata = parent.lstat()
         except OSError as exc:
-            raise ValueError("csmar_reference_source_volume_mismatch") from exc
+            raise ValueError("csmar_interim_source_volume_mismatch") from exc
         if source_device is not None and (
             not stat.S_ISDIR(metadata.st_mode) or metadata.st_dev != source_device
         ):
-            raise ValueError("csmar_reference_source_volume_mismatch")
+            raise ValueError("csmar_interim_source_volume_mismatch")
         yield value
 
 
-def _append_reference_duplicate_summary(
+def _append_duplicate_summary(
     reports: list[dict[str, object]],
     data_id: str,
     exact_duplicate_count: int,
@@ -2038,8 +1918,8 @@ def _append_reference_duplicate_summary(
     reports.append(
         {
             "data_id": data_id,
-            "report_type": "reference_duplicate_summary",
-            "reference_exact_duplicate_count": int(exact_duplicate_count),
+            "report_type": "source_duplicate_summary",
+            "exact_duplicate_count": int(exact_duplicate_count),
         }
     )
 
@@ -2228,9 +2108,6 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
     result["source_state"] = result["source_state"].str.upper()
     if not result["source_state"].isin(("O", "C")).all():
         raise ValueError("invalid_trading_calendar_state")
-    duplicate = result.duplicated(["source_market_type", "calendar_date"], keep=False)
-    if duplicate.any():
-        raise ValueError("duplicate_trading_calendar_key")
     result["is_trading_day"] = result["source_state"].eq("O").astype("bool")
     result["timestamp"] = result["calendar_date"]
     return (

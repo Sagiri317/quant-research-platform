@@ -39,6 +39,7 @@ from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     _file_identity_bytes,
+    content_hash_for_files,
     dataset_file_identity,
     dataset_file_identity_from_stat,
     native_filesystem_path,
@@ -53,6 +54,59 @@ DATA_ID_BY_RAW_KIND = {
 _SCAN_BUFFER_BYTES = 64 * 1024
 _RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
 _RawInputFile = tuple[Path, DatasetFileIdentity]
+
+
+def source_content_identity(raw_root: Path, data_id: str) -> str | None:
+    """Bind one approved interim target to its exact provider-native files."""
+    root = require_unaliased_path(Path(raw_root), error=_RAW_IDENTITY_ERROR)
+    raw_kind = next(
+        (kind for kind, target in DATA_ID_BY_RAW_KIND.items() if target == data_id),
+        None,
+    )
+    if raw_kind is None:
+        raise ValueError(f"unsupported_binance_data_id: {data_id}")
+    policy = current_runtime_resource_policy()
+    if policy is None:
+        raise RuntimeError("runtime_resource_policy_not_active")
+    if not root.exists():
+        return None
+    namespace = f"binance-raw-{raw_kind}"
+    index = ExactPrimaryKeyIndex(
+        primary_key=("relative_path",), timestamp_columns=(), scratch_parent=root.parent
+    )
+    with (
+        _raw_path_session(root) as verify_root,
+        policy.lease("source.binance.raw.identity.index", index.retained_memory_bytes),
+        index,
+    ):
+        count = _index_raw_kind_files(
+            root, raw_kind=raw_kind, index=index, namespace=namespace
+        )
+        if not count:
+            return None
+        identity = _indexed_raw_content_identity(root, index=index, namespace=namespace)
+        _verify_indexed_raw_kind_files(
+            root,
+            raw_kind=raw_kind,
+            index=index,
+            namespace=namespace,
+            expected_count=count,
+        )
+        verify_root()
+        return identity
+
+
+def _indexed_raw_content_identity(root: Path, *, index, namespace: str) -> str:
+    return content_hash_for_files(
+        (
+            (path.relative_to(root).as_posix(), path, identity)
+            for path, identity in _iter_indexed_raw_kind_files(
+                root, index=index, namespace=namespace
+            )
+        ),
+        error=_RAW_IDENTITY_ERROR,
+        resource_policy=current_runtime_resource_policy(),
+    )
 
 
 @contextmanager

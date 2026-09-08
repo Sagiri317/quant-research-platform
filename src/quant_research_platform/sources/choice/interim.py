@@ -28,6 +28,7 @@ from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.validation import (
     strict_string_series,
     strict_timestamp_series,
+    validate_financial_disclosure_chronology,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
@@ -128,6 +129,9 @@ def normalize_first_disclosure_frame(frame: pd.DataFrame) -> pd.DataFrame:
         result[column] = strict_timestamp_series(
             result[column], error="invalid_choice_disclosure_date"
         ).dt.normalize()
+    validate_financial_disclosure_chronology(
+        result["report_period"], result["first_disclosure_date"]
+    )
     if result.duplicated(["asset_id", "report_period"], keep=False).any():
         raise ValueError("duplicate_choice_first_disclosure_key")
     return result.sort_values(

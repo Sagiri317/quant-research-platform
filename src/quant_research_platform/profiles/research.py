@@ -30,6 +30,9 @@ from quant_research_platform.research.statistics_production import (
 from quant_research_platform.sources.binance.interim import (
     materialize_interim_data as binance_interim_producer,
 )
+from quant_research_platform.sources.binance.raw_exports import (
+    source_content_identity as binance_source_identity,
+)
 from quant_research_platform.sources.choice.interim import (
     interim_catalog as choice_interim_catalog,
 )
@@ -467,7 +470,9 @@ def _crypto_profile() -> ResearchProfile:
             ),
             **{
                 spec.data_id: ProducerBinding(
-                    ProducerKind.INTERIM, binance_interim_producer
+                    ProducerKind.INTERIM,
+                    binance_interim_producer,
+                    source_identity=binance_source_identity,
                 )
                 for spec in interim.list()
             },

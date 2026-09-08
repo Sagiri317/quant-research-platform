@@ -1354,8 +1354,12 @@ def _build_target(
                 layout=target_layout,
                 raw_root=interim_raw_root,
                 data_ids=(spec.target_id,),
-                start_date=_date_text(target_time_window.start),
-                end_date=_date_text(target_time_window.end),
+                start_date=time_value_isoformat(
+                    target_time_window.start, preserve_datetime=True
+                ),
+                end_date=time_value_isoformat(
+                    target_time_window.end, preserve_datetime=True
+                ),
                 resource_policy=policy,
                 instance_metadata=instance_metadata,
             )

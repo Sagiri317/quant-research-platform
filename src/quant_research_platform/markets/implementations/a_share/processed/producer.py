@@ -380,7 +380,7 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
                         history_lease = next_owner.enter_context(
                             policy.lease(
                                 "a_share.panel.suspension_history",
-                                65536 + asset_count * 3 * 4096,
+                                65536 + asset_count * 4 * 4096,
                             )
                         )
                         combined = (
@@ -398,6 +398,17 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
                                     .groupby("asset_id", sort=False)
                                     .tail(1),
                                     ordered.loc[ordered["adj_close"].notna()]
+                                    .groupby("asset_id", sort=False)
+                                    .tail(1),
+                                    ordered.loc[
+                                        ~ordered["filling_flag"].isin((0, 1))
+                                        | (
+                                            ordered["is_trading"]
+                                            & ordered[["close", "adj_close"]]
+                                            .isna()
+                                            .any(axis=1)
+                                        )
+                                    ]
                                     .groupby("asset_id", sort=False)
                                     .tail(1),
                                 ]
