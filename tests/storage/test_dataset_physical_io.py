@@ -942,9 +942,6 @@ def test_dataset_parquet_disk_preflight_precedes_native_write(
             dataset_writing.write_parquet_file(table, path)
 
     persisted = dataset_writing.table_with_decoded_row_bounds(table)
-    metadata = dict(persisted.schema.metadata or {})
-    metadata[dataset_writing._PHYSICAL_PAGE_ROWS_KEY] = b"1"
-    persisted = persisted.replace_schema_metadata(metadata)
     expected = dataset_writing._table_parquet_page_working_set_bytes(
         persisted,
         rows=table.num_rows,
@@ -976,7 +973,7 @@ def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(
                 path,
                 expected_identity=None,
                 target_chunk_bytes=32 * 1024,
-                operation_headroom_bytes=page_headroom,
+                operation_headroom_bytes=4 * page_headroom,
                 columns=("value",),
                 source_batch_rows=1,
             )

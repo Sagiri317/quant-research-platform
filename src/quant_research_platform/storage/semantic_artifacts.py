@@ -7,7 +7,10 @@ import os
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from itertools import zip_longest
 from pathlib import Path
+
+import pyarrow as pa
 
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
@@ -20,11 +23,17 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.json_codec import (
     bounded_qrp_json_object_snapshot,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
 )
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.experiments import read_trial_ledger_reference
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -38,6 +47,10 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_manifest,
     write_manifest,
+)
+from quant_research_platform.storage.parquet import (
+    _opened_parquet,
+    iter_dataset_part_batches,
 )
 
 SEMANTIC_ARTIFACT_SCHEMA_ID = "qrp-semantic-artifact"
@@ -70,8 +83,6 @@ def compare_semantic_artifacts(
         candidate_paths = tuple(member["path"] for member in candidate_members)
         if old_paths != candidate_paths:
             return SemanticArtifactComparison("LAYOUT_MISMATCH")
-        if old_members != candidate_members:
-            return SemanticArtifactComparison("CONTENT_MISMATCH")
         old_trials = read_semantic_artifact_operational_metadata(old_root).get(
             "model_trial_ledgers", []
         )
@@ -91,7 +102,9 @@ def compare_semantic_artifacts(
                 old_plan, old_records
             ) != trial_ledger_semantic_payload(candidate_plan, candidate_records):
                 return SemanticArtifactComparison("CONTENT_MISMATCH")
-        for member in old_members:
+        for member, candidate_member in zip(
+            old_members, candidate_members, strict=True
+        ):
             old_path, candidate_path = (
                 old_root / member["path"],
                 candidate_root / member["path"],
@@ -104,34 +117,42 @@ def compare_semantic_artifacts(
             identities[candidate_path] = candidate_identity
             if (
                 _member_record(member["path"], old_path) != member
-                or _member_record(member["path"], candidate_path) != member
+                or _member_record(member["path"], candidate_path) != candidate_member
             ):
                 raise ValueError("semantic_artifact_member_integrity_invalid")
-            with (
-                handle_preserving_primary(open_filesystem_file(old_path)) as old,
-                handle_preserving_primary(
-                    open_filesystem_file(candidate_path)
-                ) as candidate,
-            ):
-                if (
-                    dataset_file_identity_from_stat(os.fstat(old.fileno()))
-                    != old_identity
-                    or dataset_file_identity_from_stat(os.fstat(candidate.fileno()))
-                    != candidate_identity
+            if old_path.suffix == ".parquet":
+                if not _parquet_members_match(
+                    old_path, candidate_path, old_identity, candidate_identity
                 ):
-                    raise ValueError("semantic_artifact_member_identity_changed")
-                while left := old.read(_HASH_BUFFER_BYTES):
-                    if left != candidate.read(_HASH_BUFFER_BYTES):
-                        return SemanticArtifactComparison("CONTENT_MISMATCH")
-                if candidate.read(1):
                     return SemanticArtifactComparison("CONTENT_MISMATCH")
-                if (
-                    dataset_file_identity_from_stat(os.fstat(old.fileno()))
-                    != old_identity
-                    or dataset_file_identity_from_stat(os.fstat(candidate.fileno()))
-                    != candidate_identity
+            else:
+                if member != candidate_member:
+                    return SemanticArtifactComparison("CONTENT_MISMATCH")
+                with (
+                    handle_preserving_primary(open_filesystem_file(old_path)) as old,
+                    handle_preserving_primary(
+                        open_filesystem_file(candidate_path)
+                    ) as candidate,
                 ):
-                    raise ValueError("semantic_artifact_member_identity_changed")
+                    if (
+                        dataset_file_identity_from_stat(os.fstat(old.fileno()))
+                        != old_identity
+                        or dataset_file_identity_from_stat(os.fstat(candidate.fileno()))
+                        != candidate_identity
+                    ):
+                        raise ValueError("semantic_artifact_member_identity_changed")
+                    while left := old.read(_HASH_BUFFER_BYTES):
+                        if left != candidate.read(_HASH_BUFFER_BYTES):
+                            return SemanticArtifactComparison("CONTENT_MISMATCH")
+                    if candidate.read(1):
+                        return SemanticArtifactComparison("CONTENT_MISMATCH")
+                    if (
+                        dataset_file_identity_from_stat(os.fstat(old.fileno()))
+                        != old_identity
+                        or dataset_file_identity_from_stat(os.fstat(candidate.fileno()))
+                        != candidate_identity
+                    ):
+                        raise ValueError("semantic_artifact_member_identity_changed")
             if (
                 _member_identity(old_path) != old_identity
                 or _member_identity(candidate_path) != candidate_identity
@@ -154,6 +175,58 @@ def compare_semantic_artifacts(
     except (OSError, ValueError):
         return SemanticArtifactComparison("INSPECTION_FAILED")
     return SemanticArtifactComparison("MATCH")
+
+
+def _parquet_members_match(old_path, candidate_path, old_identity, candidate_identity):
+    # Physical encoding is not semantic identity; reuse the exact row codec.
+    with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
+        schemas = []
+        for path, identity in (
+            (old_path, old_identity),
+            (candidate_path, candidate_identity),
+        ):
+            with _opened_parquet(path, expected_identity=identity) as opened:
+                schema = opened[0].schema_arrow
+                metadata = {
+                    key: value
+                    for key, value in (schema.metadata or {}).items()
+                    if key not in {b"qrp.decoded-row-bounds", b"qrp.parquet-page-rows"}
+                }
+                schemas.append(schema.with_metadata(metadata))
+        if not schemas[0].equals(schemas[1], check_metadata=True):
+            return False
+        payload_target = max(1, policy.operation_headroom_bytes // 8)
+        codec = ExactPrimaryKeyIndex(primary_key=(), timestamp_columns=())
+
+        def rows(path, identity):
+            with closing_iterator(
+                iter_dataset_part_batches(
+                    path,
+                    expected_identity=identity,
+                    target_chunk_bytes=payload_target,
+                )
+            ) as batches:
+                for batch in batches:
+                    table = pa.Table.from_batches([batch])
+                    for _, _, payload in codec._comparison_payload_rows(
+                        table,
+                        table,
+                        namespace="comparison",
+                        payload_target_bytes=payload_target,
+                    ):
+                        yield payload
+                    del batch, table
+
+        missing = object()
+        with (
+            policy.lease("storage.semantic.comparison.payload", 2 * payload_target),
+            closing_iterator(rows(old_path, old_identity)) as old,
+            closing_iterator(rows(candidate_path, candidate_identity)) as candidate,
+        ):
+            return all(
+                left == right
+                for left, right in zip_longest(old, candidate, fillvalue=missing)
+            )
 
 
 def write_semantic_artifact(

@@ -39,7 +39,6 @@ from quant_research_platform.storage.identity import (
 
 _DECODED_ROW_BOUNDS_KEY = b"qrp.decoded-row-bounds"
 _DECODED_ROW_BOUNDS_SCHEMA_ID = "qrp-dataset-part-decoded-row-bounds"
-_PHYSICAL_PAGE_ROWS_KEY = b"qrp.parquet-page-rows"
 _PARQUET_MAX_ROW_GROUP_ROWS = 64 * 1024 * 1024
 _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES = 5 * 1024 * 1024
 _PARQUET_NATIVE_METADATA_PAGE_BYTES = 4096
@@ -201,13 +200,6 @@ def iter_dataset_part_batches(
                 parquet_file, selected_columns, row_groups=[row_group]
             )
             selected_source_rows = int(file_metadata.row_group(row_group).num_rows)
-            physical_page_rows = _physical_page_rows(parquet_file)
-            maximum_page_rows = min(
-                selected_source_rows,
-                selected_source_rows
-                if physical_page_rows is None
-                else physical_page_rows,
-            )
             projected_buffer_bytes = (
                 len(_projected_parquet_leaf_positions(parquet_file, selected_columns))
                 * _PARQUET_READ_BUFFER_BYTES
@@ -215,7 +207,6 @@ def iter_dataset_part_batches(
             admitted_batch_rows = _target_batch_rows(
                 maximum_row_bytes=maximum_projected_row_bytes,
                 fixed_decode_bytes=maximum_decode_fixed_bytes,
-                maximum_page_rows=maximum_page_rows,
                 projected_buffer_bytes=projected_buffer_bytes,
                 target_chunk_bytes=target_chunk_bytes,
                 operation_headroom_bytes=initial_physical_headroom,
@@ -254,12 +245,8 @@ def iter_dataset_part_batches(
             minimum_decode_bytes = 0
             minimum_native_bytes = (
                 maximum_decode_fixed_bytes
-                + _maximum_projected_page_decode_bytes(
-                    maximum_row_bytes=maximum_projected_row_bytes,
-                    maximum_page_rows=maximum_page_rows,
-                    projected_buffer_bytes=projected_buffer_bytes,
-                    batch_rows=1,
-                )
+                + projected_buffer_bytes
+                + maximum_projected_row_bytes
             )
             batch_rows = 1 if decode_dictionary else maximum_batch_rows
             pulled_source_rows = 0
@@ -295,7 +282,6 @@ def iter_dataset_part_batches(
                                 _target_batch_rows(
                                     maximum_row_bytes=maximum_projected_row_bytes,
                                     fixed_decode_bytes=maximum_decode_fixed_bytes,
-                                    maximum_page_rows=maximum_page_rows,
                                     projected_buffer_bytes=projected_buffer_bytes,
                                     target_chunk_bytes=target_chunk_bytes,
                                     operation_headroom_bytes=native_capacity,
@@ -306,32 +292,19 @@ def iter_dataset_part_batches(
                         batch_rows,
                         selected_source_rows - pulled_source_rows,
                     )
-                    maximum_page_decode_bytes = (
-                        maximum_decode_fixed_bytes
-                        + _maximum_projected_page_decode_bytes(
-                            maximum_row_bytes=maximum_projected_row_bytes,
-                            maximum_page_rows=maximum_page_rows,
-                            projected_buffer_bytes=projected_buffer_bytes,
-                            batch_rows=next_batch_rows,
-                        )
-                    )
                     source_batch_bytes = next_batch_rows * maximum_projected_row_bytes
                     physical_pull_bytes = (
-                        maximum_page_decode_bytes
-                        + max(
-                            0,
+                        maximum_decode_fixed_bytes
+                        + projected_buffer_bytes
+                        + (
                             _filter_working_set_bytes(
                                 source_batch_bytes=source_batch_bytes,
                                 row_count=next_batch_rows,
                                 membership=membership,
                                 membership_max_scalar_bytes=membership_max_scalar_bytes,
                             )
-                            - source_batch_bytes,
-                        )
-                        if parquet_filters and not decode_dictionary
-                        else max(
-                            maximum_page_decode_bytes,
-                            maximum_decode_fixed_bytes + source_batch_bytes,
+                            if parquet_filters and not decode_dictionary
+                            else source_batch_bytes
                         )
                     )
                     if (
@@ -689,7 +662,6 @@ def _target_batch_rows(
     *,
     maximum_row_bytes: int,
     fixed_decode_bytes: int,
-    maximum_page_rows: int,
     projected_buffer_bytes: int,
     target_chunk_bytes: int,
     operation_headroom_bytes: int | None = None,
@@ -705,31 +677,20 @@ def _target_batch_rows(
     admitted = 0
     while low <= high:
         candidate = (low + high) // 2
-        page_decode_bytes = fixed_decode_bytes + _maximum_projected_page_decode_bytes(
-            maximum_row_bytes=maximum_row_bytes,
-            maximum_page_rows=maximum_page_rows,
-            projected_buffer_bytes=projected_buffer_bytes,
-            batch_rows=candidate,
-        )
         source_batch_bytes = candidate * maximum_row_bytes
-        logical_required_bytes = fixed_decode_bytes + (
-            _filter_working_set_bytes(
-                source_batch_bytes=source_batch_bytes,
-                row_count=candidate,
-                membership=membership,
-                membership_max_scalar_bytes=membership_max_scalar_bytes,
-            )
-            if filtered
-            else source_batch_bytes
-        )
         required_bytes = (
-            page_decode_bytes
-            + max(
-                0,
-                logical_required_bytes - fixed_decode_bytes - source_batch_bytes,
+            fixed_decode_bytes
+            + projected_buffer_bytes
+            + (
+                _filter_working_set_bytes(
+                    source_batch_bytes=source_batch_bytes,
+                    row_count=candidate,
+                    membership=membership,
+                    membership_max_scalar_bytes=membership_max_scalar_bytes,
+                )
+                if filtered
+                else source_batch_bytes
             )
-            if filtered
-            else max(page_decode_bytes, logical_required_bytes)
         )
         if required_bytes <= operation_headroom_bytes:
             admitted = candidate
@@ -825,7 +786,7 @@ def _maximum_projected_row_bytes(
                 + plain_dictionary_bytes
                 + (physical_bytes + group.num_rows - 1) // group.num_rows,
             )
-        maximum_row_bytes += column_row_bytes
+        maximum_row_bytes += column_row_bytes + 4 * len(positions)
     return max(1, maximum_row_bytes)
 
 
@@ -849,9 +810,6 @@ def _maximum_projected_decode_fixed_bytes(
         if row_groups is None
         else row_groups
     )
-    dictionary_positions = _dictionary_encoded_column_positions(
-        parquet_file, columns, row_groups=selected_groups
-    )
     native_types = tuple(
         leaf
         for field in parquet_file.schema_arrow
@@ -862,17 +820,22 @@ def _maximum_projected_decode_fixed_bytes(
         for index in _projected_parquet_leaf_positions(parquet_file, columns)
         if pa.types.is_dictionary(native_types[index])
     }
-    dictionary_columns = {
-        name
-        for name in columns
-        if set(_projected_parquet_leaf_positions(parquet_file, (name,))).intersection(
-            (*dictionary_positions, *native_dictionary_positions)
-        )
-    }
     physical_bounds = dict.fromkeys(columns, 0)
     for row_group_index in selected_groups:
         group = parquet_file.metadata.row_group(row_group_index)
-        group_bounds = dict.fromkeys(columns, 0)
+        # Arrow decodes an entire page before returning a record batch. Python
+        # exposes chunk sizes, not page sizes: the chunk is the conservative
+        # bound, even if untrusted writer hints claim smaller pages. Include
+        # decompression plus decoded payload and the two int16 level buffers.
+        group_bounds = {
+            name: sum(
+                int(group.column(index).total_compressed_size)
+                + 2 * int(group.column(index).total_uncompressed_size)
+                + 4 * min(1024, int(group.column(index).num_values))
+                for index in _projected_parquet_leaf_positions(parquet_file, (name,))
+            )
+            for name in columns
+        }
         for index in native_dictionary_positions.union(
             _dictionary_encoded_column_positions(
                 parquet_file, columns, row_groups=[row_group_index]
@@ -891,16 +854,17 @@ def _maximum_projected_decode_fixed_bytes(
                 for name in columns
                 if leaf.path == name or leaf.path.startswith(f"{name}.")
             )
-            group_bounds[name] += bound
+            group_bounds[name] += max(
+                0, bound - 2 * int(column.total_uncompressed_size)
+            )
         for name in columns:
             physical_bounds[name] = max(physical_bounds[name], group_bounds[name])
     try:
         return sum(
-            physical_bounds[column]
-            if column in dictionary_columns
-            else 0
-            if decoded_bounds is None
-            else decoded_bounds[column][1]
+            max(
+                physical_bounds[column],
+                0 if decoded_bounds is None else decoded_bounds[column][1],
+            )
             for column in columns
         )
     except KeyError:
@@ -930,40 +894,6 @@ def _dictionary_encoded_column_positions(
             for group in selected_groups
         )
     )
-
-
-def _maximum_projected_page_decode_bytes(
-    *,
-    maximum_row_bytes: int,
-    maximum_page_rows: int,
-    projected_buffer_bytes: int,
-    batch_rows: int,
-) -> int:
-    if maximum_page_rows <= 0:
-        return 0
-    return (
-        projected_buffer_bytes + min(maximum_page_rows, batch_rows) * maximum_row_bytes
-    )
-
-
-def _physical_page_rows(parquet_file: pq.ParquetFile) -> int | None:
-    raw = (parquet_file.metadata.metadata or {}).get(_PHYSICAL_PAGE_ROWS_KEY)
-    if raw is None:
-        raw = (parquet_file.schema_arrow.metadata or {}).get(_PHYSICAL_PAGE_ROWS_KEY)
-    if raw is None:
-        return None
-    try:
-        text = bytes(raw).decode("ascii")
-        if not text.isascii() or not text.isdecimal():
-            raise ValueError
-        value = int(text)
-        if value <= 0:
-            raise ValueError
-        return value
-    except (UnicodeDecodeError, ValueError):
-        raise DatasetReadCapacityExceeded(
-            "dataset_decode_bound_metadata_invalid"
-        ) from None
 
 
 def table_with_decoded_row_bounds(

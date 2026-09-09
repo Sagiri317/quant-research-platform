@@ -87,7 +87,6 @@ from quant_research_platform.storage.identity import (
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 from quant_research_platform.storage.parquet import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
-    _PHYSICAL_PAGE_ROWS_KEY,
     DatasetPartMetadata,
     _parquet_row_group_footer_upper_bound,
     _parquet_row_group_size,
@@ -1084,9 +1083,6 @@ def _bounded_persisted_tables(
 def write_parquet_file(table: pa.Table, path: Path) -> Path:
     Path(native_filesystem_path(path.parent)).mkdir(parents=True, exist_ok=True)
     persisted = table_with_decoded_row_bounds(table)
-    metadata = dict(persisted.schema.metadata or {})
-    metadata[_PHYSICAL_PAGE_ROWS_KEY] = str(max(1, persisted.num_rows)).encode("ascii")
-    persisted = persisted.replace_schema_metadata(metadata)
     policy = current_runtime_resource_policy()
     if policy is None:
         batch_rows = max(1, persisted.num_rows)
@@ -1121,9 +1117,6 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
                     low = candidate + 1
                 else:
                     high = candidate - 1
-    metadata = dict(persisted.schema.metadata or {})
-    metadata[_PHYSICAL_PAGE_ROWS_KEY] = str(batch_rows).encode("ascii")
-    persisted = persisted.replace_schema_metadata(metadata)
     require_free_disk_headroom(
         path.parent,
         reserve_bytes=(

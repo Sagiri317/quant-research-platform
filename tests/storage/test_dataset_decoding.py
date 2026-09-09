@@ -48,98 +48,34 @@ from tests.storage.low_level_fixtures import (
 )
 
 
-@pytest.mark.parametrize(
-    "filtered,headroom,admitted_rows",
-    (
-        (False, 4123, 3),
-        (False, 4122, 2),
-        (False, 4105, 1),
-        (False, 4104, 0),
-        (True, 4152, 3),
-        (True, 4151, 2),
-        (True, 4116, 1),
-        (True, 4115, 0),
-    ),
-)
-def test_plain_reader_derives_bounds_once_and_keeps_integer_admission(
-    tmp_path, monkeypatch, filtered, headroom, admitted_rows
-):
+@pytest.mark.parametrize("filtered", (False, True))
+def test_plain_reader_streams_normal_files_under_admitted_capacity(tmp_path, filtered):
     path = tmp_path / "plain-admission.parquet"
     table = pa.table({"value": np.arange(4096, dtype=np.int64)})
     pq.write_table(
         table, path, use_dictionary=False, compression=None, row_group_size=2048
     )
-    del table
-    identity = dataset_physical.dataset_file_identity(path)
-    calls = {}
-    for name in (
-        "_maximum_projected_row_bytes",
-        "_maximum_projected_decode_fixed_bytes",
-        "_physical_page_rows",
-    ):
-        original = getattr(dataset_physical, name)
-        calls[name] = 0
-
-        def observed(*args, _name=name, _original=original, **kwargs):
-            calls[_name] += 1
-            return _original(*args, **kwargs)
-
-        monkeypatch.setattr(dataset_physical, name, observed)
-    native = pq.ParquetFile.iter_batches
-    pulls = []
-
-    def observed_batches(self, **kwargs):
-        pulls.append(kwargs["batch_size"])
-        yield from native(self, **kwargs)
-
-    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed_batches)
-    sizes = []
+    expected = np.arange(1024 if filtered else 0, 4096, dtype=np.int64)
     delivered = 0
-    # The plain int64 bound is 9 bytes per row plus a 4096-byte read buffer.
-    # Filtering also keeps the copied rows and two rounded boolean buffers.
     with runtime_resource_policy_scope(explicit_cap_bytes=8 * 1024**2) as policy:
         with closing_iterator(
             dataset_physical.iter_dataset_part_batches(
                 path,
-                expected_identity=identity,
+                expected_identity=None,
                 target_chunk_bytes=90,
-                operation_headroom_bytes=headroom,
-                parquet_filters=[("value", ">=", 0)] if filtered else None,
+                operation_headroom_bytes=64 * 1024,
+                parquet_filters=[("value", ">=", 1024)] if filtered else None,
             )
         ) as batches:
-            if not admitted_rows:
-                reason = (
-                    "dataset_filter_working_set_exceeds_task_memory_budget"
-                    if filtered
-                    else "dataset_working_set_exceeds_task_memory_budget"
+            for batch in batches:
+                assert batch.num_rows <= 10
+                np.testing.assert_array_equal(
+                    batch.column(0).to_numpy(),
+                    expected[delivered : delivered + batch.num_rows],
                 )
-                with pytest.raises(
-                    storage_errors.DatasetReadCapacityExceeded, match=reason
-                ):
-                    next(batches)
-            else:
-                for batch in batches:
-                    assert batch.schema == pa.schema([("value", pa.int64())])
-                    np.testing.assert_array_equal(
-                        batch.column(0).to_numpy(),
-                        np.arange(
-                            delivered, delivered + batch.num_rows, dtype=np.int64
-                        ),
-                    )
-                    sizes.append(batch.num_rows)
-                    delivered += batch.num_rows
-                    del batch
+                delivered += batch.num_rows
         assert policy.used_memory_bytes == 0
-    assert set(calls.values()) == {2 if admitted_rows else 1}
-    if admitted_rows:
-        assert pulls == [admitted_rows, admitted_rows]
-        complete, remainder = divmod(2048, admitted_rows)
-        expected = [admitted_rows] * complete + ([remainder] if remainder else [])
-        assert sizes == expected * 2
-        assert delivered == 4096
-    else:
-        assert not pulls
-    assert dataset_physical.dataset_file_identity(path) == identity
+    assert delivered == len(expected)
 
 
 def test_categorical_converter_rejects_nonnull_value_outside_declared_domain() -> None:
@@ -688,12 +624,11 @@ def test_metadata_free_batches_advance_without_delivering_oversized_payload(
     path = tmp_path / "skewed-variable-width.parquet"
     values = ["x"] * 1023 + ["y" * 1024**2]
     pq.write_table(pa.table({"value": values}), path, use_dictionary=use_dictionary)
-    if use_dictionary:
 
-        def no_native_pull(*args, **kwargs):
-            pytest.fail("oversized dictionary reached the native decoder")
+    def no_native_pull(*args, **kwargs):
+        pytest.fail("oversized decode unit reached the native decoder")
 
-        monkeypatch.setattr(pq.ParquetFile, "iter_batches", no_native_pull)
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", no_native_pull)
     delivered = []
     with pytest.raises(
         storage_errors.DatasetReadCapacityExceeded,
@@ -710,10 +645,7 @@ def test_metadata_free_batches_advance_without_delivering_oversized_payload(
             for batch in batches:
                 delivered.append((batch.num_rows, batch.get_total_buffer_size()))
 
-    if use_dictionary:
-        assert not delivered
-    else:
-        assert 0 < sum(rows for rows, _bytes in delivered) < len(values)
+    assert not delivered
     assert all(size <= 64 * 1024 for _rows, size in delivered)
 
 
@@ -1072,7 +1004,7 @@ def test_mixed_row_group_encoding_only_changes_selected_native_layout(
                 path,
                 expected_identity=dataset_physical.dataset_file_identity(path),
                 target_chunk_bytes=64 * 1024,
-                operation_headroom_bytes=256 * 1024,
+                operation_headroom_bytes=1024**2,
                 row_groups=groups,
                 parquet_filters=filters,
                 source_batch_rows=257,
@@ -2382,6 +2314,7 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
             ),
             original,
             use_dictionary=use_dictionary,
+            row_group_size=1,
         )
         path.write_bytes(original.read_bytes())
     original_bytes = original.read_bytes()
@@ -2541,3 +2474,57 @@ def test_declared_reader_preserves_observer_generator_exit(
         assert policy.used_memory_bytes == 0
     assert closed == [True]
     assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("forged_hint", (False, True))
+def test_plain_compressed_page_is_admitted_before_decode(
+    tmp_path, monkeypatch, forged_hint
+):
+    path = tmp_path / "large-page.parquet"
+    table = pa.table({"value": [b"x" * 4096] * 4096})
+    if forged_hint:
+        table = table.replace_schema_metadata({b"qrp.parquet-page-rows": b"1"})
+    pq.write_table(
+        table,
+        path,
+        compression="zstd",
+        use_dictionary=False,
+        data_page_size=32 * 1024**2,
+        write_batch_size=4096,
+        row_group_size=4096,
+    )
+    column = pq.ParquetFile(path).metadata.row_group(0).column(0)
+    assert column.total_compressed_size < 64 * 1024
+    assert column.total_uncompressed_size > 16 * 1024**2
+    original = pq.ParquetFile.iter_batches
+    pulls = []
+
+    def observed(self, **kwargs):
+        pulls.append(kwargs["batch_size"])
+        yield from original(self, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed)
+    with closing_iterator(
+        dataset_physical.iter_dataset_part_batches(
+            path,
+            expected_identity=None,
+            target_chunk_bytes=64 * 1024,
+            operation_headroom_bytes=1024**2,
+        )
+    ) as batches:
+        with pytest.raises(storage_errors.DatasetReadCapacityExceeded):
+            next(batches)
+    assert not pulls
+    rows = 0
+    with closing_iterator(
+        dataset_physical.iter_dataset_part_batches(
+            path,
+            expected_identity=None,
+            target_chunk_bytes=64 * 1024,
+            operation_headroom_bytes=64 * 1024**2,
+        )
+    ) as batches:
+        for batch in batches:
+            rows += batch.num_rows
+            assert batch.column(0).to_pylist() == [b"x" * 4096] * batch.num_rows
+    assert rows == 4096

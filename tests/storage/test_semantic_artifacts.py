@@ -479,3 +479,45 @@ def test_comparison_rechecks_the_complete_round_before_match(
     assert storage.compare_semantic_artifacts(left, right).status == "INSPECTION_FAILED"
     assert injected == [True]
     assert {path.name: path.read_bytes() for path in left.iterdir()} == old_good
+
+
+@pytest.mark.parametrize(
+    "change", ("encoding", "row", "schema", "order", "signed_zero")
+)
+def test_semantic_parquet_comparison_uses_exact_logical_rows(tmp_path, change):
+    import numpy as np
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.storage.semantic_artifacts import (
+        compare_semantic_artifacts,
+    )
+
+    table = pa.table({"id": [0, 1, 2], "value": np.array([0.0, float("nan"), 2.0])})
+    candidate = table
+    if change == "row":
+        candidate = pa.table({"id": [0, 1, 2], "value": [0.0, float("nan"), 3.0]})
+    elif change == "schema":
+        candidate = table.cast(pa.schema([("id", pa.int32()), ("value", pa.float64())]))
+    elif change == "order":
+        candidate = table.take(pa.array([2, 1, 0]))
+    elif change == "signed_zero":
+        candidate = pa.table({"id": [0, 1, 2], "value": [-0.0, float("nan"), 2.0]})
+    old = write_semantic_artifact(
+        tmp_path / "old",
+        _envelope(),
+        lambda root: pq.write_table(
+            table, root / "table.parquet", compression="NONE", row_group_size=3
+        ),
+    )
+    new = write_semantic_artifact(
+        tmp_path / "new",
+        _envelope(),
+        lambda root: pq.write_table(
+            candidate, root / "table.parquet", compression="zstd", row_group_size=1
+        ),
+    )
+    before = (old / "manifest.json").read_bytes()
+    expected = "MATCH" if change == "encoding" else "CONTENT_MISMATCH"
+    assert compare_semantic_artifacts(old, new).status == expected
+    assert (old / "manifest.json").read_bytes() == before
