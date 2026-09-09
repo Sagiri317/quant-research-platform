@@ -1187,20 +1187,44 @@ def _execute_action_with_policy(
                 target_layout = target_layout.with_target_roots(
                     {spec.target_id: output_root}
                 )
-            result = _build_target(
-                run_id=run_id,
-                profile=profile,
-                protocol=protocol,
-                layout=output_layout,
-                spec=spec,
-                planned=planned,
-                action=action,
-                research_window=window,
-                software_identity=software,
-                target_layout=target_layout,
-                policy=policy,
-                raw_root=source_root,
-            )
+            try:
+                result = _build_target(
+                    run_id=run_id,
+                    profile=profile,
+                    protocol=protocol,
+                    layout=output_layout,
+                    spec=spec,
+                    planned=planned,
+                    action=action,
+                    research_window=window,
+                    software_identity=software,
+                    target_layout=target_layout,
+                    policy=policy,
+                    raw_root=source_root,
+                )
+            except PortfolioTargetBlocked as exc:
+                result = TargetResult(
+                    target_id=spec.target_id,
+                    status=TargetStatus.BLOCKED,
+                    reason=str(exc),
+                )
+            except (ImportError, KeyError, TypeError, ValueError) as exc:
+                kind = profile.producer_bindings[spec.producer_id].kind
+                reason = {
+                    ProducerKind.INTERIM: "interim_build_failed",
+                    ProducerKind.PROCESSED: "processed_build_failed",
+                    ProducerKind.DATASET: "dataset_build_failed",
+                    ProducerKind.EVALUATION: "evaluation_build_failed",
+                    ProducerKind.MODEL: "model_selection_failed",
+                    ProducerKind.PREDICTION: "prediction_build_failed",
+                    ProducerKind.STATISTIC: "statistics_build_failed",
+                    ProducerKind.PORTFOLIO: "portfolio_build_failed",
+                }[kind]
+                result = TargetResult(
+                    target_id=spec.target_id,
+                    status=TargetStatus.FAILED,
+                    reason=f"{reason}:{_semantic_failure_code(exc)}",
+                )
             if is_candidate:
                 if result.status is TargetStatus.BUILT and output_root is not None:
                     candidate_materialized = True
@@ -1408,20 +1432,12 @@ def _build_target(
                 resource_policy=policy,
                 instance_metadata=instance_metadata,
             )
-        except PortfolioTargetBlocked as exc:
-            return TargetResult(
-                target_id=spec.target_id, status=TargetStatus.BLOCKED, reason=str(exc)
-            )
         except ValueError as exc:
             if (
                 str(exc) == "csmar_raw_export_identity_changed"
                 and not interim_raw_root.exists()
             ):
-                return TargetResult(
-                    target_id=spec.target_id,
-                    status=TargetStatus.BLOCKED,
-                    reason="external_data_unavailable",
-                )
+                raise PortfolioTargetBlocked("external_data_unavailable") from exc
             raise
         roots = getattr(result, "artifact_roots", {})
         skipped = tuple(getattr(result, "skipped", ()))
@@ -1440,14 +1456,7 @@ def _build_target(
             instance_identity=requested_identity,
         )
     if binding.kind is ProducerKind.PROCESSED:
-        try:
-            processed_spec = profile.processed.get(spec.target_id)
-        except KeyError:
-            return TargetResult(
-                target_id=spec.target_id,
-                status=TargetStatus.BLOCKED,
-                reason="producer_binding_kind_mismatch",
-            )
+        processed_spec = data_spec
         produced = producer(
             processed_spec,
             layout=target_layout,
@@ -1491,14 +1500,6 @@ def _build_target(
             instance_identity=requested_identity,
         )
     if binding.kind is ProducerKind.DATASET:
-        try:
-            profile.research_datasets.get(spec.target_id)
-        except KeyError:
-            return TargetResult(
-                target_id=spec.target_id,
-                status=TargetStatus.BLOCKED,
-                reason="producer_binding_kind_mismatch",
-            )
         producer(
             layout=target_layout,
             dataset_catalog=profile.research_datasets,
@@ -1561,475 +1562,443 @@ def _build_semantic_target(
             status=TargetStatus.BLOCKED,
             reason="research_window_required",
         )
-    try:
-        raw_identity = (
-            binding.source_identity(raw_root, spec.target_id)
-            if binding.source_identity is not None
-            else None
-        )
-        envelope = _target_envelope_for_spec(
-            profile=profile,
-            protocol=protocol,
-            target_spec=spec,
-            data_spec=None,
-            research_window=research_window,
-            upstream_identities=planned["upstream_identities"],
-            software_identity=software_identity,
-            raw_content_identity=raw_identity,
-        )
-        if envelope.instance_identity != planned["requested_identity"]:
-            raise PortfolioTargetBlocked("source_identity_changed")
-        logical_root = _target_logical_root(profile, layout, spec.target_id)
-        if logical_root is None:
-            raise ValueError("target_logical_root_missing")
-        if protocol.protocol_id == "crypto_hft" and binding.kind in {
-            ProducerKind.MODEL,
-            ProducerKind.PREDICTION,
-        }:
-            if binding.kind is ProducerKind.MODEL:
-                ids = protocol.model_ids_for_target(spec.target_id)
-                model_results = partial(
-                    binding.producer,
-                    layout=target_layout,
-                    dataset_catalog=profile.research_datasets,
-                    model_catalog=profile.models,
-                    dataset_id=protocol.scenario_id,
-                    model_ids=ids,
-                    tie_break_order=ids,
-                    time_window=time_window,
-                    resource_policy=policy,
-                    protocol_manifest=protocol.manifest(),
-                    run_id=run_id,
-                    research_protocol_identity=canonical_json_hash(protocol.manifest()),
-                    model_target_id=spec.target_id,
-                    backend_versions=software_identity.payload["dependency_versions"],
-                )
-                write_crypto_model_artifact(
-                    logical_root,
-                    envelope=envelope,
-                    model_results=model_results,
-                    trial_layout=target_layout,
-                )
-            else:
-                model_target = f"{protocol.scenario_id}_models"
-                persisted = read_crypto_model_artifact(
-                    target_layout.target_root(model_target, Path("__missing_model__")),
-                    expected_identity=planned["upstream_identities"][model_target],
-                    trial_layout=target_layout,
-                )
-
-                def write(staging):
-                    results = binding.producer(
-                        layout=target_layout,
-                        dataset_catalog=profile.research_datasets,
-                        persisted_model=persisted,
-                        time_window=time_window,
-                        resource_policy=policy,
-                    )
-                    with closing_iterator(iter(results)) as active:
-                        for result in active:
-                            with result:
-                                write_prediction_outputs(
-                                    output_chunks=result.output_chunks,
-                                    spec=result.spec,
-                                    output_spec=_output_spec_for_target(
-                                        result.spec.prediction_id,
-                                        "crypto",
-                                        "prediction",
-                                    ),
-                                    layout=StorageLayout(staging),
-                                    model_metadata=result.model_metadata,
-                                    prediction_metadata_factory=result.prediction_metadata_factory,
-                                    resource_policy=policy,
-                                )
-
-                write_semantic_artifact(logical_root, envelope, write)
-        elif binding.kind is ProducerKind.EVALUATION:
-            evaluation_spec = profile.evaluations.get(spec.target_id)
-            evaluation_result = binding.producer(
+    raw_identity = (
+        binding.source_identity(raw_root, spec.target_id)
+        if binding.source_identity is not None
+        else None
+    )
+    envelope = _target_envelope_for_spec(
+        profile=profile,
+        protocol=protocol,
+        target_spec=spec,
+        data_spec=None,
+        research_window=research_window,
+        upstream_identities=planned["upstream_identities"],
+        software_identity=software_identity,
+        raw_content_identity=raw_identity,
+    )
+    if envelope.instance_identity != planned["requested_identity"]:
+        raise PortfolioTargetBlocked("source_identity_changed")
+    logical_root = _target_logical_root(profile, layout, spec.target_id)
+    if logical_root is None:
+        raise ValueError("target_logical_root_missing")
+    if protocol.protocol_id == "crypto_hft" and binding.kind in {
+        ProducerKind.MODEL,
+        ProducerKind.PREDICTION,
+    }:
+        if binding.kind is ProducerKind.MODEL:
+            ids = protocol.model_ids_for_target(spec.target_id)
+            model_results = partial(
+                binding.producer,
                 layout=target_layout,
                 dataset_catalog=profile.research_datasets,
-                evaluation_catalog=profile.evaluations,
-                evaluation_id=spec.target_id,
+                model_catalog=profile.models,
+                dataset_id=protocol.scenario_id,
+                model_ids=ids,
+                tie_break_order=ids,
                 time_window=time_window,
                 resource_policy=policy,
-                **(
-                    {"protocol_manifest": protocol.manifest()}
-                    if protocol.protocol_id == "crypto_hft"
-                    else {"access_window": protocol.access_window}
-                ),
+                protocol_manifest=protocol.manifest(),
+                run_id=run_id,
+                research_protocol_identity=canonical_json_hash(protocol.manifest()),
+                model_target_id=spec.target_id,
+                backend_versions=software_identity.payload["dependency_versions"],
             )
-
-            def write(staging: Path) -> None:
-                with evaluation_result as result:
-                    write_evaluation_outputs_from_chunks(
-                        result.output_chunks,
-                        summary_factory=result.summaries,
-                        spec=evaluation_spec,
-                        output_spec=_output_spec_for_target(
-                            spec.target_id,
-                            evaluation_spec.market_id,
-                            "evaluation",
-                        ),
-                        layout=StorageLayout(staging),
-                        n_groups=evaluation_spec.n_groups,
-                        resource_policy=policy,
-                    )
-
-            try:
-                write_semantic_artifact(logical_root, envelope, write)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"evaluation_write_failed:{_semantic_failure_code(exc)}"
-                ) from exc
-        elif binding.kind is ProducerKind.MODEL:
-            if run_id is None:
-                raise ValueError("model_run_id_required")
-            model_ids = protocol.model_ids_for_target(spec.target_id)
-            dataset_spec = profile.research_datasets.get(protocol.scenario_id)
-            dataset_root = target_layout.target_root(
-                dataset_spec.data_id,
-                target_layout.research_dataset_root(
-                    dataset_spec.market_id, dataset_spec.data_id
-                ),
-            )
-            with open_dataset_session(
-                dataset_root,
-                columns=None,
-                time_window=_research_dataset_access_window(
-                    dataset_spec.market_id, None
-                ),
-                resource_policy=policy,
-            ) as dataset_session:
-                model_result = binding.producer(
-                    layout=target_layout,
-                    dataset_session=dataset_session,
-                    dataset_catalog=profile.research_datasets,
-                    model_catalog=profile.models,
-                    dataset_id=protocol.scenario_id,
-                    model_ids=model_ids,
-                    tie_break_order=model_ids,
-                    time_window=time_window,
-                    resource_policy=policy,
-                    protocol_manifest=protocol.manifest(),
-                    run_id=run_id,
-                    research_protocol_identity=canonical_json_hash(protocol.manifest()),
-                    model_target_id=spec.target_id,
-                    backend_versions=software_identity.payload["dependency_versions"],
-                )
-                write_quarterly_model_artifact(
-                    logical_root,
-                    model_id=spec.target_id,
-                    envelope=envelope,
-                    quarterly_results=model_result,
-                    trial_layout=target_layout,
-                    verify_source=dataset_session.verify,
-                )
-        elif binding.kind is ProducerKind.PREDICTION:
-            model_dependencies = tuple(
-                dependency
-                for dependency in spec.dependencies
-                if (
-                    profile.producer_bindings.get(dependency) is not None
-                    and profile.producer_bindings[dependency].kind is ProducerKind.MODEL
-                )
-            )
-            if len(model_dependencies) != 1:
-                raise ValueError("prediction_model_dependency_invalid")
-            model_target = model_dependencies[0]
-            model_identity = planned["upstream_identities"].get(model_target)
-            if type(model_identity) is not str:
-                raise ValueError("model_identity_missing")
-            persisted = read_quarterly_model_artifact(
-                target_layout.target_root(
-                    model_target, Path("__missing_model_target__")
-                ),
-                expected_identity=model_identity,
+            write_crypto_model_artifact(
+                logical_root,
+                envelope=envelope,
+                model_results=model_results,
                 trial_layout=target_layout,
             )
-            prediction_spec = PredictionSpec(
-                prediction_id=spec.target_id,
-                model_id=persisted.model_id,
-                research_dataset_id=protocol.scenario_id,
-                train_end=None,
-                test_start=_date_text(time_window.start),
-                test_end=_date_text(time_window.end),
-                prediction_mode="a_share_oos",
-                prediction_column=RAW_PREDICTION_COLUMN,
-            )
-            prediction_result = binding.producer(
-                layout=target_layout,
-                dataset_catalog=profile.research_datasets,
-                prediction_spec=prediction_spec,
-                persisted_model=persisted,
-                resource_policy=policy,
-                access_window=protocol.access_window,
-            )
-
-            def write(staging: Path) -> None:
-                with prediction_result as result:
-                    write_prediction_outputs(
-                        spec=prediction_spec,
-                        output_spec=_output_spec_for_target(
-                            spec.target_id,
-                            profile.market_id,
-                            "prediction",
-                        ),
-                        layout=StorageLayout(staging),
-                        output_chunks=result.output_chunks,
-                        model_metadata=result.model_metadata,
-                        prediction_metadata_factory=result.prediction_metadata_factory,
-                        resource_policy=policy,
-                    )
-
-            try:
-                write_semantic_artifact(logical_root, envelope, write)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"prediction_write_failed:{_semantic_failure_code(exc)}"
-                ) from exc
-        elif (
-            binding.kind is ProducerKind.STATISTIC
-            and protocol.protocol_id == "crypto_hft"
-        ):
-            group = protocol.statistics_table_group(spec.target_id)
-            owned_tables = binding.producer(
-                layout=target_layout,
-                protocol_manifest=protocol.manifest(),
-                time_window=time_window,
-                upstream_identities=planned["upstream_identities"],
-                resource_policy=policy,
-                **(
-                    {"raw_root": raw_root}
-                    if group == "crypto_maker_calibration"
-                    else {}
-                ),
-            )
-            try:
-                write_statistics_artifact(
-                    logical_root,
-                    envelope=envelope,
-                    tables=owned_tables.value,
-                    table_group=group,
-                    validate_tables=validate_maker_calibration
-                    if group == "crypto_maker_calibration"
-                    else None,
-                )
-            finally:
-                owned_tables.release(owner="research.crypto.statistics.output")
-        elif (
-            binding.kind is ProducerKind.STATISTIC
-            and spec.target_id == f"{protocol.scenario_id}_portfolio_statistics"
-        ):
-            candidates = protocol.portfolio_candidates()
-            ledgers = {
-                candidate.candidate_id: read_portfolio_ledger_artifact(
-                    target_layout.target_root(
-                        f"{protocol.scenario_id}_{candidate.candidate_id}_ledger",
-                        Path("__missing_ledger__"),
-                    ),
-                    expected_identity=planned["upstream_identities"][
-                        f"{protocol.scenario_id}_{candidate.candidate_id}_ledger"
-                    ],
-                )
-                for candidate in candidates
-            }
-            owned_tables = binding.producer(
-                ledgers=ledgers,
-                candidates=candidates,
-                protocol_manifest=protocol.manifest(),
-                time_window=time_window,
-                resource_policy=policy,
-                layout=target_layout,
-                dataset_spec=profile.research_datasets.get(protocol.scenario_id),
-            )
-            try:
-                write_statistics_artifact(
-                    logical_root,
-                    envelope=envelope,
-                    tables=owned_tables.value,
-                    table_group="portfolio",
-                )
-            finally:
-                owned_tables.release(owner="research.portfolio.statistics.output")
-        elif binding.kind is ProducerKind.STATISTIC:
-            dependency_kinds = {
-                dependency: profile.producer_bindings.get(dependency)
-                for dependency in spec.dependencies
-            }
-            prediction_dependencies = tuple(
-                dependency
-                for dependency, dependency_binding in dependency_kinds.items()
-                if dependency_binding is not None
-                and dependency_binding.kind is ProducerKind.PREDICTION
-            )
-            model_dependencies = tuple(
-                dependency
-                for dependency, dependency_binding in dependency_kinds.items()
-                if dependency_binding is not None
-                and dependency_binding.kind is ProducerKind.MODEL
-            )
-            dataset_dependencies = tuple(
-                dependency
-                for dependency, dependency_binding in dependency_kinds.items()
-                if dependency_binding is not None
-                and dependency_binding.kind is ProducerKind.DATASET
-            )
-            if (
-                len(prediction_dependencies) != 1
-                or len(model_dependencies) != 1
-                or len(dataset_dependencies) != 1
-            ):
-                raise ValueError("statistics_dependencies_invalid")
-            prediction_target = prediction_dependencies[0]
-            model_target = model_dependencies[0]
-            dataset_target = dataset_dependencies[0]
-            model_identity = planned["upstream_identities"].get(model_target)
-            if type(model_identity) is not str:
-                raise ValueError("model_identity_missing")
-            persisted = read_quarterly_model_artifact(
-                target_layout.target_root(
-                    model_target, Path("__missing_model_target__")
-                ),
-                expected_identity=model_identity,
-                trial_layout=target_layout,
-            )
-            prediction_root = target_layout.target_root(
-                prediction_target,
-                Path("__missing_prediction_target__"),
-            )
-            if prediction_root.name.startswith("__missing_"):
-                raise ValueError("prediction_target_root_missing")
-            with read_prediction_output_bundle(
-                prediction_root / "outputs" / prediction_target,
-                expected_output_id=prediction_target,
-                expected_run_id=f"run_{prediction_target}",
-                time_window=time_window,
-            ) as (_manifest, prediction_lookup):
-                owned_tables = binding.producer(
-                    layout=target_layout,
-                    dataset_catalog=profile.research_datasets,
-                    dataset_id=dataset_target,
-                    prediction_id=prediction_target,
-                    persisted_model=persisted,
-                    protocol_manifest=protocol.manifest(),
-                    time_window=time_window,
-                    prediction_lookup=prediction_lookup,
-                    resource_policy=policy,
-                )
-                try:
-                    write_statistics_artifact(
-                        logical_root,
-                        envelope=envelope,
-                        tables=owned_tables.value,
-                    )
-                finally:
-                    owned_tables.release(owner="research.statistics.output")
-        elif (
-            binding.kind is ProducerKind.PORTFOLIO
-            and protocol.protocol_id == "crypto_hft"
-        ):
-            candidate = protocol.portfolio_candidate_for_target(spec.target_id)
-
-            def produce_ledger(emit):
-                binding.producer(
-                    layout=target_layout,
-                    candidate=candidate,
-                    protocol_manifest=protocol.manifest(),
-                    dataset_catalog=profile.research_datasets,
-                    output_window=time_window,
-                    upstream_identities=planned["upstream_identities"],
-                    expected_funding_identity=raw_identity,
-                    raw_root=raw_root,
-                    resource_policy=policy,
-                    on_ledger=emit,
-                )
-
-            write_portfolio_ledger_artifact(
-                logical_root, envelope=envelope, produce=produce_ledger
-            )
-        elif binding.kind is ProducerKind.PORTFOLIO:
-            candidate = protocol.portfolio_candidate_for_target(spec.target_id)
-            prediction_target = candidate.prediction_target_id
-            prediction_root = target_layout.target_root(
-                prediction_target,
-                Path("__missing_prediction_target__"),
-            )
-            if prediction_root.name.startswith("__missing_"):
-                raise ValueError("prediction_target_root_missing")
-            prediction_window = time_window
-            if candidate.construction == "benchmark_enhanced":
-                prediction_window = _a_share_target_window(
-                    protocol,
-                    candidate.prediction_target_id,
-                    time_window,
-                )
-            with read_prediction_output_bundle(
-                prediction_root / "outputs" / prediction_target,
-                expected_output_id=prediction_target,
-                expected_run_id=f"run_{prediction_target}",
-                time_window=prediction_window,
-                family_selection=candidate.prediction_selector,
-            ) as (_manifest, prediction_lookup):
-                portfolio_chunks = binding.producer(
-                    candidate=candidate,
-                    layout=target_layout,
-                    upstream_identities=planned["upstream_identities"],
-                    output_window=time_window,
-                    input_window=protocol.data_window,
-                    formal_dataset_window=protocol.formal_dataset_window,
-                    prediction_window=prediction_window,
-                    frozen_calibration=protocol.frozen_alpha,
-                    prediction_lookup=prediction_lookup,
-                    assumptions=protocol.execution_assumptions,
-                    resource_policy=policy,
-                )
-
-                def produce_ledger(emit):
-                    with closing_iterator(iter(portfolio_chunks)) as chunks:
-                        for chunk in chunks:
-                            emit(chunk)
-
-                write_portfolio_ledger_artifact(
-                    logical_root,
-                    envelope=envelope,
-                    produce=produce_ledger,
-                )
         else:
-            raise ValueError("producer_binding_kind_invalid")
-        output_root = _target_instance_root(
-            profile,
-            layout,
-            spec.target_id,
-            envelope.instance_identity,
+            model_target = f"{protocol.scenario_id}_models"
+            persisted = read_crypto_model_artifact(
+                target_layout.target_root(model_target, Path("__missing_model__")),
+                expected_identity=planned["upstream_identities"][model_target],
+                trial_layout=target_layout,
+            )
+
+            def write(staging):
+                results = binding.producer(
+                    layout=target_layout,
+                    dataset_catalog=profile.research_datasets,
+                    persisted_model=persisted,
+                    time_window=time_window,
+                    resource_policy=policy,
+                )
+                with closing_iterator(iter(results)) as active:
+                    for result in active:
+                        with result:
+                            write_prediction_outputs(
+                                output_chunks=result.output_chunks,
+                                spec=result.spec,
+                                output_spec=_output_spec_for_target(
+                                    result.spec.prediction_id,
+                                    "crypto",
+                                    "prediction",
+                                ),
+                                layout=StorageLayout(staging),
+                                model_metadata=result.model_metadata,
+                                prediction_metadata_factory=result.prediction_metadata_factory,
+                                resource_policy=policy,
+                            )
+
+            write_semantic_artifact(logical_root, envelope, write)
+    elif binding.kind is ProducerKind.EVALUATION:
+        evaluation_spec = profile.evaluations.get(spec.target_id)
+        evaluation_result = binding.producer(
+            layout=target_layout,
+            dataset_catalog=profile.research_datasets,
+            evaluation_catalog=profile.evaluations,
+            evaluation_id=spec.target_id,
+            time_window=time_window,
+            resource_policy=policy,
+            **(
+                {"protocol_manifest": protocol.manifest()}
+                if protocol.protocol_id == "crypto_hft"
+                else {"access_window": protocol.access_window}
+            ),
         )
-        _validate_semantic_target_root(
-            profile,
-            protocol,
-            spec,
-            output_root,
-            envelope.instance_identity,
+
+        def write(staging: Path) -> None:
+            with evaluation_result as result:
+                write_evaluation_outputs_from_chunks(
+                    result.output_chunks,
+                    summary_factory=result.summaries,
+                    spec=evaluation_spec,
+                    output_spec=_output_spec_for_target(
+                        spec.target_id,
+                        evaluation_spec.market_id,
+                        "evaluation",
+                    ),
+                    layout=StorageLayout(staging),
+                    n_groups=evaluation_spec.n_groups,
+                    resource_policy=policy,
+                )
+
+        try:
+            write_semantic_artifact(logical_root, envelope, write)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"evaluation_write_failed:{_semantic_failure_code(exc)}"
+            ) from exc
+    elif binding.kind is ProducerKind.MODEL:
+        if run_id is None:
+            raise ValueError("model_run_id_required")
+        model_ids = protocol.model_ids_for_target(spec.target_id)
+        dataset_spec = profile.research_datasets.get(protocol.scenario_id)
+        dataset_root = target_layout.target_root(
+            dataset_spec.data_id,
+            target_layout.research_dataset_root(
+                dataset_spec.market_id, dataset_spec.data_id
+            ),
+        )
+        with open_dataset_session(
+            dataset_root,
+            columns=None,
+            time_window=_research_dataset_access_window(dataset_spec.market_id, None),
+            resource_policy=policy,
+        ) as dataset_session:
+            model_result = binding.producer(
+                layout=target_layout,
+                dataset_session=dataset_session,
+                dataset_catalog=profile.research_datasets,
+                model_catalog=profile.models,
+                dataset_id=protocol.scenario_id,
+                model_ids=model_ids,
+                tie_break_order=model_ids,
+                time_window=time_window,
+                resource_policy=policy,
+                protocol_manifest=protocol.manifest(),
+                run_id=run_id,
+                research_protocol_identity=canonical_json_hash(protocol.manifest()),
+                model_target_id=spec.target_id,
+                backend_versions=software_identity.payload["dependency_versions"],
+            )
+            write_quarterly_model_artifact(
+                logical_root,
+                model_id=spec.target_id,
+                envelope=envelope,
+                quarterly_results=model_result,
+                trial_layout=target_layout,
+                verify_source=dataset_session.verify,
+            )
+    elif binding.kind is ProducerKind.PREDICTION:
+        model_dependencies = tuple(
+            dependency
+            for dependency in spec.dependencies
+            if (
+                profile.producer_bindings.get(dependency) is not None
+                and profile.producer_bindings[dependency].kind is ProducerKind.MODEL
+            )
+        )
+        if len(model_dependencies) != 1:
+            raise ValueError("prediction_model_dependency_invalid")
+        model_target = model_dependencies[0]
+        model_identity = planned["upstream_identities"].get(model_target)
+        if type(model_identity) is not str:
+            raise ValueError("model_identity_missing")
+        persisted = read_quarterly_model_artifact(
+            target_layout.target_root(model_target, Path("__missing_model_target__")),
+            expected_identity=model_identity,
             trial_layout=target_layout,
         )
-    except PortfolioTargetBlocked as exc:
-        return TargetResult(
-            target_id=spec.target_id,
-            status=TargetStatus.BLOCKED,
-            reason=str(exc),
+        prediction_spec = PredictionSpec(
+            prediction_id=spec.target_id,
+            model_id=persisted.model_id,
+            research_dataset_id=protocol.scenario_id,
+            train_end=None,
+            test_start=_date_text(time_window.start),
+            test_end=_date_text(time_window.end),
+            prediction_mode="a_share_oos",
+            prediction_column=RAW_PREDICTION_COLUMN,
         )
-    except (ImportError, KeyError, TypeError, ValueError) as exc:
-        reason = {
-            ProducerKind.EVALUATION: "evaluation_build_failed",
-            ProducerKind.MODEL: "model_selection_failed",
-            ProducerKind.PREDICTION: "prediction_build_failed",
-            ProducerKind.STATISTIC: "statistics_build_failed",
-            ProducerKind.PORTFOLIO: "portfolio_build_failed",
-        }[binding.kind]
-        return TargetResult(
-            target_id=spec.target_id,
-            status=TargetStatus.FAILED,
-            reason=f"{reason}:{_semantic_failure_code(exc)}",
+        prediction_result = binding.producer(
+            layout=target_layout,
+            dataset_catalog=profile.research_datasets,
+            prediction_spec=prediction_spec,
+            persisted_model=persisted,
+            resource_policy=policy,
+            access_window=protocol.access_window,
         )
+
+        def write(staging: Path) -> None:
+            with prediction_result as result:
+                write_prediction_outputs(
+                    spec=prediction_spec,
+                    output_spec=_output_spec_for_target(
+                        spec.target_id,
+                        profile.market_id,
+                        "prediction",
+                    ),
+                    layout=StorageLayout(staging),
+                    output_chunks=result.output_chunks,
+                    model_metadata=result.model_metadata,
+                    prediction_metadata_factory=result.prediction_metadata_factory,
+                    resource_policy=policy,
+                )
+
+        try:
+            write_semantic_artifact(logical_root, envelope, write)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"prediction_write_failed:{_semantic_failure_code(exc)}"
+            ) from exc
+    elif (
+        binding.kind is ProducerKind.STATISTIC and protocol.protocol_id == "crypto_hft"
+    ):
+        group = protocol.statistics_table_group(spec.target_id)
+        owned_tables = binding.producer(
+            layout=target_layout,
+            protocol_manifest=protocol.manifest(),
+            time_window=time_window,
+            upstream_identities=planned["upstream_identities"],
+            resource_policy=policy,
+            **({"raw_root": raw_root} if group == "crypto_maker_calibration" else {}),
+        )
+        try:
+            write_statistics_artifact(
+                logical_root,
+                envelope=envelope,
+                tables=owned_tables.value,
+                table_group=group,
+                validate_tables=validate_maker_calibration
+                if group == "crypto_maker_calibration"
+                else None,
+            )
+        finally:
+            owned_tables.release(owner="research.crypto.statistics.output")
+    elif (
+        binding.kind is ProducerKind.STATISTIC
+        and spec.target_id == f"{protocol.scenario_id}_portfolio_statistics"
+    ):
+        candidates = protocol.portfolio_candidates()
+        ledgers = {
+            candidate.candidate_id: read_portfolio_ledger_artifact(
+                target_layout.target_root(
+                    f"{protocol.scenario_id}_{candidate.candidate_id}_ledger",
+                    Path("__missing_ledger__"),
+                ),
+                expected_identity=planned["upstream_identities"][
+                    f"{protocol.scenario_id}_{candidate.candidate_id}_ledger"
+                ],
+            )
+            for candidate in candidates
+        }
+        owned_tables = binding.producer(
+            ledgers=ledgers,
+            candidates=candidates,
+            protocol_manifest=protocol.manifest(),
+            time_window=time_window,
+            resource_policy=policy,
+            layout=target_layout,
+            dataset_spec=profile.research_datasets.get(protocol.scenario_id),
+        )
+        try:
+            write_statistics_artifact(
+                logical_root,
+                envelope=envelope,
+                tables=owned_tables.value,
+                table_group="portfolio",
+            )
+        finally:
+            owned_tables.release(owner="research.portfolio.statistics.output")
+    elif binding.kind is ProducerKind.STATISTIC:
+        dependency_kinds = {
+            dependency: profile.producer_bindings.get(dependency)
+            for dependency in spec.dependencies
+        }
+        prediction_dependencies = tuple(
+            dependency
+            for dependency, dependency_binding in dependency_kinds.items()
+            if dependency_binding is not None
+            and dependency_binding.kind is ProducerKind.PREDICTION
+        )
+        model_dependencies = tuple(
+            dependency
+            for dependency, dependency_binding in dependency_kinds.items()
+            if dependency_binding is not None
+            and dependency_binding.kind is ProducerKind.MODEL
+        )
+        dataset_dependencies = tuple(
+            dependency
+            for dependency, dependency_binding in dependency_kinds.items()
+            if dependency_binding is not None
+            and dependency_binding.kind is ProducerKind.DATASET
+        )
+        if (
+            len(prediction_dependencies) != 1
+            or len(model_dependencies) != 1
+            or len(dataset_dependencies) != 1
+        ):
+            raise ValueError("statistics_dependencies_invalid")
+        prediction_target = prediction_dependencies[0]
+        model_target = model_dependencies[0]
+        dataset_target = dataset_dependencies[0]
+        model_identity = planned["upstream_identities"].get(model_target)
+        if type(model_identity) is not str:
+            raise ValueError("model_identity_missing")
+        persisted = read_quarterly_model_artifact(
+            target_layout.target_root(model_target, Path("__missing_model_target__")),
+            expected_identity=model_identity,
+            trial_layout=target_layout,
+        )
+        prediction_root = target_layout.target_root(
+            prediction_target,
+            Path("__missing_prediction_target__"),
+        )
+        if prediction_root.name.startswith("__missing_"):
+            raise ValueError("prediction_target_root_missing")
+        with read_prediction_output_bundle(
+            prediction_root / "outputs" / prediction_target,
+            expected_output_id=prediction_target,
+            expected_run_id=f"run_{prediction_target}",
+            time_window=time_window,
+        ) as (_manifest, prediction_lookup):
+            owned_tables = binding.producer(
+                layout=target_layout,
+                dataset_catalog=profile.research_datasets,
+                dataset_id=dataset_target,
+                prediction_id=prediction_target,
+                persisted_model=persisted,
+                protocol_manifest=protocol.manifest(),
+                time_window=time_window,
+                prediction_lookup=prediction_lookup,
+                resource_policy=policy,
+            )
+            try:
+                write_statistics_artifact(
+                    logical_root,
+                    envelope=envelope,
+                    tables=owned_tables.value,
+                )
+            finally:
+                owned_tables.release(owner="research.statistics.output")
+    elif (
+        binding.kind is ProducerKind.PORTFOLIO and protocol.protocol_id == "crypto_hft"
+    ):
+        candidate = protocol.portfolio_candidate_for_target(spec.target_id)
+
+        def produce_ledger(emit):
+            binding.producer(
+                layout=target_layout,
+                candidate=candidate,
+                protocol_manifest=protocol.manifest(),
+                dataset_catalog=profile.research_datasets,
+                output_window=time_window,
+                upstream_identities=planned["upstream_identities"],
+                expected_funding_identity=raw_identity,
+                raw_root=raw_root,
+                resource_policy=policy,
+                on_ledger=emit,
+            )
+
+        write_portfolio_ledger_artifact(
+            logical_root, envelope=envelope, produce=produce_ledger
+        )
+    elif binding.kind is ProducerKind.PORTFOLIO:
+        candidate = protocol.portfolio_candidate_for_target(spec.target_id)
+        prediction_target = candidate.prediction_target_id
+        prediction_root = target_layout.target_root(
+            prediction_target,
+            Path("__missing_prediction_target__"),
+        )
+        if prediction_root.name.startswith("__missing_"):
+            raise ValueError("prediction_target_root_missing")
+        prediction_window = time_window
+        if candidate.construction == "benchmark_enhanced":
+            prediction_window = _a_share_target_window(
+                protocol,
+                candidate.prediction_target_id,
+                time_window,
+            )
+        with read_prediction_output_bundle(
+            prediction_root / "outputs" / prediction_target,
+            expected_output_id=prediction_target,
+            expected_run_id=f"run_{prediction_target}",
+            time_window=prediction_window,
+            family_selection=candidate.prediction_selector,
+        ) as (_manifest, prediction_lookup):
+            portfolio_chunks = binding.producer(
+                candidate=candidate,
+                layout=target_layout,
+                upstream_identities=planned["upstream_identities"],
+                output_window=time_window,
+                input_window=protocol.data_window,
+                formal_dataset_window=protocol.formal_dataset_window,
+                prediction_window=prediction_window,
+                frozen_calibration=protocol.frozen_alpha,
+                prediction_lookup=prediction_lookup,
+                assumptions=protocol.execution_assumptions,
+                resource_policy=policy,
+            )
+
+            def produce_ledger(emit):
+                with closing_iterator(iter(portfolio_chunks)) as chunks:
+                    for chunk in chunks:
+                        emit(chunk)
+
+            write_portfolio_ledger_artifact(
+                logical_root,
+                envelope=envelope,
+                produce=produce_ledger,
+            )
+    else:
+        raise ValueError("producer_binding_kind_invalid")
+    output_root = _target_instance_root(
+        profile,
+        layout,
+        spec.target_id,
+        envelope.instance_identity,
+    )
+    _validate_semantic_target_root(
+        profile,
+        protocol,
+        spec,
+        output_root,
+        envelope.instance_identity,
+        trial_layout=target_layout,
+    )
     return TargetResult(
         target_id=spec.target_id,
         status=TargetStatus.BUILT,

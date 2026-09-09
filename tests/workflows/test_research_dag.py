@@ -1491,7 +1491,7 @@ def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
     assert tuple((tmp_path / ".run").glob(".r-*"))
 
 
-def test_rebuild_producer_validation_failure_preserves_candidate(
+def test_rebuild_validation_failure_reports_failed_without_empty_candidate(
     tmp_path: Path,
 ) -> None:
     primary = ValueError("producer validation failure")
@@ -1519,21 +1519,21 @@ def test_rebuild_producer_validation_failure_preserves_candidate(
         first["target_results"][0]["instance_identity"],
     )
 
-    with pytest.raises(ValueError) as caught:
-        research.data_materialize(
-            profile=profile,
-            layout=layout,
-            raw_root=raw_root,
-            start_date="2020-01-01",
-            end_date="2020-12-31",
-            data_ids=(data_id,),
-            rebuild=True,
-        )
+    failed = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+        rebuild=True,
+    )
 
-    assert caught.value is primary
+    assert failed["status"] == "FAILED"
+    assert failed["target_results"][0]["reason"] == "interim_build_failed:valueerror"
     assert read_dataset_manifest_evidence(old_root)["data_id"] == data_id
     assert calls["count"] == 2
-    assert tuple((tmp_path / ".run").glob(".r-*"))
+    assert not tuple((tmp_path / ".run").glob(".r-*"))
 
 
 @pytest.mark.parametrize("exception_type", (KeyboardInterrupt, SystemExit))
@@ -2159,3 +2159,180 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     assert published["protocol"]["holdout_status"] == "HOLDOUT_LOCKED"
     assert published["status"] == "BLOCKED"
     assert "research_plan" not in profile.protocol().manifest()
+
+
+@pytest.mark.parametrize(
+    "kind", (ProducerKind.INTERIM, ProducerKind.PROCESSED, ProducerKind.DATASET)
+)
+@pytest.mark.parametrize("failure", ("duplicate", "interrupt", "memory", "io"))
+def test_target_local_validation_preserves_independent_production(
+    tmp_path, monkeypatch, kind, failure
+):
+    from contextlib import contextmanager
+
+    from quant_research_platform.catalog.processed import ProcessedDataCatalog
+    from quant_research_platform.contracts.data import (
+        ProcessedDataKind,
+        ProcessedDataSpec,
+    )
+    from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+
+    a, b, c = (
+        ("fusion_nf_core", "fusion_nf_expectations", "pv_all")
+        if kind is ProducerKind.DATASET
+        else ("a", "b", "c")
+    )
+    asset_column = "source_asset_id" if kind is ProducerKind.INTERIM else "asset_id"
+    roles = {
+        asset_column: ColumnRole.KEY,
+        "timestamp": ColumnRole.TIMESTAMP,
+        "value": ColumnRole.FACTOR,
+        "label": ColumnRole.LABEL,
+    }
+    if kind is not ProducerKind.INTERIM:
+        roles = {"market_id": ColumnRole.KEY, **roles}
+    specs = []
+    for name in (a, b, c):
+        fields = dict(
+            data_id=name,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles=roles,
+            primary_key=(asset_column, "timestamp"),
+            partition_columns=("year",),
+        )
+        if kind is ProducerKind.INTERIM:
+            spec = InterimDataSpec(**fields, source_id=SourceId("csmar"))
+        elif kind is ProducerKind.PROCESSED:
+            spec = ProcessedDataSpec(
+                **fields, market_id=MarketId("a_share"), kind=ProcessedDataKind.PANEL
+            )
+        else:
+            spec = ResearchDatasetSpec(
+                **fields,
+                market_id=MarketId("a_share"),
+                input_data_ids=("base",),
+                base_input_data_id="base",
+                factor_columns=("value",),
+                label_columns=("label",),
+            )
+        specs.append(spec)
+    by_id = {spec.data_id: spec for spec in specs}
+    calls = []
+    primary = {
+        "interrupt": KeyboardInterrupt("target_primary"),
+        "memory": MemoryError("target_primary"),
+        "io": OSError("target_primary"),
+    }.get(failure)
+
+    def frame(name):
+        calls.append(name)
+        if name == a and primary is not None:
+            raise primary
+        values = {
+            asset_column: ["asset", "asset"],
+            "timestamp": pd.to_datetime(
+                ["2020-01-02", "2020-01-02" if name == a else "2020-01-03"]
+            ),
+            "value": [1.0, 2.0],
+            "label": [0.1, 0.2],
+        }
+        if kind is not ProducerKind.INTERIM:
+            values = {"market_id": ["a_share", "a_share"], **values}
+        return pd.DataFrame(values)
+
+    def persisted(name, kwargs):
+        spec = by_id[name]
+        layout = kwargs["layout"]
+        root = layout.target_root(name, tmp_path / "unused")
+        write_dataset(
+            root,
+            frame(name),
+            spec=spec,
+            instance_metadata=kwargs["instance_metadata"],
+            resource_policy=kwargs["resource_policy"],
+            borrowed_input=True,
+        )
+        return root
+
+    def interim(**kwargs):
+        name = kwargs["data_ids"][0]
+        return InterimImportResult(
+            artifact_roots={name: persisted(name, kwargs)},
+            skipped=(),
+            pruning_report_text="synthetic",
+        )
+
+    @contextmanager
+    def processed(spec, **kwargs):
+        from quant_research_platform.runtime.resources import OwnedValue
+
+        def frames():
+            lease = yield 65536
+            yield OwnedValue(frame(spec.data_id), lease)
+
+        yield frames(), {}, None
+
+    def dataset(**kwargs):
+        persisted(kwargs["dataset_id"], kwargs)
+
+    producer = {
+        ProducerKind.INTERIM: interim,
+        ProducerKind.PROCESSED: processed,
+        ProducerKind.DATASET: dataset,
+    }[kind]
+    catalogs = (
+        {"interim": InterimDataCatalog(tuple(specs))}
+        if kind is ProducerKind.INTERIM
+        else {"processed": ProcessedDataCatalog(tuple(specs))}
+        if kind is ProducerKind.PROCESSED
+        else {"research_datasets": ResearchDatasetCatalog(tuple(specs))}
+    )
+    profile = replace(
+        research_profile(),
+        **catalogs,
+        producer_bindings={
+            name: ProducerBinding(
+                kind,
+                producer,
+                source_identity=(lambda *_: "a" * 64)
+                if kind is ProducerKind.INTERIM
+                else None,
+            )
+            for name in by_id
+        },
+    )
+    monkeypatch.setattr(
+        research,
+        "_target_specs",
+        lambda *_args, **_kwargs: (
+            TargetSpec(a, producer_id=a),
+            TargetSpec(b, dependencies=(a,), producer_id=b),
+            TargetSpec(c, producer_id=c),
+        ),
+    )
+    raw = tmp_path / "raw"
+    (raw / "csmar").mkdir(parents=True)
+    kwargs = dict(
+        profile=profile,
+        layout=StorageLayout(tmp_path),
+        raw_root=raw,
+        start_date="2020-01-01",
+        end_date="2020-01-31",
+        data_ids=(b, c),
+    )
+    if primary is not None:
+        with pytest.raises(type(primary)) as raised:
+            research.data_materialize(**kwargs)
+        assert raised.value is primary
+        assert calls == [a]
+        return
+    result = research.data_materialize(**kwargs)
+    results = {item["target_id"]: item for item in result["target_results"]}
+    assert result["status"] == "FAILED"
+    assert calls == [a, c]
+    assert results[a]["status"] == "FAILED"
+    assert "duplicate_dataset_primary_key" in results[a]["reason"]
+    assert results[b]["status"] == "BLOCKED"
+    assert results[b]["reason"] == f"dependency_blocked: {a}"
+    assert results[c]["status"] == "BUILT"
