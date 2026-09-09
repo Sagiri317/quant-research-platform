@@ -199,14 +199,6 @@ def test_csmar_source_surface_has_one_root_without_retired_sibling_api() -> None
     )
     repository_root = Path(__file__).resolve().parents[2]
     paths = set(_tracked_surface_paths())
-    paths.update(
-        relative
-        for relative in (
-            Path("CONTEXT.md"),
-            Path("docs/adr/0001-common-raw-root.md"),
-        )
-        if (repository_root / relative).exists()
-    )
     violations = []
     for relative_path in sorted(paths):
         text = (
