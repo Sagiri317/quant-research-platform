@@ -174,7 +174,7 @@ def test_correction_after_observation_calendar_does_not_rewrite_past() -> None:
     assert set(events["version_identity"]) == {"original"}
 
 
-def test_disclosure_on_last_calendar_session_fails_with_availability_reason() -> None:
+def test_disclosure_on_last_calendar_session_is_not_yet_available() -> None:
     records = (
         {
             "asset": "asset",
@@ -197,12 +197,12 @@ def test_disclosure_on_last_calendar_session_fails_with_availability_reason() ->
         }
     )
 
-    with pytest.raises(ValueError, match="financial_availability_next_session_missing"):
-        financial_events_from_interim(
-            interim,
-            disclosures,
-            trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-02-03")]),
-        )
+    result = financial_events_from_interim(
+        interim,
+        disclosures,
+        trading_sessions=pd.DatetimeIndex([pd.Timestamp("2020-02-03")]),
+    )
+    assert result.empty
 
 
 def test_choice_disclosure_owner_keeps_the_canonical_three_field_key() -> None:
@@ -720,3 +720,159 @@ def test_late_original_dependency_recomputes_newer_ttm_without_lookahead():
     assert pd.isna(observed.loc[0, "value"])
     assert observed.loc[1:, "value"].tolist() == [120.0, 118.0]
     assert observed.loc[1:, "report_period"].eq(pd.Timestamp("2020-03-31")).all()
+
+
+@pytest.mark.parametrize("revision", (False, True))
+@pytest.mark.parametrize(
+    "disclosed",
+    ("2020-01-22", "2020-01-23", "2020-02-01", "2020-02-03", "2020-02-04"),
+)
+def test_financial_event_window_clipping_and_calendar_extension(revision, disclosed):
+    original = dict(
+        asset="asset",
+        period="2019-12-31",
+        corrected=False,
+        correction_date=pd.NaT,
+        version="original",
+        value=100.0,
+    )
+    records = (original,)
+    if revision:
+        records += (
+            dict(
+                asset="asset",
+                period="2019-12-31",
+                corrected=True,
+                correction_date=pd.Timestamp(disclosed),
+                version=f"correction@{disclosed}",
+                value=110.0,
+            ),
+        )
+    interim = {
+        name: _financial_frame(name, records) for name in FINANCIAL_VALUE_COLUMNS
+    }
+    before = {name: frame.copy(deep=True) for name, frame in interim.items()}
+    disclosure = pd.DataFrame(
+        {
+            "asset_id": ["asset"],
+            "report_period": pd.to_datetime(["2019-12-31"]),
+            "first_disclosure_date": pd.to_datetime(
+                ["2020-01-21" if revision else disclosed]
+            ),
+        }
+    )
+    # The gap includes the Lunar New Year holiday; February 1 is a Saturday.
+    calendar = pd.DatetimeIndex(
+        ["2020-01-23", "2020-02-03", "2020-02-04", "2020-02-05"]
+    )
+    short = financial_events_from_interim(
+        interim, disclosure, trading_sessions=calendar[:2]
+    )
+    extended = financial_events_from_interim(
+        interim, disclosure, trading_sessions=calendar
+    )
+    expected = extended.loc[extended.available_at.le(calendar[1])].reset_index(
+        drop=True
+    )
+    if expected.empty:
+        assert short.empty
+    else:
+        pd.testing.assert_frame_equal(short, expected)
+        short_ttm = construct_ttm_events(short)
+        extended_ttm = construct_ttm_events(extended)
+        pd.testing.assert_frame_equal(
+            short_ttm,
+            extended_ttm.loc[extended_ttm.available_at.le(calendar[1])].reset_index(
+                drop=True
+            ),
+        )
+    next_session = calendar[calendar > pd.Timestamp(disclosed)][0]
+    selected = extended.loc[
+        extended.version_identity.eq(
+            f"correction@{disclosed}" if revision else "original"
+        )
+    ]
+    assert not selected.empty and selected.available_at.eq(next_session).all()
+    for name in before:
+        pd.testing.assert_frame_equal(interim[name], before[name])
+
+
+def test_last_session_revision_preserves_processed_pit_ttm_and_factor_prefix():
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.research.factors.fundamental.calculations import (
+        calculate_fundamental_factors,
+    )
+
+    records = (
+        dict(
+            asset="asset",
+            period="2019-12-31",
+            corrected=False,
+            correction_date=pd.NaT,
+            version="original",
+            value=100.0,
+        ),
+        dict(
+            asset="asset",
+            period="2019-12-31",
+            corrected=True,
+            correction_date=pd.Timestamp("2020-02-03"),
+            version="correction@2020-02-03",
+            value=110.0,
+        ),
+    )
+    calendar = pd.DatetimeIndex(["2020-01-31", "2020-02-03", "2020-02-04"])
+    panel = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 3,
+            "asset_id": ["asset"] * 3,
+            "timestamp": calendar,
+        }
+    )
+    spec = research_profile().processed.get("fundamental_pit")
+
+    def produce(history, sessions):
+        source = {
+            name: _financial_frame(name, history) for name in FINANCIAL_VALUE_COLUMNS
+        }
+        source["financial_first_disclosure"] = pd.DataFrame(
+            {
+                "asset_id": ["asset"],
+                "report_period": pd.to_datetime(["2019-12-31"]),
+                "first_disclosure_date": pd.to_datetime(["2020-01-30"]),
+            }
+        )
+        source["trading_calendar"] = pd.DataFrame(
+            {
+                "calendar_date": sessions,
+                "is_trading_day": True,
+            }
+        )
+        events = producer._financial_pit_events(source)
+        facts = producer._fundamental_pit_frame(
+            spec,
+            source=source,
+            panel=panel.loc[panel.timestamp.isin(sessions)],
+            events=events,
+        )
+        facts["total_market_cap"] = 1000.0
+        return events, facts, calculate_fundamental_factors(facts)
+
+    original = produce(records[:1], calendar[:2])
+    clipped = produce(records, calendar[:2])
+    extended = produce(records, calendar)
+    for expected, actual in zip(original, clipped, strict=True):
+        pd.testing.assert_frame_equal(actual, expected)
+    pd.testing.assert_frame_equal(
+        extended[0]
+        .loc[extended[0].available_at.le(calendar[1])]
+        .reset_index(drop=True),
+        clipped[0],
+    )
+    for full, prefix in zip(extended[1:], clipped[1:], strict=True):
+        pd.testing.assert_frame_equal(full.iloc[:2].reset_index(drop=True), prefix)
+    assert clipped[2].book_to_market.tolist() == [0.1, 0.1]
+    assert extended[2].book_to_market.tolist() == [0.1, 0.1, 0.11]

@@ -163,15 +163,13 @@ def financial_events_from_interim(
         frame["disclosure_date"] = frame["first_disclosure_date"].where(
             ~frame["is_corrected"], frame["correction_disclosure_date"]
         )
-        frame = frame.loc[frame["disclosure_date"].le(sessions[-1])].copy()
+        frame = frame.loc[frame["disclosure_date"].lt(sessions[-1])].copy()
         if frame.empty:
             continue
         positions = sessions.searchsorted(
             frame["disclosure_date"].to_numpy(dtype="datetime64[ns]"),
             side="right",
         )
-        if bool((positions >= len(sessions)).any()):
-            raise ValueError("financial_availability_next_session_missing")
         frame["available_at"] = sessions.take(positions)
         # Different public dates can share the same next trading session.
         frame = frame.sort_values("disclosure_date", kind="mergesort").drop_duplicates(
