@@ -27,12 +27,6 @@ from quant_research_platform.research.protocols import a_share, crypto_hft
 from quant_research_platform.research.statistics_production import (
     build_a_share_statistics_tables,
 )
-from quant_research_platform.sources.binance.interim import (
-    materialize_interim_data as binance_interim_producer,
-)
-from quant_research_platform.sources.binance.raw_exports import (
-    source_content_identity as binance_source_identity,
-)
 from quant_research_platform.sources.choice.interim import (
     interim_catalog as choice_interim_catalog,
 )
@@ -355,7 +349,6 @@ def _crypto_profile() -> ResearchProfile:
         recorder_source_identity,
     )
 
-    interim = binance_interim_catalog()
     processed = crypto_catalog.hft_processed_catalog()
     research_datasets = build_hft_research_dataset_catalog()
     scenario = crypto_hft.HFT_RESEARCH_DATASET_ID
@@ -367,7 +360,7 @@ def _crypto_profile() -> ResearchProfile:
         protocol=crypto_hft.protocol,
         factors=FactorCatalog(),
         labels=LabelCatalog(),
-        interim=interim,
+        interim=InterimDataCatalog(),
         processed=processed,
         research_datasets=research_datasets,
         evaluations=build_crypto_evaluation_catalog(),
@@ -472,14 +465,6 @@ def _crypto_profile() -> ResearchProfile:
             ),
             **{
                 spec.data_id: ProducerBinding(
-                    ProducerKind.INTERIM,
-                    binance_interim_producer,
-                    source_identity=binance_source_identity,
-                )
-                for spec in interim.list()
-            },
-            **{
-                spec.data_id: ProducerBinding(
                     ProducerKind.PROCESSED,
                     partial(
                         crypto_producer.produce_hft_processed_data,
@@ -503,9 +488,3 @@ def _crypto_profile() -> ResearchProfile:
         },
         schema_inventory_important_columns=("close", "eligible"),
     )
-
-
-def binance_interim_catalog() -> InterimDataCatalog:
-    from quant_research_platform.sources.binance.interim import interim_catalog
-
-    return interim_catalog()

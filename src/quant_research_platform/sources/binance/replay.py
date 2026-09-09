@@ -7,6 +7,7 @@ import hashlib
 import heapq
 import os
 import sqlite3
+import stat
 import sys
 import tempfile
 from collections.abc import Callable, Iterator, Sequence
@@ -42,11 +43,6 @@ from quant_research_platform.sources.binance.ids import (
     RESEARCH_SYMBOLS,
     SPOT_MARKET_TYPE,
 )
-from quant_research_platform.sources.binance.raw_exports import (
-    _capture_raw_file_identity,
-    _raw_path_session,
-    _verify_raw_file_handle,
-)
 from quant_research_platform.sources.binance.validation import (
     strict_boolean,
     strict_iso_timestamp,
@@ -57,6 +53,8 @@ from quant_research_platform.sources.binance.validation import (
 )
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
+    dataset_file_identity,
+    dataset_file_identity_from_stat,
     native_filesystem_path,
     require_unaliased_path,
 )
@@ -79,6 +77,7 @@ _FILE_MANIFEST_KEYS = frozenset(
 )
 _LOWER_HEX = frozenset("0123456789abcdef")
 _HASH_BUFFER_BYTES = 64 * 1024
+_RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
 _LEVEL_BYTES = 256
 _CONNECTION_INTERVAL_KEYS = frozenset(
     {
@@ -550,6 +549,103 @@ class RecorderRun:
             data_kind=data_kind,
             symbol=symbol,
         )
+
+
+@contextmanager
+def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
+    raw_root = Path(root)
+
+    def read_root_identity() -> os.stat_result | None:
+        require_unaliased_path(raw_root, error=_RAW_IDENTITY_ERROR)
+        try:
+            metadata = raw_root.lstat()
+        except FileNotFoundError:
+            return None
+        except OSError as error:
+            raise ValueError(_RAW_IDENTITY_ERROR) from error
+        _reject_raw_reparse(metadata)
+        if not stat.S_ISDIR(metadata.st_mode):
+            raise ValueError(_RAW_IDENTITY_ERROR)
+        return metadata
+
+    root_identity = read_root_identity()
+
+    def verify_root() -> None:
+        current = read_root_identity()
+        if root_identity is None:
+            if current is not None:
+                raise ValueError(_RAW_IDENTITY_ERROR)
+            return
+        if current is None:
+            raise ValueError(_RAW_IDENTITY_ERROR)
+        try:
+            unchanged = os.path.samestat(root_identity, current)
+        except OSError as error:
+            raise ValueError(_RAW_IDENTITY_ERROR) from error
+        if not unchanged:
+            raise ValueError(_RAW_IDENTITY_ERROR)
+
+    try:
+        yield verify_root
+    finally:
+        primary = sys.exception()
+        try:
+            verify_root()
+        except BaseException as verify_error:
+            if primary is not None:
+                primary.add_note(
+                    "Binance raw root verification also failed: "
+                    f"{type(verify_error).__name__}"
+                )
+            else:
+                raise
+
+
+def _capture_raw_file_identity(
+    path: Path,
+    *,
+    expected_identity: DatasetFileIdentity | None = None,
+    missing_is_file_not_found: bool = True,
+) -> DatasetFileIdentity:
+    raw_path = Path(path)
+    try:
+        raw_path.lstat()
+    except FileNotFoundError as error:
+        if missing_is_file_not_found and expected_identity is None:
+            raise FileNotFoundError(raw_path) from error
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    except OSError as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    try:
+        identity = dataset_file_identity(raw_path)
+    except ValueError as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    if expected_identity is not None and identity != expected_identity:
+        raise ValueError(_RAW_IDENTITY_ERROR)
+    return identity
+
+
+def _verify_raw_file_handle(
+    handle: Any,
+    *,
+    expected_identity: DatasetFileIdentity,
+) -> None:
+    try:
+        handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+    except (OSError, ValueError) as error:
+        raise ValueError(_RAW_IDENTITY_ERROR) from error
+    if handle_identity != expected_identity:
+        raise ValueError(_RAW_IDENTITY_ERROR)
+
+
+def _reject_raw_reparse(metadata: os.stat_result) -> None:
+    reparse_flag = getattr(metadata, "st_file_attributes", 0) & getattr(
+        stat,
+        "FILE_ATTRIBUTE_REPARSE_POINT",
+        0,
+    )
+    if reparse_flag:
+        raise ValueError(_RAW_IDENTITY_ERROR)
 
 
 @contextmanager

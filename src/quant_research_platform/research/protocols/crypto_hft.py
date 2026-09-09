@@ -35,9 +35,6 @@ from quant_research_platform.contracts.time import (
     time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import strict_finite_float
-from quant_research_platform.research.labels.forward_returns import (
-    forward_return_label_column,
-)
 from quant_research_platform.research.randomness import ROOT_SEED
 
 MARKET_ID = MarketId("crypto")
@@ -60,11 +57,6 @@ HFT_FACTOR_COLUMNS = (
     "top10_depth_per_spread",
 )
 HFT_LABEL_HORIZONS_MS = (100, 500, 1_000, 5_000)
-CRYPTO_FORWARD_RETURN_HORIZONS = (1, 5, 15)
-CRYPTO_FORWARD_RETURN_COLUMNS = tuple(
-    forward_return_label_column(horizon, DataFrequency.MINUTE)
-    for horizon in CRYPTO_FORWARD_RETURN_HORIZONS
-)
 HFT_PRICE_LABEL_COLUMNS = tuple(
     column
     for horizon in HFT_LABEL_HORIZONS_MS

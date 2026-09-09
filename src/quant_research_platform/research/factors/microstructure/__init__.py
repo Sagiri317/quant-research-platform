@@ -1,1 +1,0 @@
-"""Generic microstructure factor calculations."""

@@ -2341,12 +2341,9 @@ def test_inventory_discovery_maps_scan_error(
         _discovered_paths(data_root, spec={"partition_columns": []})
 
 
-@pytest.mark.parametrize("owner", ["dataset", "binance"])
 def test_directory_scan_processes_first_entry_before_enumerating_siblings(
-    tmp_path, monkeypatch, owner
+    tmp_path, monkeypatch
 ):
-    from quant_research_platform.sources.binance import raw_exports
-
     root = tmp_path / "data"
     root.mkdir()
     for index in range(64):
@@ -2384,27 +2381,16 @@ def test_directory_scan_processes_first_entry_before_enumerating_siblings(
             else scan(path)
         ),
     )
-    if owner == "dataset":
-        validate = DatasetSessionInventory._validated_coordinates
+    validate = DatasetSessionInventory._validated_coordinates
 
-        def observed(self, *args, **kwargs):
-            processed.append(len(scanned))
-            return validate(self, *args, **kwargs)
+    def observed(self, *args, **kwargs):
+        processed.append(len(scanned))
+        return validate(self, *args, **kwargs)
 
-        monkeypatch.setattr(DatasetSessionInventory, "_validated_coordinates", observed)
-        paths = _discovered_paths(root, spec={"partition_columns": []})
-        assert [path.name for path in paths] == [
-            f"part-{i:03d}.parquet" for i in range(64)
-        ]
-        assert processed[0] == 2
-    else:
-        entries = raw_exports._iter_raw_directory_entries(root)
-        try:
-            path, _metadata = next(entries)
-            assert path.parent == root
-            assert len(scanned) == 1
-        finally:
-            entries.close()
+    monkeypatch.setattr(DatasetSessionInventory, "_validated_coordinates", observed)
+    paths = _discovered_paths(root, spec={"partition_columns": []})
+    assert [path.name for path in paths] == [f"part-{i:03d}.parquet" for i in range(64)]
+    assert processed[0] == 2
 
 
 def test_inventory_discovery_rejects_hardlinked_part_alias(tmp_path: Path) -> None:

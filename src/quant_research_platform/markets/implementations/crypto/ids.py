@@ -5,10 +5,6 @@ from __future__ import annotations
 from quant_research_platform.contracts.ids import MarketId
 
 MARKET_ID = MarketId("crypto")
-MARKET_PANEL_DATA_ID = "market_panel_1m"
-MICROSTRUCTURE_PROCESSED_DATA_ID = "microstructure"
-FORWARD_RETURNS_PROCESSED_DATA_ID = "forward_returns"
-MICROSTRUCTURE_FORWARD_RETURNS_DATASET_ID = "microstructure_forward_returns"
 HFT_PANEL_DATA_ID = "binance_futures_l2_panel_100ms"
 HFT_FACTOR_DATA_ID = "binance_futures_microstructure_factors_100ms"
 HFT_LABEL_DATA_ID = "binance_futures_mid_labels_100ms"

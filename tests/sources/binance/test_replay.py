@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import io
 import json
+import os
 import tempfile
 import weakref
 from decimal import Decimal, localcontext
@@ -1823,3 +1824,140 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
             assert handles and all(handle.closed for handle in handles)
         assert policy.used_memory_bytes == 0
     assert high_water <= 2
+
+
+@pytest.mark.parametrize("alias_kind", ("root", "ancestor", "member"))
+def test_recorder_run_rejects_aliased_input_paths(tmp_path, alias_kind):
+    root = tmp_path / "recordings" / "run"
+    manifest = _write_run(
+        root,
+        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
+    )
+    input_root = root
+    try:
+        if alias_kind == "member":
+            member = root / manifest["files"][0]["path"]
+            outside = tmp_path / "outside.jsonl.gz"
+            member.rename(outside)
+            member.symlink_to(outside)
+        else:
+            alias = tmp_path / "alias"
+            target = root if alias_kind == "root" else root.parent
+            alias.symlink_to(target, target_is_directory=True)
+            input_root = alias if alias_kind == "root" else alias / root.name
+    except OSError as error:
+        pytest.skip(f"filesystem symlink unavailable: {error}")
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    error = (
+        "binance_replay_file_path_invalid"
+        if alias_kind == "member"
+        else "binance_raw_export_identity_changed"
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match=f"^{error}$"):
+            with open_recorder_run(input_root, policy):
+                pytest.fail("aliased recorder input admitted")
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("consumer_primary", (False, True))
+def test_recorder_run_rejects_replaced_root_and_preserves_primary(
+    tmp_path, consumer_primary
+):
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
+    )
+    original = (root / "run.json").read_bytes()
+    moved = tmp_path / "moved"
+    primary = KeyboardInterrupt("consumer_primary")
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            KeyboardInterrupt if consumer_primary else ValueError
+        ) as raised:
+            with open_recorder_run(root, policy):
+                root.rename(moved)
+                root.mkdir()
+                if consumer_primary:
+                    raise primary
+        if consumer_primary:
+            assert raised.value is primary
+            assert any("ValueError" in note for note in primary.__notes__)
+        else:
+            assert str(raised.value) == "binance_raw_export_identity_changed"
+        assert policy.used_memory_bytes == 0
+    assert (moved / "run.json").read_bytes() == original
+
+
+def test_recorder_run_rejects_member_replacement_between_capture_and_open(
+    tmp_path, monkeypatch
+):
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root,
+        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
+    )
+    member = root / manifest["files"][0]["path"]
+    original = member.read_bytes()
+    replacement = tmp_path / "replacement.jsonl.gz"
+    replacement.write_bytes(original)
+    original_open = Path.open
+    replaced = []
+
+    def replace_before_open(path, *args, **kwargs):
+        if path == member and not replaced:
+            os.replace(replacement, member)
+            replaced.append(True)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", replace_before_open)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="^binance_raw_export_identity_changed$"):
+            with open_recorder_run(root, policy):
+                pytest.fail("replaced recorder member admitted")
+        assert policy.used_memory_bytes == 0
+    assert replaced == [True]
+    assert member.read_bytes() == original
+
+
+@pytest.mark.parametrize("consumer_primary", (False, True))
+def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
+    tmp_path, consumer_primary
+):
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root,
+        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
+    )
+    member = root / manifest["files"][0]["path"]
+    original = member.read_bytes()
+    primary = KeyboardInterrupt("consumer_primary")
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            KeyboardInterrupt if consumer_primary else ValueError
+        ) as raised:
+            with open_recorder_run(root, policy) as run:
+                with closing_iterator(run.iter_records()) as records:
+                    assert next(records)["capture_seq"] == 1
+                    before = member.stat()
+                    os.utime(
+                        member,
+                        ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000),
+                    )
+                    assert member.stat().st_mtime_ns != before.st_mtime_ns
+                    if consumer_primary:
+                        raise primary
+                    list(records)
+        if consumer_primary:
+            assert raised.value is primary
+            assert any("ValueError" in note for note in primary.__notes__)
+        else:
+            assert str(raised.value) == "binance_raw_export_identity_changed"
+        assert policy.used_memory_bytes == 0
+    assert member.read_bytes() == original

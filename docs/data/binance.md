@@ -3,82 +3,9 @@
 本文描述 Binance 公开市场数据在 QRP 中的当前数据合同。
 本文只记录结构和层边界，不记录真实载荷、行级样本、运行结果或本地路径。
 
-## 规范本地封装
-
-规范本地封装导入器只接受 JSONL。每行必须是规范封装，
-所有 `data_kind` 共同必需的顶层字段为：
-
-```text
-source
-market_type
-data_kind
-symbol
-captured_at
-payload
-```
-
-`source` 必须是 `binance`，`market_type` 必须是 `spot`。
-`captured_at` 必须是带 `Z` 或 `+/-HH:MM` UTC 偏移的 ISO 时间戳字符串；
-数值时间戳和没有时区偏移的字符串不是当前合同。当前 `data_kind` 只允许：
-
-```text
-klines
-agg_trades
-depth
-```
-
-条件字段：
-
-- `klines`：`interval` 必填且必须为 `1m`。
-- `agg_trades` / `depth`：`interval` 必须缺省。
-
-严格标量规则：
-
-- 数值/整数字段拒绝 `bool`、`NaN`、`inf`、`-inf` 和非数值。
-- 整数字段拒绝小数值。
-- 布尔字段只接受 JSON 布尔值，不接受字符串或数值别名。
-- `captured_at`、K 线的 `open_time`/`close_time`，以及聚合成交的
-  `timestamp` / `T`，使用共享的 Binance 严格时间戳校验器。
-  `captured_at` 必须是带 UTC 偏移的 ISO 时间戳；市场载荷时间必须是非负毫秒时间戳。
-- `1m` K 线的 `open_time` 必须整分钟对齐，`close_time` 必须严格等于
-  `open_time + 59_999ms`。名义为 `1m` 但时间窗口不闭合的载荷，由原始数据责任模块明确拒绝。
-- 聚合成交的 `timestamp` / `T` 在原始数据责任模块校验，
-  不把非法时间延迟到中间层标准化时处理。
-
-Binance 市场载荷的毫秒时间戳还必须落在 QRP 下游可安全表示的 pandas 纳秒时间戳范围内。
-上界由 `pd.Timestamp.max` 推导；纪元零值、上界内的值返回带 UTC 时区的纳秒 `Timestamp`，
-首个越界值和更大的整数都由 Binance 来源责任模块明确拒绝。
-原始 K 线、原始聚合成交与中间层标准化复用同一范围合同。
-
-`klines` 的 `payload` 是连接器返回的 K 线数组，允许连接器追加额外字段；
-当前语义校验只读取已批准字段。`agg_trades` 和 `depth` 的 `payload`
-是连接器返回的对象。裸载荷、非封装 JSON、非 JSONL 文件和不支持的数据种类都不是当前合同。
-
-原始封装结构不因语义校验而改变。当前原始校验会检查 K 线时间窗口、
-OHLC、成交量、成交笔数、聚合成交的时间戳/价格/数量/标识范围，以及深度的价格/数量。
-K 线语义校验还要求 `taker_buy_volume <= volume`、
-`taker_buy_quote_volume <= quote_volume`；数值载荷拒绝 `NaN`、`inf`、`-inf` 和非数值。
-双边最优买价/卖价同时存在时必须满足 bid < ask；单边深度载荷可以作为有效原始输入保留，
-后续面板层通过报价观测诊断表达报价不可用。
-
-深度标准化在原始和中间层路径复用同一个责任模块辅助函数。
-`bids` 必须按价格严格递减排列，`asks` 必须按价格严格递增排列，
-每个原始档位必须恰好是 `[price, quantity]`，第 1 档表示校验后的最优买价或最优卖价。
-同一资产、时间戳、方向下重复的深度档位，在市场面板检查中明确拒绝。
-
-## 原始数据布局
-
-原始文件从以下位置发现：
-
-```text
-data/raw/binance/spot/klines/<symbol>/1m/*.jsonl
-data/raw/binance/spot/agg_trades/<symbol>/*.jsonl
-data/raw/binance/spot/depth/<symbol>/*.jsonl
-```
-
-这些路径仅是规范本地封装的输入布局，不定义公开 API、公开 CLI 或持久化研究输出。
-该导入器路径不进行网络采集。下面独立的录制运行合同只使用无需认证的
-Binance 公开市场数据端点，并且从不读取 API 密钥或秘密。
+Binance 研究输入采用下述录制运行合同；不提供旧规范封装 JSONL 的独立导入、
+分钟线或旧中间层物化入口。当前录制器只使用无需认证的 Binance 公开市场数据端点，
+不读取 API 密钥或秘密。
 
 ## 录制运行合同
 
@@ -97,7 +24,7 @@ spot-l2:
 ```
 
 两个范围使用独立的根目录、清单和汇总状态。现货中断不能使完整的期货 HFT 运行降级或被拒绝。
-现货回放、规范本地封装输入与分钟数据处理作为独立数据能力保留。
+现货与期货录制的回放保持独立。
 当前研究 profile 只注册 100ms 期货 HFT，不提供分钟级研究场景。
 每条命令都是一个托管的数据规模操作，并在其生命周期内持有主机本地 QRP 锁，
 因此同一主机上不会并发录制 `futures-hft` 和 `spot-l2`。
@@ -176,33 +103,6 @@ payload          # 无损交易所载荷
 
 录制器使用有界 `websockets` 运行时连接公开数据流，
 使用 `httpx` 获取公开 REST 元数据/快照。它没有认证端点或下单 API。
-
-## 中间层数据集
-
-`sources/binance/interim.py` 负责从原始封装到中间层的标准化：
-
-原始文件及连续标准化批次必须已经按注册的中间层主键严格有序。
-标准化保留该物理顺序，并在文件与批次之间传递最后键水位；
-不会通过批次内排序掩盖回退的依赖。因此，聚合成交按
-`(source_asset_id, timestamp, aggregate_trade_id)` 前进，深度档位按
-`(source_asset_id, timestamp, side, level)` 前进，行情柱按
-`(source_asset_id, timestamp)` 前进。重复或回退的行在任何批次大小下都会同样明确失败。
-每个快照内的深度按注册的方向字典序输出，而原始买卖价格顺序仍由上述来源语义检查管理。
-
-```text
-klines      -> market_bars_1m
-agg_trades  -> aggregate_trades_tick
-depth       -> depth_levels_tick
-```
-
-中间层物化以有界批次读取原始封装，在标准化前校验 `data_id` 与原始 `data_kind`，
-对来源时间戳应用请求的起止过滤，并通过 `storage.write_dataset` 写入来源标准化数据集。
-`sources/` 只负责供应商字段映射；市场语义与研究因子由
-`markets/implementations/crypto/` 和 `research/` 持有。
-
-当原始文件存在，但请求的过滤移除所有行时，中间层物化仍会为该 `data_id` 写入具有结构的空数据集。
-在窄时间窗口中，聚合成交或深度等可选数据流的空结构数据集是有效的；
-没有发现原始文件的 `data_id` 仍会跳过。
 
 ## 研究 DAG 的执行与资金费输入
 
