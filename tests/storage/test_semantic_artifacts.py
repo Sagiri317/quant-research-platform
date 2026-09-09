@@ -521,3 +521,37 @@ def test_semantic_parquet_comparison_uses_exact_logical_rows(tmp_path, change):
     expected = "MATCH" if change == "encoding" else "CONTENT_MISMATCH"
     assert compare_semantic_artifacts(old, new).status == expected
     assert (old / "manifest.json").read_bytes() == before
+
+
+def test_identical_parquet_rebuild_does_not_require_decoded_payload_capacity(tmp_path):
+    import shutil
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.semantic_artifacts import (
+        compare_semantic_artifacts,
+    )
+
+    table = pa.table({"payload": [b"x" * 4096] * 4096})
+    old = write_semantic_artifact(
+        tmp_path / "old",
+        _envelope(),
+        lambda root: pq.write_table(
+            table,
+            root / "table.parquet",
+            compression="zstd",
+            use_dictionary=False,
+            data_page_size=32 * 1024**2,
+        ),
+    )
+    new = write_semantic_artifact(
+        tmp_path / "new",
+        _envelope(),
+        lambda root: shutil.copyfile(old / "table.parquet", root / "table.parquet"),
+    )
+    assert (old / "table.parquet").stat().st_size < 1024**2
+    with runtime_resource_policy_scope(explicit_cap_bytes=1024**2) as policy:
+        assert compare_semantic_artifacts(old, new).status == "MATCH"
+        assert policy.used_memory_bytes == 0

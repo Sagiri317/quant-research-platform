@@ -120,14 +120,8 @@ def compare_semantic_artifacts(
                 or _member_record(member["path"], candidate_path) != candidate_member
             ):
                 raise ValueError("semantic_artifact_member_integrity_invalid")
-            if old_path.suffix == ".parquet":
-                if not _parquet_members_match(
-                    old_path, candidate_path, old_identity, candidate_identity
-                ):
-                    return SemanticArtifactComparison("CONTENT_MISMATCH")
-            else:
-                if member != candidate_member:
-                    return SemanticArtifactComparison("CONTENT_MISMATCH")
+            same_bytes = False
+            if member == candidate_member:
                 with (
                     handle_preserving_primary(open_filesystem_file(old_path)) as old,
                     handle_preserving_primary(
@@ -141,11 +135,13 @@ def compare_semantic_artifacts(
                         != candidate_identity
                     ):
                         raise ValueError("semantic_artifact_member_identity_changed")
+                    same_bytes = True
                     while left := old.read(_HASH_BUFFER_BYTES):
                         if left != candidate.read(_HASH_BUFFER_BYTES):
-                            return SemanticArtifactComparison("CONTENT_MISMATCH")
-                    if candidate.read(1):
-                        return SemanticArtifactComparison("CONTENT_MISMATCH")
+                            same_bytes = False
+                            break
+                    if same_bytes and candidate.read(1):
+                        same_bytes = False
                     if (
                         dataset_file_identity_from_stat(os.fstat(old.fileno()))
                         != old_identity
@@ -153,6 +149,13 @@ def compare_semantic_artifacts(
                         != candidate_identity
                     ):
                         raise ValueError("semantic_artifact_member_identity_changed")
+            if not same_bytes and (
+                old_path.suffix != ".parquet"
+                or not _parquet_members_match(
+                    old_path, candidate_path, old_identity, candidate_identity
+                )
+            ):
+                return SemanticArtifactComparison("CONTENT_MISMATCH")
             if (
                 _member_identity(old_path) != old_identity
                 or _member_identity(candidate_path) != candidate_identity

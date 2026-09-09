@@ -155,7 +155,8 @@ class DatasetSessionInventory:
             )
             connection.execute(f"PRAGMA main.max_page_count={sqlite_page_limit}")
             connection.execute("PRAGMA journal_mode=DELETE")
-            connection.execute("PRAGMA synchronous=NORMAL")
+            # Operation-local scratch is rebuilt, never recovered after a crash.
+            connection.execute("PRAGMA synchronous=OFF")
             connection.execute("PRAGMA temp_store=MEMORY")
             connection.execute(
                 f"PRAGMA cache_size=-{DATASET_INVENTORY_RESERVE_BYTES // 1024}"
