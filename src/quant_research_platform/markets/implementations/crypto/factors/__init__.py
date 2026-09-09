@@ -1,1 +1,0 @@
-"""Crypto factor definitions."""

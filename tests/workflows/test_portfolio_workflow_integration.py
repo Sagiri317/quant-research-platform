@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -434,6 +435,7 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
             pruning_report_text="synthetic persisted source",
         )
 
+    @contextmanager
     def processed_producer(
         spec: ProcessedDataSpec,
         *,
@@ -442,9 +444,21 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
         processed_catalog: ProcessedDataCatalog,
         source_catalog: InterimDataCatalog,
         resource_policy: object,
-    ) -> pd.DataFrame:
+    ):
+        from quant_research_platform.policy.lifecycle import closing_iterator
+        from quant_research_platform.runtime.resources import (
+            OwnedValue,
+            pandas_frame_payload_bytes,
+        )
+
         del layout, time_window, processed_catalog, source_catalog, resource_policy
-        return frames[spec.data_id].copy()
+
+        def output():
+            lease = yield pandas_frame_payload_bytes(frames[spec.data_id])
+            yield OwnedValue(frames[spec.data_id].copy(), lease)
+
+        with closing_iterator(output()) as data:
+            yield data, {}, None
 
     def dataset_producer(
         *,

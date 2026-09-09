@@ -24,21 +24,6 @@ def apply_feature_transforms(
     timestamp_column: str = "timestamp",
     resource_lease: MemoryLease | None = None,
 ) -> pd.DataFrame:
-    return _apply_feature_transforms_to_copy(
-        frame,
-        transforms,
-        timestamp_column=timestamp_column,
-        resource_lease=resource_lease,
-    )
-
-
-def _apply_feature_transforms_to_copy(
-    frame: pd.DataFrame,
-    transforms: tuple[FeatureTransformSpec, ...],
-    *,
-    timestamp_column: str,
-    resource_lease: MemoryLease | None,
-) -> pd.DataFrame:
     working_bytes = _feature_transform_working_bytes(frame, transforms)
     policy = current_runtime_resource_policy()
     reservation = (

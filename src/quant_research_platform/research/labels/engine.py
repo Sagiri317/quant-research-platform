@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 import pandas as pd
 
 from quant_research_platform.contracts.labels import LabelDefinition
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
-    session_read_window,
 )
 
 
@@ -18,7 +16,7 @@ def calculate_labels_for_panel(
     panel_frame: pd.DataFrame,
     *,
     definitions: Sequence[LabelDefinition],
-    sessions: Sequence[object] | None = None,
+    sessions: Sequence[object],
 ) -> pd.DataFrame:
     requested = tuple(definitions)
     _require_label_input_columns(panel_frame, requested)
@@ -27,18 +25,13 @@ def calculate_labels_for_panel(
     families = tuple(dict.fromkeys(definition.family for definition in requested))
     if families != ("forward_return",):
         raise ValueError("unknown_label_family")
-    axis = (
-        sessions
-        if sessions is not None
-        else tuple(sorted(pd.to_datetime(panel_frame["timestamp"]).unique()))
-    )
     result = add_forward_return_labels(
         panel_frame.loc[:, list(label_panel_input_columns(requested))],
         horizons=tuple(definition.horizon for definition in requested),
         asset_column="asset_id",
         date_column="timestamp",
         execution_price_column="adj_open",
-        sessions=axis,
+        sessions=sessions,
         can_enter_column="can_enter" if "can_enter" in panel_frame else None,
     )
     return result
@@ -65,21 +58,6 @@ def label_panel_input_columns(
 
 def label_lookahead_bars(definitions: Sequence[LabelDefinition]) -> int:
     return max((definition.lookahead for definition in definitions), default=0)
-
-
-def label_read_window_for_panel(
-    panel_keys: pd.DataFrame | Mapping[object, Sequence[pd.Timestamp]],
-    *,
-    definitions: Sequence[LabelDefinition],
-    read_window: TimeWindow,
-    core_sessions: tuple[pd.Timestamp, ...],
-) -> TimeWindow:
-    del panel_keys
-    return session_read_window(
-        read_window=read_window,
-        sessions=core_sessions,
-        lookahead_sessions=label_lookahead_bars(definitions),
-    )
 
 
 def _require_label_input_columns(

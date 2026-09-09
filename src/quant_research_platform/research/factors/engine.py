@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 
 import pandas as pd
 
@@ -12,11 +12,9 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 
-from .expectations.calculations import build_expectations_features
 from .fundamental.calculations import calculate_fundamental_factors
 from .price_volume.calculations import calculate_price_volume_factors
 from .price_volume.definitions import PRICE_VOLUME_FACTOR_FAMILY
-from .price_volume.windows import price_volume_valid_bar_read_window
 
 
 def calculate_factors_for_panel(
@@ -45,18 +43,6 @@ def calculate_factors_for_panel(
                 panel_frame,
                 factor_columns=tuple(
                     definition.output_column for definition in requested
-                ),
-            ),
-            output_columns=tuple(definition.output_column for definition in requested),
-        )
-    if families == ("expectations",):
-        return _with_keys(
-            output_source,
-            build_expectations_features(
-                panel_frame,
-                panel_frame,
-                trading_sessions=tuple(
-                    sorted(pd.to_datetime(panel_frame["timestamp"]).unique())
                 ),
             ),
             output_columns=tuple(definition.output_column for definition in requested),
@@ -110,24 +96,6 @@ def factor_lookback_bars(definitions: Sequence[FactorDefinition]) -> int:
             if value is not None
         ),
         default=0,
-    )
-
-
-def factor_read_window_for_panel(
-    panel_keys: pd.DataFrame | Mapping[object, Sequence[pd.Timestamp]],
-    *,
-    definitions: Sequence[FactorDefinition],
-    read_window: TimeWindow,
-    core_sessions: tuple[pd.Timestamp, ...],
-) -> TimeWindow:
-    lookback = factor_lookback_bars(definitions)
-    if lookback == 0:
-        return read_window
-    return price_volume_valid_bar_read_window(
-        panel_keys,
-        read_window=read_window,
-        core_sessions=core_sessions,
-        lookback_bars=lookback,
     )
 
 

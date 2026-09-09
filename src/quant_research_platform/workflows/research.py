@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from contextlib import AbstractContextManager, ExitStack, nullcontext
+from contextlib import ExitStack, nullcontext
 from dataclasses import replace
 from functools import partial
 from pathlib import Path
@@ -1470,12 +1470,7 @@ def _build_target(
                 else {}
             ),
         )
-        context = (
-            produced
-            if isinstance(produced, AbstractContextManager)
-            else nullcontext((produced, {}, None))
-        )
-        with context as (frame, producer_metadata, verify):
+        with produced as (frame, producer_metadata, verify):
             if getattr(frame, "empty", False):
                 return TargetResult(
                     target_id=spec.target_id,
@@ -1491,7 +1486,6 @@ def _build_target(
                 instance_metadata=producer_metadata,
                 staged_validator=verify,
                 resource_policy=policy,
-                borrowed_input=not isinstance(produced, AbstractContextManager),
             )
         _validate_published_target(output_root, requested_identity)
         return TargetResult(

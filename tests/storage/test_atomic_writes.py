@@ -116,51 +116,6 @@ def test_publish_no_replace_preserves_concurrent_winner(
     assert Path(native_filesystem_path(target)).read_text(encoding="utf-8") == "winner"
 
 
-def test_publish_replace_preserves_old_good_until_candidate_wins(
-    tmp_path: Path,
-) -> None:
-    source = tmp_path / "candidate"
-    target = tmp_path / "current"
-    backup = tmp_path / ".current.previous-good"
-    source.mkdir()
-    target.mkdir()
-    (source / "value").write_text("new", encoding="utf-8")
-    (target / "value").write_text("old", encoding="utf-8")
-
-    atomic.publish_replace_preserving_old_good(source, target, backup)
-
-    assert (target / "value").read_text(encoding="utf-8") == "new"
-    assert (backup / "value").read_text(encoding="utf-8") == "old"
-
-
-def test_publish_replace_rolls_back_old_good_on_candidate_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source = tmp_path / "candidate"
-    target = tmp_path / "current"
-    backup = tmp_path / ".current.previous-good"
-    source.mkdir()
-    target.mkdir()
-    (source / "value").write_text("new", encoding="utf-8")
-    (target / "value").write_text("old", encoding="utf-8")
-    real_move = atomic.move_path_no_replace
-
-    def fail_candidate(candidate: Path, destination: Path) -> None:
-        if candidate == source and destination == target:
-            raise OSError("candidate_publish_failed")
-        real_move(candidate, destination)
-
-    monkeypatch.setattr(atomic, "move_path_no_replace", fail_candidate)
-
-    with pytest.raises(OSError, match="candidate_publish_failed"):
-        atomic.publish_replace_preserving_old_good(source, target, backup)
-
-    assert (target / "value").read_text(encoding="utf-8") == "old"
-    assert (source / "value").read_text(encoding="utf-8") == "new"
-    assert not backup.exists()
-
-
 def test_atomic_write_text_rename_failure_cleans_operation_temp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

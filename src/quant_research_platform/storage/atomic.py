@@ -142,22 +142,3 @@ def publish_no_replace(
         if os.path.exists(native_filesystem_path(target)):
             raise OutputAlreadyExistsError() from exc
         raise
-
-
-def publish_replace_preserving_old_good(
-    source: Path,
-    target: Path,
-    backup: Path,
-) -> None:
-    move_path_no_replace(target, backup)
-    try:
-        move_path_no_replace(source, target)
-    except BaseException as primary:
-        try:
-            move_path_no_replace(backup, target)
-        except BaseException as rollback_error:
-            primary.add_note(
-                "storage old-good rollback also failed: "
-                f"{type(rollback_error).__name__}"
-            )
-        raise

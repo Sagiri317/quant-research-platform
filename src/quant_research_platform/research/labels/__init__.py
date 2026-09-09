@@ -5,14 +5,12 @@ from .forward_returns import (
     add_forward_return_labels,
     forward_return_available_at_column,
     forward_return_label_column,
-    session_read_window,
 )
 
 __all__ = [
     "add_forward_return_labels",
     "forward_return_available_at_column",
     "forward_return_label_column",
-    "session_read_window",
     "calculate_labels_for_panel",
     "label_lookahead_bars",
 ]

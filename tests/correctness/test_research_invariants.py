@@ -788,12 +788,11 @@ def test_factor_risk_projects_history_to_current_industry_domain() -> None:
         state.estimate()
 
 
-@pytest.mark.parametrize("calendar", [False, True])
 @pytest.mark.parametrize(
     "entry,exit_price", [(-1.0, 2.0), (1.0, 0.0), (1.0, -1.0), (1e-308, 1e308)]
 )
 def test_forward_labels_reject_invalid_economic_prices_and_overflow(
-    calendar, entry, exit_price
+    entry, exit_price
 ) -> None:
     dates = pd.bdate_range("2020-01-01", periods=3)
     frame = pd.DataFrame(
@@ -807,7 +806,7 @@ def test_forward_labels_reject_invalid_economic_prices_and_overflow(
     result = add_forward_return_labels(
         frame,
         horizons=(1,),
-        sessions=dates if calendar else None,
+        sessions=dates,
         can_enter_column="can_enter",
     )
     assert pd.isna(result.loc[0, "forward_return_1d"])
