@@ -245,6 +245,8 @@ def _merge_family_predictions(paths, columns):
                         frame = batch.to_pandas()
                         try:
                             yield frame
+                        except GeneratorExit:
+                            return
                         finally:
                             frame = None
 
@@ -277,7 +279,10 @@ def _merge_family_predictions(paths, columns):
                     first = None
                 while heap:
                     timestamp, family, frame, source = heapq.heappop(heap)
-                    yield frame
+                    try:
+                        yield frame
+                    except GeneratorExit:
+                        return
                     frame = None
                     following = next(source, None)
                     if following is not None:

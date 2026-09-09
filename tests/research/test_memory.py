@@ -589,3 +589,87 @@ def test_complete_time_frames_close_upstream_inside_policy_scope(
 
     assert raised.value is primary
     assert closed_under == [policy]
+
+
+@pytest.mark.parametrize(
+    ("session_chunks", "failure"),
+    (
+        (False, "upstream"),
+        (True, "upstream"),
+        (False, "research.time.inspect"),
+        (True, "research.time.inspect"),
+        (False, "research.time.pending"),
+        (True, "research.time.pending"),
+        (True, "research.session.inspect"),
+    ),
+)
+@pytest.mark.parametrize("consumer_primary", (False, True))
+def test_complete_time_frames_early_close_reports_cleanup_failures(
+    monkeypatch, session_chunks, failure, consumer_primary
+):
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.runtime.resources import MemoryLease
+
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2, explicit_cap_bytes=1024**2
+    )
+    closed = []
+
+    class Frames:
+        def __init__(self):
+            self.frames = iter(
+                (
+                    pd.DataFrame(
+                        {
+                            "timestamp": pd.date_range("2026-01-01", periods=3),
+                            "value": [1, 2, 3],
+                        }
+                    ),
+                )
+            )
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return next(self.frames)
+
+        def close(self):
+            closed.append(current_runtime_resource_policy())
+            if failure == "upstream":
+                raise OSError("upstream_close")
+
+    factory = (
+        iter_complete_session_frames
+        if session_chunks
+        else iter_complete_time_sized_frames
+    )
+    chunks = factory(Frames(), timestamp_column="timestamp", resource_policy=policy)
+    next(chunks)
+    if failure == "research.time.pending":
+        if session_chunks:
+            next(chunks)
+        next(chunks)
+    original_close = MemoryLease.close
+    failed = []
+
+    def fail_release(lease):
+        original_close(lease)
+        if lease.owner == failure:
+            failed.append(lease.owner)
+            raise OSError("time_lease_release")
+
+    monkeypatch.setattr(MemoryLease, "close", fail_release)
+    primary = KeyboardInterrupt("time_consumer_primary")
+    with pytest.raises(KeyboardInterrupt if consumer_primary else OSError) as caught:
+        if consumer_primary:
+            with closing_iterator(chunks):
+                raise primary
+        else:
+            chunks.close()
+    if consumer_primary:
+        assert caught.value is primary
+        assert any("OSError" in note for note in getattr(primary, "__notes__", ()))
+    assert closed == [policy]
+    assert failed == ([] if failure == "upstream" else [failure])
+    assert policy.used_memory_bytes == 0

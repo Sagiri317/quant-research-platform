@@ -238,8 +238,11 @@ def write_portfolio_ledger_artifact(
             for name in writers:
                 flush(name)
                 writers[name].add_key_value_metadata(metadata[name] or {})
-        for _batch in _iter_batches(staging, capital, envelope.research_window):
-            pass
+        with closing_iterator(
+            _iter_batches(staging, capital, envelope.research_window)
+        ) as batches:
+            for _batch in batches:
+                pass
 
     return write_semantic_artifact(Path(logical_root), envelope, write)
 
@@ -259,8 +262,9 @@ def read_portfolio_ledger_artifact(
     artifact = PortfolioLedgerArtifact(
         Path(instance_root), expected_identity, _capital(envelope)
     )
-    for _batch in artifact.iter_chunks():
-        pass
+    with closing_iterator(artifact.iter_chunks()) as batches:
+        for _batch in batches:
+            pass
     return artifact
 
 
@@ -268,16 +272,21 @@ def summarize_portfolio_ledger(artifact: PortfolioLedgerArtifact) -> dict[str, o
     fees = funding = turnover = nav = fill_quantity = 0.0
     valuation_timestamp_ns = 0
     fills = 0
-    for batch in artifact.iter_chunks():
-        fills += len(batch.trades)
-        fill_quantity += sum(abs(row.quantity) for row in batch.trades)
-        turnover += sum(abs(row.notional) for row in batch.trades)
-        fees -= sum(row.amount for row in batch.cashflows if row.kind.endswith("_cost"))
-        funding += sum(row.amount for row in batch.cashflows if row.kind == "funding")
-        nav = sum(row.value for row in batch.valuations if row.phase == "end")
-        valuation_timestamp_ns = max(
-            row.timestamp_ns for row in batch.valuations if row.phase == "end"
-        )
+    with closing_iterator(artifact.iter_chunks()) as batches:
+        for batch in batches:
+            fills += len(batch.trades)
+            fill_quantity += sum(abs(row.quantity) for row in batch.trades)
+            turnover += sum(abs(row.notional) for row in batch.trades)
+            fees -= sum(
+                row.amount for row in batch.cashflows if row.kind.endswith("_cost")
+            )
+            funding += sum(
+                row.amount for row in batch.cashflows if row.kind == "funding"
+            )
+            nav = sum(row.value for row in batch.valuations if row.phase == "end")
+            valuation_timestamp_ns = max(
+                row.timestamp_ns for row in batch.valuations if row.phase == "end"
+            )
     net = nav - artifact.capital.initial_capital
     return {
         "candidate_id": artifact.capital.candidate_id,
@@ -326,7 +335,13 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
                             * (4 * row_bytes + 128 * chunk.num_columns),
                         )
                     )
-                yield from chunk.to_pylist()
+                records = chunk.to_pylist()
+                try:
+                    yield from records
+                except GeneratorExit:
+                    return
+                finally:
+                    records = None
 
 
 def _iter_batches(
@@ -469,7 +484,10 @@ def _iter_batches(
                 )
                 if inserted != len(batch.cashflows):
                     raise ValueError("portfolio_ledger_duplicate_cashflow")
-                yield batch
+                try:
+                    yield batch
+                except GeneratorExit:
+                    return
                 sequence += 1
         if not sequence or any(group is not None for group in pending.values()):
             raise ValueError("portfolio_ledger_sequence_invalid")

@@ -1098,3 +1098,111 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
             assert summary["nav"] == result["nav"] == 1000.0
         chunks = terminal = None
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    ("failure", "consumer"),
+    (
+        ("index_close", "close"),
+        ("index_close", "keyboard"),
+        ("identity", "close"),
+        ("identity", "keyboard"),
+        ("index_close", "alpha_cutoff"),
+    ),
+)
+def test_portfolio_reader_early_close_reports_real_cleanup_failures(
+    tmp_path, monkeypatch, failure, consumer
+):
+    import shutil
+
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.research.portfolios.production import (
+        frozen_alpha_calibration,
+    )
+
+    sessions = tuple(
+        _session(
+            f"2019-01-0{index + 1}",
+            f"2019-01-0{index + 2}",
+            pre_asset=100.0 if index else 0.0,
+            target_asset=100.0,
+            post_asset=100.0,
+            pre_cash=0.0 if index else 100.0,
+            target_cash=0.0,
+            post_cash=0.0,
+        )
+        for index in range(2)
+    )
+    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy:
+        root = write_test_sessions(
+            tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=sessions
+        )
+        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        original = {path.name: path.read_bytes() for path in root.iterdir()}
+        if failure == "identity":
+            copied = tmp_path / "copy" / root.name
+            shutil.copytree(root, copied)
+            artifact = replace(artifact, root=copied)
+        closed_indexes = []
+        close_index = ledger_artifact.ExactPrimaryKeyIndex.close
+
+        def fail_index_close(index):
+            database = index.database_path
+            close_index(index)
+            closed_indexes.append(database)
+            raise OSError("ledger_index_close")
+
+        def mutate_member():
+            if failure == "identity":
+                path = artifact.root / "valuations.parquet"
+                before = path.stat()
+                with path.open("ab") as handle:
+                    handle.write(b"x")
+                assert path.stat().st_size == before.st_size + 1
+
+        primary = KeyboardInterrupt("ledger_consumer_primary")
+        with monkeypatch.context() as patch:
+            if failure == "index_close":
+                patch.setattr(
+                    ledger_artifact.ExactPrimaryKeyIndex, "close", fail_index_close
+                )
+            if consumer == "alpha_cutoff":
+                with pytest.raises(
+                    ValueError, match="holdout_alpha_source_after_cutoff"
+                ) as caught:
+                    frozen_alpha_calibration(
+                        artifact, cutoff=pd.Timestamp("2018-12-31")
+                    )
+            else:
+                chunks = artifact.iter_chunks()
+                error = (
+                    KeyboardInterrupt
+                    if consumer == "keyboard"
+                    else OSError
+                    if failure == "index_close"
+                    else ValueError
+                )
+                with pytest.raises(error) as caught:
+                    if consumer == "keyboard":
+                        with closing_iterator(chunks):
+                            assert next(chunks).valuations
+                            mutate_member()
+                            raise primary
+                    else:
+                        assert next(chunks).valuations
+                        mutate_member()
+                        chunks.close()
+            if consumer == "keyboard":
+                assert caught.value is primary
+            if consumer != "close":
+                secondary = "OSError" if failure == "index_close" else "ValueError"
+                assert any(
+                    secondary in note for note in getattr(caught.value, "__notes__", ())
+                )
+            elif failure == "identity":
+                assert str(caught.value) == "dataset_file_identity_changed"
+            if failure == "index_close":
+                assert len(closed_indexes) == 1
+                assert not closed_indexes[0].parent.exists()
+        assert {path.name: path.read_bytes() for path in root.iterdir()} == original
+        assert policy.used_memory_bytes == 0

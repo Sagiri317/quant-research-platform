@@ -66,8 +66,12 @@ def _iter_contiguous_session_frames(
                 raise ValueError(
                     "research_indivisible_time_unit_exceeds_task_memory_budget"
                 )
-            yield output
-        del output
+            try:
+                yield output
+            except GeneratorExit:
+                return
+            finally:
+                output = None
         start = stop
 
 
@@ -83,10 +87,19 @@ def iter_complete_time_sized_frames(
 
     def activate() -> Iterator[pd.DataFrame]:
         with runtime_resource_policy_scope(bound_policy), closing_iterator(frames):
-            yield from _iter_complete_time_sized_frames_impl(
-                frames,
-                timestamp_column=timestamp_column,
-            )
+            with closing_iterator(
+                _iter_complete_time_sized_frames_impl(
+                    frames,
+                    timestamp_column=timestamp_column,
+                )
+            ) as complete_frames:
+                for output in complete_frames:
+                    try:
+                        yield output
+                    except GeneratorExit:
+                        return
+                    finally:
+                        output = None
 
     return activate()
 
@@ -109,7 +122,10 @@ def iter_complete_session_frames(
         with closing_iterator(complete_frames):
             for frame in complete_frames:
                 if frame.empty:
-                    yield frame
+                    try:
+                        yield frame
+                    except GeneratorExit:
+                        return
                     continue
                 policy = current_runtime_resource_policy()
                 if policy is None:
@@ -145,14 +161,29 @@ def iter_complete_session_frames(
                         )
                         stops = np.flatnonzero(values[1:] != values[:-1]) + 1
                         if len(stops) == 0:
-                            yield frame
+                            try:
+                                yield frame
+                            except GeneratorExit:
+                                return
                             continue
                         start = 0
                         for raw_stop in stops:
                             stop = int(raw_stop)
-                            yield frame.iloc[start:stop]
+                            output = frame.iloc[start:stop]
+                            try:
+                                yield output
+                            except GeneratorExit:
+                                return
+                            finally:
+                                output = None
                             start = stop
-                        yield frame.iloc[start:]
+                        output = frame.iloc[start:]
+                        try:
+                            yield output
+                        except GeneratorExit:
+                            return
+                        finally:
+                            output = None
                     finally:
                         timestamps = values = stops = None
 
@@ -256,14 +287,20 @@ def _iter_complete_time_sized_frames_impl(
                         pending.lease.shrink_to(combined_bytes)
                         if first_stop == len(frame):
                             continue
-                        yield pending.value
+                        try:
+                            yield pending.value
+                        except GeneratorExit:
+                            return
                         emitted_max = pending_timestamp
                         pending.release(owner="research.time.pending")
                         pending = None
                         pending_timestamp = None
                         start = first_stop
                     else:
-                        yield pending.value
+                        try:
+                            yield pending.value
+                        except GeneratorExit:
+                            return
                         emitted_max = pending_timestamp
                         pending.release(owner="research.time.pending")
                         pending = None
@@ -279,10 +316,19 @@ def _iter_complete_time_sized_frames_impl(
                 if last_start > start:
                     prefix = frame.iloc[start:last_start]
                     prefix_timestamps = timestamps.iloc[start:last_start]
-                    yield from _iter_contiguous_session_frames(
-                        prefix,
-                        timestamps=prefix_timestamps,
-                    )
+                    with closing_iterator(
+                        _iter_contiguous_session_frames(
+                            prefix,
+                            timestamps=prefix_timestamps,
+                        )
+                    ) as prefix_frames:
+                        for output in prefix_frames:
+                            try:
+                                yield output
+                            except GeneratorExit:
+                                return
+                            finally:
+                                output = None
                     emitted_max = pd.Timestamp(prefix_timestamps.iloc[-1])
                 tail = frame.iloc[last_start:]
                 tail_bytes = pandas_frame_payload_bytes(tail)
@@ -314,9 +360,18 @@ def _iter_complete_time_sized_frames_impl(
 
         if pending is None:
             if saw_empty and first_empty is not None:
-                yield first_empty.iloc[0:0].copy()
+                output = first_empty.iloc[0:0].copy()
+                try:
+                    yield output
+                except GeneratorExit:
+                    return
+                finally:
+                    output = None
             return
-        yield pending.value
+        try:
+            yield pending.value
+        except GeneratorExit:
+            return
     finally:
         if pending is not None:
             pending.release(owner="research.time.pending")

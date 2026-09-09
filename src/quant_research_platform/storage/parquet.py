@@ -420,7 +420,18 @@ def iter_dataset_part_batches(
                                     membership_max_scalar_bytes=membership_max_scalar_bytes,
                                 )
                             ) as decoded:
-                                observed_decode_bytes = yield from decoded
+                                while True:
+                                    try:
+                                        decoded_batch = next(decoded)
+                                    except StopIteration as complete:
+                                        observed_decode_bytes = complete.value
+                                        break
+                                    try:
+                                        yield decoded_batch
+                                    except GeneratorExit:
+                                        return
+                                    finally:
+                                        decoded_batch = None
                             minimum_decode_bytes = max(
                                 observed_decode_bytes, decode_upper_bytes
                             )
@@ -432,7 +443,10 @@ def iter_dataset_part_batches(
                             operation_headroom_bytes=physical_headroom,
                         )
                         del raw_batch
-                        yield filtered
+                        try:
+                            yield filtered
+                        except GeneratorExit:
+                            return
                         del filtered
 
 
@@ -518,7 +532,10 @@ def _decoded_dictionary_batches(
                 filtered = _filter_arrow_batch(
                     restored, filters, operation_headroom_bytes=capacity
                 )
-                yield filtered
+                try:
+                    yield filtered
+                except GeneratorExit:
+                    return cast_fixed_bytes + new_row_bytes
             finally:
                 compact = restored = filtered = None
         start += rows

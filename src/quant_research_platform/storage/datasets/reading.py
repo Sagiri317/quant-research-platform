@@ -1406,7 +1406,10 @@ def _iter_dataset_chunks(
                 target_chunk_bytes=target_bytes,
             ):
                 yielded = True
-                yield chunk
+                try:
+                    yield chunk
+                except GeneratorExit:
+                    return
     if not yielded:
         try:
             yield _empty_frame(
@@ -1457,27 +1460,39 @@ def iter_declared_parquet_member_batches(
             )
 
         live_operation_headroom = current_operation_headroom
-    for batch in iter_dataset_part_batches(
-        Path(path),
-        expected_identity=expected_identity,
-        target_chunk_bytes=target_bytes,
-        operation_headroom_bytes=operation_headroom_bytes,
-        columns=columns,
-        parquet_filters=parquet_filters,
-        metadata_observer=metadata_observer,
-        _previous_output_bytes=previous_output_bytes,
-        _operation_headroom=live_operation_headroom,
-    ):
-        yield from _arrow_batch_to_bounded_pandas(
-            batch,
+    with closing_iterator(
+        iter_dataset_part_batches(
+            Path(path),
+            expected_identity=expected_identity,
             target_chunk_bytes=target_bytes,
             operation_headroom_bytes=operation_headroom_bytes,
-            dtype_overrides=dtype_overrides,
-            persisted_frame_observer=persisted_frame_observer,
-            batch_observer=batch_observer,
+            columns=columns,
+            parquet_filters=parquet_filters,
+            metadata_observer=metadata_observer,
             _previous_output_bytes=previous_output_bytes,
             _operation_headroom=live_operation_headroom,
         )
+    ) as batches:
+        for batch in batches:
+            with closing_iterator(
+                _arrow_batch_to_bounded_pandas(
+                    batch,
+                    target_chunk_bytes=target_bytes,
+                    operation_headroom_bytes=operation_headroom_bytes,
+                    dtype_overrides=dtype_overrides,
+                    persisted_frame_observer=persisted_frame_observer,
+                    batch_observer=batch_observer,
+                    _previous_output_bytes=previous_output_bytes,
+                    _operation_headroom=live_operation_headroom,
+                )
+            ) as converted:
+                for frame in converted:
+                    try:
+                        yield frame
+                    except GeneratorExit:
+                        return
+                    finally:
+                        frame = None
 
 
 def iter_dataset_file_batches(
@@ -1565,7 +1580,10 @@ def _iter_dataset_file_batches(
                         frame = next(member_batches)
                     except StopIteration:
                         break
-                    yield path, frame
+                    try:
+                        yield path, frame
+                    except GeneratorExit:
+                        return
     finally:
         _verify_preserving_primary(context)
 
@@ -2004,7 +2022,10 @@ def _arrow_batch_to_bounded_pandas(
                 batch_observer(arrow_slice, output)
             del frame
             previous_output_bytes[0] = output_bytes
-            yield output
+            try:
+                yield output
+            except GeneratorExit:
+                return
             del output
         start = stop
 

@@ -2295,3 +2295,249 @@ def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -
     )
 
     assert fingerprint.content_hash == expected
+
+
+@pytest.mark.parametrize(
+    ("use_dictionary", "failure"),
+    (
+        (False, "native_close"),
+        (True, "native_close"),
+        (False, "identity"),
+        (True, "identity"),
+        (True, "decode_release"),
+    ),
+)
+@pytest.mark.parametrize("reader_kind", ("physical", "declared", "prediction"))
+@pytest.mark.parametrize("consumer_primary", (False, True))
+def test_parquet_early_close_propagates_cleanup_and_identity_failures(
+    tmp_path, monkeypatch, use_dictionary, failure, consumer_primary, reader_kind
+):
+    from quant_research_platform.runtime.resources import MemoryLease
+
+    original = tmp_path / "original.parquet"
+    path = tmp_path / "read.parquet"
+    if reader_kind == "prediction":
+        from quant_research_platform.artifacts.outputs.prediction import (
+            _merge_family_predictions,
+        )
+        from quant_research_platform.artifacts.outputs.prediction_validation import (
+            validate_family_prediction_frame,
+        )
+        from quant_research_platform.contracts.predictions import (
+            A_SHARE_PREDICTION_PRIMARY_KEY,
+            RAW_PREDICTION_COLUMN,
+            prediction_output_columns,
+        )
+
+        columns = prediction_output_columns(
+            "a_share_oos", RAW_PREDICTION_COLUMN, A_SHARE_PREDICTION_PRIMARY_KEY
+        )
+        metadata = {
+            "quarterly_models": [
+                {
+                    "quarter_id": "2020Q1",
+                    "family_id": family,
+                    "model_id": f"{family}_2020Q1",
+                    "prediction_window": {"start": "2020-01-02", "end": "2020-03-31"},
+                }
+                for family in ("linear_regression", "ridge")
+            ]
+        }
+        prediction_paths = []
+        prediction_originals = {}
+        for model in metadata["quarterly_models"]:
+            frame = pd.DataFrame(
+                {
+                    "timestamp": pd.to_datetime(
+                        ["2020-01-02", "2020-01-03", "2020-01-06"]
+                    ),
+                    "asset_id": ["000001.SZ"] * 3,
+                    "family_id": model["family_id"],
+                    "quarter_id": model["quarter_id"],
+                    "model_id": model["model_id"],
+                    "raw_prediction": [0.1, 0.2, 0.3],
+                    "alpha_score": [0.01, 0.02, 0.03],
+                },
+                columns=columns,
+            )
+            validate_family_prediction_frame(frame, metadata)
+            assert not frame.duplicated(list(A_SHARE_PREDICTION_PRIMARY_KEY)).any()
+            member = path if not prediction_paths else tmp_path / "other.parquet"
+            pq.write_table(
+                pa.Table.from_pandas(frame, preserve_index=False),
+                member,
+                use_dictionary=use_dictionary,
+            )
+            prediction_paths.append((model["quarter_id"], model["family_id"], member))
+            prediction_originals[member] = member.read_bytes()
+        original.write_bytes(prediction_originals[path])
+    else:
+        pq.write_table(
+            pa.table(
+                {
+                    "value": ["x" * (32 * 1024)] * 256,
+                    "timestamp": pd.date_range("2020-01-01", periods=256),
+                    "asset_id": ["asset"] * 256,
+                }
+            ),
+            original,
+            use_dictionary=use_dictionary,
+        )
+        path.write_bytes(original.read_bytes())
+    original_bytes = original.read_bytes()
+    open_file = dataset_physical.open_filesystem_file
+    constructor = pq.ParquetFile
+    handles, reader_closed, iterator_closed = [], [], []
+
+    def observed_open(*args, **kwargs):
+        handle = open_file(*args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    class ObservedParquet:
+        def __init__(self, *args, **kwargs):
+            self.inner = constructor(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def iter_batches(self, **kwargs):
+            source = self.inner.iter_batches(**kwargs)
+            try:
+                yield from source
+            finally:
+                source.close()
+                iterator_closed.append(True)
+
+        def close(self):
+            encoded = pa.types.is_dictionary(
+                self.inner.schema_arrow.field("asset_id").type
+            )
+            self.inner.close()
+            reader_closed.append(encoded)
+            if failure == "native_close":
+                raise OSError("parquet_native_close")
+
+    close_lease = MemoryLease.close
+    released_decode = []
+
+    def fail_decode_release(lease):
+        close_lease(lease)
+        if lease.owner == "storage.parquet.decode":
+            released_decode.append(True)
+            raise OSError("parquet_decode_release")
+
+    monkeypatch.setattr(dataset_physical, "open_filesystem_file", observed_open)
+    monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
+    primary = KeyboardInterrupt("parquet_consumer_primary")
+    cap_bytes = (8 if reader_kind == "prediction" else 4) * 1024**2
+    with runtime_resource_policy_scope(explicit_cap_bytes=cap_bytes) as policy:
+        if reader_kind == "prediction":
+            batches = _merge_family_predictions(prediction_paths, columns)
+        else:
+            reader = (
+                dataset_physical.iter_dataset_part_batches
+                if reader_kind == "physical"
+                else dataset_reading.iter_declared_parquet_member_batches
+            )
+            batches = reader(
+                path,
+                expected_identity=dataset_physical.dataset_file_identity(path),
+                target_chunk_bytes=64 * 1024,
+                operation_headroom_bytes=256 * 1024,
+            )
+        assert len(next(batches)) > 0
+        readers = 2 if reader_kind == "prediction" else 1
+        assert len(handles) == readers and all(not handle.closed for handle in handles)
+        assert not reader_closed and not iterator_closed
+        if use_dictionary:
+            assert (
+                sum(
+                    lease.active and lease.owner == "storage.parquet.decode"
+                    for lease in policy._leases
+                )
+                == readers
+            )
+        if failure == "decode_release":
+            monkeypatch.setattr(MemoryLease, "close", fail_decode_release)
+        if failure == "identity":
+            before = path.stat()
+            with path.open("ab") as handle:
+                handle.write(b"x")
+            assert path.stat().st_size == before.st_size + 1
+        error = (
+            KeyboardInterrupt
+            if consumer_primary
+            else ValueError
+            if failure == "identity"
+            else OSError
+        )
+        with pytest.raises(error) as caught:
+            if consumer_primary:
+                with closing_iterator(batches):
+                    raise primary
+            else:
+                batches.close()
+        if consumer_primary:
+            assert caught.value is primary
+            secondary = "ValueError" if failure == "identity" else "OSError"
+            assert any(secondary in note for note in getattr(primary, "__notes__", ()))
+        elif failure == "identity":
+            assert str(caught.value) == "dataset_file_identity_changed"
+        assert policy.used_memory_bytes == 0
+    assert len(handles) == readers and all(handle.closed for handle in handles)
+    assert reader_closed == [use_dictionary] * readers
+    assert iterator_closed == [True] * readers
+    assert released_decode == ([True] * readers if failure == "decode_release" else [])
+    assert original.read_bytes() == original_bytes
+    if failure != "identity":
+        assert path.read_bytes() == original_bytes
+    if reader_kind == "prediction":
+        for member, payload in prediction_originals.items():
+            if member != path or failure != "identity":
+                assert member.read_bytes() == payload
+
+
+@pytest.mark.parametrize("observer_kind", ("persisted", "batch"))
+def test_declared_reader_preserves_observer_generator_exit(
+    tmp_path, monkeypatch, observer_kind
+):
+    path = tmp_path / "observer.parquet"
+    pq.write_table(pa.table({"value": [1, 2, 3]}), path)
+    original = path.read_bytes()
+    constructor = pq.ParquetFile
+    closed = []
+
+    class ObservedParquet:
+        def __init__(self, *args, **kwargs):
+            self.inner = constructor(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self.inner, name)
+
+        def close(self):
+            self.inner.close()
+            closed.append(True)
+            raise OSError("observer_native_close")
+
+    primary = GeneratorExit("observer_primary")
+
+    def observer(*args):
+        raise primary
+
+    monkeypatch.setattr(pq, "ParquetFile", ObservedParquet)
+    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+        frames = dataset_reading.iter_declared_parquet_member_batches(
+            path,
+            expected_identity=dataset_physical.dataset_file_identity(path),
+            target_chunk_bytes=64 * 1024,
+            persisted_frame_observer=observer if observer_kind == "persisted" else None,
+            batch_observer=observer if observer_kind == "batch" else None,
+        )
+        with pytest.raises(GeneratorExit) as caught:
+            next(frames)
+        assert caught.value is primary
+        assert any("OSError" in note for note in getattr(primary, "__notes__", ()))
+        assert policy.used_memory_bytes == 0
+    assert closed == [True]
+    assert path.read_bytes() == original

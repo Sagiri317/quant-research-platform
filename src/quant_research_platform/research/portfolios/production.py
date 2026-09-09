@@ -117,18 +117,21 @@ def frozen_alpha_calibration(
 ) -> tuple[AlphaCalibration, str]:
     """Read the last published, sufficiently observed development calibration."""
     latest = None
-    for batch in artifact.iter_chunks():
-        observed_at = pd.Timestamp(min(row.timestamp_ns for row in batch.valuations))
-        if observed_at > cutoff:
-            raise ValueError("holdout_alpha_source_after_cutoff")
-        values = {
-            _ALPHA_DIAGNOSTICS[row.name]: row.number
-            for row in batch.diagnostics
-            if row.asset_id == PORTFOLIO_CASH_ASSET_ID
-            and row.name in _ALPHA_DIAGNOSTICS
-        }
-        if len(values) == len(_ALPHA_DIAGNOSTICS):
-            latest = (values, observed_at.date().isoformat())
+    with closing_iterator(artifact.iter_chunks()) as batches:
+        for batch in batches:
+            observed_at = pd.Timestamp(
+                min(row.timestamp_ns for row in batch.valuations)
+            )
+            if observed_at > cutoff:
+                raise ValueError("holdout_alpha_source_after_cutoff")
+            values = {
+                _ALPHA_DIAGNOSTICS[row.name]: row.number
+                for row in batch.diagnostics
+                if row.asset_id == PORTFOLIO_CASH_ASSET_ID
+                and row.name in _ALPHA_DIAGNOSTICS
+            }
+            if len(values) == len(_ALPHA_DIAGNOSTICS):
+                latest = (values, observed_at.date().isoformat())
     if latest is None:
         raise PortfolioTargetBlocked("holdout_alpha_calibration_missing")
     values, observed_at = latest
