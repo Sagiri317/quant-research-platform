@@ -69,7 +69,12 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import DatasetReadMode
-from quant_research_platform.storage.datasets.reading import read_dataset
+from quant_research_platform.storage.datasets.reading import (
+    DatasetSession,
+    materialize_dataset_session,
+    open_dataset_session,
+    read_dataset,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 _CALENDAR_COLUMNS = ("calendar_date", "source_market_type", "is_trading_day")
@@ -377,6 +382,34 @@ def build_portfolio_ledger(
                 )
                 for root, columns in risk_inputs.items()
             }
+            panel_session = input_channels.enter_context(
+                open_dataset_session(
+                    panel_root,
+                    columns=panel_columns,
+                    time_window=history,
+                    resource_policy=resource_policy,
+                )
+            )
+            execution_session = input_channels.enter_context(
+                open_dataset_session(
+                    execution_root,
+                    columns=_EXECUTION_COLUMNS,
+                    time_window=history,
+                    resource_policy=resource_policy,
+                )
+            )
+            benchmark_session = (
+                input_channels.enter_context(
+                    open_dataset_session(
+                        benchmark_root,
+                        columns=_BENCHMARK_COLUMNS,
+                        time_window=history,
+                        resource_policy=resource_policy,
+                    )
+                )
+                if enhanced
+                else None
+            )
             for position, decision_timestamp in enumerate(sessions):
                 with ExitStack() as retained:
                     next_timestamp = (
@@ -535,9 +568,9 @@ def build_portfolio_ledger(
                                 )
                                 resize_state()
 
-                        assert benchmark_root is not None
+                        assert benchmark_session is not None
                         benchmark_weights = _benchmark_weights(
-                            benchmark_root,
+                            benchmark_session,
                             candidate.benchmark_id or "",
                             decision_timestamp,
                             resource_policy,
@@ -558,7 +591,7 @@ def build_portfolio_ledger(
                             )
                     assert dataset is not None
                     execution = _read_session(
-                        execution_root,
+                        execution_session,
                         _EXECUTION_COLUMNS,
                         decision_timestamp,
                         resource_policy,
@@ -593,7 +626,7 @@ def build_portfolio_ledger(
                             decision_timestamp, "end_at"
                         ]
                         next_panel = _read_session(
-                            panel_root,
+                            panel_session,
                             panel_columns,
                             next_timestamp,
                             resource_policy,
@@ -610,7 +643,7 @@ def build_portfolio_ledger(
                                 "portfolio_market_session_missing"
                             )
                         endpoint_panel = _read_session(
-                            panel_root,
+                            panel_session,
                             panel_columns,
                             endpoint_timestamp,
                             resource_policy,
@@ -852,17 +885,16 @@ def _read_next_session(
 
 
 def _read_session(
-    root: Path,
+    session: DatasetSession,
     columns: tuple[str, ...],
     timestamp: pd.Timestamp,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> pd.DataFrame:
-    frame = _read_materialized(
-        root,
-        columns,
-        time_window=TimeWindow(timestamp, timestamp),
-        resource_policy=resource_policy,
-    )
+    with session.filtered_view(TimeWindow(timestamp, timestamp)) as view:
+        frame = materialize_dataset_session(
+            view,
+            target_chunk_bytes=resource_policy.operation_headroom_bytes,
+        )
     if "timestamp" not in frame.columns:
         raise ValueError("portfolio_input_schema_invalid")
     normalized = _session_frame(frame, columns)
@@ -1043,17 +1075,16 @@ def _completed_calibration_rows(
 
 
 def _benchmark_weights(
-    root: Path,
+    session: DatasetSession,
     benchmark_id: str,
     timestamp: pd.Timestamp,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> pd.Series:
-    frame = _read_materialized(
-        root,
-        _BENCHMARK_COLUMNS,
-        time_window=TimeWindow(timestamp, timestamp),
-        resource_policy=resource_policy,
-    )
+    with session.filtered_view(TimeWindow(timestamp, timestamp)) as view:
+        frame = materialize_dataset_session(
+            view,
+            target_chunk_bytes=resource_policy.operation_headroom_bytes,
+        )
     if type(frame) is not pd.DataFrame:
         raise ValueError("portfolio_input_reader_not_materialized")
     if not set(_BENCHMARK_COLUMNS).issubset(frame.columns):

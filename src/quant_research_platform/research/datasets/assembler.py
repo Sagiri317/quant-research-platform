@@ -325,8 +325,8 @@ def _join_processed_inputs(
                     coverage_bound = sum(
                         (
                             input_bytes,  # input key projection
-                            base_key_bytes + input_bytes,  # extra-key join
-                            base_key_bytes + input_bytes,  # missing-key join
+                            base_key_bytes + input_bytes,  # base index and lookup
+                            base_key_bytes + input_bytes,  # input index and lookup
                             len(base_keys) + len(input_frame),  # result masks
                         )
                     )
@@ -550,28 +550,22 @@ def _validate_input_key_coverage(
     input_data_id: str,
 ) -> None:
     key_columns = list(dataset_spec.primary_key)
-    input_keys = input_frame.loc[:, key_columns].copy()
-    extra = input_keys.merge(
-        base_keys,
-        on=key_columns,
-        how="left",
-        indicator=True,
-    )["_merge"].eq("left_only")
+    input_keys = input_frame.loc[:, key_columns]
+    policy = dataset_spec.key_coverage.get(input_data_id, "strict")
+    if input_keys.equals(base_keys) and policy in {"strict", "sparse"}:
+        return
+    base_index = pd.MultiIndex.from_frame(base_keys)
+    input_index = pd.MultiIndex.from_frame(input_keys)
+    extra = ~input_index.isin(base_index)
     if bool(extra.any()):
         raise ValueError(
             f"extra_research_input_keys: {input_data_id}: {int(extra.sum())}"
         )
-    policy = dataset_spec.key_coverage.get(input_data_id, "strict")
     if policy == "sparse":
         return
     if policy != "strict":
         raise ValueError(f"invalid_research_key_coverage: {input_data_id}={policy}")
-    missing = base_keys.merge(
-        input_keys,
-        on=key_columns,
-        how="left",
-        indicator=True,
-    )["_merge"].eq("left_only")
+    missing = ~base_index.isin(input_index)
     if bool(missing.any()):
         raise ValueError(
             f"missing_research_input_keys: {input_data_id}: {int(missing.sum())}"

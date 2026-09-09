@@ -381,6 +381,32 @@ def _build_producer(
         return selected.loc[:, list(columns)].copy()
 
     expected_policy = resource_policy
+
+    class Session:
+        def __init__(self, root, columns):
+            self.root, self.columns = root, columns
+            self.window = None
+
+        @contextmanager
+        def filtered_view(self, window):
+            self.window = window
+            yield self
+
+    @contextmanager
+    def open_session(root, *, columns, time_window, resource_policy):
+        assert resource_policy is expected_policy
+        yield Session(root, columns)
+
+    def materialize_session(session, *, target_chunk_bytes):
+        return fake_read_dataset(
+            session.root,
+            columns=session.columns,
+            time_window=session.window,
+            resource_policy=expected_policy,
+        )
+
+    monkeypatch.setattr(production, "open_dataset_session", open_session)
+    monkeypatch.setattr(production, "materialize_dataset_session", materialize_session)
     monkeypatch.setattr(production, "read_dataset", fake_read_dataset)
     assumptions = ExecutionAssumptions(
         initial_nav=100.0,
