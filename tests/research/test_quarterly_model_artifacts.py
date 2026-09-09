@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import warnings
 from contextlib import contextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -76,6 +76,38 @@ from tests.research.workflow_test_support import (
     _selection_metadata,
     _trial_reference,
 )
+
+
+def _mock_prediction_dataset(monkeypatch, frame):
+    import pyarrow as pa
+
+    @dataclass
+    class Session:
+        logical_columns: tuple = ()
+        physical_columns: tuple = ()
+        owns_inventory: bool = False
+        owns_lease: bool = False
+
+        @property
+        def arrow_schema(self):
+            return pa.Schema.from_pandas(frame, preserve_index=False)
+
+        @property
+        def spec(self):
+            return {"timestamp_column": "timestamp"}
+
+        @contextmanager
+        def filtered_view(self, _window):
+            yield self
+
+    @contextmanager
+    def open_session(*_args, **_kwargs):
+        yield Session()
+
+    monkeypatch.setattr(runner, "open_dataset_session", open_session)
+    monkeypatch.setattr(
+        runner, "iter_dataset_chunks", lambda *_args, **_kwargs: iter((frame,))
+    )
 
 
 def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limit(
@@ -360,11 +392,7 @@ def test_persisted_quarter_consumption_uses_active_columns_and_actual_model_ids(
             "eligible": [True, True],
         }
     )
-    monkeypatch.setattr(
-        runner,
-        "iter_research_dataset_chunks",
-        lambda *_args, **_kwargs: iter((frame,)),
-    )
+    _mock_prediction_dataset(monkeypatch, frame)
     prediction_spec = PredictionSpec(
         prediction_id="prediction",
         model_id="model-artifact",
@@ -447,11 +475,7 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
             "eligible": [True] * 3,
         }
     )
-    monkeypatch.setattr(
-        runner,
-        "iter_research_dataset_chunks",
-        lambda *_args, **_kwargs: iter((frame,)),
-    )
+    _mock_prediction_dataset(monkeypatch, frame)
     prediction_spec = PredictionSpec(
         prediction_id="prediction",
         model_id="model-artifact",
@@ -485,11 +509,7 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
             assert lookup.prediction_column == "alpha_score"
 
     shuffled = frame.iloc[[2, 0, 1]].reset_index(drop=True)
-    monkeypatch.setattr(
-        runner,
-        "iter_research_dataset_chunks",
-        lambda *_args, **_kwargs: iter((shuffled,)),
-    )
+    _mock_prediction_dataset(monkeypatch, shuffled)
     second = runner.build_prediction_result_from_persisted_model(
         layout=StorageLayout(project_root=tmp_path),
         dataset_catalog=ResearchDatasetCatalog((spec,)),
@@ -566,11 +586,7 @@ def test_persisted_quarter_request_is_clipped_to_requested_window(
             "eligible": True,
         }
     )
-    monkeypatch.setattr(
-        runner,
-        "iter_research_dataset_chunks",
-        lambda *_args, **_kwargs: iter((frame,)),
-    )
+    _mock_prediction_dataset(monkeypatch, frame)
     prediction_spec = PredictionSpec(
         prediction_id="prediction",
         model_id="model-artifact",

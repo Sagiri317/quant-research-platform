@@ -10,7 +10,11 @@ import pandas as pd
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.datasets.io import (
+    _research_dataset_access_window,
+    iter_research_dataset_chunks,
+)
 from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
@@ -26,6 +30,11 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
+)
+from quant_research_platform.storage.datasets.reading import (
+    iter_dataset_chunks,
+    open_dataset_session,
+    resolve_columns_from_schema,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -78,7 +87,21 @@ def build_prediction_result_from_persisted_model(
     state = _PredictionMetadataState(selected_input_columns)
 
     def output_chunks() -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
-        with runtime_resource_policy_scope(resource_policy) as policy:
+        window = _research_dataset_access_window(
+            dataset_spec.market_id,
+            TimeWindow(requested_start, requested_end),
+            access_window,
+        )
+        root = layout.target_root(
+            dataset_spec.data_id,
+            layout.research_dataset_root(dataset_spec.market_id, dataset_spec.data_id),
+        )
+        with (
+            runtime_resource_policy_scope(resource_policy) as policy,
+            open_dataset_session(
+                root, columns=None, time_window=window, resource_policy=policy
+            ) as dataset_session,
+        ):
             for item in selected:
                 metadata = dict(item["model_metadata"])
                 q_start_value = max(
@@ -120,29 +143,43 @@ def build_prediction_result_from_persisted_model(
                 ) -> Iterable[pd.DataFrame]:
                     if {"family_id", "quarter_id"}.intersection(_read_columns):
                         raise ValueError("prediction_input_coordinate_collision")
-                    for frame in iter_validated_research_input_chunks(
-                        iter_research_dataset_chunks(
-                            layout,
-                            market_id=dataset_spec.market_id,
-                            dataset_id=dataset_spec.data_id,
-                            time_window=TimeWindow(_q_start, _q_end),
-                            columns=_read_columns,
-                            access_window=access_window,
-                        ),
-                        dataset_spec=dataset_spec,
-                        input_columns=_q_input_columns,
-                    ):
-                        with policy.lease(
-                            "research.prediction.family_coordinates",
-                            max(1, len(frame) * 512 + 65536),
-                        ):
-                            frame["family_id"] = _family
-                            frame["quarter_id"] = _quarter
-                            try:
-                                yield frame
-                            finally:
-                                del frame["family_id"]
-                                del frame["quarter_id"]
+                    columns = resolve_columns_from_schema(
+                        tuple(dataset_session.arrow_schema.names),
+                        spec=dataset_session.spec,
+                        columns=_read_columns,
+                    )
+                    projection = replace(
+                        dataset_session,
+                        logical_columns=columns,
+                        physical_columns=columns,
+                        owns_inventory=False,
+                        owns_lease=False,
+                    )
+                    with projection.filtered_view(TimeWindow(_q_start, _q_end)) as view:
+                        with closing_iterator(
+                            iter_validated_research_input_chunks(
+                                iter_dataset_chunks(
+                                    view,
+                                    target_chunk_bytes=max(
+                                        1, policy.operation_headroom_bytes
+                                    ),
+                                ),
+                                dataset_spec=dataset_spec,
+                                input_columns=_q_input_columns,
+                            )
+                        ) as source:
+                            for frame in source:
+                                with policy.lease(
+                                    "research.prediction.family_coordinates",
+                                    max(1, len(frame) * 512 + 65536),
+                                ):
+                                    frame["family_id"] = _family
+                                    frame["quarter_id"] = _quarter
+                                    try:
+                                        yield frame
+                                    finally:
+                                        del frame["family_id"]
+                                        del frame["quarter_id"]
 
                 q_spec = replace(
                     prediction_spec,
