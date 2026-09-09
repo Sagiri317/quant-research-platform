@@ -6,6 +6,7 @@ from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
+from numpy.lib.stride_tricks import sliding_window_view
 
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -51,7 +52,7 @@ def calculate_price_volume_factors(
     if ordered.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("price_volume_key_duplicate")
     ordered = ordered.sort_values(["asset_id", "timestamp"], kind="mergesort")
-    output: dict[str, list[float]] = {factor: [] for factor in requested}
+    output: dict[str, list[np.ndarray]] = {factor: [] for factor in requested}
     bounds = (
         None if output_window is None else time_window_timestamp_interval(output_window)
     )
@@ -94,12 +95,7 @@ def calculate_price_volume_factors(
                 )
             )
         for factor in requested:
-            windows = _PRICE_VOLUME_INPUT_WINDOWS[factor][1]
-            size = windows[0] if windows else 0
-            output[factor].extend(
-                _calculate_value(values, factor, index, size)
-                for index in range(start, stop)
-            )
+            output[factor].append(_calculate_values(values, factor, start, stop))
     ordered = ordered.loc[:, ("asset_id", "timestamp")]
     if bounds is not None:
         lower, upper, closed = bounds
@@ -110,231 +106,174 @@ def calculate_price_volume_factors(
         ]
     ordered = ordered.reset_index(drop=True)
     for factor in requested:
-        ordered[factor] = np.asarray(output[factor], dtype="float64")
+        ordered[factor] = (
+            np.concatenate(output[factor])
+            if output[factor]
+            else np.empty(0, dtype="float64")
+        )
     return ordered
 
 
-def _calculate_value(
-    values: dict[str, np.ndarray], factor: str, index: int, size: int
-) -> float:
-    source = values[_PRICE_VOLUME_INPUT_WINDOWS[factor][0][0]]
-    if factor.startswith("reversal_") or factor in {"momentum_20d", "momentum_60d"}:
-        return _lagged_momentum(source, index, size, 0) * (
-            -1.0 if factor.startswith("reversal_") else 1.0
-        )
-    if factor.startswith("momentum_"):
-        return _lagged_momentum(
-            source, index, size, _PRICE_VOLUME_INPUT_WINDOWS[factor][1][1]
-        )
-    if factor.startswith("volatility_") or factor == "amount_volatility_20d":
-        return _window_stat(source, index, size, "std")
-    if factor.startswith("downside_volatility_"):
-        return _window_rms(source, index, size)
-    if factor == "upside_volatility_20d":
-        current = _window(source, index, size)
-        return (
-            float("nan")
-            if current is None
-            else float(np.sqrt(np.mean(np.maximum(current, 0.0) ** 2)))
-        )
-    if factor in {"max_return_20d", "min_return_20d", "skewness_60d", "kurtosis_60d"}:
-        statistic = {
-            "max_return_20d": "max",
-            "min_return_20d": "min",
-            "skewness_60d": "skew",
-            "kurtosis_60d": "kurt",
-        }[factor]
-        return _window_stat(source, index, size, statistic)
-    if factor == "drawdown_60d":
-        return _window_drawdown(source, index, size)
-    if factor == "amplitude_20d":
-        return _window_ratio_mean(
-            values["high"], values["low"], values["close"], index, size
-        )
-    if factor in {"log_avg_amount_20d", "avg_amount_20d"}:
-        mean = _window_stat(source, index, size, "mean")
-        return _log(mean) if factor == "log_avg_amount_20d" else mean
-    if factor in {"turnover_20d", "turnover_60d", "turnover_volatility_20d"}:
-        return _window_stat(
-            values["turnover"],
-            index,
-            size,
-            "std" if factor == "turnover_volatility_20d" else "mean",
-        )
-    if factor.endswith("_change_20d"):
-        current = values["turnover"] if factor == "turnover_change_20d" else source
-        return _lagged_momentum(current, index, size, 0)
-    if factor.startswith("amihud_"):
-        return _window_amihud(source, values["amount"], index, size)
-    if factor in {"amount_shock_20d", "volume_shock_20d"}:
-        return _amount_shock(source, index, size)
-    if factor.endswith("_corr_20d"):
-        right = values[factor.removeprefix("return_").removesuffix("_corr_20d")]
-        return _window_corr(source, right, index, size)
-    if factor == "trend_efficiency_60d":
-        return _trend_efficiency(source, index, size)
-    if factor == "signed_amount_flow_20d":
-        return _signed_amount_flow(source, values["amount"], index, size)
-    if factor == "return_amount_imbalance_20d":
-        ret, flow = _window(source, index, size), _window(values["amount"], index, size)
-        if ret is None or flow is None:
-            return float("nan")
-        denominator = float(np.sum(np.abs(ret) * flow))
-        return (
-            float(np.sum(ret * flow) / denominator)
-            if denominator != 0.0
-            else float("nan")
-        )
-    if factor == "zero_amount_ratio_20d":
-        current = _window(source, index, size)
-        return float("nan") if current is None else float(np.mean(current <= 0.0))
+def _calculate_values(
+    values: dict[str, np.ndarray], factor: str, start: int, stop: int
+) -> np.ndarray:
+    names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
+    size = windows[0] if windows else 0
+    source = values["turnover" if factor.startswith("turnover_") else names[0]]
+    output = np.full(stop - start, np.nan)
+    if factor.startswith(("reversal_", "momentum_")) or factor.endswith("_change_20d"):
+        first = max(start, size)
+        if first >= stop:
+            return output
+        skip = windows[1] if len(windows) > 1 else 0
+        numerator = source[first - skip : stop - skip]
+        denominator = source[first - size : stop - size]
+        valid = np.isfinite(numerator) & np.isfinite(denominator) & (denominator != 0)
+        current = output[first - start :]
+        current[valid] = numerator[valid] / denominator[valid] - 1.0
+        if factor.startswith("reversal_"):
+            current *= -1.0
+        return output
     if factor in {"log_float_market_cap", "log_total_market_cap"}:
-        return _log(source[index])
-    raise ValueError("price_volume_calculation_missing")
+        return _log(source[start:stop])
+    shift = int(factor in {"amount_shock_20d", "volume_shock_20d"})
+    first = max(start, size - 1 + shift)
+    if first >= stop:
+        return output
 
+    def window(column: np.ndarray) -> np.ndarray:
+        return sliding_window_view(column, size)[
+            first - size + 1 - shift : stop - size + 1 - shift
+        ]
 
-def _window(values: np.ndarray, index: int, size: int) -> np.ndarray | None:
-    start = index - size + 1
-    if start < 0:
-        return None
-    current = values[start : index + 1]
-    return current if np.isfinite(current).all() else None
-
-
-def _window_stat(values: np.ndarray, index: int, size: int, statistic: str) -> float:
-    current = _window(values, index, size)
-    if current is None:
-        return float("nan")
-    if statistic == "std":
-        return float(np.std(current, ddof=1)) if size >= 2 else float("nan")
-    if statistic == "max":
-        return float(np.max(current))
-    if statistic == "min":
-        return float(np.min(current))
-    if statistic == "kurt":
-        if size < 4 or np.min(current) == np.max(current):
-            return float("nan")
-        normalized = current / np.max(np.abs(current))
-        centered = normalized - np.mean(normalized)
-        centered /= np.max(np.abs(centered))
-        moment_2 = np.mean(centered * centered)
-        moment_4 = np.mean(centered**4)
-        return float(
+    matrix = window(source)
+    valid = np.isfinite(matrix).all(axis=1)
+    extra_names = (
+        ("low", "close")
+        if factor == "amplitude_20d"
+        else ("amount",)
+        if factor.startswith("amihud_")
+        or factor in {"signed_amount_flow_20d", "return_amount_imbalance_20d"}
+        else (factor.removeprefix("return_").removesuffix("_corr_20d"),)
+        if factor.endswith("_corr_20d")
+        else ()
+    )
+    extra = {name: window(values[name]) for name in extra_names}
+    for matrix_extra in extra.values():
+        valid &= np.isfinite(matrix_extra).all(axis=1)
+    if factor == "drawdown_60d":
+        valid &= (matrix > 0).all(axis=1)
+    if factor == "amplitude_20d":
+        valid &= (extra["close"] != 0).all(axis=1)
+    if factor.startswith("amihud_"):
+        valid &= (extra["amount"] > 0).all(axis=1)
+    if factor.endswith("_corr_20d"):
+        valid &= (np.ptp(matrix, axis=1) != 0) & (
+            np.ptp(extra[extra_names[0]], axis=1) != 0
+        )
+    if factor == "kurtosis_60d":
+        valid &= np.min(matrix, axis=1) != np.max(matrix, axis=1)
+    if shift:
+        valid &= np.isfinite(source[first:stop])
+    current = matrix[valid]
+    extra = {name: data[valid] for name, data in extra.items()}
+    if factor.startswith("volatility_") or factor in {
+        "amount_volatility_20d",
+        "turnover_volatility_20d",
+    }:
+        result = np.std(current, axis=1, ddof=1)
+    elif factor.startswith("downside_volatility_"):
+        result = np.sqrt(np.mean(np.minimum(current, 0.0) ** 2, axis=1))
+    elif factor == "upside_volatility_20d":
+        result = np.sqrt(np.mean(np.maximum(current, 0.0) ** 2, axis=1))
+    elif factor == "max_return_20d":
+        result = np.max(current, axis=1)
+    elif factor == "min_return_20d":
+        result = np.min(current, axis=1)
+    elif factor == "skewness_60d":
+        # Batched pandas skew has measured ULP differences from the scalar kernel.
+        result = np.fromiter((pd.Series(row).skew() for row in current), dtype=float)
+    elif factor == "kurtosis_60d":
+        normalized = current / np.max(np.abs(current), axis=1, keepdims=True)
+        centered = normalized - np.mean(normalized, axis=1, keepdims=True)
+        centered /= np.max(np.abs(centered), axis=1, keepdims=True)
+        moment_2 = np.mean(centered * centered, axis=1)
+        moment_4 = np.mean(centered**4, axis=1)
+        result = (
             (size - 1)
             / ((size - 2) * (size - 3))
             * ((size + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
         )
-    if statistic == "mean":
-        return float(np.mean(current))
-    if statistic == "skew":
-        return float(pd.Series(current).skew()) if size >= 3 else float("nan")
-    raise ValueError("price_volume_statistic_invalid")
+    elif factor == "drawdown_60d":
+        result = np.min(current / np.maximum.accumulate(current, axis=1) - 1.0, axis=1)
+    elif factor == "amplitude_20d":
+        result = np.mean((current - extra["low"]) / extra["close"], axis=1)
+    elif factor in {
+        "log_avg_amount_20d",
+        "avg_amount_20d",
+        "turnover_20d",
+        "turnover_60d",
+    }:
+        result = np.mean(current, axis=1)
+        if factor == "log_avg_amount_20d":
+            result = _log(result)
+    elif factor.startswith("amihud_"):
+        result = np.mean(np.abs(current) / extra["amount"], axis=1)
+    elif shift:
+        mean = np.mean(current, axis=1)
+        result = (
+            np.divide(
+                source[first:stop][valid],
+                mean,
+                out=np.full(len(current), np.nan),
+                where=mean != 0,
+            )
+            - 1.0
+        )
+    elif factor.endswith("_corr_20d"):
+        # Retain the exact native covariance/normalization kernel.
+        result = np.fromiter(
+            (
+                np.corrcoef(a, b)[0, 1]
+                for a, b in zip(current, extra[extra_names[0]], strict=True)
+            ),
+            dtype=float,
+        )
+    elif factor == "trend_efficiency_60d":
+        denominator = np.sum(np.abs(current), axis=1)
+        result = np.divide(
+            np.abs(np.sum(current, axis=1)),
+            denominator,
+            out=np.full(len(current), np.nan),
+            where=denominator != 0,
+        )
+    elif factor in {"signed_amount_flow_20d", "return_amount_imbalance_20d"}:
+        flow = extra["amount"]
+        numerator = np.sum(
+            (np.sign(current) if factor == "signed_amount_flow_20d" else current)
+            * flow,
+            axis=1,
+        )
+        denominator = np.sum(
+            flow if factor == "signed_amount_flow_20d" else np.abs(current) * flow,
+            axis=1,
+        )
+        result = np.divide(
+            numerator,
+            denominator,
+            out=np.full(len(current), np.nan),
+            where=denominator != 0,
+        )
+    elif factor == "zero_amount_ratio_20d":
+        result = np.mean(current <= 0.0, axis=1)
+    else:
+        raise ValueError("price_volume_calculation_missing")
+    output[first - start :][valid] = result
+    return output
 
 
-def _window_rms(values: np.ndarray, index: int, size: int) -> float:
-    current = _window(values, index, size)
-    if current is None:
-        return float("nan")
-    return float(np.sqrt(np.mean(np.minimum(current, 0.0) ** 2)))
-
-
-def _window_drawdown(values: np.ndarray, index: int, size: int) -> float:
-    current = _window(values, index, size)
-    if current is None or (current <= 0.0).any():
-        return float("nan")
-    drawdowns = current / np.maximum.accumulate(current) - 1.0
-    return float(np.min(drawdowns))
-
-
-def _window_ratio_mean(
-    high: np.ndarray,
-    low: np.ndarray,
-    close: np.ndarray,
-    index: int,
-    size: int,
-) -> float:
-    values = _window(high, index, size)
-    lows = _window(low, index, size)
-    closes = _window(close, index, size)
-    if values is None or lows is None or closes is None or (closes == 0.0).any():
-        return float("nan")
-    return float(np.mean((values - lows) / closes))
-
-
-def _window_amihud(
-    returns: np.ndarray, amount: np.ndarray, index: int, size: int
-) -> float:
-    ret = _window(returns, index, size)
-    flow = _window(amount, index, size)
-    if ret is None or flow is None or (flow <= 0.0).any():
-        return float("nan")
-    return float(np.mean(np.abs(ret) / flow))
-
-
-def _amount_shock(amount: np.ndarray, index: int, size: int) -> float:
-    if index < size:
-        return float("nan")
-    current = amount[index]
-    baseline = amount[index - size : index]
-    if not np.isfinite(current) or not np.isfinite(baseline).all():
-        return float("nan")
-    mean = float(np.mean(baseline))
-    return float(current / mean - 1.0) if mean != 0.0 else float("nan")
-
-
-def _window_corr(left: np.ndarray, right: np.ndarray, index: int, size: int) -> float:
-    left_window = _window(left, index, size)
-    right_window = _window(right, index, size)
-    if left_window is None or right_window is None:
-        return float("nan")
-    if np.ptp(left_window) == 0.0 or np.ptp(right_window) == 0.0:
-        return float("nan")
-    return float(np.corrcoef(left_window, right_window)[0, 1])
-
-
-def _trend_efficiency(values: np.ndarray, index: int, size: int) -> float:
-    current = _window(values, index, size)
-    if current is None:
-        return float("nan")
-    denominator = float(np.sum(np.abs(current)))
-    return (
-        float(abs(np.sum(current)) / denominator)
-        if denominator != 0.0
-        else float("nan")
-    )
-
-
-def _signed_amount_flow(
-    returns: np.ndarray, amount: np.ndarray, index: int, size: int
-) -> float:
-    ret = _window(returns, index, size)
-    flow = _window(amount, index, size)
-    if ret is None or flow is None:
-        return float("nan")
-    denominator = float(np.sum(flow))
-    return (
-        float(np.sum(np.sign(ret) * flow) / denominator)
-        if denominator != 0.0
-        else float("nan")
-    )
-
-
-def _lagged_momentum(
-    price: np.ndarray, index: int, long_window: int, skip: int
-) -> float:
-    if index < long_window:
-        return float("nan")
-    numerator = price[index - skip]
-    denominator = price[index - long_window]
-    return _return(numerator, denominator)
-
-
-def _return(numerator: float, denominator: float) -> float:
-    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator == 0.0:
-        return float("nan")
-    value = numerator / denominator - 1.0
-    return float(value)
-
-
-def _log(value: float) -> float:
-    return float(np.log(value)) if np.isfinite(value) and value > 0.0 else float("nan")
+def _log(values: np.ndarray) -> np.ndarray:
+    result = np.full(len(values), np.nan)
+    valid = np.isfinite(values) & (values > 0)
+    result[valid] = np.log(values[valid])
+    return result

@@ -248,3 +248,27 @@ def test_price_volume_rejects_removed_names_before_calculation():
             calculate_price_volume_factors(
                 pd.DataFrame(), factor_columns=("reversal_5d", name)
             )
+
+
+def test_price_volume_skew_preserves_native_single_window_rounding():
+    values = np.random.default_rng(20260910).normal(size=320)
+    values[200] = np.nan
+    dates = pd.bdate_range("2020-01-01", periods=len(values))
+    panel = pd.DataFrame(
+        {"asset_id": "asset", "timestamp": dates, "period_return": values}
+    )
+    original = panel.copy(deep=True)
+    actual = calculate_price_volume_factors(
+        panel,
+        factor_columns=("skewness_60d",),
+        output_window=TimeWindow(dates[59].date(), dates[-1].date()),
+    )
+    expected = pd.Series(
+        [
+            pd.Series(values[start : start + 60]).skew(skipna=False)
+            for start in range(len(values) - 59)
+        ],
+        name="skewness_60d",
+    )
+    pd.testing.assert_series_equal(actual["skewness_60d"], expected, check_exact=True)
+    pd.testing.assert_frame_equal(panel, original, check_exact=True)
