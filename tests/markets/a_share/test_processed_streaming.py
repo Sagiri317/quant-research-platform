@@ -465,16 +465,19 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
         "closed_calendar": "a_share_trading_calendar_empty",
         "invalid_market_type": "invalid_market_type",
     }
+    result = build()
+    market = next(
+        row for row in result["target_results"] if row["target_id"] == "market_panel_1d"
+    )
     if case in errors:
-        with pytest.raises(ValueError, match=errors[case]):
-            build()
-    else:
-        result = build()
-        market = next(
-            row
-            for row in result["target_results"]
-            if row["target_id"] == "market_panel_1d"
+        assert result["status"] == "FAILED"
+        assert market["status"] == "FAILED"
+        assert errors[case] in market["reason"]
+        descendant = next(
+            row for row in result["target_results"] if row["target_id"] == "pv_all"
         )
+        assert descendant["status"] == "BLOCKED"
+    else:
         if case == "late_lifecycle":
             assert market["status"] == "BUILT"
         else:
