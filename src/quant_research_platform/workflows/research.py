@@ -1788,26 +1788,34 @@ def _build_semantic_target(
         binding.kind is ProducerKind.STATISTIC and protocol.protocol_id == "crypto_hft"
     ):
         group = protocol.statistics_table_group(spec.target_id)
-        owned_tables = binding.producer(
+        producer = partial(
+            binding.producer,
             layout=target_layout,
             protocol_manifest=protocol.manifest(),
             time_window=time_window,
             upstream_identities=planned["upstream_identities"],
             resource_policy=policy,
-            **({"raw_root": raw_root} if group == "crypto_maker_calibration" else {}),
         )
-        try:
+        if group == "crypto_maker_calibration":
             write_statistics_artifact(
                 logical_root,
                 envelope=envelope,
-                tables=owned_tables.value,
+                tables=partial(producer, raw_root=raw_root),
                 table_group=group,
-                validate_tables=validate_maker_calibration
-                if group == "crypto_maker_calibration"
-                else None,
+                validate_tables=validate_maker_calibration,
             )
-        finally:
-            owned_tables.release(owner="research.crypto.statistics.output")
+        else:
+            owned_tables = producer()
+            try:
+                write_statistics_artifact(
+                    logical_root,
+                    envelope=envelope,
+                    tables=owned_tables.value,
+                    table_group=group,
+                )
+            finally:
+                owned_tables.release(owner="research.statistics.output")
+
     elif (
         binding.kind is ProducerKind.STATISTIC
         and spec.target_id == f"{protocol.scenario_id}_portfolio_statistics"

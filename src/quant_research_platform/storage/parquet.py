@@ -963,7 +963,7 @@ def _parquet_row_group_footer_upper_bound(
     *,
     rows: int,
 ) -> int:
-    """Bound retained footer state with statistics and indexes disabled."""
+    """Bound retained footer structure; page indexes remain disabled."""
 
     group_rows = _parquet_row_group_size(rows)
     group_count = max(1, (rows + group_rows - 1) // group_rows)
@@ -1550,7 +1550,9 @@ def _parquet_table_write_state(
 
 
 @contextmanager
-def parquet_table_writer(handle, *, parent: Path, compression: str, schema=None):
+def parquet_table_writer(
+    handle, *, parent: Path, compression: str, schema=None, statistics=()
+):
     """Own one native stream, its page/footer reservations and primary failure."""
     with (
         handle_preserving_primary(ExitStack()) as state,
@@ -1606,7 +1608,9 @@ def parquet_table_writer(handle, *, parent: Path, compression: str, schema=None)
                                 write_batch_size=batch_rows,
                                 max_rows_per_page=batch_rows,
                                 use_dictionary=False,
-                                write_statistics=False,
+                                write_statistics=list(statistics)
+                                if statistics
+                                else False,
                                 write_page_index=False,
                                 write_page_checksum=False,
                             )

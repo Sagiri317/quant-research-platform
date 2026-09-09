@@ -1,6 +1,6 @@
 """Small explicit market tapes for maker action tests."""
 
-import numpy as np
+from types import SimpleNamespace
 
 from quant_research_platform.contracts.order_book import BookBoundary, TradeEvent
 from quant_research_platform.markets.implementations.crypto.execution import (
@@ -40,14 +40,36 @@ def calibration_inputs(paths, errors):
             }
         )
     offsets.append(len(event_rows))
-    return (
-        {column: np.array([row[column] for row in samples]) for column in samples[0]},
-        {
-            column: np.array([row[column] for row in event_rows])
-            for column in event_rows[0]
-        },
-        np.array(offsets, dtype=np.int64),
-    )
+
+    def sample_rows():
+        yield from samples
+
+    def events(start, stop):
+        for event_id in range(start, stop):
+            rows = event_rows[offsets[event_id] : offsets[event_id + 1]]
+            first = rows[0]
+            yield SimpleNamespace(
+                kind=first["event_kind"],
+                event_at=first["event_at"],
+                event_id=event_id,
+                segment_id=first["context_id"],
+                connection_id=first["context_id"],
+                price_tick=first["price_tick"],
+                visible_quantity=first["quantity"],
+                buyer_is_maker=first["side"] == "buy",
+                bids=tuple(
+                    (row["price_tick"], row["quantity"])
+                    for row in rows
+                    if row["side"] == "buy"
+                ),
+                asks=tuple(
+                    (row["price_tick"], row["quantity"])
+                    for row in rows
+                    if row["side"] == "sell"
+                ),
+            )
+
+    return sample_rows, events
 
 
 def maker_event_rows(event_id, event, *, offset=0):

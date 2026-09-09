@@ -336,8 +336,11 @@ def test_actual_maker_keeps_cashflows_of_all_queued_commands():
 
 
 def test_many_known_funding_offsets_complete_under_one_small_query_budget():
+    from quant_research_platform.storage.exact_keys import EXACT_KEY_SQLITE_CACHE_BYTES
+
     policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2, explicit_cap_bytes=64 * 1024
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=EXACT_KEY_SQLITE_CACHE_BYTES + 64 * 1024,
     )
     state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
     paths = [

@@ -5,16 +5,14 @@ from __future__ import annotations
 import json
 import struct
 import tempfile
-from array import array
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+from itertools import groupby
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-
-import numpy as np
 
 from quant_research_platform.contracts.json_codec import (
     json_record_working_set_bytes,
@@ -47,6 +45,11 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
     require_free_disk_headroom,
+)
+from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.storage.exact_keys import (
+    EXACT_KEY_SQLITE_CACHE_BYTES,
+    ExactPrimaryKeyIndex,
 )
 
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
@@ -1367,42 +1370,20 @@ def _maker_new_order(
 
 
 class MakerCalibration:
-    """Borrow one shared validation tape; replay executable quote actions."""
+    """Stream shared validation samples and replay only their event windows."""
 
-    def __init__(self, samples, events, event_offsets, *, resource_policy):
+    def __init__(self, samples, events, *, resource_policy):
         self.samples = samples
         self.events = events
-        self.event_offsets = event_offsets
         self.policy = resource_policy
-        self.maximum_book_rows = max(
-            int(stop) - int(start)
-            for start, stop in zip(event_offsets[:-1], event_offsets[1:], strict=True)
-        )
 
     def close(self):
-        self.samples = self.events = self.event_offsets = None
+        self.samples = self.events = None
 
+    @contextmanager
     def _book(self, event_id):
-        start, stop = self.event_offsets[event_id : event_id + 2]
-        return SimpleNamespace(
-            segment_id=self.events["context_id"][start],
-            bids=tuple(
-                (
-                    int(self.events["price_tick"][index]),
-                    float(self.events["quantity"][index]),
-                )
-                for index in range(start, stop)
-                if self.events["side"][index] == "buy"
-            ),
-            asks=tuple(
-                (
-                    int(self.events["price_tick"][index]),
-                    float(self.events["quantity"][index]),
-                )
-                for index in range(start, stop)
-                if self.events["side"][index] == "sell"
-            ),
-        )
+        with closing_iterator(self.events(event_id, event_id + 1)) as events:
+            yield next(events)
 
     def _response(
         self,
@@ -1417,14 +1398,14 @@ class MakerCalibration:
         replace_quantity,
     ):
         side = new_order.side
-        start = int(self.samples["decision_at"][sample])
+        start = int(sample["decision_at"])
         end = start + lifetime_ns
-        initial = self._book(int(self.samples["initial_book_event_id"][sample]))
-        origin = (initial.bids if side == "buy" else initial.asks)[0][0]
-        del initial
+        with self._book(int(sample["initial_book_event_id"])) as initial:
+            origin = (initial.bids if side == "buy" else initial.asks)[0][0]
+            initial = None
         current_origin = (state.bids if side == "buy" else state.asks)[0][0]
-        book_context = self.samples["book_segment_id"][sample]
-        trade_context = self.samples["trade_connection_id"][sample]
+        book_context = sample["book_segment_id"]
+        trade_context = sample["trade_connection_id"]
 
         def mapped(order):
             return replace(
@@ -1477,82 +1458,75 @@ class MakerCalibration:
                 for tick, quantity in state.asks
             ),
         )
-        index = int(self.samples["event_start"][sample])
-        stop = int(self.samples["event_end"][sample])
-        while index < stop or pending:
-            position = int(self.event_offsets[index]) if index < stop else None
-            event_time = (
-                int(self.events["event_at"][position]) if position is not None else None
-            )
-            command_time = pending[0][0] if pending else None
-            stamp = _maker_next_time(event_time, command_time)
-            if stamp >= end:
-                break
-            for _expired in _maker_expired_orders(active, stamp):
-                if _expired is candidate:
-                    candidate_reason = "expired"
-            if event_time == stamp:
-                kind = self.events["event_kind"][position]
-                if kind == "boundary":
-                    if candidate is not None and candidate_reason is None:
-                        candidate_reason = "book_boundary"
-                    active.clear()
-                    pending.clear()
-                    current_state = None
-                elif kind == "book":
-                    next_state = self._book(index)
-                    if (
-                        current_state is not None
-                        and next_state.segment_id != current_state.segment_id
-                    ):
-                        if candidate is not None and candidate_reason is None:
-                            candidate_reason = "book_boundary"
-                        active.clear()
-                        pending.clear()
-                    current_state = next_state
-                else:
-                    order = active.get(side)
-                    if (
-                        order is not None
-                        and current_state is not None
-                        and order.segment_id == current_state.segment_id
-                    ):
-                        trade = SimpleNamespace(
-                            visible_quantity=float(self.events["quantity"][position]),
-                            connection_id=self.events["context_id"][position],
-                            price_tick=int(self.events["price_tick"][position]),
-                            buyer_is_maker=self.events["side"][position] == "buy",
-                        )
-                        quantity, _reason = _maker_trade_fill(order, trade)
-                        if quantity > 0:
-                            price = tick_to_price(
-                                int(current_origin + order.price_tick - origin),
-                                new_order.tick_size,
-                            )
-                            yield stamp - start, quantity, price, order is candidate
-                            order.remaining -= quantity
-                            if order.remaining <= 0:
-                                active.pop(side)
-                                if order is candidate:
-                                    candidate_reason = "filled"
-                index += 1
-                continue
-            command = pending.popleft()
-            _old, reason = _maker_apply_command(
-                active, command, current_state, observed, traded
-            )
-            if command[2] is candidate and reason is not None:
-                candidate_reason = reason
-        return candidate_reason or "expired"
+        with closing_iterator(
+            self.events(int(sample["event_start"]), int(sample["event_end"]))
+        ) as events:
+            try:
+                event = next(events, None)
+                while event is not None or pending:
+                    event_time = event.event_at if event is not None else None
+                    command_time = pending[0][0] if pending else None
+                    stamp = _maker_next_time(event_time, command_time)
+                    if stamp >= end:
+                        break
+                    for _expired in _maker_expired_orders(active, stamp):
+                        if _expired is candidate:
+                            candidate_reason = "expired"
+                    if event_time == stamp:
+                        kind = event.kind
+                        if kind == "boundary":
+                            if candidate is not None and candidate_reason is None:
+                                candidate_reason = "book_boundary"
+                            active.clear()
+                            pending.clear()
+                            current_state = None
+                        elif kind == "book":
+                            next_state = event
+                            if (
+                                current_state is not None
+                                and next_state.segment_id != current_state.segment_id
+                            ):
+                                if candidate is not None and candidate_reason is None:
+                                    candidate_reason = "book_boundary"
+                                active.clear()
+                                pending.clear()
+                            current_state = next_state
+                        else:
+                            order = active.get(side)
+                            if (
+                                order is not None
+                                and current_state is not None
+                                and order.segment_id == current_state.segment_id
+                            ):
+                                quantity, _reason = _maker_trade_fill(order, event)
+                                if quantity > 0:
+                                    price = tick_to_price(
+                                        int(current_origin + order.price_tick - origin),
+                                        new_order.tick_size,
+                                    )
+                                    yield (
+                                        stamp - start,
+                                        quantity,
+                                        price,
+                                        order is candidate,
+                                    )
+                                    order.remaining -= quantity
+                                    if order.remaining <= 0:
+                                        active.pop(side)
+                                        if order is candidate:
+                                            candidate_reason = "filled"
+                        event = next(events, None)
+                        continue
+                    command = pending.popleft()
+                    _old, reason = _maker_apply_command(
+                        active, command, current_state, observed, traded
+                    )
+                    if command[2] is candidate and reason is not None:
+                        candidate_reason = reason
+                return candidate_reason or "expired"
 
-    def _compress(self, quantities):
-        values, inverse, counts = np.unique(
-            quantities, return_inverse=True, return_counts=True
-        )
-        errors = np.bincount(
-            inverse, weights=self.samples["forecast_error"], minlength=len(values)
-        )
-        return values, counts, errors
+            finally:
+                current_state = event = None
 
     def select(
         self,
@@ -1567,27 +1541,17 @@ class MakerCalibration:
         fee_bps,
         funding,
     ):
-        samples = len(self.samples["sample_id"])
-        visits = sum(
-            int(stop) - int(start)
-            for start, stop in zip(
-                self.samples["event_start"], self.samples["event_end"], strict=True
-            )
-        )
-        with self.policy.lease(
-            "crypto.maker.calibration.query",
-            max(
-                65536,
-                256
-                * (
-                    samples
-                    + visits
-                    + 2 * self.maximum_book_rows
-                    + len(state.bids)
-                    + len(state.asks)
-                )
-                + 2048 * (len(commands) + 1),
+        with (
+            self.policy.lease(
+                "crypto.maker.calibration.query",
+                max(
+                    65536,
+                    512 * (len(state.bids) + len(state.asks))
+                    + 2048 * (len(commands) + len(funding) + 1),
+                ),
             ),
+            self.policy.lease("storage.exact_keys", EXACT_KEY_SQLITE_CACHE_BYTES),
+            ExactPrimaryKeyIndex(primary_key=(), timestamp_columns=()) as spill,
         ):
             sign = 1.0 if new_order.side == "buy" else -1.0
             mid = _mid(state)
@@ -1595,85 +1559,156 @@ class MakerCalibration:
                 mid * (1.0 + prediction), "hft_prediction_price_invalid"
             )
             limit = new_order.remaining
-            quantities = np.zeros(samples)
-            fill_samples, fill_times, fill_quantities = (
-                array("q"),
-                array("q"),
-                array("d"),
-            )
             keep_gain = cancel_gain = 0.0
-            for sample in range(samples):
-                error = self.samples["forecast_error"][sample]
-                for replacement in (None, limit):
-                    cumulative = 0.0
-                    for elapsed, quantity, price, is_new in self._response(
-                        sample,
-                        state=state,
-                        decision_ns=decision_ns,
-                        new_order=new_order,
-                        active_order=active_order,
-                        commands=commands,
-                        lifetime_ns=lifetime_ns,
-                        replace_quantity=replacement,
-                    ):
-                        if is_new:
-                            cumulative += quantity
-                            fill_samples.append(sample)
-                            fill_times.append(elapsed)
-                            fill_quantities.append(cumulative)
-                        else:
-                            gain = quantity * (
-                                sign * (forecast - price)
-                                - price * fee_bps / 10000.0
-                                + sign * mid * error
-                            )
-                            gain += (
-                                quantity
-                                * sign
-                                * sum(
-                                    cash for stamp, cash in funding if elapsed < stamp
+            sample_count = 0
+
+            def records():
+                nonlocal keep_gain, cancel_gain, sample_count
+                for quantity in (0.0, limit):
+                    payload = struct.pack(">d", quantity)
+                    yield "choices", payload, payload
+                with closing_iterator(self.samples()) as samples:
+                    for sample in samples:
+                        sample_id = sample_count
+                        sample_count += 1
+                        error = sample["forecast_error"]
+                        funded = [0.0] * len(funding)
+                        for replacement in (None, limit):
+                            cumulative = 0.0
+                            with closing_iterator(
+                                self._response(
+                                    sample,
+                                    state=state,
+                                    decision_ns=decision_ns,
+                                    new_order=new_order,
+                                    active_order=active_order,
+                                    commands=commands,
+                                    lifetime_ns=lifetime_ns,
+                                    replace_quantity=replacement,
                                 )
+                            ) as response:
+                                for elapsed, quantity, price, is_new in response:
+                                    if is_new:
+                                        cumulative += quantity
+                                        if 0.0 <= cumulative <= limit:
+                                            payload = struct.pack(">d", cumulative)
+                                            yield "choices", payload, payload
+                                        for index, (stamp, _cash) in enumerate(funding):
+                                            if elapsed < stamp:
+                                                funded[index] = max(
+                                                    funded[index], cumulative
+                                                )
+                                    else:
+                                        gain = quantity * (
+                                            sign * (forecast - price)
+                                            - price * fee_bps / 10000.0
+                                            + sign * mid * error
+                                        )
+                                        gain += (
+                                            quantity
+                                            * sign
+                                            * sum(
+                                                cash
+                                                for stamp, cash in funding
+                                                if elapsed < stamp
+                                            )
+                                        )
+                                        if replacement is None:
+                                            keep_gain += gain
+                                        else:
+                                            cancel_gain += gain
+                            if replacement is not None:
+                                yield (
+                                    "response",
+                                    struct.pack(">dQ", cumulative, sample_id),
+                                    struct.pack(">dd", cumulative, error),
+                                )
+                        for index, quantity in enumerate(funded):
+                            yield (
+                                f"funding_{index}",
+                                struct.pack(">dQ", quantity, sample_id),
+                                struct.pack(">dd", quantity, 0.0),
                             )
-                            if replacement is None:
-                                keep_gain += gain
-                            else:
-                                cancel_gain += gain
-                    if replacement is not None:
-                        quantities[sample] = cumulative
-            indexes = np.frombuffer(fill_samples, dtype=np.int64)
-            times = np.frombuffer(fill_times, dtype=np.int64)
-            cumulative = np.frombuffer(fill_quantities, dtype=np.float64)
-            choices = np.unique(np.concatenate(([0.0, limit], cumulative)))
-            choices = choices[(choices >= 0.0) & (choices <= limit)]
+
+            with closing_iterator(records()) as rows:
+                spill.add_identity_payload_rows(rows=rows)
+
+            def curve(namespace):
+                with closing_iterator(
+                    spill.identity_payload_values(namespace=namespace)
+                ) as payloads:
+                    rows = (struct.unpack(">dd", payload) for payload in payloads)
+                    for quantity, group in groupby(rows, key=lambda row: row[0]):
+                        count, error_sum = 0, 0.0
+                        for _quantity, error in group:
+                            count += 1
+                            error_sum += error
+                        yield quantity, count, error_sum
+
             price = tick_to_price(new_order.price_tick, new_order.tick_size)
             edge = sign * (forecast - price) - price * fee_bps / 10000.0
 
-            def response(curve, weights):
-                filled = curve[0]
-                weighted = np.concatenate(([0.0], np.cumsum(filled * weights)))
-                totals = np.concatenate(([0.0], np.cumsum(weights)))
-                positions = np.searchsorted(filled, choices, side="right")
-                return weighted[positions] + choices * (totals[-1] - totals[positions])
+            def responses(namespace, *, with_error):
+                def weight(count, error):
+                    return count * edge + sign * mid * error if with_error else count
 
-            curve = self._compress(quantities)
-            gains = response(curve, curve[1] * edge + sign * mid * curve[2])
-            for elapsed, cash in funding:
-                funded = np.zeros(samples)
-                selected = times < elapsed
-                np.maximum.at(funded, indexes[selected], cumulative[selected])
-                curve = self._compress(funded)
-                gains += sign * cash * response(curve, curve[1])
-            gains = (gains + cancel_gain) / samples
-            selected = int(np.argmax(gains))
-            keep_gain /= samples
-            keep = (
-                bool(active_order is not None or commands)
-                and keep_gain >= gains[selected]
-            )
+                total = 0.0 if with_error else 0
+                with closing_iterator(curve(namespace)) as groups:
+                    for _quantity, count, error in groups:
+                        # Preserve the original ordered cumsum, not compensated sum.
+                        total += weight(count, error)
+                weighted = 0.0
+                prefix = 0.0 if with_error else 0
+                with (
+                    closing_iterator(curve(namespace)) as groups,
+                    closing_iterator(
+                        spill.identity_payload_values(namespace="choices")
+                    ) as choices,
+                ):
+                    current = next(groups, None)
+                    for payload in choices:
+                        choice = struct.unpack(">d", payload)[0]
+                        while current is not None and current[0] <= choice:
+                            quantity, count, error = current
+                            value = weight(count, error)
+                            weighted += quantity * value
+                            prefix += value
+                            current = next(groups, None)
+                        yield weighted + choice * (total - prefix)
+
+            with handle_preserving_primary(ExitStack()) as reads:
+                choices = reads.enter_context(
+                    closing_iterator(spill.identity_payload_values(namespace="choices"))
+                )
+                streams = [
+                    reads.enter_context(
+                        closing_iterator(responses("response", with_error=True))
+                    ),
+                    *(
+                        reads.enter_context(
+                            closing_iterator(
+                                responses(f"funding_{index}", with_error=False)
+                            )
+                        )
+                        for index in range(len(funding))
+                    ),
+                ]
+                best_gain = -float("inf")
+                best_quantity = 0.0
+                for payload, base, *funded in zip(choices, *streams, strict=True):
+                    gain = base
+                    for (_stamp, cash), value in zip(funding, funded, strict=True):
+                        gain += sign * cash * value
+                    gain = (gain + cancel_gain) / sample_count
+                    if gain > best_gain:
+                        best_gain = gain
+                        best_quantity = struct.unpack(">d", payload)[0]
+            keep_gain /= sample_count
+            keep = bool(active_order is not None or commands) and keep_gain >= best_gain
             return (
                 keep,
-                (0.0 if keep else float(choices[selected])),
-                (float(keep_gain) if keep else float(gains[selected])),
+                0.0 if keep else float(best_quantity),
+                float(keep_gain) if keep else float(best_gain),
             )
 
 

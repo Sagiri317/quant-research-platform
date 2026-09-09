@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +10,6 @@ from types import MappingProxyType
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
@@ -19,21 +18,27 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.storage.datasets.reading import (
+    iter_declared_parquet_member_batches,
+)
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
+    dataset_file_identity,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
     _parquet_frame_bound,
     _parquet_frame_reservation,
-    _parquet_row_group_size,
-    _parquet_table_write_state,
-    _parquet_writer_fixed_reservation,
-    dataset_file_identity,
     parquet_decoded_working_set_bounds,
+    parquet_table_writer,
 )
 from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact_record,
@@ -611,13 +616,52 @@ class StatisticsArtifact:
     root: Path
     identity: str
     _members: Mapping[str, object]
+    _identities: Mapping[str, DatasetFileIdentity]
+    _row_counts: Mapping[str, int]
+
+    def _verify(self):
+        for member, identity in self._identities.items():
+            path = self.root / member
+            if dataset_file_identity(path) != identity:
+                raise ValueError("statistics_table_identity_changed")
+            verify_semantic_artifact_member(
+                self.root, relative_path=member, expected=dict(self._members[member])
+            )
+            if dataset_file_identity(path) != identity:
+                raise ValueError("statistics_table_identity_changed")
+
+    def _batches(self, member, *, filters=None):
+        if member not in self._members:
+            raise ValueError("statistics_table_member_invalid")
+        with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
+            target = max(1, min(1024**2, policy.operation_headroom_bytes // 8))
+            with closing_iterator(
+                iter_declared_parquet_member_batches(
+                    self.root / member,
+                    expected_identity=self._identities[member],
+                    target_chunk_bytes=target,
+                    operation_headroom_bytes=policy.operation_headroom_bytes,
+                    parquet_filters=filters,
+                )
+            ) as frames:
+                for frame in frames:
+                    with policy.lease(
+                        "artifacts.statistics.validation",
+                        max(65536, 2 * pandas_frame_payload_bytes(frame)),
+                    ):
+                        result = None
+                        try:
+                            result = _validated_frame(frame, member=member)
+                            yield result
+                        finally:
+                            result = None
 
     @contextmanager
     def table(self, member: str):
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
         path = self.root / member
-        identity = dataset_file_identity(path)
+        identity = self._identities[member]
         verify_semantic_artifact_member(
             self.root,
             relative_path=member,
@@ -667,86 +711,144 @@ def write_statistics_artifact(
     logical_root: Path,
     *,
     envelope: BusinessManifestEnvelope,
-    tables: Mapping[str, pd.DataFrame],
+    tables: Mapping[str, pd.DataFrame] | Callable[..., None],
     table_group: str = "research",
     validate_tables=None,
 ) -> Path:
-    if table_group not in STATISTICS_TABLE_GROUPS or set(tables) != {
+    if table_group not in STATISTICS_TABLE_GROUPS:
+        raise ValueError("statistics_tables_invalid")
+    calibration = table_group == "crypto_maker_calibration"
+    if calibration and not callable(validate_tables):
+        raise ValueError("statistics_business_validator_required")
+    expected = {
         member.removesuffix(".parquet")
         for member in STATISTICS_TABLE_GROUPS[table_group]
-    }:
+    }
+    if (calibration and not callable(tables)) or (
+        not calibration and (not isinstance(tables, Mapping) or set(tables) != expected)
+    ):
         raise ValueError("statistics_tables_invalid")
-    if table_group == "crypto_maker_calibration":
-        if not callable(validate_tables):
-            raise ValueError("statistics_business_validator_required")
-        validate_tables(tables, envelope.payload())
 
-    def write(staging: Path) -> None:
+    def write_batches(staging, produce):
         policy = current_runtime_resource_policy()
-        for table_name, frame in tables.items():
-            member = f"{table_name}.parquet"
-            state = ExitStack()
-            validated = table = persisted = None
-            primary: BaseException | None = None
-            try:
-                state.enter_context(
-                    _parquet_writer_fixed_reservation(writer_count=1, index_bytes=0)
-                )
-                if policy is not None:
-                    payload_bytes = pandas_frame_payload_bytes(frame)
-                    validation_bytes = max(65536, 2 * payload_bytes)
-                    policy.require_working_set(
-                        validation_bytes
-                        + _parquet_frame_bound(frame, key_columns=())
-                        - payload_bytes,
-                        error="statistics_validation_exceeds_task_memory_budget",
-                    )
-                    state.enter_context(
-                        policy.lease(
-                            "artifacts.statistics.validation",
-                            validation_bytes,
+        with handle_preserving_primary(ExitStack()) as output:
+            writers = {}
+
+            def append(table_name, frame):
+                if table_name not in expected:
+                    raise ValueError("statistics_tables_invalid")
+                member = f"{table_name}.parquet"
+                if member not in writers:
+                    handle = output.enter_context(
+                        handle_preserving_primary(
+                            open(native_filesystem_path(staging / member), "xb")
                         )
                     )
-                state.enter_context(
-                    _parquet_frame_reservation(frame, borrowed_input=True)
-                )
-                validated = _validated_frame(frame, member=member)
-                table = pa.Table.from_pandas(
-                    validated, schema=_ARROW_SCHEMAS[member], preserve_index=False
-                )
-                persisted, native_state, batch_rows, _retained = (
-                    _parquet_table_write_state(table)
-                )
-                state.enter_context(native_state)
-                pq.write_table(
-                    persisted,
-                    native_filesystem_path(staging / member),
-                    row_group_size=_parquet_row_group_size(persisted.num_rows),
-                    write_batch_size=batch_rows,
-                    max_rows_per_page=batch_rows,
-                    compression="zstd",
-                    use_dictionary=False,
-                    write_statistics=False,
-                    write_page_index=False,
-                    write_page_checksum=False,
-                )
-            except BaseException as exc:
-                primary = exc
-            finally:
-                validated = table = persisted = None
-                try:
-                    state.close()
-                except BaseException as close_error:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        "statistics table state release also failed: "
-                        f"{type(close_error).__name__}"
+                    writers[member] = output.enter_context(
+                        parquet_table_writer(
+                            handle,
+                            parent=staging,
+                            compression="zstd",
+                            schema=_ARROW_SCHEMAS[member],
+                            statistics=tuple(
+                                column
+                                for column in (
+                                    "fold_id",
+                                    "side",
+                                    "event_id",
+                                    "sample_id",
+                                )
+                                if column in _TABLE_COLUMNS[member]
+                            ),
+                        )
                     )
-                if primary is not None:
-                    raise primary
+                validated = table = None
+                with handle_preserving_primary(ExitStack()) as working:
+                    try:
+                        if policy is not None:
+                            payload_bytes = pandas_frame_payload_bytes(frame)
+                            validation_bytes = max(65536, 2 * payload_bytes)
+                            policy.require_working_set(
+                                validation_bytes
+                                + _parquet_frame_bound(frame, key_columns=())
+                                - payload_bytes,
+                                error="statistics_validation_exceeds_task_memory_budget",
+                            )
+                            working.enter_context(
+                                policy.lease(
+                                    "artifacts.statistics.validation", validation_bytes
+                                )
+                            )
+                        working.enter_context(
+                            _parquet_frame_reservation(frame, borrowed_input=True)
+                        )
+                        validated = _validated_frame(frame, member=member)
+                        table = pa.Table.from_pandas(
+                            validated,
+                            schema=_ARROW_SCHEMAS[member],
+                            preserve_index=False,
+                        )
+                        writers[member](table)
+                    finally:
+                        validated = table = None
 
-    return write_semantic_artifact(Path(logical_root), envelope, write)
+            produce(on_table=append)
+            return {member.removesuffix(".parquet") for member in writers}
+
+    def write(staging):
+        if calibration:
+            written = write_batches(staging, tables)
+            if written != expected:
+                raise ValueError("statistics_tables_invalid")
+        else:
+            for table_name, frame in tables.items():
+                write_batches(
+                    staging,
+                    lambda on_table, name=table_name, value=frame: on_table(
+                        name, value
+                    ),
+                )
+
+    def validate(staging, members):
+        artifact = _statistics_artifact(staging, envelope.instance_identity, members)
+        validate_tables(artifact, envelope.payload())
+
+    return write_semantic_artifact(
+        Path(logical_root),
+        envelope,
+        write,
+        staged_validator=validate if calibration else None,
+    )
+
+
+def _statistics_artifact(root, identity, members):
+    by_path = {str(member.get("path")): member for member in members}
+    if not any(
+        set(by_path) == set(group) for group in STATISTICS_TABLE_GROUPS.values()
+    ) or len(by_path) != len(members):
+        raise ValueError("statistics_artifact_members_invalid")
+    identities, row_counts = {}, {}
+    for member in by_path:
+        path = root / member
+        physical = dataset_file_identity(path)
+        verify_semantic_artifact_member(
+            root, relative_path=member, expected=dict(by_path[member])
+        )
+        with _opened_parquet(path, expected_identity=physical) as (parquet, _, _handle):
+            if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
+                raise ValueError("statistics_table_schema_invalid")
+            count = parquet.metadata.num_rows
+            if count == 0 and member not in _EMPTY_TABLE_MEMBERS:
+                raise ValueError("statistics_table_empty")
+            identities[member] = physical
+            row_counts[member] = count
+    return StatisticsArtifact(
+        root=root,
+        identity=identity,
+        _members=MappingProxyType(by_path),
+        _identities=MappingProxyType(identities),
+        _row_counts=MappingProxyType(row_counts),
+    )
 
 
 def read_statistics_artifact(
@@ -759,40 +861,14 @@ def read_statistics_artifact(
         Path(instance_root),
         expected_identity=expected_identity,
     )
-    by_path = {str(member.get("path")): member for member in members}
-    if not any(
-        set(by_path) == set(group) for group in STATISTICS_TABLE_GROUPS.values()
-    ) or len(by_path) != len(members):
-        raise ValueError("statistics_artifact_members_invalid")
-    artifact = StatisticsArtifact(
-        root=Path(instance_root),
-        identity=expected_identity,
-        _members=MappingProxyType(by_path),
-    )
     with runtime_resource_policy_scope(current_runtime_resource_policy()):
-        for member in by_path:
-            path = Path(instance_root) / member
-            with _opened_parquet(
-                path, expected_identity=dataset_file_identity(path)
-            ) as (parquet, _identity, _handle):
-                if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
-                    raise ValueError("statistics_table_schema_invalid")
-                if (
-                    parquet.metadata.num_rows == 0
-                    and member not in _EMPTY_TABLE_MEMBERS
-                ):
-                    raise ValueError("statistics_table_empty")
-        if set(by_path) == set(STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]):
+        artifact = _statistics_artifact(Path(instance_root), expected_identity, members)
+        if set(artifact._members) == set(
+            STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]
+        ):
             if not callable(validate_tables):
                 raise ValueError("statistics_business_validator_required")
-            with ExitStack() as reads:
-                tables = {
-                    member.removesuffix(".parquet"): reads.enter_context(
-                        artifact.table(member)
-                    )
-                    for member in by_path
-                }
-                validate_tables(tables, envelope)
+            validate_tables(artifact, envelope)
     return artifact
 
 

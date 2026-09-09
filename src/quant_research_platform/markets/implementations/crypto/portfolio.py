@@ -2,8 +2,11 @@
 
 from array import array
 from contextlib import ExitStack
-from itertools import zip_longest
+from functools import partial
+from itertools import chain, groupby, zip_longest
+from math import isfinite
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -346,8 +349,12 @@ def _paired_validation(artifact, fold_id, asset_id):
                 pass
 
 
+_CALIBRATION_BATCH_BYTES = 8 * 1024**2
+
+
 def produce_maker_calibration(
     *,
+    on_table,
     layout,
     protocol_manifest,
     time_window,
@@ -395,16 +402,71 @@ def produce_maker_calibration(
         "event_kind",
         "context_id",
     }
-    samples = {
-        column: [] if column in strings else array("q" if column in integers else "d")
-        for column in sample_columns
+    columns_by_table = {
+        "crypto_maker_samples": sample_columns,
+        "crypto_maker_events": event_columns,
     }
-    events = {
-        column: [] if column in strings else array("q" if column in integers else "d")
-        for column in event_columns
-    }
-    summaries = []
-    lease = resource_policy.lease("crypto.maker.calibration.samples", 65536)
+
+    def empty(columns):
+        return {
+            column: []
+            if column in strings
+            else array("q" if column in integers else "d")
+            for column in columns
+        }
+
+    buffers = {name: empty(columns) for name, columns in columns_by_table.items()}
+    sizes = dict.fromkeys(buffers, 0)
+    written = set()
+    lease = resource_policy.lease("crypto.maker.calibration.buffer", 65536)
+
+    def frame(values, columns):
+        arrays = {}
+        for column in columns:
+            value = values[column]
+            if isinstance(value, array):
+                value = np.frombuffer(
+                    value, dtype=np.int64 if column in integers else np.float64
+                )
+                if column in {
+                    "decision_at",
+                    "prediction_end",
+                    "label_available_at",
+                    "event_at",
+                }:
+                    value = value.view("datetime64[ns]")
+            arrays[column] = value
+        return pd.DataFrame(arrays, columns=columns, copy=False)
+
+    def flush(name):
+        output = frame(buffers[name], columns_by_table[name])
+        try:
+            on_table(name, output)
+        finally:
+            output = None
+        written.add(name)
+        buffers[name] = empty(columns_by_table[name])
+        sizes[name] = 0
+        lease.shrink_to(65536 + sum(sizes.values()))
+
+    def append(name, values):
+        row_bytes = (512 if name == "crypto_maker_events" else 2048) + 4 * sum(
+            len(value) for value in values if isinstance(value, str)
+        )
+        target = max(
+            1,
+            min(
+                _CALIBRATION_BATCH_BYTES,
+                (resource_policy.operation_headroom_bytes + sum(sizes.values())) // 8,
+            ),
+        )
+        if sum(sizes.values()) and sum(sizes.values()) + row_bytes > target:
+            flush(max(sizes, key=sizes.get))
+        lease.grow(row_bytes)
+        sizes[name] += row_bytes
+        for column, value in zip(columns_by_table[name], values, strict=True):
+            buffers[name][column].append(value)
+
     try:
         with open_run(raw_root, resource_policy) as run:
             if run.source_identity != panel["source_artifact_identity"]:
@@ -443,7 +505,6 @@ def produce_maker_calibration(
                     fold_id=fold["fold_id"],
                     counts=counts,
                 ):
-                    lease.grow(512)
                     values = (
                         fold_id,
                         side,
@@ -463,8 +524,7 @@ def produce_maker_calibration(
                         event_start,
                         event_end,
                     )
-                    for column, value in zip(sample_columns, values, strict=True):
-                        samples[column].append(value)
+                    append("crypto_maker_samples", values)
                     counts[side][0] += 1
                     counts[side][1] += int(filled == 0)
                     counts[side][2] += int(
@@ -496,7 +556,6 @@ def produce_maker_calibration(
                             for index, (tick, quantity) in enumerate(levels)
                         )
                     for side, level, tick, quantity in rows:
-                        lease.grow(512)
                         values = (
                             fold_id,
                             event_id,
@@ -508,8 +567,7 @@ def produce_maker_calibration(
                             tick,
                             quantity,
                         )
-                        for column, value in zip(event_columns, values, strict=True):
-                            events[column].append(value)
+                        append("crypto_maker_events", values)
 
                 cutoff = pd.Timestamp(fold["validation"]["end"]).value
                 result = replay_maker_calibration(
@@ -530,6 +588,7 @@ def produce_maker_calibration(
                     on_event=observe_event,
                 )
                 minimum = plan["execution"]["maker"]["min_calibration_samples"]
+                summaries = []
                 for side, (count, zero, rejected) in counts.items():
                     summaries.append(
                         {
@@ -547,38 +606,18 @@ def produce_maker_calibration(
                         }
                     )
 
-        def frame(buffers, columns):
-            values = {}
-            for column in columns:
-                value = buffers[column]
-                if isinstance(value, array):
-                    value = np.frombuffer(
-                        value, dtype=np.int64 if column in integers else np.float64
-                    )
-                    if column in {
-                        "decision_at",
-                        "prediction_end",
-                        "label_available_at",
-                        "event_at",
-                    }:
-                        value = value.view("datetime64[ns]")
-                values[column] = value
-            return pd.DataFrame(values, columns=columns, copy=False)
-
-        tables = {
-            "crypto_maker_samples": frame(samples, sample_columns),
-            "crypto_maker_events": frame(events, event_columns),
-            "crypto_maker_calibration": pd.DataFrame.from_records(summaries),
-        }
-        samples = events = summaries = None
-        lease.shrink_to(
-            max(1, sum(pandas_frame_payload_bytes(table) for table in tables.values()))
-        )
-        lease.transfer("research.statistics.output")
-        return OwnedValue(tables, lease)
-    except BaseException:
+                on_table(
+                    "crypto_maker_calibration", pd.DataFrame.from_records(summaries)
+                )
+                for name in buffers:
+                    if sizes[name]:
+                        flush(name)
+        for name in buffers:
+            if sizes[name] or name not in written:
+                flush(name)
+    finally:
+        buffers.clear()
         _close_lease_preserving_primary(lease, owner="crypto.maker.calibration")
-        raise
 
 
 def produce_maker_ledger(
@@ -623,95 +662,22 @@ def produce_maker_ledger(
                 expected_identity=upstream_identities[target],
                 validate_tables=validate_maker_calibration,
             )
-            calibrations = {}
-            with ExitStack() as reads:
-                samples = reads.enter_context(
-                    artifact.table("crypto_maker_samples.parquet")
-                )
-                events = reads.enter_context(
-                    artifact.table("crypto_maker_events.parquet")
-                )
-                summary = reads.enter_context(
-                    artifact.table("crypto_maker_calibration.parquet")
-                )
+            with artifact.table("crypto_maker_calibration.parquet") as summary:
                 if not summary.status.eq("DEFINED").all():
                     raise PortfolioTargetBlocked(
                         "maker_calibration_insufficient_samples"
                     )
-                state = resources.enter_context(
-                    resource_policy.lease(
-                        "crypto.maker.calibration.state",
-                        max(
-                            1,
-                            4
-                            * (
-                                pandas_frame_payload_bytes(samples)
-                                + pandas_frame_payload_bytes(events)
-                            ),
-                        ),
+            calibrations = {}
+            for fold_id, _window in windows:
+                calibrations[fold_id] = {}
+                for side in ("buy", "sell"):
+                    calibration = MakerCalibration(
+                        partial(_calibration_samples, artifact, fold_id, side),
+                        partial(_calibration_events, artifact, fold_id),
+                        resource_policy=resource_policy,
                     )
-                )
-                retained = 0
-                for fold_id, _window in windows:
-                    calibrations[fold_id] = {}
-                    event_part = events.loc[events.fold_id.eq(fold_id)]
-                    event_data = {
-                        column: event_part[column].to_numpy(copy=True)
-                        for column in (
-                            "event_id",
-                            "event_at",
-                            "event_kind",
-                            "context_id",
-                            "side",
-                            "level_index",
-                            "price_tick",
-                            "quantity",
-                        )
-                    }
-                    event_data["event_at"] = event_data["event_at"].view(np.int64)
-                    offsets = np.concatenate(
-                        (
-                            np.flatnonzero(
-                                np.r_[True, np.diff(event_data["event_id"]) != 0]
-                            ),
-                            [len(event_part)],
-                        )
-                    )
-                    retained += pandas_frame_payload_bytes(event_part) + offsets.nbytes
-                    for side in ("buy", "sell"):
-                        part = samples.loc[
-                            samples.fold_id.eq(fold_id) & samples.side.eq(side),
-                            [
-                                "sample_id",
-                                "forecast_error",
-                                "decision_at",
-                                "initial_book_event_id",
-                                "event_start",
-                                "event_end",
-                                "book_segment_id",
-                                "trade_connection_id",
-                            ],
-                        ].sort_values("sample_id")
-                        sample_data = {
-                            column: part[column].to_numpy(copy=True)
-                            for column in part.columns
-                        }
-                        sample_data["decision_at"] = sample_data["decision_at"].view(
-                            np.int64
-                        )
-                        calibration = MakerCalibration(
-                            sample_data,
-                            event_data,
-                            offsets,
-                            resource_policy=resource_policy,
-                        )
-                        resources.callback(calibration.close)
-                        calibrations[fold_id][side] = calibration
-                        retained += pandas_frame_payload_bytes(part)
-                        del part, sample_data
-                    del event_part, event_data, offsets
-                state.shrink_to(max(1, retained))
-                samples = events = summary = None
+                    resources.callback(calibration.close)
+                    calibrations[fold_id][side] = calibration
 
         def quotes():
             if candidate.calibrated:
@@ -829,10 +795,191 @@ def produce_maker_ledger(
                 raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
             if result["net_pnl"] is None:
                 raise PortfolioTargetBlocked("portfolio_terminal_valuation_missing")
+            if candidate.calibrated:
+                artifact._verify()
             return result
 
 
-def validate_maker_calibration(tables, envelope):
+def _calibration_rows(artifact, member, filters=()):
+    with closing_iterator(artifact._batches(member, filters=list(filters))) as batches:
+        for frame in batches:
+            yield from frame.itertuples(index=False)
+
+
+def _calibration_samples(artifact, fold_id, side):
+    with closing_iterator(
+        _calibration_rows(
+            artifact,
+            "crypto_maker_samples.parquet",
+            (("fold_id", "==", fold_id), ("side", "==", side)),
+        )
+    ) as rows:
+        for row in rows:
+            sample = row._asdict()
+            sample["decision_at"] = row.decision_at.value
+            yield sample
+
+
+def _calibration_events(artifact, fold_id, start, stop):
+    if start == stop:
+        return
+    policy = current_runtime_resource_policy()
+    active = previous = lease = event = bids = asks = None
+    with closing_iterator(
+        _calibration_rows(
+            artifact,
+            "crypto_maker_events.parquet",
+            (
+                ("fold_id", "==", fold_id),
+                ("event_id", ">=", start),
+                ("event_id", "<", stop),
+            ),
+        )
+    ) as rows:
+        try:
+            for event_id, group in groupby(rows, key=lambda row: row.event_id):
+                first = next(group)
+                if first.event_kind == "book":
+                    lease = policy.lease(
+                        "crypto.maker.calibration.book",
+                        65536 + 4 * len(first.context_id),
+                    )
+                    bids, asks = [], []
+                    for row in chain((first,), group):
+                        lease.grow(256)
+                        (bids if row.side == "buy" else asks).append(
+                            (int(row.price_tick), float(row.quantity))
+                        )
+                    event = SimpleNamespace(
+                        kind="book",
+                        event_id=event_id,
+                        event_at=first.event_at.value,
+                        segment_id=first.context_id,
+                        bids=tuple(bids),
+                        asks=tuple(asks),
+                    )
+                    bids = asks = None
+                    previous, active = active, OwnedValue(event, lease)
+                    lease = None
+                    yield event
+                    event = None
+                    if previous is not None:
+                        retired, previous = previous, None
+                        retired.release(owner="crypto.maker.calibration.book")
+                else:
+                    event = SimpleNamespace(
+                        kind=first.event_kind,
+                        event_id=event_id,
+                        event_at=first.event_at.value,
+                        segment_id=first.context_id,
+                        connection_id=first.context_id,
+                        price_tick=int(first.price_tick),
+                        visible_quantity=float(first.quantity),
+                        buyer_is_maker=first.side == "buy",
+                    )
+                    yield event
+                    event = None
+                    if first.event_kind == "boundary" and active is not None:
+                        retired, active = active, None
+                        retired.release(owner="crypto.maker.calibration.book")
+        finally:
+            event = bids = asks = None
+            for owned in (previous, active):
+                if owned is not None:
+                    owned.release(owner="crypto.maker.calibration.book")
+            if lease is not None:
+                _close_lease_preserving_primary(
+                    lease, owner="crypto.maker.calibration.book"
+                )
+
+
+def _calibration_headers(artifact, fold_id, cutoff):
+    expected = 0
+    previous_time = None
+    with closing_iterator(
+        _calibration_rows(
+            artifact, "crypto_maker_events.parquet", (("fold_id", "==", fold_id),)
+        )
+    ) as rows:
+        for event_id, group in groupby(rows, key=lambda row: row.event_id):
+            first = next(group)
+            stamp = first.event_at.value
+            if (
+                event_id != expected
+                or stamp > cutoff
+                or previous_time is not None
+                and stamp < previous_time
+            ):
+                raise ValueError("crypto_calibration_event_order_invalid")
+            expected += 1
+            previous_time = stamp
+            counts = {"buy": 0, "sell": 0}
+            best, last = {}, {}
+            row_count = 0
+            for row in chain((first,), group):
+                row_count += 1
+                if (
+                    (row.event_at, row.event_kind, row.context_id)
+                    != (first.event_at, first.event_kind, first.context_id)
+                    or not isfinite(row.quantity)
+                    or row.quantity < 0
+                ):
+                    raise ValueError("crypto_calibration_event_invalid")
+                if row.event_kind == "book":
+                    if (
+                        row.side not in counts
+                        or not row.context_id
+                        or row.price_tick <= 0
+                        or row.quantity <= 0
+                    ):
+                        raise ValueError("crypto_calibration_event_invalid")
+                    if row.level_index != counts[row.side]:
+                        raise ValueError("crypto_calibration_book_invalid")
+                    if counts[row.side]:
+                        if (
+                            row.price_tick >= last[row.side]
+                            if row.side == "buy"
+                            else row.price_tick <= last[row.side]
+                        ):
+                            raise ValueError("crypto_calibration_book_invalid")
+                    else:
+                        best[row.side] = row.price_tick
+                    last[row.side] = row.price_tick
+                    counts[row.side] += 1
+                elif row.event_kind == "trade":
+                    if (
+                        row_count != 1
+                        or row.side not in counts
+                        or not row.context_id
+                        or row.price_tick <= 0
+                        or row.level_index != 0
+                    ):
+                        raise ValueError("crypto_calibration_event_invalid")
+                elif row.event_kind == "boundary":
+                    if (
+                        row_count != 1
+                        or row.side
+                        or row.price_tick != 0
+                        or row.quantity != 0
+                        or row.level_index != 0
+                    ):
+                        raise ValueError("crypto_calibration_event_invalid")
+                else:
+                    raise ValueError("crypto_calibration_event_invalid")
+            if first.event_kind == "book" and (
+                not all(counts.values()) or best["buy"] >= best["sell"]
+            ):
+                raise ValueError("crypto_calibration_book_invalid")
+            yield SimpleNamespace(
+                event_id=event_id,
+                event_at=stamp,
+                kind=first.event_kind,
+                context=first.context_id,
+                row_count=row_count,
+            )
+
+
+def validate_maker_calibration(artifact, envelope):
     protocol = envelope["semantic_metadata"]["target_contract"]["protocol"]
     plan = protocol["research_plan"]
     minimum = plan["execution"]["maker"]["min_calibration_samples"]
@@ -846,288 +993,221 @@ def validate_maker_calibration(tables, envelope):
         >= pd.Timestamp(output["start"])
     }
     reference_config = _maker_config(plan, "btc_usdt", calibration=True)
-
-    samples = tables["crypto_maker_samples"]
-    events = tables["crypto_maker_events"]
-    summary = tables["crypto_maker_calibration"]
-    keys = ["fold_id", "side", "sample_id"]
     policy = current_runtime_resource_policy()
-    with policy.lease(
-        "artifacts.crypto.calibration.validation",
-        max(
-            65536,
-            4 * sum(pandas_frame_payload_bytes(frame) for frame in tables.values()),
-        ),
-    ):
-        if (
-            set(zip(summary.fold_id, summary.side, strict=True))
-            != {(fold, side) for fold in folds for side in ("buy", "sell")}
-            or summary.duplicated(["fold_id", "side"]).any()
-            or samples.duplicated(keys).any()
-            or events.duplicated(["fold_id", "event_id", "side", "level_index"]).any()
-            or not samples.fold_id.isin(folds).all()
-            or not samples.side.isin(("buy", "sell")).all()
-            or not events.fold_id.isin(folds).all()
-        ):
+    totals = dict.fromkeys(("samples", "events", "calibration"), 0)
+    paired_columns = tuple(
+        column
+        for column in STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
+        if column not in ("side", "filled_quantity", "terminal_reason")
+    )
+    for fold_id, fold in folds.items():
+        summaries = {}
+        with closing_iterator(
+            _calibration_rows(
+                artifact,
+                "crypto_maker_calibration.parquet",
+                (("fold_id", "==", fold_id),),
+            )
+        ) as rows:
+            for row in rows:
+                if row.side not in ("buy", "sell") or row.side in summaries:
+                    raise ValueError("crypto_calibration_keys_invalid")
+                summaries[row.side] = row
+        if set(summaries) != {"buy", "sell"}:
             raise ValueError("crypto_calibration_keys_invalid")
-        if not samples.empty and (
-            not np.isfinite(
-                samples[
-                    [
-                        "price_prediction",
-                        "observed_return",
-                        "forecast_error",
-                        "filled_quantity",
-                        "quote_quantity",
-                    ]
-                ].to_numpy()
-            ).all()
-            or not (
-                samples.forecast_error.to_numpy()
-                == samples.observed_return.to_numpy()
-                - samples.price_prediction.to_numpy()
-            ).all()
-            or not (
-                (samples.filled_quantity >= 0)
-                & (samples.filled_quantity <= samples.quote_quantity)
-                & (samples.quote_quantity > 0)
-            ).all()
-            or samples.book_segment_id.eq("").any()
-            or samples.trade_connection_id.eq("").any()
-            or not samples.quote_quantity.eq(reference_config.order_quantity).all()
-        ):
-            raise ValueError("crypto_calibration_response_invalid")
-        if (
-            not events.event_kind.isin(("book", "trade", "boundary")).all()
-            or not np.isfinite(events.quantity.to_numpy()).all()
-            or events.quantity.lt(0).any()
-        ):
-            raise ValueError("crypto_calibration_event_invalid")
-        for fold_id, fold in folds.items():
-            sample = samples.loc[samples.fold_id.eq(fold_id)]
-            if not sample.empty and not (
-                sample.decision_at.between(
-                    pd.Timestamp(fold["validation"]["start"]),
-                    pd.Timestamp(fold["validation"]["end"]),
-                ).all()
-                and (
-                    sample.prediction_end
-                    == sample.decision_at
-                    + pd.Timedelta(milliseconds=protocol["label_horizon_ms"])
-                ).all()
-                and (sample.label_available_at >= sample.prediction_end).all()
-                and (
-                    sample.label_available_at <= pd.Timestamp(fold["validation"]["end"])
-                ).all()
-            ):
-                raise ValueError("crypto_calibration_outcome_not_mature")
-            part = events.loc[events.fold_id.eq(fold_id)]
-            headers = part.drop_duplicates("event_id")
-            count = len(headers)
-            if sample.empty:
-                if count:
-                    raise ValueError("crypto_calibration_event_coordinates_invalid")
-                continue
-            if (
-                not np.array_equal(headers.event_id.to_numpy(), np.arange(count))
-                or (part.event_id.diff().dropna() < 0).any()
-                or (headers.event_at.diff().dropna() < pd.Timedelta(0)).any()
-                or (headers.event_at > pd.Timestamp(fold["validation"]["end"])).any()
-            ):
-                raise ValueError("crypto_calibration_event_order_invalid")
-            grouped = part.groupby("event_id", sort=False)
-            if (
-                not grouped[["event_at", "event_kind", "context_id"]]
-                .nunique(dropna=False)
-                .eq(1)
-                .all()
-                .all()
-            ):
-                raise ValueError("crypto_calibration_event_invalid")
-            books = part.loc[part.event_kind.eq("book")]
-            trades = part.loc[part.event_kind.eq("trade")]
-            boundaries = part.loc[part.event_kind.eq("boundary")]
-            if (
-                not books.side.isin(("buy", "sell")).all()
-                or books.context_id.eq("").any()
-                or books.price_tick.le(0).any()
-                or books.quantity.le(0).any()
-                or not trades.side.isin(("buy", "sell")).all()
-                or trades.context_id.eq("").any()
-                or trades.price_tick.le(0).any()
-                or not trades.level_index.eq(0).all()
-                or not boundaries.side.eq("").all()
-                or not boundaries.price_tick.eq(0).all()
-                or not boundaries.quantity.eq(0).all()
-                or not boundaries.level_index.eq(0).all()
-                or not grouped.size()
-                .loc[headers.loc[~headers.event_kind.eq("book"), "event_id"]]
-                .eq(1)
-                .all()
-            ):
-                raise ValueError("crypto_calibration_event_invalid")
-            book_groups = books.groupby(["event_id", "side"], sort=False)
-            if (
-                not np.array_equal(
-                    books.level_index.to_numpy(), book_groups.cumcount().to_numpy()
-                )
-                or not books.groupby("event_id").side.nunique().eq(2).all()
-            ):
-                raise ValueError("crypto_calibration_book_invalid")
-            for side in ("buy", "sell"):
-                levels = books.loc[books.side.eq(side)]
-                identifiers = levels.event_id.to_numpy()
-                ticks = levels.price_tick.to_numpy()
-                same = identifiers[1:] == identifiers[:-1]
-                invalid = (
-                    ticks[1:] >= ticks[:-1]
-                    if side == "buy"
-                    else ticks[1:] <= ticks[:-1]
-                )
-                if (same & invalid).any():
-                    raise ValueError("crypto_calibration_book_invalid")
-            best = books.loc[books.level_index.eq(0)].pivot(
-                index="event_id", columns="side", values="price_tick"
+        totals["calibration"] += 2
+        cutoff = pd.Timestamp(fold["validation"]["end"]).value
+        beginning = pd.Timestamp(fold["validation"]["start"]).value
+        counts = {side: [0, 0, 0] for side in ("buy", "sell")}
+        with handle_preserving_primary(ExitStack()) as reads:
+            starts = reads.enter_context(
+                closing_iterator(_calibration_headers(artifact, fold_id, cutoff))
             )
-            if not (best["buy"] < best["sell"]).all():
-                raise ValueError("crypto_calibration_book_invalid")
-            initial = sample.initial_book_event_id.to_numpy()
-            starts, ends = sample.event_start.to_numpy(), sample.event_end.to_numpy()
-            if (
-                (initial < 0).any()
-                or (initial >= count).any()
-                or (initial >= starts).any()
-                or (starts < 0).any()
-                or (starts > ends).any()
-                or (ends > count).any()
-            ):
-                raise ValueError("crypto_calibration_event_coordinates_invalid")
-            kinds = headers.event_kind.to_numpy()
-            times = headers.event_at.to_numpy().view(np.int64)
-            decisions = sample.decision_at.to_numpy().view(np.int64)
-            expiries = sample.prediction_end.to_numpy().view(np.int64)
-            states = np.flatnonzero(np.isin(kinds, ("book", "boundary")))
-            if (
-                not (kinds[initial] == "book").all()
-                or not np.array_equal(
-                    headers.context_id.to_numpy()[initial],
-                    sample.book_segment_id.to_numpy(),
-                )
-                or (times[initial] > decisions).any()
-                or not np.array_equal(
-                    states[np.searchsorted(states, starts, side="left") - 1], initial
-                )
-                or (times[starts - 1] > decisions).any()
-                or (times[starts[starts < count]] <= decisions[starts < count]).any()
-                or (times[ends[ends > starts] - 1] >= expiries[ends > starts]).any()
-                or (times[ends[ends < count]] < expiries[ends < count]).any()
-            ):
-                raise ValueError("crypto_calibration_event_coordinates_invalid")
-            covered = np.zeros(count + 1, dtype=np.int64)
-            np.add.at(covered, starts, 1)
-            np.add.at(covered, ends, -1)
-            used = np.cumsum(covered[:-1]) > 0
-            used[initial] = True
-            if not used.all():
-                raise ValueError("crypto_calibration_event_coordinates_invalid")
-            paired_columns = [
-                column
-                for column in sample.columns
-                if column not in ("side", "filled_quantity", "terminal_reason")
-            ]
-            buy = (
-                sample.loc[sample.side.eq("buy"), paired_columns]
-                .sort_values("sample_id")
-                .reset_index(drop=True)
+            ends = reads.enter_context(
+                closing_iterator(_calibration_headers(artifact, fold_id, cutoff))
             )
-            sell = (
-                sample.loc[sample.side.eq("sell"), paired_columns]
-                .sort_values("sample_id")
-                .reset_index(drop=True)
-            )
-            if not buy.equals(sell):
-                raise ValueError("crypto_calibration_paired_path_invalid")
-            event_data = {
-                column: part[column].to_numpy()
-                for column in part.columns
-                if column != "fold_id"
-            }
-            event_data["event_at"] = event_data["event_at"].view(np.int64)
-            offsets = np.r_[
-                np.flatnonzero(np.r_[True, np.diff(event_data["event_id"]) != 0]),
-                len(part),
-            ]
-            sample_data = {
-                column: sample[column].to_numpy() for column in sample.columns
-            }
-            sample_data["decision_at"] = sample_data["decision_at"].view(np.int64)
-            calibration = MakerCalibration(
-                sample_data, event_data, offsets, resource_policy=policy
-            )
-            try:
-                for index, row in enumerate(sample.itertuples(index=False)):
-                    state = calibration._book(int(row.initial_book_event_id))
-                    order = _MakerOrder(
-                        0,
-                        row.side,
-                        (state.bids if row.side == "buy" else state.asks)[0][0],
-                        row.quote_quantity,
-                        0.0,
-                        0.0,
-                        row.book_segment_id,
-                        row.trade_connection_id,
-                        "1",
-                        row.decision_at.value,
-                        row.prediction_end.value,
-                        row.decision_at.value + reference_config.latency_ms * 1000000,
+            samples = [
+                reads.enter_context(
+                    closing_iterator(
+                        _calibration_rows(
+                            artifact,
+                            "crypto_maker_samples.parquet",
+                            (("fold_id", "==", fold_id), ("side", "==", side)),
+                        )
                     )
-                    remaining = row.quote_quantity
-                    with closing_iterator(
-                        calibration._response(
-                            index,
-                            state=state,
-                            decision_ns=row.decision_at.value,
-                            new_order=order,
-                            active_order=None,
-                            commands=(),
-                            lifetime_ns=protocol["label_horizon_ms"] * 1000000,
-                            replace_quantity=row.quote_quantity,
-                        )
-                    ) as response:
-                        while True:
-                            try:
-                                _elapsed, quantity, _price, _new = next(response)
-                            except StopIteration as complete:
-                                reason = complete.value
-                                break
-                            remaining -= quantity
-                    if (
-                        row.filled_quantity != row.quote_quantity - remaining
-                        or row.terminal_reason != reason
-                    ):
-                        raise ValueError(
-                            "crypto_calibration_reference_response_invalid"
-                        )
-            finally:
-                calibration.close()
-        for row in summary.itertuples(index=False):
-            sample = samples.loc[
-                samples.fold_id.eq(row.fold_id) & samples.side.eq(row.side)
+                )
+                for side in ("buy", "sell")
             ]
-            fold = folds[row.fold_id]
+            calibrations = {}
+            for side in ("buy", "sell"):
+                model = MakerCalibration(
+                    partial(_calibration_samples, artifact, fold_id, side),
+                    partial(_calibration_events, artifact, fold_id),
+                    resource_policy=policy,
+                )
+                reads.callback(model.close)
+                calibrations[side] = model
+            start_header = next(starts, None)
+            end_header = next(ends, None)
+            previous_start = previous_end = latest_state = None
+            covered = 0
+            for sample_id, pair in enumerate(zip_longest(*samples)):
+                buy, sell = pair
+                if (
+                    buy is None
+                    or sell is None
+                    or buy.sample_id != sample_id
+                    or sell.sample_id != sample_id
+                    or any(
+                        getattr(buy, column) != getattr(sell, column)
+                        for column in paired_columns
+                    )
+                ):
+                    raise ValueError("crypto_calibration_paired_path_invalid")
+                for row in pair:
+                    if (
+                        not all(
+                            isfinite(getattr(row, column))
+                            for column in (
+                                "price_prediction",
+                                "observed_return",
+                                "forecast_error",
+                                "filled_quantity",
+                                "quote_quantity",
+                            )
+                        )
+                        or row.forecast_error
+                        != row.observed_return - row.price_prediction
+                        or not 0 <= row.filled_quantity <= row.quote_quantity
+                        or row.quote_quantity != reference_config.order_quantity
+                        or not row.book_segment_id
+                        or not row.trade_connection_id
+                    ):
+                        raise ValueError("crypto_calibration_response_invalid")
+                decision = buy.decision_at.value
+                expiry = buy.prediction_end.value
+                if not (
+                    beginning <= decision <= cutoff
+                    and expiry == decision + protocol["label_horizon_ms"] * 1000000
+                    and expiry <= buy.label_available_at.value <= cutoff
+                ):
+                    raise ValueError("crypto_calibration_outcome_not_mature")
+                initial, start, stop = (
+                    buy.initial_book_event_id,
+                    buy.event_start,
+                    buy.event_end,
+                )
+                if not 0 <= initial < start <= stop:
+                    raise ValueError("crypto_calibration_event_coordinates_invalid")
+                while start_header is not None and start_header.event_id < start:
+                    previous_start = start_header
+                    if start_header.kind in ("book", "boundary"):
+                        latest_state = start_header
+                    start_header = next(starts, None)
+                if (
+                    previous_start is None
+                    or previous_start.event_id != start - 1
+                    or latest_state is None
+                    or latest_state.event_id != initial
+                    or latest_state.kind != "book"
+                    or latest_state.context != buy.book_segment_id
+                    or previous_start.event_at > decision
+                    or start_header is not None
+                    and start_header.event_at <= decision
+                ):
+                    raise ValueError("crypto_calibration_event_coordinates_invalid")
+                while end_header is not None and end_header.event_id < stop:
+                    previous_end = end_header
+                    totals["events"] += end_header.row_count
+                    end_header = next(ends, None)
+                if (
+                    previous_end is None
+                    or previous_end.event_id != stop - 1
+                    or stop > start
+                    and previous_end.event_at >= expiry
+                    or end_header is not None
+                    and end_header.event_at < expiry
+                    or start > covered
+                    and (initial != covered or start != covered + 1)
+                ):
+                    raise ValueError("crypto_calibration_event_coordinates_invalid")
+                covered = max(covered, stop)
+                for row in pair:
+                    model = calibrations[row.side]
+                    sample = row._asdict()
+                    sample["decision_at"] = decision
+                    with model._book(initial) as state:
+                        with policy.lease(
+                            "crypto.maker.calibration.reference",
+                            65536 + 512 * (len(state.bids) + len(state.asks)),
+                        ):
+                            order = _MakerOrder(
+                                0,
+                                row.side,
+                                (state.bids if row.side == "buy" else state.asks)[0][0],
+                                row.quote_quantity,
+                                0.0,
+                                0.0,
+                                row.book_segment_id,
+                                row.trade_connection_id,
+                                "1",
+                                decision,
+                                expiry,
+                                decision + reference_config.latency_ms * 1000000,
+                            )
+                            remaining = row.quote_quantity
+                            with closing_iterator(
+                                model._response(
+                                    sample,
+                                    state=state,
+                                    decision_ns=decision,
+                                    new_order=order,
+                                    active_order=None,
+                                    commands=(),
+                                    lifetime_ns=protocol["label_horizon_ms"] * 1000000,
+                                    replace_quantity=row.quote_quantity,
+                                )
+                            ) as response:
+                                while True:
+                                    try:
+                                        _elapsed, quantity, _price, _new = next(
+                                            response
+                                        )
+                                    except StopIteration as complete:
+                                        reason = complete.value
+                                        break
+                                    remaining -= quantity
+                            if (
+                                row.filled_quantity != row.quote_quantity - remaining
+                                or row.terminal_reason != reason
+                            ):
+                                raise ValueError(
+                                    "crypto_calibration_reference_response_invalid"
+                                )
+                            state = None
+                    counts[row.side][0] += 1
+                    counts[row.side][1] += row.filled_quantity == 0
+                    counts[row.side][2] += (
+                        row.terminal_reason == "post_only_crossing_rejected"
+                    )
+                    totals["samples"] += 1
+            if end_header is not None:
+                raise ValueError("crypto_calibration_event_coordinates_invalid")
+        for side, row in summaries.items():
+            count, zero, rejected = counts[side]
             if (
                 row.minimum_samples != minimum
-                or row.sample_count != len(sample)
-                or row.zero_fill_count != int(sample.filled_quantity.eq(0).sum())
-                or row.post_only_rejection_count
-                != int(sample.terminal_reason.eq("post_only_crossing_rejected").sum())
-                or row.status != ("DEFINED" if len(sample) >= minimum else "UNDEFINED")
+                or row.sample_count != count
+                or row.zero_fill_count != zero
+                or row.post_only_rejection_count != rejected
+                or row.status != ("DEFINED" if count >= minimum else "UNDEFINED")
                 or row.reason
-                != (
-                    "" if len(sample) >= minimum else "insufficient_calibration_samples"
-                )
-                or not np.array_equal(
-                    np.sort(sample.sample_id.to_numpy()), np.arange(len(sample))
-                )
+                != ("" if count >= minimum else "insufficient_calibration_samples")
             ):
                 raise ValueError("crypto_calibration_summary_invalid")
+    if any(
+        count != artifact._row_counts[f"crypto_maker_{name}.parquet"]
+        for name, count in totals.items()
+    ):
+        raise ValueError("crypto_calibration_keys_invalid")
+    artifact._verify()
