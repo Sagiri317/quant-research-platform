@@ -21,6 +21,7 @@ import quant_research_platform.storage.datasets.schema as dataset_schema
 import quant_research_platform.storage.datasets.writing as dataset_writing
 import quant_research_platform.storage.exact_keys as dataset_key_tracking
 import quant_research_platform.storage.manifests as storage_manifests
+from quant_research_platform.contracts.json_codec import render_qrp_json_object
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
@@ -818,6 +819,9 @@ def test_inspection_rejects_output_overlap_after_partition_traversal(
         timestamp_column=None,
         time_window=None,
     )
+    context.physical_columns = tuple(schema.names)
+    context.spec_bytes = render_qrp_json_object(context.spec).encode("utf-8")
+    context.manifest_bytes = render_qrp_json_object(context.manifest).encode("utf-8")
     accumulated_state_bytes = (
         dataset_reading.dataset_partition_state_reserve_bytes(context)
         + len(b"id")

@@ -14,7 +14,10 @@ from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
     prediction_output_metadata,
 )
-from quant_research_platform.storage.identity import dataset_file_identity
+from quant_research_platform.storage.identity import (
+    dataset_file_identity,
+    native_filesystem_path,
+)
 from tests.helpers.output_frames import (
     make_prediction_report_spec,
     make_price_volume_prediction_output_frame,
@@ -660,7 +663,7 @@ def test_prediction_bundle_preserves_fatal_and_primary_on_close(
         target = root / "prediction.parquet" if boundary == "member_stat" else root
 
         def fail_io(candidate, *args, **kwargs):
-            if Path(candidate) == target:
+            if Path(candidate) in (target, Path(native_filesystem_path(target))):
                 raise primary
             return original(candidate, *args, **kwargs)
 
