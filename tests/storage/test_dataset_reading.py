@@ -828,6 +828,9 @@ def test_fingerprint_releases_hash_array_before_next_source_batch(
         inventory=SimpleNamespace(retained_memory_bytes=0),
         retained_memory_bytes=0,
     )
+    context.physical_columns = context.logical_columns
+    context.spec_bytes = json.dumps(context.spec).encode("utf-8")
+    context.manifest_bytes = b"{}"
 
     fingerprint = dataset_fingerprinting.fingerprint_dataset_session(
         context,
@@ -863,6 +866,9 @@ def test_fingerprint_rejects_exhausted_operation_headroom_before_traversal(
         retained_memory_bytes=policy.memory_budget_bytes,
         read_paths=(),
     )
+    context.logical_columns = context.physical_columns = ("id",)
+    context.spec_bytes = b'{"primary_key":["id"]}'
+    context.manifest_bytes = b"{}"
 
     with runtime_resource_policy_scope(policy):
         retained_lease = policy.lease(
@@ -914,6 +920,9 @@ def test_fingerprint_reserves_many_partition_counters_before_traversal(
             for index in range(200)
         ),
     )
+    context.logical_columns = context.physical_columns = ("id",)
+    context.spec_bytes = b'{"primary_key":["id"]}'
+    context.manifest_bytes = b"{}"
 
     with pytest.raises(
         ValueError,
@@ -963,6 +972,9 @@ def test_fingerprint_rejects_many_partition_output_overlap_after_traversal(
         time_window=None,
         schema_hash="schema",
     )
+    context.physical_columns = context.logical_columns
+    context.spec_bytes = json.dumps(context.spec).encode("utf-8")
+    context.manifest_bytes = b"{}"
     partition_state_bytes = dataset_reading.dataset_partition_state_reserve_bytes(
         context
     )
