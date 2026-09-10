@@ -567,18 +567,26 @@ class ExecutionAccounting:
 
 @dataclass(frozen=True)
 class AlphaCalibration:
-    slope: float
-    intercept: float
-    slope_standard_error: float
-    slope_t_statistic: float
-    slope_pvalue: float
-    slope_ci_low: float
-    slope_ci_high: float
-    weighted_r2: float
+    slope: float | None
+    intercept: float | None
+    slope_standard_error: float | None
+    slope_t_statistic: float | None
+    slope_pvalue: float | None
+    slope_ci_low: float | None
+    slope_ci_high: float | None
+    weighted_r2: float | None
     coverage: float
     valid_rebalance_dates: int
     scheduled_rebalance_dates: int
-    benchmark_only: bool
+    undefined_reason: str | None
+
+    @property
+    def status(self) -> str:
+        return "UNDEFINED" if self.undefined_reason else "DEFINED"
+
+    @property
+    def benchmark_only(self) -> bool:
+        return self.undefined_reason is not None or self.slope <= 0.0
 
 
 def alpha_calibration_intervals(
@@ -654,21 +662,25 @@ def calibrate_expected_alpha(
     date_count = 0 if scheduled.empty else int(dates.loc[valid & valid_dates].nunique())
     coverage = date_count / max(1, len(scheduled))
     enough_coverage = date_count >= minimum_valid_dates and coverage >= minimum_coverage
-    if not enough_coverage:
+
+    def undefined(reason: str) -> AlphaCalibration:
         return AlphaCalibration(
-            slope=0.0,
-            intercept=0.0,
-            slope_standard_error=0.0,
-            slope_t_statistic=0.0,
-            slope_pvalue=1.0,
-            slope_ci_low=0.0,
-            slope_ci_high=0.0,
-            weighted_r2=0.0,
+            slope=None,
+            intercept=None,
+            slope_standard_error=None,
+            slope_t_statistic=None,
+            slope_pvalue=None,
+            slope_ci_low=None,
+            slope_ci_high=None,
+            weighted_r2=None,
             coverage=coverage,
             valid_rebalance_dates=date_count,
             scheduled_rebalance_dates=len(scheduled),
-            benchmark_only=True,
+            undefined_reason=reason,
         )
+
+    if not enough_coverage:
+        return undefined("alpha_calibration_insufficient_coverage")
     selected = valid & valid_dates
     counts = dates.loc[selected].groupby(dates.loc[selected]).transform("size")
     weights = 1.0 / (date_count * counts.to_numpy(dtype="float64"))
@@ -680,10 +692,11 @@ def calibrate_expected_alpha(
     )
     fit = np.sqrt(weights)[:, None] * design
     target = np.sqrt(weights) * returns.loc[selected].to_numpy(dtype="float64")
-    coefficients, *_ = np.linalg.lstsq(fit, target, rcond=None)
+    coefficients, _, rank, _ = np.linalg.lstsq(fit, target, rcond=None)
+    if rank != design.shape[1]:
+        return undefined("alpha_calibration_rank_deficient")
     slope = float(coefficients[1])
     intercept = float(coefficients[0])
-    benchmark_only = slope <= 0.0
     bread = np.zeros((2, 2), dtype="float64")
     cluster_scores = []
     actual = returns.loc[selected].to_numpy(dtype="float64")
@@ -730,7 +743,7 @@ def calibrate_expected_alpha(
         coverage=coverage,
         valid_rebalance_dates=date_count,
         scheduled_rebalance_dates=len(scheduled),
-        benchmark_only=benchmark_only,
+        undefined_reason=None,
     )
 
 

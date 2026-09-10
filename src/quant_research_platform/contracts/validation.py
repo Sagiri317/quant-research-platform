@@ -333,38 +333,6 @@ def strict_finite_numeric_series(
     error: str,
     allow_null: bool = False,
 ) -> pd.Series:
-    return _strict_numeric_series(values, error=error, allow_null=allow_null)
-
-
-def strict_hashable_key_series(
-    values: pd.Series,
-    *,
-    error: str,
-    allow_null: bool = False,
-) -> pd.Series:
-    series = pd.Series(values, copy=True)
-    null_mask = _null_mask(series)
-    if bool(null_mask.any()) and not allow_null:
-        raise ValueError(error)
-    output: list[object] = []
-    for value, is_null in zip(series.tolist(), null_mask.tolist(), strict=True):
-        if is_null:
-            if allow_null:
-                output.append(pd.NA)
-                continue
-            raise ValueError(error)
-        if not _is_hashable(value):
-            raise ValueError(error)
-        output.append(value)
-    return pd.Series(output, index=series.index, dtype="object")
-
-
-def _strict_numeric_series(
-    values: pd.Series,
-    *,
-    error: str,
-    allow_null: bool,
-) -> pd.Series:
     series = pd.Series(values, copy=True)
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
@@ -393,6 +361,29 @@ def _strict_numeric_series(
     if not bool(np.isfinite(non_null).all()):
         raise ValueError(error)
     return numeric.astype("Float64" if allow_null else "float64")
+
+
+def strict_hashable_key_series(
+    values: pd.Series,
+    *,
+    error: str,
+    allow_null: bool = False,
+) -> pd.Series:
+    series = pd.Series(values, copy=True)
+    null_mask = _null_mask(series)
+    if bool(null_mask.any()) and not allow_null:
+        raise ValueError(error)
+    output: list[object] = []
+    for value, is_null in zip(series.tolist(), null_mask.tolist(), strict=True):
+        if is_null:
+            if allow_null:
+                output.append(pd.NA)
+                continue
+            raise ValueError(error)
+        if not _is_hashable(value):
+            raise ValueError(error)
+        output.append(value)
+    return pd.Series(output, index=series.index, dtype="object")
 
 
 def _is_hashable(value: object) -> bool:

@@ -67,27 +67,6 @@ def write_prediction_outputs(
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
 ) -> Path:
-    """Write bounded prediction chunks into an output bundle."""
-
-    return _write_prediction_output_chunks(
-        output_chunks,
-        spec=spec,
-        output_spec=output_spec,
-        layout=layout,
-        model_metadata=model_metadata,
-        prediction_metadata_factory=prediction_metadata_factory,
-    )
-
-
-def _write_prediction_output_chunks(
-    frames: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]],
-    *,
-    spec: PredictionSpec,
-    output_spec: OutputSpec,
-    layout: StorageLayout,
-    model_metadata: Mapping[str, object],
-    prediction_metadata_factory: Callable[[], Mapping[str, object]],
-) -> Path:
     output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
@@ -104,10 +83,10 @@ def _write_prediction_output_chunks(
     def _write(temp_root: Path) -> None:
         paths = []
         try:
-            active_frames = frames
+            active_frames = output_chunks
             if spec.prediction_mode == "a_share_oos":
                 paths = _stage_family_predictions(
-                    frames, temp_root, required, spec, model_metadata_payload
+                    output_chunks, temp_root, required, spec, model_metadata_payload
                 )
                 require_free_disk_headroom(
                     temp_root,

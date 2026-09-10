@@ -5,7 +5,6 @@ from pathlib import Path
 import pytest
 
 from quant_research_platform.storage import manifests
-from quant_research_platform.storage._scratch_ownership import owned_scratch_name
 
 
 def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
@@ -33,79 +32,9 @@ def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
     assert loaded["source_id"] == "csmar"
 
 
-def test_manifest_replace_does_not_overwrite_unclaimed_temp_collision(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    final_path = tmp_path / "manifest.json"
-    final_path.write_text('{"schema_id": "old"}\n', encoding="utf-8")
-    live_temp = final_path.with_name(owned_scratch_name(".f-", "c" * 12))
-    live_temp.write_text("live\n", encoding="utf-8")
-    monkeypatch.setattr(
-        manifests,
-        "uuid4",
-        lambda: type("FixedUuid", (), {"hex": "c" * 32})(),
-    )
-
-    with pytest.raises(FileExistsError):
-        manifests.replace_qrp_json(final_path, {"schema_id": "new"})
-
-    assert live_temp.read_text(encoding="utf-8") == "live\n"
-    assert manifests.read_manifest(final_path)["schema_id"] == "old"
-
-
-def test_manifest_replace_cleans_claimed_temp_after_control_flow_cancellation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    final_path = tmp_path / "manifest.json"
-    final_path.write_text('{"schema_id": "old"}\n', encoding="utf-8")
-    primary = KeyboardInterrupt("pre_commit")
-    monkeypatch.setattr(
-        Path,
-        "replace",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(primary),
-    )
-
-    with pytest.raises(KeyboardInterrupt) as caught:
-        manifests.replace_qrp_json(final_path, {"schema_id": "new"})
-
-    assert caught.value is primary
-    assert not tuple(tmp_path.glob(".f-*"))
-    assert manifests.read_manifest(final_path)["schema_id"] == "old"
-
-
-def test_manifest_replace_preserves_committed_cancellation_and_new_final(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    final_path = tmp_path / "manifest.json"
-    final_path.write_text('{"schema_id": "old"}\n', encoding="utf-8")
-    primary = KeyboardInterrupt("post_commit")
-    real_replace = Path.replace
-
-    def commit_then_interrupt(source: Path, target: Path) -> Path:
-        real_replace(source, target)
-        raise primary
-
-    monkeypatch.setattr(Path, "replace", commit_then_interrupt)
-
-    with pytest.raises(KeyboardInterrupt) as caught:
-        manifests.replace_qrp_json(final_path, {"schema_id": "new"})
-
-    assert {
-        "caught": caught.value,
-        "temps": tuple(tmp_path.glob(".f-*")),
-        "schema_id": manifests.read_manifest(final_path)["schema_id"],
-    } == {"caught": primary, "temps": (), "schema_id": "new"}
-
-
 @pytest.mark.parametrize(
     ("writer_name", "safety_name"),
-    (
-        ("write_internal_artifact_manifest", "assert_internal_artifact_metadata_safe"),
-        ("replace_qrp_json", "evidence_json_value_unsafe_reason"),
-    ),
+    (("write_internal_artifact_manifest", "assert_internal_artifact_metadata_safe"),),
 )
 def test_manifest_writers_render_the_snapshot_checked_for_safety(
     writer_name: str,

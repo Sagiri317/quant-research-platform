@@ -10,7 +10,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
-from arch.bootstrap import MCS, SPA, StationaryBootstrap, StepM, optimal_block_length
+from arch.bootstrap import MCS, SPA, StationaryBootstrap, StepM
 from scipy.stats import kurtosis, norm, skew
 from statsmodels.stats.diagnostic import het_white
 from statsmodels.stats.multitest import multipletests
@@ -59,16 +59,6 @@ class BootstrapInterval:
     block_size: int
     repetitions: int
     seed: int
-
-
-def stationary_block_length(values: object) -> int:
-    """Return arch's stationary-bootstrap block length, rounded up."""
-
-    data = _finite_vector(values, minimum=3)
-    estimate = float(optimal_block_length(data).iloc[0]["stationary"])
-    if not np.isfinite(estimate) or estimate <= 0.0:
-        raise ValueError("bootstrap_block_length_undefined")
-    return int(np.ceil(estimate))
 
 
 @dataclass(frozen=True)
@@ -162,7 +152,10 @@ def aligned_candidate_matrix(
     ):
         raise ValueError("candidate_matrix_numeric_required")
     policy = current_runtime_resource_policy()
-    snapshot_bytes = len(frame) * (8 * frame.shape[1] + 2) + 64 * 1024
+    # Cast, filtered frame and detached output may coexist with masks and indices.
+    snapshot_bytes = (
+        len(frame) * (26 * frame.shape[1] + 24) + 128 * frame.shape[1] + 64 * 1024
+    )
     if (
         policy is not None
         and policy.explicit_memory_cap_bytes is not None
@@ -893,7 +886,8 @@ def _finite_matrix(
     if len(shape) != 2:
         raise ValueError("finite_matrix_required")
     policy = current_runtime_resource_policy()
-    snapshot_bytes = int(shape[0]) * int(shape[1]) * 8 + 64 * 1024
+    # The float64 conversion and finite-value mask coexist.
+    snapshot_bytes = int(shape[0]) * int(shape[1]) * 9 + 64 * 1024
     if (
         policy is not None
         and policy.explicit_memory_cap_bytes is not None
@@ -921,7 +915,7 @@ def _loss_inputs(
     )
     if not isinstance(model_losses, pd.DataFrame):
         raise ValueError("loss_matrix_candidate_id_invalid")
-    models = model_losses.copy()
+    models = model_losses
     if not isinstance(benchmark_losses, pd.Series) and len(benchmark) != len(models):
         raise ValueError("loss_matrix_length_mismatch")
     if "__benchmark_loss__" in models.columns:

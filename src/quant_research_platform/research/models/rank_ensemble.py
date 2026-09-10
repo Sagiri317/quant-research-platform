@@ -37,7 +37,7 @@ class EqualWeightRankEnsembleFactory:
     columns: tuple[str, ...]
     label_column: str
 
-    def fit_training_frame(self, frame: pd.DataFrame) -> RankEnsemblePredictor:
+    def fit(self, frame: pd.DataFrame, _target: np.ndarray) -> RankEnsemblePredictor:
         directions = _rank_directions(
             frame,
             input_columns=self.columns,
@@ -54,7 +54,7 @@ class ICWeightedRankEnsembleFactory:
     columns: tuple[str, ...]
     label_column: str
 
-    def fit_training_frame(self, frame: pd.DataFrame) -> ICWeightedRankEnsemble:
+    def fit(self, frame: pd.DataFrame, _target: np.ndarray) -> ICWeightedRankEnsemble:
         return ICWeightedRankEnsemble.fit(
             frame,
             input_columns=self.columns,

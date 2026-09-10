@@ -14,6 +14,7 @@ import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.business_manifest import BusinessManifestEnvelope
 from quant_research_platform.contracts.portfolios import (
+    PORTFOLIO_CASH_ASSET_ID,
     ExecutedTrade,
     PortfolioCapital,
     PortfolioCashFlow,
@@ -272,8 +273,19 @@ def summarize_portfolio_ledger(artifact: PortfolioLedgerArtifact) -> dict[str, o
     fees = funding = turnover = nav = fill_quantity = 0.0
     valuation_timestamp_ns = 0
     fills = 0
+    alpha_calibration = {}
     with closing_iterator(artifact.iter_chunks()) as batches:
         for batch in batches:
+            calibration = {
+                row.name.removeprefix("alpha_"): row.text
+                if row.text is not None
+                else row.number
+                for row in batch.diagnostics
+                if row.asset_id == PORTFOLIO_CASH_ASSET_ID
+                and row.name.startswith("alpha_")
+            }
+            if "status" in calibration:
+                alpha_calibration = calibration
             fills += len(batch.trades)
             fill_quantity += sum(abs(row.quantity) for row in batch.trades)
             turnover += sum(abs(row.notional) for row in batch.trades)
@@ -302,6 +314,7 @@ def summarize_portfolio_ledger(artifact: PortfolioLedgerArtifact) -> dict[str, o
         "fill_events": fills,
         "fill_quantity": fill_quantity,
         "valuation_timestamp_ns": valuation_timestamp_ns,
+        **({"alpha_calibration": alpha_calibration} if alpha_calibration else {}),
     }
 
 

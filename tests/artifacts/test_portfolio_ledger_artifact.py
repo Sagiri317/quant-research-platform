@@ -1206,3 +1206,63 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
                 assert not closed_indexes[0].parent.exists()
         assert {path.name: path.read_bytes() for path in root.iterdir()} == original
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("observed_dates", [1, 8])
+def test_unidentified_alpha_survives_publication_and_blocks_freezing(
+    tmp_path, observed_dates
+):
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
+        calibrate_expected_alpha,
+    )
+    from quant_research_platform.research.portfolios.production import (
+        frozen_alpha_calibration,
+    )
+
+    sessions = pd.bdate_range("2018-12-10", periods=10)
+    intervals = alpha_calibration_intervals(sessions, "daily")
+    calibration = calibrate_expected_alpha(
+        pd.DataFrame(
+            {
+                "timestamp": np.repeat(intervals.timestamp.iloc[:observed_dates], 10),
+                "alpha_score": 0.0,
+                "holding_return": np.arange(observed_dates * 10) / 10000,
+            }
+        ),
+        as_of=sessions[-1],
+        scheduled_intervals=intervals,
+    )
+    frame = _session(
+        "2019-01-01",
+        "2019-01-02",
+        pre_asset=0.0,
+        target_asset=0.0,
+        post_asset=0.0,
+        pre_cash=100.0,
+        target_cash=100.0,
+        post_cash=100.0,
+    )
+    frame["alpha_status"] = None
+    frame["alpha_undefined_reason"] = None
+    cash = frame.asset_id.eq("__cash__")
+    frame.loc[cash, "alpha_status"] = calibration.status
+    frame.loc[cash, "alpha_undefined_reason"] = calibration.undefined_reason
+    frame.loc[cash, "alpha_coverage"] = calibration.coverage
+    frame.loc[cash, "alpha_valid_dates"] = calibration.valid_rebalance_dates
+    frame.loc[cash, "alpha_scheduled_dates"] = calibration.scheduled_rebalance_dates
+    root = write_test_sessions(
+        tmp_path / "undefined", envelope=_envelope(), ledger_chunks=(frame,)
+    )
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+    assert summary["alpha_calibration"]["status"] == "UNDEFINED"
+    assert (
+        summary["alpha_calibration"]["undefined_reason"] == calibration.undefined_reason
+    )
+    assert "slope" not in summary["alpha_calibration"]
+    assert summary["nav"] == 100.0
+    with pytest.raises(
+        PortfolioTargetBlocked, match="holdout_alpha_calibration_undefined"
+    ):
+        frozen_alpha_calibration(artifact, cutoff=pd.Timestamp("2023-12-31"))

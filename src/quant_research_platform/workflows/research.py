@@ -235,7 +235,7 @@ def _plan_targets(
         if action == "dataset build" and terminals
         else _default_scenario_id(profile)
     )
-    protocol = _protocol(profile, scenario)
+    protocol = profile.protocol(scenario_id=scenario, access_window="development")
     protocol_terminals = tuple(sorted(set(protocol.terminal_targets(action))))
     if action != "data materialize" and terminals != protocol_terminals:
         raise ValueError("protocol_terminal_targets_invalid")
@@ -467,9 +467,9 @@ def data_materialize(
 ) -> dict[str, object]:
     selected = tuple(
         data_ids
-        or _protocol(profile, _default_scenario_id(profile)).terminal_targets(
-            "data materialize"
-        )
+        or profile.protocol(
+            scenario_id=_default_scenario_id(profile), access_window="development"
+        ).terminal_targets("data materialize")
         or (spec.data_id for spec in profile.interim.list())
     )
     if plan:
@@ -481,7 +481,10 @@ def data_materialize(
             raw_root=raw_root,
             rebuild=rebuild,
             research_window=_research_window(
-                _protocol(profile, _default_scenario_id(profile)),
+                profile.protocol(
+                    scenario_id=_default_scenario_id(profile),
+                    access_window="development",
+                ),
                 None,
                 start_date=start_date,
                 end_date=end_date,
@@ -498,7 +501,9 @@ def data_materialize(
         end_date=end_date,
         rebuild=rebuild,
         research_window=_research_window(
-            _protocol(profile, _default_scenario_id(profile)),
+            profile.protocol(
+                scenario_id=_default_scenario_id(profile), access_window="development"
+            ),
             None,
             start_date=start_date,
             end_date=end_date,
@@ -527,7 +532,7 @@ def dataset_build(
             rebuild=rebuild,
             raw_root=raw_root or _default_raw_root(layout),
             research_window=_research_window(
-                _protocol(profile, dataset_id),
+                profile.protocol(scenario_id=dataset_id, access_window="development"),
                 None,
                 start_date=start_date,
                 end_date=end_date,
@@ -544,7 +549,7 @@ def dataset_build(
         rebuild=rebuild,
         raw_root=raw_root or _default_raw_root(layout),
         research_window=_research_window(
-            _protocol(profile, dataset_id),
+            profile.protocol(scenario_id=dataset_id, access_window="development"),
             None,
             start_date=start_date,
             end_date=end_date,
@@ -578,7 +583,7 @@ def research_run(
         )
     elif research_plan is not None:
         raise ValueError("research_plan_not_supported")
-    protocol = _protocol(profile, scenario_id)
+    protocol = profile.protocol(scenario_id=scenario_id, access_window="development")
     if not plan:
         model_ids = tuple(
             dict.fromkeys(
@@ -656,7 +661,9 @@ def research_run(
                 rebuild=rebuild,
                 raw_root=raw_root or _default_raw_root(layout),
                 research_window=_research_window(
-                    _protocol(profile, scenario_id),
+                    profile.protocol(
+                        scenario_id=scenario_id, access_window="development"
+                    ),
                     None,
                     start_date=start_date,
                     end_date=end_date,
@@ -1086,7 +1093,7 @@ def _execute_action_with_policy(
 ) -> dict[str, object]:
     source_root = raw_root or _default_raw_root(layout)
     scenario_id = _scenario_from_terminal(profile, action, terminal_targets)
-    protocol = _protocol(profile, scenario_id)
+    protocol = profile.protocol(scenario_id=scenario_id, access_window="development")
     software = software_identity or production_software_identity()
     window = _research_window(
         protocol,
@@ -1439,8 +1446,8 @@ def _build_target(
             ):
                 raise PortfolioTargetBlocked("external_data_unavailable") from exc
             raise
-        roots = getattr(result, "artifact_roots", {})
-        skipped = tuple(getattr(result, "skipped", ()))
+        roots = result.artifact_roots
+        skipped = result.skipped
         if spec.target_id in skipped or spec.target_id not in roots:
             return TargetResult(
                 target_id=spec.target_id,
@@ -1742,8 +1749,8 @@ def _build_semantic_target(
             model_id=persisted.model_id,
             research_dataset_id=protocol.scenario_id,
             train_end=None,
-            test_start=_date_text(time_window.start),
-            test_end=_date_text(time_window.end),
+            test_start=time_value_isoformat(time_window.start, date_only=True),
+            test_end=time_value_isoformat(time_window.end, date_only=True),
             prediction_mode="a_share_oos",
             prediction_column=RAW_PREDICTION_COLUMN,
         )
@@ -2310,10 +2317,6 @@ def _semantic_failure_code(exc: BaseException) -> str:
     ):
         return value
     return type(exc).__name__.lower()
-
-
-def _date_text(value: object) -> str:
-    return pd.Timestamp(value).date().isoformat()
 
 
 def _reuse_target(
@@ -3172,10 +3175,6 @@ def _interim_raw_root(raw_root: Path, spec: InterimDataSpec) -> Path:
     return Path(raw_root) / str(spec.source_id)
 
 
-def _protocol(profile: ResearchProfile, scenario_id: str) -> Any:
-    return profile.protocol(scenario_id=scenario_id, access_window="development")
-
-
 def _scenario_from_terminal(
     profile: ResearchProfile,
     action: str,
@@ -3188,7 +3187,9 @@ def _scenario_from_terminal(
     datasets = tuple(spec.data_id for spec in profile.research_datasets.list())
     for scenario_id in datasets:
         if terminal_targets == tuple(
-            _protocol(profile, scenario_id).terminal_targets(action)
+            profile.protocol(
+                scenario_id=scenario_id, access_window="development"
+            ).terminal_targets(action)
         ):
             return scenario_id
     raise ValueError("protocol_terminal_target_invalid")

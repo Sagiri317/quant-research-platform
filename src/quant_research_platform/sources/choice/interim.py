@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -141,37 +142,51 @@ def normalize_first_disclosure_frame(frame: pd.DataFrame) -> pd.DataFrame:
 
 def _raw_requests(raw_root: Path, *, financial: bool):
     root = require_unaliased_path(Path(raw_root), error="choice_raw_identity_changed")
-    for directory in (root / "css").glob("*"):
-        if not re.fullmatch(r"[0-9a-f]{64}", directory.name):
-            continue
-        require_unaliased_path(directory, error="choice_raw_identity_changed")
-        manifest = read_manifest(directory / "response.metadata.json")
-        payload = manifest["metadata"]["request"]
-        request = ChoiceRequest(
-            endpoint=payload["endpoint"],
-            arguments=tuple(payload["arguments"]),
-            sdk_version=payload["sdk_version"],
-            cutoff=date.fromisoformat(payload["cutoff"]),
-            max_response_bytes=manifest["byte_count"],
-        )
-        if request.identity() != directory.name or request.endpoint != "css":
-            raise ValueError("choice_raw_identity_changed")
-        options = dict(
-            (name.lower(), value)
-            for part in request.arguments[2].split(",")
-            if part
-            for name, _, value in (part.partition("="),)
-        )
-        fields = set(request.arguments[1].upper().split(","))
-        disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
-        snapshot = (
-            financial
-            and bool(set(_INDICATORS).intersection(fields))
-            and options.get("type", "1") in {"1", "3"}
-        )
-        if "reportdate" not in options or not (disclosure or snapshot):
-            continue
-        yield directory, request, options, disclosure
+    try:
+        entries = os.scandir(root / "css")
+    except FileNotFoundError:
+        return
+    except NotADirectoryError as error:
+        raise ValueError("choice_raw_identity_changed") from error
+    with closing_iterator(entries):
+        for entry in entries:
+            directory = root / "css" / entry.name
+            if not re.fullmatch(r"[0-9a-f]{64}", directory.name):
+                continue
+            require_unaliased_path(directory, error="choice_raw_identity_changed")
+            manifest = read_manifest(directory / "response.metadata.json")
+            try:
+                payload = manifest["metadata"]["request"]
+                if type(payload["arguments"]) is not list:
+                    raise ValueError("choice_raw_request_metadata_invalid")
+                request = ChoiceRequest(
+                    endpoint=payload["endpoint"],
+                    arguments=tuple(payload["arguments"]),
+                    sdk_version=payload["sdk_version"],
+                    cutoff=date.fromisoformat(payload["cutoff"]),
+                    max_response_bytes=manifest["byte_count"],
+                )
+                request_identity = request.identity()
+            except (KeyError, TypeError) as error:
+                raise ValueError("choice_raw_request_metadata_invalid") from error
+            if request_identity != directory.name or request.endpoint != "css":
+                raise ValueError("choice_raw_identity_changed")
+            options = dict(
+                (name.lower(), value)
+                for part in request.arguments[2].split(",")
+                if part
+                for name, _, value in (part.partition("="),)
+            )
+            fields = set(request.arguments[1].upper().split(","))
+            disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
+            snapshot = (
+                financial
+                and bool(set(_INDICATORS).intersection(fields))
+                and options.get("type", "1") in {"1", "3"}
+            )
+            if "reportdate" not in options or not (disclosure or snapshot):
+                continue
+            yield directory, request, options, disclosure
 
 
 def source_content_identity(raw_root: Path, data_id: str) -> str | None:
@@ -180,10 +195,13 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
     members = []
-    with policy.lease("source.choice.identity.members", 1) as retained:
-        for root, _request, _options, _disclosure in _raw_requests(
-            raw_root, financial=data_id != FIRST_DISCLOSURE_DATA_ID
-        ):
+    with (
+        policy.lease("source.choice.identity.members", 1) as retained,
+        closing_iterator(
+            _raw_requests(raw_root, financial=data_id != FIRST_DISCLOSURE_DATA_ID)
+        ) as requests,
+    ):
+        for root, _request, _options, _disclosure in requests:
             retained.grow(2048)
             for name in ("response.csv", "response.metadata.json"):
                 path = root / name
@@ -270,89 +288,93 @@ def _raw_index(raw_root, financial, policy):
     with policy.lease("source.choice.index", index.retained_memory_bytes), index:
 
         def rows():
-            for root, request, options, disclosure in _raw_requests(
-                raw_root, financial=financial
-            ):
-                period = options["reportdate"]
-                with read_choice_response(
-                    root, request, resource_policy=policy
-                ) as response:
-                    if not response["Data"]:
-                        continue
-                    if len(response["Dates"]) != 1:
-                        raise ValueError("choice_financial_snapshot_dates_invalid")
-                    fields = response["Indicators"]
-                    for code, cells in response["Data"].items():
-                        if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
-                            raise ValueError("invalid_choice_asset_id")
-                        values = dict(zip(fields, cells, strict=True))
-                        pair = [code, period]
-                        coordinate = [
-                            *pair,
-                            options["enddate"],
-                            options.get("type", "1"),
-                        ]
-                        if disclosure:
-                            for field in _DISCLOSURE_INDICATORS.intersection(values):
-                                yield _identity_payload_row(
-                                    index,
-                                    "disclosure_field",
-                                    [*coordinate, field],
-                                    {
-                                        "values": [
-                                            day.isoformat()
-                                            for day in _dates(values[field])
-                                        ],
-                                        "request_identity": root.name,
-                                    },
-                                )
-                            yield _identity_payload_row(
-                                index,
-                                f"disclosure_coordinates:{code}:{period}",
-                                coordinate,
-                                coordinate,
-                            )
-                            yield _identity_payload_row(index, "report", pair, pair)
-                            if "STMTACTDATE" in values:
-                                first = [
-                                    day
-                                    for day in _dates(values["STMTACTDATE"])
-                                    if day <= request.cutoff
-                                ]
-                                if first:
+            with closing_iterator(
+                _raw_requests(raw_root, financial=financial)
+            ) as requests:
+                for root, request, options, disclosure in requests:
+                    period = options["reportdate"]
+                    with read_choice_response(
+                        root, request, resource_policy=policy
+                    ) as response:
+                        if not response["Data"]:
+                            continue
+                        if len(response["Dates"]) != 1:
+                            raise ValueError("choice_financial_snapshot_dates_invalid")
+                        fields = response["Indicators"]
+                        for code, cells in response["Data"].items():
+                            if not re.fullmatch(r"\d{6}\.(SH|SZ|BJ)", code):
+                                raise ValueError("invalid_choice_asset_id")
+                            values = dict(zip(fields, cells, strict=True))
+                            pair = [code, period]
+                            coordinate = [
+                                *pair,
+                                options["enddate"],
+                                options.get("type", "1"),
+                            ]
+                            if disclosure:
+                                for field in _DISCLOSURE_INDICATORS.intersection(
+                                    values
+                                ):
                                     yield _identity_payload_row(
                                         index,
-                                        "disclosure",
-                                        pair,
-                                        [*pair, first[0].isoformat()],
+                                        "disclosure_field",
+                                        [*coordinate, field],
+                                        {
+                                            "values": [
+                                                day.isoformat()
+                                                for day in _dates(values[field])
+                                            ],
+                                            "request_identity": root.name,
+                                        },
                                     )
-                            if "ITEMVALUECHANGEDATE" in values:
-                                for event in _dates(values["ITEMVALUECHANGEDATE"]):
-                                    if event <= request.cutoff:
-                                        yield _identity_payload_row(
-                                            index,
-                                            f"events:{code}:{period}",
-                                            event.isoformat(),
-                                            event.isoformat(),
-                                        )
-                        if (
-                            financial
-                            and set(_INDICATORS).intersection(values)
-                            and options.get("type", "1") in {"1", "3"}
-                        ):
-                            for field in set(_INDICATORS).intersection(values):
                                 yield _identity_payload_row(
                                     index,
-                                    "snapshot",
-                                    [*coordinate, field],
-                                    {
-                                        "values": _values((values[field],))[0],
-                                        "request_identity": root.name,
-                                    },
+                                    f"disclosure_coordinates:{code}:{period}",
+                                    coordinate,
+                                    coordinate,
                                 )
-                            yield _identity_payload_row(index, "report", pair, pair)
+                                yield _identity_payload_row(index, "report", pair, pair)
+                                if "STMTACTDATE" in values:
+                                    first = [
+                                        day
+                                        for day in _dates(values["STMTACTDATE"])
+                                        if day <= request.cutoff
+                                    ]
+                                    if first:
+                                        yield _identity_payload_row(
+                                            index,
+                                            "disclosure",
+                                            pair,
+                                            [*pair, first[0].isoformat()],
+                                        )
+                                if "ITEMVALUECHANGEDATE" in values:
+                                    for event in _dates(values["ITEMVALUECHANGEDATE"]):
+                                        if event <= request.cutoff:
+                                            yield _identity_payload_row(
+                                                index,
+                                                f"events:{code}:{period}",
+                                                event.isoformat(),
+                                                event.isoformat(),
+                                            )
+                            if (
+                                financial
+                                and set(_INDICATORS).intersection(values)
+                                and options.get("type", "1") in {"1", "3"}
+                            ):
+                                for field in set(_INDICATORS).intersection(values):
+                                    yield _identity_payload_row(
+                                        index,
+                                        "snapshot",
+                                        [*coordinate, field],
+                                        {
+                                            "values": _values((values[field],))[0],
+                                            "request_identity": root.name,
+                                        },
+                                    )
+                                yield _identity_payload_row(index, "report", pair, pair)
 
-        index.add_identity_payload_rows(rows=rows())
+        with closing_iterator(rows()) as input_rows:
+            index.add_identity_payload_rows(rows=input_rows)
         yield index
 
 

@@ -10,11 +10,6 @@ DEFAULT_GENERATED_MARKERS: tuple[str, ...] = (
     "outputs",
     "logs",
 )
-RUN_RESULT_LOGICAL_PATH_MARKERS: tuple[str, ...] = (
-    "data",
-    "outputs",
-    "logs",
-)
 RUN_RESULT_DATASET_LAYERS = frozenset({"interim", "processed", "research"})
 
 
@@ -47,18 +42,6 @@ def logical_path(
     if item.is_absolute():
         return item.name
     return item.as_posix()
-
-
-def dataset_layer_from_path(path: str | Path) -> str | None:
-    """Infer a dataset logical layer from the last ``data/<layer>`` root."""
-
-    parts = _posix_parts(Path(path))
-    for index in range(len(parts) - 2, -1, -1):
-        if parts[index] == "data":
-            layer = parts[index + 1]
-            if layer in {"raw", "interim", "processed", "research"}:
-                return layer
-    return None
 
 
 def _posix_parts(path: Path) -> tuple[str, ...]:

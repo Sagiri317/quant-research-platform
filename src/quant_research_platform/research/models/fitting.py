@@ -18,7 +18,6 @@ import quant_research_platform.research.models.dependencies as dependencies
 import quant_research_platform.research.models.estimators as estimators
 import quant_research_platform.research.models.feature_importance as feature_importance
 import quant_research_platform.research.models.supervised as supervised
-import quant_research_platform.research.models.validation_split as validation_split
 from quant_research_platform.contracts.experiments import (
     legal_training_rows,
     resolve_training_availability_column,
@@ -646,7 +645,7 @@ def _collect_training_frame_owned(
                         projection_lease = None
                     continue
                 if spec.max_train_rows is not None:
-                    usable = validation_split.trim_training_buffer(usable, spec)
+                    usable = _apply_training_controls(usable, spec)
                     usable_payload_bytes = pandas_frame_payload_bytes(usable)
                 if projection_lease is not None:
                     projection_lease.shrink_to(usable_payload_bytes)
@@ -725,7 +724,7 @@ def _collect_training_frame_owned(
             )
         previous_training = training
         try:
-            controlled_training = validation_split.apply_training_controls(
+            controlled_training = _apply_training_controls(
                 training,
                 spec,
             )
@@ -906,11 +905,11 @@ def _fit_predictor(
     estimator: object,
     threads: int,
 ) -> object:
-    fit_training_frame = getattr(estimator, "fit_training_frame", None)
-    if callable(fit_training_frame):
-        return fit_training_frame(training)
-    if not hasattr(estimator, "fit"):
-        return estimator
+    if spec.model_algorithm in {
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    }:
+        return estimator.fit(training, y)
     from sklearn.exceptions import ConvergenceWarning
 
     if spec.model_algorithm in supervised._PARALLEL_MODEL_ALGORITHMS:  # noqa: SLF001
@@ -923,28 +922,10 @@ def _fit_predictor(
         if spec.model_algorithm in {"xgboost_regressor", "lightgbm_regressor"}
         else 1
     )
-    if spec.model_algorithm not in {
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-    }:
-        matrix = training.loc[:, spec.input_columns]
-        weights = equal_date_sample_weights(training["timestamp"])
-        scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
-        scaled_matrix = scaler.transform(matrix)
-        try:
-            with warnings.catch_warnings():
-                warnings.simplefilter("error", ConvergenceWarning)
-                with (
-                    threadpool_limits(limits=1, user_api="blas"),
-                    threadpool_limits(
-                        limits=openmp_threads,
-                        user_api="openmp",
-                    ),
-                ):
-                    estimator.fit(scaled_matrix, y, sample_weight=weights)
-        except ConvergenceWarning:
-            raise ValueError("model_fit_non_converged") from None
-        return ScaledPredictor(estimator, scaler)
+    matrix = training.loc[:, spec.input_columns]
+    weights = equal_date_sample_weights(training["timestamp"])
+    scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
+    scaled_matrix = scaler.transform(matrix)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)
@@ -955,10 +936,10 @@ def _fit_predictor(
                     user_api="openmp",
                 ),
             ):
-                estimator.fit(training.loc[:, spec.input_columns], y)
+                estimator.fit(scaled_matrix, y, sample_weight=weights)
     except ConvergenceWarning:
         raise ValueError("model_fit_non_converged") from None
-    return estimator
+    return ScaledPredictor(estimator, scaler)
 
 
 def iter_model_work_frames(
@@ -1343,3 +1324,19 @@ def _strict_non_negative_count_value(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise ValueError("invalid_model_metadata_count")
     return value
+
+
+def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFrame:
+    """Apply only the generic, explicitly requested row cap."""
+
+    if frame.empty:
+        return frame
+    result = frame.copy()
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"],
+        error="invalid_model_training_timestamp",
+    )
+    result = result.sort_values("timestamp", kind="mergesort")
+    if spec.max_train_rows is not None:
+        result = result.tail(spec.max_train_rows)
+    return result.reset_index(drop=True)

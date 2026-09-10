@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 from collections.abc import Collection, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from datetime import date
@@ -13,7 +12,6 @@ import pandas as pd
 
 from quant_research_platform.contracts.json_codec import (
     bounded_rendered_qrp_json_object_size,
-    canonical_identity_bytes,
     canonical_json_hash,
     render_qrp_json_object,
 )
@@ -143,35 +141,6 @@ def write_schema_inventory(
         yield '\n  ],\n  "schema_id": "qrp-schema-inventory"\n}\n'
 
     return atomic_write_chunks(output, chunks(), encoding="utf-8")
-
-
-def summarize_schema_inventory(
-    project_root: Path,
-    *,
-    important_null_count_columns: Collection[str] | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> dict[str, object]:
-    count = 0
-    total_rows = 0
-    digest = hashlib.sha256()
-    with iter_schema_inventory_items(
-        project_root,
-        important_null_count_columns=important_null_count_columns,
-        resource_policy=resource_policy,
-    ) as items:
-        for item in items:
-            _validate_schema_inventory_item(item)
-            count += 1
-            total_rows += int(item["row_count"])
-            _update_schema_inventory_summary_hash(digest, item)
-    if count == 0:
-        raise ValueError("schema_inventory_no_datasets_found")
-    return {
-        "schema_id": "qrp-schema-inventory-summary",
-        "dataset_count": count,
-        "total_row_count": total_rows,
-        "schema_hash": digest.hexdigest(),
-    }
 
 
 def _validate_schema_inventory_item(value: object) -> dict[str, Any]:
@@ -647,21 +616,3 @@ def _schema_hash(
             "partition_columns": list(partition_columns),
         },
     )
-
-
-def _update_schema_inventory_summary_hash(
-    digest: hashlib._Hash,
-    item: dict[str, Any],
-) -> None:
-    identity = canonical_identity_bytes(
-        {
-            "artifact_id": item["artifact_id"],
-            "layer": item["layer"],
-            "kind": item["kind"],
-            "logical_relative_root": item["logical_relative_root"],
-            "schema_hash": item["schema_hash"],
-            "row_count": item["row_count"],
-        }
-    )
-    digest.update(len(identity).to_bytes(8, byteorder="big"))
-    digest.update(identity)

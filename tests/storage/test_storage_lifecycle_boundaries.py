@@ -146,7 +146,7 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
     operations = (
         lambda: atomic.atomic_write_text(alias / "text.txt", "payload"),
         lambda: atomic.atomic_write_directory(alias / "tree", lambda _root: None),
-        lambda: manifests.replace_qrp_json(
+        lambda: manifests.write_manifest(
             alias / "manifest.json", {"schema_id": "qrp-test"}
         ),
         lambda: key_owner.ExactPrimaryKeyIndex(
@@ -1500,26 +1500,6 @@ def test_bounded_manifest_read_preserves_body_primary_over_handle_close(
 
     with pytest.raises(primary_type, match="body_primary"):
         manifests.read_bounded_qrp_json(path)
-
-
-@pytest.mark.parametrize("primary_type", _PRIMARY_EXCEPTION_TYPES)
-def test_manifest_replace_preserves_body_primary_over_handle_close(
-    primary_type: type[BaseException],
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    primary = primary_type("body_primary")
-    monkeypatch.setattr(
-        scratch_owner,
-        "open_owned_scratch_file",
-        lambda *_args, **_kwargs: _BodyAndCloseFailingHandle(primary),
-    )
-
-    with pytest.raises(primary_type, match="body_primary"):
-        manifests.replace_qrp_json(
-            tmp_path / "manifest.json",
-            {"schema_id": "qrp-test"},
-        )
 
 
 def test_compare_runtime_admission_failure_is_not_mapped(

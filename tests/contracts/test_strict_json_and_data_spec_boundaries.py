@@ -425,7 +425,7 @@ def test_bounded_json_closes_owned_sources_after_later_construction_failure() ->
 
 @pytest.mark.parametrize(
     "writer_name",
-    ("write_manifest", "write_internal_artifact_manifest", "replace_qrp_json"),
+    ("write_manifest", "write_internal_artifact_manifest"),
 )
 def test_manifest_writers_match_reader_size_cap(
     writer_name: str,
@@ -445,7 +445,7 @@ def test_manifest_writers_match_reader_size_cap(
 
 @pytest.mark.parametrize(
     "writer_name",
-    ("write_manifest", "write_internal_artifact_manifest", "replace_qrp_json"),
+    ("write_manifest", "write_internal_artifact_manifest"),
 )
 def test_manifest_writers_share_exact_pretty_render_boundary(
     writer_name: str,

@@ -103,6 +103,8 @@ _EXECUTION_COLUMNS = ("asset_id", "timestamp", "can_enter", "can_exit")
 _BENCHMARK_COLUMNS = ("benchmark_id", "asset_id", "timestamp", "weight")
 _SESSION_KEY = ("timestamp", "asset_id")
 _ALPHA_DIAGNOSTICS = {
+    "alpha_status": "status",
+    "alpha_undefined_reason": "undefined_reason",
     "alpha_slope": "slope",
     "alpha_intercept": "intercept",
     "alpha_slope_se": "slope_standard_error",
@@ -130,23 +132,33 @@ def frozen_alpha_calibration(
             if observed_at > cutoff:
                 raise ValueError("holdout_alpha_source_after_cutoff")
             values = {
-                _ALPHA_DIAGNOSTICS[row.name]: row.number
+                _ALPHA_DIAGNOSTICS[row.name]: (
+                    row.text
+                    if row.name in {"alpha_status", "alpha_undefined_reason"}
+                    else row.number
+                )
                 for row in batch.diagnostics
                 if row.asset_id == PORTFOLIO_CASH_ASSET_ID
                 and row.name in _ALPHA_DIAGNOSTICS
             }
-            if len(values) == len(_ALPHA_DIAGNOSTICS):
+            if values and "status" not in values:
+                raise PortfolioTargetBlocked("holdout_alpha_calibration_missing")
+            if "status" in values:
                 latest = (values, observed_at.date().isoformat())
     if latest is None:
         raise PortfolioTargetBlocked("holdout_alpha_calibration_missing")
     values, observed_at = latest
+    if values["status"] == "UNDEFINED":
+        raise PortfolioTargetBlocked("holdout_alpha_calibration_undefined")
+    if values.pop("status") != "DEFINED":
+        raise ValueError("holdout_alpha_calibration_status_invalid")
+    if set(values) != set(_ALPHA_DIAGNOSTICS.values()) - {"status", "undefined_reason"}:
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
     if values["valid_rebalance_dates"] < 6 or values["coverage"] < 0.8:
         raise PortfolioTargetBlocked("holdout_alpha_calibration_insufficient")
     for name in ("valid_rebalance_dates", "scheduled_rebalance_dates"):
         values[name] = int(values[name])
-    return AlphaCalibration(
-        **values, benchmark_only=values["slope"] <= 0.0
-    ), observed_at
+    return AlphaCalibration(**values, undefined_reason=None), observed_at
 
 
 @dataclass(frozen=True, slots=True)

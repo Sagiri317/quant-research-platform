@@ -213,10 +213,8 @@ def inspect(
     )
 
 
-def _echo_result(result: object) -> None:
-    if hasattr(result, "__dict__"):
-        result = result.__dict__
-    typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True, default=str))
+def _echo_result(result: dict[str, object]) -> None:
+    typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
 
 
 def main() -> None:

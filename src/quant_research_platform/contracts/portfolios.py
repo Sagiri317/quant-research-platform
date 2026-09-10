@@ -82,6 +82,8 @@ CONTINUOUS_EXECUTION_COLUMNS = (
     "benchmark_weight",
     "asset_specific_variance",
     "decision_reason",
+    "alpha_status",
+    "alpha_undefined_reason",
     "alpha_slope",
     "alpha_intercept",
     "alpha_slope_se",

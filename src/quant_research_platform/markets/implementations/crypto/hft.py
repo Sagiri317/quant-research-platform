@@ -11,14 +11,12 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
     TradeEvent,
     tick_to_price,
 )
-from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import (
     strict_finite_float,
     strict_timestamp_series,
@@ -32,73 +30,6 @@ from quant_research_platform.runtime.resources import OwnedValue
 
 HFT_GRID_MS = 100
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
-
-
-def build_crypto_grid_experiment_fold(
-    grid: pd.DatetimeIndex,
-    *,
-    fold_id: str,
-    train: TimeWindow,
-    validation: TimeWindow,
-    development_test: TimeWindow,
-    final_holdout: TimeWindow,
-    embargo_steps: int = 0,
-    complete: bool = True,
-) -> ExperimentFold:
-    """Bind one fold to exact positions in the existing 100 ms Crypto grid."""
-
-    if any(
-        not isinstance(bound, dt.datetime)
-        for window in (train, validation, development_test, final_holdout)
-        for bound in (window.start, window.end)
-    ):
-        raise ValueError("crypto_experiment_requires_datetime_windows")
-    timestamps = pd.DatetimeIndex(grid)
-    if (
-        timestamps.empty
-        or timestamps.has_duplicates
-        or not timestamps.is_monotonic_increasing
-        or (
-            len(timestamps) > 1
-            and not bool(
-                (
-                    timestamps[1:] - timestamps[:-1]
-                    == pd.Timedelta(milliseconds=HFT_GRID_MS)
-                ).all()
-            )
-        )
-    ):
-        raise ValueError("crypto_experiment_grid_invalid")
-    positions = timestamps.get_indexer(
-        pd.DatetimeIndex(
-            [
-                train.start,
-                train.end,
-                validation.start,
-                validation.end,
-                development_test.start,
-                development_test.end,
-                final_holdout.start,
-            ]
-        )
-    )
-    if bool((positions < 0).any()):
-        raise ValueError("crypto_experiment_boundary_not_grid_point")
-    return ExperimentFold(
-        fold_id=fold_id,
-        train=train,
-        validation=validation,
-        development_test=development_test,
-        embargo_steps=embargo_steps,
-        step_kind="crypto_100ms_grid",
-        train_end_step=int(positions[1]),
-        validation_start_step=int(positions[2]),
-        validation_end_step=int(positions[3]),
-        development_test_start_step=int(positions[4]),
-        development_test_end_step=int(positions[5]),
-        final_holdout_start_step=int(positions[6]),
-        complete=complete,
-    )
 
 
 def l1_ofi(

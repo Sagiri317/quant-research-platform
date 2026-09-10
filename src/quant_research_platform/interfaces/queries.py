@@ -23,7 +23,6 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
 
 API_VERSION = "0.1"
 
@@ -57,18 +56,6 @@ def describe_research_dataset_requirements(
         factor_count=len(spec.factor_columns),
         feature_count=len(spec.feature_columns),
         label_count=len(spec.label_columns),
-    )
-
-
-def run_status(*, profile: ResearchProfile, layout: StorageLayout, run_id=None):
-    return research.status(profile=profile, layout=layout, run_id=run_id)
-
-
-def inspect_target(
-    *, profile: ResearchProfile, layout: StorageLayout, target_id, run_id=None
-):
-    return research.inspect(
-        profile=profile, layout=layout, dataset_id=target_id, run_id=run_id
     )
 
 

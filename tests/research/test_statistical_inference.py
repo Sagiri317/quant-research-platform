@@ -16,7 +16,6 @@ from quant_research_platform.research.statistics import (
     model_confidence_set,
     probabilistic_and_deflated_sharpe,
     spa_reality_check,
-    stationary_block_length,
     stationary_bootstrap_mean_ci,
     stepm_superior_models,
     time_series_inference_summary,
@@ -117,8 +116,6 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
     )
 
     assert first == second
-    block_values = np.sin(np.arange(64, dtype="float64") / 3.0)
-    assert stationary_block_length(block_values) >= 1
     result = cscv_pbo(returns, slice_count=4, max_combinations=6)
     assert result.combination_count == 6
     assert result.status == "DEFINED"
@@ -341,3 +338,36 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
             factor_columns=("factor",),
             max_lags=1,
         )
+
+
+@pytest.mark.parametrize("kind", ["aligned", "finite"])
+def test_matrix_cap_includes_conversion_and_live_temporaries(monkeypatch, kind):
+    from quant_research_platform.research import statistics
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    rows, columns = 20000, 32
+    values = np.arange(rows * columns, dtype="int32").reshape(rows, columns)
+    frame = pd.DataFrame(values, columns=[f"c{i}" for i in range(columns)])
+    cap = rows * (8 * columns + (2 if kind == "aligned" else 0)) + 65537
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024**2, explicit_cap_bytes=cap
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("conversion occurred before resource admission")
+
+    with runtime_resource_policy_scope(policy):
+        with monkeypatch.context() as patch:
+            if kind == "aligned":
+                patch.setattr(pd.DataFrame, "astype", forbidden)
+            else:
+                patch.setattr(np, "asarray", forbidden)
+            with pytest.raises(
+                MemoryError, match="statistical_matrix_exceeds_runtime_headroom"
+            ):
+                if kind == "aligned":
+                    aligned_candidate_matrix(frame)
+                else:
+                    statistics._finite_matrix(values, minimum_rows=4, minimum_columns=2)
+        assert policy.used_memory_bytes == 0

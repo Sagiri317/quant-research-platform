@@ -847,3 +847,115 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
         hashlib.sha256(path.read_bytes()).hexdigest() == digest
         for path, digest in before.items()
     )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "metadata_missing",
+        "metadata_type",
+        "request_missing",
+        "arguments_type",
+        "arguments_count",
+        "cutoff_type",
+        "csv_missing",
+        "json_corrupt",
+    ],
+)
+def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
+    import json
+
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        root, _ = _disclosure(session, layout)
+    sidecar = root / "response.metadata.json"
+    payload = json.loads(sidecar.read_text())
+    if mutation == "metadata_missing":
+        del payload["metadata"]
+    elif mutation == "metadata_type":
+        payload["metadata"] = []
+    elif mutation == "request_missing":
+        del payload["metadata"]["request"]
+    elif mutation == "arguments_type":
+        payload["metadata"]["request"]["arguments"] = None
+    elif mutation == "arguments_count":
+        payload["metadata"]["request"]["arguments"] = ["x"]
+    elif mutation == "cutoff_type":
+        payload["metadata"]["request"]["cutoff"] = 1
+    elif mutation == "csv_missing":
+        (root / "response.csv").unlink()
+    sidecar.write_text("{" if mutation == "json_corrupt" else json.dumps(payload))
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError):
+            interim.source_content_identity(
+                layout.raw_source_root("choice"), "financial_first_disclosure"
+            )
+        assert policy.used_memory_bytes == 0
+
+
+def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path):
+    import json
+
+    from tests.sources.reference.test_interim import _write_reference_root
+
+    layout = StorageLayout(tmp_path)
+    _write_reference_root(layout.project_root / "data/raw")
+    with choice_session(SDK(response())) as session:
+        root, _ = _disclosure(session, layout)
+    sidecar = root / "response.metadata.json"
+    payload = json.loads(sidecar.read_text())
+    del payload["metadata"]["request"]
+    sidecar.write_text(json.dumps(payload))
+    profile = research_profile()
+    result = research.research_run(
+        profile=profile,
+        layout=layout,
+        scenario_id="pv_all",
+        start_date="2019-03-04",
+        end_date="2019-03-15",
+    )
+    record = read_research_run_record(layout.research_run_path(result["run_id"]))
+    targets = {row.target_id: row for row in record.target_results}
+    assert targets["financial_first_disclosure"].status.value == "BLOCKED"
+    assert targets["financial_first_disclosure"].reason == "source_identity_invalid"
+    assert targets["a_share_fee_schedule"].status.value == "BUILT"
+    report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
+    assert report["status"] != "COMPLETE"
+    assert "source_identity_invalid" in str(
+        report["report"]["sections"]["readiness/blockers"]
+    )
+
+
+@pytest.mark.parametrize(
+    "error", [PermissionError("synthetic_permission"), OSError(5, "synthetic_io")]
+)
+@pytest.mark.parametrize("boundary", ["metadata", "directory"])
+def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, boundary):
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout)
+
+    def fail(_path):
+        raise error
+
+    if boundary == "metadata":
+        monkeypatch.setattr(interim, "read_manifest", fail)
+    else:
+        original = interim.os.scandir
+
+        def scan(path):
+            if str(path) == str(layout.raw_source_root("choice") / "css"):
+                raise error
+            return original(path)
+
+        monkeypatch.setattr(interim.os, "scandir", scan)
+    with pytest.raises(type(error)) as caught:
+        research.data_materialize(
+            profile=research_profile(),
+            layout=layout,
+            raw_root=None,
+            start_date="2019-01-01",
+            end_date="2019-12-31",
+            data_ids=("financial_first_disclosure",),
+        )
+    assert caught.value is error

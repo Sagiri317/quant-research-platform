@@ -19,11 +19,3 @@ RESEARCH_DATASET_IDS = {
     "fusion_nf_core": "fusion_nf_core",
     "fusion_nf_expectations": "fusion_nf_expectations",
 }
-
-
-def market_panel_data_id(
-    frequency: DataFrequency | str = DataFrequency.DAILY,
-) -> str:
-    if DataFrequency(frequency) is not DataFrequency.DAILY:
-        raise ValueError("unsupported_a_share_panel_frequency")
-    return MARKET_PANEL_ID

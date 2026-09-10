@@ -18,7 +18,7 @@ from quant_research_platform.contracts.models import (
     model_spec_payload,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import (
     _research_dataset_access_window,
@@ -229,14 +229,20 @@ def _build_a_share_quarterly_models(
                     ),
                     model_id=model_ids[0],
                     research_dataset_id=dataset_id,
-                    train_end=_date_text(quarter.train.end),
-                    test_start=_date_text(quarter.development_test.start),
-                    test_end=_date_text(quarter.development_test.end),
-                    candidate_model_ids=model_ids[1:],
-                    model_selection_validation_start=_date_text(
-                        quarter.validation.start
+                    train_end=time_value_isoformat(quarter.train.end, date_only=True),
+                    test_start=time_value_isoformat(
+                        quarter.development_test.start, date_only=True
                     ),
-                    model_selection_validation_end=_date_text(quarter.validation.end),
+                    test_end=time_value_isoformat(
+                        quarter.development_test.end, date_only=True
+                    ),
+                    candidate_model_ids=model_ids[1:],
+                    model_selection_validation_start=time_value_isoformat(
+                        quarter.validation.start, date_only=True
+                    ),
+                    model_selection_validation_end=time_value_isoformat(
+                        quarter.validation.end, date_only=True
+                    ),
                 )
                 winner_specs, selection_metadata, trial_ledgers, config_indices = (
                     _select_model_family_winners(
@@ -263,7 +269,9 @@ def _build_a_share_quarterly_models(
                         dataset_spec=dataset_spec,
                         selected_spec=selected_spec,
                         chunks=chunks,
-                        fitting_cutoff=_date_text(quarter.validation.end),
+                        fitting_cutoff=time_value_isoformat(
+                            quarter.validation.end, date_only=True
+                        ),
                         quarter_id=quarter_id_for_fold(quarter),
                         root_seed=root_seed,
                         config_index=config_indices[family_id],
@@ -397,10 +405,6 @@ def _refit_model_spec(selected_spec, *, n_train, quarter_id, root_seed, config_i
             selected_spec.model_algorithm, n_train=n_train, config_index=config_index
         ),
     )
-
-
-def _date_text(value: object) -> str:
-    return pd.Timestamp(value).date().isoformat()
 
 
 def _select_model_family_winners(

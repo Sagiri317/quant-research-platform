@@ -40,7 +40,6 @@ from quant_research_platform.storage.datasets.paths import (
     timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage.datasets.reading import (
-    filter_frame_by_time_window,
     read_columns_for_time_window,
 )
 from quant_research_platform.storage.datasets.schema import (
@@ -1764,55 +1763,13 @@ def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
             )
 
 
-def test_dataset_compare_and_filter_fail_closed_paths(tmp_path: Path) -> None:
+def test_dataset_compare_reports_missing_sides(tmp_path: Path) -> None:
     left = tmp_path / "left"
     right = tmp_path / "right"
 
     assert datasets.compare_datasets(left, right).status == "MISSING_LEFT"
     left.mkdir()
     assert datasets.compare_datasets(left, right).status == "MISSING_RIGHT"
-
-    spec_payload = {
-        "primary_key": ["market_id", "asset_id"],
-        "column_roles": {
-            "market_id": ColumnRole.KEY.value,
-            "asset_id": ColumnRole.KEY.value,
-        },
-    }
-    with pytest.raises(ValueError, match="time_window_not_supported"):
-        filter_frame_by_time_window(
-            make_helper_edges_dataset_frame(market_id="dummy"),
-            spec=spec_payload,
-            time_window=TimeWindow("2024-01-01", "2024-01-31"),
-        )
-    with pytest.raises(ValueError, match="time_window_timestamp_column_not_selected"):
-        filter_frame_by_time_window(
-            make_helper_edges_dataset_frame(market_id="dummy").drop(
-                columns=["timestamp"]
-            ),
-            spec=data_spec_payload(
-                make_processed_dataset_spec("storage_demo", market_id="dummy")
-            ),
-            time_window=TimeWindow("2024-01-01", "2024-01-31"),
-        )
-    assert filter_frame_by_time_window(
-        make_helper_edges_dataset_frame(market_id="dummy"),
-        spec=data_spec_payload(
-            make_processed_dataset_spec("storage_demo", market_id="dummy")
-        ),
-        time_window=TimeWindow("2025-01-03", "2025-01-31"),
-    ).empty
-
-    with pytest.raises(ValueError, match="invalid_time_window_timestamp_value"):
-        filter_frame_by_time_window(
-            make_helper_edges_dataset_frame(market_id="dummy").assign(
-                timestamp=["2024-01-02", "bad-date"]
-            ),
-            spec=data_spec_payload(
-                make_processed_dataset_spec("storage_demo", market_id="dummy")
-            ),
-            time_window=TimeWindow("2024-01-01", "2024-01-31"),
-        )
 
 
 def test_dataset_partition_and_manifest_shape_helpers() -> None:

@@ -98,36 +98,24 @@ def validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
         part for part in PurePosixPath(root.as_posix()).parts if part != "/"
     )
     if isinstance(spec, InterimDataSpec):
-        if (
-            _unique_matching_suffix(
-                path_parts,
-                lambda candidate: _is_interim_output_suffix(candidate, spec),
-            )
-            is None
-        ):
-            raise ValueError("invalid_interim_dataset_root")
-        return
-    if isinstance(spec, ProcessedDataSpec):
-        if (
-            _unique_matching_suffix(
-                path_parts,
-                lambda candidate: _is_processed_output_suffix(candidate, spec),
-            )
-            is None
-        ):
-            raise ValueError("invalid_processed_dataset_root")
-        return
-    if isinstance(spec, ResearchDatasetSpec):
-        if (
-            _unique_matching_suffix(
-                path_parts,
-                lambda candidate: _is_research_dataset_output_suffix(candidate, spec),
-            )
-            is None
-        ):
-            raise ValueError("invalid_research_dataset_root")
-        return
-    raise ValueError("unsupported_data_spec_type")
+        prefix = ("data", "interim", str(spec.source_id))
+        error = "invalid_interim_dataset_root"
+    elif isinstance(spec, ProcessedDataSpec):
+        prefix = ("data", "processed", str(spec.market_id), spec.kind.value)
+        error = "invalid_processed_dataset_root"
+    elif isinstance(spec, ResearchDatasetSpec):
+        prefix = ("data", "research", str(spec.market_id))
+        error = "invalid_research_dataset_root"
+    else:
+        raise ValueError("unsupported_data_spec_type")
+    if (
+        _unique_matching_suffix(
+            path_parts,
+            lambda candidate: _matches_artifact_path(candidate, prefix, spec.data_id),
+        )
+        is None
+    ):
+        raise ValueError(error)
 
 
 def _unique_matching_suffix(
@@ -156,42 +144,6 @@ def _starts_storage_layout(parts: tuple[str, ...]) -> bool:
             "processed",
             "research",
         }
-    )
-
-
-def _is_interim_output_suffix(parts: tuple[str, ...], spec: InterimDataSpec) -> bool:
-    return _matches_artifact_path(
-        parts,
-        ("data", "interim", str(spec.source_id)),
-        spec.data_id,
-    )
-
-
-def _is_processed_output_suffix(
-    parts: tuple[str, ...],
-    spec: ProcessedDataSpec,
-) -> bool:
-    expected_prefix = (
-        "data",
-        "processed",
-        str(spec.market_id),
-        spec.kind.value,
-    )
-    return _matches_artifact_path(
-        parts,
-        expected_prefix,
-        spec.data_id,
-    )
-
-
-def _is_research_dataset_output_suffix(
-    parts: tuple[str, ...],
-    spec: ResearchDatasetSpec,
-) -> bool:
-    return _matches_artifact_path(
-        parts,
-        ("data", "research", str(spec.market_id)),
-        spec.data_id,
     )
 
 

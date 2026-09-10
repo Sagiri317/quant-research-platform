@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts.json_codec import (
@@ -15,10 +14,6 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
-    evidence_json_value_unsafe_reason,
-)
-from quant_research_platform.storage._scratch_ownership import (
-    remove_owned_scratch,
 )
 from quant_research_platform.storage.atomic import atomic_write_text
 from quant_research_platform.storage.datasets.schema import (
@@ -185,55 +180,6 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     assert_internal_artifact_metadata_safe(snapshot)
     text = render_qrp_json_object(snapshot) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")
-
-
-def replace_qrp_json(path: Path, payload: dict[str, Any]) -> Path:
-    """Atomically replace a QRP-owned JSON object after share-safety validation."""
-
-    snapshot = _bounded_qrp_json_snapshot(payload)
-    _require_schema_id(snapshot)
-    unsafe = evidence_json_value_unsafe_reason(snapshot)
-    if unsafe is not None:
-        raise ValueError(f"unsafe_qrp_json: {unsafe}")
-    final_path = Path(path)
-    text = render_qrp_json_object(snapshot) + "\n"
-    require_unaliased_path(final_path.parent, error="invalid_storage_write_path")
-    final_path.parent.mkdir(parents=True, exist_ok=True)
-    require_unaliased_path(final_path, error="invalid_storage_write_path")
-    temp_path = final_path.with_name(
-        scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
-    )
-    require_unaliased_path(temp_path, error="invalid_storage_write_path")
-    claimed_temp = False
-    try:
-        handle = scratch_owner.open_owned_scratch_file(
-            temp_path,
-            encoding="utf-8",
-        )
-        claimed_temp = True
-        with scratch_owner.handle_preserving_primary(handle):
-            require_unaliased_path(
-                final_path.parent,
-                error="invalid_storage_write_path",
-            )
-            handle.write(text)
-            handle.flush()
-            os.fsync(handle.fileno())
-        require_unaliased_path(temp_path, error="invalid_storage_write_path")
-        require_unaliased_path(final_path, error="invalid_storage_write_path")
-        temp_path.replace(final_path)
-    except BaseException as primary:
-        if claimed_temp:
-            try:
-                require_unaliased_path(temp_path, error="invalid_storage_write_path")
-                remove_owned_scratch(temp_path)
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "manifest scratch cleanup also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-        raise
-    return final_path
 
 
 def _require_schema_id(payload: object) -> None:

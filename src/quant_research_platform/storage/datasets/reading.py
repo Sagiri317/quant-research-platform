@@ -28,7 +28,6 @@ from quant_research_platform.contracts.time import (
     time_window_date_bounds,
     time_window_timestamp_interval,
 )
-from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -2092,30 +2091,6 @@ def iter_bounded_frame_chunks(
     for start in range(0, len(frame), rows_per_chunk):
         stop = min(len(frame), start + rows_per_chunk)
         yield frame.iloc[start:stop]
-
-
-def filter_frame_by_time_window(
-    frame: pd.DataFrame,
-    *,
-    spec: Mapping[str, Any],
-    time_window: TimeWindow | None,
-) -> pd.DataFrame:
-    if time_window is None:
-        return frame
-    timestamp_column = timestamp_column_from_spec_payload(spec)
-    if timestamp_column is None:
-        raise ValueError("time_window_not_supported")
-    if timestamp_column not in frame:
-        raise ValueError("time_window_timestamp_column_not_selected")
-    values = strict_timestamp_series(
-        frame[timestamp_column],
-        error="invalid_time_window_timestamp_value",
-    )
-    start, end, end_inclusive = time_window_timestamp_interval(time_window)
-    end_timestamp = pd.Timestamp(end)
-    end_mask = values.le(end_timestamp) if end_inclusive else values.lt(end_timestamp)
-    mask = values.ge(pd.Timestamp(start)) & end_mask
-    return frame.loc[mask].copy()
 
 
 def prune_paths_for_time_window(

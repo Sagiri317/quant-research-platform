@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import FrozenInstanceError, replace
 from datetime import date
 
-import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.experiments import (
@@ -12,12 +11,6 @@ from quant_research_platform.contracts.experiments import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.markets.implementations.a_share.calendar import (
-    build_a_share_experiment_fold,
-)
-from quant_research_platform.markets.implementations.crypto.hft import (
-    build_crypto_grid_experiment_fold,
-)
 
 
 def _fold(
@@ -116,55 +109,4 @@ def test_experiment_plan_rejects_holdout_overlap_and_keeps_no_purge_surface() ->
                 *plan.folds[:-1],
                 replace(plan.folds[-1], final_holdout_start_step=24),
             ),
-        )
-
-
-def test_market_owners_bind_embargo_to_real_steps() -> None:
-    sessions = pd.date_range("2020-01-01", periods=10, freq="B")
-    calendar = pd.DataFrame(
-        {
-            "calendar_date": sessions,
-            "source_market_type": 1,
-            "is_trading_day": True,
-        }
-    )
-    a_share = build_a_share_experiment_fold(
-        calendar,
-        fold_id="a-share-fold",
-        train=TimeWindow(sessions[0].date(), sessions[1].date()),
-        validation=TimeWindow(sessions[4].date(), sessions[5].date()),
-        development_test=TimeWindow(sessions[7].date(), sessions[8].date()),
-        final_holdout=TimeWindow(sessions[9].date(), sessions[9].date()),
-        embargo_steps=1,
-    )
-    crypto_grid = pd.date_range("2026-01-01", periods=10, freq="100ms")
-    crypto = build_crypto_grid_experiment_fold(
-        crypto_grid,
-        fold_id="crypto-fold",
-        train=TimeWindow(
-            crypto_grid[0].to_pydatetime(), crypto_grid[1].to_pydatetime()
-        ),
-        validation=TimeWindow(
-            crypto_grid[4].to_pydatetime(), crypto_grid[5].to_pydatetime()
-        ),
-        development_test=TimeWindow(
-            crypto_grid[7].to_pydatetime(), crypto_grid[8].to_pydatetime()
-        ),
-        final_holdout=TimeWindow(
-            crypto_grid[9].to_pydatetime(), crypto_grid[9].to_pydatetime()
-        ),
-        embargo_steps=1,
-    )
-
-    assert a_share.step_kind == "a_share_trading_session"
-    assert crypto.step_kind == "crypto_100ms_grid"
-    with pytest.raises(ValueError, match="^experiment_embargo_gap_invalid$"):
-        build_a_share_experiment_fold(
-            calendar,
-            fold_id="bad-fold",
-            train=TimeWindow(sessions[0].date(), sessions[1].date()),
-            validation=TimeWindow(sessions[4].date(), sessions[5].date()),
-            development_test=TimeWindow(sessions[7].date(), sessions[8].date()),
-            final_holdout=TimeWindow(sessions[9].date(), sessions[9].date()),
-            embargo_steps=0,
         )

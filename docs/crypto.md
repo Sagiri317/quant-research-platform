@@ -29,10 +29,7 @@
 
 正式模型目录为9个配置：3个价格模型、1个proxy模型，以及 btc_independent、
 eth_independent、pooled、leave_btc_out、leave_eth_out 五种Ridge范围。
-合成完整链曾使用两币种、两折、18个fold model、9个prediction、10个evaluation和14份账本，
-完整依赖图为32目标。这是明确样本下的软件证据，不能外推为长期真实行情验证。
 当前真实验收按用户安排延期；新的合格录制与资金费归档仍是下一次真实研究的输入前提。
-实际提交、检查范围和豁免保存在 .run/README.md，不在本文件追加测试流水账。
 
 ## 3. 短期建议
 

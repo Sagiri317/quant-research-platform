@@ -1266,3 +1266,45 @@ def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
         fit.factor_returns, expected.params, rtol=1e-11, atol=1e-13
     )
     np.testing.assert_allclose(fit.residuals, expected.resid, rtol=1e-11, atol=1e-13)
+
+
+@pytest.mark.parametrize("constant", [0.0, 2.0])
+@pytest.mark.parametrize("observed_dates", [1, 8])
+def test_alpha_unidentified_statistics_are_not_defined_zero(constant, observed_dates):
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
+    )
+
+    sessions = pd.bdate_range("2023-01-02", periods=10)
+    intervals = alpha_calibration_intervals(sessions, "daily")
+    frame = pd.DataFrame(
+        {
+            "timestamp": np.repeat(intervals.timestamp.iloc[:observed_dates], 10),
+            "alpha_score": constant,
+            "holding_return": np.arange(observed_dates * 10) / 10000,
+        }
+    )
+    design = np.column_stack([np.ones(len(frame)), frame.alpha_score])
+    assert np.linalg.matrix_rank(design) == 1
+    result = calibrate_expected_alpha(
+        frame, as_of=sessions[-1], scheduled_intervals=intervals
+    )
+    assert result.status == "UNDEFINED"
+    assert result.undefined_reason == (
+        "alpha_calibration_rank_deficient"
+        if observed_dates == 8
+        else "alpha_calibration_insufficient_coverage"
+    )
+    assert result.benchmark_only
+    assert result.coverage == observed_dates / 8
+    for field in (
+        "slope",
+        "intercept",
+        "slope_standard_error",
+        "slope_t_statistic",
+        "slope_pvalue",
+        "slope_ci_low",
+        "slope_ci_high",
+        "weighted_r2",
+    ):
+        assert getattr(result, field) is None

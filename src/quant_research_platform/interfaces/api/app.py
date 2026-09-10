@@ -23,6 +23,7 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.workflows import research
 
 CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
 DEFAULT_CORS_ORIGINS = (
@@ -135,7 +136,7 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
         profile: str = A_SHARE_PROFILE_ID, run_id: str | None = None
     ) -> dict[str, object]:
         return evidence_query(
-            queries.run_status, profile=selected_profile(profile), run_id=run_id
+            research.status, profile=selected_profile(profile), run_id=run_id
         )
 
     @app.get("/api/0.1/inspect/{target_id}", operation_id="inspect_published_target")
@@ -143,9 +144,9 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
         target_id: str, profile: str = A_SHARE_PROFILE_ID, run_id: str | None = None
     ) -> dict[str, object]:
         return evidence_query(
-            queries.inspect_target,
+            research.inspect,
             profile=selected_profile(profile),
-            target_id=target_id,
+            dataset_id=target_id,
             run_id=run_id,
         )
 

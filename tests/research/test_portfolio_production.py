@@ -729,7 +729,7 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         production,
         "calibrate_expected_alpha",
         lambda *args, **kwargs: replace(
-            original_calibrate(*args, **kwargs), benchmark_only=False, slope=0.01
+            original_calibrate(*args, **kwargs), undefined_reason=None, slope=0.01
         ),
     )
 
@@ -1240,7 +1240,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         ),
         risk,
         production.AlphaCalibration(
-            1.0, 0.0, 1.0, 1.0, 0.5, -1.0, 1.0, 0.0, 1.0, 6, 6, False
+            1.0, 0.0, 1.0, 1.0, 0.5, -1.0, 1.0, 0.0, 1.0, 6, 6, None
         ),
     )
     candidate = PortfolioCandidateSpec(

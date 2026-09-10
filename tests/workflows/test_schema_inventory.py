@@ -27,9 +27,6 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.workflows import (
-    validate_schema_inventory_summary,
-)
 from quant_research_platform.interfaces import private_cli
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -147,13 +144,9 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(tmp_path: Path) 
             resource_policy=policy,
         )
         assert policy.used_memory_bytes == 0
-        summary = schema_inventory.summarize_schema_inventory(
-            tmp_path, resource_policy=policy
-        )
-        assert summary["dataset_count"] == 9
-        assert summary["total_row_count"] == 18
-        assert policy.used_memory_bytes == 0
     items = json.loads(output.read_text(encoding="utf-8"))["datasets"]
+    assert len(items) == 9
+    assert sum(item["row_count"] for item in items) == 18
     assert [item["logical_relative_root"] for item in items] == sorted(expected)
     for item in items:
         layer, kind, rows = expected[item["logical_relative_root"]]
@@ -709,61 +702,6 @@ def _valid_inventory_payload() -> dict[str, object]:
             }
         ],
     }
-
-
-@pytest.mark.parametrize("failure_codes", ({"failure": "code"}, ("failure",)))
-def test_schema_inventory_summary_rejects_non_list_validation_failure_codes(
-    failure_codes: object,
-) -> None:
-    value = {
-        "schema_id": "qrp-schema-inventory-summary",
-        "status": "FAIL",
-        "failure_codes": failure_codes,
-        "dataset_count": 1,
-        "total_row_count": 2,
-    }
-
-    with pytest.raises(ValueError, match="schema_inventory_summary_invalid"):
-        validate_schema_inventory_summary(
-            value,
-            validation_status="FAIL",
-            validation_failure_codes=failure_codes,  # type: ignore[arg-type]
-            dataset_count=1,
-            total_row_count=2,
-        )
-
-
-def test_schema_inventory_summary_uses_streaming_production_owner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
-    artifact_root = (
-        tmp_path / "data" / "processed" / "a_share" / "factor" / "inventory_factor"
-    )
-    item = deepcopy(_valid_inventory_payload())["datasets"][0]
-
-    monkeypatch.setattr(
-        schema_inventory,
-        "_iter_dataset_artifact_roots",
-        lambda _root: (artifact_root,),
-    )
-    monkeypatch.setattr(
-        schema_inventory,
-        "_inventory_item",
-        lambda *_args, **_kwargs: (item, 0),
-    )
-
-    summary = schema_inventory.summarize_schema_inventory(
-        tmp_path,
-        resource_policy=policy,
-    )
-
-    assert summary["schema_id"] == "qrp-schema-inventory-summary"
-    assert summary["dataset_count"] == 1
-    assert summary["total_row_count"] == 3
-    assert len(summary["schema_hash"]) == 64
-    assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize(

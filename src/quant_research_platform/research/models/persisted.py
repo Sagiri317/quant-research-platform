@@ -29,7 +29,7 @@ from quant_research_platform.contracts.models import (
     validate_model_metadata_core,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.models.fitting import validate_model_state
 from quant_research_platform.research.models.production import _refit_model_spec
@@ -211,7 +211,9 @@ def write_quarterly_model_artifact(
                     quarter_root = models_root / quarter_id
                     quarter_root.mkdir(exist_ok=True)
 
-                    cutoff = _date_text(quarter.validation.end)
+                    cutoff = time_value_isoformat(
+                        quarter.validation.end, date_only=True
+                    )
                     if "fit_cutoff" in metadata and metadata["fit_cutoff"] != cutoff:
                         raise ValueError("model_fit_cutoff_mismatch")
                     metadata["fit_cutoff"] = cutoff
@@ -796,11 +798,10 @@ def _window_payload(window: TimeWindow) -> dict[str, str]:
         raise TypeError("model_artifact_window_invalid")
     start = window.start
     end = window.end
-    return {"start": _date_text(start), "end": _date_text(end)}
-
-
-def _date_text(value: object) -> str:
-    return pd.Timestamp(value).date().isoformat()
+    return {
+        "start": time_value_isoformat(start, date_only=True),
+        "end": time_value_isoformat(end, date_only=True),
+    }
 
 
 def _next_quarter_id(value: str) -> str:

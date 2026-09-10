@@ -2459,3 +2459,28 @@ def test_rf_state_bound_uses_declared_leaf_weight_without_losing_row_or_depth_li
                 frame, spec, estimator=estimator
             ) == 3 * (4096 + expected_nodes * 256)
         assert policy.used_memory_bytes == 0
+
+
+def test_estimator_without_fit_cannot_be_returned_as_fitted():
+    spec = ModelSpec(
+        model_id="missing_fit",
+        model_algorithm="ridge_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+        hyperparameters={"alpha": 1.0},
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2018-01-01", "2018-01-02"]),
+            "x": [1.0, 2.0],
+            "label": [1.0, 2.0],
+        }
+    )
+    with pytest.raises(AttributeError, match="fit"):
+        fitting._fit_predictor(
+            spec,
+            training=frame,
+            y=frame.label.to_numpy(),
+            estimator=object(),
+            threads=1,
+        )
