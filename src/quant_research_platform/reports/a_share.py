@@ -74,7 +74,10 @@ def build_a_share_report(
             f"{scenario}_persisted_predictions",
             "prediction_artifact_identity",
         ),
-        "portfolio": _rows_section(portfolio_rows),
+        "portfolio": {
+            "status": "DEFINED" if portfolio_rows else "BLOCKED",
+            "results": portfolio_rows,
+        },
         "cost": {
             "status": portfolio_statistics["status"],
             "results": [
@@ -168,7 +171,3 @@ def _identity_section(
     if identity is None:
         return {"status": "BLOCKED", "reason": "target_unavailable"}
     return {"status": "DEFINED", identity_key: identity}
-
-
-def _rows_section(rows: list[dict[str, object]]) -> dict[str, object]:
-    return {"status": "DEFINED" if rows else "BLOCKED", "results": rows}

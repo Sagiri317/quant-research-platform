@@ -74,25 +74,6 @@ def inspect_dataset_session(
         return result
 
 
-def _inspect_dataset_owned(
-    dataset_root: Path,
-    *,
-    time_window: TimeWindow | None = None,
-    resource_policy: RuntimeResourcePolicy,
-) -> OwnedValue[DatasetInspection]:
-    with open_dataset_session(
-        dataset_root,
-        columns=None,
-        time_window=time_window,
-        require_consumable=False,
-        resource_policy=resource_policy,
-    ) as context:
-        return _inspect_dataset_session_owned(
-            context,
-            resource_policy=resource_policy,
-        )
-
-
 def _inspect_dataset_session_owned(
     context: DatasetSession,
     *,
@@ -154,7 +135,7 @@ def _inspect_dataset_session_owned(
 
 def _inspection_operation_bound(context: DatasetSession) -> int:
     path_count = len(context.all_paths)
-    columns = getattr(context, "physical_columns", context.arrow_schema.names)
+    columns = context.physical_columns
     result_bound = _inspection_result_bound(
         context,
         path_count=path_count,
@@ -178,10 +159,8 @@ def _inspection_result_bound(
     if path_count is None:
         path_count = len(context.all_paths)
     if columns is None:
-        columns = getattr(context, "physical_columns", context.arrow_schema.names)
-    metadata_bytes = len(getattr(context, "spec_bytes", b"")) + len(
-        getattr(context, "manifest_bytes", b"")
-    )
+        columns = context.physical_columns
+    metadata_bytes = len(context.spec_bytes) + len(context.manifest_bytes)
     result_bound = metadata_bytes + sum(
         len(str(column).encode("utf-8")) + pointer_bytes for column in columns
     )

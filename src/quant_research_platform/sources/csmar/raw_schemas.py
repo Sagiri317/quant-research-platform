@@ -221,9 +221,9 @@ class BoundedCsvRecord:
     ) -> None:
         owner = self._owner
         materialization_control_span_bytes = (
-            getattr(owner, "_source_buffer_span_bytes", 0)
-            + len(getattr(owner, "_buffer", b""))
-            + getattr(owner, "_spool_buffer_span_bytes", 0)
+            owner._source_buffer_span_bytes
+            + len(owner._buffer)
+            + owner._spool_buffer_span_bytes
         )
         parser_lease = owner._parser_lease
         lease = owner._record_lease
@@ -271,20 +271,15 @@ class _BoundedCsvRecords:
     ) -> None:
         try:
             path_identity = dataset_file_identity(path)
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
             raise ValueError("csmar_raw_export_identity_changed") from exc
         if expected_identity is not None and path_identity != expected_identity:
             raise ValueError("csmar_raw_export_identity_changed")
         handle = None
         try:
             handle = path.open("rb")
-            fileno = getattr(handle, "fileno", None)
-            identity = (
-                None
-                if fileno is None
-                else dataset_file_identity_from_stat(os.fstat(fileno()))
-            )
-            if identity is not None and identity != path_identity:
+            identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+            if identity != path_identity:
                 raise ValueError("csmar_raw_export_identity_changed")
             self._handle = handle
             self._identity = identity
@@ -334,6 +329,8 @@ class _BoundedCsvRecords:
                         "csmar raw handle close also failed: "
                         f"{type(close_error).__name__}"
                     )
+            if isinstance(primary, (FileNotFoundError, NotADirectoryError)):
+                raise ValueError("csmar_raw_export_identity_changed") from primary
             raise
 
     def __iter__(self) -> _BoundedCsvRecords:
@@ -719,10 +716,9 @@ class _BoundedCsvRecords:
         self._buffer_position = 0
         self._pushback.clear()
         try:
-            if self._identity is not None:
-                after = dataset_file_identity_from_stat(os.fstat(self._handle.fileno()))
-                if after != self._identity:
-                    raise ValueError("csmar_raw_export_identity_changed")
+            after = dataset_file_identity_from_stat(os.fstat(self._handle.fileno()))
+            if after != self._identity:
+                raise ValueError("csmar_raw_export_identity_changed")
         except BaseException as exc:
             if primary is not None:
                 primary.add_note(
@@ -1004,5 +1000,5 @@ def _inspect_raw_export_file_under_policy(
 def raw_export_file_identity(path: Path) -> DatasetFileIdentity:
     try:
         return dataset_file_identity(path)
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError("csmar_raw_export_identity_changed") from exc

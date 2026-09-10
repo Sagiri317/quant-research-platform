@@ -5,25 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 
-def build_failed_schema_inventory_summary(
-    *, failure_codes: list[str], dataset_count: int, total_row_count: int
-) -> dict[str, Any]:
-    value = {
-        "schema_id": "qrp-schema-inventory-summary",
-        "status": "FAIL",
-        "failure_codes": list(failure_codes),
-        "dataset_count": dataset_count,
-        "total_row_count": total_row_count,
-    }
-    return validate_schema_inventory_summary(
-        value,
-        validation_status="FAIL",
-        validation_failure_codes=failure_codes,
-        dataset_count=dataset_count,
-        total_row_count=total_row_count,
-    )
-
-
 def validate_schema_inventory_summary(
     value: object,
     *,

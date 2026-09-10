@@ -2336,3 +2336,66 @@ def test_target_local_validation_preserves_independent_production(
     assert results[b]["status"] == "BLOCKED"
     assert results[b]["reason"] == f"dependency_blocked: {a}"
     assert results[c]["status"] == "BUILT"
+
+
+@pytest.mark.parametrize("failure", ("missing", "memory", "io", "interrupt"))
+@pytest.mark.parametrize("fail_at", (1, 2))
+def test_source_hash_failure_keeps_run_failure_semantics(
+    tmp_path, monkeypatch, failure, fail_at
+):
+    import errno
+
+    from quant_research_platform.storage import identity
+
+    raw = tmp_path / "raw"
+    marker = raw / "csmar" / "source.raw"
+    marker.parent.mkdir(parents=True)
+    marker.write_bytes(b"synthetic")
+    profile, _, _ = _calendar_rebuild_profile("value", marker=marker)
+    primary = {
+        "missing": FileNotFoundError(errno.ENOENT, "missing"),
+        "memory": MemoryError("primary"),
+        "io": OSError(errno.EIO, "primary"),
+        "interrupt": KeyboardInterrupt("primary"),
+    }[failure]
+    original = identity._hash_file_content
+    calls = 0
+
+    def fail_hash(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls >= fail_at:
+            raise primary
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(identity, "_hash_file_content", fail_hash)
+    kwargs = dict(
+        profile=profile,
+        layout=StorageLayout(tmp_path),
+        raw_root=raw,
+        scenario_id="pv_all",
+        start_date="2019-01-01",
+        end_date="2019-12-31",
+    )
+    if failure == "missing":
+        result = research.research_run(**kwargs)
+        calendar = next(
+            item
+            for item in result["target_results"]
+            if item["target_id"] == "trading_calendar"
+        )
+        assert calendar["status"] == "BLOCKED"
+        assert calendar["reason"] == "source_identity_invalid"
+    else:
+        with pytest.raises(type(primary)) as caught:
+            research.research_run(**kwargs)
+        assert caught.value is primary
+    records = tuple((tmp_path / "data/runs/research").glob("*.json"))
+    assert len(records) == 1
+    record = read_research_run_record(records[0])
+    if failure != "missing":
+        assert record.status.value == "FAILED"
+        assert (
+            record.failure_reason
+            == f"research_run_failed:{type(primary).__name__.lower()}"
+        )

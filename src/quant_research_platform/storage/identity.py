@@ -57,7 +57,7 @@ def dataset_file_identity(path: Path) -> DatasetFileIdentity:
     )
     try:
         before = os.stat(native_filesystem_path(candidate), follow_symlinks=False)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("invalid_dataset_part_files") from exc
     if not stat.S_ISREG(before.st_mode) or int(before.st_ino) <= 0:
         raise ValueError("invalid_dataset_part_files")
@@ -96,15 +96,16 @@ def content_hash_for_files(
     if not entries:
         raise ValueError(error)
     member_hashes: list[tuple[str, str]] = []
-    for logical_id, path, expected in entries:
-        try:
+    try:
+        for index, (logical_id, path, expected) in enumerate(entries):
             before = dataset_file_identity(path)
             if expected is not None and before != expected:
                 raise ValueError(error)
+            entries[index] = (logical_id, path, before)
             if resource_policy is None:
                 member_hash = _hash_file_content(path, before, error)
             else:
-                headroom = int(getattr(resource_policy, "operation_headroom_bytes", 0))
+                headroom = resource_policy.operation_headroom_bytes
                 if headroom <= 0:
                     raise ValueError(error)
                 with resource_policy.lease(
@@ -115,18 +116,21 @@ def content_hash_for_files(
                         path,
                         before,
                         error,
-                        chunk_size=min(1024 * 1024, lease.reserved_bytes),
+                        chunk_size=lease.reserved_bytes,
                     )
             member_hashes.append((logical_id, member_hash))
-        except (MemoryError, OSError, ValueError) as exc:
-            raise ValueError(error) from exc
-    digest = hashlib.sha256()
-    for logical_id, member_hash in sorted(member_hashes):
-        for value in (logical_id, member_hash):
-            encoded = value.encode("utf-8")
-            digest.update(len(encoded).to_bytes(8, "big"))
-            digest.update(encoded)
-    return digest.hexdigest()
+        digest = hashlib.sha256()
+        for logical_id, member_hash in sorted(member_hashes):
+            for value in (logical_id, member_hash):
+                encoded = value.encode("utf-8")
+                digest.update(len(encoded).to_bytes(8, "big"))
+                digest.update(encoded)
+        for _, path, expected in entries:
+            if dataset_file_identity(path) != expected:
+                raise ValueError(error)
+        return digest.hexdigest()
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+        raise ValueError(error) from exc
 
 
 def _hash_file_content(
@@ -139,12 +143,18 @@ def _hash_file_content(
     if chunk_size <= 0:
         raise ValueError(error)
     digest = hashlib.sha256()
-    with closing_iterator(open_filesystem_file(Path(path))) as handle:
+    with closing_iterator(
+        open(native_filesystem_path(path), "rb", buffering=0)
+    ) as handle:
         handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
         if handle_identity != expected:
             raise ValueError(error)
-        while chunk := handle.read(chunk_size):
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                break
             digest.update(chunk)
+            del chunk
         final_handle_identity = dataset_file_identity_from_stat(
             os.fstat(handle.fileno())
         )
@@ -199,13 +209,11 @@ def require_unaliased_path(path: Path, *, error: str) -> Path:
             current /= part
             if path_is_filesystem_alias(current):
                 raise ValueError(error)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError(error) from exc
     return candidate
 
 
 def path_is_filesystem_alias(path: Path) -> bool:
     candidate = Path(path)
-    return candidate.is_symlink() or (
-        hasattr(candidate, "is_junction") and candidate.is_junction()
-    )
+    return candidate.is_symlink() or candidate.is_junction()

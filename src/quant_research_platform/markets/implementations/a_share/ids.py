@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from quant_research_platform.contracts.data import DataFrequency, data_frequency_slug
+from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.ids import MarketId
 
 MARKET_ID = MarketId("a_share")
@@ -27,7 +27,3 @@ def market_panel_data_id(
     if DataFrequency(frequency) is not DataFrequency.DAILY:
         raise ValueError("unsupported_a_share_panel_frequency")
     return MARKET_PANEL_ID
-
-
-def data_frequency_id(prefix: str, frequency: DataFrequency | str) -> str:
-    return f"{prefix}_{data_frequency_slug(frequency)}"

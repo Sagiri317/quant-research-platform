@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     content_hash_for_files,
     dataset_file_identity,
@@ -101,6 +102,9 @@ def load_a_share_fee_source(
     metadata = _read_sidecar(sidecar_path, sidecar_identity)
     csv_bytes = csv_identity.size
     _validate_sidecar(metadata, csv_sha256, csv_bytes=csv_bytes)
+    rows, data_row_count = _read_rows(csv_path, csv_identity)
+    if metadata.get("row_count") != data_row_count:
+        raise ValueError("a_share_fee_source_row_count_mismatch")
     source_identity = content_hash_for_files(
         (
             (A_SHARE_FEE_CSV_NAME, csv_path, csv_identity),
@@ -108,9 +112,6 @@ def load_a_share_fee_source(
         ),
         error="a_share_fee_source_identity_invalid",
     )
-    rows, data_row_count = _read_rows(csv_path, csv_identity)
-    if metadata.get("row_count") != data_row_count:
-        raise ValueError("a_share_fee_source_row_count_mismatch")
     return AShareFeeSource(
         rows=rows,
         csv_sha256=csv_sha256,
@@ -151,13 +152,13 @@ def _sha256_file(path: Path):
     digest = hashlib.sha256()
     expected = _file_identity(path)
     try:
-        with open_filesystem_file(path) as handle:
+        with closing_iterator(open_filesystem_file(path)) as handle:
             if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != expected:
                 raise ValueError("a_share_fee_source_identity_changed")
             while chunk := handle.read(1024 * 1024):
                 digest.update(chunk)
             final = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("a_share_fee_source_unavailable") from exc
     if final != expected or _file_identity(path) != expected:
         raise ValueError("a_share_fee_source_identity_changed")
@@ -168,12 +169,12 @@ def _read_sidecar(path: Path, expected) -> dict[str, object]:
     try:
         if expected.size > _MAX_SIDECAR_BYTES:
             raise ValueError("a_share_fee_sidecar_too_large")
-        with open_filesystem_file(path) as handle:
+        with closing_iterator(open_filesystem_file(path)) as handle:
             if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != expected:
                 raise ValueError("a_share_fee_source_identity_changed")
             raw = handle.read(_MAX_SIDECAR_BYTES + 1)
             final = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("a_share_fee_source_unavailable") from exc
     if len(raw) > _MAX_SIDECAR_BYTES:
         raise ValueError("a_share_fee_sidecar_too_large")
@@ -210,7 +211,7 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
     seen: set[tuple[object, ...]] = set()
     data_row_count = 0
     try:
-        with open_filesystem_file(path) as binary:
+        with closing_iterator(open_filesystem_file(path)) as binary:
             if dataset_file_identity_from_stat(os.fstat(binary.fileno())) != expected:
                 raise ValueError("a_share_fee_source_identity_changed")
             handle = io.TextIOWrapper(binary, encoding="utf-8-sig", newline="")
@@ -280,7 +281,7 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
                     )
             handle.detach()
             final = dataset_file_identity_from_stat(os.fstat(binary.fileno()))
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("a_share_fee_source_unavailable") from exc
     if final != expected or _file_identity(path) != expected:
         raise ValueError("a_share_fee_source_identity_changed")

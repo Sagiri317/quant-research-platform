@@ -189,7 +189,7 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
                 path = root / name
                 try:
                     member_identity = dataset_file_identity(path)
-                except (OSError, ValueError) as error:
+                except ValueError as error:
                     raise ValueError("choice_raw_identity_changed") from error
                 members.append((f"css/{root.name}/{name}", path, member_identity))
         if not members:

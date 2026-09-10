@@ -235,15 +235,11 @@ def _fingerprint_dataset_session_owned_with_lease(
 
 def _fingerprint_operation_bound(context: DatasetSession) -> int:
     pointer_bytes = struct.calcsize("P")
-    paths = getattr(context, "read_paths", ())
+    paths = context.read_paths
     path_count = len(paths)
-    columns = tuple(getattr(context, "logical_columns", ())) + tuple(
-        getattr(context, "physical_columns", ())
-    )
+    columns = context.logical_columns + context.physical_columns
     text_bytes = sum(len(str(column).encode("utf-8")) for column in columns)
-    metadata_bytes = len(getattr(context, "spec_bytes", b"")) + len(
-        getattr(context, "manifest_bytes", b"")
-    )
+    metadata_bytes = len(context.spec_bytes) + len(context.manifest_bytes)
     return (
         metadata_bytes
         + text_bytes * 4

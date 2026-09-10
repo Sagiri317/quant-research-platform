@@ -23,7 +23,6 @@ from quant_research_platform.contracts.outputs import (
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
 )
@@ -167,16 +166,6 @@ def output_manifest_payload(
     return payload
 
 
-def _signal_payload(signal: SignalSpec) -> dict[str, object]:
-    return {
-        "signal_id": signal.signal_id,
-        "source_kind": signal.source_kind,
-        "source_column": signal.source_column,
-        "direction": signal.direction,
-        "transform": signal.transform,
-    }
-
-
 def _evaluation_diagnostics_payload(
     diagnostics: EvaluationDiagnostics,
 ) -> dict[str, object]:
@@ -236,7 +225,16 @@ def evaluation_output_metadata(
         "market_id": str(spec.market_id),
         "research_dataset_id": spec.research_dataset_id,
         "evaluation_axis": spec.evaluation_axis,
-        "signals": [_signal_payload(signal) for signal in spec.signals],
+        "signals": [
+            {
+                "signal_id": signal.signal_id,
+                "source_kind": signal.source_kind,
+                "source_column": signal.source_column,
+                "direction": signal.direction,
+                "transform": signal.transform,
+            }
+            for signal in spec.signals
+        ],
         "label_columns": list(spec.label_columns),
         "label_availability_columns": dict(spec.label_availability_columns),
         "filter_mode": spec.filter_mode,

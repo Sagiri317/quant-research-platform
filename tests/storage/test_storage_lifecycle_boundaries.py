@@ -46,13 +46,12 @@ _PRIMARY_EXCEPTION_TYPES = (
 )
 
 
-@pytest.mark.parametrize("primary_type", _PRIMARY_EXCEPTION_TYPES)
+@pytest.mark.parametrize("primary_type", (*_PRIMARY_EXCEPTION_TYPES, OSError))
 def test_content_hash_close_preserves_primary_and_closes_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary_type
 ) -> None:
     path = tmp_path / "hash.bin"
     path.write_bytes(b"synthetic")
-    expected = identity.dataset_file_identity(path)
     raw = path.open("rb")
     primary = primary_type("hash_primary")
     closed = []
@@ -69,10 +68,18 @@ def test_content_hash_close_preserves_primary_and_closes_file(
             raw.close()
             raise OSError("close_secondary")
 
-    monkeypatch.setattr(identity, "open_filesystem_file", lambda _path: Handle())
+    monkeypatch.setattr(
+        identity, "open", lambda *_args, **_kwargs: Handle(), raising=False
+    )
     try:
-        with pytest.raises(primary_type) as raised:
-            identity._hash_file_content(path, expected, "identity_changed")
+        with runtime_resource_policy_scope() as policy:
+            with pytest.raises(primary_type) as raised:
+                identity.content_hash_for_files(
+                    (("member", path),),
+                    error="identity_changed",
+                    resource_policy=policy,
+                )
+            assert policy.used_memory_bytes == 0
         assert raised.value is primary
         assert raw.closed and closed == [True]
         assert raised.value.__notes__ == ["iterator close also failed: OSError"]
@@ -1867,3 +1874,136 @@ def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:
 
     assert not owned_file.exists()
     assert not owned_directory.exists()
+
+
+@pytest.mark.parametrize("size", (0, 3, 2 * 1024**2 + 7))
+def test_content_hash_digest_and_live_workspace_fit_one_lease(tmp_path, size):
+    import hashlib
+    import tracemalloc
+
+    path = tmp_path / "content.bin"
+    payload = b"x" * size
+    path.write_bytes(payload)
+    digest = hashlib.sha256()
+    for value in ("member", hashlib.sha256(payload).hexdigest()):
+        encoded = value.encode()
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+    with runtime_resource_policy_scope(explicit_cap_bytes=1024**2) as policy:
+        tracemalloc.start()
+        try:
+            actual = identity.content_hash_for_files(
+                (("member", path),), error="changed", resource_policy=policy
+            )
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        assert actual == digest.hexdigest()
+        assert policy.used_memory_bytes == 0
+        # Allow interpreter metadata, but never a second live payload chunk.
+        assert peak < 1024**2 + 128 * 1024
+
+
+def test_content_hash_rechecks_earlier_members_before_return(tmp_path, monkeypatch):
+    first, last = tmp_path / "first", tmp_path / "last"
+    first.write_bytes(b"original")
+    last.write_bytes(b"last")
+    real_hash = identity._hash_file_content
+
+    def mutate_earlier(path, *args, **kwargs):
+        result = real_hash(path, *args, **kwargs)
+        if path == last:
+            first.write_bytes(b"changed after its own final verification")
+        return result
+
+    monkeypatch.setattr(identity, "_hash_file_content", mutate_earlier)
+    with pytest.raises(ValueError, match="changed"):
+        identity.content_hash_for_files(
+            (("first", first), ("last", last)), error="changed"
+        )
+
+
+@pytest.mark.parametrize("boundary", ("stat", "open"))
+@pytest.mark.parametrize("failure", ("missing", "memory", "io", "interrupt"))
+def test_content_identity_distinguishes_invalid_from_fatal(
+    tmp_path, monkeypatch, boundary, failure
+):
+    import errno
+
+    path = tmp_path / "member"
+    path.write_bytes(b"synthetic")
+    primary = {
+        "missing": FileNotFoundError(errno.ENOENT, "missing"),
+        "memory": MemoryError("primary"),
+        "io": OSError(errno.EIO, "primary"),
+        "interrupt": KeyboardInterrupt("primary"),
+    }[failure]
+
+    def fail(*args, **kwargs):
+        raise primary
+
+    with monkeypatch.context() as patch:
+        if boundary == "stat":
+            patch.setattr(identity.os, "stat", fail)
+        else:
+            patch.setattr(identity, "open", fail, raising=False)
+        with pytest.raises(
+            ValueError if failure == "missing" else type(primary)
+        ) as caught:
+            identity.content_hash_for_files((("member", path),), error="changed")
+        if failure != "missing":
+            assert caught.value is primary
+
+
+@pytest.mark.parametrize("source", ("choice", "csmar", "reference"))
+@pytest.mark.parametrize("boundary", ("stat", "open"))
+def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, boundary):
+    import errno
+
+    from quant_research_platform.sources.choice import interim as choice
+    from quant_research_platform.sources.choice.raw_exports import choice_session
+    from quant_research_platform.sources.csmar import interim as csmar
+    from quant_research_platform.sources.reference import interim as reference
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.choice_raw import SDK, response, write_css
+    from tests.sources.reference.test_interim import _write_reference_root
+
+    layout = StorageLayout(tmp_path)
+    if source == "choice":
+        with choice_session(SDK(response())) as session:
+            write_css(
+                session,
+                layout,
+                period="2019-12-31",
+                end_date="2025-12-31",
+                indicators=("STMTACTDATE",),
+                data={"000001.SZ": ["2020/1/30"]},
+            )
+        root, data_id = layout.raw_source_root("choice"), "financial_balance"
+        path = next(root.rglob("response.metadata.json"))
+        owner = choice
+    elif source == "csmar":
+        root, data_id = tmp_path, "trading_calendar"
+        path = root / "native-calendar.csv"
+        path.write_text("Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n")
+        owner = csmar
+    else:
+        root = _write_reference_root(tmp_path / "raw") / "reference"
+        data_id = reference.A_SHARE_FEE_SCHEDULE_DATA_ID
+        path = next(root.rglob("*.csv"))
+        owner = reference
+    primary = OSError(errno.EIO, "primary")
+    original = os.stat if boundary == "stat" else Path.open
+
+    def fail(candidate, *args, **kwargs):
+        if candidate == path or candidate == str(path):
+            raise primary
+        return original(candidate, *args, **kwargs)
+
+    with runtime_resource_policy_scope() as policy:
+        with monkeypatch.context() as patch:
+            patch.setattr(os if boundary == "stat" else Path, boundary, fail)
+            with pytest.raises(OSError) as caught:
+                owner.source_content_identity(root, data_id)
+            assert caught.value is primary
+        assert policy.used_memory_bytes == 0

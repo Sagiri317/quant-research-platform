@@ -26,6 +26,7 @@ from quant_research_platform.contracts.predictions import (
     prediction_output_columns,
 )
 from quant_research_platform.contracts.validation import clear_exception_frames
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
@@ -83,7 +84,7 @@ def validate_output_bundle(
             manifest_path,
             expected_identity=manifest_identity,
         )
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError("output_manifest_unreadable") from exc
     validate_output_manifest_business_envelope(manifest)
     if expected_run_id is not None and manifest["run_id"] != expected_run_id:
@@ -128,7 +129,7 @@ def validate_output_bundle(
                     dataset_file_identity(path) != identity
                     for path, identity in admitted_identities
                 )
-            except (OSError, ValueError) as exc:
+            except ValueError as exc:
                 raise ValueError("output_bundle_identity_changed") from exc
             if identities_changed:
                 raise ValueError("output_bundle_identity_changed")
@@ -468,31 +469,26 @@ def read_prediction_output_bundle(
                             batch = table = timestamps = keep = frame = None
                 if lookup.row_count == 0:
                     raise ValueError("empty_prediction_window")
-        except Exception as exc:
-            if isinstance(exc, ValueError):
-                raise
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("prediction_output_unreadable") from exc
 
-    with runtime_resource_policy_scope(policy) as policy:
-        try:
-            manifest, _members = validate_output_bundle(
-                root,
-                expected_output_id=expected_output_id,
-                expected_run_id=expected_run_id,
-                observer=read_prediction,
-            )
-            if lookup is None:
-                raise ValueError("prediction_output_unreadable")
-            yield manifest, lookup
-        finally:
-            stack.close()
+    with runtime_resource_policy_scope(policy) as policy, closing_iterator(stack):
+        manifest, _members = validate_output_bundle(
+            root,
+            expected_output_id=expected_output_id,
+            expected_run_id=expected_run_id,
+            observer=read_prediction,
+        )
+        if lookup is None:
+            raise ValueError("prediction_output_unreadable")
+        yield manifest, lookup
 
 
 def _require_exact_member_set(root: Path, expected_names: tuple[str, ...]) -> None:
     try:
         with os.scandir(native_filesystem_path(root)) as entries:
             observed_names = tuple(entry.name for entry in entries)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("output_member_set_mismatch") from exc
     if (
         len({name.casefold() for name in observed_names}) != len(observed_names)
@@ -514,7 +510,7 @@ def _validated_bundle_root(root: Path) -> tuple[Path, os.stat_result]:
         ):
             raise ValueError("output_bundle_root_invalid")
         return root, identity
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("output_bundle_root_invalid") from exc
 
 
@@ -526,7 +522,7 @@ def _validated_regular_member(
 ) -> DatasetFileIdentity:
     try:
         identity = dataset_file_identity(path)
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError(error) from exc
     if path.parent != resolved_root:
         raise ValueError(error)

@@ -72,7 +72,11 @@ def production_software_identity(
 ) -> ProductionSoftwareIdentity:
     """Hash production package content plus resolved backend versions."""
 
-    root = Path(package_root) if package_root is not None else _package_root()
+    root = (
+        Path(package_root)
+        if package_root is not None
+        else Path(__file__).resolve().parents[1]
+    )
     payload = {
         "package_content_hash": _package_content_hash(root),
         "dependency_versions": _dependency_versions(dependency_versions),
@@ -81,10 +85,6 @@ def production_software_identity(
         payload=payload,
         identity_hash=canonical_json_hash(payload),
     )
-
-
-def _package_root() -> Path:
-    return Path(__file__).resolve().parents[1]
 
 
 def _package_content_hash(root: Path) -> str:

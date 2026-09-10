@@ -408,10 +408,6 @@ def require_free_disk_headroom(path: Path, *, reserve_bytes: int) -> int:
     return free
 
 
-def _acquire_machine_lock() -> _MachineLock:
-    return _MachineLock.acquire()
-
-
 def _capture_runtime_resource_policy(
     *,
     explicit_cap_bytes: int | None = None,
@@ -420,7 +416,7 @@ def _capture_runtime_resource_policy(
 
     if _PROCESS_POISONED:
         raise RuntimeError("runtime_data_scale_process_poisoned")
-    lock = _acquire_machine_lock()
+    lock = _MachineLock.acquire()
     try:
         explicit_cap = (
             None

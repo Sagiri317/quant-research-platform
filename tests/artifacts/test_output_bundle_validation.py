@@ -613,3 +613,66 @@ def test_validate_output_bundle_propagates_final_secondary_without_primary(
         "observer_hits": 1,
         "root_hits": 2,
     }
+
+
+@pytest.mark.parametrize(
+    ("boundary", "failure"),
+    (
+        ("decode", "memory"),
+        ("decode", "io"),
+        ("decode", "interrupt"),
+        ("root_stat", "io"),
+        ("member_stat", "io"),
+        ("scandir", "io"),
+    ),
+)
+@pytest.mark.parametrize("cleanup_fails", (False, True))
+def test_prediction_bundle_preserves_fatal_and_primary_on_close(
+    tmp_path, monkeypatch, boundary, failure, cleanup_fails
+):
+    import errno
+    from contextlib import ExitStack
+
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    root = tmp_path / "bundle"
+    _write_bundle(root)
+    primary = {
+        "memory": MemoryError("primary"),
+        "io": OSError(errno.EIO, "primary"),
+        "interrupt": KeyboardInterrupt("primary"),
+    }[failure]
+    stack = ExitStack()
+    close = stack.close
+
+    def fail(*args, **kwargs):
+        raise primary
+
+    def close_then_fail():
+        close()
+        raise OSError("secondary")
+
+    if boundary == "decode":
+        monkeypatch.setattr(bundle_validation, "_opened_parquet", fail)
+    else:
+        operation = "scandir" if boundary == "scandir" else "stat"
+        original = getattr(os, operation)
+        target = root / "prediction.parquet" if boundary == "member_stat" else root
+
+        def fail_io(candidate, *args, **kwargs):
+            if Path(candidate) == target:
+                raise primary
+            return original(candidate, *args, **kwargs)
+
+        monkeypatch.setattr(os, operation, fail_io)
+    monkeypatch.setattr(bundle_validation, "ExitStack", lambda: stack)
+    if cleanup_fails:
+        monkeypatch.setattr(stack, "close", close_then_fail)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(type(primary)) as caught:
+            with bundle_validation.read_prediction_output_bundle(
+                root, expected_output_id="pred-run"
+            ):
+                pytest.fail("fatal source failure was swallowed")
+        assert caught.value is primary
+        assert policy.used_memory_bytes == 0

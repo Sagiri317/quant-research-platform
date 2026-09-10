@@ -25,8 +25,8 @@ def capture_test_policy(
             return_value=available_memory_bytes,
         ),
         patch.object(
-            resources,
-            "_acquire_machine_lock",
+            resources._MachineLock,
+            "acquire",
             side_effect=lambda: _TestMachineLock(),
         ),
     ):

@@ -43,11 +43,6 @@ def _validate_non_empty_string(value: object, error: str) -> str:
     return value
 
 
-def require_non_negative_int(value: object, *, error: str) -> None:
-    if type(value) is not int or value < 0:
-        raise ValueError(error)
-
-
 def strict_finite_float(value: object, *, error: str) -> float:
     if isinstance(value, bool):
         raise ValueError(error)

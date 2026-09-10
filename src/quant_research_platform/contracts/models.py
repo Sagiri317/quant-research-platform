@@ -79,10 +79,6 @@ def _model_algorithm_facts(algorithm: str) -> _ModelAlgorithmFacts:
         raise ValueError("unsupported_model_algorithm") from exc
 
 
-def _model_algorithm_ids() -> tuple[str, ...]:
-    return tuple(sorted(_MODEL_ALGORITHM_FACTS))
-
-
 def _freeze_model_value(value: object) -> object:
     if isinstance(value, np.generic):
         return _freeze_model_value(value.item())

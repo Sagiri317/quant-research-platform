@@ -1500,3 +1500,22 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
             relative: (original / relative).read_bytes() for relative in old_good
         } == old_good
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("primary_type", (MemoryError, OSError, KeyboardInterrupt))
+def test_csmar_inspection_keeps_fatal_source_failure(
+    tmp_path, monkeypatch, primary_type
+):
+    path = tmp_path / "native-calendar.csv"
+    path.write_text("Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n")
+    primary = primary_type("primary")
+
+    def fail(*args, **kwargs):
+        raise primary
+
+    monkeypatch.setattr(raw_exports, "inspect_raw_export_file", fail)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(primary_type) as caught:
+            interim.source_content_identity(tmp_path, "trading_calendar")
+        assert caught.value is primary
+        assert policy.used_memory_bytes == 0

@@ -48,7 +48,7 @@ def read_bounded_qrp_json(
     )
     try:
         identity = dataset_file_identity(candidate)
-    except (OSError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     if expected_identity is not None and identity != expected_identity:
         raise ValueError("dataset_metadata_file_identity_changed")
@@ -62,7 +62,7 @@ def read_bounded_qrp_json(
                 raise ValueError("dataset_metadata_file_identity_changed")
             raw = handle.read(_MAX_QRP_JSON_BYTES + 1)
             after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     except ValueError as exc:
         raise ValueError("dataset_metadata_file_identity_changed") from exc
@@ -103,7 +103,7 @@ def read_bounded_qrp_json_directory(
                         raise ValueError("dataset_metadata_directory_member_invalid")
                     names.append(entry.name)
             after = os.stat(native_filesystem_path(candidate), follow_symlinks=False)
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("dataset_metadata_directory_invalid") from exc
         if _directory_identity(before) != _directory_identity(after):
             raise ValueError("dataset_metadata_directory_identity_changed")
@@ -111,7 +111,7 @@ def read_bounded_qrp_json_directory(
 
     try:
         before = os.stat(native_filesystem_path(candidate), follow_symlinks=False)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_directory_invalid") from exc
     names = member_names()
     result = tuple((name, read_bounded_qrp_json(candidate / name)[1]) for name in names)

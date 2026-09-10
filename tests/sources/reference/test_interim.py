@@ -278,3 +278,45 @@ def test_fee_source_identity_race_preserves_old_good(
     assert unrelated.read_text(encoding="utf-8") == "keep"
     if not existing_target:
         assert not target.exists()
+
+
+def test_fee_identity_rechecks_sidecar_after_rows(tmp_path, monkeypatch):
+    from quant_research_platform.sources.reference import a_share_fees
+
+    root = _write_reference_root(tmp_path / "raw") / "reference"
+    sidecar = next(root.rglob("*.metadata.json"))
+    original = a_share_fees._read_rows
+
+    def read_then_change(*args):
+        rows = original(*args)
+        sidecar.write_bytes(sidecar.read_bytes() + b" ")
+        return rows
+
+    monkeypatch.setattr(a_share_fees, "_read_rows", read_then_change)
+    with pytest.raises(ValueError, match="identity"):
+        load_a_share_fee_source(reference_root=root)
+
+
+def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
+    import io
+
+    from quant_research_platform.sources.reference import a_share_fees
+
+    root = _write_reference_root(tmp_path / "raw") / "reference"
+    path = next(root.rglob("*.csv"))
+    primary = MemoryError("primary")
+
+    class Handle(io.BufferedReader):
+        def read(self, *args):
+            raise primary
+
+        def close(self):
+            super().close()
+            raise OSError("secondary")
+
+    handle = Handle(io.FileIO(path))
+    monkeypatch.setattr(a_share_fees, "open_filesystem_file", lambda _: handle)
+    with pytest.raises(MemoryError) as caught:
+        load_a_share_fee_source(reference_root=root)
+    assert caught.value is primary
+    assert handle.closed

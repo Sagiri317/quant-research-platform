@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
@@ -43,15 +42,4 @@ def expectations_factor_definitions(
             required_input_data_id=required_input_data_id,
         )
         for name in EXPECTATIONS_FACTORS
-    )
-
-
-def expectations_factor_catalog(
-    *, market_id: MarketId, required_input_data_id: str
-) -> FactorCatalog:
-    return FactorCatalog(
-        expectations_factor_definitions(
-            market_id=market_id,
-            required_input_data_id=required_input_data_id,
-        )
     )

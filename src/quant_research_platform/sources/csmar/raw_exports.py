@@ -12,7 +12,6 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
 from itertools import groupby, islice
 from pathlib import Path
 
@@ -42,7 +41,6 @@ from .raw_schemas import (
     LOGICAL_RECORD_LIMIT_ERROR,
     MAX_LOGICAL_RECORD_BYTES,
     BoundedCsvRecord,
-    RawExportInspection,
     _infer_dataset_from_header,
     infer_dataset_from_native_export,
     inspect_raw_export_file,
@@ -152,15 +150,6 @@ def _utf8_size(value: str) -> int:
         size += 1 + (codepoint > 0x7F) + (codepoint > 0x7FF) + (codepoint > 0xFFFF)
         index += 1
     return size
-
-
-@dataclass(frozen=True)
-class RawExportIntakeResult:
-    """Record one raw export inspection result."""
-
-    path: Path
-    inspection: RawExportInspection | None = None
-    error: str | None = None
 
 
 class _IndexInfoContinuationSpool:
@@ -354,7 +343,7 @@ def _raw_export_path_session(
     def read_root_identity() -> os.stat_result:
         try:
             metadata = root.lstat()
-        except OSError as error:
+        except (FileNotFoundError, NotADirectoryError) as error:
             raise ValueError("csmar_raw_export_identity_changed") from error
         reparse_flag = getattr(metadata, "st_file_attributes", 0) & getattr(
             stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0
@@ -367,15 +356,13 @@ def _raw_export_path_session(
 
     def verify_root() -> None:
         current = read_root_identity()
-        try:
-            unchanged = os.path.samestat(root_identity, current)
-        except OSError as error:
-            raise ValueError("csmar_raw_export_identity_changed") from error
-        if not unchanged:
+        if not os.path.samestat(root_identity, current):
             raise ValueError("csmar_raw_export_identity_changed")
 
     def fail_walk(error: OSError) -> None:
-        raise ValueError("csmar_raw_export_identity_changed") from error
+        if isinstance(error, (FileNotFoundError, NotADirectoryError)):
+            raise ValueError("csmar_raw_export_identity_changed") from error
+        raise error
 
     def iter_paths() -> Iterator[Path]:
         walker = iter(
@@ -426,25 +413,6 @@ def _raw_export_path_session(
                     "CSMAR raw export root verification also failed: "
                     f"{type(verify_error).__name__}"
                 )
-
-
-def _inspect_raw_export_with_identity(
-    path: Path,
-    *,
-    resource_policy: RuntimeResourcePolicy | None = None,
-    expected_identity: DatasetFileIdentity | None = None,
-) -> RawExportIntakeResult:
-    try:
-        with runtime_resource_policy_scope(resource_policy):
-            inspection = inspect_raw_export_file(
-                path,
-                resource_policy=resource_policy,
-                expected_identity=expected_identity,
-            )
-    except Exception as exc:  # noqa: BLE001
-        return RawExportIntakeResult(path=path, error=str(exc))
-
-    return RawExportIntakeResult(path=path, inspection=inspection)
 
 
 def iter_index_info_rows(
@@ -1121,21 +1089,15 @@ def dataset_files_with_identity_by_id(
                         requested_datasets=requested,
                     )
                     for path, identity in files:
-                        result = _inspect_raw_export_with_identity(
+                        inspection = inspect_raw_export_file(
                             path,
                             resource_policy=policy,
                             expected_identity=identity,
                         )
-                        if result.error is not None:
-                            raise ValueError(
-                                "csmar_raw_export_inspection_failed"
-                            ) from None
-                        if result.inspection is None:
-                            raise ValueError("csmar_raw_export_inspection_failed")
-                        if result.inspection.missing_required_columns:
+                        if inspection.missing_required_columns:
                             raise ValueError("csmar_raw_export_schema_invalid")
                         relative = path.relative_to(root).as_posix().encode("utf-8")
-                        dataset = result.inspection.dataset.encode("utf-8")
+                        dataset = inspection.dataset.encode("utf-8")
                         identity_payload = b"\0".join(
                             str(value).encode("ascii")
                             for value in (
@@ -1255,8 +1217,6 @@ def _raw_dataset_candidate(
             expected_identity=expected_identity,
         )
         return _infer_dataset_from_header(columns)
-    except OSError:
-        return None
     except ValueError as exc:
         if str(exc) == "csmar_raw_export_identity_changed":
             raise

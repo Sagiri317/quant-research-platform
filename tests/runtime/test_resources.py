@@ -109,7 +109,7 @@ def _patch_capture(
         events.append("available")
         return available_memory_bytes
 
-    monkeypatch.setattr(resources, "_acquire_machine_lock", acquire)
+    monkeypatch.setattr(resources._MachineLock, "acquire", acquire)
     monkeypatch.setattr(resources, "_available_memory_bytes", available)
     return events, locks
 

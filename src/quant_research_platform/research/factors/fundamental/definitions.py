@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
@@ -90,14 +89,3 @@ def fundamental_factor_definitions(
         for factor in FUNDAMENTAL_FACTORS
     )
     return definitions
-
-
-def fundamental_factor_catalog(
-    *, market_id: MarketId, required_input_data_id: str
-) -> FactorCatalog:
-    return FactorCatalog(
-        fundamental_factor_definitions(
-            market_id=market_id,
-            required_input_data_id=required_input_data_id,
-        )
-    )

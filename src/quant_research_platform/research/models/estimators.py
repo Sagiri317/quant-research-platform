@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.research.models.rank_ensemble import (
@@ -12,17 +11,12 @@ from quant_research_platform.research.models.rank_ensemble import (
 )
 
 
-@dataclass(frozen=True)
-class _LinearRegressionEstimator:
-    pass
-
-
 def linear_regression_estimator(
     spec: ModelSpec,
     params: dict[str, object],
 ) -> object:
     del spec, params
-    return _LinearRegressionEstimator()
+    return object()
 
 
 def ridge_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
