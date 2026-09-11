@@ -724,9 +724,10 @@ def _apply_special_treatment(
     result["asset_id"] = strict_string_series(
         result["asset_id"], error="invalid_special_treatment_asset_id"
     )
-    status = result["trading_status_code"].fillna(-1)
-    result["is_st"] = status.isin(ST_STATUS_CODES)
-    result["is_pt"] = status.eq(16)
+    status = result["trading_status_code"].astype("Int64")
+    known = status.between(0, 16).fillna(False)
+    result["is_st"] = status.isin(ST_STATUS_CODES).astype("boolean").where(known)
+    result["is_pt"] = status.eq(16).where(known)
     if history is None or history.empty:
         return result
     history = history.rename(columns={"source_asset_id": "asset_id"})
@@ -736,8 +737,9 @@ def _apply_special_treatment(
     if {"asset_id", "timestamp", "change_type"}.issubset(history.columns):
         right = history.loc[:, ["asset_id", "timestamp", "change_type"]].copy()
         change_type = right["change_type"].astype("string").str.upper()
-        right["is_pt"] = change_type.eq("C")
-        right["is_st"] = change_type.isin({"B", "D"})
+        known = change_type.isin({"A", "B", "C", "D"})
+        right["is_pt"] = change_type.eq("C").where(known)
+        right["is_st"] = change_type.isin({"B", "D"}).astype("boolean").where(known)
     elif {"asset_id", "timestamp", "is_st", "is_pt"}.issubset(history.columns):
         right = history.loc[:, ["asset_id", "timestamp", "is_st", "is_pt"]].copy()
     else:
@@ -761,11 +763,16 @@ def _apply_special_treatment(
 
 def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
     result = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").copy()
-    result["is_trading"] = result["filling_flag"].eq(0).fillna(False)
+    result["is_trading"] = (
+        result["filling_flag"]
+        .eq(0)
+        .astype("boolean")
+        .where(result["filling_flag"].isin((0, 1)))
+    )
     for asset_id, positions in result.groupby("asset_id", sort=False).groups.items():
         _ = asset_id
         values = result.loc[positions]
-        trading = result.loc[positions, "is_trading"]
+        trading = result.loc[positions, "is_trading"].fillna(False)
         suspended = values["filling_flag"].eq(1).fillna(False)
         unknown = ~(trading | suspended)
         for close_column, price_columns in (
@@ -815,6 +822,5 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
         result.loc[positions, "period_return"] = result.loc[
             positions, "period_return"
         ].where(~reopening | reopening_return.isna(), reopening_return)
-    result["is_trading"] = result["is_trading"].astype(bool)
     result["is_a_share_scope"] = result["market_type"].isin(CURRENT_MARKET_TYPES)
     return result

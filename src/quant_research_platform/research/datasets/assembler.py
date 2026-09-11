@@ -826,6 +826,7 @@ def _a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
         column: strict_bool_series(
             frame[column],
             error=f"invalid_a_share_eligibility_fact: {column}",
+            allow_null=True,
         )
         for column in ("is_a_share_scope", "is_trading", "is_st", "is_pt")
     }

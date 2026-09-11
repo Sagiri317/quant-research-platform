@@ -283,8 +283,10 @@ def test_execution_mask_is_independent_and_uses_signal_row_legality() -> None:
     result = derive_execution_mask(panel)
 
     assert "scenario_universe" not in result
-    assert result["can_enter"].tolist() == [False, True, False]
-    assert result["can_exit"].tolist() == [True, True, False]
+    assert result["can_enter"].iloc[:2].tolist() == [False, True]
+    assert pd.isna(result["can_enter"].iloc[2])
+    assert result["can_exit"].iloc[:2].tolist() == [True, True]
+    assert pd.isna(result["can_exit"].iloc[2])
 
 
 def test_execution_mask_and_label_consumer_share_signal_row_timing() -> None:
@@ -310,7 +312,8 @@ def test_execution_mask_and_label_consumer_share_signal_row_timing() -> None:
         sessions=sessions,
     )
 
-    assert mask["can_enter"].tolist() == [False, True, True, False]
+    assert mask["can_enter"].iloc[:3].tolist() == [False, True, True]
+    assert pd.isna(mask["can_enter"].iloc[3])
     assert pd.isna(labeled.loc[0, "forward_return_1d"])
     assert labeled.loc[1, "forward_return_1d"] == pytest.approx(13.0 / 12.0 - 1.0)
 

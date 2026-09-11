@@ -432,6 +432,8 @@ _CRYPTO_TABLES = {
         "book_segment_id",
         "trade_connection_id",
         "initial_book_event_id",
+        "initial_bid_tick",
+        "initial_ask_tick",
         "event_start",
         "event_end",
     ),
@@ -550,6 +552,8 @@ _COUNT_COLUMNS.update(
         "crypto_maker_samples.parquet": (
             "sample_id",
             "initial_book_event_id",
+            "initial_bid_tick",
+            "initial_ask_tick",
             "event_start",
             "event_end",
         ),

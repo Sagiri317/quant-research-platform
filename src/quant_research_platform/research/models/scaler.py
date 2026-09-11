@@ -26,7 +26,7 @@ class ModelMatrixScaler:
         sample_weight: object | None = None,
     ) -> ModelMatrixScaler:
         columns = tuple(str(column) for column in frame.columns)
-        if not columns or frame.columns.has_duplicates:
+        if frame.empty or not columns or frame.columns.has_duplicates:
             raise ValueError("model_scaler_columns_invalid")
         values = _finite_matrix(frame, columns)
         weights = _weights(sample_weight, len(values))

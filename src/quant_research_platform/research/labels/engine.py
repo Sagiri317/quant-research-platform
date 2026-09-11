@@ -32,7 +32,6 @@ def calculate_labels_for_panel(
         date_column="timestamp",
         execution_price_column="adj_open",
         sessions=sessions,
-        can_enter_column="can_enter" if "can_enter" in panel_frame else None,
     )
     return result
 

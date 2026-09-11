@@ -1400,9 +1400,7 @@ class MakerCalibration:
         side = new_order.side
         start = int(sample["decision_at"])
         end = start + lifetime_ns
-        with self._book(int(sample["initial_book_event_id"])) as initial:
-            origin = (initial.bids if side == "buy" else initial.asks)[0][0]
-            initial = None
+        origin = sample["initial_bid_tick" if side == "buy" else "initial_ask_tick"]
         current_origin = (state.bids if side == "buy" else state.asks)[0][0]
         book_context = sample["book_segment_id"]
         trade_context = sample["trade_connection_id"]
@@ -1771,6 +1769,8 @@ def replay_maker_calibration(
                 book_segment_id=order.segment_id,
                 trade_connection_id=order.trade_connection_id,
                 initial_book_event_id=sample["initial_book_event_id"],
+                initial_bid_tick=sample["initial_bid_tick"],
+                initial_ask_tick=sample["initial_ask_tick"],
                 event_start=sample["event_start"],
                 event_end=event_count,
             )
@@ -1900,6 +1900,8 @@ def replay_maker_calibration(
                             "attempted": False,
                             "terminal_reason": None,
                             "initial_book_event_id": latest_book_id,
+                            "initial_bid_tick": latest_state.bids[0][0],
+                            "initial_ask_tick": latest_state.asks[0][0],
                             "event_start": event_count,
                         }
                     )

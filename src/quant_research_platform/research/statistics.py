@@ -189,6 +189,8 @@ def hac_mean(
         raise ValueError("hac_max_lags_invalid")
     if not 0.0 < confidence < 1.0:
         raise ValueError("confidence_invalid")
+    if float(np.ptp(data)) <= 8 * np.finfo("float64").eps * float(np.max(np.abs(data))):
+        raise ValueError("hac_inference_undefined")
     fit = sm.OLS(data, np.ones((len(data), 1))).fit(
         cov_type="HAC", cov_kwds={"maxlags": max_lags}
     )
@@ -197,7 +199,12 @@ def hac_mean(
         [fit.params[0], fit.bse[0], fit.tvalues[0], fit.pvalues[0], *interval],
         dtype="float64",
     )
-    if not bool(np.isfinite(outputs).all()):
+    if (
+        not bool(np.isfinite(outputs).all())
+        or outputs[1] <= 0
+        or not 0 <= outputs[3] <= 1
+        or outputs[4] > outputs[5]
+    ):
         raise ValueError("hac_inference_undefined")
     return MeanInference(
         mean=float(fit.params[0]),
@@ -241,6 +248,8 @@ def stationary_bootstrap_mean_ci(
         method="percentile",
         size=confidence,
     )
+    if not np.isfinite(interval).all() or interval[0, 0] > interval[1, 0]:
+        raise ValueError("bootstrap_inference_undefined")
     return BootstrapInterval(
         mean=float(np.mean(data)),
         lower=float(interval[0, 0]),
@@ -456,7 +465,12 @@ def probabilistic_and_deflated_sharpe(
     if type(benchmark_sharpe) is not float or not np.isfinite(benchmark_sharpe):
         raise ValueError("sharpe_benchmark_invalid")
     standard_deviation = float(np.std(data, ddof=1))
-    if standard_deviation == 0.0:
+    if (
+        not np.isfinite(standard_deviation)
+        or standard_deviation == 0.0
+        or float(np.ptp(data))
+        <= 8 * np.finfo("float64").eps * float(np.max(np.abs(data)))
+    ):
         raise ValueError("sharpe_zero_variance")
     observed = float(np.mean(data) / standard_deviation)
     sample_skew = float(skew(data, bias=False))
@@ -466,7 +480,7 @@ def probabilistic_and_deflated_sharpe(
         - sample_skew * observed
         + ((sample_kurtosis - 1.0) / 4.0) * observed * observed
     ) / (len(data) - 1)
-    if variance <= 0.0:
+    if not np.isfinite(variance) or variance <= 0.0:
         raise ValueError("sharpe_variance_invalid")
     scale = variance**0.5
     trial_scale = float(np.std(trials, ddof=1)) if np.isfinite(trials).all() else np.nan
@@ -601,22 +615,15 @@ def fama_macbeth(
     period_coefficients = pd.DataFrame(
         coefficients, index=pd.Index(periods, name="timestamp")
     )
-    summary = pd.DataFrame(
-        {
-            name: {
-                "mean": result.mean,
-                "standard_error": result.standard_error,
-                "t_statistic": result.t_statistic,
-                "p_value": result.p_value,
-                "ci_lower": result.confidence_interval[0],
-                "ci_upper": result.confidence_interval[1],
-            }
-            for name in period_coefficients.columns
-            for result in [
-                hac_mean(period_coefficients[name].to_numpy(), max_lags=max_lags)
-            ]
-        }
-    ).T
+    summary = time_series_inference_summary(
+        period_coefficients.reset_index(),
+        identity_column="timestamp",
+        max_lags=max_lags,
+        fdr_method=None,
+        fdr_alpha=0.05,
+    )
+    if not summary.empty:
+        summary = summary.set_index("timestamp")
     return FamaMacBethResult(
         period_coefficients=period_coefficients,
         summary=summary,
@@ -681,12 +688,16 @@ def fama_macbeth_period(
         if bool((weights <= 0.0).any()):
             raise ValueError("fama_macbeth_weights_invalid")
         fit = sm.WLS(y, x, weights=weights).fit()
-    try:
-        white_p_value = float(het_white(fit.resid, x)[1])
-        if not np.isfinite(white_p_value):
+    residual_scale = float(np.max(np.abs(fit.resid)))
+    fit_scale = max(float(np.max(np.abs(y))), float(np.max(np.abs(fit.fittedvalues))))
+    white_p_value = None
+    if residual_scale > 32 * np.finfo("float64").eps * fit_scale:
+        try:
+            white_p_value = float(het_white(fit.resid, x)[1])
+            if not np.isfinite(white_p_value) or not 0 <= white_p_value <= 1:
+                white_p_value = None
+        except (AssertionError, ValueError):
             white_p_value = None
-    except (AssertionError, ValueError):
-        white_p_value = None
     return FamaMacBethPeriodResult(
         coefficients=fit.params.copy(),
         white_p_value=white_p_value,
@@ -769,9 +780,11 @@ def time_series_inference_summary(
     rows: list[dict[str, object]] = []
     for column in value_columns:
         values = pd.to_numeric(frame[column], errors="raise").astype("float64")
-        valid = values.notna() & np.isfinite(values)
+        if np.isinf(values).any():
+            raise ValueError("time_series_inference_nonfinite")
+        valid = values.notna()
         count = int(valid.sum())
-        if count <= max_lags:
+        if count < max(2, max_lags + 1):
             rows.append(
                 {
                     identity_column: column,
@@ -866,7 +879,7 @@ def _validate_bootstrap_configuration(
         type(block_size) is not int
         or block_size <= 0
         or type(repetitions) is not int
-        or repetitions <= 0
+        or repetitions < 2
         or type(seed) is not int
     ):
         raise ValueError("bootstrap_configuration_invalid")

@@ -260,7 +260,7 @@ def _validate_source_artifact_identity(value: Any) -> dict[str, str]:
     }
 
 
-def _require_identity_hash(value: Any, *, error: str) -> str:
+def _require_identity_hash(value: Any, error: str) -> str:
     if (
         not isinstance(value, str)
         or len(value) != 64
@@ -1404,7 +1404,7 @@ def validate_dataset_manifest_payload(
     validate_physical_schema_payload(physical_schema)
     if list(physical_schema_columns(physical_schema)) != columns:
         raise ValueError("manifest_columns_mismatch")
-    schema_hash = _require_hash(
+    schema_hash = _require_identity_hash(
         manifest.get("schema_hash"), "manifest_schema_hash_invalid"
     )
     if canonical_json_hash(physical_schema) != schema_hash:
@@ -1412,7 +1412,7 @@ def validate_dataset_manifest_payload(
     logical_dtypes = validate_logical_dtype_payload(manifest.get("logical_dtypes"))
     if [item["name"] for item in logical_dtypes["columns"]] != columns:
         raise ValueError("manifest_logical_dtypes_mismatch")
-    logical_dtype_hash = _require_hash(
+    logical_dtype_hash = _require_identity_hash(
         manifest.get("logical_dtype_hash"),
         "manifest_logical_dtype_hash_invalid",
     )
@@ -1796,16 +1796,6 @@ def _require_string_list(
 
 def _is_exact_int(value: object) -> bool:
     return type(value) is int
-
-
-def _require_hash(value: object, error: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in _LOWER_HEX for character in value)
-    ):
-        raise ValueError(error)
-    return value
 
 
 def _require_count_mapping(

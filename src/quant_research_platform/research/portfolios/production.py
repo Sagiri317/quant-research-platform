@@ -30,9 +30,6 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.labels.forward_returns import (
-    add_forward_return_labels,
-)
 from quant_research_platform.research.portfolios.accounting import (
     AlphaCalibration,
     ExecutionAccounting,
@@ -1509,14 +1506,7 @@ def _build_session(
         if str(error) != "execution_adv_invalid:missing_required_assets":
             raise
         raise PortfolioTargetBlocked("portfolio_adv_warmup_insufficient") from error
-    returns = _holding_returns(
-        account,
-        panel,
-        next_panel,
-        endpoint_panel,
-        decision_timestamp=decision_timestamp,
-        next_timestamp=next_timestamp,
-    )
+    returns = _holding_returns(account, next_panel, endpoint_panel)
     return account, returns, adv, optimization, decision_delta
 
 
@@ -1658,6 +1648,8 @@ def _mask_values(execution: pd.DataFrame, assets: pd.Index) -> dict[str, pd.Seri
     missing = [asset for asset in assets if asset not in indexed.index]
     if missing:
         raise PortfolioTargetBlocked("portfolio_execution_mask_missing")
+    if indexed.loc[list(assets), ["can_enter", "can_exit"]].isna().any().any():
+        raise PortfolioTargetBlocked("portfolio_execution_fact_unknown")
     return {
         column: indexed.loc[list(assets), column].astype(bool)
         for column in ("can_enter", "can_exit")
@@ -1666,52 +1658,28 @@ def _mask_values(execution: pd.DataFrame, assets: pd.Index) -> dict[str, pd.Seri
 
 def _holding_returns(
     account: ExecutionAccounting,
-    panel: pd.DataFrame,
     next_panel: pd.DataFrame,
     endpoint_panel: pd.DataFrame,
-    *,
-    decision_timestamp: pd.Timestamp,
-    next_timestamp: pd.Timestamp,
 ) -> pd.Series:
     assets = account.asset_ledger["asset_id"].astype(str)
     returns = pd.Series(0.0, index=assets, dtype="float64")
-    positive = account.asset_ledger["post_trade_notional"].to_numpy() > 0.0
-    if not positive.any():
+    selected = assets.loc[account.asset_ledger["post_trade_notional"].to_numpy() > 0.0]
+    if selected.empty:
         return returns
-    selected = assets.loc[positive]
-    frames = []
-    endpoint_timestamp = pd.Timestamp(endpoint_panel["timestamp"].iloc[0])
-    for frame in (panel, next_panel, endpoint_panel):
-        selected_frame = frame.loc[frame["asset_id"].astype(str).isin(set(selected))]
-        if not selected_frame.empty:
-            frames.append(
-                selected_frame.loc[:, ["asset_id", "timestamp", "adj_open"]].copy()
-            )
-    combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
-    if combined.empty:
-        raise PortfolioTargetBlocked("portfolio_held_return_missing")
-    combined["adj_open"] = pd.to_numeric(combined["adj_open"], errors="raise")
-    if (
-        combined["adj_open"].isna().any()
-        or not np.isfinite(combined["adj_open"].to_numpy()).all()
-    ):
+    prices = []
+    for frame in (next_panel, endpoint_panel):
+        values = frame.set_index("asset_id")["adj_open"].reindex(selected)
+        if values.isna().any():
+            raise PortfolioTargetBlocked("portfolio_held_return_missing")
+        values = pd.to_numeric(values, errors="raise").astype("float64")
+        if not np.isfinite(values).all() or values.le(0).any():
+            raise ValueError("portfolio_return_invalid")
+        prices.append(values)
+    with np.errstate(over="ignore"):
+        values = prices[1] / prices[0] - 1.0
+    if not np.isfinite(values).all():
         raise ValueError("portfolio_return_invalid")
-    labels = add_forward_return_labels(
-        combined,
-        horizons=(1,),
-        sessions=(decision_timestamp, next_timestamp, endpoint_timestamp),
-        can_enter_column=None,
-    )
-    label = labels.loc[labels["timestamp"].eq(decision_timestamp)]
-    values = label.set_index("asset_id")["forward_return_1d"]
-    missing = [
-        asset
-        for asset in selected
-        if asset not in values.index or pd.isna(values[asset])
-    ]
-    if missing:
-        raise PortfolioTargetBlocked("portfolio_held_return_missing")
-    returns.loc[selected] = values.reindex(selected).astype("float64")
+    returns.loc[selected] = values
     return returns
 
 

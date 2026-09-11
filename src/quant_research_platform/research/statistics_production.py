@@ -506,21 +506,21 @@ def _prediction_summary(
         "bootstrap_repetitions": repetitions,
         "bootstrap_seed": seed,
     }
-    if count <= max_lags:
+    if count < max(2, max_lags + 1):
         return pd.DataFrame([row])
     try:
         inference = hac_mean(values, max_lags=max_lags)
+        bootstrap = stationary_bootstrap_mean_ci(
+            values,
+            block_size=block_size,
+            repetitions=repetitions,
+            seed=seed,
+        )
     except ValueError as exc:
-        if str(exc) != "hac_inference_undefined":
+        if str(exc) not in {"hac_inference_undefined", "bootstrap_inference_undefined"}:
             raise
-        row["reason"] = "hac_inference_undefined"
+        row["reason"] = str(exc)
         return pd.DataFrame([row])
-    bootstrap = stationary_bootstrap_mean_ci(
-        values,
-        block_size=block_size,
-        repetitions=repetitions,
-        seed=seed,
-    )
     row.update(
         status="DEFINED",
         reason=None,
@@ -825,7 +825,7 @@ def _fama_macbeth_summary(
             "white_defined_period_count": white_defined,
             "white_undefined_period_count": white_undefined,
         }
-        if count > max_lags:
+        if count >= max(2, max_lags + 1):
             try:
                 inference = hac_mean(values, max_lags=max_lags)
             except ValueError as exc:

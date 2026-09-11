@@ -35,6 +35,8 @@ def calibration_inputs(paths, errors):
                 "book_segment_id": books[0].segment_id,
                 "trade_connection_id": "trade-connection-1",
                 "initial_book_event_id": initial,
+                "initial_bid_tick": books[0].bids[0][0],
+                "initial_ask_tick": books[0].asks[0][0],
                 "event_start": initial + 1,
                 "event_end": event_id,
             }

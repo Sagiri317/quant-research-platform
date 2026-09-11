@@ -551,6 +551,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                     + 0.03 * x * x
                     + 0.08 * np.sin((asset_index + 1) * (date_index + 1))
                 )
+                # Five-day blocks vary independently of the daily prediction sign.
+                if (date_index // 5) % 2:
+                    label *= -1.0
                 if not mature:
                     label *= immature_sign
                 if name == "zero":
@@ -655,16 +658,17 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     )
     evaluation_row = evaluation_summaries[0].iloc[0]
     assert evaluation_row["valid_rankic_count"] == 20
-    assert evaluation_row["mean_rankic"] == 1.0
+    assert evaluation_row["mean_rankic"] == pytest.approx(0.0, abs=1e-15)
     factors = outputs[0]["factor_diagnostics"]
     assert set(factors["family_id"]) == {"price_volume"}
     assert set(factors["fdr_method"]) == {"BH", "BY"}
     assert set(factors["planned_hypothesis_count"]) == {len(a_share.PV_FULL)}
-    assert set(factors["defined_hypothesis_count"]) == {1}
-    assert set(factors["missing_hypothesis_count"]) == {len(a_share.PV_FULL) - 1}
+    assert set(factors["defined_hypothesis_count"]) == {2}
+    assert set(factors["missing_hypothesis_count"]) == {len(a_share.PV_FULL) - 2}
     prediction = outputs[0]["prediction_diagnostics"].iloc[0]
     assert prediction["observation_count"] == 20
     assert prediction["status"] == "DEFINED"
+    assert prediction["mean"] == pytest.approx(0.2, abs=1e-15)
     assert prediction["bootstrap_seed"] == derive_seed(
         42, "a_share_statistics_bootstrap", "pv_all", "prediction"
     )

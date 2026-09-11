@@ -14,7 +14,10 @@ from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     TradeCostComponents,
 )
-from quant_research_platform.contracts.validation import strict_bool_series
+from quant_research_platform.contracts.validation import (
+    strict_bool_series,
+    strict_finite_numeric_series,
+)
 
 _CHARGE_CODES = frozenset({"BROKER_COMMISSION", "STAMP_DUTY", "TRANSFER_FEE"})
 _ALL_FEE_CODES = _CHARGE_CODES | frozenset({"EXCHANGE_HANDLING_FEE", "REGULATORY_FEE"})
@@ -335,40 +338,36 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
         raise ValueError("execution_mask_columns_invalid")
     result = panel.sort_values(["asset_id", "timestamp"], kind="mergesort").copy()
     result["is_trading"] = strict_bool_series(
-        result["is_trading"], error="execution_trading_status_invalid"
+        result["is_trading"], error="execution_trading_status_invalid", allow_null=True
     )
-    status = pd.to_numeric(result["limit_status"], errors="raise")
+    status = strict_finite_numeric_series(
+        result["limit_status"], error="execution_limit_status_invalid", allow_null=True
+    ).astype("Float64")
     if bool((status.dropna().isin((-1, 0, 1)) == False).any()):  # noqa: E712
         raise ValueError("execution_limit_status_invalid")
-    prices = result.loc[:, ["open", "high", "low", "close"]].apply(
-        pd.to_numeric, errors="raise"
+    prices = (
+        result.loc[:, ["open", "high", "low", "close"]]
+        .apply(
+            lambda column: strict_finite_numeric_series(
+                column, error="execution_price_invalid", allow_null=True
+            )
+        )
+        .astype("Float64")
     )
     equal_price = (
         prices["open"].eq(prices["high"])
         & prices["open"].eq(prices["low"])
         & prices["open"].eq(prices["close"])
     )
-    result["one_word_limit_up"] = status.eq(1) & equal_price
-    result["one_word_limit_down"] = status.eq(-1) & equal_price
+    known_prices = (
+        status.notna() & prices.notna().all(axis=1) & prices.gt(0).all(axis=1)
+    )
+    result["one_word_limit_up"] = (status.eq(1) & equal_price).where(known_prices)
+    result["one_word_limit_down"] = (status.eq(-1) & equal_price).where(known_prices)
     grouped = result.groupby("asset_id", sort=False)
-    next_trading = (
-        grouped["is_trading"]
-        .shift(-EXECUTION_LOOKAHEAD_SESSIONS)
-        .fillna(False)
-        .astype(bool)
-    )
-    next_up = (
-        grouped["one_word_limit_up"]
-        .shift(-EXECUTION_LOOKAHEAD_SESSIONS)
-        .fillna(False)
-        .astype(bool)
-    )
-    next_down = (
-        grouped["one_word_limit_down"]
-        .shift(-EXECUTION_LOOKAHEAD_SESSIONS)
-        .fillna(False)
-        .astype(bool)
-    )
+    next_trading = grouped["is_trading"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
+    next_up = grouped["one_word_limit_up"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
+    next_down = grouped["one_word_limit_down"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
     output = result.loc[:, ("market_id", "asset_id", "timestamp")].copy()
     output["can_enter"] = next_trading & ~next_up
     output["can_exit"] = next_trading & ~next_down

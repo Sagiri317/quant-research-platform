@@ -133,13 +133,14 @@ def test_query_admits_deep_book_temporaries_before_materialization(monkeypatch, 
     materialized = []
     with runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy:
         model = MakerCalibration(*inputs, resource_policy=policy)
-        original = model._book
+        original = model._response
 
-        def observed_book(event_id):
-            materialized.append(event_id)
-            return original(event_id)
+        def observed_response(*args, **kwargs):
+            assert policy.used_memory_bytes >= 512 * (len(state.bids) + len(state.asks))
+            materialized.append(True)
+            return original(*args, **kwargs)
 
-        monkeypatch.setattr(model, "_book", observed_book)
+        monkeypatch.setattr(model, "_response", observed_response)
         query = dict(
             state=state,
             decision_ns=0,
@@ -607,3 +608,48 @@ def test_calibrated_maker_compares_old_expiry_with_real_cancel_replace(
         if keep_wins:
             assert fills[0]["order_id"] == 1
         assert policy.used_memory_bytes == 0
+
+
+def test_decisions_reuse_captured_sample_origins_without_initial_book_reads():
+    state = _state(0)
+    paths = [([state], [_trade(100, price="99.5", quantity="5", maker_buyer=True)])] * 3
+    samples, events = calibration_inputs(paths, [0.0] * 3)
+    initial_ids = {sample["initial_book_event_id"] for sample in samples()}
+    reads = []
+
+    def window(start, stop):
+        assert start not in initial_ids
+        reads.append((start, stop))
+        yield from events(start, stop)
+
+    order = _maker_new_order(
+        0,
+        "buy",
+        0.3,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config(),
+        {"s1": (0, 1000000000)},
+        {"trade-connection-1": (0, 1000000000)},
+    )
+    with runtime_resource_policy_scope() as policy:
+        model = MakerCalibration(samples, window, resource_policy=policy)
+        try:
+            for prediction in (0.0, 0.01):
+                keep, quantity, gain = model.select(
+                    state=state,
+                    decision_ns=0,
+                    new_order=replace(order),
+                    active_order=None,
+                    commands=(),
+                    lifetime_ns=500000000,
+                    prediction=prediction,
+                    fee_bps=0.0,
+                    funding=[],
+                )
+                assert not keep and quantity == 0.3
+                assert gain == pytest.approx(0.15 + 30 * prediction)
+        finally:
+            model.close()
+        assert policy.used_memory_bytes == 0
+    assert len(reads) == 12

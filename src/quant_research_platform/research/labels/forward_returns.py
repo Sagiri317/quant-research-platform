@@ -24,7 +24,7 @@ def add_forward_return_labels(
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",
     sessions: Sequence[object],
-    can_enter_column: str | None = None,
+    can_enter_column: str = "can_enter",
 ) -> pd.DataFrame:
     """Add entry-open to exit-open returns on the supplied trading-session axis."""
 
@@ -35,7 +35,7 @@ def add_forward_return_labels(
         date_column=date_column,
         execution_price_column=execution_price_column,
     )
-    if can_enter_column is not None and can_enter_column not in validated.columns:
+    if can_enter_column not in validated.columns:
         raise ValueError(f"missing_forward_return_columns: {can_enter_column}")
     axis = _session_axis(sessions)
     result = validated.sort_values([asset_column, date_column], kind="mergesort").copy()
@@ -56,13 +56,11 @@ def add_forward_return_labels(
     position_by_session = {timestamp: index for index, timestamp in enumerate(axis)}
     positions = result[date_column].map(position_by_session).to_numpy()
     prices = price.to_numpy(dtype="float64", copy=False)
-    can_enter = (
-        strict_bool_series(
-            result[can_enter_column], error="invalid_forward_return_can_enter"
-        ).to_numpy(copy=False)
-        if can_enter_column is not None
-        else None
-    )
+    can_enter = strict_bool_series(
+        result[can_enter_column],
+        error="invalid_forward_return_can_enter",
+        allow_null=True,
+    ).to_numpy(copy=False)
     for horizon in horizons:
         labels = np.full(len(result), np.nan, dtype="float64")
         available = np.full(len(result), np.datetime64("NaT"), dtype="datetime64[ns]")
@@ -82,7 +80,7 @@ def add_forward_return_labels(
             exit_row = row_lookup.get((asset, exit_date))
             if entry_row is None or exit_row is None:
                 continue
-            if can_enter is not None and not bool(can_enter[position]):
+            if pd.isna(can_enter[position]) or not bool(can_enter[position]):
                 continue
             entry_price = prices[entry_row]
             exit_price = prices[exit_row]

@@ -464,7 +464,16 @@ can_exit
 
 执行掩码不得持久化为面向模型的研究特征/上下文列；标签或组合在需要时，通过明确连接使用执行产物。
 
-未来 `can_enter/can_exit` 变化不得改变过去的特征、eligible、model_target 或预测。
+QRP 训练标签采用唯一的 execution-aware realized label：构造信号 t 的标签时，
+该定义必需的未来入场执行事实决定标签有效性；与该期限无关的更晚事实不得
+反向改写已成熟或已发布的历史 model_target。未来执行事实不得进入特征、eligible
+或拟合截止时尚未成熟的训练样本。不存在 execution-unaware 的备用 target。
+
+执行 owner 使用 nullable boolean：True/False 是已知允许/禁止，NULL 是 unknown。
+缺失交易状态、涨跌停或必要价格不得被肯定化；已确认停牌为禁止，尾部缺少
+下一 session 观测为 unknown，不能声称市场禁止交易。显式 IPO/no-limit 事件可以解除涨跌幅限制；缺少事件不是
+无此例外的证据，仍需有效的当日市场事实。ST/PT 未知保留 NULL；eligible=False
+只表示不具备入选证据，不能解释为已知非 ST/PT。组合遇到未知执行事实明确 BLOCKED。
 
 ### 5.9 正式因子库
 
@@ -848,7 +857,7 @@ A 股经济时间线：
 
 `1d / 120d`
 
-若信号行 `can_enter` 为假，所有依赖该入场的标签均缺失。
+若信号行 `can_enter` 为假或 unknown，所有依赖该入场的标签均缺失。
 
 卖出限制不延长固定标签期限；标签仍定义固定期限经济收益，而不是模拟清算结果。
 
@@ -856,7 +865,11 @@ A 股经济时间线：
 
 `forward_return_*d_available_at`
 
-`available_at = exit session open`，即离场交易日开盘。
+signal time 为 t 收盘；entry/exit event time 分别为 t+1/t+1+h 开盘。
+日线一字板判定使用入场日 OHLC，information availability 为入场日收盘；
+标签 maturity 为所需执行事实与两端价格均已可得的离场交易日开盘。
+日频持久化日期使用 session 标签，`available_at = exit session open`；
+不把执行事实的发生时间当成信号日已知信息。
 
 #### 模型目标
 
@@ -974,7 +987,9 @@ XGBoost
 
 目标不缩放。
 
-训练集中零方差的模型列映射为 0，不删除。
+训练期零方差列的冻结 scale=1，训练样本变换为 0，不删除该列。
+OOS 始终使用训练期 mean/scale；新值按 (x-mean)/scale 变换，不能永久置零。
+fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
 
 排名集成和单因子不使用该缩放器。
 
@@ -1799,3 +1814,13 @@ ADV 范围/参与率
 字段或覆盖缺失不构成永久备用语义、虚假值、当前状态历史回填、缩短窗口或隐藏模型变化的理由。
 
 数据获取状态属于操作事实，不改变本决定文档。
+
+### 统计退化与发布
+
+HAC 要求至少两个有限观测且 0 <= lag < N。常量或振幅不超过
+8×float64 epsilon×最大绝对值的序列，均值推断为 UNDEFINED；零/非有限 SE
+或非法后端区间也为 UNDEFINED，不发布巨大伪 t 值。缺失观测按已有共同覆盖
+合同处理，Inf 属于无效输入；小样本不调用后端。Bootstrap 至少两次重复，
+相同观测允许有限的点区间；非有限或反序区间不得发布。
+秩亏回归不发布伪系数，SPA/StepM/MCS 的常量差分、零方差与非法后端 p 值
+保持 UNDEFINED。报告和 Notebook 只消费已发布统计，不补算第二真相。

@@ -136,6 +136,8 @@ def maker_calibration_tables():
                 "book_segment_id": sample["book_segment_id"],
                 "trade_connection_id": sample["trade_connection_id"],
                 "initial_book_event_id": sample["initial_book_event_id"],
+                "initial_bid_tick": sample["initial_bid_tick"],
+                "initial_ask_tick": sample["initial_ask_tick"],
                 "event_start": sample["event_start"],
                 "event_end": sample["event_end"],
             }

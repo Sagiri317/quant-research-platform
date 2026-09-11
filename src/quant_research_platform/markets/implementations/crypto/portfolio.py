@@ -383,6 +383,8 @@ def produce_maker_calibration(
         "prediction_end",
         "label_available_at",
         "initial_book_event_id",
+        "initial_bid_tick",
+        "initial_ask_tick",
         "event_start",
         "event_end",
         "event_id",
@@ -494,6 +496,8 @@ def produce_maker_calibration(
                     book_segment_id,
                     trade_connection_id,
                     initial_book_event_id,
+                    initial_bid_tick,
+                    initial_ask_tick,
                     event_start,
                     event_end,
                     fold_id=fold["fold_id"],
@@ -515,6 +519,8 @@ def produce_maker_calibration(
                         book_segment_id,
                         trade_connection_id,
                         initial_book_event_id,
+                        initial_bid_tick,
+                        initial_ask_tick,
                         event_start,
                         event_end,
                     )
@@ -1128,6 +1134,11 @@ def validate_maker_calibration(artifact, envelope):
                     sample = row._asdict()
                     sample["decision_at"] = decision
                     with model._book(initial) as state:
+                        if (row.initial_bid_tick, row.initial_ask_tick) != (
+                            state.bids[0][0],
+                            state.asks[0][0],
+                        ):
+                            raise ValueError("crypto_calibration_origin_invalid")
                         with policy.lease(
                             "crypto.maker.calibration.reference",
                             65536 + 512 * (len(state.bids) + len(state.asks)),
