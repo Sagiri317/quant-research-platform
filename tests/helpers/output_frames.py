@@ -1,3 +1,4 @@
+# Structural serialization fixtures; metric values are not statistical oracles.
 from __future__ import annotations
 
 import pandas as pd

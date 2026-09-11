@@ -1266,3 +1266,94 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
         PortfolioTargetBlocked, match="holdout_alpha_calibration_undefined"
     ):
         frozen_alpha_calibration(artifact, cutoff=pd.Timestamp("2023-12-31"))
+
+
+@pytest.mark.parametrize("slope,intercept", [(0.0, 0.0), (0.0, 0.25), (0.125, 0.0)])
+def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
+    tmp_path, slope, intercept
+):
+    from quant_research_platform.research.portfolios.accounting import (
+        calibrate_expected_alpha,
+    )
+    from quant_research_platform.research.portfolios.production import (
+        _ALPHA_DIAGNOSTICS,
+        frozen_alpha_calibration,
+    )
+
+    dates = pd.date_range("2018-07-01", periods=6, freq="MS")
+    inputs = pd.DataFrame(
+        {"timestamp": dates.repeat(2), "alpha_score": [-0.5, 0.5] * 6}
+    )
+    inputs["holding_return"] = intercept + slope * inputs.alpha_score
+    intervals = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "entry_at": dates + pd.Timedelta(days=1),
+            "available_at": dates + pd.Timedelta(days=2),
+        }
+    )
+    calibration = calibrate_expected_alpha(
+        inputs, as_of=pd.Timestamp("2019-01-01"), scheduled_intervals=intervals
+    )
+    assert calibration.status == "DEFINED"
+    assert calibration.slope == pytest.approx(slope)
+    assert calibration.slope_standard_error == 0.0
+    assert (
+        calibration.slope_t_statistic
+        is calibration.slope_pvalue
+        is calibration.slope_ci_low
+        is calibration.slope_ci_high
+        is None
+    )
+    assert calibration.inference_status == "UNDEFINED"
+    assert calibration.r2_status == ("UNDEFINED" if slope == 0.0 else "DEFINED")
+    if slope:
+        assert calibration.weighted_r2 == 1.0
+    frame = _session(
+        "2019-01-01",
+        "2019-01-02",
+        pre_asset=0.0,
+        target_asset=100.0,
+        post_asset=100.0,
+        pre_cash=100.0,
+        target_cash=0.0,
+        post_cash=0.0,
+    )
+    for column, field in _ALPHA_DIAGNOSTICS.items():
+        frame[column] = pd.Series([None] * len(frame), dtype=object)
+        frame.loc[frame.asset_id.eq("__cash__"), column] = getattr(calibration, field)
+    root = write_test_sessions(
+        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
+    )
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    frozen, _ = frozen_alpha_calibration(artifact, cutoff=pd.Timestamp("2019-12-31"))
+    assert frozen == calibration
+    summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+    assert summary["alpha_calibration"]["inference_status"] == "UNDEFINED"
+    assert (
+        summary["alpha_calibration"]["inference_reason"]
+        == "alpha_calibration_zero_standard_error"
+    )
+    assert "slope_t" not in summary["alpha_calibration"]
+    from quant_research_platform.artifacts.research import (
+        read_research_report_artifact,
+        write_research_report_artifact,
+    )
+    from tests.artifacts.test_research_artifact import _report
+
+    envelope, payload = _report()
+    payload["sections"]["portfolio"] = {"status": "DEFINED", "results": [summary]}
+    report_root = write_research_report_artifact(
+        tmp_path / "report", envelope=envelope, payload=payload
+    )
+    saved = read_research_report_artifact(
+        report_root, expected_identity=envelope.instance_identity
+    )
+    assert (
+        saved["sections"]["portfolio"]["results"][0]["alpha_calibration"]
+        == summary["alpha_calibration"]
+    )
+    assert (
+        "alpha_calibration_zero_standard_error"
+        in (report_root / "report.md").read_text()
+    )

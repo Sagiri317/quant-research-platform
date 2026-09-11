@@ -8,8 +8,6 @@ from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import pandas as pd
-
 from quant_research_platform.contracts.json_codec import (
     bounded_rendered_qrp_json_object_size,
     canonical_json_hash,
@@ -500,15 +498,12 @@ def _aggregate_dataset_stats(
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
     dtypes: dict[str, str] = {}
-    row_count = 0
     row_count_by_year: dict[str, int] = {}
     null_key_counts = {column: 0 for column in primary_key}
     important_columns = tuple(
         column for column in columns if column in important_null_count_columns
     )
     important_null_counts = {column: 0 for column in important_columns}
-    min_timestamp: pd.Timestamp | None = None
-    max_timestamp: pd.Timestamp | None = None
     duplicate_primary_key_count = exact_duplicate_count
     chunks = iter_dataset_chunks(
         session,
@@ -516,7 +511,6 @@ def _aggregate_dataset_stats(
     )
     with closing_iterator(chunks):
         for frame in chunks:
-            row_count += int(len(frame))
             for column in frame.columns:
                 dtypes.setdefault(str(column), str(frame[column].dtype))
             if session.timestamp_column is not None:
@@ -530,18 +524,6 @@ def _aggregate_dataset_stats(
                         row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
                             count
                         )
-                    chunk_min = timestamps.min()
-                    chunk_max = timestamps.max()
-                    min_timestamp = (
-                        chunk_min
-                        if min_timestamp is None
-                        else min(min_timestamp, chunk_min)
-                    )
-                    max_timestamp = (
-                        chunk_max
-                        if max_timestamp is None
-                        else max(max_timestamp, chunk_max)
-                    )
             for column in primary_key:
                 null_key_counts[column] += int(frame[column].isna().sum())
             for column in important_columns:
@@ -549,10 +531,7 @@ def _aggregate_dataset_stats(
 
     return {
         "dtypes": {column: dtypes.get(column, "") for column in columns},
-        "row_count": row_count,
         "row_count_by_year": dict(sorted(row_count_by_year.items())),
-        "min_timestamp": _format_timestamp(min_timestamp),
-        "max_timestamp": _format_timestamp(max_timestamp),
         "null_key_counts": dict(sorted(null_key_counts.items())),
         "duplicate_primary_key_count": duplicate_primary_key_count,
         "selected_important_column_null_counts": dict(
@@ -593,12 +572,6 @@ def _infer_primary_key(columns: tuple[str, ...]) -> tuple[str, ...]:
         if all(column in columns for column in candidate):
             return candidate
     return ()
-
-
-def _format_timestamp(value: pd.Timestamp | None) -> str | None:
-    if value is None:
-        return None
-    return value.date().isoformat()
 
 
 def _schema_hash(

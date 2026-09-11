@@ -610,19 +610,19 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
             root,
             resource_policy=policy,
             identity_index=index,
-            requested_datasets=(_raw_dataset_for_interim(data_id),),
+            requested_datasets=(data_id,),
         )
         with closing_iterator(records_iterator):
             records = tuple(records_iterator)
         _verify_csmar_member_set(
             root,
             index,
-            requested_datasets=(_raw_dataset_for_interim(data_id),),
+            requested_datasets=(data_id,),
         )
         selected = [
             (dataset, path, identity)
             for dataset, path, identity in records
-            if dataset == _raw_dataset_for_interim(data_id)
+            if dataset == data_id
         ]
         if not selected:
             return None
@@ -634,7 +634,7 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
         _verify_csmar_member_set(
             root,
             index,
-            requested_datasets=(_raw_dataset_for_interim(data_id),),
+            requested_datasets=(data_id,),
         )
         return identity
 
@@ -643,7 +643,7 @@ def normalize_raw_frame(
     frame: pd.DataFrame,
     data_id: str,
 ) -> pd.DataFrame:
-    mapped = map_columns(frame, _raw_dataset_for_interim(data_id))
+    mapped = map_columns(frame, data_id)
     if "stock_code" in mapped.columns:
         mapped["stock_code"] = normalize_provider_stock_code_series(
             mapped["stock_code"]
@@ -1194,7 +1194,7 @@ def _iter_interim_frames(
 
     def activate() -> Iterator[object]:
         operation_reports: list[dict[str, object]] = []
-        raw_dataset = _raw_dataset_for_interim(data_id)
+        raw_dataset = data_id
         inputs = iter(input_files)
         with closing_iterator(inputs):
             try:
@@ -1301,7 +1301,7 @@ def _materialize_interim_data(
     pruning_reports: list[dict[str, object]] = []
     requested_by_raw: dict[str, str] = {}
     for data_id in data_ids:
-        requested_by_raw[_raw_dataset_for_interim(data_id)] = data_id
+        requested_by_raw[data_id] = data_id
     requested_raw_datasets = tuple(requested_by_raw)
     pending = set(data_ids)
     require_unaliased_path(
@@ -2113,10 +2113,6 @@ def _date_column(data_id: str) -> str:
     }:
         return "timestamp"
     raise ValueError(f"data_id_has_no_filtering_date_column: {data_id}")
-
-
-def _raw_dataset_for_interim(data_id: str) -> str:
-    return data_id
 
 
 def _filter_normalized_frame(

@@ -53,7 +53,8 @@ def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
     assert raw.isna().all()
 
 
-def test_market_panel_keeps_suspension_and_excludes_holiday_fill() -> None:
+@pytest.mark.parametrize("missing_caps", [False, True])
+def test_market_panel_keeps_suspension_and_excludes_holiday_fill(missing_caps) -> None:
     sessions = pd.DatetimeIndex(
         pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
     )
@@ -79,6 +80,8 @@ def test_market_panel_keeps_suspension_and_excludes_holiday_fill() -> None:
             "limit_status": [0.0] * 4,
         }
     )
+    if missing_caps:
+        bars[["float_market_cap", "total_market_cap"]] = np.nan
     stock_master = pd.DataFrame(
         {
             "source_asset_id": ["000001"],
@@ -126,6 +129,12 @@ def test_market_panel_keeps_suspension_and_excludes_holiday_fill() -> None:
     assert reopening["period_return"] == pytest.approx(0.2)
     assert result["industry_level1_code"].isna().all()
     assert "scenario_universe" not in result
+    if missing_caps:
+        assert result[["float_market_cap", "total_market_cap"]].isna().all().all()
+        assert result.loc[result.is_trading, "turnover"].isna().all()
+    else:
+        assert result.float_market_cap.tolist() == [1000.0] * 3
+        assert result.total_market_cap.tolist() == [1000.0] * 3
 
 
 def test_holiday_fill_on_open_session_fails_without_cross_asset_deletion() -> None:

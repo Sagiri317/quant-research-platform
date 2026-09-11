@@ -200,12 +200,6 @@ def correctness_research_dataset_catalog(
     )
 
 
-def correctness_processed_catalog():
-    from tests.helpers.research_processed_inputs import make_demo_processed_catalog
-
-    return make_demo_processed_catalog()
-
-
 def _demo_research_dataset_defaults() -> dict[str, object]:
     return {
         "data_id": "demo",

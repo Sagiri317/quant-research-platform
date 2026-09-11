@@ -194,7 +194,7 @@ def test_panel_transform_waits_for_reservation_and_closes_source(
 @pytest.mark.parametrize("batch_rows", (2, 4, 8))
 def test_common_panel_gaps_start_new_segments_without_inventing_rows(batch_rows):
     from quant_research_platform.markets.implementations.crypto import hft
-    from tests.helpers.binance_hft import _coverage
+    from tests.helpers.binance_hft import _coverage, coverage_lookup
     from tests.markets.crypto.test_hft import _boundary, _state
 
     def panels(events, asset, coverage):
@@ -207,7 +207,9 @@ def test_common_panel_gaps_start_new_segments_without_inventing_rows(batch_rows)
                 start_ms=0,
                 end_ms=300,
                 book_coverage=coverage,
-                trade_coverage={"trade-connection-1": _coverage(0, 400)},
+                trade_coverage=coverage_lookup(
+                    {"trade-connection-1": _coverage(0, 400)}
+                ),
                 batch_rows=4,
             )
         )

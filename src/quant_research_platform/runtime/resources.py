@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import shutil
 import sys
-import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -329,10 +327,6 @@ def runtime_resource_policy_scope(
             explicit_cap_bytes=explicit_cap_bytes,
         )
     assert policy is not None
-    if active is None and policy.state != "ACTIVE":
-        raise RuntimeError("runtime_resource_policy_not_active")
-    if active is not None and active is not policy:
-        raise RuntimeError("runtime_resource_policy_conflict")
     if policy.state != "ACTIVE":
         raise RuntimeError("runtime_resource_policy_not_active")
     if active is None:
@@ -457,9 +451,9 @@ def _capture_runtime_resource_policy(
 
 
 def _machine_lock_path() -> Path:
-    user = os.environ.get("USERNAME") or os.environ.get("USER") or ""
-    user_hash = hashlib.sha256(user.encode("utf-8")).hexdigest()[:16]
-    return Path(tempfile.gettempdir()) / f".qrp-data-scale-{user_hash}.lock"
+    if os.name == "nt":
+        return Path.home() / ".qrp-data-scale.lock"
+    return Path("/tmp") / f".qrp-data-scale-{os.getuid()}.lock"
 
 
 def _cgroup_v2_directories() -> Iterator[Path]:

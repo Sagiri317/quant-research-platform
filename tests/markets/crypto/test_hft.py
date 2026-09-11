@@ -23,7 +23,12 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
-from tests.helpers.binance_hft import _coverage, _panel_rows, _row_timestamp_ms
+from tests.helpers.binance_hft import (
+    _coverage,
+    _panel_rows,
+    _row_timestamp_ms,
+    coverage_lookup,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 
 
@@ -43,9 +48,9 @@ def test_panel_uses_exact_validated_receipt_nanoseconds() -> None:
                 start_ms=origin_ms + 100,
                 end_ms=origin_ms + 300,
                 book_coverage={"s1": _coverage(origin_ms, origin_ms + 400)},
-                trade_coverage={
-                    "trade-connection-1": _coverage(origin_ms, origin_ms + 400)
-                },
+                trade_coverage=coverage_lookup(
+                    {"trade-connection-1": _coverage(origin_ms, origin_ms + 400)}
+                ),
                 market_id="crypto",
                 asset_id="btc_usdt",
                 batch_rows=4,
@@ -137,7 +142,7 @@ def test_panel_frames_build_from_column_buffers(
             start_ms=0,
             end_ms=200,
             book_coverage={"s1": _coverage(0, 300)},
-            trade_coverage={"trade-connection-1": _coverage(0, 300)},
+            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 300)}),
             batch_rows=2,
         )
     )
@@ -199,7 +204,7 @@ def test_panel_first_trade_failure_releases_first_book_and_closes_children() -> 
                         start_ms=0,
                         end_ms=100,
                         book_coverage={},
-                        trade_coverage={},
+                        trade_coverage=coverage_lookup({}),
                     )
                 )
             assert raised.value is primary

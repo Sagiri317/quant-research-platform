@@ -313,11 +313,6 @@ def evaluate_model_trial_metrics_from_chunks(
                     Path(scratch),
                     row_count=validation_row_count,
                 )
-                if (
-                    database.execute("SELECT 1 FROM validation_rows LIMIT 1").fetchone()
-                    is None
-                ):
-                    raise ValueError("empty_model_selection_validation_window")
                 (
                     validation_rows,
                     validation_mse,

@@ -138,6 +138,8 @@ def _features_for_observation(
     end_dates = tuple(sorted(candidates["forecast_end_date"].unique()))
     selected: list[pd.DataFrame] = []
     for end_date in end_dates[:2]:
+        if pd.Timestamp(end_date).year > pd.Timestamp(end_dates[0]).year + 1:
+            break
         current = candidates.loc[candidates["forecast_end_date"].eq(end_date)]
         latest = current.groupby("institution_id", sort=False)["declare_date"].max()
         current = current.merge(
@@ -153,8 +155,6 @@ def _features_for_observation(
             "forecast_eps"
         ].median()
         selected.append(current)
-    if not selected:
-        return base
     eps_values = selected[0]["forecast_eps"].to_numpy(dtype="float64")
     if len(eps_values) < minimum_institutions:
         return base

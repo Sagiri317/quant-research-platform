@@ -291,7 +291,7 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
     )
 
     monkeypatch.setattr(
-        schema_inventory.pd.util,
+        pd.util,
         "hash_pandas_object",
         lambda values, **_kwargs: pd.Series(
             [0] * len(values),

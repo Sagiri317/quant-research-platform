@@ -297,7 +297,7 @@ def _execute_notebook(
         not cell.get("outputs") and cell.get("execution_count") is None
         for cell in notebook.cells
     )
-    evidence = repository / ".run/notebook-evidence" / profile_id / uuid4().hex
+    evidence = layout.project_root / ".run/notebook-evidence" / profile_id / uuid4().hex
     kernel = evidence / "kernels/quantlab313"
     kernel.mkdir(parents=True)
     empty_cwd = evidence / "empty-cwd"

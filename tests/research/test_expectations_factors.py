@@ -205,3 +205,28 @@ def test_asset_candidate_scan_preserves_interleaved_observation_positions(monkey
     assert actual.forward_earnings_yield_fy1.tolist()[::2] == [0.5, 0.2]
     assert actual.iloc[1, 2:].isna().all()
     assert sum(candidate_rows) == 9
+
+
+def test_fy2_does_not_skip_a_missing_calendar_year():
+    records = pd.DataFrame(
+        [
+            {
+                "asset_id": "asset",
+                "declare_date": pd.Timestamp("2020-01-02"),
+                "forecast_end_date": pd.Timestamp(f"{year}-12-31"),
+                "institution_id": institution,
+                "forecast_eps": eps,
+            }
+            for year, eps in ((2020, 2.0), (2022, 9.0))
+            for institution in ("A", "B", "C")
+        ]
+    )
+    sessions = pd.bdate_range("2020-01-02", "2020-01-06")
+    observations = pd.DataFrame(
+        {"asset_id": "asset", "timestamp": sessions[-1:], "close": 10.0}
+    )
+    actual = build_expectations_features(
+        records, observations, trading_sessions=sessions
+    )
+    assert actual.forward_earnings_yield_fy1.iloc[0] == 0.2
+    assert pd.isna(actual.forward_earnings_yield_fy2.iloc[0])

@@ -5,7 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import math
 from collections import deque
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from typing import Any
 
 import numpy as np
@@ -68,7 +68,7 @@ def iter_panel_frames(
     start_ms: int,
     end_ms: int,
     book_coverage: Mapping[str, tuple[int, int]],
-    trade_coverage: Mapping[str, tuple[int, int]],
+    trade_coverage: Callable[[int, int], tuple[str, ...]],
     batch_rows: int,
     interval_ms: int = HFT_GRID_MS,
 ) -> Iterator[pd.DataFrame]:
@@ -113,11 +113,7 @@ def iter_panel_frames(
                 taker_sell_volume = 0.0
                 trade_capture_seq_min: int | None = None
                 trade_capture_seq_max: int | None = None
-                trade_connections = tuple(
-                    connection_id
-                    for connection_id, bounds in trade_coverage.items()
-                    if bounds[0] <= interval_start_ns and bounds[1] > grid_time_ns
-                )
+                trade_connections = trade_coverage(interval_start_ns, grid_time_ns)
                 while (
                     next_book is not None
                     and _book_observed_time(next_book) <= grid_time_ns

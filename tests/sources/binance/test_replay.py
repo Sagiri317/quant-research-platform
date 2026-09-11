@@ -7,6 +7,7 @@ import json
 import os
 import tempfile
 import weakref
+from datetime import UTC
 from decimal import Decimal, localcontext
 from pathlib import Path
 
@@ -70,6 +71,10 @@ def test_connection_coverage_cleanup_preserves_active_primary() -> None:
             raise OSError("scratch_cleanup")
 
     index = object.__new__(replay._ConnectionCoverageIndex)
+    from contextlib import ExitStack
+
+    index._coverage_readers = ExitStack()
+    index._lease = None
     index._database = FailingDatabase()
     index._scratch = FailingScratch()
 
@@ -1456,6 +1461,7 @@ def test_futures_zero_transaction_time_is_not_replaced_by_event_time(
             )
             if isinstance(event, OwnedValue)
         )
+        assert state.value.transaction_time_ms == 0
         assert state.value.observed_time_ms > state.value.transaction_time_ms
         state.lease.close()
 
@@ -1961,3 +1967,85 @@ def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
             assert str(raised.value) == "binance_raw_export_identity_changed"
         assert policy.used_memory_bytes == 0
     assert member.read_bytes() == original
+
+
+def test_connection_queries_do_not_materialize_long_history(tmp_path):
+    import gzip
+    import hashlib
+    import json
+    import tracemalloc
+    from datetime import datetime, timedelta
+
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
+    )
+    sidecar = root / "connection_intervals.jsonl.gz"
+    with gzip.open(sidecar, "rt", encoding="utf-8") as stream:
+        original = json.loads(next(stream))
+    start = datetime(2020, 1, 1, tzinfo=UTC)
+    with gzip.open(sidecar, "wt", encoding="utf-8") as stream:
+        stream.write(json.dumps(original) + "\n")
+        for index in range(2000):
+            opened = start + timedelta(seconds=2 * index)
+            row = dict(
+                original,
+                connection_id=f"history-{index}",
+                opened_at=opened.isoformat(),
+                closed_at=(opened + timedelta(seconds=1)).isoformat(),
+            )
+            stream.write(json.dumps(row) + "\n")
+    with sidecar.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    manifest["capture"]["connection_intervals"].update(
+        record_count=2001, compressed_bytes=sidecar.stat().st_size, sha256=digest
+    )
+    (root / "run.json").write_text(json.dumps(manifest))
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2, explicit_cap_bytes=16 * 1024**2
+    )
+    with runtime_resource_policy_scope(policy):
+        with open_recorder_run(root, policy) as run:
+            tracemalloc.start()
+            try:
+                coverage = run.connection_coverage(
+                    market_type=FUTURES_MARKET_TYPE,
+                    data_kind="agg_trades",
+                    symbol="BTCUSDT",
+                )
+                first = int(pd.Timestamp(start).value)
+                assert coverage.covering(first, first + 999_999_999) == ("history-0",)
+                assert coverage.covering(first, first + 1_000_000_000) == ()
+                assert coverage["history-1"] == (
+                    first + 2_000_000_000,
+                    first + 3_000_000_000,
+                )
+                assert coverage.get("absent") is None
+                with pytest.raises(
+                    ValueError, match="binance_coverage_window_non_monotonic"
+                ):
+                    coverage.covering(first - 1, first)
+
+                sweep = run.connection_coverage(
+                    market_type=FUTURES_MARKET_TYPE,
+                    data_kind="agg_trades",
+                    symbol="BTCUSDT",
+                )
+                steps = []
+                database = run._coverage_index._database
+                database.set_progress_handler(lambda: steps.append(1) or 0, 100)
+                try:
+                    for index in range(100):
+                        sweep.covering(
+                            first + index * 100_000_000,
+                            first + (index + 1) * 100_000_000,
+                        )
+                finally:
+                    database.set_progress_handler(None, 0)
+                assert (
+                    len(steps) < 1000
+                )  # SQLite work must not rescan 2000 future rows per grid.
+                assert tracemalloc.get_traced_memory()[1] < 256 * 1024
+            finally:
+                tracemalloc.stop()
+        assert policy.used_memory_bytes == 0

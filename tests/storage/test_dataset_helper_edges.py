@@ -1630,11 +1630,12 @@ def test_exact_key_index_close_failure_does_not_replace_primary(
     )
     with pytest.raises(RuntimeError, match="primary_failure"):
         with index:
+            scratch = index.database_path.parent
             assert index._connection is not None
             index._connection = FailingCloseConnection(index._connection)  # type: ignore[assignment]
             raise RuntimeError("primary_failure")
 
-    assert tuple(tmp_path.iterdir()) == ()
+    assert not scratch.exists()
 
 
 def test_dataset_comparison_failure_summary_does_not_expose_local_path(

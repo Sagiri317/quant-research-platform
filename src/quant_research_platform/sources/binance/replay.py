@@ -32,8 +32,10 @@ from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    MemoryLease,
     OwnedValue,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
@@ -51,6 +53,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
     validate_market_payload,
 )
+from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
@@ -201,7 +204,13 @@ class _ConnectionCoverageIndex:
         )
         self._scratch = None
         self._database = None
+        self._lease = None
+        self._policy = resource_policy
+        self._coverage_readers = ExitStack()
         try:
+            self._lease = resource_policy.lease(
+                "binance.replay.coverage_index", 3 * 1024 * 1024
+            )
             self._scratch = tempfile.TemporaryDirectory(prefix="qrp-binance-coverage-")
             self._database = sqlite3.connect(
                 Path(self._scratch.name) / "coverage.sqlite3"
@@ -216,6 +225,12 @@ class _ConnectionCoverageIndex:
                 "data_kind TEXT NOT NULL, stream TEXT NOT NULL, "
                 "segment_id TEXT, opened_ns INTEGER NOT NULL, "
                 "closed_ns INTEGER NOT NULL)"
+            )
+            self._database.execute("PRAGMA cache_size=-1024")
+            self._database.execute("PRAGMA temp_store=FILE")
+            self._database.execute(
+                "CREATE INDEX coverage_window ON coverage "
+                "(market, data_kind, opened_ns)"
             )
             self._load(markets=markets, resource_policy=resource_policy)
         except BaseException:
@@ -363,22 +378,6 @@ class _ConnectionCoverageIndex:
             f"PRAGMA main.max_page_count={current_pages + growth_pages}"
         )
 
-    def coverage(
-        self,
-        *,
-        market_type: str,
-        data_kind: str,
-        symbol: str,
-    ) -> dict[str, tuple[int, int]]:
-        return {
-            str(connection_id): (int(opened_ns), int(closed_ns))
-            for connection_id, opened_ns, closed_ns in self._database.execute(
-                "SELECT connection_id, opened_ns, closed_ns FROM coverage "
-                "WHERE market = ? AND data_kind = ? AND stream LIKE ?",
-                (market_type, data_kind, f"{symbol.lower()}@%"),
-            )
-        }
-
     def bounds(
         self,
         connection_id: object,
@@ -428,6 +427,16 @@ class _ConnectionCoverageIndex:
         self._scratch = None
         self._descriptor = {}
         try:
+            self._coverage_readers.close()
+        except BaseException as close_error:
+            if primary is not None:
+                primary.add_note(
+                    "Binance coverage window close also failed: "
+                    + type(close_error).__name__
+                )
+            else:
+                failure = close_error
+        try:
             if database is not None:
                 database.close()
         except BaseException as close_error:
@@ -436,8 +445,13 @@ class _ConnectionCoverageIndex:
                     "Binance connection coverage database close also failed: "
                     f"{type(close_error).__name__}"
                 )
-            else:
+            elif failure is None:
                 failure = close_error
+            else:
+                failure.add_note(
+                    "Binance coverage database close also failed: "
+                    + type(close_error).__name__
+                )
         try:
             if scratch is not None:
                 scratch.cleanup()
@@ -452,8 +466,90 @@ class _ConnectionCoverageIndex:
                 failure = cleanup_error
             else:
                 failure.add_note(note)
+        lease = self._lease
+        if lease is not None:
+            try:
+                _close_lease_preserving_primary(
+                    lease, owner="binance.replay.coverage_index"
+                )
+            except BaseException as close_error:
+                if failure is None:
+                    failure = close_error
+                else:
+                    failure.add_note(
+                        "coverage lease close also failed: "
+                        f"{type(close_error).__name__}"
+                    )
         if failure is not None:
             raise failure
+
+
+class _ConnectionCoverage:
+    """Run-owned exact lookups and a monotone, budgeted interval sweep."""
+
+    def __init__(self, index, market_type, data_kind, symbol):
+        self.index = index
+        self.parameters = (market_type, data_kind, f"{symbol.lower()}@%")
+        self.cursor = None
+        self.pending = None
+        self.active = []
+        self.last_bounds = None
+        self.lease = index._policy.lease(
+            "binance.replay.coverage_window",
+            2 * _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 65536,
+        )
+
+    def get(self, connection_id, default=None):
+        row = self.index._database.execute(
+            "SELECT opened_ns, closed_ns FROM coverage "
+            "WHERE market=? AND data_kind=? AND stream LIKE ? AND connection_id=?",
+            (*self.parameters, connection_id),
+        ).fetchone()
+        return default if row is None else row
+
+    def __getitem__(self, connection_id):
+        row = self.get(connection_id)
+        if row is None:
+            raise KeyError(connection_id)
+        return row
+
+    def covering(self, start_ns, end_ns):
+        if self.last_bounds is not None and (
+            start_ns < self.last_bounds[0] or end_ns < self.last_bounds[1]
+        ):
+            raise ValueError("binance_coverage_window_non_monotonic")
+        self.last_bounds = (start_ns, end_ns)
+        if self.cursor is None:
+            self.cursor = self.index._database.execute(
+                "SELECT opened_ns, closed_ns, connection_id FROM coverage "
+                "WHERE market=? AND data_kind=? AND stream LIKE ? AND closed_ns>? "
+                "ORDER BY opened_ns",
+                (*self.parameters, end_ns),
+            )
+            self.pending = self.cursor.fetchone()
+        while self.active and self.active[0][0] <= end_ns:
+            _, _, size = heapq.heappop(self.active)
+            self.lease.shrink_to(self.lease.reserved_bytes - size)
+        while self.pending is not None and self.pending[0] <= start_ns:
+            _, closed_ns, connection_id = self.pending
+            if closed_ns > end_ns:
+                size = 512 + 4 * len(connection_id)
+                self.lease.grow(size)
+                heapq.heappush(self.active, (closed_ns, connection_id, size))
+            self.pending = self.cursor.fetchone()
+        # Two entries suffice to reject ambiguous coverage; no per-grid history scan.
+        return tuple(item[1] for item in self.active[:2])
+
+    def close(self):
+        try:
+            if self.cursor is not None:
+                self.cursor.close()
+        finally:
+            self.cursor = self.pending = None
+            self.active.clear()
+            _close_lease_preserving_primary(
+                self.lease, owner="binance.replay.coverage_window"
+            )
 
 
 @dataclass
@@ -541,13 +637,15 @@ class RecorderRun:
         market_type: str,
         data_kind: str,
         symbol: str,
-    ) -> dict[str, tuple[int, int]]:
+    ) -> _ConnectionCoverage:
         if data_kind == "depth_snapshot":
             data_kind = "depth"
-        return self._coverage_index.coverage(
-            market_type=market_type,
-            data_kind=data_kind,
-            symbol=symbol,
+        return self._coverage_index._coverage_readers.enter_context(
+            handle_preserving_primary(
+                _ConnectionCoverage(
+                    self._coverage_index, market_type, data_kind, symbol
+                )
+            )
         )
 
 
@@ -1386,6 +1484,7 @@ class DepthReconstructor:
         connection_close_ns: int,
         resource_policy: RuntimeResourcePolicy,
         stats: ReconstructionStats,
+        coverage_lease: MemoryLease,
     ) -> None:
         if market_type not in {SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE}:
             raise ValueError("binance_replay_market_type_invalid")
@@ -1404,6 +1503,7 @@ class DepthReconstructor:
         self.connection_close_ns = connection_close_ns
         self.policy = resource_policy
         self.stats = stats
+        self.coverage_lease = coverage_lease
         self._book_lease = resource_policy.lease(
             "binance.replay.book",
             4 * max_book_levels * _LEVEL_BYTES + 256 * 1024,
@@ -1571,6 +1671,7 @@ class DepthReconstructor:
                 self.stats.recovered_segments += 1
         previous = self.stats.coverage_segments.get(segment_id)
         if previous is None:
+            self.coverage_lease.grow(4 * (512 + 4 * len(segment_id)))
             self.stats.coverage_segments[segment_id] = (
                 observed_time,
                 self.connection_close_ns,
@@ -1744,7 +1845,12 @@ def iter_reconstructed_depth(
         market_type=market_type,
         data_kinds=("depth_snapshot", "depth"),
     )
-    with closing_iterator(records):
+    with (
+        closing_iterator(records),
+        run.resource_policy.lease(
+            "binance.replay.transient_coverage", 0
+        ) as transient_coverage,
+    ):
         try:
             for record in records:
                 segment_id, connection_id = _record_identity(record)
@@ -1768,6 +1874,9 @@ def iter_reconstructed_depth(
                     )
                     if bounds is None:
                         raise ValueError("binance_replay_connection_coverage_invalid")
+                    if stats is None:
+                        active_stats.coverage_segments.clear()
+                        transient_coverage.shrink_to(0)
                     reconstructor = DepthReconstructor(
                         market_type,
                         tick_size=metadata["tick_size"],
@@ -1777,6 +1886,9 @@ def iter_reconstructed_depth(
                         connection_close_ns=bounds[1],
                         resource_policy=run.resource_policy,
                         stats=active_stats,
+                        coverage_lease=run._coverage_index._lease
+                        if stats is not None
+                        else transient_coverage,
                     )
                     active_segment = segment_id
                     pending_invalid_reason = None

@@ -232,12 +232,9 @@ def produce_taker_ledger(
     bounds = _window_bounds(windows)
     dataset = dataset_catalog.get(protocol_manifest["scenario_id"])
     panel = _panel(layout, upstream_identities)
-    coverage = {
-        key: tuple(value)
-        for key, value in panel["producer_diagnostics"]["reconstruction"][symbol][
-            "coverage_segments"
-        ].items()
-    }
+    coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
+        "coverage_segments"
+    ]
     with (
         open_run(raw_root, resource_policy) as run,
         read_funding(
@@ -471,12 +468,9 @@ def produce_maker_calibration(
         with open_run(raw_root, resource_policy) as run:
             if run.source_identity != panel["source_artifact_identity"]:
                 raise ValueError("crypto_execution_recorder_identity_mismatch")
-            coverage = {
-                key: tuple(value)
-                for key, value in panel["producer_diagnostics"]["reconstruction"][
-                    symbol
-                ]["coverage_segments"].items()
-            }
+            coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
+                "coverage_segments"
+            ]
             trade_coverage = run.connection_coverage(
                 market_type=market_type, data_kind="agg_trades", symbol=symbol
             )
@@ -647,12 +641,9 @@ def produce_maker_ledger(
     config = _maker_config(plan, candidate.asset_id)
     panel = _panel(layout, upstream_identities)
     dataset = dataset_catalog.get(protocol_manifest["scenario_id"])
-    coverage = {
-        key: tuple(value)
-        for key, value in panel["producer_diagnostics"]["reconstruction"][symbol][
-            "coverage_segments"
-        ].items()
-    }
+    coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
+        "coverage_segments"
+    ]
     with handle_preserving_primary(ExitStack()) as resources:
         calibrations = None
         if candidate.calibrated:

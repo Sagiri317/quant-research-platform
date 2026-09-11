@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, fields
 from itertools import groupby
 from pathlib import Path
@@ -25,6 +25,7 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import current_runtime_resource_policy
+from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
@@ -79,22 +80,6 @@ _SCHEMAS = {
 _BUFFER_ROWS = 256
 
 
-@contextmanager
-def _preserving_close(resource):
-    try:
-        yield resource
-    except BaseException as primary:
-        try:
-            resource.close()
-        except BaseException as cleanup:
-            primary.add_note(
-                f"portfolio resource close also failed: {type(cleanup).__name__}"
-            )
-        raise
-    else:
-        resource.close()
-
-
 @dataclass(frozen=True, slots=True)
 class PortfolioLedgerArtifact:
     root: Path
@@ -130,8 +115,8 @@ def write_portfolio_ledger_artifact(
 
     def write(staging: Path) -> None:
         with (
-            _preserving_close(ExitStack()) as resources,
-            _preserving_close(ExitStack()) as stack,
+            handle_preserving_primary(ExitStack()) as resources,
+            handle_preserving_primary(ExitStack()) as stack,
         ):
             policy = current_runtime_resource_policy()
             buffer_lease = (
@@ -151,7 +136,7 @@ def write_portfolio_ledger_artifact(
             )
             writers = {
                 name: stack.enter_context(
-                    _preserving_close(
+                    handle_preserving_primary(
                         pq.ParquetWriter(
                             native_filesystem_path(staging / f"{name}.parquet"),
                             schema,
@@ -337,7 +322,7 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
             if not chunk.schema.remove_metadata().equals(_SCHEMAS[name]):
                 raise ValueError("portfolio_ledger_schema_invalid")
             row_bytes, fixed = record_batch_decoded_working_set_bounds(chunk)
-            with _preserving_close(ExitStack()) as ownership:
+            with handle_preserving_primary(ExitStack()) as ownership:
                 policy = current_runtime_resource_policy()
                 if policy is not None:
                     ownership.enter_context(
@@ -361,7 +346,7 @@ def _iter_batches(
     root: Path, capital: PortfolioCapital, research_window: Mapping[str, object]
 ) -> Iterator[PortfolioLedgerBatch]:
     bounds = tuple(pd.Timestamp(research_window[key]).value for key in ("start", "end"))
-    with _preserving_close(ExitStack()) as stack:
+    with handle_preserving_primary(ExitStack()) as stack:
         policy = current_runtime_resource_policy()
         if policy is not None:
             stack.enter_context(
@@ -392,7 +377,7 @@ def _iter_batches(
         while pending["valuations"] is not None:
             if pending["valuations"][0] != sequence:
                 raise ValueError("portfolio_ledger_sequence_invalid")
-            with _preserving_close(ExitStack()) as retained:
+            with handle_preserving_primary(ExitStack()) as retained:
                 lease = (
                     retained.enter_context(
                         policy.lease("artifacts.portfolio.transition", 1)

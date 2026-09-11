@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import ast
+import os
 import re
-import subprocess
 from pathlib import Path
 
 SOURCE_ROOT = Path("src/quant_research_platform")
@@ -165,10 +165,10 @@ def test_model_algorithm_surface_matches_a_share_and_crypto_protocols() -> None:
     assert set(_MODEL_ALGORITHM_FACTS) == expected
 
 
-def test_tracked_surfaces_have_no_retired_naming() -> None:
+def test_source_surfaces_have_no_retired_naming() -> None:
     violations: list[str] = []
     repository_root = Path(__file__).resolve().parents[2]
-    for relative_path in _tracked_surface_paths():
+    for relative_path in _source_surface_paths():
         if _contains_retired_token(relative_path.as_posix()):
             violations.append(f"{relative_path}:path")
         path = repository_root / relative_path
@@ -198,7 +198,7 @@ def test_csmar_source_surface_has_one_root_without_retired_sibling_api() -> None
         "resolve" + "_" + "source_root",
     )
     repository_root = Path(__file__).resolve().parents[2]
-    paths = set(_tracked_surface_paths())
+    paths = set(_source_surface_paths())
     violations = []
     for relative_path in sorted(paths):
         text = (
@@ -259,23 +259,25 @@ def _contains_retired_token(value: str) -> bool:
     return _RETIRED_TEXT.search(value) is not None
 
 
-def _tracked_surface_paths() -> tuple[Path, ...]:
+def _source_surface_paths() -> tuple[Path, ...]:
     repository_root = Path(__file__).resolve().parents[2]
-    result = subprocess.run(
-        ["git", "ls-files", "-z"],
-        cwd=repository_root,
-        check=True,
-        capture_output=True,
-    )
-    tracked = (Path(raw.decode("utf-8")) for raw in result.stdout.split(b"\0") if raw)
-    selected = tuple(
-        path
-        for path in tracked
-        if path.name == "README.md"
-        or path.parts[:1] in (("docs",), ("src",), ("tests",))
-    )
-    # The scan is intentionally limited to live tracked files during a dirty deletion.
-    return tuple(path for path in selected if (repository_root / path).exists())
+    paths = [Path("README.md")]
+    for name in ("docs", "src", "tests"):
+        for directory, folders, files in os.walk(
+            repository_root / name, followlinks=False
+        ):
+            folders[:] = [
+                folder
+                for folder in folders
+                if folder
+                not in {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
+            ]
+            paths.extend(
+                (Path(directory) / name).relative_to(repository_root)
+                for name in files
+                if Path(name).suffix not in {".pyc", ".pyo"}
+            )
+    return tuple(sorted(path for path in paths if (repository_root / path).is_file()))
 
 
 def _imports_research_workflow(path: Path) -> bool:

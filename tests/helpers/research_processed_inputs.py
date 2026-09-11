@@ -22,27 +22,6 @@ from tests.helpers.research_specs import DEMO_FACTOR_COLUMN, DEMO_LABEL_COLUMN
 
 
 def make_demo_processed_catalog() -> ProcessedDataCatalog:
-    return _demo_processed_catalog()
-
-
-def make_filter_processed_catalog() -> ProcessedDataCatalog:
-    return _filter_processed_catalog()
-
-
-def make_dummy_processed_catalog(
-    *,
-    include_extensions: bool = False,
-    duplicate_factor_context: bool = False,
-    missing_factor_key: bool = False,
-) -> ProcessedDataCatalog:
-    return _dummy_processed_catalog(
-        include_extensions=include_extensions,
-        duplicate_factor_context=duplicate_factor_context,
-        missing_factor_key=missing_factor_key,
-    )
-
-
-def _demo_processed_catalog() -> ProcessedDataCatalog:
     return ProcessedDataCatalog(
         (
             _processed_spec(
@@ -85,7 +64,7 @@ def _demo_processed_catalog() -> ProcessedDataCatalog:
     )
 
 
-def _filter_processed_catalog() -> ProcessedDataCatalog:
+def make_filter_processed_catalog() -> ProcessedDataCatalog:
     return ProcessedDataCatalog(
         (
             _processed_spec(
@@ -127,11 +106,11 @@ def _filter_processed_catalog() -> ProcessedDataCatalog:
     )
 
 
-def _dummy_processed_catalog(
+def make_dummy_processed_catalog(
     *,
-    include_extensions: bool,
-    duplicate_factor_context: bool,
-    missing_factor_key: bool,
+    include_extensions: bool = False,
+    duplicate_factor_context: bool = False,
+    missing_factor_key: bool = False,
 ) -> ProcessedDataCatalog:
     specs = (
         _dummy_processed_spec(

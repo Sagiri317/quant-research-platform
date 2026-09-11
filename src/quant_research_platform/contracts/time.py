@@ -30,11 +30,6 @@ def is_intraday_time_window(time_window: TimeWindow) -> bool:
     return isinstance(time_window.start, datetime)
 
 
-def require_date_window(time_window: TimeWindow, *, context: str) -> None:
-    if is_intraday_time_window(time_window):
-        raise ValueError(f"{context}_requires_date_time_window")
-
-
 def time_window_date_bounds(time_window: TimeWindow) -> tuple[date, date]:
     start = (
         time_window.start.date()
@@ -90,6 +85,8 @@ def is_intraday_time_value(value: date | datetime | str) -> bool:
 
 
 def _coerce_bound(value: date | datetime | str) -> date | datetime:
+    if value is pd.NaT:
+        raise ValueError("invalid_time_window_bound")
     if isinstance(value, datetime):
         return _normalize_datetime(value)
     if isinstance(value, date):

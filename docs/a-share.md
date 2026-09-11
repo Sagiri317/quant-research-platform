@@ -352,6 +352,9 @@ Adjprcwd
 
 `Dsmvosd float_market_cap`
 
+供应商市值缺失时保持缺失，不用历史股数乘现价代填。股本事实保留独立口径；
+规模、换手、价值分母和研究资格按各自既有缺失规则处理。
+
 正式成交额 Amount：
 
 `Amount = Dnvaltrd + Ahvaltrd_D`
@@ -710,7 +713,7 @@ available_at 仅表示声明日之后首个交易日的可用门槛，不作为�
 同机构/同日多个分析师 -> 机构内中位数
 跨机构中位数 / MAD / 计数
 FY1 = earliest not-ended annual forecast_end_date  # 第一个尚未结束的年度预测期
-FY2 = next annual forecast_end_date  # 紧随其后的年度预测期
+FY2 = FY1 forecast_end_date + 1 calendar year  # 紧邻的下一财年，缺年不跳到更远年度
 forward EP = median forecast EPS / unadjusted signal-day close  # 前瞻盈利收益率定义
 ```
 
@@ -1321,7 +1324,11 @@ slope <= 0 -> benchmark-only logic  # 非正斜率采用仅基准逻辑
 ```
 
 SE/t/p/CI 使用按再平衡日期聚类的稳健推断，置信水平为 95%；
-加权 R2 和覆盖度作为诊断。
+加权 R2 和覆盖度作为诊断。满秩时斜率可用性与单项诊断定义性独立：
+常量收益的 R2 为 UNDEFINED；零 SE 的 t/p/CI 为 UNDEFINED，SE 保留 0。
+拟合残差绝对值不超过 8 倍 float64 epsilon 乘实际/拟合收益最大绝对值时，
+按数值精度内的零残差处理。诊断状态和原因随账本保存，冻结读取验证它们；
+合法零斜率仍执行仅基准，不用伪造显著性或区间满足冻结要求。
 
 2024–2025 的 Alpha OLS 校准同样属于监督学习，整个留出期不得用成熟留出收益重新拟合或更新斜率。
 使用明确开发 run 已发布增强账本的末期实际校准状态及来源引用，CSI500/CSI1000 必须一致。

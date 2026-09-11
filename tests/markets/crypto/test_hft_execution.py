@@ -772,7 +772,7 @@ def test_cost_sensitivity_reprices_actual_turnover_and_net_pnl() -> None:
     }
 
 
-def test_taker_long_stream_retains_no_fill_or_equity_dataframe() -> None:
+def test_taker_long_stream_returns_counts_without_dataframe_results() -> None:
     def decisions():
         for index in range(20_000):
             yield {"timestamp_ms": index, "prediction": 0.0}

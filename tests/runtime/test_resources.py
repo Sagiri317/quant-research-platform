@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 from collections.abc import Iterator
 from pathlib import Path
@@ -468,7 +469,20 @@ def _child_environment() -> dict[str, str]:
     return environment
 
 
-def test_two_process_busy_then_crash_reentry() -> None:
+@pytest.mark.parametrize("different_temp", [False, True])
+def test_two_process_busy_then_crash_reentry(
+    tmp_path: Path, monkeypatch, different_temp: bool
+) -> None:
+    environment = _child_environment()
+    child_temp = tmp_path / "child"
+    parent_temp = tmp_path / "parent" if different_temp else child_temp
+    child_temp.mkdir()
+    parent_temp.mkdir(exist_ok=True)
+    for name in ("TMPDIR", "TEMP", "TMP"):
+        environment[name] = str(child_temp)
+        monkeypatch.setenv(name, str(parent_temp))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    assert Path(tempfile.gettempdir()) == parent_temp
     child = subprocess.Popen(
         (
             sys.executable,
@@ -483,7 +497,7 @@ def test_two_process_busy_then_crash_reentry() -> None:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        env=_child_environment(),
+        env=environment,
     )
     try:
         assert child.stdout is not None

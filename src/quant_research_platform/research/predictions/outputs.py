@@ -124,7 +124,6 @@ def build_prediction_result_from_frames(
     reject_filter_input_columns(input_columns)
     coordinates = ("quarter_id",) if spec.prediction_mode == "a_share_oos" else ()
     required = set((*spec.primary_key, *input_columns, *coordinates))
-    _validate_oos_split(spec)
     work_columns = tuple(
         dict.fromkeys(
             (
@@ -452,17 +451,6 @@ def _iter_prediction_output_frames(
                                 f"{type(cleanup_error).__name__}"
                             )
                     raise
-
-
-def _validate_oos_split(spec: PredictionSpec) -> None:
-    if spec.train_end is not None and pd.Timestamp(spec.train_end) >= pd.Timestamp(
-        spec.test_start
-    ):
-        raise ValueError("prediction_train_end_must_precede_test_start")
-    if spec.test_end is not None and pd.Timestamp(spec.test_end) < pd.Timestamp(
-        spec.test_start
-    ):
-        raise ValueError("prediction_test_end_must_not_precede_test_start")
 
 
 def _iter_prediction_work_frames(

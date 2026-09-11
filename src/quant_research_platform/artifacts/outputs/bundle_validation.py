@@ -264,18 +264,6 @@ def read_prediction_output_bundle(
         primary_key_value = metadata.get("primary_key")
         prediction_column = metadata.get("prediction_column")
         prediction_mode = metadata.get("prediction_mode")
-        if (
-            type(primary_key_value) is not list
-            or not primary_key_value
-            or any(
-                type(column) is not str or not column for column in primary_key_value
-            )
-            or type(prediction_column) is not str
-            or not prediction_column
-            or type(prediction_mode) is not str
-            or prediction_mode not in {"minimal_oos", "a_share_oos", "crypto_oos"}
-        ):
-            raise ValueError("persisted_prediction_metadata_mismatch")
         lookup_column = (
             ALPHA_SCORE_COLUMN
             if prediction_mode == "a_share_oos"
@@ -339,15 +327,6 @@ def read_prediction_output_bundle(
                     raise ValueError("persisted_prediction_row_count_mismatch")
                 test_start = metadata.get("test_start")
                 test_end = metadata.get("test_end")
-                if (
-                    type(test_start) is not str
-                    or not test_start
-                    or (
-                        test_end is not None
-                        and (type(test_end) is not str or not test_end)
-                    )
-                ):
-                    raise ValueError("persisted_prediction_metadata_mismatch")
                 decoded_row_bytes, decode_fixed_bytes = (
                     parquet_decoded_working_set_bounds(parquet, expected_columns)
                 )

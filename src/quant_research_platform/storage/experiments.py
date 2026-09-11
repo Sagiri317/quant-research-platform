@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from pathlib import Path
 
 from quant_research_platform.contracts.experiments import (
@@ -43,11 +44,20 @@ def append_trial_record(
 
         atomic_write_directory(root, write)
     existing = read_trial_ledger(root, plan)
-    if record.attempt_index != len(existing) + 1:
+    finishing = (
+        bool(existing)
+        and record.attempt_index == len(existing)
+        and existing[-1].status == "attempted"
+        and record.status != "attempted"
+    )
+    if finishing:
+        _validate_trial_completion(existing[-1], record)
+    elif record.attempt_index != len(existing) + 1:
         raise ValueError("trial_attempt_not_next")
     if any(item.development_test_contaminated for item in existing):
         raise ValueError("trial_contaminated_experiment_requires_new_id")
-    path = Path(root) / "records" / f"{record.attempt_index:08d}.json"
+    suffix = "-terminal" if finishing else ""
+    path = Path(root) / "records" / f"{record.attempt_index:08d}{suffix}.json"
     return atomic_write_json(path, record.payload())
 
 
@@ -63,22 +73,50 @@ def read_trial_ledger(
         raise ValueError("trial_plan_mismatch")
     plan = saved
     entries = read_bounded_qrp_json_directory(
-        root / "records", max_members=plan.trial_budget
+        root / "records", max_members=2 * plan.trial_budget
     )
-    records = tuple(TrialRecord.from_payload(payload) for _name, payload in entries)
+    events = {name: TrialRecord.from_payload(payload) for name, payload in entries}
+    starts = {
+        record.attempt_index: record
+        for name, record in events.items()
+        if name == f"{record.attempt_index:08d}.json"
+    }
+    for name, record in events.items():
+        if name == f"{record.attempt_index:08d}.json":
+            continue
+        if (
+            name != f"{record.attempt_index:08d}-terminal.json"
+            or record.attempt_index not in starts
+        ):
+            raise ValueError("trial_ledger_filename_mismatch")
+        _validate_trial_completion(starts[record.attempt_index], record)
+    records = tuple(
+        events.get(f"{index:08d}-terminal.json", starts[index])
+        for index in sorted(starts)
+    )
     indices = tuple(record.attempt_index for record in records)
     if indices != tuple(range(1, len(records) + 1)):
         raise ValueError("trial_ledger_order_invalid")
-    if any(
-        name != f"{record.attempt_index:08d}.json"
-        for (name, _payload), record in zip(entries, records, strict=True)
-    ):
-        raise ValueError("trial_ledger_filename_mismatch")
     for record in records:
         validate_trial_record_against_plan(plan, record)
     if any(record.development_test_contaminated for record in records[:-1]):
         raise ValueError("trial_contaminated_experiment_reused")
     return records
+
+
+def _validate_trial_completion(start: TrialRecord, terminal: TrialRecord) -> None:
+    if start.status != "attempted" or terminal.status == "attempted":
+        raise ValueError("trial_terminal_transition_invalid")
+    expected = replace(
+        start,
+        event_id=terminal.event_id,
+        status=terminal.status,
+        validation_metrics=terminal.validation_metrics,
+        thread_settings=terminal.thread_settings,
+        undefined_reasons=terminal.undefined_reasons,
+    )
+    if expected.payload() != terminal.payload():
+        raise ValueError("trial_terminal_identity_mismatch")
 
 
 def read_trial_plan(root: Path) -> ExperimentPlan:

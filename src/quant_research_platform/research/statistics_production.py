@@ -367,7 +367,9 @@ def build_a_share_statistics_tables(
                 root_seed=root_seed,
                 dataset_id=dataset_id,
             )
-        fmb_periods = _fama_macbeth_period_table(fmb_period_records)
+        fmb_periods = pd.DataFrame.from_records(
+            fmb_period_records, columns=_FAMA_MACBETH_PERIOD_COLUMNS
+        )
         del rank_records, fmb_period_records, loss_records
         fmb_summary = _fama_macbeth_summary(
             fmb_periods,
@@ -779,10 +781,6 @@ def _fama_macbeth_period_records(
             for coefficient_id in coefficient_ids
         )
     return rows
-
-
-def _fama_macbeth_period_table(records: list[dict[str, object]]) -> pd.DataFrame:
-    return pd.DataFrame.from_records(records, columns=_FAMA_MACBETH_PERIOD_COLUMNS)
 
 
 def _fama_macbeth_summary(

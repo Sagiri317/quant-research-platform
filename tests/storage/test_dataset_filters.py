@@ -342,6 +342,7 @@ def test_categorical_empty_result_can_exceed_the_soft_chunk_target(
 
 def test_session_filter_reuses_prepared_values(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "tuple_in_filter_prepared_once")
     frame = make_default_dataset_frame(
@@ -359,6 +360,14 @@ def test_session_filter_reuses_prepared_values(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=16 * 1024 * 1024,
     )
+    calls = []
+    prepare = dataset_reading._prepare_in_filter
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(dataset_reading, "_prepare_in_filter", counted)
     with dataset_reading.open_dataset_session(
         root,
         columns=("timestamp", "value"),
@@ -374,6 +383,7 @@ def test_session_filter_reuses_prepared_values(
         )
 
     assert sum(map(len, chunks)) == 2
+    assert len(calls) == 2  # Each predicate is prepared once, independent of chunks.
 
 
 def test_dataset_session_plan_retained_memory_scales_with_wide_columns(

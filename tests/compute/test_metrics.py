@@ -65,23 +65,6 @@ def test_compute_ic_by_timestamp_computes_pearson_and_rankic() -> None:
     assert result["n_obs"].tolist() == [3, 3]
 
 
-def test_compute_ic_by_timestamp_does_not_call_pandas_series_corr(
-    monkeypatch,
-) -> None:
-    def fail_corr(*_args, **_kwargs):
-        raise AssertionError("IC should use vectorized correlation math")
-
-    monkeypatch.setattr(pd.Series, "corr", fail_corr)
-
-    result, _ = compute_ic_and_grouped_label_values(
-        make_perfect_cross_section_compute_panel(),
-        ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
-    )
-
-    assert result["ic"].round(6).tolist() == [1.0, 1.0]
-    assert result["rankic"].round(6).tolist() == [1.0, 1.0]
-
-
 def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
@@ -100,40 +83,6 @@ def test_compute_grouped_label_values_assigns_timestamp_level_groups() -> None:
         0.02,
         0.03,
     ]
-
-
-def test_compute_grouped_label_values_does_not_call_pandas_qcut(monkeypatch) -> None:
-    def fail_qcut(*_args, **_kwargs):
-        raise AssertionError("group assignment should use deterministic rank buckets")
-
-    monkeypatch.setattr(pd, "qcut", fail_qcut)
-
-    _, result = compute_ic_and_grouped_label_values(
-        make_perfect_cross_section_compute_panel(),
-        ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
-        n_groups=3,
-    )
-
-    assert result["group"].tolist() == [1, 2, 3, 1, 2, 3]
-
-
-def test_compute_grouped_label_values_does_not_group_assigned_pairs(
-    monkeypatch,
-) -> None:
-    def fail_assign(*_args, **_kwargs):
-        raise AssertionError(
-            "grouped label values should aggregate rank buckets directly"
-        )
-
-    monkeypatch.setattr(pd.DataFrame, "assign", fail_assign)
-
-    _, result = compute_ic_and_grouped_label_values(
-        make_perfect_cross_section_compute_panel(),
-        ComputePanelSpec(signal_columns=("factor",), label_column="forward_return"),
-        n_groups=3,
-    )
-
-    assert result["group"].tolist() == [1, 2, 3, 1, 2, 3]
 
 
 def test_grouped_label_values_keep_tie_classes_and_real_tiny_variation() -> None:

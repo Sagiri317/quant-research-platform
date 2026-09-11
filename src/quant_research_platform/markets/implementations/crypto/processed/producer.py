@@ -113,7 +113,7 @@ def produce_hft_processed_data(
                         market_type=binance_ids.FUTURES_MARKET_TYPE,
                         data_kind="agg_trades",
                         symbol=symbol,
-                    ),
+                    ).covering,
                     market_id=str(MARKET_ID),
                     asset_id=canonical_crypto_asset_id(symbol),
                     batch_rows=symbol_rows,
@@ -140,14 +140,7 @@ def produce_hft_processed_data(
                     ),
                     "recorder_file_count": len(run.manifest["files"]),
                     "reconstruction": {
-                        symbol: {
-                            **asdict(value),
-                            "coverage_segments": {
-                                key: list(bounds)
-                                for key, bounds in value.coverage_segments.items()
-                            },
-                        }
-                        for symbol, value in stats.items()
+                        symbol: asdict(value) for symbol, value in stats.items()
                     },
                 }
 

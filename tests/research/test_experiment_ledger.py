@@ -310,7 +310,9 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
     def fail_fit(*_args, **_kwargs):
         raise primary
 
-    def fail_record(*_args, **_kwargs):
+    def fail_record(root, plan, record):
+        if record.status == "attempted":
+            return append_trial_record(root, plan, record)
         raise OSError("record write failed")
 
     with monkeypatch.context() as patch:
@@ -370,3 +372,60 @@ def test_model_trial_read_validates_metrics_without_restricting_generic_experime
         }
         with pytest.raises(ValueError, match="invalid_model"):
             read_model_trial_ledger_reference(layout, reference)
+
+
+def test_started_trial_survives_without_finish_and_terminal_is_identity_bound(tmp_path):
+    plan = _plan()
+    root = tmp_path / "ledger"
+    start = _record(plan, event_id="started", attempt_index=1, status="attempted")
+    started_path = append_trial_record(root, plan, start)
+    original = started_path.read_bytes()
+    assert read_trial_ledger(root, plan) == (start,)
+    terminal = replace(start, event_id="finished", status="abandoned")
+    with pytest.raises(ValueError, match="trial_terminal_identity_mismatch"):
+        append_trial_record(root, plan, replace(terminal, random_seed=99))
+    assert read_trial_ledger(root, plan) == (start,)
+    append_trial_record(root, plan, terminal)
+    assert started_path.read_bytes() == original
+    assert read_trial_ledger(root, plan) == (terminal,)
+    with pytest.raises(ValueError, match="trial_attempt_not_next"):
+        append_trial_record(root, plan, terminal)
+
+
+def test_production_begin_survives_hard_exit(tmp_path):
+    import os
+    import subprocess
+    import sys
+
+    from quant_research_platform.storage.layout import StorageLayout
+
+    code = """import os, sys
+from pathlib import Path
+from tests.research.test_experiment_ledger import _plan
+from quant_research_platform.research.experiments import TrialRecorder
+from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.storage.layout import StorageLayout
+recorder = TrialRecorder(StorageLayout(Path(sys.argv[1])), 'run_test', _plan())
+recorder.begin(ModelSpec(
+    model_id='ridge', model_algorithm='ridge_regression',
+    input_feature_columns=('feature',), label_column='label', random_seed=7,
+    hyperparameters={'alpha': 1.0}))
+os._exit(17)
+"""
+    environment = os.environ.copy()
+    repository = Path(__file__).resolve().parents[2]
+    environment["PYTHONPATH"] = os.pathsep.join(
+        (str(repository), str(repository / "src"))
+    )
+    child = subprocess.run(
+        [sys.executable, "-c", code, str(tmp_path)],
+        env=environment,
+        capture_output=True,
+        timeout=30,
+    )
+    assert child.returncode == 17
+    records = read_trial_ledger(
+        StorageLayout(tmp_path).trial_ledger_root("run_test", _plan().experiment_id),
+        _plan(),
+    )
+    assert len(records) == 1 and records[0].status == "attempted"

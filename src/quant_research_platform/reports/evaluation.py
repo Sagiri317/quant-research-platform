@@ -7,7 +7,6 @@ import pandas as pd
 from quant_research_platform.contracts.evaluations import (
     EvaluationDiagnostics,
     EvaluationSpec,
-    strict_non_negative_count_series,
 )
 
 
@@ -15,10 +14,9 @@ def render_evaluation_summary(
     *,
     spec: EvaluationSpec,
     evaluation_diagnostics: EvaluationDiagnostics,
-    metrics: pd.DataFrame,
     ic_summary: pd.DataFrame,
     group_spread_summary: pd.DataFrame,
-    coverage_summary: pd.DataFrame | None = None,
+    coverage_summary: pd.DataFrame,
 ) -> str:
     signals = ", ".join(signal.signal_id for signal in spec.signals)
     labels = ", ".join(spec.label_columns)
@@ -58,11 +56,7 @@ def render_evaluation_summary(
             "## Signal/Label Coverage Summary",
             "",
             _markdown_table(
-                (
-                    _signal_label_coverage_summary(metrics)
-                    if coverage_summary is None
-                    else coverage_summary
-                ),
+                coverage_summary,
                 (
                     "signal",
                     "label",
@@ -106,28 +100,3 @@ def _markdown_cell(value: object) -> str:
     if isinstance(value, float):
         return f"{value:.6g}"
     return str(value).replace("|", r"\|")
-
-
-def _signal_label_coverage_summary(metrics: pd.DataFrame) -> pd.DataFrame:
-    columns = ["signal", "label", "mean_n_obs", "min_n_obs", "non_empty_period_count"]
-    if metrics.empty:
-        return pd.DataFrame(columns=columns)
-    source = metrics.copy()
-    if "n_obs" not in source:
-        return (
-            source.loc[:, ["signal", "label"]]
-            .drop_duplicates()
-            .assign(
-                mean_n_obs=pd.NA,
-                min_n_obs=pd.NA,
-                non_empty_period_count=pd.NA,
-            )
-        )
-    source["n_obs"] = strict_non_negative_count_series(source["n_obs"])
-    grouped = source.groupby(["signal", "label"], as_index=False, sort=True)["n_obs"]
-    summary = grouped.agg(
-        mean_n_obs="mean",
-        min_n_obs="min",
-        non_empty_period_count=lambda values: int(values.gt(0).sum()),
-    )
-    return summary.loc[:, columns]

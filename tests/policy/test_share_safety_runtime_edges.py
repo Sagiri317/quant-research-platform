@@ -27,7 +27,7 @@ def test_bounded_evidence_text_scan_preserves_chunk_and_utf8_semantics() -> None
     assert evidence_text_stream_unsafe_reason(unsafe_chunks) == "credential"
 
 
-def test_bounded_text_scan_does_not_retain_document() -> None:
+def test_text_scan_accepts_large_safe_document() -> None:
     chunks = (f"metric_{index}=safe\n".encode() for index in range(100_000))
 
     assert evidence_text_stream_unsafe_reason(chunks) is None

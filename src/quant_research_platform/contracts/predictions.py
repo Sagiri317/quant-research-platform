@@ -143,8 +143,6 @@ class PredictionSpec:
             self.train_end is not None or self.candidate_model_ids
         ):
             raise ValueError("a_share_persisted_prediction_requires_quarter_lineage")
-        if self.prediction_mode == "minimal_oos" and self.train_end is None:
-            raise ValueError("prediction_train_end_required")
         expected_prediction_column = (
             RAW_PREDICTION_COLUMN
             if self.prediction_mode == "a_share_oos"

@@ -585,6 +585,28 @@ class AlphaCalibration:
         return "UNDEFINED" if self.undefined_reason else "DEFINED"
 
     @property
+    def inference_status(self) -> str:
+        return "UNDEFINED" if self.slope_t_statistic is None else "DEFINED"
+
+    @property
+    def inference_reason(self) -> str:
+        return self.undefined_reason or (
+            "alpha_calibration_zero_standard_error"
+            if self.slope_t_statistic is None
+            else ""
+        )
+
+    @property
+    def r2_status(self) -> str:
+        return "UNDEFINED" if self.weighted_r2 is None else "DEFINED"
+
+    @property
+    def r2_reason(self) -> str:
+        return self.undefined_reason or (
+            "alpha_calibration_constant_return" if self.weighted_r2 is None else ""
+        )
+
+    @property
     def benchmark_only(self) -> bool:
         return self.undefined_reason is not None or self.slope <= 0.0
 
@@ -700,7 +722,20 @@ def calibrate_expected_alpha(
     bread = np.zeros((2, 2), dtype="float64")
     cluster_scores = []
     actual = returns.loc[selected].to_numpy(dtype="float64")
+    if np.ptp(actual) == 0.0:
+        slope, intercept = 0.0, float(actual[0])
+        coefficients = np.array([intercept, slope])
     residual = actual - design @ coefficients
+    # Treat a fit within floating-point roundoff as zero residual variance.
+    roundoff = (
+        8
+        * np.finfo(float).eps
+        * max(
+            float(np.max(np.abs(actual))), float(np.max(np.abs(design @ coefficients)))
+        )
+    )
+    if np.max(np.abs(residual)) <= roundoff:
+        residual = np.zeros_like(residual)
     selected_dates = dates.loc[selected].to_numpy()
     _, cluster_codes = np.unique(selected_dates, return_inverse=True)
     for cluster in np.unique(cluster_codes):
@@ -720,26 +755,27 @@ def calibrate_expected_alpha(
         ci_high = slope + critical * standard_error
         t_statistic = statistic
     else:
-        statistic = 0.0 if slope == 0.0 else np.inf
-        pvalue = 1.0 if slope == 0.0 else 0.0
-        ci_low = ci_high = slope
-        t_statistic = statistic
+        pvalue = None
+        ci_low = ci_high = None
+        t_statistic = None
     centered = actual - np.average(actual, weights=weights)
-    denominator = float(np.dot(weights, centered * centered))
+    denominator = (
+        0.0 if np.ptp(actual) == 0.0 else float(np.dot(weights, centered * centered))
+    )
     weighted_r2 = (
         1.0 - float(np.dot(weights, residual * residual)) / denominator
         if denominator > 0.0
-        else 0.0
+        else None
     )
     return AlphaCalibration(
         slope=slope,
         intercept=intercept,
         slope_standard_error=standard_error,
-        slope_t_statistic=float(t_statistic),
+        slope_t_statistic=t_statistic,
         slope_pvalue=pvalue,
-        slope_ci_low=float(ci_low),
-        slope_ci_high=float(ci_high),
-        weighted_r2=float(weighted_r2),
+        slope_ci_low=ci_low,
+        slope_ci_high=ci_high,
+        weighted_r2=weighted_r2,
         coverage=coverage,
         valid_rebalance_dates=date_count,
         scheduled_rebalance_dates=len(scheduled),

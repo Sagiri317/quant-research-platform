@@ -225,10 +225,11 @@ def test_supervised_models_persist_a_training_only_scaler() -> None:
             estimator=build_estimator_from_model_spec(spec),
             fitting_cutoff="2024-01-02",
         )
-        fitted = result.value if hasattr(result, "value") else result
+        fitted = result.value
         assert fitted.metadata["scaler"]["columns"] == ["feature"]
-        if hasattr(result, "release"):
-            result.release(owner="test.scaler")
+        assert fitted.prediction_model.scaler.mean_ == (1.5,)
+        assert fitted.prediction_model.scaler.scale_ == (0.5,)
+        result.release(owner="test.scaler")
 
 
 def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
@@ -262,7 +263,7 @@ def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
             estimator=build_estimator_from_model_spec(spec),
             fitting_cutoff="2024-01-02",
         )
-        fitted = result.value if hasattr(result, "value") else result
+        fitted = result.value
         assert fitted.metadata["rows_after_input_label_dropna"] == 2
         assert fitted.metadata["train_end"] == "2024-01-01"
         if hasattr(result, "release"):
@@ -297,14 +298,15 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
             estimator=build_estimator_from_model_spec(spec),
             fitting_cutoff="2024-01-02",
         )
-        fitted = result.value if hasattr(result, "value") else result
+        fitted = result.value
         predictions = fitted.prediction_model.predict(
             frame.loc[:, ["timestamp", "factor_a", "factor_b"]]
         )
+        assert fitted.prediction_model.directions == (1.0, -1.0)
+        assert predictions[-1] == pytest.approx(1.0 / 6.0)
         assert np.isfinite(predictions).all()
         assert fitted.metadata["scaler"] is None
-        if hasattr(result, "release"):
-            result.release(owner="test.rank")
+        result.release(owner="test.rank")
 
 
 def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
@@ -373,9 +375,10 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
     assert calibrated.valid_rebalance_dates == 6
     assert calibrated.slope > 0.0
     assert calibrated.slope_standard_error == pytest.approx(0.0, abs=1e-14)
-    assert calibrated.slope_ci_low == pytest.approx(calibrated.slope)
-    assert calibrated.slope_ci_high == pytest.approx(calibrated.slope)
-    assert 0.0 <= calibrated.slope_pvalue <= 1.0
+    assert calibrated.slope_ci_low is calibrated.slope_ci_high is None
+    assert calibrated.slope_pvalue is None
+    assert calibrated.inference_status == "UNDEFINED"
+    assert calibrated.inference_reason == "alpha_calibration_zero_standard_error"
     inverse = calibrate_expected_alpha(
         frame.assign(holding_return=-frame["holding_return"]),
         as_of=calendar[-1],

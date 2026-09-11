@@ -60,6 +60,7 @@ class TrialRecorder:
             status="attempted",
             artifact_lineage=self.plan.input_lineage,
         )
+        append_trial_record(self.root, self.plan, record)
         return record
 
     def finish(

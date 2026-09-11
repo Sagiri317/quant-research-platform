@@ -151,7 +151,6 @@ def write_evaluation_outputs_from_chunks(
         rendered_summary = evaluation_report.render_evaluation_summary(
             spec=spec,
             evaluation_diagnostics=evaluation_diagnostics,
-            metrics=pd.DataFrame(columns=EVALUATION_METRICS_COLUMNS),
             ic_summary=ic_summary,
             group_spread_summary=group_spread_summary,
             coverage_summary=coverage_summary,

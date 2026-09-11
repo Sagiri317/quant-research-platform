@@ -421,12 +421,6 @@ def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
                 allow_exact_matches=True,
                 suffixes=("", "_cap"),
             )
-        current["float_market_cap"] = current["float_market_cap"].fillna(
-            current["a_float_shares"] * current["close"]
-        )
-        current["total_market_cap"] = current["total_market_cap"].fillna(
-            current["total_shares"] * current["close"]
-        )
         outputs.append(current)
     return pd.concat(outputs, ignore_index=True)
 

@@ -163,6 +163,7 @@ def _quote(
 
 
 def _panel_rows(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+    kwargs["trade_coverage"] = coverage_lookup(kwargs["trade_coverage"])
     frames = list(
         iter_panel_frames(
             *args,
@@ -539,3 +540,9 @@ def _write_file(
         "compressed_bytes": len(raw),
         "sha256": hashlib.sha256(raw).hexdigest(),
     }
+
+
+def coverage_lookup(mapping):
+    return lambda start, end: tuple(
+        key for key, bounds in mapping.items() if bounds[0] <= start and bounds[1] > end
+    )

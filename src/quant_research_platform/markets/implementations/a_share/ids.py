@@ -14,8 +14,3 @@ FUNDAMENTAL_PIT_ID = "fundamental_pit"
 FUNDAMENTAL_DATA_ID = "fundamental_factors"
 EXPECTATIONS_DATA_ID = "expectations_factors"
 FORWARD_RETURNS_DATA_ID = "forward_returns"
-RESEARCH_DATASET_IDS = {
-    "pv_all": "pv_all",
-    "fusion_nf_core": "fusion_nf_core",
-    "fusion_nf_expectations": "fusion_nf_expectations",
-}

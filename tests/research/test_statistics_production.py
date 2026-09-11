@@ -512,7 +512,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
 
 
 def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients() -> None:
-    periods = statistics_production._fama_macbeth_period_table([])
+    periods = pd.DataFrame(columns=statistics_production._FAMA_MACBETH_PERIOD_COLUMNS)
     summary = statistics_production._fama_macbeth_summary(
         periods,
         factors=("factor",),

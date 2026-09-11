@@ -75,8 +75,10 @@ def compare_semantic_artifacts(
             root / "manifest.json": _member_identity(root / "manifest.json")
             for root in (old_root, candidate_root)
         }
-        old_envelope, old_members = _read_semantic_record(old_root)
-        candidate_envelope, candidate_members = _read_semantic_record(candidate_root)
+        old_envelope, old_members = read_semantic_artifact_record(old_root)
+        candidate_envelope, candidate_members = read_semantic_artifact_record(
+            candidate_root
+        )
         if old_envelope != candidate_envelope:
             return SemanticArtifactComparison("CONTENT_MISMATCH")
         old_paths = tuple(member["path"] for member in old_members)
@@ -275,20 +277,6 @@ def read_semantic_artifact(
     return envelope
 
 
-def read_semantic_artifact_record(
-    instance_root: Path,
-    *,
-    expected_identity: str | None = None,
-) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
-    """Read one validated semantic envelope and its member inventory."""
-
-    envelope, members = _read_semantic_record(
-        instance_root,
-        expected_identity=expected_identity,
-    )
-    return envelope, members
-
-
 def verify_semantic_artifact_member(
     instance_root: Path,
     *,
@@ -318,7 +306,7 @@ def verify_semantic_artifact_member(
         raise ValueError("semantic_artifact_member_integrity_invalid")
 
 
-def _read_semantic_record(
+def read_semantic_artifact_record(
     instance_root: Path,
     *,
     expected_identity: str | None = None,

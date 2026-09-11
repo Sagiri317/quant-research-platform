@@ -113,6 +113,10 @@ _ALPHA_DIAGNOSTICS = {
     "alpha_slope_ci_low": "slope_ci_low",
     "alpha_slope_ci_high": "slope_ci_high",
     "alpha_weighted_r2": "weighted_r2",
+    "alpha_inference_status": "inference_status",
+    "alpha_inference_reason": "inference_reason",
+    "alpha_r2_status": "r2_status",
+    "alpha_r2_reason": "r2_reason",
     "alpha_coverage": "coverage",
     "alpha_valid_dates": "valid_rebalance_dates",
     "alpha_scheduled_dates": "scheduled_rebalance_dates",
@@ -133,9 +137,7 @@ def frozen_alpha_calibration(
                 raise ValueError("holdout_alpha_source_after_cutoff")
             values = {
                 _ALPHA_DIAGNOSTICS[row.name]: (
-                    row.text
-                    if row.name in {"alpha_status", "alpha_undefined_reason"}
-                    else row.number
+                    row.text if row.text is not None else row.number
                 )
                 for row in batch.diagnostics
                 if row.asset_id == PORTFOLIO_CASH_ASSET_ID
@@ -152,13 +154,41 @@ def frozen_alpha_calibration(
         raise PortfolioTargetBlocked("holdout_alpha_calibration_undefined")
     if values.pop("status") != "DEFINED":
         raise ValueError("holdout_alpha_calibration_status_invalid")
-    if set(values) != set(_ALPHA_DIAGNOSTICS.values()) - {"status", "undefined_reason"}:
+    diagnostic_names = {
+        "inference_status",
+        "inference_reason",
+        "r2_status",
+        "r2_reason",
+    }
+    if not diagnostic_names.issubset(values):
         raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    diagnostics = {name: values.pop(name) for name in diagnostic_names}
+    missing = set()
+    if diagnostics["inference_status"] == "UNDEFINED":
+        if values.get("slope_standard_error") != 0.0:
+            raise ValueError("holdout_alpha_calibration_statistics_invalid")
+        missing.update(
+            {"slope_t_statistic", "slope_pvalue", "slope_ci_low", "slope_ci_high"}
+        )
+    if diagnostics["r2_status"] == "UNDEFINED":
+        missing.add("weighted_r2")
+    expected = (
+        set(_ALPHA_DIAGNOSTICS.values())
+        - {"status", "undefined_reason"}
+        - diagnostic_names
+        - missing
+    )
+    if set(values) != expected:
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    values.update(dict.fromkeys(missing))
     if values["valid_rebalance_dates"] < 6 or values["coverage"] < 0.8:
         raise PortfolioTargetBlocked("holdout_alpha_calibration_insufficient")
     for name in ("valid_rebalance_dates", "scheduled_rebalance_dates"):
         values[name] = int(values[name])
-    return AlphaCalibration(**values, undefined_reason=None), observed_at
+    calibration = AlphaCalibration(**values, undefined_reason=None)
+    if any(getattr(calibration, name) != value for name, value in diagnostics.items()):
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    return calibration, observed_at
 
 
 @dataclass(frozen=True, slots=True)

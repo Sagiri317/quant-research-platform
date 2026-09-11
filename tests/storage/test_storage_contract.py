@@ -37,7 +37,7 @@ def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
             spec=make_processed_dataset_spec(),
         )
 
-    assert not (tmp_path / "public" / "x").exists()
+    assert not (tmp_path / "outside-local-only").exists()
 
 
 def test_public_dataset_writer_rejects_lazy_input_before_iteration(
