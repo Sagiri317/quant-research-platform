@@ -221,9 +221,9 @@ def test_member_limit_precedes_wide_directory_materialization_and_hashing(
 
     monkeypatch.setattr(storage.os, "scandir", lambda _path: Entries())
     monkeypatch.setattr(storage, "_member_record", record)
-    with pytest.raises(ValueError, match="semantic_artifact_member_limit_exceeded"):
+    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         storage.read_semantic_artifact_record(root)
-    assert counts == {"next": 257, "hash": 256, "close": 1}
+    assert counts == {"next": 1, "hash": 0, "close": 1}
 
 
 def test_nested_inventory_descends_before_reading_next_sibling(tmp_path, monkeypatch):
@@ -256,10 +256,10 @@ def test_nested_inventory_descends_before_reading_next_sibling(tmp_path, monkeyp
     # Restrict the wrapper to inventory: atomic publication owns its own scans.
     actual_inventory = storage._member_inventory
 
-    def inventory(root):
+    def inventory(root, **kwargs):
         with monkeypatch.context() as scoped:
             scoped.setattr(storage.os, "scandir", Entries)
-            return actual_inventory(root)
+            return actual_inventory(root, **kwargs)
 
     monkeypatch.setattr(storage, "_member_inventory", inventory)
     root = storage.write_semantic_artifact(tmp_path / "model", _envelope(), writer)
@@ -275,9 +275,11 @@ def test_inventory_closes_all_ancestors_without_replacing_primary(
 ):
     import quant_research_platform.storage.semantic_artifacts as storage
 
-    root = _write_artifact(tmp_path)
-    (root / "nested").mkdir()
-    (root / "nested" / "bad.bin").write_bytes(b"bad")
+    def writer(staging):
+        (staging / "nested").mkdir()
+        (staging / "nested" / "bad.bin").write_bytes(b"bad")
+
+    root = write_semantic_artifact(tmp_path / "model", _envelope(), writer)
     primary = KeyboardInterrupt("inventory primary")
     actual_scandir = storage.os.scandir
     closed = []
@@ -357,7 +359,10 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
     assert payload.read_bytes() == b"external synthetic content"
 
 
-def test_inventory_limit_failure_preserves_published_artifact_and_parent(tmp_path):
+def test_inventory_limit_failure_preserves_published_artifact_and_parent(
+    tmp_path, monkeypatch
+):
+    import quant_research_platform.storage.semantic_artifacts as storage
     from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     root = _write_artifact(tmp_path)
@@ -367,6 +372,7 @@ def test_inventory_limit_failure_preserves_published_artifact_and_parent(tmp_pat
     del candidate_fields["instance_identity"], candidate_fields["status"]
     candidate_fields["semantic_metadata"] = {"candidate": True}
     candidate = build_business_manifest_envelope(**candidate_fields)
+    monkeypatch.setattr(storage, "_MAX_QRP_JSON_BYTES", 2048)
 
     def writer(staging):
         for index in range(257):
@@ -555,3 +561,21 @@ def test_identical_parquet_rebuild_does_not_require_decoded_payload_capacity(tmp
     with runtime_resource_policy_scope(explicit_cap_bytes=1024**2) as policy:
         assert compare_semantic_artifacts(old, new).status == "MATCH"
         assert policy.used_memory_bytes == 0
+
+
+def test_member_inventory_round_trips_more_than_256_declared_members(tmp_path):
+    import quant_research_platform.storage.semantic_artifacts as storage
+
+    def writer(staging):
+        for index in range(265):
+            (staging / f"member-{index}.bin").write_bytes(str(index).encode())
+
+    root = write_semantic_artifact(tmp_path / "wide", _envelope(), writer)
+    _, members = storage.read_semantic_artifact_record(root)
+    assert len(members) == 265
+    assert {member["path"] for member in members} == {
+        f"member-{i}.bin" for i in range(265)
+    }
+    (root / "member-264.bin").write_bytes(b"changed")
+    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
+        storage.read_semantic_artifact_record(root)

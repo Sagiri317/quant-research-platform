@@ -8,7 +8,6 @@ from quant_research_platform.artifacts import research as report_artifact
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
 )
-from quant_research_platform.contracts.json_codec import json_record_working_set_bytes
 from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
 from quant_research_platform.interfaces.models import (
     FactorCatalogResponse,
@@ -83,11 +82,13 @@ def read_report(
         with policy.lease(
             "queries.report",
             report_artifact.report_payload_working_set(record.payload())
-            + json_record_working_set_bytes(by_path["report.json"]["size"])
             + 8 * by_path["report.md"]["size"],
-        ):
+        ) as lease:
             payload = report_artifact.read_research_report_artifact(
-                root, expected_identity=report_identity, source_run=record
+                root,
+                expected_identity=report_identity,
+                source_run=record,
+                report_lease=lease,
             )
             markdown = report_artifact._read_utf8(
                 root / "report.md", expected_member=by_path["report.md"]

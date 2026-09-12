@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import sys
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 from uuid import uuid4
@@ -94,10 +95,16 @@ def check_published_evidence_views(
         upstream_identities=envelope["upstream_identities"],
         semantic_metadata=envelope["semantic_metadata"],
     )
+    archived_payload = deepcopy(payload)
+    archived_payload["sections"]["Data/Coverage"]["scale diagnostics"] = {
+        "results": [
+            {"metric_id": "synthetic_metric", "value": 0.1} for _ in range(20000)
+        ]
+    }
     archived_markdown = "# Archived synthetic evidence\n\nRead the exact report.json.\n"
 
     def archived_writer(staging):
-        write_json_evidence(staging / "report.json", payload)
+        write_json_evidence(staging / "report.json", archived_payload)
         write_markdown_evidence(staging / "report.md", archived_markdown)
 
     previous_root = layout.instance_root(logical, previous.instance_identity)
@@ -106,10 +113,11 @@ def check_published_evidence_views(
             report_artifact.read_research_report_artifact(
                 previous_root, expected_identity=previous.instance_identity
             )
-            == payload
+            == archived_payload
         )
     else:
         write_semantic_artifact(logical, previous, archived_writer)
+    assert (previous_root / "report.json").stat().st_size > 1024 * 1024
     before = _files(layout.project_root / "data")
     guarded = replace(
         profile,
@@ -166,6 +174,13 @@ def check_published_evidence_views(
             report_identity=previous.instance_identity,
         )
         assert archived["markdown"] == archived_markdown
+        assert archived["report"] == archived_payload
+        large_view = client.get(
+            f"/api/0.1/runs/{run_id}/reports/{previous.instance_identity}",
+            params=params,
+        )
+        assert large_view.status_code == 200
+        assert large_view.json()["report"] == archived_payload
         portfolio_target = next(
             row.target_id
             for row in record.target_results
@@ -182,7 +197,7 @@ def check_published_evidence_views(
         assert (
             curve.json()["source_point_count"] == curve.json()["displayed_point_count"]
         )
-        assert len(captured) == 6 and all(
+        assert len(captured) == 7 and all(
             policy.state == "CLOSED" and policy.used_memory_bytes == 0
             for policy in captured
         )

@@ -139,9 +139,7 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
 
 
 @pytest.mark.parametrize("selected_folds", [22, 21, 1])
-def test_crypto_member_limit_precedes_training_for_selected_window(
-    tmp_path, selected_folds
-):
+def test_crypto_valid_selected_windows_reach_training(tmp_path, selected_folds):
     from copy import deepcopy
     from datetime import datetime, timedelta
 
@@ -197,13 +195,10 @@ def test_crypto_member_limit_precedes_training_for_selected_window(
         calls.append(True)
         raise RuntimeError("training_entry_sentinel")
 
-    rejected = selected_folds == 22
     with runtime_resource_policy_scope() as policy:
         with pytest.raises(
-            ValueError if rejected else RuntimeError,
-            match="semantic_artifact_member_limit_exceeded"
-            if rejected
-            else "training_entry_sentinel",
+            RuntimeError,
+            match="training_entry_sentinel",
         ):
             write_crypto_model_artifact(
                 tmp_path / "models",
@@ -211,7 +206,7 @@ def test_crypto_member_limit_precedes_training_for_selected_window(
                 model_results=model_results,
                 trial_layout=None,
             )
-        assert len(calls) == (0 if rejected else 1)
+        assert len(calls) == 1
         assert policy.used_memory_bytes == 0
     assert not tuple((tmp_path / "models" / "instances").glob("*"))
 
@@ -585,9 +580,17 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         check_crypto_fold_boundaries,
         check_crypto_model_staging,
         check_crypto_prediction_staging,
+        check_crypto_wide_fold_artifact,
     )
 
     check_crypto_fold_boundaries(
+        layout=layout,
+        dataset_root=dataset_root,
+        profile=profile,
+        saved=saved,
+        monkeypatch=monkeypatch,
+    )
+    check_crypto_wide_fold_artifact(
         layout=layout,
         dataset_root=dataset_root,
         profile=profile,

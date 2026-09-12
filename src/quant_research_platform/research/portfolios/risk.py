@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.research.features.transforms import _mad_winsorize
 
 
 @dataclass(frozen=True)
@@ -197,16 +198,7 @@ def preprocess_risk_styles(
     for column in style_columns:
         values = pd.to_numeric(result[column], errors="raise").astype("float64")
         grouped = values.where(eligible).groupby(timestamps, sort=False)
-        median = grouped.transform("median")
-        mad = grouped.transform(
-            lambda values: (
-                float(np.median(np.abs(values.dropna() - values.median())))
-                if len(values.dropna())
-                else np.nan
-            )
-        )
-        bound = 3.0 * 1.4826 * mad
-        clipped = values.clip(lower=median - bound, upper=median + bound)
+        clipped = _mad_winsorize(values, grouped)
         fitting_values = clipped.where(eligible)
         means = fitting_values.groupby(timestamps, sort=False).transform("mean")
         scales = fitting_values.groupby(timestamps, sort=False).transform(

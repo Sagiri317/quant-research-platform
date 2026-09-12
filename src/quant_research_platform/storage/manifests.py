@@ -37,7 +37,10 @@ def read_bounded_qrp_json(
     path: Path,
     *,
     expected_identity: DatasetFileIdentity | None = None,
+    max_bytes: int = _MAX_QRP_JSON_BYTES,
 ) -> tuple[bytes, dict[str, Any]]:
+    if type(max_bytes) is not int or max_bytes < 0:
+        raise ValueError("dataset_metadata_size_limit_invalid")
     candidate = require_unaliased_path(
         Path(path), error="dataset_metadata_file_invalid"
     )
@@ -47,7 +50,7 @@ def read_bounded_qrp_json(
         raise ValueError("dataset_metadata_file_invalid") from exc
     if expected_identity is not None and identity != expected_identity:
         raise ValueError("dataset_metadata_file_identity_changed")
-    if identity.size > _MAX_QRP_JSON_BYTES:
+    if identity.size > max_bytes:
         raise ValueError("dataset_metadata_file_too_large")
     try:
         handle = open_filesystem_file(candidate)
@@ -55,13 +58,13 @@ def read_bounded_qrp_json(
             before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
             if before != identity:
                 raise ValueError("dataset_metadata_file_identity_changed")
-            raw = handle.read(_MAX_QRP_JSON_BYTES + 1)
+            raw = handle.read(max_bytes + 1)
             after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     except ValueError as exc:
         raise ValueError("dataset_metadata_file_identity_changed") from exc
-    if len(raw) > _MAX_QRP_JSON_BYTES:
+    if len(raw) > max_bytes:
         raise ValueError("dataset_metadata_file_too_large")
     if before != identity or after != identity:
         raise ValueError("dataset_metadata_file_identity_changed")

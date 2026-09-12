@@ -112,15 +112,6 @@ class PboResult:
 
 
 @dataclass(frozen=True)
-class FamaMacBethResult:
-    period_coefficients: pd.DataFrame
-    summary: pd.DataFrame
-    white_p_values: pd.Series
-    white_reasons: pd.Series
-    period_count: int
-
-
-@dataclass(frozen=True)
 class FamaMacBethPeriodResult:
     coefficients: pd.Series
     white_p_value: float | None
@@ -566,77 +557,6 @@ def cscv_pbo(returns: object, *, slice_count: int, max_combinations: int) -> Pbo
         candidate_count=matrix.shape[1],
         status="DEFINED",
         reason=None,
-    )
-
-
-def fama_macbeth(
-    frame: pd.DataFrame,
-    *,
-    return_column: str,
-    factor_columns: tuple[str, ...],
-    max_lags: int,
-    weight_column: str | None = None,
-) -> FamaMacBethResult:
-    required = {"timestamp", "asset_id", return_column, *factor_columns}
-    if weight_column is not None:
-        required.add(weight_column)
-    if not isinstance(frame, pd.DataFrame) or not required.issubset(frame.columns):
-        raise ValueError("fama_macbeth_columns_invalid")
-    frame = frame.copy()
-    frame["timestamp"] = strict_timestamp_series(
-        frame["timestamp"], error="fama_macbeth_timestamp_invalid"
-    )
-    frame["asset_id"] = strict_hashable_key_series(
-        frame["asset_id"], error="fama_macbeth_asset_id_invalid"
-    )
-    if bool(frame.duplicated(["timestamp", "asset_id"], keep=False).any()):
-        raise ValueError("fama_macbeth_primary_key_duplicate")
-    if not factor_columns or len(set(factor_columns)) != len(factor_columns):
-        raise ValueError("fama_macbeth_factors_invalid")
-    coefficients: list[pd.Series] = []
-    periods: list[object] = []
-    white_p_values: list[float] = []
-    white_reasons: list[str | None] = []
-    for period, group in frame.groupby("timestamp", sort=True):
-        period_result = fama_macbeth_period(
-            group,
-            return_column=return_column,
-            factor_columns=factor_columns,
-            weight_column=weight_column,
-        )
-        coefficients.append(period_result.coefficients)
-        periods.append(period)
-        white_p_values.append(
-            period_result.white_p_value
-            if period_result.white_p_value is not None
-            else float("nan")
-        )
-        white_reasons.append(period_result.white_reason)
-    period_coefficients = pd.DataFrame(
-        coefficients, index=pd.Index(periods, name="timestamp")
-    )
-    summary = time_series_inference_summary(
-        period_coefficients.reset_index(),
-        identity_column="timestamp",
-        max_lags=max_lags,
-        fdr_method=None,
-        fdr_alpha=0.05,
-    )
-    if not summary.empty:
-        summary = summary.set_index("timestamp")
-    return FamaMacBethResult(
-        period_coefficients=period_coefficients,
-        summary=summary,
-        white_p_values=pd.Series(
-            white_p_values, index=period_coefficients.index, name="white_p_value"
-        ),
-        white_reasons=pd.Series(
-            white_reasons,
-            index=period_coefficients.index,
-            name="white_reason",
-            dtype="object",
-        ),
-        period_count=len(period_coefficients),
     )
 
 

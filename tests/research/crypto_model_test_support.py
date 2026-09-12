@@ -586,3 +586,132 @@ def check_crypto_model_staging(*, layout, profile, saved):
             assert read_semantic_artifact_record(saved.instance_root) == original
             assert not tuple(logical_root.glob(".*staging*"))
             assert policy.used_memory_bytes == 0
+
+
+def check_crypto_wide_fold_artifact(
+    *, layout, dataset_root, profile, saved, monkeypatch
+):
+    """Persist 22 synthetic folds through real model fitting and trial ledgers."""
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.research.models import persisted
+    from quant_research_platform.research.protocols.crypto_hft import (
+        protocol as crypto_protocol,
+    )
+
+    original = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
+    plan = deepcopy(original["research_plan"])
+    template = deepcopy(plan["folds"][0])
+    plan["folds"] = []
+    for index in range(22):
+        fold = deepcopy(template)
+        fold["fold_id"] = f"wide_{index}"
+        for name in ("train", "validation", "development_test"):
+            fold[name] = {
+                key: (
+                    pd.Timestamp(value) + pd.Timedelta(seconds=100 * index)
+                ).isoformat()
+                for key, value in fold[name].items()
+            }
+        plan["folds"].append(fold)
+    last = pd.Timestamp(plan["folds"][-1]["development_test"]["end"])
+    plan["final_holdout"] = {
+        "start": (last + pd.Timedelta(seconds=10)).isoformat(),
+        "end": (last + pd.Timedelta(seconds=11)).isoformat(),
+    }
+    protocol = crypto_protocol(original["scenario_id"], research_plan=plan).manifest()
+    fields = {
+        key: saved.envelope[key]
+        for key in (
+            "logical_artifact_id",
+            "schema_identity",
+            "software_identity",
+            "upstream_identities",
+        )
+    }
+    envelope = build_business_manifest_envelope(
+        **fields,
+        protocol_or_spec_identity=canonical_json_hash(protocol),
+        research_window={
+            "start": plan["folds"][0]["development_test"]["start"],
+            "end": plan["folds"][-1]["development_test"]["end"],
+            "access": "development",
+        },
+        semantic_metadata={"target_contract": {"protocol": protocol}},
+    )
+    from quant_research_platform.research.models.supervised import preflight_model_specs
+
+    preflight_model_specs(profile.models.list())
+    ids = tuple(spec.model_id for spec in profile.models.list())
+    with runtime_resource_policy_scope() as policy:
+        frame = read_dataset(
+            dataset_root, mode=DatasetReadMode.MATERIALIZED, resource_policy=policy
+        )
+        frame = frame.loc[
+            frame.timestamp.between(
+                pd.Timestamp(template["train"]["start"]),
+                pd.Timestamp(template["validation"]["end"]),
+            )
+        ].copy()
+
+        def chunks(_layout, *, time_window, columns, **kwargs):
+            index = int(
+                (
+                    pd.Timestamp(time_window.start)
+                    - pd.Timestamp(template["train"]["start"])
+                ).total_seconds()
+                // 100
+            )
+            shifted = frame.copy()
+            for column in shifted:
+                if pd.api.types.is_datetime64_any_dtype(shifted[column]):
+                    shifted[column] += pd.Timedelta(seconds=100 * index)
+            yield shifted.loc[
+                shifted.timestamp.between(
+                    pd.Timestamp(time_window.start), pd.Timestamp(time_window.end)
+                ),
+                list(columns),
+            ].copy()
+
+        def results(*, on_validation):
+            return production.build_crypto_fold_models(
+                layout=layout.with_target_roots(
+                    {original["scenario_id"]: dataset_root}
+                ),
+                dataset_catalog=profile.research_datasets,
+                model_catalog=profile.models,
+                dataset_id=original["scenario_id"],
+                model_ids=ids,
+                tie_break_order=ids,
+                time_window=TimeWindow(
+                    envelope.research_window["start"], envelope.research_window["end"]
+                ),
+                resource_policy=policy,
+                protocol_manifest=protocol,
+                run_id="run_crypto_wide",
+                research_protocol_identity=canonical_json_hash(protocol),
+                model_target_id=envelope.logical_artifact_id,
+                backend_versions={"fixture": "1"},
+                on_validation=on_validation,
+            )
+
+        with monkeypatch.context() as patch:
+            patch.setattr(production, "iter_research_dataset_chunks", chunks)
+            root = persisted.write_crypto_model_artifact(
+                layout.project_root / "wide-models",
+                envelope=envelope,
+                model_results=results,
+                trial_layout=layout,
+            )
+        loaded = persisted.read_crypto_model_artifact(
+            root, expected_identity=envelope.instance_identity, trial_layout=layout
+        )
+        assert len(loaded.models) == 22 * 9
+        assert len(loaded.member_records) == 265
+        for entry in loaded.models:
+            with persisted.read_crypto_model_member(
+                loaded, entry, resource_policy=policy
+            ) as model:
+                assert model is not None
+        assert policy.used_memory_bytes == 0

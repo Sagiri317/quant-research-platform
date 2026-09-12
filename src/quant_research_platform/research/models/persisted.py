@@ -66,7 +66,6 @@ from quant_research_platform.storage.parquet import (
     parquet_table_writer,
 )
 from quant_research_platform.storage.semantic_artifacts import (
-    MAX_SEMANTIC_ARTIFACT_MEMBERS,
     read_semantic_artifact_operational_metadata,
     read_semantic_artifact_record,
     verify_semantic_artifact_member,
@@ -860,12 +859,6 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
     )
 
     _protocol, folds, model_ids = _crypto_model_scope(envelope.payload())
-    validation_count = len(set(model_ids).intersection(HFT_MAKER_CALIBRATION_MODEL_IDS))
-    if (
-        1 + len(folds) * (len(model_ids) + 1 + validation_count)
-        > MAX_SEMANTIC_ARTIFACT_MEMBERS
-    ):
-        raise ValueError("semantic_artifact_member_limit_exceeded")
     operational = {"model_trial_ledgers": []}
 
     def write(staging):

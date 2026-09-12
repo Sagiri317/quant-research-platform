@@ -218,6 +218,18 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         operation_evidence=operation,
         holdout_evidence=evidence,
     )
+    record = replace(
+        record,
+        terminal_targets=tuple(f"target_{i}" for i in range(4000)),
+        target_results=tuple(
+            replace(
+                record.target_results[0],
+                target_id=f"target_{i}",
+                artifact_root=f"data/artifacts/market/target_{i}",
+            )
+            for i in range(4000)
+        ),
+    )
     original = record.payload()
     protocol["scope"]["assets"].append("eth_usdt")
     evidence["prior_runs"].clear()
@@ -240,5 +252,6 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
     assert replace(record).payload() == original
     with runtime_resource_policy_scope() as policy:
         path = write_research_run_record(tmp_path / f"{record.run_id}.json", record)
+        assert path.stat().st_size > 1024 * 1024
         assert read_research_run_record(path).payload() == original
         assert policy.used_memory_bytes == 0

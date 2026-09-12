@@ -10,7 +10,7 @@ from statsmodels.stats.multitest import multipletests
 from quant_research_platform.research.statistics import (
     aligned_candidate_matrix,
     cscv_pbo,
-    fama_macbeth,
+    fama_macbeth_period,
     fdr_adjust,
     hac_mean,
     model_confidence_set,
@@ -291,33 +291,31 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
                 }
             )
 
-    result = fama_macbeth(
-        pd.DataFrame(rows),
-        return_column="return",
-        factor_columns=("factor",),
-        max_lags=1,
+    from quant_research_platform.research.statistics_production import (
+        _fama_macbeth_period_records,
+        _fama_macbeth_summary,
     )
 
+    periods = []
     expected_slopes = []
+    weighted_slopes = []
+    expected_weighted = []
     for _, group in pd.DataFrame(rows).groupby("timestamp", sort=True):
+        periods.extend(
+            _fama_macbeth_period_records(
+                group, return_column="return", factors=("factor",), core_factors=()
+            )
+        )
         expected_slopes.append(
             OLS(group["return"], add_constant(group[["factor"]])).fit().params["factor"]
         )
-    assert result.period_count == 4
-    assert result.summary.loc["factor", "mean"] == pytest.approx(
-        np.mean(expected_slopes)
-    )
-    assert result.white_p_values.notna().all()
-    assert result.white_reasons.isna().all()
-    weighted = fama_macbeth(
-        pd.DataFrame(rows),
-        return_column="return",
-        factor_columns=("factor",),
-        max_lags=1,
-        weight_column="weight",
-    )
-    expected_weighted = []
-    for _, group in pd.DataFrame(rows).groupby("timestamp", sort=True):
+        weighted = fama_macbeth_period(
+            group,
+            return_column="return",
+            factor_columns=("factor",),
+            weight_column="weight",
+        )
+        weighted_slopes.append(weighted.coefficients["factor"])
         expected_weighted.append(
             WLS(
                 group["return"],
@@ -327,16 +325,22 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
             .fit()
             .params["factor"]
         )
-    assert weighted.summary.loc["factor", "mean"] == pytest.approx(
-        np.mean(expected_weighted)
+        assert weighted.white_p_value is not None
+        assert weighted.white_reason is None
+    periods = pd.DataFrame(periods)
+    summary = _fama_macbeth_summary(
+        periods, factors=("factor",), core_factors=(), max_lags=1
     )
-    duplicate = pd.concat((pd.DataFrame(rows), pd.DataFrame(rows).iloc[[0]]))
+    slope = summary.loc[summary.coefficient_id.eq("factor")].iloc[0]
+    assert slope.period_count == 4
+    assert slope["mean"] == pytest.approx(np.mean(expected_slopes))
+    assert periods.white_p_value.notna().all()
+    assert periods.white_reason.isna().all()
+    np.testing.assert_allclose(weighted_slopes, expected_weighted)
+    duplicate = pd.concat((group, group.iloc[[0]]))
     with pytest.raises(ValueError, match="^fama_macbeth_primary_key_duplicate$"):
-        fama_macbeth(
-            duplicate,
-            return_column="return",
-            factor_columns=("factor",),
-            max_lags=1,
+        _fama_macbeth_period_records(
+            duplicate, return_column="return", factors=("factor",), core_factors=()
         )
 
 

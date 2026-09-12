@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from quant_research_platform.artifacts.evidence import (
+    read_json_evidence,
     write_json_evidence,
     write_markdown_evidence,
 )
@@ -51,7 +52,6 @@ from quant_research_platform.storage.identity import open_filesystem_file
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_dataset_manifest_evidence,
-    read_qrp_json,
 )
 from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact,
@@ -104,17 +104,17 @@ def read_research_run_record(
     path: Path, *, expected_profile_id: str | None = None
 ) -> ResearchRunRecord:
     candidate = Path(path)
-    payload = read_qrp_json(
+    with read_json_evidence(
         candidate,
         expected_schema_id="qrp-research-run",
         error="research_run_record_invalid",
-    )
-    record = research_run_record_from_payload(payload)
-    if candidate.stem != record.run_id:
-        raise ValueError("research_run_id_mismatch")
-    if expected_profile_id is not None and record.profile_id != expected_profile_id:
-        raise ValueError("research_run_profile_mismatch")
-    return record
+    ) as payload:
+        record = research_run_record_from_payload(payload)
+        if candidate.stem != record.run_id:
+            raise ValueError("research_run_id_mismatch")
+        if expected_profile_id is not None and record.profile_id != expected_profile_id:
+            raise ValueError("research_run_profile_mismatch")
+        return record
 
 
 def load_a_share_run_evidence(
@@ -585,6 +585,7 @@ def read_research_report_artifact(
     *,
     expected_identity: str,
     source_run: ResearchRunRecord | None = None,
+    report_lease=None,
 ) -> dict[str, object]:
     envelope, members = read_semantic_artifact_record(
         Path(instance_root),
@@ -602,28 +603,29 @@ def read_research_report_artifact(
         raise ValueError("research_report_semantics_invalid")
     schema_id = contract.get("schema_id")
     _report_contract(schema_id)
-    payload = read_qrp_json(
+    with read_json_evidence(
         Path(instance_root) / "report.json",
         expected_schema_id=schema_id,
         error="research_report_payload_invalid",
-    )
-    _validate_report_payload(payload)
-    _validate_report_semantics(envelope, payload)
-    if source_run is not None and (
-        payload["run_id"] != source_run.run_id
-        or payload["scenario_id"] != source_run.scenario_id
-        or payload["source_run_status"] != source_run.status.value
-        or envelope["research_window"] != dict(source_run.research_window)
-        or envelope["protocol_or_spec_identity"] != source_run.protocol_identity
-        or envelope["upstream_identities"]
-        != {"source_run": canonical_json_hash(source_run.payload())}
-    ):
-        raise ValueError("research_report_run_lineage_mismatch")
-    if payload["scenario_id"] != envelope["logical_artifact_id"].removesuffix(
-        "_report_artifact"
-    ):
-        raise ValueError("research_report_payload_invalid")
-    return payload
+        lease=report_lease,
+    ) as payload:
+        _validate_report_payload(payload)
+        _validate_report_semantics(envelope, payload)
+        if source_run is not None and (
+            payload["run_id"] != source_run.run_id
+            or payload["scenario_id"] != source_run.scenario_id
+            or payload["source_run_status"] != source_run.status.value
+            or envelope["research_window"] != dict(source_run.research_window)
+            or envelope["protocol_or_spec_identity"] != source_run.protocol_identity
+            or envelope["upstream_identities"]
+            != {"source_run": canonical_json_hash(source_run.payload())}
+        ):
+            raise ValueError("research_report_run_lineage_mismatch")
+        if payload["scenario_id"] != envelope["logical_artifact_id"].removesuffix(
+            "_report_artifact"
+        ):
+            raise ValueError("research_report_payload_invalid")
+        return payload
 
 
 def _validate_report_payload(payload: object) -> None:

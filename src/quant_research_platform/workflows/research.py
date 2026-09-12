@@ -59,7 +59,6 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
-    json_record_working_set_bytes,
 )
 from quant_research_platform.contracts.models import (
     A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
@@ -991,13 +990,13 @@ def _inspect_run_target(*, profile, layout, target_id, run_id):
             if envelope["semantic_metadata"].get("source_run_id") != run_id:
                 continue
             with current_runtime_resource_policy().lease(
-                "queries.report_inspection",
-                json_record_working_set_bytes(
-                    (instance / "report.json").stat().st_size
-                ),
-            ):
+                "queries.report_inspection", 0
+            ) as lease:
                 report = read_research_report_artifact(
-                    instance, expected_identity=instance.name, source_run=record
+                    instance,
+                    expected_identity=instance.name,
+                    source_run=record,
+                    report_lease=lease,
                 )
                 instances.append(
                     {

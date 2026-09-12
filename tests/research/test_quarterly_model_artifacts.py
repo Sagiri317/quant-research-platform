@@ -119,9 +119,6 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     from quant_research_platform.research.models.production import QuarterlyModelResult
     from quant_research_platform.research.models.supervised import preflight_model_specs
     from quant_research_platform.storage.manifests import read_qrp_json
-    from quant_research_platform.storage.semantic_artifacts import (
-        MAX_SEMANTIC_ARTIFACT_MEMBERS,
-    )
 
     protocol = a_share.protocol("fusion_nf_expectations", factor_scope="full")
     specs = tuple(
@@ -290,7 +287,6 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     )
     assert (development, total) == (20, 28)
     assert (1 + development * 9, 1 + total * 9) == (181, 253)
-    assert 1 + total * 9 <= MAX_SEMANTIC_ARTIFACT_MEMBERS == 256
 
 
 def _envelope(*, software_identity="c" * 64) -> object:

@@ -1742,3 +1742,28 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
         fitted_only.loc[:, list(RISK_STYLE_COLUMNS)].reset_index(drop=True),
         check_exact=True,
     )
+
+
+def test_zero_mad_risk_style_preserves_identifiable_factor_return():
+    from quant_research_platform.research.portfolios.risk import (
+        FactorRiskState,
+        preprocess_risk_styles,
+    )
+
+    values = np.r_[np.zeros(60), np.ones(40)]
+    frame = pd.DataFrame(
+        {
+            "asset_id": [f"synthetic_{i}" for i in range(100)],
+            "timestamp": pd.Timestamp("2023-01-03"),
+            "industry_level1_code": "I",
+            "float_market_cap": 1.0,
+            "style": values,
+            "asset_return": 0.01 + 0.02 * values,
+        }
+    )
+    actual = preprocess_risk_styles(frame, style_columns=("style",))
+    np.testing.assert_allclose(actual["style"], (values - 0.4) / np.sqrt(0.24))
+    fit = FactorRiskState(style_columns=("style",)).fit_return_session(frame)
+    assert fit is not None
+    assert fit.factor_returns["style"] == pytest.approx(0.02 * np.sqrt(0.24))
+    np.testing.assert_allclose(fit.residuals, 0.0, atol=1e-15)

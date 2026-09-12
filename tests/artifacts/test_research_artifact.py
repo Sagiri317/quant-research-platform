@@ -222,3 +222,38 @@ def test_report_markdown_lists_every_formal_result_without_json_walls(tmp_path):
         and "[report.json](report.json)" in markdown
     )
     assert "None" not in markdown and '"results":' not in markdown
+
+
+def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp_path):
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    envelope, payload = _report()
+    payload["sections"]["risk"] = {
+        "results": [
+            {"metric_id": "synthetic_metric", "value": 0.1} for _ in range(20000)
+        ]
+    }
+    logical = tmp_path / "large"
+    root = write_research_report_artifact(logical, envelope=envelope, payload=payload)
+    original = (root / "report.json").read_bytes()
+    assert len(original) > 1024 * 1024
+    assert (
+        read_research_report_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        == payload
+    )
+    with runtime_resource_policy_scope(explicit_cap_bytes=1024 * 1024) as policy:
+        with pytest.raises(MemoryError):
+            read_research_report_artifact(
+                root, expected_identity=envelope.instance_identity
+            )
+        with pytest.raises(MemoryError):
+            write_research_report_artifact(
+                tmp_path / "rejected", envelope=envelope, payload=payload
+            )
+        assert policy.used_memory_bytes == 0
+    assert (root / "report.json").read_bytes() == original
+    assert not (
+        tmp_path / "rejected" / "instances" / envelope.instance_identity
+    ).exists()

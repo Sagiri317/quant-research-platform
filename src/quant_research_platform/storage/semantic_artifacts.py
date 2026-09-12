@@ -22,6 +22,7 @@ from quant_research_platform.contracts.experiments import (
 )
 from quant_research_platform.contracts.json_codec import (
     bounded_qrp_json_object_snapshot,
+    render_qrp_json_object,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
@@ -45,6 +46,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
+    _MAX_QRP_JSON_BYTES,
     read_manifest,
     write_manifest,
 )
@@ -55,7 +57,6 @@ from quant_research_platform.storage.parquet import (
 
 SEMANTIC_ARTIFACT_SCHEMA_ID = "qrp-semantic-artifact"
 MAX_SEMANTIC_ARTIFACT_INSTANCES = 1024
-MAX_SEMANTIC_ARTIFACT_MEMBERS = 256
 _HASH_BUFFER_BYTES = 1024 * 1024
 
 
@@ -339,7 +340,9 @@ def read_semantic_artifact_record(
     ):
         raise ValueError("semantic_artifact_identity_mismatch")
     members = _validate_member_payload(payload["members"])
-    if members != _member_inventory(root):
+    if members != _member_inventory(
+        root, expected_paths={str(member["path"]) for member in members}
+    ):
         raise ValueError("semantic_artifact_member_integrity_invalid")
     return envelope, members
 
@@ -354,7 +357,7 @@ def read_semantic_artifact_operational_metadata(
 
 
 def _operational_metadata(value: object) -> dict[str, object]:
-    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=1024 * 1024)
+    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=_MAX_QRP_JSON_BYTES)
     if set(snapshot) - {"model_trial_ledgers"}:
         raise ValueError("semantic_artifact_operational_metadata_invalid")
     if "model_trial_ledgers" in snapshot:
@@ -427,11 +430,22 @@ def _directory_identity(path: Path) -> tuple[int, int, int, int]:
     return (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns)
 
 
-def _member_inventory(root: Path) -> tuple[dict[str, object], ...]:
+def _member_inventory(
+    root: Path, *, expected_paths: set[str] | None = None
+) -> tuple[dict[str, object], ...]:
     members: list[dict[str, object]] = []
 
+    encoded_bytes = 0
+
     def record(relative: str, child: Path) -> None:
-        members.append(_member_record(relative, child))
+        nonlocal encoded_bytes
+        if expected_paths is not None and relative not in expected_paths:
+            raise ValueError("semantic_artifact_member_integrity_invalid")
+        member = _member_record(relative, child)
+        encoded_bytes += len(render_qrp_json_object(member).encode("utf-8"))
+        if encoded_bytes > _MAX_QRP_JSON_BYTES:
+            raise ValueError("semantic_artifact_member_limit_exceeded")
+        members.append(member)
 
     _visit_member_paths(root, record)
     remaining = {str(member["path"]) for member in members}
@@ -457,7 +471,7 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
     except ValueError as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
     pending = []
-    member_count = 0
+    path_bytes = 0
     try:
         try:
             pending.append(
@@ -476,6 +490,9 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
                         raise ValueError("semantic_artifact_member_set_changed")
                     continue
                 relative = f"{prefix}/{entry.name}" if prefix else entry.name
+                path_bytes += len(relative.encode("utf-8")) + 2
+                if path_bytes > _MAX_QRP_JSON_BYTES:
+                    raise ValueError("semantic_artifact_member_limit_exceeded")
                 if entry.is_symlink():
                     raise ValueError("semantic_artifact_member_invalid")
                 child = directory / entry.name
@@ -494,9 +511,6 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
                 elif entry.is_file(follow_symlinks=False):
                     if not prefix and entry.name == "manifest.json":
                         continue
-                    if member_count >= MAX_SEMANTIC_ARTIFACT_MEMBERS:
-                        raise ValueError("semantic_artifact_member_limit_exceeded")
-                    member_count += 1
                     visit(relative, child)
                 else:
                     raise ValueError("semantic_artifact_member_invalid")

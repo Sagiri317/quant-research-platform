@@ -242,18 +242,10 @@ def _mad_winsorize(
     values: pd.Series,
     grouped: pd.core.groupby.SeriesGroupBy,
 ) -> pd.Series:
-    def clip(group: pd.Series) -> pd.Series:
-        valid = group.dropna()
-        if valid.empty:
-            return group
-        median = float(valid.median())
-        mad = float(np.median(np.abs(valid.to_numpy(dtype="float64") - median)))
-        if mad == 0.0:
-            return group
-        bound = 3.0 * 1.4826 * mad
-        return group.clip(median - bound, median + bound)
-
-    return grouped.transform(clip)
+    median = grouped.transform("median")
+    mad = grouped.transform(lambda group: (group - group.median()).abs().median())
+    bound = (3.0 * 1.4826 * mad).where(mad.ne(0.0))
+    return values.clip(lower=median - bound, upper=median + bound)
 
 
 def neutralize_cross_section(
