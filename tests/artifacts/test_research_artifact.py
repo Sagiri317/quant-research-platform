@@ -257,3 +257,19 @@ def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp
     assert not (
         tmp_path / "rejected" / "instances" / envelope.instance_identity
     ).exists()
+
+
+@pytest.mark.parametrize("directory", [False, True])
+def test_run_evidence_preserves_json_file_boundary_error(tmp_path, directory):
+    from quant_research_platform.artifacts.research import read_research_run_record
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.manifests import read_manifest
+
+    path = tmp_path / "run_missing.json"
+    if directory:
+        path.mkdir()
+    with runtime_resource_policy_scope() as policy:
+        for reader in (read_manifest, read_research_run_record):
+            with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
+                reader(path)
+        assert policy.used_memory_bytes == 0

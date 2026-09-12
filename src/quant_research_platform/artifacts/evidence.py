@@ -17,8 +17,10 @@ from quant_research_platform.policy.share_safety import (
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
-from quant_research_platform.storage.identity import dataset_file_identity
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.manifests import (
+    _qrp_json_file_identity,
+    read_bounded_qrp_json,
+)
 
 
 def write_json_evidence(path: Path, payload: dict[str, Any]) -> Path:
@@ -44,7 +46,7 @@ def write_json_evidence(path: Path, payload: dict[str, Any]) -> Path:
 @contextmanager
 def read_json_evidence(path: Path, *, expected_schema_id: str, error: str, lease=None):
     """Keep decoded evidence admitted until its consumer exits or releases its lease."""
-    identity = dataset_file_identity(path)
+    identity = _qrp_json_file_identity(path)
     with runtime_resource_policy_scope() as policy:
         with (
             policy.lease("evidence.json.read", 0)

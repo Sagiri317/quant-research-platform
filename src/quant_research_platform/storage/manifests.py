@@ -33,6 +33,13 @@ from quant_research_platform.storage.identity import (
 _MAX_QRP_JSON_BYTES = 1024 * 1024
 
 
+def _qrp_json_file_identity(path: Path) -> DatasetFileIdentity:
+    try:
+        return dataset_file_identity(path)
+    except ValueError as exc:
+        raise ValueError("dataset_metadata_file_invalid") from exc
+
+
 def read_bounded_qrp_json(
     path: Path,
     *,
@@ -41,13 +48,8 @@ def read_bounded_qrp_json(
 ) -> tuple[bytes, dict[str, Any]]:
     if type(max_bytes) is not int or max_bytes < 0:
         raise ValueError("dataset_metadata_size_limit_invalid")
-    candidate = require_unaliased_path(
-        Path(path), error="dataset_metadata_file_invalid"
-    )
-    try:
-        identity = dataset_file_identity(candidate)
-    except ValueError as exc:
-        raise ValueError("dataset_metadata_file_invalid") from exc
+    candidate = Path(path)
+    identity = _qrp_json_file_identity(candidate)
     if expected_identity is not None and identity != expected_identity:
         raise ValueError("dataset_metadata_file_identity_changed")
     if identity.size > max_bytes:
