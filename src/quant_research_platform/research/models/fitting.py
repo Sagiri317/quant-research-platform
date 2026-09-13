@@ -597,9 +597,21 @@ def _collect_training_frame_owned(
                     *spec.input_columns,
                     spec.label_column,
                 ]
-                usable_bound = _selected_frame_payload_bytes(
-                    filtered,
-                    selected_columns,
+                # Row gathering may materialize an index and Arrow validity bitmaps.
+                usable_bound = (
+                    _selected_frame_payload_bytes(filtered, selected_columns)
+                    + max(
+                        0,
+                        len(filtered) * np.dtype(np.intp).itemsize
+                        - int(filtered.index.memory_usage(deep=True)),
+                    )
+                    + ((len(filtered) + 7) // 8)
+                    * sum(
+                        isinstance(
+                            filtered[column].array, pd.arrays.ArrowExtensionArray
+                        )
+                        for column in selected_columns
+                    )
                 )
                 projection_lease = None
                 if resource_policy is not None:

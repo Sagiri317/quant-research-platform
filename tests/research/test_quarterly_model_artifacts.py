@@ -2480,3 +2480,59 @@ def test_estimator_without_fit_cannot_be_returned_as_fitted():
             estimator=object(),
             threads=1,
         )
+
+
+@pytest.mark.parametrize("arrow_features", [False, True])
+@pytest.mark.parametrize("missing_position", [0, 200, 501, 997, 999])
+def test_training_admits_materialized_filter_index_without_changing_rows(
+    missing_position,
+    arrow_features,
+):
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    positions = np.arange(1000, dtype="float64")
+    features = tuple(f"x{index}" for index in range(6))
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=1000, freq="100ms"),
+            "label_available_at": pd.Timestamp("2024-01-02"),
+            "asset_id": ["asset_b", "asset_a"] * 500,
+            "eligible": True,
+            "label": positions * 2 + 3,
+            **{name: positions + index for index, name in enumerate(features)},
+        }
+    )
+    if arrow_features:
+        frame = frame.astype({name: "float64[pyarrow]" for name in features})
+    frame.loc[missing_position, "label"] = np.nan
+    original = frame.copy(deep=True)
+    expected_positions = [
+        position for position in range(1000) if position != missing_position
+    ]
+    spec = ModelSpec(
+        model_id="sparse_training",
+        model_algorithm="linear_regression",
+        input_factor_columns=features,
+        label_column="label",
+    )
+    policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        owned = fitting._collect_training_frame_owned(
+            [frame], spec, fitting_cutoff="2024-01-03"
+        )
+        try:
+            actual, counts, _metadata = owned.value
+            assert actual.x0.tolist() == expected_positions
+            assert actual.label.tolist() == [
+                position * 2 + 3 for position in expected_positions
+            ]
+            assert actual.timestamp.tolist() == [
+                frame.timestamp.iloc[position] for position in expected_positions
+            ]
+            assert counts["rows_after_input_label_dropna"] == 999
+            pd.testing.assert_frame_equal(frame, original, check_exact=True)
+            assert policy.used_memory_bytes == owned.lease.reserved_bytes
+            actual = None
+        finally:
+            owned.release(owner="test.sparse_training")
+    assert policy.used_memory_bytes == 0
