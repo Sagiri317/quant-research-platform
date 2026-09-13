@@ -194,6 +194,7 @@ def _common_symbol_panel_frames(
         binance_ids.RESEARCH_SYMBOLS
     ):
         raise ValueError("hft_common_panel_inputs_invalid")
+    dtypes = {}
     timestamp_position = columns.index("timestamp")
     segment_position = columns.index("segment_id")
 
@@ -203,6 +204,7 @@ def _common_symbol_panel_frames(
             for frame in active:
                 if tuple(frame.columns) != columns:
                     raise ValueError("hft_panel_frame_columns_invalid")
+                dtypes.update(frame.dtypes)
                 for row in frame.itertuples(index=False, name=None):
                     timestamp = row[timestamp_position]
                     if previous is not None and timestamp <= previous:
@@ -242,8 +244,12 @@ def _common_symbol_panel_frames(
             if any(row[timestamp_position] != target for row in current):
                 continue
             if records and len(records) + len(current) > batch_rows:
-                yield pd.DataFrame.from_records(records, columns=columns).sort_values(
-                    ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+                yield (
+                    pd.DataFrame.from_records(records, columns=columns)
+                    .astype(dtypes)
+                    .sort_values(
+                        ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+                    )
                 )
                 records.clear()
             if (
@@ -267,8 +273,12 @@ def _common_symbol_panel_frames(
                 except StopIteration:
                     ended = True
             if len(records) >= batch_rows:
-                yield pd.DataFrame.from_records(records, columns=columns).sort_values(
-                    ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+                yield (
+                    pd.DataFrame.from_records(records, columns=columns)
+                    .astype(dtypes)
+                    .sort_values(
+                        ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+                    )
                 )
                 records.clear()
         if ended:
@@ -276,8 +286,12 @@ def _common_symbol_panel_frames(
                 for _row in stream:
                     pass
         if records:
-            yield pd.DataFrame.from_records(records, columns=columns).sort_values(
-                ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+            yield (
+                pd.DataFrame.from_records(records, columns=columns)
+                .astype(dtypes)
+                .sort_values(
+                    ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
+                )
             )
 
 

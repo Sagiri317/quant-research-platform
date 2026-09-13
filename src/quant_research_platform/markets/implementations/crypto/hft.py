@@ -273,13 +273,13 @@ def _book_observed_time(
 
 
 def _panel_frame(buffers):
-    return pd.DataFrame(buffers).astype(
-        {
-            "book_receive_monotonic_ns": "Int64",
-            "trade_source_sequence_min": "Int64",
-            "trade_source_sequence_max": "Int64",
-        }
-    )
+    for column in (
+        "book_receive_monotonic_ns",
+        "trade_source_sequence_min",
+        "trade_source_sequence_max",
+    ):
+        buffers[column] = pd.array(buffers[column], dtype="Int64")
+    return pd.DataFrame(buffers)
 
 
 def _panel_column_buffers() -> dict[str, list[Any]]:

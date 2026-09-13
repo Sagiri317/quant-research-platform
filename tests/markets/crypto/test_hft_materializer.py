@@ -9,7 +9,10 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_PANEL_DATA_ID,
     HFT_RESEARCH_DATASET_ID,
 )
-from quant_research_platform.markets.implementations.crypto.processed import producer
+from quant_research_platform.markets.implementations.crypto.processed import (
+    catalog,
+    producer,
+)
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
@@ -455,3 +458,84 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
             )
         assert raised.value is primary and policy.used_memory_bytes == 0
     assert read_dataset_manifest_evidence(root) == manifest
+
+
+@pytest.mark.parametrize("batch_rows", [2, 3, 4, 9])
+@pytest.mark.parametrize("monotonic", [None, 2**53 + 1])
+def test_common_panel_persistence_preserves_source_nullable_dtypes(
+    tmp_path, batch_rows, monotonic
+):
+    from dataclasses import replace
+
+    from quant_research_platform.markets.implementations.crypto import hft
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from tests.helpers.binance_hft import _coverage, coverage_lookup
+    from tests.markets.crypto.test_hft import _state, _trade
+
+    spec = catalog.hft_processed_catalog().get(HFT_PANEL_DATA_ID)
+    inputs = {}
+    with runtime_resource_policy_scope():
+        for symbol, asset, frame_rows in (
+            ("BTCUSDT", "btc_usdt", 2),
+            ("ETHUSDT", "eth_usdt", 3),
+        ):
+            states = [
+                replace(_state(stamp), receive_monotonic_ns=monotonic)
+                for stamp in range(0, 500, 100)
+            ]
+            trades = [
+                replace(
+                    _trade(200, 1.0, maker_buyer=False),
+                    source_sequence=2**53 + 1,
+                    receive_monotonic_ns=monotonic,
+                )
+            ]
+            inputs[symbol] = tuple(
+                frame.loc[:, list(spec.required_columns)]
+                for frame in hft.iter_panel_frames(
+                    states,
+                    trades,
+                    market_id="crypto",
+                    asset_id=asset,
+                    start_ms=0,
+                    end_ms=400,
+                    batch_rows=frame_rows,
+                    book_coverage={"s1": _coverage(0, 501)},
+                    trade_coverage=coverage_lookup(
+                        {"trade-connection-1": _coverage(0, 501)}
+                    ),
+                )
+            )
+    frames = tuple(
+        producer._common_symbol_panel_frames(
+            inputs, columns=spec.required_columns, batch_rows=batch_rows
+        )
+    )
+    expected_dtypes = inputs["BTCUSDT"][0].dtypes
+    for frame in frames:
+        pd.testing.assert_series_equal(frame.dtypes, expected_dtypes)
+    merged = pd.concat(frames, ignore_index=True)
+    layout = StorageLayout(tmp_path)
+    root = layout.target_root(
+        spec.data_id,
+        layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+    )
+    write_dataset(root, merged, spec=spec, resource_policy=None, borrowed_input=True)
+    restored = read_dataset(root, resource_policy=None)
+    pd.testing.assert_frame_equal(
+        restored.sort_values(["asset_id", "timestamp"]).reset_index(drop=True),
+        merged.assign(timestamp=merged.timestamp.astype("datetime64[ns]"))
+        .sort_values(["asset_id", "timestamp"])
+        .reset_index(drop=True),
+        check_exact=True,
+    )
+    for symbol, asset in (("BTCUSDT", "btc_usdt"), ("ETHUSDT", "eth_usdt")):
+        expected = pd.concat(inputs[symbol], ignore_index=True)
+        expected["timestamp"] = expected.timestamp.astype("datetime64[ns]")
+        actual = restored.loc[restored.asset_id.eq(asset)].reset_index(drop=True)
+        columns = [name for name in spec.required_columns if name != "segment_id"]
+        pd.testing.assert_frame_equal(
+            actual[columns], expected[columns], check_exact=True
+        )
+    assert restored.trade_source_sequence_min.dropna().tolist() == [2**53 + 1] * 2
+    assert restored.book_receive_monotonic_ns.isna().all() == (monotonic is None)
