@@ -230,3 +230,74 @@ def test_fy2_does_not_skip_a_missing_calendar_year():
     )
     assert actual.forward_earnings_yield_fy1.iloc[0] == 0.2
     assert pd.isna(actual.forward_earnings_yield_fy2.iloc[0])
+
+
+@pytest.mark.parametrize(
+    "fy1_count,fy2_count,fy2_year", [(2, 3, 2026), (3, 2, 2026), (2, 3, 2027)]
+)
+def test_fiscal_year_coverage_is_independent_in_persisted_producer(
+    tmp_path, fy1_count, fy2_count, fy2_year
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.datasets.writing import write_dataset
+
+    records = pd.DataFrame(
+        [
+            {
+                "source_asset_id": "asset",
+                "declare_date": pd.Timestamp("2025-01-03"),
+                "forecast_end_date": pd.Timestamp(f"{year}-12-31"),
+                "institution_id": str(i),
+                "forecast_eps": float((i + 1) * multiple),
+            }
+            for year, count, multiple in (
+                (2025, fy1_count, 1),
+                (fy2_year, fy2_count, 2),
+            )
+            for i in range(count)
+        ]
+    )
+    sessions = pd.bdate_range("2025-01-03", "2025-01-06").as_unit("ns")
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset",
+            "timestamp": sessions,
+            "close": 10.0,
+        }
+    )
+    spec = research_profile().processed.get("expectations_factors")
+    with runtime_resource_policy_scope() as policy:
+        actual = producer._compute_processed_frame(
+            spec,
+            source={"analyst_forecast": records},
+            dependencies={"market_panel_1d": panel},
+            trading_sessions=tuple(sessions),
+        )
+        root = tmp_path / "data/processed/a_share/factor/expectations_factors"
+        write_dataset(
+            root, actual, spec=spec, resource_policy=policy, borrowed_input=True
+        )
+        saved = read_dataset(root, resource_policy=policy)
+        assert saved.iloc[0, 3:].isna().all()
+        fy1_columns = [
+            "forward_earnings_yield_fy1",
+            "forecast_dispersion_fy1",
+            "log_analyst_coverage",
+        ]
+        if fy1_count < 3:
+            assert saved.loc[1, fy1_columns].isna().all()
+        else:
+            assert saved.loc[1, fy1_columns].tolist() == pytest.approx(
+                [0.2, 1.0, np.log(3.0)]
+            )
+        if fy2_count >= 3 and fy2_year == 2026:
+            assert saved.loc[1, "forward_earnings_yield_fy2"] == 0.4
+        else:
+            assert pd.isna(saved.loc[1, "forward_earnings_yield_fy2"])
+        assert policy.used_memory_bytes == 0

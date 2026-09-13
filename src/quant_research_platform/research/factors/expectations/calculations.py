@@ -156,13 +156,12 @@ def _features_for_observation(
         ].median()
         selected.append(current)
     eps_values = selected[0]["forecast_eps"].to_numpy(dtype="float64")
-    if len(eps_values) < minimum_institutions:
-        return base
-    median_eps = float(np.median(eps_values))
-    mad = float(np.median(np.abs(eps_values - median_eps)))
-    base["forward_earnings_yield_fy1"] = median_eps / close
-    base["forecast_dispersion_fy1"] = mad
-    base["log_analyst_coverage"] = float(np.log(len(eps_values)))
+    if len(eps_values) >= minimum_institutions:
+        median_eps = float(np.median(eps_values))
+        mad = float(np.median(np.abs(eps_values - median_eps)))
+        base["forward_earnings_yield_fy1"] = median_eps / close
+        base["forecast_dispersion_fy1"] = mad
+        base["log_analyst_coverage"] = float(np.log(len(eps_values)))
     if len(selected) > 1:
         fy2 = selected[1]["forecast_eps"].to_numpy(dtype="float64")
         if len(fy2) >= minimum_institutions:

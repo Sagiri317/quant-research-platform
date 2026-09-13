@@ -723,7 +723,8 @@ log_analyst_coverage
 仅使用 PIT 记录
 主方案新鲜度从 declare_date 起算 90 个自然日；第90日包含，第91日排除
 180 日稳健性方案
->= 3 家机构
+FY1/FY2 分别独立满足 >= 3 家机构，FY1 不达标不阻止 FY2 单独可用
+FY1 的 forward EP、dispersion、log_analyst_coverage 仍仅按 FY1 的资格和计数定义
 available_at 仅表示声明日之后首个交易日的可用门槛，不作为新鲜度起点
 先筛 available_at <= 信号日 且 declare_date >= 信号日-新鲜度
 每家机构按 declare_date 选最新有效预测

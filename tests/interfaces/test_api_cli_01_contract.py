@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -7,7 +8,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from typer.main import get_command
 from typer.testing import CliRunner
 
@@ -191,30 +192,36 @@ def test_cli_main_preserves_keyboard_interrupt(monkeypatch):
     assert caught.value is primary
 
 
-def test_api_catalog_and_requirements_use_current_a_share_protocol() -> None:
-    client = TestClient(create_app())
-    responses = (
-        client.get("/api/0.1/catalog/factors"),
-        client.get("/api/0.1/catalog/labels"),
-        client.get("/api/0.1/research-datasets/pv_all/requirements"),
-    )
-    assert [response.status_code for response in responses] == [200, 200, 200]
-    factor_items = responses[0].json()["items"]
-    assert len(factor_items) == len(list_factors(research_profile()).items)
-    assert {item["output_column"] for item in factor_items} >= {
-        "reversal_1d",
-        "log_float_market_cap",
-    }
-    requirements = responses[2].json()
-    assert requirements["dataset_id"] == "pv_all"
-    assert requirements["input_data_ids"] == [
-        "market_panel_1d",
-        "price_volume_facts",
-        "forward_returns",
-    ]
-    _assert_public_text_is_sanitized(
-        "\n".join(str(response.json()) for response in responses)
-    )
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_api_catalog_and_requirements_use_current_a_share_protocol(
+    anyio_backend,
+) -> None:
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app()), base_url="http://testserver"
+    ) as client:
+        responses = (
+            await client.get("/api/0.1/catalog/factors"),
+            await client.get("/api/0.1/catalog/labels"),
+            await client.get("/api/0.1/research-datasets/pv_all/requirements"),
+        )
+        assert [response.status_code for response in responses] == [200, 200, 200]
+        factor_items = responses[0].json()["items"]
+        assert len(factor_items) == len(list_factors(research_profile()).items)
+        assert {item["output_column"] for item in factor_items} >= {
+            "reversal_1d",
+            "log_float_market_cap",
+        }
+        requirements = responses[2].json()
+        assert requirements["dataset_id"] == "pv_all"
+        assert requirements["input_data_ids"] == [
+            "market_panel_1d",
+            "price_volume_facts",
+            "forward_returns",
+        ]
+        _assert_public_text_is_sanitized(
+            "\n".join(str(response.json()) for response in responses)
+        )
 
 
 def test_openapi_has_closed_current_response_models() -> None:
@@ -333,8 +340,10 @@ def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> Non
     assert '"status": "READY"' not in holdout.output
 
 
-def test_read_only_status_never_plans_and_client_cannot_bind_a_project(
-    tmp_path, monkeypatch
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_read_only_status_never_plans_and_client_cannot_bind_a_project(
+    anyio_backend, tmp_path, monkeypatch
 ):
     from quant_research_platform.workflows import research
 
@@ -353,44 +362,62 @@ def test_read_only_status_never_plans_and_client_cannot_bind_a_project(
     outside = tmp_path / "untrusted"
     outside.mkdir()
     (outside / "secret.txt").write_text("must_not_be_returned", encoding="utf-8")
-    client = TestClient(create_app(project_root=root))
-    response = client.get("/api/0.1/status", params={"project_root": str(outside)})
-    assert response.status_code == 200
-    assert response.json() == {"profile_id": "a_share_csmar_choice", "runs": []}
-    assert not root.exists()
-    assert TestClient(create_app()).get("/api/0.1/status").status_code == 503
-    for params in (
-        {"run_id": "../secret"},
-        {"run_id": "missing"},
-        {"profile": "../secret"},
-    ):
-        failed = client.get("/api/0.1/status", params=params)
-        assert failed.status_code in {404, 422}
-        assert "must_not_be_returned" not in failed.text
-        assert str(tmp_path) not in failed.text
-    assert not root.exists()
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app(project_root=root)),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get(
+            "/api/0.1/status", params={"project_root": str(outside)}
+        )
+        assert response.status_code == 200
+        assert response.json() == {"profile_id": "a_share_csmar_choice", "runs": []}
+        assert not root.exists()
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()), base_url="http://testserver"
+        ) as unbound:
+            assert (await unbound.get("/api/0.1/status")).status_code == 503
+        for params in (
+            {"run_id": "../secret"},
+            {"run_id": "missing"},
+            {"profile": "../secret"},
+        ):
+            failed = await client.get("/api/0.1/status", params=params)
+            assert failed.status_code in {404, 422}
+            assert "must_not_be_returned" not in failed.text
+            assert str(tmp_path) not in failed.text
+        assert not root.exists()
 
 
-def test_catalog_queries_support_both_existing_profiles():
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_catalog_queries_support_both_existing_profiles(
+    anyio_backend,
+):
     from quant_research_platform.profiles.research import CRYPTO_PROFILE_ID
 
-    client = TestClient(create_app())
-    profile = research_profile(CRYPTO_PROFILE_ID)
-    response = client.get(
-        "/api/0.1/catalog/factors", params={"profile": CRYPTO_PROFILE_ID}
-    )
-    assert response.status_code == 200
-    assert len(response.json()["items"]) == len(profile.factors.list())
-    dataset_id = profile.research_datasets.list()[0].data_id
-    requirements = client.get(
-        f"/api/0.1/research-datasets/{dataset_id}/requirements",
-        params={"profile": CRYPTO_PROFILE_ID},
-    )
-    assert requirements.status_code == 200
-    assert requirements.json()["market_id"] == "crypto"
+    async with AsyncClient(
+        transport=ASGITransport(app=create_app()), base_url="http://testserver"
+    ) as client:
+        profile = research_profile(CRYPTO_PROFILE_ID)
+        response = await client.get(
+            "/api/0.1/catalog/factors", params={"profile": CRYPTO_PROFILE_ID}
+        )
+        assert response.status_code == 200
+        assert len(response.json()["items"]) == len(profile.factors.list())
+        dataset_id = profile.research_datasets.list()[0].data_id
+        requirements = await client.get(
+            f"/api/0.1/research-datasets/{dataset_id}/requirements",
+            params={"profile": CRYPTO_PROFILE_ID},
+        )
+        assert requirements.status_code == 200
+        assert requirements.json()["market_id"] == "crypto"
 
 
-def test_overlapping_published_queries_reject_busy_and_recover(tmp_path, monkeypatch):
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+async def test_overlapping_published_queries_reject_busy_and_recover(
+    anyio_backend, tmp_path, monkeypatch
+):
     from quant_research_platform.artifacts import research as artifact
     from quant_research_platform.contracts.json_codec import canonical_json_hash
     from quant_research_platform.contracts.targets import (
@@ -432,13 +459,14 @@ def test_overlapping_published_queries_reject_busy_and_recover(tmp_path, monkeyp
     )
     artifact.write_research_run_record(layout.research_run_path(record.run_id), record)
     entered, release = threading.Event(), threading.Event()
-    roots, responses = [], []
+    roots, worker_threads = [], []
     original_read = artifact.read_research_run_record
 
     def paused_read(*args, **kwargs):
         root = resources.current_runtime_resource_policy()
         assert root is not None
         roots.append(root)
+        worker_threads.append(threading.get_ident())
         with root.lease("test.query_read", 1):
             if len(roots) == 1:
                 entered.set()
@@ -446,46 +474,52 @@ def test_overlapping_published_queries_reject_busy_and_recover(tmp_path, monkeyp
             return original_read(*args, **kwargs)
 
     monkeypatch.setattr(artifact, "read_research_run_record", paused_read)
-    client = TestClient(
-        create_app(project_root=tmp_path), raise_server_exceptions=False
-    )
-    url = "/api/0.1/runs/run_one/portfolios/portfolio"
-    thread = threading.Thread(target=lambda: responses.append(client.get(url)))
-    thread.start()
-    try:
-        assert entered.wait(timeout=5)
-        rejected = client.get(url)
-        assert rejected.status_code == 503
-        assert rejected.json()["error"]["error_code"] == "runtime_data_scale_lock_busy"
-        assert len(roots) == 1 and roots[0].used_memory_bytes == 1
-    finally:
-        release.set()
-        thread.join(timeout=5)
-    assert not thread.is_alive()
-    assert len(responses) == 1 and responses[0].status_code == 200
-    subsequent = client.get(url)
-    assert subsequent.status_code == 200
-    assert (
-        subsequent.json()
-        == responses[0].json()
-        == {
-            "target_id": "portfolio",
-            "status": "BLOCKED",
-            "reason": "missing_prediction",
-        }
-    )
-    assert len(roots) == 2 and roots[0] is not roots[1]
-    assert all(root.state == "CLOSED" and root.used_memory_bytes == 0 for root in roots)
-    assert not resources._PROCESS_POISONED
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=create_app(project_root=tmp_path), raise_app_exceptions=False
+        ),
+        base_url="http://testserver",
+    ) as client:
+        url = "/api/0.1/runs/run_one/portfolios/portfolio"
+        first_request = asyncio.create_task(client.get(url))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            rejected = await client.get(url)
+            assert rejected.status_code == 503
+            assert (
+                rejected.json()["error"]["error_code"] == "runtime_data_scale_lock_busy"
+            )
+            assert len(roots) == 1 and roots[0].used_memory_bytes == 1
+        finally:
+            release.set()
+            first = await asyncio.wait_for(first_request, timeout=5)
+        assert first_request.done() and first.status_code == 200
+        assert all(value != threading.get_ident() for value in worker_threads)
+        subsequent = await client.get(url)
+        assert subsequent.status_code == 200
+        assert (
+            subsequent.json()
+            == first.json()
+            == {
+                "target_id": "portfolio",
+                "status": "BLOCKED",
+                "reason": "missing_prediction",
+            }
+        )
+        assert len(roots) == 2 and roots[0] is not roots[1]
+        assert all(
+            root.state == "CLOSED" and root.used_memory_bytes == 0 for root in roots
+        )
+        assert not resources._PROCESS_POISONED
 
-    def fail_read(*_args, **_kwargs):
-        raise RuntimeError("private_runtime_failure")
+        def fail_read(*_args, **_kwargs):
+            raise RuntimeError("private_runtime_failure")
 
-    monkeypatch.setattr(artifact, "read_research_run_record", fail_read)
-    failed = client.get(url)
-    assert failed.status_code == 500
-    assert failed.json()["error"]["error_code"] == "internal_error"
-    assert "private_runtime_failure" not in failed.text
+        monkeypatch.setattr(artifact, "read_research_run_record", fail_read)
+        failed = await client.get(url)
+        assert failed.status_code == 500
+        assert failed.json()["error"]["error_code"] == "internal_error"
+        assert "private_runtime_failure" not in failed.text
 
 
 def _assert_public_text_is_sanitized(text: str) -> None:

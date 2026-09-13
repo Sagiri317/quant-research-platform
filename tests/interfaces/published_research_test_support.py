@@ -14,7 +14,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
 from quant_research_platform.artifacts import research as report_artifact
 from quant_research_platform.artifacts.evidence import (
@@ -147,117 +147,143 @@ def check_published_evidence_views(
                 guarded if value == guarded.profile_id else original_profile(value)
             ),
         )
-        client = TestClient(api_module.create_app(project_root=layout.project_root))
-        params = {"profile": profile.profile_id}
-        directory = client.get("/api/0.1/status", params=params)
-        assert directory.status_code == 200 and "status" not in directory.json()
-        assert run_id in {row["run_id"] for row in directory.json()["runs"]}
-        selected = client.get("/api/0.1/status", params={**params, "run_id": run_id})
-        assert selected.status_code == 200 and selected.json() == record.payload()
-        inspection = client.get(
-            f"/api/0.1/inspect/{target_id}", params={**params, "run_id": run_id}
-        )
-        assert inspection.status_code == 200
-        assert {row["instance_identity"] for row in inspection.json()["instances"]} >= {
-            report_identity,
-            previous.instance_identity,
-        }
-        assert inspection.json()["blocker"] == "report_identity_required"
-        view = client.get(
-            f"/api/0.1/runs/{run_id}/reports/{report_identity}", params=params
-        )
-        assert view.status_code == 200 and view.json()["report"] == payload
-        archived = queries.read_report(
-            profile=guarded,
-            layout=layout,
-            run_id=run_id,
-            report_identity=previous.instance_identity,
-        )
-        assert archived["markdown"] == archived_markdown
-        assert archived["report"] == archived_payload
-        large_view = client.get(
-            f"/api/0.1/runs/{run_id}/reports/{previous.instance_identity}",
-            params=params,
-        )
-        assert large_view.status_code == 200
-        assert large_view.json()["report"] == archived_payload
-        portfolio_target = next(
-            row.target_id
-            for row in record.target_results
-            if row.producer_kind.value == "PORTFOLIO"
-        )
-        curve = client.get(
-            f"/api/0.1/runs/{run_id}/portfolios/{portfolio_target}", params=params
-        )
-        assert curve.status_code == 200 and curve.json()["status"] == "DEFINED"
-        assert all(
-            set(point) == {"sequence", "timestamp_ns", "phase", "nav"}
-            for point in curve.json()["points"]
-        )
-        assert (
-            curve.json()["source_point_count"] == curve.json()["displayed_point_count"]
-        )
-        assert len(captured) == 7 and all(
-            policy.state == "CLOSED" and policy.used_memory_bytes == 0
-            for policy in captured
-        )
-        wrong_profile = (
-            CRYPTO_PROFILE_ID
-            if profile.profile_id == A_SHARE_PROFILE_ID
-            else A_SHARE_PROFILE_ID
-        )
-        failures = [
-            client.get(
-                f"/api/0.1/runs/{other_run_id}/reports/{report_identity}", params=params
-            ),
-            client.get(f"/api/0.1/runs/{run_id}/reports/{'0' * 64}", params=params),
-            client.get(
-                f"/api/0.1/runs/{run_id}/reports/{report_identity}",
-                params={"profile": wrong_profile},
-            ),
-            client.get(f"/api/0.1/runs/{run_id}/portfolios/not_in_run", params=params),
-        ]
-        saved = (root / "report.json").read_bytes()
-        try:
-            (root / "report.json").write_bytes(b"invalid_private_payload_must_not_leak")
-            failures.append(
-                client.get(
+
+        async def check_http():
+            async with AsyncClient(
+                transport=ASGITransport(
+                    app=api_module.create_app(project_root=layout.project_root)
+                ),
+                base_url="http://testserver",
+            ) as client:
+                params = {"profile": profile.profile_id}
+                directory = await client.get("/api/0.1/status", params=params)
+                assert directory.status_code == 200 and "status" not in directory.json()
+                assert run_id in {row["run_id"] for row in directory.json()["runs"]}
+                selected = await client.get(
+                    "/api/0.1/status", params={**params, "run_id": run_id}
+                )
+                assert (
+                    selected.status_code == 200 and selected.json() == record.payload()
+                )
+                inspection = await client.get(
+                    f"/api/0.1/inspect/{target_id}", params={**params, "run_id": run_id}
+                )
+                assert inspection.status_code == 200
+                assert {
+                    row["instance_identity"] for row in inspection.json()["instances"]
+                } >= {
+                    report_identity,
+                    previous.instance_identity,
+                }
+                assert inspection.json()["blocker"] == "report_identity_required"
+                view = await client.get(
                     f"/api/0.1/runs/{run_id}/reports/{report_identity}", params=params
                 )
-            )
-        finally:
-            (root / "report.json").write_bytes(saved)
-        saved_markdown = (root / "report.md").read_bytes()
-        actual_read_report = report_artifact.read_research_report_artifact
-
-        def changed_after_validation(*args, **kwargs):
-            result = actual_read_report(*args, **kwargs)
-            (root / "report.md").write_bytes(b"x" * len(saved_markdown))
-            return result
-
-        try:
-            with monkeypatch.context() as race:
-                race.setattr(
-                    report_artifact,
-                    "read_research_report_artifact",
-                    changed_after_validation,
+                assert view.status_code == 200 and view.json()["report"] == payload
+                archived = queries.read_report(
+                    profile=guarded,
+                    layout=layout,
+                    run_id=run_id,
+                    report_identity=previous.instance_identity,
                 )
-                failed = client.get(
-                    f"/api/0.1/runs/{run_id}/reports/{report_identity}", params=params
+                assert archived["markdown"] == archived_markdown
+                assert archived["report"] == archived_payload
+                large_view = await client.get(
+                    f"/api/0.1/runs/{run_id}/reports/{previous.instance_identity}",
+                    params=params,
                 )
-                assert failed.status_code == 422
-        finally:
-            (root / "report.md").write_bytes(saved_markdown)
-        assert all(response.status_code in {404, 422} for response in failures)
-        assert all(
-            "invalid_private_payload" not in response.text
-            and str(layout.project_root) not in response.text
-            for response in failures
-        )
-        assert all(
-            policy.state == "CLOSED" and policy.used_memory_bytes == 0
-            for policy in captured
-        )
+                assert large_view.status_code == 200
+                assert large_view.json()["report"] == archived_payload
+                portfolio_target = next(
+                    row.target_id
+                    for row in record.target_results
+                    if row.producer_kind.value == "PORTFOLIO"
+                )
+                curve = await client.get(
+                    f"/api/0.1/runs/{run_id}/portfolios/{portfolio_target}",
+                    params=params,
+                )
+                assert curve.status_code == 200 and curve.json()["status"] == "DEFINED"
+                assert all(
+                    set(point) == {"sequence", "timestamp_ns", "phase", "nav"}
+                    for point in curve.json()["points"]
+                )
+                assert (
+                    curve.json()["source_point_count"]
+                    == curve.json()["displayed_point_count"]
+                )
+                assert len(captured) == 7 and all(
+                    policy.state == "CLOSED" and policy.used_memory_bytes == 0
+                    for policy in captured
+                )
+                wrong_profile = (
+                    CRYPTO_PROFILE_ID
+                    if profile.profile_id == A_SHARE_PROFILE_ID
+                    else A_SHARE_PROFILE_ID
+                )
+                failures = [
+                    await client.get(
+                        f"/api/0.1/runs/{other_run_id}/reports/{report_identity}",
+                        params=params,
+                    ),
+                    await client.get(
+                        f"/api/0.1/runs/{run_id}/reports/{'0' * 64}", params=params
+                    ),
+                    await client.get(
+                        f"/api/0.1/runs/{run_id}/reports/{report_identity}",
+                        params={"profile": wrong_profile},
+                    ),
+                    await client.get(
+                        f"/api/0.1/runs/{run_id}/portfolios/not_in_run", params=params
+                    ),
+                ]
+                saved = (root / "report.json").read_bytes()
+                try:
+                    (root / "report.json").write_bytes(
+                        b"invalid_private_payload_must_not_leak"
+                    )
+                    failures.append(
+                        await client.get(
+                            f"/api/0.1/runs/{run_id}/reports/{report_identity}",
+                            params=params,
+                        )
+                    )
+                finally:
+                    (root / "report.json").write_bytes(saved)
+                saved_markdown = (root / "report.md").read_bytes()
+                actual_read_report = report_artifact.read_research_report_artifact
+
+                def changed_after_validation(*args, **kwargs):
+                    result = actual_read_report(*args, **kwargs)
+                    (root / "report.md").write_bytes(b"x" * len(saved_markdown))
+                    return result
+
+                try:
+                    with monkeypatch.context() as race:
+                        race.setattr(
+                            report_artifact,
+                            "read_research_report_artifact",
+                            changed_after_validation,
+                        )
+                        failed = await client.get(
+                            f"/api/0.1/runs/{run_id}/reports/{report_identity}",
+                            params=params,
+                        )
+                        assert failed.status_code == 422
+                finally:
+                    (root / "report.md").write_bytes(saved_markdown)
+                assert all(response.status_code in {404, 422} for response in failures)
+                assert all(
+                    "invalid_private_payload" not in response.text
+                    and str(layout.project_root) not in response.text
+                    for response in failures
+                )
+                assert all(
+                    policy.state == "CLOSED" and policy.used_memory_bytes == 0
+                    for policy in captured
+                )
+
+        asyncio.run(check_http())
     assert _files(layout.project_root / "data") == before
 
     if profile.profile_id == CRYPTO_PROFILE_ID:

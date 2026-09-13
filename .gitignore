@@ -34,6 +34,7 @@ web/test-results/
 
 # 数据和密钥
 data/raw/
+data/archive/
 data/interim/
 data/processed/
 data/research/
