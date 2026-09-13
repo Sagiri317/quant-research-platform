@@ -491,3 +491,93 @@ def test_persisted_tick_spread_preserves_constant_and_real_tick_changes(
     assert factors["spread"].iloc[:9].tolist() == [float(tick_size)] * 9
     assert factors["spread"].iloc[9] == 2 * float(tick_size)
     assert factors["microprice_deviation"].tolist() == [0.0] * 10
+
+
+@pytest.mark.parametrize("frame_rows", [2, 11])
+@pytest.mark.parametrize("numerator", [11, 13, 19])
+@pytest.mark.parametrize("perturb", [False, True])
+def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes(
+    tmp_path, numerator, perturb, frame_rows
+):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    value = 10**10
+    states = []
+    for index in range(11):
+        mid = value + int(perturb and index == 10)
+        states.append(
+            replace(
+                _state(index * 100, bid_tick=2 * mid - 1, ask_tick=2 * mid + 1),
+                tick_size="0.5",
+            )
+        )
+        value = value * numerator // 10
+    with runtime_resource_policy_scope():
+        panel = pd.concat(
+            iter_panel_frames(
+                states,
+                [_trade(i * 100, 1.0, maker_buyer=False) for i in range(11)],
+                market_id="crypto",
+                asset_id="btc_usdt",
+                batch_rows=2,
+                start_ms=0,
+                end_ms=1000,
+                book_coverage={"s1": _coverage(0, 1101)},
+                trade_coverage=coverage_lookup(
+                    {"trade-connection-1": _coverage(0, 1101)}
+                ),
+            ),
+            ignore_index=True,
+        )
+    layout = StorageLayout(project_root=tmp_path)
+    catalog = hft_processed_catalog()
+    restored = panel
+    for data_id in (
+        "binance_futures_l2_panel_100ms",
+        "binance_futures_microstructure_factors_100ms",
+    ):
+        spec = catalog.get(data_id)
+        root = layout.target_root(
+            spec.data_id,
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+        )
+        frame = (
+            panel
+            if data_id == "binance_futures_l2_panel_100ms"
+            else pd.concat(
+                iter_factor_frames(
+                    restored.iloc[start : start + frame_rows]
+                    for start in range(0, len(restored), frame_rows)
+                ),
+                ignore_index=True,
+            )
+        )
+        frame = frame.loc[:, list(spec.column_roles)]
+        write_dataset(root, frame, spec=spec, resource_policy=None, borrowed_input=True)
+        restored = read_dataset(root)
+    returns = restored["return_100ms"].dropna()
+    volatility = restored["realized_volatility_1s"]
+    assert len(returns) == 10
+    assert returns.iloc[:9].nunique() == 1
+    assert volatility.iloc[:2].isna().all()
+    assert volatility.iloc[2:10].tolist() == [0.0] * 8
+    if perturb:
+        assert returns.iloc[-1] != returns.iloc[0]
+        # Nine equal observations and one delta have sample std abs(delta)/sqrt(10).
+        expected = abs(returns.iloc[-1] - returns.iloc[0]) / math.sqrt(10)
+        assert volatility.iloc[-1] == pytest.approx(expected, rel=1e-14, abs=0)
+        assert volatility.iloc[-1] > 0
+    else:
+        assert returns.nunique() == 1
+        assert volatility.iloc[-1] == 0.0
+
+    reset_panel = panel.copy()
+    reset_panel.loc[8:, "segment_id"] = "s2:trade-connection-1"
+    reset_factors = pd.concat(
+        iter_factor_frames((reset_panel.iloc[:9], reset_panel.iloc[9:])),
+        ignore_index=True,
+    )
+    assert reset_factors["realized_volatility_1s"].iloc[8:10].isna().all()
+    assert reset_factors["return_100ms"].iloc[8:9].isna().all()

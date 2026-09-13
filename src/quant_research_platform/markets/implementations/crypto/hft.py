@@ -6,6 +6,7 @@ import datetime as dt
 import math
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from statistics import stdev
 from typing import Any
 
 import numpy as np
@@ -447,7 +448,8 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
                 return_tail.clear()
             if math.isfinite(value):
                 return_tail.append(float(value))
-            volatility[index] = _sample_std(return_tail)
+            if len(return_tail) >= 2:
+                volatility[index] = stdev(return_tail)
         output = _identity_frame(frame)
         output["spread"] = spread
         output["relative_spread"] = spread / mid
@@ -489,13 +491,6 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
         active_segment = str(segments[-1])
         previous_time = int(timestamps[-1])
         previous_mid = float(mid[-1])
-
-
-def _sample_std(values: deque[float]) -> float:
-    if len(values) < 2:
-        return math.nan
-    mean = sum(values) / len(values)
-    return math.sqrt(sum((value - mean) ** 2 for value in values) / (len(values) - 1))
 
 
 def iter_label_frames(
