@@ -8,6 +8,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     derive_execution_mask,
 )
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
+    _apply_special_treatment,
     _apply_suspension_semantics,
     _industry_version_active_mask,
     compute_market_panel,
@@ -678,3 +679,98 @@ def test_industry_version_mask_preserves_interval_and_positional_boundaries():
     ):
         pd.testing.assert_series_equal(original, current)
     pd.testing.assert_frame_equal(before[3], versions)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_special_treatment_pit_and_late_older_events_persist(tmp_path, reverse):
+    from quant_research_platform.sources.csmar.interim import (
+        interim_catalog,
+        normalize_raw_frame,
+    )
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    raw = pd.DataFrame(
+        {
+            "Symbol": ["000001"] * 3,
+            "Chgtype": ["AB", "BA", "AD"],
+            "Annoudt": ["2020-01-02", "2020-01-03", "2020-01-05"],
+            "Execudt": ["2020-01-01", "2020-01-03", "2020-01-02"],
+        }
+    )
+    history = normalize_raw_frame(
+        raw.iloc[::-1] if reverse else raw, "special_treatment_changes"
+    )
+    spec = interim_catalog().get("special_treatment_changes")
+    layout = StorageLayout(project_root=tmp_path)
+    root = layout.target_root(
+        spec.data_id, layout.interim_data_root(spec.source_id, spec.data_id)
+    )
+    write_dataset(root, history, spec=spec, resource_policy=None, borrowed_input=True)
+    restored = read_dataset(root)
+    panel = pd.DataFrame(
+        {
+            "asset_id": "000001",
+            "timestamp": pd.date_range("2020-01-01", periods=6).as_unit("ns"),
+            "trading_status_code": 0,
+        }
+    )
+    actual = _apply_special_treatment(panel, restored)
+    assert actual["is_st"].tolist() == [False, True, False, False, False, False]
+    assert actual["is_pt"].tolist() == [False] * 6
+    assert str(restored["is_st"].dtype) == "boolean"
+
+
+def test_special_treatment_equal_effective_conflict_is_explicit():
+    from quant_research_platform.sources.csmar.interim import normalize_raw_frame
+
+    history = normalize_raw_frame(
+        pd.DataFrame(
+            {
+                "Symbol": ["000001", "000001"],
+                "Chgtype": ["AB", "BA"],
+                "Annoudt": ["2020-01-01", "2020-01-02"],
+                "Execudt": ["2020-01-01"] * 2,
+            }
+        ),
+        "special_treatment_changes",
+    )
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["000001"],
+            "timestamp": pd.to_datetime(["2020-01-01"]).as_unit("ns"),
+            "trading_status_code": [0],
+        }
+    )
+    assert _apply_special_treatment(panel, history)["is_st"].tolist() == [True]
+    panel["timestamp"] = pd.to_datetime(["2020-01-02"]).as_unit("ns")
+    with pytest.raises(ValueError, match="special_treatment_effective_state_ambiguous"):
+        _apply_special_treatment(panel, history)
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_special_treatment_shared_availability_and_repeated_state(reverse):
+    from quant_research_platform.sources.csmar.interim import normalize_raw_frame
+
+    raw = pd.DataFrame(
+        {
+            "Symbol": ["000001"] * 3,
+            "Chgtype": ["AB", "DB", "BC"],
+            "Annoudt": ["2020-01-02", "2020-01-03", "2020-01-03"],
+            "Execudt": ["2020-01-01", "2020-01-01", "2020-01-02"],
+        }
+    )
+    history = normalize_raw_frame(
+        raw.iloc[::-1] if reverse else raw, "special_treatment_changes"
+    )
+    panel = pd.DataFrame(
+        {
+            "asset_id": "000001",
+            "timestamp": pd.date_range("2020-01-01", periods=3).as_unit("ns"),
+            "trading_status_code": 0,
+        }
+    )
+    actual = _apply_special_treatment(panel, history)
+    assert actual["is_st"].tolist() == [False, True, False]
+    assert actual["is_pt"].tolist() == [False, False, True]

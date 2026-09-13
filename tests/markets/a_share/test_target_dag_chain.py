@@ -15,6 +15,7 @@ from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.sources.csmar.interim import (
     InterimImportResult,
     interim_catalog,
+    normalize_raw_frame,
 )
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.datasets.writing import write_dataset
@@ -349,14 +350,16 @@ def _synthetic_interim_frames(sessions: pd.DatetimeIndex) -> dict[str, pd.DataFr
             "reason": ["P8606"],
         }
     )
-    special = pd.DataFrame(
-        {
-            "source_asset_id": [assets[0]],
-            "timestamp": [sessions[0] - pd.Timedelta(days=1)],
-            "change_type": ["A"],
-            "announcement_date": [sessions[0] - pd.Timedelta(days=2)],
-            "effective_date": [sessions[0] - pd.Timedelta(days=1)],
-        }
+    special = normalize_raw_frame(
+        pd.DataFrame(
+            {
+                "Symbol": [assets[0]],
+                "Chgtype": ["BA"],
+                "Annoudt": [sessions[0] - pd.Timedelta(days=2)],
+                "Execudt": [sessions[0] - pd.Timedelta(days=1)],
+            }
+        ),
+        "special_treatment_changes",
     )
     return {
         "market_bars_1d": market_bars,

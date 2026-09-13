@@ -740,16 +740,24 @@ def _apply_special_treatment(
     history["asset_id"] = strict_string_series(
         history["asset_id"], error="invalid_special_treatment_asset_id"
     )
-    if {"asset_id", "timestamp", "change_type"}.issubset(history.columns):
-        right = history.loc[:, ["asset_id", "timestamp", "change_type"]].copy()
-        change_type = right["change_type"].astype("string").str.upper()
-        known = change_type.isin({"A", "B", "C", "D"})
-        right["is_pt"] = change_type.eq("C").where(known)
-        right["is_st"] = change_type.isin({"B", "D"}).astype("boolean").where(known)
-    elif {"asset_id", "timestamp", "is_st", "is_pt"}.issubset(history.columns):
-        right = history.loc[:, ["asset_id", "timestamp", "is_st", "is_pt"]].copy()
-    else:
-        raise ValueError("special_treatment_history_columns_invalid")
+    right = history.loc[
+        :, ["asset_id", "announcement_date", "effective_date", "is_st", "is_pt"]
+    ].copy()
+    right["timestamp"] = right[["announcement_date", "effective_date"]].max(axis=1)
+    right = right.loc[right["timestamp"] <= result["timestamp"].max()]
+    # Equal-effective events cannot assign conflicting states without a source order.
+    conflicts = right.groupby(["asset_id", "effective_date"])[
+        ["is_st", "is_pt"]
+    ].nunique(dropna=False)
+    if conflicts.gt(1).any().any():
+        raise ValueError("special_treatment_effective_state_ambiguous")
+    right = right.sort_values(
+        ["timestamp", "effective_date", "asset_id"], kind="mergesort"
+    ).drop_duplicates(["asset_id", "effective_date"], keep="first")
+    # A late announcement of an older effective event must not replace newer facts.
+    latest_effective = right.groupby("asset_id", sort=False)["effective_date"].cummax()
+    right = right.loc[right["effective_date"].eq(latest_effective)]
+    right = right.drop_duplicates(["asset_id", "timestamp"], keep="last")
     right = right.loc[:, ["asset_id", "timestamp", "is_st", "is_pt"]].sort_values(
         ["timestamp", "asset_id"], kind="mergesort"
     )

@@ -284,7 +284,6 @@ class _BoundedCsvRecords:
             self._handle = handle
             self._identity = identity
             self._spool: object | None = None
-            self._path = path
             self._limit_bytes = limit_bytes
             self._resource_policy = resource_policy
             self._payload_lease_ref = payload_lease_ref

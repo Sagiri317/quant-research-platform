@@ -236,3 +236,10 @@ maker 报价采用公开 L2 队列近似和显式延迟。生效时会穿价的 
 核对。OOS decision 复用这两个已验证原点，不为每次 KEEP/替换重放重读初始盘口。
 当前订单数量、队列、待执行命令和期限仍决定各样本响应，不能将决策相关的响应
 冻结为统一成交率；不新增另一份 sample store 或 calibration cache。
+
+
+`book_spread` 在 PANEL 的整数 tick owner 中以 `(ask_tick - bid_tick) × tick_size` 计算并持久化。
+FACTOR 直接消费该价差；relative_spread 和 top10_depth_per_spread 共用同一事实，
+不重新相减绝对浮点报价。microprice_deviation 按
+`spread × (bid_qty - ask_qty) / (2 × (bid_qty + ask_qty))` 计算，microprice 为
+`mid + microprice_deviation`，避免相等队列的零偏移被绝对价格抵消误差污染。

@@ -301,6 +301,8 @@ SPECIAL_TREATMENT_CHANGE_COLUMNS = (
     "change_type",
     "announcement_date",
     "effective_date",
+    "is_st",
+    "is_pt",
 )
 EQUITY_CHANGE_COLUMNS = (
     "source_asset_id",
@@ -1091,6 +1093,12 @@ def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataF
         result["change_type"] = strict_string_series(
             result["change_type"], error="invalid_special_treatment_change_type"
         )
+        if not result["change_type"].str.fullmatch(r"[ABCDSTX]{2}").all():
+            raise ValueError("invalid_special_treatment_change_type")
+        destination = result["change_type"].str[1]
+        known = destination.isin(("A", "B", "C", "D"))
+        result["is_st"] = destination.isin(("B", "D")).astype("boolean").where(known)
+        result["is_pt"] = destination.eq("C").astype("boolean").where(known)
         return (
             result.loc[:, SPECIAL_TREATMENT_CHANGE_COLUMNS]
             .sort_values(["source_asset_id", "timestamp"], kind="mergesort")

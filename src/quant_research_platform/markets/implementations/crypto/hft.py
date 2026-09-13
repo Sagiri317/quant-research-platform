@@ -295,6 +295,7 @@ def _panel_column_buffers() -> dict[str, list[Any]]:
             "best_ask_price",
             "best_ask_qty",
             "mid",
+            "book_spread",
             "bid_depth_1",
             "ask_depth_1",
             "bid_depth_5",
@@ -337,7 +338,8 @@ def _append_panel_columns(
     bid_quantity = bids[0][1]
     ask_price = tick_to_price(asks[0][0], state.tick_size)
     ask_quantity = asks[0][1]
-    mid = (bid_price + ask_price) / 2.0
+    mid = tick_to_price(bids[0][0] + asks[0][0], state.tick_size) / 2.0
+    spread = tick_to_price(asks[0][0] - bids[0][0], state.tick_size)
     bid_depth_1 = sum(quantity for _price, quantity in bids[:1])
     ask_depth_1 = sum(quantity for _price, quantity in asks[:1])
     bid_depth_5 = sum(quantity for _price, quantity in bids[:5])
@@ -367,6 +369,7 @@ def _append_panel_columns(
     buffers["best_ask_price"].append(ask_price)
     buffers["best_ask_qty"].append(ask_quantity)
     buffers["mid"].append(mid)
+    buffers["book_spread"].append(spread)
     buffers["bid_depth_1"].append(bid_depth_1)
     buffers["ask_depth_1"].append(ask_depth_1)
     buffers["bid_depth_5"].append(bid_depth_5)
@@ -403,11 +406,9 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
             previous_time=previous_time,
         )
         mid = _finite_column(frame, "mid", "hft_factor_mid_invalid")
-        bid_price = _finite_column(frame, "best_bid_price", "hft_factor_book_invalid")
-        ask_price = _finite_column(frame, "best_ask_price", "hft_factor_book_invalid")
         bid_quantity = _finite_column(frame, "best_bid_qty", "hft_factor_book_invalid")
         ask_quantity = _finite_column(frame, "best_ask_qty", "hft_factor_book_invalid")
-        spread = ask_price - bid_price
+        spread = _finite_column(frame, "book_spread", "hft_factor_book_invalid")
         if bool(np.any(mid <= 0)) or bool(np.any(spread <= 0)):
             raise ValueError("hft_factor_book_invalid")
         depth = {
@@ -426,11 +427,11 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
             for levels in (1, 5, 10)
         }
         bbo_quantity = bid_quantity + ask_quantity
-        microprice = np.full(len(frame), np.nan, dtype="float64")
+        microprice_deviation = np.full(len(frame), np.nan, dtype="float64")
         np.divide(
-            ask_price * bid_quantity + bid_price * ask_quantity,
+            0.5 * spread * (bid_quantity - ask_quantity),
             bbo_quantity,
-            out=microprice,
+            out=microprice_deviation,
             where=bbo_quantity > 0,
         )
         returns = np.full(len(frame), np.nan, dtype="float64")
@@ -461,8 +462,8 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
                 where=total > 0,
             )
             output[f"imbalance_{levels}"] = imbalance
-        output["microprice"] = microprice
-        output["microprice_deviation"] = microprice - mid
+        output["microprice"] = mid + microprice_deviation
+        output["microprice_deviation"] = microprice_deviation
         output["ofi_100ms"] = _finite_column(
             frame, "book_ofi_100ms", "hft_factor_ofi_invalid"
         )

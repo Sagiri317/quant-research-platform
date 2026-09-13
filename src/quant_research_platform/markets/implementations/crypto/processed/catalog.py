@@ -38,6 +38,7 @@ HFT_PANEL_CONTEXT_COLUMNS = (
     "best_ask_price",
     "best_ask_qty",
     "mid",
+    "book_spread",
     "bid_depth_1",
     "ask_depth_1",
     "bid_depth_5",

@@ -32,11 +32,11 @@ class ModelMatrixScaler:
         weights = _weights(sample_weight, len(values))
         total = float(weights.sum())
         mean = (weights[:, None] * values).sum(axis=0) / total
-        variance = (weights[:, None] * (values - mean) ** 2).sum(axis=0) / total
         constant = np.ptp(values, axis=0) == 0.0
         mean[constant] = values[0, constant]
+        variance = (weights[:, None] * (values - mean) ** 2).sum(axis=0) / total
         scale = np.sqrt(variance)
-        scale[constant | (scale == 0.0)] = 1.0
+        scale[scale == 0.0] = 1.0
         return cls(
             columns=columns,
             mean_=tuple(float(value) for value in mean),

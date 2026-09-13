@@ -901,7 +901,7 @@ def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.n
     return np.where(unresolved & (len(data) > 1), 0.0, np.std(data, axis=0, ddof=1))
 
 
-def _candidate_sharpes(values: np.ndarray, roundoff: object = 0.0) -> np.ndarray | None:
+def _candidate_sharpes(values: np.ndarray, roundoff: object) -> np.ndarray | None:
     means = np.mean(values, axis=0)
     standard_deviations = return_standard_deviation(values, roundoff=roundoff)
     if bool((standard_deviations == 0.0).any()):

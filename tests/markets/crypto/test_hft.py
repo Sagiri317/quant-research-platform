@@ -18,6 +18,9 @@ from quant_research_platform.markets.implementations.crypto.hft import (
     iter_panel_frames,
     l1_ofi,
 )
+from quant_research_platform.markets.implementations.crypto.processed.catalog import (
+    hft_processed_catalog,
+)
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
@@ -436,3 +439,55 @@ def test_factor_and_label_frames_match_across_chunk_boundaries() -> None:
 
     pd.testing.assert_frame_equal(factor_chunked, factor_full, check_exact=True)
     pd.testing.assert_frame_equal(label_chunked, label_full, check_exact=True)
+
+
+@pytest.mark.parametrize("tick_size,ticks", [("0.01", 247900), ("0.1", 600000)])
+def test_persisted_tick_spread_preserves_constant_and_real_tick_changes(
+    tmp_path, tick_size, ticks
+):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    states = [
+        replace(
+            _state(
+                i * 100,
+                bid_tick=ticks + i,
+                ask_tick=ticks + i + (2 if i == 9 else 1),
+                bid_qty=0.1,
+                ask_qty=0.1,
+            ),
+            tick_size=tick_size,
+        )
+        for i in range(10)
+    ]
+    with runtime_resource_policy_scope():
+        panel = pd.concat(
+            iter_panel_frames(
+                states,
+                [_trade(i * 100, 1.0, maker_buyer=False) for i in range(10)],
+                market_id="crypto",
+                asset_id="btc_usdt",
+                batch_rows=2,
+                start_ms=0,
+                end_ms=900,
+                book_coverage={"s1": _coverage(0, 1001)},
+                trade_coverage=coverage_lookup(
+                    {"trade-connection-1": _coverage(0, 1001)}
+                ),
+            ),
+            ignore_index=True,
+        )
+    spec = hft_processed_catalog().get("binance_futures_l2_panel_100ms")
+    layout = StorageLayout(project_root=tmp_path)
+    root = layout.target_root(
+        spec.data_id,
+        layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+    )
+    write_dataset(root, panel, spec=spec, resource_policy=None, borrowed_input=True)
+    restored = read_dataset(root)
+    factors = pd.concat(iter_factor_frames((restored,)), ignore_index=True)
+    assert factors["spread"].iloc[:9].tolist() == [float(tick_size)] * 9
+    assert factors["spread"].iloc[9] == 2 * float(tick_size)
+    assert factors["microprice_deviation"].tolist() == [0.0] * 10

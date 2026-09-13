@@ -190,7 +190,7 @@ def _write_raw(layout, policy):
         "special_treatment_changes",
         (
             {"Symbol": assets[1], "Chgtype": code, "Annoudt": stamp, "Execudt": stamp}
-            for code, stamp in (("B", "2011-01-04"), ("A", "2011-01-06"))
+            for code, stamp in (("AB", "2011-01-04"), ("BA", "2011-01-06"))
         ),
     )
     total_return_codes = protocol("pv_all").manifest()["benchmark_total_return_indices"]

@@ -1537,3 +1537,52 @@ def test_csmar_inspection_keeps_fatal_source_failure(
             interim.source_content_identity(tmp_path, "trading_calendar")
         assert caught.value is primary
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "code,st,pt",
+    [
+        ("AB", True, False),
+        ("AD", True, False),
+        ("BC", False, True),
+        ("BA", False, False),
+        ("AS", None, None),
+        ("DT", None, None),
+        ("TX", None, None),
+    ],
+)
+def test_special_treatment_destination_state(code, st, pt):
+    result = interim.normalize_raw_frame(
+        pd.DataFrame(
+            {
+                "Symbol": ["000001"],
+                "Chgtype": [code],
+                "Annoudt": ["2020-01-02"],
+                "Execudt": ["2020-01-01"],
+            }
+        ),
+        "special_treatment_changes",
+    )
+    assert result["change_type"].iloc[0] == code
+    for column, expected in (("is_st", st), ("is_pt", pt)):
+        assert str(result[column].dtype) == "boolean"
+        if expected is None:
+            assert pd.isna(result[column].iloc[0])
+        else:
+            assert bool(result[column].iloc[0]) is expected
+
+
+@pytest.mark.parametrize("code", ["A", "B", "ZZ", "ABA", "ab"])
+def test_special_treatment_rejects_non_provider_transition(code):
+    with pytest.raises(ValueError, match="invalid_special_treatment_change_type"):
+        interim.normalize_raw_frame(
+            pd.DataFrame(
+                {
+                    "Symbol": ["000001"],
+                    "Chgtype": [code],
+                    "Annoudt": ["2020-01-02"],
+                    "Execudt": ["2020-01-01"],
+                }
+            ),
+            "special_treatment_changes",
+        )
