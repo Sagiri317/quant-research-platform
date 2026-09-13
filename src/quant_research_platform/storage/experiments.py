@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,9 +14,14 @@ from quant_research_platform.contracts.experiments import (
     validate_trial_ledger_reference,
     validate_trial_record_against_plan,
 )
+from quant_research_platform.contracts.json_codec import (
+    bounded_rendered_qrp_json_object_size,
+    json_record_working_set_bytes,
+)
 from quant_research_platform.contracts.models import (
     validate_completed_model_trial_metrics,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
@@ -151,30 +157,39 @@ def research_run_trial_references(
     )
     if not root.exists():
         return ()
-    names = []
-    with os.scandir(root) as entries:
-        for entry in entries:
-            if len(names) >= 1024 or not entry.is_dir(follow_symlinks=False):
-                raise ValueError("trial_run_members_invalid")
-            names.append(entry.name)
-    references = []
-    for name in sorted(names):
-        experiment_root = layout.trial_ledger_root(run_id, name)
-        plan = read_trial_plan(experiment_root)
-        records = read_trial_ledger(experiment_root, plan)
-        if plan.experiment_id != name or any(
-            record.run_id != run_id for record in records
-        ):
-            raise ValueError("trial_run_members_invalid")
-        references.append(
-            {
-                "run_id": run_id,
-                "experiment_id": name,
-                "protocol_hash": plan.protocol_hash,
-                "semantic_identity": trial_ledger_semantic_identity(plan, records),
-            }
-        )
-    return tuple(references)
+    with runtime_resource_policy_scope() as policy:
+        with policy.lease("storage.trial_run.references", 0) as lease:
+            references = []
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if not entry.is_dir(follow_symlinks=False):
+                        raise ValueError("trial_run_members_invalid")
+                    name = entry.name
+                    experiment_root = layout.trial_ledger_root(run_id, name)
+                    plan = read_trial_plan(experiment_root)
+                    records = read_trial_ledger(experiment_root, plan)
+                    if plan.experiment_id != name or any(
+                        record.run_id != run_id for record in records
+                    ):
+                        raise ValueError("trial_run_members_invalid")
+                    reference = {
+                        "run_id": run_id,
+                        "experiment_id": name,
+                        "protocol_hash": plan.protocol_hash,
+                        "semantic_identity": trial_ledger_semantic_identity(
+                            plan, records
+                        ),
+                    }
+                    lease.grow(
+                        json_record_working_set_bytes(
+                            bounded_rendered_qrp_json_object_size(
+                                reference, lazy_arrays={}, max_bytes=sys.maxsize
+                            )
+                        )
+                    )
+                    references.append(reference)
+            references.sort(key=lambda reference: reference["experiment_id"])
+            return tuple(references)
 
 
 def read_model_trial_ledger_reference(

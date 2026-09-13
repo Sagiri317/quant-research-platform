@@ -1311,3 +1311,22 @@ def test_alpha_unidentified_statistics_are_not_defined_zero(constant, observed_d
         "weighted_r2",
     ):
         assert getattr(result, field) is None
+
+
+@pytest.mark.parametrize("count", (3, 10, 100))
+def test_decimal_constant_scaler_freezes_exact_training_value(count):
+    training = pd.DataFrame(
+        {"constant": np.full(count, 0.1), "varying": np.arange(count, dtype=float)}
+    )
+    scaler = ModelMatrixScaler.fit(training, sample_weight=np.linspace(1.0, 2.0, count))
+    assert scaler.mean_[0] == 0.1
+    assert scaler.scale_[0] == 1.0
+    assert scaler.transform(training).constant.eq(0.0).all()
+    assert (
+        scaler.transform(
+            pd.DataFrame({"constant": [0.2], "varying": [10.0]})
+        ).constant.iloc[0]
+        == 0.1
+    )
+    training.loc[0, "constant"] = np.nextafter(0.1, 1.0)
+    assert ModelMatrixScaler.fit(training).scale_[0] != 1.0

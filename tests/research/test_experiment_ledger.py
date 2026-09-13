@@ -429,3 +429,35 @@ os._exit(17)
         _plan(),
     )
     assert len(records) == 1 and records[0].status == "attempted"
+
+
+def test_run_ledger_references_have_no_arbitrary_member_limit(tmp_path):
+    from quant_research_platform.storage.experiments import (
+        research_run_trial_references,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    layout = StorageLayout(tmp_path)
+    for index in range(1026):
+        plan = replace(_plan(), experiment_id=f"experiment_{index:04d}")
+        record = _record(plan, event_id="start", attempt_index=1, status="attempted")
+        append_trial_record(
+            layout.trial_ledger_root(record.run_id, plan.experiment_id), plan, record
+        )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    policy = capture_test_policy(
+        available_memory_bytes=1024**3, explicit_cap_bytes=1024
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(MemoryError):
+            research_run_trial_references(layout, "run_test")
+        assert policy.used_memory_bytes == 0
+    references = research_run_trial_references(layout, "run_test")
+    assert len(references) == 1026
+    assert len({item["experiment_id"] for item in references}) == 1026
+    root = layout.trial_ledger_root("run_test")
+    (root / "invalid").write_text("not a ledger")
+    with pytest.raises(ValueError, match="trial_run_members_invalid"):
+        research_run_trial_references(layout, "run_test")

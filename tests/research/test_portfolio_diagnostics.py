@@ -635,7 +635,10 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
         assert policy.used_memory_bytes == 0
 
 
-def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(tmp_path):
+@pytest.mark.parametrize("constant", (False, True))
+def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
+    tmp_path, constant
+):
     from itertools import combinations
 
     import numpy as np
@@ -667,6 +670,8 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(tmp_p
     dates = pd.bdate_range("2023-01-02", periods=75)
     candidates = protocol("pv_all").portfolio_candidates()
     returns = np.random.default_rng(802).normal(0.0002, 0.008, (73, 5))
+    if constant:
+        returns[:, 0] = 0.1
     window = {
         "start": str(dates[0].date()),
         "end": str(dates[-1].date()),
@@ -797,6 +802,31 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(tmp_p
         artifact = read_statistics_artifact(
             root, expected_identity=envelope.instance_identity
         )
+        if constant:
+            with artifact.table("portfolio_performance.parquet") as rows:
+                selected = rows.loc[
+                    rows.candidate_id.eq(candidates[0].candidate_id)
+                ].set_index("metric_id")
+                assert selected.loc["sharpe", "status"] == "UNDEFINED"
+                assert selected.loc["annualized_volatility", "value"] == 0.0
+            with artifact.table("portfolio_robustness.parquet") as rows:
+                assert len(rows) == 11
+                assert rows.candidate_count.eq(5).all()
+                assert rows.loc[rows.test_id.eq("dsr"), "status"].eq("UNDEFINED").all()
+                assert (
+                    rows.loc[rows.test_id.eq("cscv_pbo"), "status"]
+                    .eq("UNDEFINED")
+                    .all()
+                )
+                psr = rows.loc[rows.test_id.eq("psr")].set_index("candidate_id")
+                assert psr.loc[candidates[0].candidate_id, "status"] == "UNDEFINED"
+                assert (
+                    psr.loc[[item.candidate_id for item in candidates[1:]], "status"]
+                    .eq("DEFINED")
+                    .all()
+                )
+            assert policy.used_memory_bytes == 0
+            return
         with artifact.table("portfolio_robustness.parquet") as rows:
             assert len(rows) == 11 and rows.status.eq("DEFINED").all()
             sharpes = returns.mean(axis=0) / returns.std(axis=0, ddof=1)

@@ -28,12 +28,37 @@ from quant_research_platform.research.portfolios.schedules import holding_interv
 from quant_research_platform.research.statistics import (
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
+    return_standard_deviation,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     _close_lease_preserving_primary,
     pandas_frame_payload_bytes,
 )
+
+
+def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndarray:
+    """Enclose NAV-ratio rounding using adjacent float64 operand values.
+
+    One outward ULP encloses each rounded NAV. Outward division/subtraction
+    bounds cover both (end / start - 1) and ((end - start) / start).
+    """
+    before = np.asarray(start, dtype="float64")
+    after = np.asarray(end, dtype="float64")
+    lower = np.nextafter(
+        np.nextafter(after, -np.inf)
+        / np.nextafter(before, np.where(after >= 0, np.inf, -np.inf)),
+        -np.inf,
+    )
+    upper = np.nextafter(
+        np.nextafter(after, np.inf)
+        / np.nextafter(before, np.where(after >= 0, -np.inf, np.inf)),
+        np.inf,
+    )
+    lower = np.nextafter(lower - 1.0, -np.inf)
+    upper = np.nextafter(upper - 1.0, np.inf)
+    data = np.asarray(returns, dtype="float64")
+    return np.maximum(np.abs(data - lower), np.abs(upper - data))
 
 
 def fixed_turnover_cost_sensitivity(
@@ -353,8 +378,16 @@ def build_crypto_portfolio_statistics_tables(
                 not daily_missing
                 and count >= statistics_policy["annualization_minimum_observations"]
             ):
+                defined = [row for row in daily if row["status"] == "DEFINED"]
                 deviation = float(
-                    values.std(ddof=statistics_policy["standard_deviation_ddof"])
+                    return_standard_deviation(
+                        values,
+                        roundoff=_nav_return_roundoff(
+                            [row["start_nav"] for row in defined],
+                            [row["end_nav"] for row in defined],
+                            values,
+                        ),
+                    )
                 )
                 metric(
                     "annualized_volatility",
@@ -1153,7 +1186,14 @@ def _portfolio_statistics_tables(
             ):
                 raise ValueError("portfolio_statistics_compounding_invalid")
             count = len(selected)
-            deviation = float(selected.net_return.std(ddof=1))
+            deviation = float(
+                return_standard_deviation(
+                    selected.net_return,
+                    roundoff=_nav_return_roundoff(
+                        selected.nav_before, selected.nav_end, selected.net_return
+                    ),
+                )
+            )
             values = {
                 "terminal_nav": previous_nav,
                 "capital_return": float(wealth.iloc[-1] - 1),
@@ -1181,7 +1221,23 @@ def _portfolio_statistics_tables(
                         strict=True,
                     ):
                         row["relative_wealth"] = float(value)
-                    active_sd = float(selected.active_return.std(ddof=1))
+                    benchmark = benchmarks[candidate.benchmark_id]
+                    active_roundoff = (
+                        _nav_return_roundoff(
+                            selected.nav_before, selected.nav_end, selected.net_return
+                        )
+                        + _nav_return_roundoff(
+                            benchmark.reindex(selected.entry_at).to_numpy(),
+                            benchmark.reindex(selected.end_at).to_numpy(),
+                            selected.benchmark_return,
+                        )
+                        + np.spacing(np.abs(selected.active_return.to_numpy()))
+                    )
+                    active_sd = float(
+                        return_standard_deviation(
+                            selected.active_return, roundoff=active_roundoff
+                        )
+                    )
                     values.update(
                         annualized_active_return=float(
                             selected.active_return.mean() * 252
@@ -1256,13 +1312,24 @@ def _portfolio_statistics_tables(
         if matrix.isna().any().any():
             raise ValueError("portfolio_statistics_candidate_dates_misaligned")
         if access == "development":
-            trial_sharpes = matrix.mean() / matrix.std(ddof=1)
+            before = daily.pivot(
+                index=["entry_at", "end_at"],
+                columns="candidate_id",
+                values="nav_before",
+            ).reindex(columns=ids)
+            after = daily.pivot(
+                index=["entry_at", "end_at"], columns="candidate_id", values="nav_end"
+            ).reindex(columns=ids)
+            roundoff = _nav_return_roundoff(before, after, matrix)
+            deviations = return_standard_deviation(matrix, roundoff=roundoff)
+            trial_sharpes = matrix.mean() / np.where(deviations > 0, deviations, np.nan)
             for candidate_id in ids:
                 try:
                     result = probabilistic_and_deflated_sharpe(
                         matrix[candidate_id],
                         benchmark_sharpe=0.0,
                         trial_sharpes=trial_sharpes,
+                        return_roundoff=roundoff[:, ids.index(candidate_id)],
                     )
                     outputs = (
                         ("psr", result.psr, ""),
@@ -1290,7 +1357,12 @@ def _portfolio_statistics_tables(
                         )
                     )
             if len(matrix) >= 10:
-                result = cscv_pbo(matrix, slice_count=10, max_combinations=252)
+                result = cscv_pbo(
+                    matrix,
+                    slice_count=10,
+                    max_combinations=252,
+                    return_roundoff=roundoff,
+                )
                 value, status, reason = result.pbo, result.status, result.reason or ""
             else:
                 value, status, reason = np.nan, "UNDEFINED", "cscv_slice_count_invalid"

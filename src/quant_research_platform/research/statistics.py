@@ -453,6 +453,7 @@ def probabilistic_and_deflated_sharpe(
     *,
     benchmark_sharpe: float,
     trial_sharpes: object,
+    return_roundoff: object = 0.0,
 ) -> SharpeInference:
     data = _finite_vector(returns, minimum=4)
     trials = np.asarray(trial_sharpes, dtype="float64")
@@ -460,17 +461,15 @@ def probabilistic_and_deflated_sharpe(
         raise ValueError("finite_vector_required")
     if type(benchmark_sharpe) is not float or not np.isfinite(benchmark_sharpe):
         raise ValueError("sharpe_benchmark_invalid")
-    standard_deviation = float(np.std(data, ddof=1))
-    if (
-        not np.isfinite(standard_deviation)
-        or standard_deviation == 0.0
-        or float(np.ptp(data))
-        <= 8 * np.finfo("float64").eps * float(np.max(np.abs(data)))
-    ):
+    standard_deviation = float(
+        return_standard_deviation(data, roundoff=return_roundoff)
+    )
+    if not np.isfinite(standard_deviation) or standard_deviation == 0.0:
         raise ValueError("sharpe_zero_variance")
     observed = float(np.mean(data) / standard_deviation)
-    sample_skew = float(skew(data, bias=False))
-    sample_kurtosis = float(kurtosis(data, fisher=False, bias=False))
+    normalized = (data - data[0]) / standard_deviation
+    sample_skew = float(skew(normalized, bias=False))
+    sample_kurtosis = float(kurtosis(normalized, fisher=False, bias=False))
     variance = (
         1.0
         - sample_skew * observed
@@ -479,7 +478,11 @@ def probabilistic_and_deflated_sharpe(
     if not np.isfinite(variance) or variance <= 0.0:
         raise ValueError("sharpe_variance_invalid")
     scale = variance**0.5
-    trial_scale = float(np.std(trials, ddof=1)) if np.isfinite(trials).all() else np.nan
+    trial_scale = (
+        float(return_standard_deviation(trials))
+        if np.isfinite(trials).all()
+        else np.nan
+    )
     trial_count = len(trials)
     reference = trial_scale * (
         (1.0 - np.euler_gamma) * norm.ppf(1.0 - 1.0 / trial_count)
@@ -505,7 +508,13 @@ def probabilistic_and_deflated_sharpe(
     )
 
 
-def cscv_pbo(returns: object, *, slice_count: int, max_combinations: int) -> PboResult:
+def cscv_pbo(
+    returns: object,
+    *,
+    slice_count: int,
+    max_combinations: int,
+    return_roundoff: object = 0.0,
+) -> PboResult:
     shape = getattr(returns, "shape", None)
     if shape is None:
         shape = np.shape(returns)
@@ -521,6 +530,7 @@ def cscv_pbo(returns: object, *, slice_count: int, max_combinations: int) -> Pbo
     if type(max_combinations) is not int or combination_count > max_combinations:
         raise ValueError("cscv_combination_budget_exceeded")
     matrix = _finite_matrix(returns, minimum_rows=4, minimum_columns=2)
+    roundoff = _return_roundoff(matrix, return_roundoff)
     if any(
         np.array_equal(matrix[:, left], matrix[:, right])
         for left in range(matrix.shape[1])
@@ -536,10 +546,10 @@ def cscv_pbo(returns: object, *, slice_count: int, max_combinations: int) -> Pbo
     all_slice_ids = set(range(slice_count))
     for in_sample_ids in combinations(range(slice_count), slice_count // 2):
         out_sample_ids = tuple(sorted(all_slice_ids.difference(in_sample_ids)))
-        in_sample = matrix[np.concatenate([slices[index] for index in in_sample_ids])]
-        out_sample = matrix[np.concatenate([slices[index] for index in out_sample_ids])]
-        in_scores = _candidate_sharpes(in_sample)
-        out_scores = _candidate_sharpes(out_sample)
+        in_indices = np.concatenate([slices[index] for index in in_sample_ids])
+        out_indices = np.concatenate([slices[index] for index in out_sample_ids])
+        in_scores = _candidate_sharpes(matrix[in_indices], roundoff[in_indices])
+        out_scores = _candidate_sharpes(matrix[out_indices], roundoff[out_indices])
         if in_scores is None or out_scores is None:
             return _undefined_pbo(
                 matrix, slice_count, combination_count, "candidate_sharpe_undefined"
@@ -868,9 +878,32 @@ def _loss_inputs(
     return aligned_candidate_matrix(combined, minimum_observations=3)
 
 
-def _candidate_sharpes(values: np.ndarray) -> np.ndarray | None:
+def _return_roundoff(values: np.ndarray, roundoff: object) -> np.ndarray:
+    errors = np.asarray(roundoff, dtype="float64")
+    if (
+        errors.shape not in ((), values.shape)
+        or not np.isfinite(errors).all()
+        or (errors < 0).any()
+    ):
+        raise ValueError("return_roundoff_invalid")
+    return np.broadcast_to(errors, values.shape)
+
+
+def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.ndarray:
+    """Sample risk, with zero only when all supplied error intervals overlap.
+
+    Direct observations have zero uncertainty. NAV-derived callers supply their
+    arithmetic resolution; that resolution is not an economic return threshold.
+    """
+    data = np.asarray(values, dtype="float64")
+    errors = _return_roundoff(data, roundoff)
+    unresolved = np.max(data - errors, axis=0) <= np.min(data + errors, axis=0)
+    return np.where(unresolved & (len(data) > 1), 0.0, np.std(data, axis=0, ddof=1))
+
+
+def _candidate_sharpes(values: np.ndarray, roundoff: object = 0.0) -> np.ndarray | None:
     means = np.mean(values, axis=0)
-    standard_deviations = np.std(values, axis=0, ddof=1)
+    standard_deviations = return_standard_deviation(values, roundoff=roundoff)
     if bool((standard_deviations == 0.0).any()):
         return None
     return means / standard_deviations

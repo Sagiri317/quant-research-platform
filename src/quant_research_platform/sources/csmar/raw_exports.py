@@ -159,10 +159,9 @@ class _IndexInfoContinuationSpool:
         self,
         *,
         record_limit_bytes: int,
-        scratch_parent: Path,
     ) -> None:
         scratch_parent = require_unaliased_path(
-            Path(scratch_parent), error="csmar_raw_scratch_parent_invalid"
+            Path(tempfile.gettempdir()), error="csmar_raw_scratch_parent_invalid"
         )
         require_free_disk_headroom(
             scratch_parent,
@@ -459,7 +458,6 @@ def _iter_index_info_rows_under_policy(
         closing_iterator(rows),
         _IndexInfoContinuationSpool(
             record_limit_bytes=record_limit_bytes,
-            scratch_parent=export_path.parent,
         ) as continuations,
     ):
         pending_row: list[str] | None = None

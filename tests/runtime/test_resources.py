@@ -698,3 +698,10 @@ def test_model_thread_rule_uses_capacity_without_rewriting_request(requested, ex
             )
             == expected
         )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX effective UID lock domain")
+def test_machine_lock_uses_effective_uid(monkeypatch):
+    monkeypatch.setattr(os, "getuid", lambda: 1001)
+    monkeypatch.setattr(os, "geteuid", lambda: 1002)
+    assert resources._machine_lock_path() == Path("/tmp/.qrp-data-scale-1002.lock")

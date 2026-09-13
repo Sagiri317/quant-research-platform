@@ -895,6 +895,8 @@ def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
         if len(valid) < 2:
             continue
         valid_values = values.loc[valid].to_numpy(dtype="float64", copy=False)
+        if np.ptp(valid_values) == 0.0:
+            continue
         centered = valid_values - float(valid_values.mean())
         scale = float(np.sqrt(np.mean(centered**2)))
         if scale == 0.0 or not np.isfinite(scale):

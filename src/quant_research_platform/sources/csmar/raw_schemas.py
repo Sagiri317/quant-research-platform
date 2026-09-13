@@ -428,7 +428,7 @@ class _BoundedCsvRecords:
         if self._spool is not None:
             return
         self._require_capacity(self._slow_control_span_bytes)
-        scratch_parent = self._path.parent
+        scratch_parent = Path(tempfile.gettempdir())
         scratch_parent = require_unaliased_path(
             Path(scratch_parent), error="csmar_raw_scratch_parent_invalid"
         )

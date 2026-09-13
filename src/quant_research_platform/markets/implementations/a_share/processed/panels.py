@@ -528,6 +528,12 @@ def _asof_industry(
         current.drop(columns="_industry_event_timestamp", inplace=True)
         output.append(current)
     result = pd.concat(output, ignore_index=True)
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        result[column] = result[column].astype("string")
     result["is_nonfinancial_industry"] = result["is_nonfinancial_industry"].astype(
         "boolean"
     )

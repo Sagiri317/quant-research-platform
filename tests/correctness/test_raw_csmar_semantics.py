@@ -1033,7 +1033,22 @@ def test_csmar_identity_rejects_requested_bad_schema_and_cleans_scratch(
     assert not tuple(tmp_path.parent.glob(".k-*/k.db"))
 
 
-def test_dirty_index_info_csv_audit_counts_and_semantics(tmp_path: Path) -> None:
+def test_dirty_index_info_csv_audit_counts_and_semantics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(raw_schemas.tempfile, "tempdir", str(scratch))
+    temporary_file = raw_schemas.tempfile.TemporaryFile
+    handles = []
+
+    def open_scratch(*args, **kwargs):
+        assert kwargs["dir"] == scratch
+        handle = temporary_file(*args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(raw_schemas.tempfile, "TemporaryFile", open_scratch)
     index_path = tmp_path / "index_info_dirty.csv"
     index_path.write_text(
         "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
@@ -1056,6 +1071,9 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(tmp_path: Path) -> None
         "index_info",
         overrides=interim._validated_column_overrides({}),
     )
+
+    assert len(handles) >= 2 and all(handle.closed for handle in handles)
+    assert not list(scratch.iterdir())
 
     assert audit == {
         "metadata_row_count": 1,

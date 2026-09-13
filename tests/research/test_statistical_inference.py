@@ -375,3 +375,52 @@ def test_matrix_cap_includes_conversion_and_live_temporaries(monkeypatch, kind):
                 else:
                     statistics._finite_matrix(values, minimum_rows=4, minimum_columns=2)
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("count", (40, 80, 100))
+def test_decimal_constant_cscv_is_undefined(count):
+    matrix = np.column_stack((np.full(count, 0.1), np.linspace(-0.1, 0.2, count)))
+    result = cscv_pbo(matrix, slice_count=10, max_combinations=252)
+    assert result.status == "UNDEFINED"
+    assert result.reason == "candidate_sharpe_undefined"
+
+
+def test_nav_roundoff_is_explicit_and_retains_resolvable_variation():
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _nav_return_roundoff,
+    )
+    from quant_research_platform.research.statistics import return_standard_deviation
+
+    nav = 1000 * 1.1 ** np.arange(81)
+    values = nav[1:] / nav[:-1] - 1.0
+    error = _nav_return_roundoff(nav[:-1], nav[1:], values)
+    assert np.ptp(values) > 0
+    assert return_standard_deviation(values) > 0
+    assert return_standard_deviation(values, roundoff=error) == 0
+    with pytest.raises(ValueError, match="sharpe_zero_variance"):
+        probabilistic_and_deflated_sharpe(
+            values,
+            benchmark_sharpe=0.0,
+            trial_sharpes=[0.1, 0.2],
+            return_roundoff=error,
+        )
+    varied = values + np.linspace(-1e-12, 1e-12, len(values))
+    assert return_standard_deviation(varied, roundoff=error) > 0
+    direct = np.array([0.1, np.nextafter(0.1, 1.0)] * 40)
+    assert return_standard_deviation(direct) > 0
+    matrix = np.column_stack((varied, np.linspace(-0.01, 0.02, len(values))))
+    # The full candidate varies, but a legal half-sample is constant to NAV resolution.
+    matrix[:40, 0] = values[:40]
+    errors = np.column_stack((error, np.zeros(len(values))))
+    result = cscv_pbo(
+        matrix, slice_count=10, max_combinations=252, return_roundoff=errors
+    )
+    assert (
+        result.status == "UNDEFINED" and result.reason == "candidate_sharpe_undefined"
+    )
+    result = probabilistic_and_deflated_sharpe(
+        np.linspace(-0.1, 0.2, 80), benchmark_sharpe=0.0, trial_sharpes=[0.1] * 10
+    )
+    assert (
+        result.dsr is None and result.dsr_reason == "trial_sharpe_dispersion_undefined"
+    )

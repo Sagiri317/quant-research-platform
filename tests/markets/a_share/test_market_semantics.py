@@ -438,7 +438,7 @@ def test_missing_listing_lifecycle_does_not_enter_the_panel() -> None:
     assert result.empty
 
 
-def test_industry_history_uses_effective_standard_and_set_hierarchy() -> None:
+def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) -> None:
     sessions = pd.DatetimeIndex(
         pd.to_datetime(["2022-12-30", "2023-01-03", "2023-01-04"])
     )
@@ -556,6 +556,28 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy() -> None:
         .isna()
         .all()
     )
+
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    spec = research_profile().processed.get("market_panel_1d")
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(
+        root, missing_transition.loc[:, list(spec.required_columns)], spec=spec
+    )
+    restored = read_dataset(root)
+    assert len(restored) == 3
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        assert str(restored[column].dtype) == "string"
+        assert restored[column].isna().sum() == 2
 
     abandoned = compute_market_panel(
         bars,

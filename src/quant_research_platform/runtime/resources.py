@@ -453,7 +453,7 @@ def _capture_runtime_resource_policy(
 def _machine_lock_path() -> Path:
     if os.name == "nt":
         return Path.home() / ".qrp-data-scale.lock"
-    return Path("/tmp") / f".qrp-data-scale-{os.getuid()}.lock"
+    return Path("/tmp") / f".qrp-data-scale-{os.geteuid()}.lock"
 
 
 def _cgroup_v2_directories() -> Iterator[Path]:

@@ -151,8 +151,10 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
             assert pd.isna(result.factor.iloc[-1])
 
 
+@pytest.mark.parametrize("constant", (False, True))
 def test_a_share_assembler_persists_only_eligible_sample_truth(
     tmp_path,
+    constant,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed = processed_catalog()
@@ -236,7 +238,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         if column in labels:
             continue
         if column == "forward_return_20d":
-            labels[column] = [0.10, 0.20, np.nan]
+            labels[column] = [0.10] * 3 if constant else [0.10, 0.20, np.nan]
         elif column.endswith("_available_at"):
             horizon = int(
                 column.removeprefix("forward_return_").removesuffix("d_available_at")
@@ -244,7 +246,8 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
             labels[column] = sessions[horizon + 1]
         else:
             labels[column] = 0.10
-    labels.loc[2, "forward_return_20d_available_at"] = pd.NaT
+    if not constant:
+        labels.loc[2, "forward_return_20d_available_at"] = pd.NaT
     write_dataset(
         layout.processed_data_root(
             label_spec.market_id, label_spec.kind, label_spec.data_id
@@ -273,8 +276,11 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
     assert set(("eligible", "model_target")).issubset(result.columns)
     assert {"scenario_universe", "can_enter", "can_exit"}.isdisjoint(result)
     assert result["eligible"].tolist() == [True, True, True]
-    assert result["model_target"].iloc[:2].tolist() == pytest.approx([-1.0, 1.0])
-    assert pd.isna(result.loc[2, "model_target"])
+    if constant:
+        assert result.model_target.isna().all()
+    else:
+        assert result["model_target"].iloc[:2].tolist() == pytest.approx([-1.0, 1.0])
+        assert pd.isna(result.loc[2, "model_target"])
 
 
 @pytest.mark.parametrize("variation", (0.0, 1e-8))
