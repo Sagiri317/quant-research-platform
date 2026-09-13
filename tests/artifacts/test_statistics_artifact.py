@@ -793,7 +793,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
     coverage = {"s1": (2100000000, 2800000000)}
     run = SimpleNamespace(
         source_identity=source_identity,
-        connection_coverage=lambda **kwargs: {
+        observation_coverage=lambda **kwargs: {
             "trade-connection-1": (2100000000, 2800000000)
         },
     )
@@ -987,7 +987,7 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
     coverage = {"s1": (first * 1000000, (last + 600) * 1000000)}
     run = SimpleNamespace(
         source_identity="d" * 64,
-        connection_coverage=lambda **kwargs: {
+        observation_coverage=lambda **kwargs: {
             "trade-connection-1": (first * 1000000, (last + 600) * 1000000)
         },
     )

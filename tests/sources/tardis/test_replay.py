@@ -6,7 +6,6 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.order_book import BookState
-from quant_research_platform.profiles.research import _open_crypto_source
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
@@ -15,6 +14,7 @@ from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.binance.replay import (
     ReconstructionStats,
     iter_reconstructed_depth,
+    open_market_source,
 )
 from quant_research_platform.sources.tardis.raw import import_day
 from tests.helpers.runtime_resources import capture_test_policy
@@ -78,7 +78,7 @@ def test_late_snapshot_has_no_early_book_or_coverage(tmp_path, bridge):
             byte_budget=1024**2,
             resource_policy=policy,
         )
-        with _open_crypto_source(published, resource_policy=policy) as source:
+        with open_market_source(published, resource_policy=policy) as source:
             stats = ReconstructionStats()
             books = []
             for event in iter_reconstructed_depth(
@@ -179,7 +179,7 @@ def test_vendor_clock_panel_persists_nullable_monotonic_and_native_identity(tmp_
             byte_budget=1024**2,
             resource_policy=policy,
         )
-        with _open_crypto_source(tmp_path / "published", policy) as source:
+        with open_market_source(tmp_path / "published", policy) as source:
             stats = ReconstructionStats()
             frames = iter_panel_frames(
                 iter_reconstructed_depth(
@@ -286,7 +286,7 @@ def test_execution_end_stops_inside_invalid_book_segment(tmp_path, monkeypatch):
                     yield row
 
         monkeypatch.setattr(tardis_replay, "iter_native_slice", counted)
-        with _open_crypto_source(tmp_path / "published", policy) as source:
+        with open_market_source(tmp_path / "published", policy) as source:
             events = _books_until(
                 source,
                 reconstruct_depth=partial(
