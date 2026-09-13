@@ -1581,7 +1581,6 @@ def test_artifact_root_rejects_exact_or_ancestor_alias(
             ["cmd", "/c", "mklink", "/J", str(alias), str(target)],
             check=False,
             capture_output=True,
-            text=True,
         )
         if created.returncode != 0:
             pytest.skip("junction_not_available")

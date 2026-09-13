@@ -345,7 +345,6 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
             ["cmd", "/c", "mklink", "/J", str(alias), str(external)],
             check=False,
             capture_output=True,
-            text=True,
         )
         if created.returncode != 0:
             pytest.skip("junction_not_available")

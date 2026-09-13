@@ -2248,7 +2248,6 @@ def test_inventory_discovery_rejects_junction_data_root(tmp_path: Path) -> None:
         ["cmd", "/c", "mklink", "/J", str(data_root), str(external)],
         check=False,
         capture_output=True,
-        text=True,
     )
     if created.returncode != 0:
         pytest.skip("junction_not_available")
@@ -2274,7 +2273,6 @@ def test_inventory_discovery_does_not_descend_nested_junction(
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
         capture_output=True,
-        text=True,
     )
     if created.returncode != 0:
         pytest.skip("junction_not_available")

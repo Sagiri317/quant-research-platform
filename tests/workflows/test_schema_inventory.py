@@ -187,7 +187,6 @@ def test_schema_inventory_does_not_descend_nested_junction(tmp_path: Path) -> No
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
         capture_output=True,
-        text=True,
     )
     if created.returncode != 0:
         pytest.skip("junction_not_available")
@@ -206,7 +205,6 @@ def test_schema_inventory_rejects_junction_project_root(tmp_path: Path) -> None:
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(root), str(external)],
         capture_output=True,
-        text=True,
     )
     if created.returncode != 0:
         pytest.skip("junction_not_available")
