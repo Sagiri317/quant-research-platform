@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import cache, partial
 from types import MappingProxyType
@@ -334,7 +335,6 @@ def _crypto_profile() -> ResearchProfile:
         build_hft_research_dataset_catalog,
     )
     from quant_research_platform.sources.binance.funding import (
-        funding_source_identity,
         read_funding_observations,
     )
     from quant_research_platform.sources.binance.ids import (
@@ -345,8 +345,6 @@ def _crypto_profile() -> ResearchProfile:
         ReconstructionStats,
         iter_agg_trades,
         iter_reconstructed_depth,
-        open_recorder_run,
-        recorder_source_identity,
     )
 
     processed = crypto_catalog.hft_processed_catalog()
@@ -394,7 +392,7 @@ def _crypto_profile() -> ResearchProfile:
                     produce_maker_calibration,
                     symbol="BTCUSDT",
                     market_type=FUTURES_MARKET_TYPE,
-                    open_run=open_recorder_run,
+                    open_run=_open_crypto_source,
                     reconstruct_depth=partial(
                         iter_reconstructed_depth, market_type=FUTURES_MARKET_TYPE
                     ),
@@ -411,7 +409,7 @@ def _crypto_profile() -> ResearchProfile:
                         produce_maker_ledger,
                         symbol=symbols[candidate.asset_id],
                         market_type=FUTURES_MARKET_TYPE,
-                        open_run=open_recorder_run,
+                        open_run=_open_crypto_source,
                         reconstruct_depth=partial(
                             iter_reconstructed_depth, market_type=FUTURES_MARKET_TYPE
                         ),
@@ -423,7 +421,7 @@ def _crypto_profile() -> ResearchProfile:
                         read_statistics_artifact=read_statistics_artifact,
                     ),
                     source_identity=partial(
-                        funding_source_identity, symbol=symbols[candidate.asset_id]
+                        _crypto_funding_identity, symbol=symbols[candidate.asset_id]
                     ),
                 )
                 for candidate in crypto_hft.maker_candidates()
@@ -434,7 +432,7 @@ def _crypto_profile() -> ResearchProfile:
                     partial(
                         produce_taker_ledger,
                         symbol=symbols[candidate.asset_id],
-                        open_run=open_recorder_run,
+                        open_run=_open_crypto_source,
                         reconstruct_depth=partial(
                             iter_reconstructed_depth, market_type=FUTURES_MARKET_TYPE
                         ),
@@ -442,7 +440,7 @@ def _crypto_profile() -> ResearchProfile:
                         read_prediction_bundle=read_prediction_output_bundle,
                     ),
                     source_identity=partial(
-                        funding_source_identity, symbol=symbols[candidate.asset_id]
+                        _crypto_funding_identity, symbol=symbols[candidate.asset_id]
                     ),
                 )
                 for candidate in crypto_hft.taker_candidates()
@@ -468,12 +466,12 @@ def _crypto_profile() -> ResearchProfile:
                     ProducerKind.PROCESSED,
                     partial(
                         crypto_producer.produce_hft_processed_data,
-                        open_run=open_recorder_run,
+                        open_run=_open_crypto_source,
                         reconstruct_depth=iter_reconstructed_depth,
                         read_trades=iter_agg_trades,
                         make_stats=ReconstructionStats,
                     ),
-                    source_identity=recorder_source_identity
+                    source_identity=_crypto_source_identity
                     if spec.data_id == HFT_PANEL_DATA_ID
                     else None,
                 )
@@ -488,3 +486,41 @@ def _crypto_profile() -> ResearchProfile:
         },
         schema_inventory_important_columns=("close", "eligible"),
     )
+
+
+@contextmanager
+def _open_crypto_source(root, resource_policy=None):
+    """Select one immutable native format; never fall back after validation fails."""
+    from quant_research_platform.sources.binance.replay import open_recorder_run
+    from quant_research_platform.sources.tardis.replay import open_tardis_day
+    from quant_research_platform.storage.identity import require_unaliased_path
+
+    root = require_unaliased_path(root, error="crypto_source_path_invalid")
+    official = (root / "run.json").is_file()
+    historical = (root / "manifest.json").is_file()
+    if official == historical:
+        if official:
+            raise ValueError("crypto_source_identity_ambiguous")
+        raise FileNotFoundError("crypto_source_manifest_missing")
+    opener = open_recorder_run if official else open_tardis_day
+    with opener(root, resource_policy) as source:
+        yield source
+
+
+def _crypto_source_identity(root, _target_id):
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+
+    try:
+        with _open_crypto_source(root) as source:
+            return canonical_json_hash(source.source_identity)
+    except FileNotFoundError:
+        return None
+
+
+def _crypto_funding_identity(root, target_id, *, symbol):
+    from quant_research_platform.sources.binance.funding import funding_source_identity
+
+    with _open_crypto_source(root) as source:
+        return funding_source_identity(
+            source.funding_root(symbol), target_id, symbol=symbol
+        )

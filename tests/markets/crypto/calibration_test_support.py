@@ -33,10 +33,10 @@ def calibration_inputs(paths, errors):
                 "decision_at": start,
                 "forecast_error": error,
                 "book_segment_id": books[0].segment_id,
-                "trade_connection_id": "trade-connection-1",
+                "trade_observation_id": "trade-connection-1",
                 "initial_book_event_id": initial,
-                "initial_bid_tick": books[0].bids[0][0],
-                "initial_ask_tick": books[0].asks[0][0],
+                "initial_bid_index": books[0].bids[0][0],
+                "initial_ask_index": books[0].asks[0][0],
                 "event_start": initial + 1,
                 "event_end": event_id,
             }
@@ -55,17 +55,17 @@ def calibration_inputs(paths, errors):
                 event_at=first["event_at"],
                 event_id=event_id,
                 segment_id=first["context_id"],
-                connection_id=first["context_id"],
-                price_tick=first["price_tick"],
+                observation_id=first["context_id"],
+                price_index=first["price_index"],
                 visible_quantity=first["quantity"],
                 buyer_is_maker=first["side"] == "buy",
                 bids=tuple(
-                    (row["price_tick"], row["quantity"])
+                    (row["price_index"], row["quantity"])
                     for row in rows
                     if row["side"] == "buy"
                 ),
                 asks=tuple(
-                    (row["price_tick"], row["quantity"])
+                    (row["price_index"], row["quantity"])
                     for row in rows
                     if row["side"] == "sell"
                 ),
@@ -76,12 +76,12 @@ def calibration_inputs(paths, errors):
 
 def maker_event_rows(event_id, event, *, offset=0):
     if isinstance(event, TradeEvent):
-        kind, context = "trade", event.connection_id
+        kind, context = "trade", event.observation_id
         levels = (
             (
                 "buy" if event.buyer_is_maker else "sell",
                 0,
-                event.price_tick,
+                event.price_index,
                 event.visible_quantity,
             ),
         )
@@ -103,6 +103,6 @@ def maker_event_rows(event_id, event, *, offset=0):
             "context_id": context,
             "side": side,
             "level_index": level,
-            "price_tick": tick,
+            "price_index": tick,
             "quantity": quantity,
         }

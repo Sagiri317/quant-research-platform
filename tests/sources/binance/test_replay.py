@@ -21,8 +21,8 @@ from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
     TradeEvent,
-    price_to_tick,
-    tick_to_price,
+    index_to_price,
+    price_to_index,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -70,7 +70,7 @@ def test_connection_coverage_cleanup_preserves_active_primary() -> None:
         def cleanup(self) -> None:
             raise OSError("scratch_cleanup")
 
-    index = object.__new__(replay._ConnectionCoverageIndex)
+    index = object.__new__(replay.ObservationCoverageIndex)
     from contextlib import ExitStack
 
     index._coverage_readers = ExitStack()
@@ -104,7 +104,7 @@ def test_connection_coverage_gzip_constructor_failure_closes_raw(
         raise primary
 
     monkeypatch.setattr(replay.gzip, "GzipFile", fail_gzip)
-    index = object.__new__(replay._ConnectionCoverageIndex)
+    index = object.__new__(replay.ObservationCoverageIndex)
     index._path = FakePath()
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     try:
@@ -157,7 +157,7 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
         "_verify_raw_file_handle",
         lambda *_args, **_kwargs: None,
     )
-    index = object.__new__(replay._ConnectionCoverageIndex)
+    index = object.__new__(replay.ObservationCoverageIndex)
     index._path = FakePath(raw_handle)
     index.identity = object()
     index._descriptor = {
@@ -196,13 +196,13 @@ def test_recorder_run_close_failure_preserves_body_primary(
         ],
     )
 
-    real_close = replay._ConnectionCoverageIndex.close
+    real_close = replay.ObservationCoverageIndex.close
 
     def fail_close(index: object) -> None:
         real_close(index)
         raise OSError("coverage-close-secondary")
 
-    monkeypatch.setattr(replay._ConnectionCoverageIndex, "close", fail_close)
+    monkeypatch.setattr(replay.ObservationCoverageIndex, "close", fail_close)
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
     with runtime_resource_policy_scope(policy):
@@ -867,11 +867,12 @@ def test_connection_coverage_rejects_disk_before_scratch(
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(OSError, match="coverage_disk_headroom"):
-            replay._ConnectionCoverageIndex(
+            replay.ObservationCoverageIndex(
                 root,
                 manifest["capture"]["connection_intervals"],
                 markets={FUTURES_MARKET_TYPE},
                 resource_policy=policy,
+                decode_interval=replay._decode_recorder_interval,
             )
 
 
@@ -917,11 +918,12 @@ def test_connection_coverage_rechecks_disk_and_removes_scratch_on_failure(
     try:
         with runtime_resource_policy_scope(policy):
             with pytest.raises(OSError, match="coverage_disk_headroom"):
-                index = replay._ConnectionCoverageIndex(
+                index = replay.ObservationCoverageIndex(
                     root,
                     manifest["capture"]["connection_intervals"],
                     markets={FUTURES_MARKET_TYPE},
                     resource_policy=policy,
+                    decode_interval=replay._decode_recorder_interval,
                 )
     finally:
         if index is not None:
@@ -1051,7 +1053,7 @@ def test_agg_trades_normalize_all_clocks_and_visible_quantity(tmp_path: Path) ->
     assert trade.observed_time_ms == 1787788800123
     assert trade.quantity == 2.0
     assert trade.visible_quantity == 1.0
-    assert trade.price_tick == 1000
+    assert trade.price_index == 1000
 
 
 def _futures_run(root: Path, depth_rows: list[dict[str, object]]) -> None:
@@ -1246,13 +1248,13 @@ def test_futures_bootstrap_keeps_all_clocks_and_exact_tick_identity(
         assert state.event_time_ms == 12
         assert state.receive_time == "2026-08-27T00:00:00.123456Z"
         assert state.receive_monotonic_ns == 10
-        assert state.capture_seq == 2
+        assert state.source_sequence == 2
         assert state.best_bid == (1000, 2.0)
         _close_owned_events(events)
-    assert price_to_tick("100.0", "0.1", error="bad") == 1000
-    assert tick_to_price(1000, "0.1") == 100.0
+    assert price_to_index("100.0", "0.1", error="bad") == 1000
+    assert index_to_price(1000, "0.1") == 100.0
     with pytest.raises(ValueError, match="bad"):
-        price_to_tick("100.05", "0.1", error="bad")
+        price_to_index("100.05", "0.1", error="bad")
 
 
 @pytest.mark.parametrize("precision", (1, 7, 28))
@@ -1262,24 +1264,24 @@ def test_tick_conversion_is_exact_independently_of_decimal_context(
     price = "12345678901234567890.123456789"
     with localcontext() as context:
         context.prec = precision
-        ticks = price_to_tick(price, "0.000000001", error="off_tick")
+        ticks = price_to_index(price, "0.000000001", error="off_tick")
         assert ticks == 12345678901234567890123456789
-        assert tick_to_price(ticks, "0.000000001") == float(Decimal(price))
-        assert tick_to_price(-ticks, "0.000000001") == -float(Decimal(price))
-        assert tick_to_price(0, "0.000000001") == 0.0
-        assert price_to_tick("5e-324", "5e-324", error="off_tick") == 1
-        assert tick_to_price(1, "5e-324") == 5e-324
+        assert index_to_price(ticks, "0.000000001") == float(Decimal(price))
+        assert index_to_price(-ticks, "0.000000001") == -float(Decimal(price))
+        assert index_to_price(0, "0.000000001") == 0.0
+        assert price_to_index("5e-324", "5e-324", error="off_tick") == 1
+        assert index_to_price(1, "5e-324") == 5e-324
         with pytest.raises(ValueError, match="off_tick"):
             replay._levels(
                 [["100.00000000000000000000000000001", "1"]],
-                tick_size="0.1",
+                price_unit="0.1",
                 error="off_tick",
                 allow_zero=False,
                 max_levels=1,
             )
         assert replay._levels(
             [[price, "1"]],
-            tick_size="0.000000001",
+            price_unit="0.000000001",
             error="off_tick",
             allow_zero=False,
             max_levels=1,
@@ -1297,16 +1299,16 @@ def test_extreme_decimal_exponents_reject_before_integer_expansion(
         lambda *_args: pytest.fail("integer expansion before float-range admission"),
     )
     with pytest.raises(
-        ValueError, match="order_book_tick_size_invalid" if is_tick else "off_tick"
+        ValueError, match="order_book_price_unit_invalid" if is_tick else "off_tick"
     ):
-        price_to_tick(
+        price_to_index(
             "1" if is_tick else value, value if is_tick else "1", error="off_tick"
         )
 
 
 def test_tick_price_output_rejects_unrepresentable_economic_price() -> None:
-    with pytest.raises(ValueError, match="order_book_price_tick_invalid"):
-        tick_to_price(10**1000, "1")
+    with pytest.raises(ValueError, match="order_book_price_index_invalid"):
+        index_to_price(10**1000, "1")
 
 
 def test_snapshot_frontier_is_not_promoted_to_executable_depth(tmp_path: Path) -> None:
@@ -2008,7 +2010,7 @@ def test_connection_queries_do_not_materialize_long_history(tmp_path):
         with open_recorder_run(root, policy) as run:
             tracemalloc.start()
             try:
-                coverage = run.connection_coverage(
+                coverage = run.observation_coverage(
                     market_type=FUTURES_MARKET_TYPE,
                     data_kind="agg_trades",
                     symbol="BTCUSDT",
@@ -2026,7 +2028,7 @@ def test_connection_queries_do_not_materialize_long_history(tmp_path):
                 ):
                     coverage.covering(first - 1, first)
 
-                sweep = run.connection_coverage(
+                sweep = run.observation_coverage(
                     market_type=FUTURES_MARKET_TYPE,
                     data_kind="agg_trades",
                     symbol="BTCUSDT",
@@ -2048,4 +2050,67 @@ def test_connection_queries_do_not_materialize_long_history(tmp_path):
                 assert tracemalloc.get_traced_memory()[1] < 256 * 1024
             finally:
                 tracemalloc.stop()
+        assert policy.used_memory_bytes == 0
+
+
+def test_live_depth_advance_preserves_unknown_future_coverage_and_validity():
+    stats = replay.ReconstructionStats()
+    snapshot = dict(
+        _raw(
+            1,
+            {"lastUpdateId": 10, "bids": [["100", "1"]], "asks": [["101", "1"]]},
+            segment_id="segment-1",
+        ),
+        market_type=FUTURES_MARKET_TYPE,
+        tick_size="1",
+    )
+    update = dict(
+        _raw(
+            2,
+            {"U": 10, "u": 10, "pu": 9, "E": 1, "T": 1, "b": [["100", "2"]], "a": []},
+            segment_id="segment-1",
+        ),
+        market_type=FUTURES_MARKET_TYPE,
+        tick_size="1",
+    )
+    with runtime_resource_policy_scope() as policy:
+        with policy.lease("test.live.coverage", 0) as coverage:
+            book = replay.DepthReconstructor(
+                FUTURES_MARKET_TYPE,
+                price_unit="1",
+                snapshot_limit=1,
+                required_levels=1,
+                max_book_levels=4,
+                connection_close_ns=None,
+                resource_policy=policy,
+                stats=stats,
+                coverage_lease=coverage,
+            )
+            try:
+                book.bootstrap(replay.normalize_recorder_record(snapshot))
+                assert book.advance(replay.normalize_recorder_record(update)) is True
+                assert book.valid
+                assert stats.coverage_segments == {}
+                assert stats.emitted_states == 0
+                depleted = dict(
+                    update,
+                    capture_seq=3,
+                    payload={
+                        "U": 11,
+                        "u": 11,
+                        "pu": 10,
+                        "E": 2,
+                        "T": 2,
+                        "b": [["100", "0"]],
+                        "a": [],
+                    },
+                )
+                boundary = book.advance(replay.normalize_recorder_record(depleted))
+                assert isinstance(boundary, BookBoundary)
+                assert boundary.reason == "one_sided_book"
+                assert boundary.source_sequence == 3
+                assert not book.valid
+                assert stats.coverage_segments == {}
+            finally:
+                book.close()
         assert policy.used_memory_bytes == 0

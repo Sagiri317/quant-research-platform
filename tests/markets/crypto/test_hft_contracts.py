@@ -48,21 +48,21 @@ def _state(
     *,
     event_time_ms: int = 0,
     transaction_time_ms: int = 0,
-    bid_tick: int = 995,
-    ask_tick: int = 1005,
+    bid_index: int = 995,
+    ask_index: int = 1005,
     bid_qty: float = 2.0,
     ask_qty: float = 1.0,
     segment_id: str = "book-1",
-    connection_id: str = "book-connection-1",
-    capture_seq: int | None = None,
+    observation_id: str = "book-connection-1",
+    source_sequence: int | None = None,
     receive_monotonic_ns: int | None = None,
 ) -> BookState:
-    sequence = observed_time_ms + 1 if capture_seq is None else capture_seq
+    sequence = observed_time_ms + 1 if source_sequence is None else source_sequence
     monotonic = (
         observed_time_ms + 1 if receive_monotonic_ns is None else receive_monotonic_ns
     )
     return BookState(
-        capture_seq=sequence,
+        source_sequence=sequence,
         event_time_ms=event_time_ms,
         transaction_time_ms=transaction_time_ms,
         observed_time_ns=observed_time_ms * 1_000_000,
@@ -70,11 +70,11 @@ def _state(
         receive_monotonic_ns=monotonic,
         update_id=sequence,
         segment_id=segment_id,
-        connection_id=connection_id,
+        observation_id=observation_id,
         market_type=FUTURES_MARKET_TYPE,
-        tick_size="0.1",
-        bids=((bid_tick, bid_qty), (bid_tick - 5, 3.0)),
-        asks=((ask_tick, ask_qty), (ask_tick + 5, 2.0)),
+        price_unit="0.1",
+        bids=((bid_index, bid_qty), (bid_index - 5, 3.0)),
+        asks=((ask_index, ask_qty), (ask_index + 5, 2.0)),
     )
 
 
@@ -82,17 +82,17 @@ def _boundary(
     observed_time_ms: int,
     *,
     segment_id: str = "book-1",
-    connection_id: str = "book-connection-1",
+    observation_id: str = "book-connection-1",
 ) -> BookBoundary:
     return BookBoundary(
-        capture_seq=observed_time_ms + 1,
+        source_sequence=observed_time_ms + 1,
         event_time_ms=observed_time_ms,
         transaction_time_ms=observed_time_ms,
         observed_time_ns=observed_time_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=observed_time_ms + 1,
         segment_id=segment_id,
-        connection_id=connection_id,
+        observation_id=observation_id,
         market_type=FUTURES_MARKET_TYPE,
         reason="reconnect_boundary",
     )
@@ -103,26 +103,26 @@ def _trade(
     *,
     quantity: float = 1.0,
     visible_quantity: float | None = None,
-    price_tick: int = 995,
-    connection_id: str = "trade-connection-1",
-    capture_seq: int | None = None,
+    price_index: int = 995,
+    observation_id: str = "trade-connection-1",
+    source_sequence: int | None = None,
     receive_monotonic_ns: int | None = None,
 ) -> TradeEvent:
-    sequence = observed_time_ms + 10 if capture_seq is None else capture_seq
+    sequence = observed_time_ms + 10 if source_sequence is None else source_sequence
     monotonic = (
         observed_time_ms + 10 if receive_monotonic_ns is None else receive_monotonic_ns
     )
     return TradeEvent(
-        capture_seq=sequence,
+        source_sequence=sequence,
         event_time_ms=observed_time_ms,
         transaction_time_ms=observed_time_ms,
         observed_time_ns=observed_time_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=monotonic,
-        connection_id=connection_id,
+        observation_id=observation_id,
         market_type=FUTURES_MARKET_TYPE,
-        tick_size="0.1",
-        price_tick=price_tick,
+        price_unit="0.1",
+        price_index=price_index,
         quantity=quantity,
         visible_quantity=quantity if visible_quantity is None else visible_quantity,
         buyer_is_maker=True,
@@ -154,28 +154,28 @@ def _taker_config(*, latency_ms: int = 0) -> TakerConfig:
 def _state_at_ns(
     observed_time_ns: int,
     *,
-    capture_seq: int,
-    bid_tick: int = 995,
-    ask_tick: int = 1005,
+    source_sequence: int,
+    bid_index: int = 995,
+    ask_index: int = 1005,
     bid_qty: float = 2.0,
     ask_qty: float = 1.0,
     segment_id: str = "book-1",
 ) -> BookState:
     observed_time_ms = observed_time_ns // 1_000_000
     return BookState(
-        capture_seq=capture_seq,
+        source_sequence=source_sequence,
         event_time_ms=observed_time_ms,
         transaction_time_ms=observed_time_ms,
         observed_time_ns=observed_time_ns,
         receive_time="2026-08-27T00:00:00.000000Z",
-        receive_monotonic_ns=capture_seq,
-        update_id=capture_seq,
+        receive_monotonic_ns=source_sequence,
+        update_id=source_sequence,
         segment_id=segment_id,
-        connection_id=f"connection-{segment_id}",
+        observation_id=f"connection-{segment_id}",
         market_type=FUTURES_MARKET_TYPE,
-        tick_size="0.1",
-        bids=((bid_tick, bid_qty), (bid_tick - 5, 3.0)),
-        asks=((ask_tick, ask_qty), (ask_tick + 5, 2.0)),
+        price_unit="0.1",
+        bids=((bid_index, bid_qty), (bid_index - 5, 3.0)),
+        asks=((ask_index, ask_qty), (ask_index + 5, 2.0)),
     )
 
 
@@ -213,8 +213,8 @@ def test_unobserved_state_is_hidden_from_panel_and_taker() -> None:
 
 
 def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
-    initial = _state_at_ns(0, capture_seq=1)
-    just_after_boundary = _state_at_ns(100_000_001, capture_seq=2)
+    initial = _state_at_ns(0, source_sequence=1)
+    just_after_boundary = _state_at_ns(100_000_001, source_sequence=2)
     coverage = {"book-1": (0, 200_000_000)}
     trade_coverage = {"trade-connection-1": (0, 200_000_000)}
 
@@ -228,7 +228,7 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
             trade_coverage=trade_coverage,
         )
     )
-    assert rows[0]["book_capture_seq"] == initial.capture_seq
+    assert rows[0]["book_source_sequence"] == initial.source_sequence
 
     fills: list[dict[str, object]] = []
     diagnostics = simulate_taker(
@@ -262,7 +262,7 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
 
 
 def test_panel_coverage_uses_exact_half_open_nanoseconds() -> None:
-    state = _state_at_ns(100_000_000, capture_seq=1)
+    state = _state_at_ns(100_000_000, source_sequence=1)
     common = {
         "book_events": [state],
         "trades": [],
@@ -321,7 +321,7 @@ def test_depth_reconnect_does_not_make_first_partial_interval_valid() -> None:
             [
                 _state(0),
                 _boundary(150),
-                _state(200, segment_id="book-2", connection_id="book-connection-2"),
+                _state(200, segment_id="book-2", observation_id="book-connection-2"),
             ],
             [],
             start_ms=100,
@@ -337,7 +337,7 @@ def test_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
     rows = list(
         _panel_rows(
             [_state(0)],
-            [_trade(200, connection_id="trade-connection-2")],
+            [_trade(200, observation_id="trade-connection-2")],
             start_ms=100,
             end_ms=300,
             book_coverage={"book-1": _coverage(0, 400)},
@@ -352,31 +352,31 @@ def test_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
 
 def test_maker_uses_local_observation_order_for_same_time_events() -> None:
     book_first_fills, trade_first_fills = [], []
-    initial = _state(0, capture_seq=1, receive_monotonic_ns=1)
+    initial = _state(0, source_sequence=1, receive_monotonic_ns=1)
     changed = _state(
         100,
-        bid_tick=994,
-        ask_tick=1008,
-        capture_seq=2,
+        bid_index=994,
+        ask_index=1008,
+        source_sequence=2,
         receive_monotonic_ns=20,
     )
     book_first_trade = _trade(
         100,
         quantity=3.0,
-        capture_seq=3,
+        source_sequence=3,
         receive_monotonic_ns=30,
     )
     trade_first_book = _state(
         100,
-        bid_tick=994,
-        ask_tick=1008,
-        capture_seq=3,
+        bid_index=994,
+        ask_index=1008,
+        source_sequence=3,
         receive_monotonic_ns=30,
     )
     trade_first = _trade(
         100,
         quantity=3.0,
-        capture_seq=2,
+        source_sequence=2,
         receive_monotonic_ns=20,
     )
 
@@ -446,7 +446,7 @@ def test_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> None
 def test_zero_visible_trade_through_cannot_fill_a_maker_order() -> None:
     result = simulate_maker(
         [_state(0)],
-        [_trade(50, quantity=1.0, visible_quantity=0.0, price_tick=994)],
+        [_trade(50, quantity=1.0, visible_quantity=0.0, price_index=994)],
         [_quote(0)],
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
@@ -462,8 +462,8 @@ def test_zero_visible_trade_through_does_not_advance_queue() -> None:
     result = simulate_maker(
         [_state(0)],
         [
-            _trade(50, quantity=1.0, visible_quantity=0.0, price_tick=994),
-            _trade(100, quantity=1.0, visible_quantity=1.0, price_tick=995),
+            _trade(50, quantity=1.0, visible_quantity=0.0, price_index=994),
+            _trade(100, quantity=1.0, visible_quantity=1.0, price_index=995),
         ],
         [_quote(0)],
         config=_maker_config(),
@@ -480,7 +480,7 @@ def test_trade_through_consumes_full_remaining_order_not_visible_quantity() -> N
     fills: list[dict[str, object]] = []
     result = simulate_maker(
         [_state(0)],
-        [_trade(50, quantity=1.0, visible_quantity=0.1, price_tick=994)],
+        [_trade(50, quantity=1.0, visible_quantity=0.1, price_index=994)],
         [_quote(0)],
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200_000_000)},
@@ -497,7 +497,7 @@ def test_trade_through_consumes_full_remaining_order_not_visible_quantity() -> N
 def test_maker_max_abs_position_updates_on_terminal_fill() -> None:
     result = simulate_maker(
         [_state(0)],
-        [_trade(50, quantity=1.0, visible_quantity=1.0, price_tick=994)],
+        [_trade(50, quantity=1.0, visible_quantity=1.0, price_index=994)],
         [_quote(0)],
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200_000_000)},
@@ -514,8 +514,8 @@ def test_maker_order_expires_at_first_missing_trade_coverage_boundary() -> None:
     result = simulate_maker(
         [_state(0)],
         [
-            _trade(50, quantity=1.0, visible_quantity=1.0, price_tick=995),
-            _trade(100, quantity=1.0, visible_quantity=1.0, price_tick=994),
+            _trade(50, quantity=1.0, visible_quantity=1.0, price_index=995),
+            _trade(100, quantity=1.0, visible_quantity=1.0, price_index=994),
         ],
         [_quote(0)],
         config=_maker_config(),
@@ -552,7 +552,11 @@ def test_maker_requires_matching_book_and_trade_schedule_identity() -> None:
     result = simulate_maker(
         [_state(0)],
         [],
-        [_quote(0, book_segment_id="book-2", trade_connection_id="trade-connection-2")],
+        [
+            _quote(
+                0, book_segment_id="book-2", trade_observation_id="trade-connection-2"
+            )
+        ],
         config=_maker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
         trade_coverage={"trade-connection-1": _coverage(0, 200)},
@@ -570,7 +574,7 @@ def test_book_state_lease_and_taker_timing_and_terminal_mark() -> None:
         [
             _state(0),
             _state(5, event_time_ms=1, transaction_time_ms=1),
-            _state(20, bid_tick=1005, ask_tick=1015),
+            _state(20, bid_index=1005, ask_index=1015),
         ],
         [{"timestamp_ms": 0, "prediction": 0.1}],
         funding_forecasts=KNOWN_NO_FUNDING,
@@ -592,7 +596,7 @@ def test_book_state_lease_and_taker_timing_and_terminal_mark() -> None:
     assert equities[0]["timestamp_ms"] == 0
 
     terminal = simulate_taker(
-        [_state(0), _state(100, bid_tick=1005, ask_tick=1015)],
+        [_state(0), _state(100, bid_index=1005, ask_index=1015)],
         [{"timestamp_ms": 0, "prediction": 0.1}],
         funding_forecasts=KNOWN_NO_FUNDING,
         prediction_horizon_ms=500,
@@ -660,3 +664,40 @@ def test_hft_grid_is_the_only_model_and_label_step_owner() -> None:
         ignore_index=True,
     ).to_dict("records")
     assert labels[0][f"future_mid_return_{HFT_GRID_MS}ms"] == 0.0
+
+
+def test_source_order_keeps_real_monotonic_ties_and_archive_line_order():
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.order_book import observation_order_key
+
+    earlier = _state(100, source_sequence=9, receive_monotonic_ns=1)
+    later = _state(100, source_sequence=2, receive_monotonic_ns=2)
+    assert observation_order_key(earlier) < observation_order_key(later)
+    archive_first = replace(later, receive_monotonic_ns=None)
+    archive_last = replace(earlier, receive_monotonic_ns=None)
+    assert observation_order_key(archive_first) < observation_order_key(archive_last)
+    assert archive_first.receive_monotonic_ns is None
+
+
+@pytest.mark.parametrize(
+    ("value", "places"),
+    [
+        ("100.100000", 1),
+        ("1e3", 0),
+        ("1e-9", 9),
+        ("1000000000000000000000000000.000000001", 9),
+        ("123.123456789012345678901234567890000", 29),
+    ],
+)
+def test_price_unit_precision_never_rounds_through_decimal_context(value, places):
+    from quant_research_platform.contracts.order_book import price_decimal_places
+
+    assert price_decimal_places(value) == places
+
+
+def test_price_coordinates_preserve_exact_integers_before_storage_admission():
+    from quant_research_platform.contracts.order_book import price_to_index
+
+    assert price_to_index(str(2**63 - 1), "1", error="price_invalid") == 2**63 - 1
+    assert price_to_index(str(2**63), "1", error="price_invalid") == 2**63

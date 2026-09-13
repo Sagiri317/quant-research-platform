@@ -61,20 +61,20 @@ def test_panel_uses_exact_validated_receipt_nanoseconds() -> None:
         ),
         ignore_index=True,
     )
-    assert pd.Timestamp(frame.local_receive_time.iloc[0]).value == observed
+    assert pd.Timestamp(frame.observed_utc.iloc[0]).value == observed
 
 
 def _state(
     timestamp_ms: int,
     *,
-    bid_tick: int = 995,
-    ask_tick: int = 1005,
+    bid_index: int = 995,
+    ask_index: int = 1005,
     bid_qty: float = 2.0,
     ask_qty: float = 1.0,
     segment_id: str = "s1",
 ) -> BookState:
     return BookState(
-        capture_seq=timestamp_ms + 1,
+        source_sequence=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
@@ -82,24 +82,24 @@ def _state(
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
         segment_id=segment_id,
-        connection_id=f"connection-{segment_id}",
+        observation_id=f"connection-{segment_id}",
         market_type=FUTURES_MARKET_TYPE,
-        tick_size="0.1",
-        bids=((bid_tick, bid_qty), (bid_tick - 10, 3.0)),
-        asks=((ask_tick, ask_qty), (ask_tick + 10, 2.0)),
+        price_unit="0.1",
+        bids=((bid_index, bid_qty), (bid_index - 10, 3.0)),
+        asks=((ask_index, ask_qty), (ask_index + 10, 2.0)),
     )
 
 
 def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
     return BookBoundary(
-        capture_seq=timestamp_ms + 1,
+        source_sequence=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
         receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
-        connection_id=f"connection-{segment_id}",
+        observation_id=f"connection-{segment_id}",
         market_type=FUTURES_MARKET_TYPE,
         reason="sequence_gap",
     )
@@ -107,16 +107,16 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
 
 def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEvent:
     return TradeEvent(
-        capture_seq=timestamp_ms + 10,
+        source_sequence=timestamp_ms + 10,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
         receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
         receive_monotonic_ns=timestamp_ms + 10,
-        connection_id="trade-connection-1",
+        observation_id="trade-connection-1",
         market_type=FUTURES_MARKET_TYPE,
-        tick_size="0.1",
-        price_tick=1005,
+        price_unit="0.1",
+        price_index=1005,
         quantity=quantity,
         visible_quantity=quantity,
         buyer_is_maker=maker_buyer,
@@ -254,7 +254,7 @@ def test_panel_excludes_pre_interval_trades_and_keeps_stream_clocks_separate() -
     assert row["book_observed_time_ms"] == 0
     assert row["exchange_event_time_ms"] == 1
     assert row["transaction_time_ms"] == 0
-    assert row["book_capture_seq"] == 1
+    assert row["book_source_sequence"] == 1
 
 
 def test_panel_ofi_excludes_book_events_before_interval_lower_bound() -> None:
@@ -297,8 +297,8 @@ def test_factor_rows_are_hand_calculated_from_panel_sufficient_statistics() -> N
         _panel_rows(
             [
                 _state(0),
-                _state(100, bid_tick=1000, ask_tick=1010, bid_qty=3.0, ask_qty=1.0),
-                _state(200, bid_tick=1005, ask_tick=1015, bid_qty=4.0, ask_qty=2.0),
+                _state(100, bid_index=1000, ask_index=1010, bid_qty=3.0, ask_qty=1.0),
+                _state(200, bid_index=1005, ask_index=1015, bid_qty=4.0, ask_qty=2.0),
             ],
             [_trade(100, 2.0, maker_buyer=False)],
             start_ms=0,
@@ -441,9 +441,9 @@ def test_factor_and_label_frames_match_across_chunk_boundaries() -> None:
     pd.testing.assert_frame_equal(label_chunked, label_full, check_exact=True)
 
 
-@pytest.mark.parametrize("tick_size,ticks", [("0.01", 247900), ("0.1", 600000)])
+@pytest.mark.parametrize("price_unit,ticks", [("0.01", 247900), ("0.1", 600000)])
 def test_persisted_tick_spread_preserves_constant_and_real_tick_changes(
-    tmp_path, tick_size, ticks
+    tmp_path, price_unit, ticks
 ):
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
@@ -453,12 +453,12 @@ def test_persisted_tick_spread_preserves_constant_and_real_tick_changes(
         replace(
             _state(
                 i * 100,
-                bid_tick=ticks + i,
-                ask_tick=ticks + i + (2 if i == 9 else 1),
+                bid_index=ticks + i,
+                ask_index=ticks + i + (2 if i == 9 else 1),
                 bid_qty=0.1,
                 ask_qty=0.1,
             ),
-            tick_size=tick_size,
+            price_unit=price_unit,
         )
         for i in range(10)
     ]
@@ -488,8 +488,8 @@ def test_persisted_tick_spread_preserves_constant_and_real_tick_changes(
     write_dataset(root, panel, spec=spec, resource_policy=None, borrowed_input=True)
     restored = read_dataset(root)
     factors = pd.concat(iter_factor_frames((restored,)), ignore_index=True)
-    assert factors["spread"].iloc[:9].tolist() == [float(tick_size)] * 9
-    assert factors["spread"].iloc[9] == 2 * float(tick_size)
+    assert factors["spread"].iloc[:9].tolist() == [float(price_unit)] * 9
+    assert factors["spread"].iloc[9] == 2 * float(price_unit)
     assert factors["microprice_deviation"].tolist() == [0.0] * 10
 
 
@@ -509,8 +509,8 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
         mid = value + int(perturb and index == 10)
         states.append(
             replace(
-                _state(index * 100, bid_tick=2 * mid - 1, ask_tick=2 * mid + 1),
-                tick_size="0.5",
+                _state(index * 100, bid_index=2 * mid - 1, ask_index=2 * mid + 1),
+                price_unit="0.5",
             )
         )
         value = value * numerator // 10
@@ -581,3 +581,162 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
     )
     assert reset_factors["realized_volatility_1s"].iloc[8:10].isna().all()
     assert reset_factors["return_100ms"].iloc[8:9].isna().all()
+
+
+def test_price_unit_is_only_a_coordinate_for_panel_factors_and_all_labels():
+    from dataclasses import replace
+
+    from tests.helpers.binance_hft import coverage_lookup
+
+    baseline = None
+    for multiplier, unit in ((1, "0.1"), (10, "0.01"), (100, "0.001")):
+        states = []
+        for stamp in range(0, 6200, 100):
+            state = _state(
+                stamp,
+                bid_index=995 + (stamp // 100) % 4,
+                ask_index=1005 + (stamp // 100) % 3,
+                bid_qty=2 + (stamp // 100) % 3,
+                ask_qty=1 + (stamp // 100) % 2,
+            )
+            states.append(
+                replace(
+                    state,
+                    price_unit=unit,
+                    bids=tuple((index * multiplier, qty) for index, qty in state.bids),
+                    asks=tuple((index * multiplier, qty) for index, qty in state.asks),
+                )
+            )
+        trades = []
+        for stamp in range(40, 6050, 80):
+            trade = _trade(
+                stamp, 0.2 + (stamp // 80) % 3, maker_buyer=(stamp // 80) % 2 == 0
+            )
+            trades.append(
+                replace(
+                    trade, price_unit=unit, price_index=trade.price_index * multiplier
+                )
+            )
+        panel = pd.concat(
+            list(
+                iter_panel_frames(
+                    states,
+                    trades,
+                    market_id="crypto",
+                    asset_id="btc_usdt",
+                    start_ms=0,
+                    end_ms=6000,
+                    batch_rows=17,
+                    book_coverage={"s1": (0, 7_000_000_000)},
+                    trade_coverage=coverage_lookup(
+                        {"trade-connection-1": (0, 7_000_000_000)}
+                    ),
+                )
+            ),
+            ignore_index=True,
+        )
+        factor = pd.concat(list(iter_factor_frames([panel])), ignore_index=True)
+        label = pd.concat(
+            list(iter_label_frames([panel], horizons_ms=(100, 500, 1000, 5000))),
+            ignore_index=True,
+        )
+        actual = panel, factor, label
+        if baseline is None:
+            baseline = actual
+        else:
+            for expected, frame in zip(baseline, actual, strict=True):
+                pd.testing.assert_frame_equal(expected, frame, check_exact=True)
+
+
+@pytest.mark.parametrize("frame_rows", [2, 10])
+def test_persisted_depth_ratios_keep_scale_invariance_and_one_ulp_change(
+    tmp_path, frame_rows
+):
+    from fractions import Fraction
+
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    quantities = [0.01, 0.015, 0.03, 0.035, 0.07, 0.1, 0.15, 0.3, 0.5, 0.15]
+    states = []
+    for index, ask in enumerate(quantities):
+        bid = (
+            math.nextafter(2 * ask, math.inf)
+            if index == len(quantities) - 1
+            else 2 * ask
+        )
+        states.append(
+            replace(
+                _state(index * 100),
+                bids=tuple((995 - level * 10, bid) for level in range(10)),
+                asks=tuple((1005 + level * 10, ask) for level in range(10)),
+            )
+        )
+    with runtime_resource_policy_scope():
+        panel = pd.concat(
+            iter_panel_frames(
+                states,
+                [_trade(i * 100, 1.0, maker_buyer=False) for i in range(10)],
+                market_id="crypto",
+                asset_id="btc_usdt",
+                batch_rows=2,
+                start_ms=0,
+                end_ms=900,
+                book_coverage={"s1": _coverage(0, 1001)},
+                trade_coverage=coverage_lookup(
+                    {"trade-connection-1": _coverage(0, 1001)}
+                ),
+            ),
+            ignore_index=True,
+        )
+    catalog = hft_processed_catalog()
+    layout = StorageLayout(project_root=tmp_path)
+    restored = panel
+    for data_id in (
+        "binance_futures_l2_panel_100ms",
+        "binance_futures_microstructure_factors_100ms",
+    ):
+        spec = catalog.get(data_id)
+        root = layout.target_root(
+            spec.data_id,
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+        )
+        frame = (
+            panel
+            if data_id == "binance_futures_l2_panel_100ms"
+            else pd.concat(
+                iter_factor_frames(
+                    restored.iloc[start : start + frame_rows]
+                    for start in range(0, len(restored), frame_rows)
+                ),
+                ignore_index=True,
+            )
+        )
+        frame = frame.loc[:, list(spec.column_roles)]
+        write_dataset(root, frame, spec=spec, resource_policy=None, borrowed_input=True)
+        restored = read_dataset(root)
+        if data_id == "binance_futures_l2_panel_100ms":
+            for levels in (1, 5, 10):
+                for bid, ask in zip(
+                    restored[f"bid_depth_{levels}"].iloc[:-1],
+                    restored[f"ask_depth_{levels}"].iloc[:-1],
+                    strict=True,
+                ):
+                    assert Fraction(bid) / Fraction(ask) == 2
+    columns = [f"imbalance_{levels}" for levels in (1, 5, 10)] + [
+        "microprice_deviation"
+    ]
+    for column in columns[:3]:
+        assert restored[column].iloc[:-1].tolist() == [1 / 3] * 9
+    assert restored.microprice_deviation.iloc[:-1].tolist() == [1 / 6] * 9
+    assert restored.imbalance_1.iloc[-1] > 1 / 3
+    assert restored.microprice_deviation.iloc[-1] > 1 / 6
+    scaler = ModelMatrixScaler.fit(restored.loc[:8, columns])
+    assert scaler.scale_ == (1.0,) * 4
+    assert not scaler.transform(restored.loc[:8, columns]).to_numpy().any()
+    assert (
+        scaler.transform(restored.loc[9:, columns]).iloc[0, 0]
+        == restored.imbalance_1.iloc[-1] - 1 / 3
+    )

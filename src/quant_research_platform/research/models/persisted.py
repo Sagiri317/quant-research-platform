@@ -81,7 +81,7 @@ _CRYPTO_VALIDATION_SCHEMA = pa.schema(
         ("prediction_score", pa.float64()),
         ("label_available_at", pa.timestamp("ns")),
         ("book_segment_id", pa.string()),
-        ("trade_connection_id", pa.string()),
+        ("trade_observation_id", pa.string()),
         ("segment_id", pa.string()),
     )
 )

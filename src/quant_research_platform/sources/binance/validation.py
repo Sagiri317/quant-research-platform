@@ -124,12 +124,12 @@ def strict_iso_timestamp(value: object, *, error: str) -> pd.Timestamp:
     if not isinstance(value, str) or not _has_utc_offset(value):
         raise ValueError(error)
     try:
-        timestamp = pd.to_datetime(value, utc=True, errors="raise")
+        timestamp = pd.Timestamp(value).tz_convert("UTC")
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(error) from exc
     if pd.isna(timestamp):
         raise ValueError(error)
-    return pd.Timestamp(timestamp)
+    return timestamp
 
 
 def _has_utc_offset(value: str) -> bool:

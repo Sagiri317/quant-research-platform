@@ -10,17 +10,17 @@ from math import isfinite
 
 @dataclass(frozen=True)
 class BookState:
-    capture_seq: int
+    source_sequence: int
     event_time_ms: int
     transaction_time_ms: int | None
     observed_time_ns: int
     receive_time: str
-    receive_monotonic_ns: int
+    receive_monotonic_ns: int | None
     update_id: int
     segment_id: str
-    connection_id: str
+    observation_id: str
     market_type: str
-    tick_size: str
+    price_unit: str
     bids: tuple[tuple[int, float], ...]
     asks: tuple[tuple[int, float], ...]
 
@@ -39,14 +39,14 @@ class BookState:
 
 @dataclass(frozen=True)
 class BookBoundary:
-    capture_seq: int
+    source_sequence: int
     event_time_ms: int
     transaction_time_ms: int | None
     observed_time_ns: int
     receive_time: str
-    receive_monotonic_ns: int
+    receive_monotonic_ns: int | None
     segment_id: str
-    connection_id: str
+    observation_id: str
     market_type: str
     reason: str
 
@@ -57,16 +57,16 @@ class BookBoundary:
 
 @dataclass(frozen=True)
 class TradeEvent:
-    capture_seq: int
+    source_sequence: int
     event_time_ms: int
     transaction_time_ms: int
     observed_time_ns: int
     receive_time: str
-    receive_monotonic_ns: int
-    connection_id: str
+    receive_monotonic_ns: int | None
+    observation_id: str
     market_type: str
-    tick_size: str
-    price_tick: int
+    price_unit: str
+    price_index: int
     quantity: float
     visible_quantity: float
     buyer_is_maker: bool
@@ -76,51 +76,65 @@ class TradeEvent:
         return self.observed_time_ns // 1_000_000
 
 
-def validate_tick_size(value: object) -> str:
-    text, _decimal = _tick_size(value)
-    return text
+def validate_price_unit(value: object) -> str:
+    _positive_decimal(value, error="order_book_price_unit_invalid")
+    return value
 
 
-def price_to_tick(value: object, tick_size: str, *, error: str) -> int:
-    _, tick = _tick_size(tick_size)
-    if isinstance(value, bool) or not isinstance(value, str) or not value:
+def price_to_index(value: object, price_unit: str, *, error: str) -> int:
+    unit = _positive_decimal(price_unit, error="order_book_price_unit_invalid")
+    price = _positive_decimal(value, error=error)
+    index = Fraction(price) / Fraction(unit)
+    if index.denominator != 1:
         raise ValueError(error)
+    return index.numerator
+
+
+def index_to_price(price_index: int, price_unit: str) -> float:
+    unit = _positive_decimal(price_unit, error="order_book_price_unit_invalid")
+    if type(price_index) is not int:
+        raise ValueError("order_book_price_index_invalid")
     try:
-        price = Decimal(value)
-    except InvalidOperation as exc:
-        raise ValueError(error) from exc
-    if not price.is_finite() or price <= 0 or not 0.0 < float(price) < float("inf"):
-        raise ValueError(error)
-    ticks = Fraction(price) / Fraction(tick)
-    if ticks.denominator != 1:
-        raise ValueError(error)
-    return ticks.numerator
-
-
-def tick_to_price(price_tick: int, tick_size: str) -> float:
-    _, tick = _tick_size(tick_size)
-    if type(price_tick) is not int:
-        raise ValueError("order_book_price_tick_invalid")
-    try:
-        price = float(price_tick * Fraction(tick))
+        price = float(price_index * Fraction(unit))
     except OverflowError:
-        raise ValueError("order_book_price_tick_invalid") from None
+        raise ValueError("order_book_price_index_invalid") from None
     if not isfinite(price):
-        raise ValueError("order_book_price_tick_invalid")
+        raise ValueError("order_book_price_index_invalid")
     return price
 
 
-def _tick_size(value: object) -> tuple[str, Decimal]:
+def price_decimal_places(value: object) -> int:
+    """Return exact required decimal places without Decimal context rounding."""
+    decimal = _positive_decimal(value, error="order_book_price_invalid")
+    parts = decimal.as_tuple()
+    trailing = 0
+    for digit in reversed(parts.digits):
+        if digit:
+            break
+        trailing += 1
+    return max(0, -parts.exponent - trailing)
+
+
+def _positive_decimal(value: object, *, error: str) -> Decimal:
     if not isinstance(value, str) or not value:
-        raise ValueError("order_book_tick_size_invalid")
+        raise ValueError(error)
     try:
         decimal = Decimal(value)
     except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError("order_book_tick_size_invalid") from exc
+        raise ValueError(error) from exc
     if (
         not decimal.is_finite()
         or decimal <= 0
         or not 0.0 < float(decimal) < float("inf")
     ):
-        raise ValueError("order_book_tick_size_invalid")
-    return value, decimal
+        raise ValueError(error)
+    return decimal
+
+
+def observation_order_key(
+    event: BookState | BookBoundary | TradeEvent,
+) -> tuple[int, ...]:
+    """Use only the selected source's real clocks and stable native order."""
+    if event.receive_monotonic_ns is None:
+        return event.observed_time_ns, event.source_sequence
+    return event.observed_time_ns, event.receive_monotonic_ns, event.source_sequence

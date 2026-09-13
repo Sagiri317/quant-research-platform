@@ -72,7 +72,7 @@ def _panel(layout, upstream_identities):
 
 
 def _books_until(run, *, reconstruct_depth, symbol, end_ns):
-    source = reconstruct_depth(run, symbol=symbol)
+    source = reconstruct_depth(run, symbol=symbol, end_ns=end_ns)
     with closing_iterator(source):
         for event in source:
             value = event.value if isinstance(event, OwnedValue) else event
@@ -163,7 +163,7 @@ def _prediction_rows(
                             // 1_000_000,
                             "asset_id": asset_id,
                             "book_segment_id": row.book_segment_id,
-                            "trade_connection_id": row.trade_connection_id,
+                            "trade_observation_id": row.trade_observation_id,
                             "segment_id": row.segment_id,
                             "fold_id": row.fold_id,
                             "prediction_score": None
@@ -238,7 +238,7 @@ def produce_taker_ledger(
     with (
         open_run(raw_root, resource_policy) as run,
         read_funding(
-            raw_root, symbol=symbol, resource_policy=resource_policy
+            run.funding_root(symbol), symbol=symbol, resource_policy=resource_policy
         ) as funding,
     ):
         if run.source_identity != panel["source_artifact_identity"]:
@@ -330,7 +330,7 @@ def _paired_validation(artifact, fold_id, asset_id):
                     "timestamp_ms": pd.Timestamp(price.timestamp).value // 1_000_000,
                     "asset_id": asset_id,
                     "book_segment_id": price.book_segment_id,
-                    "trade_connection_id": price.trade_connection_id,
+                    "trade_observation_id": price.trade_observation_id,
                     "price_prediction": float(price.prediction_score),
                     "price_label": float(price.label),
                     "proxy_prediction": float(proxy.prediction_score),
@@ -383,21 +383,21 @@ def produce_maker_calibration(
         "prediction_end",
         "label_available_at",
         "initial_book_event_id",
-        "initial_bid_tick",
-        "initial_ask_tick",
+        "initial_bid_index",
+        "initial_ask_index",
         "event_start",
         "event_end",
         "event_id",
         "event_at",
         "level_index",
-        "price_tick",
+        "price_index",
     }
     strings = {
         "fold_id",
         "side",
         "terminal_reason",
         "book_segment_id",
-        "trade_connection_id",
+        "trade_observation_id",
         "event_kind",
         "context_id",
     }
@@ -473,7 +473,7 @@ def produce_maker_calibration(
             coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
                 "coverage_segments"
             ]
-            trade_coverage = run.connection_coverage(
+            trade_coverage = run.observation_coverage(
                 market_type=market_type, data_kind="agg_trades", symbol=symbol
             )
             for fold in plan["folds"]:
@@ -494,10 +494,10 @@ def produce_maker_calibration(
                     quote_quantity,
                     terminal_reason,
                     book_segment_id,
-                    trade_connection_id,
+                    trade_observation_id,
                     initial_book_event_id,
-                    initial_bid_tick,
-                    initial_ask_tick,
+                    initial_bid_index,
+                    initial_ask_index,
                     event_start,
                     event_end,
                     fold_id=fold["fold_id"],
@@ -517,10 +517,10 @@ def produce_maker_calibration(
                         quote_quantity,
                         terminal_reason,
                         book_segment_id,
-                        trade_connection_id,
+                        trade_observation_id,
                         initial_book_event_id,
-                        initial_bid_tick,
-                        initial_ask_tick,
+                        initial_bid_index,
+                        initial_ask_index,
                         event_start,
                         event_end,
                     )
@@ -533,12 +533,12 @@ def produce_maker_calibration(
 
                 def observe_event(*, event_id, event, fold_id=fold["fold_id"]):
                     if isinstance(event, TradeEvent):
-                        kind, context = "trade", event.connection_id
+                        kind, context = "trade", event.observation_id
                         rows = (
                             (
                                 "buy" if event.buyer_is_maker else "sell",
                                 0,
-                                event.price_tick,
+                                event.price_index,
                                 event.visible_quantity,
                             ),
                         )
@@ -754,7 +754,7 @@ def produce_maker_ledger(
         with (
             open_run(raw_root, resource_policy) as run,
             read_funding(
-                raw_root, symbol=symbol, resource_policy=resource_policy
+                run.funding_root(symbol), symbol=symbol, resource_policy=resource_policy
             ) as funding,
         ):
             if run.source_identity != panel["source_artifact_identity"]:
@@ -771,7 +771,7 @@ def produce_maker_ledger(
                 quotes(),
                 config=config,
                 observed_coverage=coverage,
-                trade_coverage=run.connection_coverage(
+                trade_coverage=run.observation_coverage(
                     market_type=market_type, data_kind="agg_trades", symbol=symbol
                 ),
                 resource_policy=resource_policy,
@@ -845,7 +845,7 @@ def _calibration_events(artifact, fold_id, start, stop):
                     for row in chain((first,), group):
                         lease.grow(256)
                         (bids if row.side == "buy" else asks).append(
-                            (int(row.price_tick), float(row.quantity))
+                            (int(row.price_index), float(row.quantity))
                         )
                     event = SimpleNamespace(
                         kind="book",
@@ -869,8 +869,8 @@ def _calibration_events(artifact, fold_id, start, stop):
                         event_id=event_id,
                         event_at=first.event_at.value,
                         segment_id=first.context_id,
-                        connection_id=first.context_id,
-                        price_tick=int(first.price_tick),
+                        observation_id=first.context_id,
+                        price_index=int(first.price_index),
                         visible_quantity=float(first.quantity),
                         buyer_is_maker=first.side == "buy",
                     )
@@ -926,7 +926,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
                     if (
                         row.side not in counts
                         or not row.context_id
-                        or row.price_tick <= 0
+                        or row.price_index <= 0
                         or row.quantity <= 0
                     ):
                         raise ValueError("crypto_calibration_event_invalid")
@@ -934,21 +934,21 @@ def _calibration_headers(artifact, fold_id, cutoff):
                         raise ValueError("crypto_calibration_book_invalid")
                     if counts[row.side]:
                         if (
-                            row.price_tick >= last[row.side]
+                            row.price_index >= last[row.side]
                             if row.side == "buy"
-                            else row.price_tick <= last[row.side]
+                            else row.price_index <= last[row.side]
                         ):
                             raise ValueError("crypto_calibration_book_invalid")
                     else:
-                        best[row.side] = row.price_tick
-                    last[row.side] = row.price_tick
+                        best[row.side] = row.price_index
+                    last[row.side] = row.price_index
                     counts[row.side] += 1
                 elif row.event_kind == "trade":
                     if (
                         row_count != 1
                         or row.side not in counts
                         or not row.context_id
-                        or row.price_tick <= 0
+                        or row.price_index <= 0
                         or row.level_index != 0
                     ):
                         raise ValueError("crypto_calibration_event_invalid")
@@ -956,7 +956,7 @@ def _calibration_headers(artifact, fold_id, cutoff):
                     if (
                         row_count != 1
                         or row.side
-                        or row.price_tick != 0
+                        or row.price_index != 0
                         or row.quantity != 0
                         or row.level_index != 0
                     ):
@@ -1078,7 +1078,7 @@ def validate_maker_calibration(artifact, envelope):
                         or not 0 <= row.filled_quantity <= row.quote_quantity
                         or row.quote_quantity != reference_config.order_quantity
                         or not row.book_segment_id
-                        or not row.trade_connection_id
+                        or not row.trade_observation_id
                     ):
                         raise ValueError("crypto_calibration_response_invalid")
                 decision = buy.decision_at.value
@@ -1134,7 +1134,7 @@ def validate_maker_calibration(artifact, envelope):
                     sample = row._asdict()
                     sample["decision_at"] = decision
                     with model._book(initial) as state:
-                        if (row.initial_bid_tick, row.initial_ask_tick) != (
+                        if (row.initial_bid_index, row.initial_ask_index) != (
                             state.bids[0][0],
                             state.asks[0][0],
                         ):
@@ -1151,7 +1151,7 @@ def validate_maker_calibration(artifact, envelope):
                                 0.0,
                                 0.0,
                                 row.book_segment_id,
-                                row.trade_connection_id,
+                                row.trade_observation_id,
                                 "1",
                                 decision,
                                 expiry,

@@ -6,6 +6,7 @@ import datetime as dt
 import math
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
+from fractions import Fraction
 from statistics import stdev
 from typing import Any
 
@@ -16,7 +17,7 @@ from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
     TradeEvent,
-    tick_to_price,
+    index_to_price,
 )
 from quant_research_platform.contracts.validation import (
     strict_finite_float,
@@ -112,8 +113,8 @@ def iter_panel_frames(
                 signed_trade_volume = 0.0
                 taker_buy_volume = 0.0
                 taker_sell_volume = 0.0
-                trade_capture_seq_min: int | None = None
-                trade_capture_seq_max: int | None = None
+                trade_source_sequence_min: int | None = None
+                trade_source_sequence_max: int | None = None
                 trade_connections = trade_coverage(interval_start_ns, grid_time_ns)
                 while (
                     next_book is not None
@@ -193,21 +194,21 @@ def iter_panel_frames(
                     if (
                         current_state is not None
                         and len(trade_connections) == 1
-                        and trade.connection_id == trade_connections[0]
+                        and trade.observation_id == trade_connections[0]
                         and trade.observed_time_ns > interval_start_ns
                         and trade.observed_time_ns <= grid_time_ns
                     ):
                         trade_count += 1
                         trade_volume += quantity
-                        trade_capture_seq_min = (
-                            trade.capture_seq
-                            if trade_capture_seq_min is None
-                            else min(trade_capture_seq_min, trade.capture_seq)
+                        trade_source_sequence_min = (
+                            trade.source_sequence
+                            if trade_source_sequence_min is None
+                            else min(trade_source_sequence_min, trade.source_sequence)
                         )
-                        trade_capture_seq_max = (
-                            trade.capture_seq
-                            if trade_capture_seq_max is None
-                            else max(trade_capture_seq_max, trade.capture_seq)
+                        trade_source_sequence_max = (
+                            trade.source_sequence
+                            if trade_source_sequence_max is None
+                            else max(trade_source_sequence_max, trade.source_sequence)
                         )
                         if trade.buyer_is_maker:
                             signed_trade_volume -= quantity
@@ -232,9 +233,9 @@ def iter_panel_frames(
                     grid_time,
                     market_id=market_id,
                     asset_id=asset_id,
-                    trade_connection_id=trade_connections[0],
-                    trade_capture_seq_min=trade_capture_seq_min,
-                    trade_capture_seq_max=trade_capture_seq_max,
+                    trade_observation_id=trade_connections[0],
+                    trade_source_sequence_min=trade_source_sequence_min,
+                    trade_source_sequence_max=trade_source_sequence_max,
                     book_ofi=book_ofi,
                     trade_count=trade_count,
                     trade_volume=trade_volume,
@@ -243,10 +244,10 @@ def iter_panel_frames(
                     taker_sell_volume=taker_sell_volume,
                 )
                 if len(buffers["timestamp"]) >= batch_rows:
-                    yield pd.DataFrame(buffers)
+                    yield _panel_frame(buffers)
                     buffers = _panel_column_buffers()
             if buffers["timestamp"]:
-                yield pd.DataFrame(buffers)
+                yield _panel_frame(buffers)
         finally:
             if current_owned is not None:
                 current_owned.release(owner="crypto.hft.book")
@@ -271,6 +272,16 @@ def _book_observed_time(
     )
 
 
+def _panel_frame(buffers):
+    return pd.DataFrame(buffers).astype(
+        {
+            "book_receive_monotonic_ns": "Int64",
+            "trade_source_sequence_min": "Int64",
+            "trade_source_sequence_max": "Int64",
+        }
+    )
+
+
 def _panel_column_buffers() -> dict[str, list[Any]]:
     return {
         column: []
@@ -280,15 +291,15 @@ def _panel_column_buffers() -> dict[str, list[Any]]:
             "timestamp",
             "segment_id",
             "book_segment_id",
-            "book_connection_id",
-            "trade_connection_id",
-            "book_capture_seq",
-            "trade_capture_seq_min",
-            "trade_capture_seq_max",
+            "book_observation_id",
+            "trade_observation_id",
+            "book_source_sequence",
+            "trade_source_sequence_min",
+            "trade_source_sequence_max",
             "book_observed_time_ms",
             "exchange_event_time_ms",
             "transaction_time_ms",
-            "local_receive_time",
+            "observed_utc",
             "book_receive_monotonic_ns",
             "update_id",
             "best_bid_price",
@@ -321,9 +332,9 @@ def _append_panel_columns(
     *,
     market_id: str,
     asset_id: str,
-    trade_connection_id: str,
-    trade_capture_seq_min: int | None,
-    trade_capture_seq_max: int | None,
+    trade_observation_id: str,
+    trade_source_sequence_min: int | None,
+    trade_source_sequence_max: int | None,
     book_ofi: float,
     trade_count: int,
     trade_volume: float,
@@ -335,12 +346,12 @@ def _append_panel_columns(
     asks = state.asks[:10]
     if not bids or not asks:
         raise ValueError("hft_panel_one_sided_book")
-    bid_price = tick_to_price(bids[0][0], state.tick_size)
+    bid_price = index_to_price(bids[0][0], state.price_unit)
     bid_quantity = bids[0][1]
-    ask_price = tick_to_price(asks[0][0], state.tick_size)
+    ask_price = index_to_price(asks[0][0], state.price_unit)
     ask_quantity = asks[0][1]
-    mid = tick_to_price(bids[0][0] + asks[0][0], state.tick_size) / 2.0
-    spread = tick_to_price(asks[0][0] - bids[0][0], state.tick_size)
+    mid = index_to_price(bids[0][0] + asks[0][0], state.price_unit) / 2.0
+    spread = index_to_price(asks[0][0] - bids[0][0], state.price_unit)
     bid_depth_1 = sum(quantity for _price, quantity in bids[:1])
     ask_depth_1 = sum(quantity for _price, quantity in asks[:1])
     bid_depth_5 = sum(quantity for _price, quantity in bids[:5])
@@ -350,19 +361,17 @@ def _append_panel_columns(
     buffers["market_id"].append(market_id)
     buffers["asset_id"].append(asset_id)
     buffers["timestamp"].append(_timestamp(grid_time))
-    buffers["segment_id"].append(f"{state.segment_id}:{trade_connection_id}")
+    buffers["segment_id"].append(f"{state.segment_id}:{trade_observation_id}")
     buffers["book_segment_id"].append(state.segment_id)
-    buffers["book_connection_id"].append(state.connection_id)
-    buffers["trade_connection_id"].append(trade_connection_id)
-    buffers["book_capture_seq"].append(state.capture_seq)
-    buffers["trade_capture_seq_min"].append(trade_capture_seq_min)
-    buffers["trade_capture_seq_max"].append(trade_capture_seq_max)
+    buffers["book_observation_id"].append(state.observation_id)
+    buffers["trade_observation_id"].append(trade_observation_id)
+    buffers["book_source_sequence"].append(state.source_sequence)
+    buffers["trade_source_sequence_min"].append(trade_source_sequence_min)
+    buffers["trade_source_sequence_max"].append(trade_source_sequence_max)
     buffers["book_observed_time_ms"].append(state.observed_time_ms)
     buffers["exchange_event_time_ms"].append(state.event_time_ms)
     buffers["transaction_time_ms"].append(state.transaction_time_ms)
-    buffers["local_receive_time"].append(
-        pd.Timestamp(state.observed_time_ns, unit="ns")
-    )
+    buffers["observed_utc"].append(pd.Timestamp(state.observed_time_ns, unit="ns"))
     buffers["book_receive_monotonic_ns"].append(state.receive_monotonic_ns)
     buffers["update_id"].append(state.update_id)
     buffers["best_bid_price"].append(bid_price)
@@ -407,8 +416,6 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
             previous_time=previous_time,
         )
         mid = _finite_column(frame, "mid", "hft_factor_mid_invalid")
-        bid_quantity = _finite_column(frame, "best_bid_qty", "hft_factor_book_invalid")
-        ask_quantity = _finite_column(frame, "best_ask_qty", "hft_factor_book_invalid")
         spread = _finite_column(frame, "book_spread", "hft_factor_book_invalid")
         if bool(np.any(mid <= 0)) or bool(np.any(spread <= 0)):
             raise ValueError("hft_factor_book_invalid")
@@ -427,14 +434,6 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
             )
             for levels in (1, 5, 10)
         }
-        bbo_quantity = bid_quantity + ask_quantity
-        microprice_deviation = np.full(len(frame), np.nan, dtype="float64")
-        np.divide(
-            0.5 * spread * (bid_quantity - ask_quantity),
-            bbo_quantity,
-            out=microprice_deviation,
-            where=bbo_quantity > 0,
-        )
         returns = np.full(len(frame), np.nan, dtype="float64")
         same_segment = ~boundaries
         returns[1:][same_segment[1:]] = (
@@ -455,15 +454,18 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
         output["relative_spread"] = spread / mid
         for levels in (1, 5, 10):
             bid_depth, ask_depth = depth[levels]
-            total = bid_depth + ask_depth
             imbalance = np.full(len(frame), np.nan, dtype="float64")
-            np.divide(
-                bid_depth - ask_depth,
-                total,
-                out=imbalance,
-                where=total > 0,
-            )
+            for index, (bid_value, ask_value) in enumerate(
+                zip(bid_depth, ask_depth, strict=True)
+            ):
+                bid = Fraction(float(bid_value))
+                ask = Fraction(float(ask_value))
+                total = bid + ask
+                if total > 0:
+                    # Round once; proportional float depths must stay constant.
+                    imbalance[index] = float((bid - ask) / total)
             output[f"imbalance_{levels}"] = imbalance
+        microprice_deviation = 0.5 * spread * output["imbalance_1"].to_numpy()
         output["microprice"] = mid + microprice_deviation
         output["microprice_deviation"] = microprice_deviation
         output["ofi_100ms"] = _finite_column(

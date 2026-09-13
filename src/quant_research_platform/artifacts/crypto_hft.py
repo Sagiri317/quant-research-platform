@@ -97,7 +97,7 @@ def produce_crypto_report(
                 if target == panel_id:
                     recording_counts = {
                         key: manifest["producer_diagnostics"][key]
-                        for key in ("raw_record_count", "recorder_file_count")
+                        for key in ("raw_record_count", "source_file_count")
                     }
                     reconstruction = manifest["producer_diagnostics"]["reconstruction"]
                     if type(reconstruction) is not dict or any(

@@ -25,6 +25,7 @@ def _write(raw, *, rows=(), metadata_changes=None):
         "valuation_currency": "USDT",
         "coverage": {"start_ns": 0, "end_ns": 100, "status": "COMPLETE"},
         "provenance": "explicit_synthetic_funding_calendar",
+        "settlement_source": None,
     }
     metadata.update(metadata_changes or {})
 
@@ -48,25 +49,39 @@ def _write(raw, *, rows=(), metadata_changes=None):
 def test_funding_missing_and_explicit_zero_have_distinct_evidence(tmp_path):
     raw = tmp_path / "raw"
     with pytest.raises(PortfolioTargetBlocked, match="binance_funding_input_missing"):
-        funding_source_identity(raw, "ledger", symbol="BTCUSDT")
+        funding_source_identity(
+            raw.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+        )
     _write(raw, rows=(("forecast", 0, 100, None, None, []),))
     with runtime_resource_policy_scope() as policy:
         with read_funding_observations(
-            raw, symbol="BTCUSDT", resource_policy=policy
+            raw.parent / "funding" / "BTCUSDT", symbol="BTCUSDT", resource_policy=policy
         ) as source:
             assert source.events == () and source.coverage == (0, 100)
             forecasts = tuple(source.forecasts)
             assert len(forecasts) == 1 and forecasts[0].cashflows == ()
             original = source.identity
-        assert funding_source_identity(raw, "ledger", symbol="BTCUSDT") == original
+        assert (
+            funding_source_identity(
+                raw.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+            )
+            == original
+        )
         with pytest.raises(
             PortfolioTargetBlocked, match="binance_funding_input_missing"
         ):
-            funding_source_identity(raw, "ledger", symbol="ETHUSDT")
+            funding_source_identity(
+                raw.parent / "funding" / "ETHUSDT", "ledger", symbol="ETHUSDT"
+            )
         assert policy.used_memory_bytes == 0
     changed = tmp_path / "changed" / "raw"
     _write(changed, rows=(("forecast", 0, 100, None, None, [[50, -1.0]]),))
-    assert funding_source_identity(changed, "ledger", symbol="BTCUSDT") != original
+    assert (
+        funding_source_identity(
+            changed.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+        )
+        != original
+    )
 
 
 @pytest.mark.parametrize(
@@ -82,7 +97,9 @@ def test_funding_unproven_coverage_never_becomes_zero(tmp_path, changes):
     with pytest.raises(
         PortfolioTargetBlocked, match="binance_funding_coverage_unproven"
     ):
-        funding_source_identity(raw, "ledger", symbol="BTCUSDT")
+        funding_source_identity(
+            raw.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+        )
 
 
 @pytest.mark.parametrize(
@@ -101,7 +118,9 @@ def test_funding_malformed_calendar_rejected_with_resources_released(tmp_path, r
     _write(raw, rows=rows)
     with runtime_resource_policy_scope() as policy:
         with pytest.raises(ValueError, match="binance_funding_input_invalid"):
-            funding_source_identity(raw, "ledger", symbol="BTCUSDT")
+            funding_source_identity(
+                raw.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+            )
         assert policy.used_memory_bytes == 0
 
 
@@ -113,7 +132,9 @@ def test_funding_changed_during_consumption_is_rejected_and_primary_preserved(tm
     _write(changed, rows=(("forecast", 0, 100, None, None, [[50, 1.0]]),))
     with runtime_resource_policy_scope() as policy:
         with pytest.raises(ValueError, match="binance_funding_identity_changed"):
-            with read_funding_observations(raw, symbol="BTCUSDT") as source:
+            with read_funding_observations(
+                raw.parent / "funding" / "BTCUSDT", symbol="BTCUSDT"
+            ) as source:
                 assert tuple(source.forecasts)
                 for name in ("response.csv", "response.metadata.json"):
                     (raw.parent / "funding" / "BTCUSDT" / name).write_bytes(
@@ -121,7 +142,9 @@ def test_funding_changed_during_consumption_is_rejected_and_primary_preserved(tm
                     )
         primary = KeyboardInterrupt("primary")
         with pytest.raises(KeyboardInterrupt) as raised:
-            with read_funding_observations(raw, symbol="BTCUSDT"):
+            with read_funding_observations(
+                raw.parent / "funding" / "BTCUSDT", symbol="BTCUSDT"
+            ):
                 raise primary
         assert raised.value is primary
         assert policy.used_memory_bytes == 0

@@ -207,8 +207,8 @@ def test_actual_maker_keeps_legal_nonbest_old_price_in_relative_tick_space():
         bid = 990 if moved else 995
         return _state(
             stamp,
-            bid_tick=bid,
-            ask_tick=bid + 10,
+            bid_index=bid,
+            ask_index=bid + 10,
             bid_levels=((bid, 10.0), (bid - 5, 3.0)),
         )
 
@@ -445,9 +445,9 @@ def test_delayed_post_only_rejection_preserves_decision_quantity_and_zero_sample
     for crossing in (False, True):
         books = [
             _state(0),
-            _state(5, bid_tick=980, ask_tick=990) if crossing else _state(5),
+            _state(5, bid_index=980, ask_index=990) if crossing else _state(5),
             _state(30),
-            _state(500, bid_tick=998, ask_tick=1008),
+            _state(500, bid_index=998, ask_index=1008),
         ]
         batches, observations, events = [], [], []
         with runtime_resource_policy_scope() as policy:

@@ -324,6 +324,35 @@ def check_crypto_model_staging(*, layout, profile, saved):
     logical_root = saved.instance_root.parent.parent
     previous_instances = {p.name for p in saved.instance_root.parent.iterdir()}
     with runtime_resource_policy_scope() as policy:
+        from quant_research_platform.research.protocols.crypto_hft import (
+            HFT_FACTOR_COLUMNS,
+            HFT_RIDGE_FACTOR_COLUMNS,
+        )
+
+        for entry in saved.models:
+            spec = profile.models.get(entry["model_id"])
+            if spec.model_algorithm != "ridge_regression":
+                continue
+            assert (
+                tuple(entry["model_metadata"]["input_columns"])
+                == HFT_RIDGE_FACTOR_COLUMNS
+            )
+            with persisted.read_crypto_model_member(
+                saved, entry, resource_policy=policy
+            ) as model:
+                assert model.scaler.columns == HFT_RIDGE_FACTOR_COLUMNS
+                probe = pd.DataFrame(
+                    {
+                        column: np.arange(3, dtype=float) + 1
+                        for column in HFT_FACTOR_COLUMNS
+                    }
+                )
+                predict = fitting.prediction_callable(spec.input_columns, model)
+                before = predict(probe)
+                for column in set(HFT_FACTOR_COLUMNS) - set(HFT_RIDGE_FACTOR_COLUMNS):
+                    probe[column] *= 1000
+                np.testing.assert_array_equal(before, predict(probe))
+        assert policy.used_memory_bytes == 0
         with policy.lease("test.crypto.model_corruption", 8 * 1024**2):
             entry = saved.models[0]
             columns = entry["model_metadata"]["input_columns"]

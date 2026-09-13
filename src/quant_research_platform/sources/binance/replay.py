@@ -25,8 +25,9 @@ from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
     TradeEvent,
-    price_to_tick,
-    validate_tick_size,
+    observation_order_key,
+    price_to_index,
+    validate_price_unit,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.validation import clear_exception_frames
@@ -40,6 +41,7 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
+    FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
     RECORDING_SCOPE_MARKET_TYPES,
     RESEARCH_SYMBOLS,
@@ -58,7 +60,6 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
-    native_filesystem_path,
     require_unaliased_path,
 )
 
@@ -82,6 +83,8 @@ _LOWER_HEX = frozenset("0123456789abcdef")
 _HASH_BUFFER_BYTES = 64 * 1024
 _RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
 _LEVEL_BYTES = 256
+RECONSTRUCTION_REQUIRED_LEVELS = 10
+RECONSTRUCTION_MAX_BOOK_LEVELS = 10_000
 _CONNECTION_INTERVAL_KEYS = frozenset(
     {
         "market",
@@ -177,7 +180,7 @@ class _RunFile:
     identity: DatasetFileIdentity
 
 
-class _ConnectionCoverageIndex:
+class ObservationCoverageIndex:
     def __init__(
         self,
         root: Path,
@@ -185,7 +188,9 @@ class _ConnectionCoverageIndex:
         *,
         markets: set[str],
         resource_policy: RuntimeResourcePolicy,
+        decode_interval: Callable,
     ) -> None:
+        self._decode_interval = decode_interval
         self._root = root
         self._descriptor = descriptor
         self._path = root / descriptor["path"]
@@ -221,7 +226,7 @@ class _ConnectionCoverageIndex:
             self._database.execute(f"PRAGMA main.max_page_count={startup_pages}")
             self._database.execute(
                 "CREATE TABLE coverage ("
-                "connection_id TEXT PRIMARY KEY, market TEXT NOT NULL, "
+                "observation_id TEXT PRIMARY KEY, market TEXT NOT NULL, "
                 "data_kind TEXT NOT NULL, stream TEXT NOT NULL, "
                 "segment_id TEXT, opened_ns INTEGER NOT NULL, "
                 "closed_ns INTEGER NOT NULL)"
@@ -272,6 +277,7 @@ class _ConnectionCoverageIndex:
                 ):
                     line: bytes | None = None
                     interval: dict[str, Any] | None = None
+                    row = None
                     try:
                         line = gzip_handle.readline(
                             _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 1
@@ -288,10 +294,7 @@ class _ConnectionCoverageIndex:
                             raise ValueError(
                                 "binance_replay_connection_intervals_invalid"
                             ) from exc
-                        opened_ns, closed_ns = _validate_connection_interval(
-                            interval,
-                            markets=markets,
-                        )
+                        row = self._decode_interval(interval, markets=markets)
                         if count % _COVERAGE_DISK_BATCH_ROWS == 0:
                             self._admit_disk_growth(
                                 min(
@@ -302,15 +305,7 @@ class _ConnectionCoverageIndex:
                         try:
                             self._database.execute(
                                 "INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?, ?)",
-                                (
-                                    interval["connection_id"],
-                                    interval["market"],
-                                    interval["data_kind"],
-                                    interval["stream"],
-                                    interval["segment_id"],
-                                    opened_ns,
-                                    closed_ns,
-                                ),
+                                row,
                             )
                         except sqlite3.IntegrityError as exc:
                             raise ValueError(
@@ -318,7 +313,7 @@ class _ConnectionCoverageIndex:
                             ) from exc
                         count += 1
                     finally:
-                        del interval, line
+                        del interval, line, row
             gzip_handle.close()
             digesting_handle.drain()
             if (
@@ -380,22 +375,22 @@ class _ConnectionCoverageIndex:
 
     def bounds(
         self,
-        connection_id: object,
+        observation_id: object,
         *,
         market_type: str,
         data_kind: str,
     ) -> tuple[int, int] | None:
         row = self._database.execute(
             "SELECT opened_ns, closed_ns FROM coverage "
-            "WHERE connection_id = ? AND market = ? AND data_kind = ?",
-            (connection_id, market_type, data_kind),
+            "WHERE observation_id = ? AND market = ? AND data_kind = ?",
+            (observation_id, market_type, data_kind),
         ).fetchone()
         return None if row is None else (int(row[0]), int(row[1]))
 
-    def segment_id(self, connection_id: object) -> str | None:
+    def segment_id(self, observation_id: object) -> str | None:
         row = self._database.execute(
-            "SELECT segment_id FROM coverage WHERE connection_id = ?",
-            (connection_id,),
+            "SELECT segment_id FROM coverage WHERE observation_id = ?",
+            (observation_id,),
         ).fetchone()
         return None if row is None else row[0]
 
@@ -484,7 +479,7 @@ class _ConnectionCoverageIndex:
             raise failure
 
 
-class _ConnectionCoverage:
+class ObservationCoverage:
     """Run-owned exact lookups and a monotone, budgeted interval sweep."""
 
     def __init__(self, index, market_type, data_kind, symbol):
@@ -499,18 +494,18 @@ class _ConnectionCoverage:
             2 * _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 65536,
         )
 
-    def get(self, connection_id, default=None):
+    def get(self, observation_id, default=None):
         row = self.index._database.execute(
             "SELECT opened_ns, closed_ns FROM coverage "
-            "WHERE market=? AND data_kind=? AND stream LIKE ? AND connection_id=?",
-            (*self.parameters, connection_id),
+            "WHERE market=? AND data_kind=? AND stream LIKE ? AND observation_id=?",
+            (*self.parameters, observation_id),
         ).fetchone()
         return default if row is None else row
 
-    def __getitem__(self, connection_id):
-        row = self.get(connection_id)
+    def __getitem__(self, observation_id):
+        row = self.get(observation_id)
         if row is None:
-            raise KeyError(connection_id)
+            raise KeyError(observation_id)
         return row
 
     def covering(self, start_ns, end_ns):
@@ -521,7 +516,7 @@ class _ConnectionCoverage:
         self.last_bounds = (start_ns, end_ns)
         if self.cursor is None:
             self.cursor = self.index._database.execute(
-                "SELECT opened_ns, closed_ns, connection_id FROM coverage "
+                "SELECT opened_ns, closed_ns, observation_id FROM coverage "
                 "WHERE market=? AND data_kind=? AND stream LIKE ? AND closed_ns>? "
                 "ORDER BY opened_ns",
                 (*self.parameters, end_ns),
@@ -531,11 +526,11 @@ class _ConnectionCoverage:
             _, _, size = heapq.heappop(self.active)
             self.lease.shrink_to(self.lease.reserved_bytes - size)
         while self.pending is not None and self.pending[0] <= start_ns:
-            _, closed_ns, connection_id = self.pending
+            _, closed_ns, observation_id = self.pending
             if closed_ns > end_ns:
-                size = 512 + 4 * len(connection_id)
+                size = 512 + 4 * len(observation_id)
                 self.lease.grow(size)
-                heapq.heappush(self.active, (closed_ns, connection_id, size))
+                heapq.heappush(self.active, (closed_ns, observation_id, size))
             self.pending = self.cursor.fetchone()
         # Two entries suffice to reject ambiguous coverage; no per-grid history scan.
         return tuple(item[1] for item in self.active[:2])
@@ -559,7 +554,38 @@ class RecorderRun:
     source_identity: dict[str, str]
     resource_policy: RuntimeResourcePolicy
     _files: tuple[_RunFile, ...] = field(repr=False)
-    _coverage_index: _ConnectionCoverageIndex = field(repr=False)
+    _coverage_index: ObservationCoverageIndex = field(repr=False)
+
+    def funding_root(self, symbol):
+        return self.root.parent / "funding" / symbol
+
+    def hft_source_info(self):
+        if self.manifest["market_data_status"] == "FAIL":
+            raise ValueError("hft_recorder_run_failed")
+        if (
+            self.manifest["recording_scope"] != FUTURES_HFT_RECORDING_SCOPE
+            or FUTURES_MARKET_TYPE not in self.manifest["market_types"]
+        ):
+            raise ValueError("hft_futures_run_missing")
+        if tuple(self.manifest["symbols"]) != RESEARCH_SYMBOLS:
+            raise ValueError("hft_symbols_incomplete")
+        return {
+            "raw_record_count": sum(
+                item["record_count"] for item in self.manifest["files"]
+            ),
+            "source_file_count": len(self.manifest["files"]),
+        }
+
+    def market_metadata(self, market_type, symbol):
+        if market_type not in self.manifest["market_types"]:
+            raise ValueError("binance_replay_market_type_missing")
+        if symbol not in self.manifest["symbols"]:
+            raise ValueError("binance_replay_symbol_missing")
+        native = self.manifest["market_metadata"][symbol][market_type]
+        return {
+            "price_unit": native["tick_size"],
+            "snapshot_limit": native["snapshot_limit"],
+        }
 
     def _retire(self) -> None:
         self.manifest = {}
@@ -631,18 +657,31 @@ class RecorderRun:
                     previous_capture_seq = capture_seq
                     yield record
 
-    def connection_coverage(
+    def iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
+        """Decode recorder-specific identity into the shared venue event contract."""
+        with closing_iterator(
+            self.iter_records(
+                symbol=symbol,
+                market_type=market_type,
+                data_kinds=data_kinds,
+            )
+        ) as records:
+            for record in records:
+                if end_ns is None or record["observed_time_ns"] <= end_ns:
+                    yield normalize_recorder_record(record)
+
+    def observation_coverage(
         self,
         *,
         market_type: str,
         data_kind: str,
         symbol: str,
-    ) -> _ConnectionCoverage:
+    ) -> ObservationCoverage:
         if data_kind == "depth_snapshot":
             data_kind = "depth"
         return self._coverage_index._coverage_readers.enter_context(
             handle_preserving_primary(
-                _ConnectionCoverage(
+                ObservationCoverage(
                     self._coverage_index, market_type, data_kind, symbol
                 )
             )
@@ -760,15 +799,16 @@ def open_recorder_run(
                 manifest,
                 manifest_identity,
             ):
-                coverage_index: _ConnectionCoverageIndex | None = None
+                coverage_index: ObservationCoverageIndex | None = None
                 files: tuple[_RunFile, ...] = ()
                 run: RecorderRun | None = None
                 try:
-                    coverage_index = _ConnectionCoverageIndex(
+                    coverage_index = ObservationCoverageIndex(
                         run_root,
                         manifest["capture"]["connection_intervals"],
                         markets=set(manifest["market_types"]),
                         resource_policy=policy,
+                        decode_interval=_decode_recorder_interval,
                     )
                     try:
                         files = _capture_run_files(
@@ -949,7 +989,7 @@ def _validate_run_manifest(value: object) -> None:
                 "snapshot_limit",
             }:
                 raise ValueError("binance_replay_market_metadata_invalid")
-            validate_tick_size(metadata["tick_size"])
+            validate_price_unit(metadata["tick_size"])
             limit = metadata["snapshot_limit"]
             if isinstance(limit, bool) or type(limit) is not int or limit <= 0:
                 raise ValueError("binance_replay_market_metadata_invalid")
@@ -1116,10 +1156,26 @@ def _validate_connection_interval(
         raise
 
 
+def _decode_recorder_interval(value, *, markets):
+    try:
+        opened_ns, closed_ns = _validate_connection_interval(value, markets=markets)
+        return (
+            value["connection_id"],
+            value["market"],
+            value["data_kind"],
+            value["stream"],
+            value["segment_id"],
+            opened_ns,
+            closed_ns,
+        )
+    finally:
+        value = None
+
+
 def _validate_record_coverage(
     record: dict[str, Any],
     *,
-    coverage_index: _ConnectionCoverageIndex,
+    coverage_index: ObservationCoverageIndex,
 ) -> None:
     data_kind = record["data_kind"]
     if data_kind == "metadata":
@@ -1149,7 +1205,7 @@ def _capture_run_files(
     manifest: dict[str, Any],
     policy: RuntimeResourcePolicy,
     *,
-    coverage_index: _ConnectionCoverageIndex,
+    coverage_index: ObservationCoverageIndex,
 ) -> tuple[_RunFile, ...]:
     declared_paths = {item["path"] for item in manifest["files"]} | {
         manifest["capture"]["connection_intervals"]["path"]
@@ -1449,7 +1505,7 @@ def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
 def _levels(
     value: object,
     *,
-    tick_size: str,
+    price_unit: str,
     error: str,
     allow_zero: bool,
     max_levels: int,
@@ -1460,13 +1516,22 @@ def _levels(
     for level in value:
         if not isinstance(level, list) or len(level) != 2:
             raise ValueError(error)
-        price_tick = price_to_tick(level[0], tick_size, error=error)
+        price_index = price_to_index(level[0], price_unit, error=error)
         quantity = strict_non_negative_float(level[1], error=error)
         if not allow_zero and quantity == 0:
             raise ValueError(error)
-        if price_tick in result:
+        if price_index in result:
             raise ValueError(error)
-        result[price_tick] = quantity
+        result[price_index] = quantity
+    return result
+
+
+def normalize_recorder_record(record):
+    """Preserve native recorder clocks while exposing source-neutral identity."""
+    result = dict(record)
+    result["source_sequence"] = result.pop("capture_seq")
+    result["observation_id"] = result.pop("connection_id")
+    result["price_unit"] = result.pop("tick_size")
     return result
 
 
@@ -1477,11 +1542,11 @@ class DepthReconstructor:
         self,
         market_type: str,
         *,
-        tick_size: str,
+        price_unit: str,
         snapshot_limit: int,
         required_levels: int,
         max_book_levels: int,
-        connection_close_ns: int,
+        connection_close_ns: int | None,
         resource_policy: RuntimeResourcePolicy,
         stats: ReconstructionStats,
         coverage_lease: MemoryLease,
@@ -1494,10 +1559,12 @@ class DepthReconstructor:
             raise ValueError("binance_replay_snapshot_coverage_invalid")
         if type(max_book_levels) is not int or max_book_levels < snapshot_limit:
             raise ValueError("binance_replay_book_bound_invalid")
-        if type(connection_close_ns) is not int or connection_close_ns < 0:
+        if connection_close_ns is not None and (
+            type(connection_close_ns) is not int or connection_close_ns < 0
+        ):
             raise ValueError("binance_replay_connection_coverage_invalid")
         self.market_type = market_type
-        self.tick_size = validate_tick_size(tick_size)
+        self.price_unit = validate_price_unit(price_unit)
         self.required_levels = required_levels
         self.max_book_levels = max_book_levels
         self.connection_close_ns = connection_close_ns
@@ -1511,7 +1578,7 @@ class DepthReconstructor:
         self._bids: dict[int, float] = {}
         self._asks: dict[int, float] = {}
         self._segment_id: str | None = None
-        self._connection_id: str | None = None
+        self._observation_id: str | None = None
         self._last_update_id: int | None = None
         self._last_time: int | None = None
         self._known_bid_floor_tick: int | None = None
@@ -1534,17 +1601,17 @@ class DepthReconstructor:
         payload = record.get("payload")
         if not isinstance(payload, dict):
             raise ValueError("binance_replay_snapshot_payload_invalid")
-        segment_id, connection_id = _record_identity(record)
+        segment_id, observation_id = _record_identity(record)
         bids = _levels(
             payload.get("bids"),
-            tick_size=self.tick_size,
+            price_unit=self.price_unit,
             error="binance_replay_snapshot_bids_invalid",
             allow_zero=False,
             max_levels=self.max_book_levels,
         )
         asks = _levels(
             payload.get("asks"),
-            tick_size=self.tick_size,
+            price_unit=self.price_unit,
             error="binance_replay_snapshot_asks_invalid",
             allow_zero=False,
             max_levels=self.max_book_levels,
@@ -1557,7 +1624,7 @@ class DepthReconstructor:
         self._known_bid_floor_tick = min(bids)
         self._known_ask_ceiling_tick = max(asks)
         self._segment_id = segment_id
-        self._connection_id = connection_id
+        self._observation_id = observation_id
         self._last_update_id = strict_non_negative_integer(
             payload.get("lastUpdateId"),
             error="binance_replay_snapshot_id_invalid",
@@ -1566,16 +1633,17 @@ class DepthReconstructor:
         self._bootstrapped = False
         self._invalid = False
 
-    def feed(
+    def advance(
         self,
         record: dict[str, Any],
-    ) -> Iterator[OwnedValue[BookState] | BookBoundary]:
+    ) -> bool | BookBoundary:
+        """Apply one update without materializing a book for live validity checks."""
         if self._invalid:
-            return
+            return False
         if record.get("market_type") != self.market_type:
             raise ValueError("binance_replay_market_type_mismatch")
-        segment_id, connection_id = _record_identity(record)
-        if segment_id != self._segment_id or connection_id != self._connection_id:
+        segment_id, observation_id = _record_identity(record)
+        if segment_id != self._segment_id or observation_id != self._observation_id:
             raise ValueError("binance_replay_segment_identity_mismatch")
         payload = record.get("payload")
         if not isinstance(payload, dict):
@@ -1598,7 +1666,7 @@ class DepthReconstructor:
             self.stats.stale_events += 1
             if last == self._last_update_id:
                 self.stats.duplicate_events += 1
-            return
+            return False
         if not self._bootstrapped:
             target = (
                 self._last_update_id
@@ -1606,26 +1674,22 @@ class DepthReconstructor:
                 else self._last_update_id + 1
             )
             if not first <= target <= last:
-                if first > target:
-                    yield self._invalidate(record, "sequence_gap")
-                return
+                return self._invalidate(record, "sequence_gap")
         elif self.market_type == FUTURES_MARKET_TYPE:
             if payload.get("pu") != self._last_update_id:
-                yield self._invalidate(record, "sequence_gap")
-                return
+                return self._invalidate(record, "sequence_gap")
         elif first > self._last_update_id + 1:
-            yield self._invalidate(record, "sequence_gap")
-            return
+            return self._invalidate(record, "sequence_gap")
         bid_updates = _levels(
             payload.get("b"),
-            tick_size=self.tick_size,
+            price_unit=self.price_unit,
             error="binance_replay_delta_bids_invalid",
             allow_zero=True,
             max_levels=self.max_book_levels,
         )
         ask_updates = _levels(
             payload.get("a"),
-            tick_size=self.tick_size,
+            price_unit=self.price_unit,
             error="binance_replay_delta_asks_invalid",
             allow_zero=True,
             max_levels=self.max_book_levels,
@@ -1633,28 +1697,26 @@ class DepthReconstructor:
         assert self._known_bid_floor_tick is not None
         assert self._known_ask_ceiling_tick is not None
         known_bid_updates = {
-            price_tick: quantity
-            for price_tick, quantity in bid_updates.items()
-            if price_tick >= self._known_bid_floor_tick
+            price_index: quantity
+            for price_index, quantity in bid_updates.items()
+            if price_index >= self._known_bid_floor_tick
         }
         known_ask_updates = {
-            price_tick: quantity
-            for price_tick, quantity in ask_updates.items()
-            if price_tick <= self._known_ask_ceiling_tick
+            price_index: quantity
+            for price_index, quantity in ask_updates.items()
+            if price_index <= self._known_ask_ceiling_tick
         }
         if (
             _projected_level_count(self._bids, known_bid_updates) > self.max_book_levels
             or _projected_level_count(self._asks, known_ask_updates)
             > self.max_book_levels
         ):
-            yield self._invalidate(record, "book_bound_exceeded")
-            return
+            return self._invalidate(record, "book_bound_exceeded")
         _apply_levels(self._bids, known_bid_updates)
         _apply_levels(self._asks, known_ask_updates)
         reason = self._invalid_reason(self._bids, self._asks)
         if reason is not None:
-            yield self._invalidate(record, reason)
-            return
+            return self._invalidate(record, reason)
         event_time, transaction_time, observed_time = _record_times(
             record,
             market_type=self.market_type,
@@ -1669,19 +1731,30 @@ class DepthReconstructor:
             self.stats.valid_segments += 1
             if self.stats.valid_segments > 1:
                 self.stats.recovered_segments += 1
-        previous = self.stats.coverage_segments.get(segment_id)
-        if previous is None:
-            self.coverage_lease.grow(4 * (512 + 4 * len(segment_id)))
-            self.stats.coverage_segments[segment_id] = (
-                observed_time,
-                self.connection_close_ns,
-            )
+        return True
+
+    def feed(
+        self,
+        record: dict[str, Any],
+    ) -> Iterator[OwnedValue[BookState] | BookBoundary]:
+        result = self.advance(record)
+        if isinstance(result, BookBoundary):
+            yield result
+            return
+        if not result:
+            return
+        event_time, transaction_time, observed_time = _record_times(
+            record, market_type=self.market_type
+        )
+        segment_id, observation_id = _record_identity(record)
+        last = self._last_update_id
+        assert last is not None
         state_bound = 64 * 1024 + (len(self._bids) + len(self._asks)) * _LEVEL_BYTES
         state_lease = self.policy.lease("binance.replay.state", state_bound)
         transferred = False
         try:
             state = BookState(
-                capture_seq=record["capture_seq"],
+                source_sequence=record["source_sequence"],
                 event_time_ms=event_time,
                 transaction_time_ms=transaction_time,
                 observed_time_ns=observed_time,
@@ -1689,12 +1762,20 @@ class DepthReconstructor:
                 receive_monotonic_ns=record["receive_monotonic_ns"],
                 update_id=last,
                 segment_id=segment_id,
-                connection_id=connection_id,
+                observation_id=observation_id,
                 market_type=self.market_type,
-                tick_size=self.tick_size,
+                price_unit=self.price_unit,
                 bids=tuple(sorted(self._bids.items(), reverse=True)),
                 asks=tuple(sorted(self._asks.items())),
             )
+            if self.connection_close_ns is not None:
+                previous = self.stats.coverage_segments.get(segment_id)
+                if previous is None:
+                    self.coverage_lease.grow(4 * (512 + 4 * len(segment_id)))
+                    self.stats.coverage_segments[segment_id] = (
+                        observed_time,
+                        self.connection_close_ns,
+                    )
             self.stats.emitted_states += 1
             state_lease.transfer("binance.replay.book_state_consumer")
             transferred = True
@@ -1733,7 +1814,7 @@ class DepthReconstructor:
             record,
             market_type=self.market_type,
         )
-        segment_id, connection_id = _record_identity(record)
+        segment_id, observation_id = _record_identity(record)
         if segment_id in self.stats.coverage_segments:
             start, end = self.stats.coverage_segments[segment_id]
             self.stats.coverage_segments[segment_id] = (
@@ -1748,14 +1829,14 @@ class DepthReconstructor:
         if reason == "sequence_gap":
             self.stats.gaps += 1
         return BookBoundary(
-            capture_seq=record["capture_seq"],
+            source_sequence=record["source_sequence"],
             event_time_ms=event_time,
             transaction_time_ms=transaction_time,
             observed_time_ns=observed_time,
             receive_time=record["receive_time"],
             receive_monotonic_ns=record["receive_monotonic_ns"],
             segment_id=segment_id,
-            connection_id=connection_id,
+            observation_id=observation_id,
             market_type=self.market_type,
             reason=reason,
         )
@@ -1763,12 +1844,12 @@ class DepthReconstructor:
 
 def _record_identity(record: dict[str, Any]) -> tuple[str, str]:
     segment_id = record.get("segment_id")
-    connection_id = record.get("connection_id")
+    observation_id = record.get("observation_id")
     if not isinstance(segment_id, str) or not segment_id:
         raise ValueError("binance_replay_segment_identity_invalid")
-    if not isinstance(connection_id, str) or not connection_id:
-        raise ValueError("binance_replay_connection_identity_invalid")
-    return segment_id, connection_id
+    if not isinstance(observation_id, str) or not observation_id:
+        raise ValueError("binance_replay_observation_identity_invalid")
+    return segment_id, observation_id
 
 
 def _record_times(
@@ -1803,47 +1884,45 @@ def _projected_level_count(
     updates: dict[int, float],
 ) -> int:
     result = len(current)
-    for price_tick, quantity in updates.items():
-        if quantity == 0 and price_tick in current:
+    for price_index, quantity in updates.items():
+        if quantity == 0 and price_index in current:
             result -= 1
-        elif quantity > 0 and price_tick not in current:
+        elif quantity > 0 and price_index not in current:
             result += 1
     return result
 
 
 def _apply_levels(target: dict[int, float], updates: dict[int, float]) -> None:
-    for price_tick, quantity in updates.items():
+    for price_index, quantity in updates.items():
         if quantity == 0:
-            target.pop(price_tick, None)
+            target.pop(price_index, None)
         else:
-            target[price_tick] = quantity
+            target[price_index] = quantity
 
 
 def iter_reconstructed_depth(
-    run: RecorderRun,
+    run,
     market_type: str,
     *,
     symbol: str,
-    required_levels: int = 10,
-    max_book_levels: int = 10_000,
+    required_levels: int = RECONSTRUCTION_REQUIRED_LEVELS,
+    max_book_levels: int = RECONSTRUCTION_MAX_BOOK_LEVELS,
     stats: ReconstructionStats | None = None,
+    end_ns: int | None = None,
 ) -> Iterator[OwnedValue[BookState] | BookBoundary]:
     """Replay one venue book with one capture-ordered snapshot/delta pass."""
 
-    if market_type not in run.manifest["market_types"]:
-        raise ValueError("binance_replay_market_type_missing")
-    if symbol not in run.manifest["symbols"]:
-        raise ValueError("binance_replay_symbol_missing")
-    metadata = run.manifest["market_metadata"][symbol][market_type]
+    metadata = run.market_metadata(market_type, symbol)
     active_stats = stats if stats is not None else ReconstructionStats()
     reconstructor: DepthReconstructor | None = None
     active_segment: str | None = None
     pending_reconnect: tuple[str, str] | None = None
     pending_invalid_reason: str | None = None
-    records = run.iter_records(
+    records = run.iter_market_records(
         symbol=symbol,
         market_type=market_type,
         data_kinds=("depth_snapshot", "depth"),
+        end_ns=end_ns,
     )
     with (
         closing_iterator(records),
@@ -1853,7 +1932,7 @@ def iter_reconstructed_depth(
     ):
         try:
             for record in records:
-                segment_id, connection_id = _record_identity(record)
+                segment_id, observation_id = _record_identity(record)
                 if record["data_kind"] == "depth_snapshot":
                     if reconstructor is not None:
                         if active_segment == segment_id:
@@ -1863,12 +1942,12 @@ def iter_reconstructed_depth(
                         if reconstructor.valid:
                             pending_reconnect = (
                                 active_segment or segment_id,
-                                reconstructor._connection_id or "",
+                                reconstructor._observation_id or "",
                             )
                         reconstructor.close()
                         reconstructor = None
                     bounds = run._coverage_index.bounds(  # noqa: SLF001
-                        connection_id,
+                        observation_id,
                         market_type=market_type,
                         data_kind="depth",
                     )
@@ -1879,7 +1958,7 @@ def iter_reconstructed_depth(
                         transient_coverage.shrink_to(0)
                     reconstructor = DepthReconstructor(
                         market_type,
-                        tick_size=metadata["tick_size"],
+                        price_unit=metadata["price_unit"],
                         snapshot_limit=metadata["snapshot_limit"],
                         required_levels=required_levels,
                         max_book_levels=max_book_levels,
@@ -1926,19 +2005,24 @@ def iter_reconstructed_depth(
                             reconstructor._close_coverage(observed_time)
                             active_stats.reconnect_boundaries += 1
                             yield BookBoundary(
-                                capture_seq=record["capture_seq"],
+                                source_sequence=record["source_sequence"],
                                 event_time_ms=event_time,
                                 transaction_time_ms=transaction_time,
                                 observed_time_ns=observed_time,
                                 receive_time=record["receive_time"],
                                 receive_monotonic_ns=record["receive_monotonic_ns"],
                                 segment_id=active_segment or segment_id,
-                                connection_id=reconstructor._connection_id or "",
+                                observation_id=reconstructor._observation_id or "",
                                 market_type=market_type,
                                 reason="reconnect_boundary",
                             )
                         reconstructor.close()
                     raise ValueError("binance_replay_snapshot_missing")
+
+                if record["data_kind"] == "depth_bootstrap":
+                    if reconstructor is not None:
+                        reconstructor.advance(record)
+                    continue
 
                 if pending_reconnect is not None:
                     event_time, transaction_time, observed_time = _record_times(
@@ -1947,14 +2031,14 @@ def iter_reconstructed_depth(
                     )
                     active_stats.reconnect_boundaries += 1
                     yield BookBoundary(
-                        capture_seq=record["capture_seq"],
+                        source_sequence=record["source_sequence"],
                         event_time_ms=event_time,
                         transaction_time_ms=transaction_time,
                         observed_time_ns=observed_time,
                         receive_time=record["receive_time"],
                         receive_monotonic_ns=record["receive_monotonic_ns"],
                         segment_id=pending_reconnect[0],
-                        connection_id=pending_reconnect[1],
+                        observation_id=pending_reconnect[1],
                         market_type=market_type,
                         reason="reconnect_boundary",
                     )
@@ -1965,14 +2049,14 @@ def iter_reconstructed_depth(
                         market_type=market_type,
                     )
                     yield BookBoundary(
-                        capture_seq=record["capture_seq"],
+                        source_sequence=record["source_sequence"],
                         event_time_ms=event_time,
                         transaction_time_ms=transaction_time,
                         observed_time_ns=observed_time,
                         receive_time=record["receive_time"],
                         receive_monotonic_ns=record["receive_monotonic_ns"],
                         segment_id=segment_id,
-                        connection_id=connection_id,
+                        observation_id=observation_id,
                         market_type=market_type,
                         reason=pending_invalid_reason,
                     )
@@ -1996,7 +2080,7 @@ def iter_reconstructed_depth(
 
 
 def iter_agg_trades(
-    run: RecorderRun,
+    run,
     market_type: str,
     *,
     symbol: str,
@@ -2004,13 +2088,13 @@ def iter_agg_trades(
 ) -> Iterator[TradeEvent]:
     """Normalize one recorder trade stream while preserving local identity."""
 
-    if market_type not in run.manifest["market_types"]:
-        raise ValueError("binance_replay_market_type_missing")
-    previous_key: tuple[int, int, int] | None = None
-    records = run.iter_records(
+    run.market_metadata(market_type, symbol)
+    previous_key: tuple[int, ...] | None = None
+    records = run.iter_market_records(
         symbol=symbol,
         market_type=market_type,
         data_kinds=("agg_trades",),
+        end_ns=None if end_ms is None else end_ms * 1_000_000,
     )
     with closing_iterator(records):
         for record in records:
@@ -2027,16 +2111,6 @@ def iter_agg_trades(
                 record["receive_time"],
                 error="binance_replay_receive_time_invalid",
             ).value
-            if end_ms is not None and observed_time > end_ms * 1_000_000:
-                break
-            key = (
-                observed_time,
-                record["receive_monotonic_ns"],
-                record["capture_seq"],
-            )
-            if previous_key is not None and key < previous_key:
-                raise ValueError("binance_replay_trade_order_non_monotonic")
-            previous_key = key
             quantity = strict_positive_float(
                 payload.get("q"),
                 error="binance_replay_trade_quantity_invalid",
@@ -2051,19 +2125,19 @@ def iter_agg_trades(
             )
             if visible_quantity > quantity:
                 raise ValueError("binance_replay_trade_visible_quantity_invalid")
-            yield TradeEvent(
-                capture_seq=record["capture_seq"],
+            trade = TradeEvent(
+                source_sequence=record["source_sequence"],
                 event_time_ms=event_time,
                 transaction_time_ms=transaction_time,
                 observed_time_ns=observed_time,
                 receive_time=record["receive_time"],
                 receive_monotonic_ns=record["receive_monotonic_ns"],
-                connection_id=record["connection_id"],
+                observation_id=record["observation_id"],
                 market_type=market_type,
-                tick_size=record["tick_size"],
-                price_tick=price_to_tick(
+                price_unit=record["price_unit"],
+                price_index=price_to_index(
                     payload.get("p"),
-                    record["tick_size"],
+                    record["price_unit"],
                     error="binance_replay_trade_price_invalid",
                 ),
                 quantity=quantity,
@@ -2074,14 +2148,8 @@ def iter_agg_trades(
                 ),
             )
 
-
-def recorder_source_identity(root: Path, _target_id: str) -> str | None:
-    """Bind existing recorder truth without creating a synthetic interim dataset."""
-    root = require_unaliased_path(root, error="binance_replay_file_path_invalid")
-    if not os.path.exists(native_filesystem_path(root)):
-        return None
-    try:
-        with open_recorder_run(root) as run:
-            return canonical_json_hash(run.source_identity)
-    except FileNotFoundError:
-        return None
+            key = observation_order_key(trade)
+            if previous_key is not None and key < previous_key:
+                raise ValueError("binance_replay_trade_order_non_monotonic")
+            previous_key = key
+            yield trade

@@ -11,7 +11,7 @@ from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
     TradeEvent,
-    price_to_tick,
+    price_to_index,
 )
 from quant_research_platform.contracts.portfolios import (
     FundingForecast,
@@ -46,6 +46,7 @@ from tests.helpers.binance_hft import (
 from tests.helpers.runtime_resources import capture_test_policy
 
 
+@pytest.mark.usefixtures("coordinate_scale")
 def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
     from tests.markets.crypto.calibration_test_support import calibration_from_paths
 
@@ -103,14 +104,14 @@ def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
 def _state(
     timestamp_ms: int,
     *,
-    bid_tick: int = 995,
-    ask_tick: int = 1005,
+    bid_index: int = 995,
+    ask_index: int = 1005,
     bid_levels: tuple[tuple[int, float], ...] | None = None,
     ask_levels: tuple[tuple[int, float], ...] | None = None,
     segment_id: str = "s1",
 ) -> BookState:
     return BookState(
-        capture_seq=timestamp_ms + 1,
+        source_sequence=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
@@ -118,24 +119,24 @@ def _state(
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
         segment_id=segment_id,
-        connection_id=f"connection-{segment_id}",
+        observation_id=f"connection-{segment_id}",
         market_type=FUTURES_MARKET_TYPE,
-        tick_size="0.1",
-        bids=bid_levels or ((bid_tick, 2.0), (bid_tick - 5, 3.0)),
-        asks=ask_levels or ((ask_tick, 1.0), (ask_tick + 5, 2.0)),
+        price_unit="0.1",
+        bids=bid_levels or ((bid_index, 2.0), (bid_index - 5, 3.0)),
+        asks=ask_levels or ((ask_index, 1.0), (ask_index + 5, 2.0)),
     )
 
 
 def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
     return BookBoundary(
-        capture_seq=timestamp_ms + 1,
+        source_sequence=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
-        connection_id=f"connection-{segment_id}",
+        observation_id=f"connection-{segment_id}",
         market_type=FUTURES_MARKET_TYPE,
         reason="sequence_gap",
     )
@@ -150,16 +151,16 @@ def _trade(
 ) -> TradeEvent:
     quantity_value = float(quantity)
     return TradeEvent(
-        capture_seq=timestamp_ms + 10,
+        source_sequence=timestamp_ms + 10,
         event_time_ms=timestamp_ms,
         transaction_time_ms=timestamp_ms,
         observed_time_ns=timestamp_ms * 1_000_000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=timestamp_ms + 10,
-        connection_id="trade-connection-1",
+        observation_id="trade-connection-1",
         market_type=FUTURES_MARKET_TYPE,
-        tick_size="0.1",
-        price_tick=price_to_tick(price, "0.1", error="bad"),
+        price_unit="0.1",
+        price_index=price_to_index(price, "0.1", error="bad"),
         quantity=quantity_value,
         visible_quantity=quantity_value,
         buyer_is_maker=maker_buyer,
@@ -193,7 +194,7 @@ simulate_maker = with_test_resource_policy(_simulate_maker)
 
 
 @pytest.mark.parametrize(
-    "wrong_identity", (None, "book_segment_id", "trade_connection_id")
+    "wrong_identity", (None, "book_segment_id", "trade_observation_id")
 )
 def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) -> None:
     from quant_research_platform.markets.implementations.crypto.portfolio import (
@@ -211,7 +212,7 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
                     "asset_id": asset,
                     "segment_id": "s1:trade-connection-1",
                     "book_segment_id": "s1",
-                    "trade_connection_id": "trade-connection-1",
+                    "trade_observation_id": "trade-connection-1",
                     "prediction_score": 1.0,
                     "label": 0.0,
                     "label_available_at": pd.Timestamp(100_000_000),
@@ -308,10 +309,11 @@ def test_market_event_first_trade_failure_releases_first_book_and_children() -> 
                 owned.release(owner="test.crypto.execution.first_book")
 
 
+@pytest.mark.usefixtures("coordinate_scale")
 def test_taker_uses_latest_actual_state_at_effective_time() -> None:
     fills = []
     diagnostics = simulate_taker(
-        [_state(0), _state(5), _state(15, bid_tick=1005, ask_tick=1015)],
+        [_state(0), _state(5), _state(15, bid_index=1005, ask_index=1015)],
         [{"timestamp_ms": 0, "prediction": 0.02, "segment_id": "s1"}],
         funding_forecasts=KNOWN_NO_FUNDING,
         prediction_horizon_ms=500,
@@ -523,6 +525,7 @@ def test_failing_fill_observer_is_not_replayed_during_cleanup() -> None:
     assert policy.used_memory_bytes == 0
 
 
+@pytest.mark.usefixtures("coordinate_scale")
 def test_taker_walks_known_l2_and_reports_partial_coverage_honestly() -> None:
     fills = []
     diagnostics = simulate_taker(
@@ -600,7 +603,7 @@ def test_taker_terminal_pnl_is_unknown_after_book_boundary() -> None:
 
 def test_taker_markout_does_not_use_state_past_observed_coverage() -> None:
     diagnostics = simulate_taker(
-        [_state(0), _state(200, bid_tick=1005, ask_tick=1015)],
+        [_state(0), _state(200, bid_index=1005, ask_index=1015)],
         [{"timestamp_ms": 0, "prediction": 0.02}],
         funding_forecasts=KNOWN_NO_FUNDING,
         prediction_horizon_ms=500,
@@ -620,9 +623,9 @@ def test_taker_markout_uses_latest_state_as_of_target() -> None:
     fills: list[dict[str, object]] = []
     diagnostics = simulate_taker(
         [
-            _state(0, bid_tick=1000, ask_tick=1005),
-            _state(50, bid_tick=1005, ask_tick=1015),
-            _state(200, bid_tick=1095, ask_tick=1105),
+            _state(0, bid_index=1000, ask_index=1005),
+            _state(50, bid_index=1005, ask_index=1015),
+            _state(200, bid_index=1095, ask_index=1105),
         ],
         [{"timestamp_ms": 0, "prediction": 0.1}],
         funding_forecasts=KNOWN_NO_FUNDING,
@@ -640,6 +643,7 @@ def test_taker_markout_uses_latest_state_as_of_target() -> None:
     assert fills[0]["markout_per_unit"] == pytest.approx(0.5)
 
 
+@pytest.mark.usefixtures("coordinate_scale")
 def test_taker_target_position_does_not_accumulate_repeated_signal() -> None:
     diagnostics = simulate_taker(
         [_state(0), _state(100), _state(200)],
@@ -662,10 +666,11 @@ def test_taker_target_position_does_not_accumulate_repeated_signal() -> None:
     assert diagnostics["max_abs_position"] == 2.0
 
 
+@pytest.mark.usefixtures("coordinate_scale")
 def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
     fills = []
     diagnostics = simulate_maker(
-        [_state(0), _state(200, bid_tick=1000, ask_tick=1010)],
+        [_state(0), _state(200, bid_index=1000, ask_index=1010)],
         [
             _trade(50, price="99.5", quantity="2.5", maker_buyer=True),
             _trade(100, price="99.5", quantity="0.5", maker_buyer=True),
@@ -690,6 +695,7 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
     assert diagnostics["inventory_revaluation_pnl"] is not None
 
 
+@pytest.mark.usefixtures("coordinate_scale")
 def test_maker_trade_through_fills_and_boundary_blocks_stale_trade() -> None:
     fills = []
     diagnostics = simulate_maker(
@@ -1031,3 +1037,31 @@ def test_taker_terminal_mark_cannot_reuse_price_before_pending_effective_time():
     )
     assert result["filled_orders"] == 1 and result["unfilled_quantity"] == 1.0
     assert result["net_pnl"] is None and result["nav"] is None
+
+
+@pytest.fixture(params=(1, 10, 100))
+def coordinate_scale(request, monkeypatch):
+    import sys
+    from dataclasses import replace
+
+    multiplier = request.param
+    unit = {1: "0.1", 10: "0.01", 100: "0.001"}[multiplier]
+    original_state, original_trade = _state, _trade
+
+    def state(*args, **kwargs):
+        value = original_state(*args, **kwargs)
+        return replace(
+            value,
+            price_unit=unit,
+            bids=tuple((index * multiplier, qty) for index, qty in value.bids),
+            asks=tuple((index * multiplier, qty) for index, qty in value.asks),
+        )
+
+    def trade(*args, **kwargs):
+        value = original_trade(*args, **kwargs)
+        return replace(
+            value, price_unit=unit, price_index=value.price_index * multiplier
+        )
+
+    monkeypatch.setattr(sys.modules[__name__], "_state", state)
+    monkeypatch.setattr(sys.modules[__name__], "_trade", trade)

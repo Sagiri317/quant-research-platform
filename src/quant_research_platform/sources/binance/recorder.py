@@ -13,8 +13,8 @@ import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Iterator
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,7 @@ from quant_research_platform.contracts.json_codec import (
     json_record_working_set_bytes,
     parse_qrp_json_object,
 )
+from quant_research_platform.contracts.order_book import BookBoundary
 from quant_research_platform.contracts.validation import (
     clear_exception_frames,
     strict_finite_float,
@@ -45,6 +46,13 @@ from quant_research_platform.sources.binance.ids import (
     RESEARCH_SYMBOLS,
     SPOT_L2_RECORDING_SCOPE,
     SPOT_MARKET_TYPE,
+)
+from quant_research_platform.sources.binance.replay import (
+    RECONSTRUCTION_MAX_BOOK_LEVELS,
+    RECONSTRUCTION_REQUIRED_LEVELS,
+    DepthReconstructor,
+    ReconstructionStats,
+    normalize_recorder_record,
 )
 from quant_research_platform.sources.binance.validation import (
     strict_iso_timestamp,
@@ -707,7 +715,8 @@ class _StreamReader(threading.Thread):
         stats: _CaptureStats,
         stop: threading.Event,
         config: RecorderConfig,
-        on_generation_ready: Callable[[_StreamReader, int], None] | None = None,
+        resource_policy: RuntimeResourcePolicy,
+        tick_size: str,
     ) -> None:
         super().__init__(
             name=f"binance-{stream.market_type}-{stream.data_kind}",
@@ -718,38 +727,10 @@ class _StreamReader(threading.Thread):
         self.stats = stats
         self.stop = stop
         self.config = config
-        self.on_generation_ready = on_generation_ready
+        self.resource_policy = resource_policy
+        self.tick_size = tick_size
         self.ready = threading.Event()
         self.failure: str | None = None
-        self._identity_lock = threading.Lock()
-        self._connection_id: str | None = None
-        self._segment_id: str | None = None
-        self._generation = 0
-        self._snapshot_ack: threading.Event | None = None
-
-    def current_identity(self) -> tuple[int, str | None, str | None]:
-        with self._identity_lock:
-            return self._generation, self._connection_id, self._segment_id
-
-    def acknowledge_snapshot(self, generation: int) -> bool:
-        with self._identity_lock:
-            if generation != self._generation or self._snapshot_ack is None:
-                return False
-            self._snapshot_ack.set()
-            return True
-
-    def wait_for_snapshot(self, generation: int, timeout: float) -> bool:
-        with self._identity_lock:
-            if generation != self._generation or self._snapshot_ack is None:
-                return False
-            acknowledgement = self._snapshot_ack
-        return acknowledgement.wait(timeout)
-
-    def _await_snapshot(self, generation: int) -> bool:
-        while not self.stop.is_set():
-            if self.wait_for_snapshot(generation, 0.1):
-                return True
-        return False
 
     def run(self) -> None:
         backoff = 1.0
@@ -757,7 +738,12 @@ class _StreamReader(threading.Thread):
         while not self.stop.is_set():
             try:
                 self._read_connection(reconnect=reconnect)
-            except (_ConnectionProblem, _DepthResyncRequired, _InvalidPayload):
+            except _DepthResyncRequired:
+                if self.stop.is_set():
+                    break
+                reconnect = True
+                continue
+            except (_ConnectionProblem, _InvalidPayload):
                 if self.stop.is_set():
                     break
                 self.stats.connection_error()
@@ -778,6 +764,8 @@ class _StreamReader(threading.Thread):
         close_reason = "stop"
         closed_at: str | None = None
         closed_monotonic_ns: int | None = None
+        depth_resources = ExitStack()
+        depth_book: DepthReconstructor | None = None
 
         def freeze_close() -> None:
             nonlocal closed_at, closed_monotonic_ns
@@ -797,13 +785,6 @@ class _StreamReader(threading.Thread):
                 )
             except (OSError, TimeoutError, WebSocketException) as exc:
                 raise _ConnectionProblem() from exc
-            with self._identity_lock:
-                self._generation += 1
-                self._connection_id = connection_id
-                self._segment_id = segment_id
-                self._snapshot_ack = (
-                    threading.Event() if self.stream.data_kind == "depth" else None
-                )
             self.stats.opened(
                 self.stream,
                 reconnect=reconnect,
@@ -813,14 +794,32 @@ class _StreamReader(threading.Thread):
                 opened_monotonic_ns=time.monotonic_ns(),
             )
             opened = True
-            self.ready.set()
             if self.stream.data_kind == "depth":
-                generation = self.current_identity()[0]
-                if self.on_generation_ready is not None:
-                    self.on_generation_ready(self, generation)
-                if not self._await_snapshot(generation):
-                    raise _ConnectionProblem()
-            previous_u: int | None = None
+                coverage = depth_resources.enter_context(
+                    self.resource_policy.lease("binance.recorder.depth_coverage", 0)
+                )
+                depth_book = DepthReconstructor(
+                    self.stream.market_type,
+                    price_unit=self.tick_size,
+                    snapshot_limit=SNAPSHOT_LIMITS[self.stream.market_type],
+                    required_levels=RECONSTRUCTION_REQUIRED_LEVELS,
+                    max_book_levels=RECONSTRUCTION_MAX_BOOK_LEVELS,
+                    connection_close_ns=None,
+                    resource_policy=self.resource_policy,
+                    stats=ReconstructionStats(),
+                    coverage_lease=coverage,
+                )
+                depth_resources.callback(depth_book.close)
+                assert segment_id is not None
+                _record_depth_snapshot(
+                    self.writer,
+                    self.resource_policy,
+                    self.stream,
+                    connection_id=connection_id,
+                    segment_id=segment_id,
+                    reconstructor=depth_book,
+                )
+            self.ready.set()
             last_message_at = time.monotonic()
             while True:
                 if self.stop.is_set():
@@ -860,19 +859,7 @@ class _StreamReader(threading.Thread):
                     self.stats.invalid()
                     freeze_close()
                     raise _InvalidPayload() from None
-                needs_resync = False
-                if self.stream.data_kind == "depth":
-                    current_u = payload["u"]
-                    if previous_u is not None:
-                        if current_u <= previous_u:
-                            self.stats.stale()
-                        elif self.stream.market_type == FUTURES_MARKET_TYPE:
-                            needs_resync = payload["pu"] != previous_u
-                        else:
-                            needs_resync = payload["U"] > previous_u + 1
-                    if current_u > (previous_u if previous_u is not None else -1):
-                        previous_u = current_u
-                self.writer.write(
+                capture_seq = self.writer.write(
                     symbol=self.stream.symbol,
                     market_type=self.stream.market_type,
                     data_kind=self.stream.data_kind,
@@ -883,10 +870,28 @@ class _StreamReader(threading.Thread):
                     connection_id=connection_id,
                     segment_id=segment_id,
                 )
-                if needs_resync:
-                    self.stats.sequence_gap()
-                    freeze_close()
-                    raise _DepthResyncRequired()
+                if depth_book is not None:
+                    result = depth_book.advance(
+                        normalize_recorder_record(
+                            {
+                                "capture_seq": capture_seq,
+                                "tick_size": self.tick_size,
+                                "market_type": self.stream.market_type,
+                                "payload": payload,
+                                "receive_time": receive_time,
+                                "receive_monotonic_ns": receive_monotonic_ns,
+                                "connection_id": connection_id,
+                                "segment_id": segment_id,
+                            }
+                        )
+                    )
+                    if isinstance(result, BookBoundary):
+                        if result.reason == "sequence_gap":
+                            self.stats.sequence_gap()
+                        freeze_close()
+                        raise _DepthResyncRequired()
+                    if not result:
+                        self.stats.stale()
         except _DepthResyncRequired:
             close_reason = "depth_resync"
             freeze_close()
@@ -906,38 +911,38 @@ class _StreamReader(threading.Thread):
         finally:
             primary = sys.exception()
             first_failure: BaseException | None = None
+            cleanups = []
             if opened:
                 assert closed_at is not None
                 assert closed_monotonic_ns is not None
-                try:
-                    self.stats.closed(
-                        connection_id,
-                        closed_at=closed_at,
-                        closed_monotonic_ns=closed_monotonic_ns,
-                        close_reason=close_reason,
+                cleanups.append(
+                    (
+                        "connection interval",
+                        lambda: self.stats.closed(
+                            connection_id,
+                            closed_at=closed_at,
+                            closed_monotonic_ns=closed_monotonic_ns,
+                            close_reason=close_reason,
+                        ),
                     )
-                except BaseException as cleanup_error:
-                    if primary is not None:
-                        primary.add_note(
-                            "Binance connection interval close also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                    else:
-                        first_failure = cleanup_error
+                )
+            cleanups.append(("depth validation", depth_resources.close))
             if websocket is not None:
+                cleanups.append(("websocket", websocket.close))
+            for name, close in cleanups:
                 try:
-                    websocket.close()
+                    close()
                 except BaseException as cleanup_error:
                     if primary is not None:
                         primary.add_note(
-                            "Binance websocket close also failed: "
+                            f"Binance {name} close also failed: "
                             f"{type(cleanup_error).__name__}"
                         )
                     elif first_failure is None:
                         first_failure = cleanup_error
                     else:
                         first_failure.add_note(
-                            "Binance websocket close also failed: "
+                            f"Binance {name} close also failed: "
                             f"{type(cleanup_error).__name__}"
                         )
             if first_failure is not None:
@@ -1103,52 +1108,63 @@ def _validate_snapshot(payload: object, *, market_type: str) -> dict[str, Any]:
 def _record_depth_snapshot(
     writer: _RunWriter,
     policy: RuntimeResourcePolicy,
-    reader: _StreamReader,
+    stream: RecorderStream,
     *,
-    generation: int,
+    connection_id: str,
+    segment_id: str,
+    reconstructor: DepthReconstructor,
 ) -> None:
-    market_type = reader.stream.market_type
+    market_type = stream.market_type
     base_url, endpoint = (
         (SPOT_REST_BASE_URL, "/api/v3/depth")
         if market_type == SPOT_MARKET_TYPE
         else (FUTURES_REST_BASE_URL, "/fapi/v1/depth")
     )
-    before = reader.current_identity()
-    if before[0] != generation:
-        raise _ConnectionProblem()
     with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
-        payload = snapshot = received = monotonic_ns = after = None
+        payload = snapshot = received = monotonic_ns = None
         try:
-            payload, received, monotonic_ns = _http_get_json(
-                base_url,
-                endpoint,
-                params={
-                    "symbol": reader.stream.symbol,
-                    "limit": str(SNAPSHOT_LIMITS[market_type]),
-                },
-            )
-            after = reader.current_identity()
-            if before != after:
-                raise _ConnectionProblem()
+            try:
+                payload, received, monotonic_ns = _http_get_json(
+                    base_url,
+                    endpoint,
+                    params={
+                        "symbol": stream.symbol,
+                        "limit": str(SNAPSHOT_LIMITS[market_type]),
+                    },
+                )
+            except (TimeoutError, OSError) as error:
+                raise _ConnectionProblem() from error
             snapshot = _validate_snapshot(payload, market_type=market_type)
-            writer.write(
-                symbol=reader.stream.symbol,
+            capture_seq = writer.write(
+                symbol=stream.symbol,
                 market_type=market_type,
                 data_kind="depth_snapshot",
                 stream=f"REST:{endpoint}",
                 payload=snapshot,
                 receive_time=received,
                 receive_monotonic_ns=monotonic_ns,
-                connection_id=after[1],
-                segment_id=after[2],
+                connection_id=connection_id,
+                segment_id=segment_id,
             )
-            if not reader.acknowledge_snapshot(generation):
-                raise _ConnectionProblem()
+            reconstructor.bootstrap(
+                normalize_recorder_record(
+                    {
+                        "capture_seq": capture_seq,
+                        "tick_size": reconstructor.price_unit,
+                        "market_type": market_type,
+                        "payload": snapshot,
+                        "receive_time": received,
+                        "receive_monotonic_ns": monotonic_ns,
+                        "connection_id": connection_id,
+                        "segment_id": segment_id,
+                    }
+                )
+            )
         except BaseException as error:
             clear_exception_frames(error)
             raise
         finally:
-            payload = snapshot = received = monotonic_ns = after = None
+            payload = snapshot = received = monotonic_ns = None
 
 
 def record(config: RecorderConfig) -> dict[str, Any]:
@@ -1205,14 +1221,10 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                             stats=stats,
                             stop=stop,
                             config=config,
-                            on_generation_ready=(
-                                lambda reader, generation: _record_depth_snapshot(
-                                    writer,
-                                    policy,
-                                    reader,
-                                    generation=generation,
-                                )
-                            ),
+                            resource_policy=policy,
+                            tick_size=market_metadata[stream.symbol][
+                                stream.market_type
+                            ]["tick_size"],
                         )
                         for stream in streams
                     ]
@@ -1225,16 +1237,6 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                             raise TimeoutError(
                                 "binance_recorder_stream_connect_timeout"
                             )
-                    depth_readers = [
-                        reader
-                        for reader in readers
-                        if reader.stream.data_kind == "depth"
-                    ]
-                    for reader in depth_readers:
-                        remaining = max(0.0, deadline - time.monotonic())
-                        generation = reader.current_identity()[0]
-                        if not reader.wait_for_snapshot(generation, remaining):
-                            raise TimeoutError("binance_recorder_snapshot_ack_timeout")
                     started_at = _utc_now()
                     started_clock = time.monotonic()
                     cpu_start = time.process_time()
@@ -1309,6 +1311,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
         if cleanup_errors
         else "PARTIAL"
         if captured["connection_errors"]
+        or any(captured["reconnects"].values())
         or captured["sequence_gaps"]
         or captured["invalid_messages"]
         or missing_required_streams

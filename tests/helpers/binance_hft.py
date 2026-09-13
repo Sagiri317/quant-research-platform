@@ -95,6 +95,7 @@ def write_hft_funding_fixture(raw_root: Path) -> None:
                     "status": "COMPLETE",
                 },
                 "provenance": "synthetic_explicit_calendar_and_known_forecasts",
+                "settlement_source": None,
             }
             rows = (
                 ("settlement", 4_800_000_000, None, -0.02, mark, None),
@@ -152,13 +153,13 @@ def _quote(
     timestamp_ms: int,
     *,
     book_segment_id: str = "book-1",
-    trade_connection_id: str = "trade-connection-1",
+    trade_observation_id: str = "trade-connection-1",
 ) -> dict[str, object]:
     return {
         "timestamp_ms": timestamp_ms,
         "asset_id": "btc_usdt",
         "book_segment_id": book_segment_id,
-        "trade_connection_id": trade_connection_id,
+        "trade_observation_id": trade_observation_id,
     }
 
 

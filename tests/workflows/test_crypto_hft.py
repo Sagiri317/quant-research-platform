@@ -68,7 +68,7 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
             "asset_id": ["btc_usdt"] * 3,
             "segment_id": ["book-1:trade-1"] * 3,
             "book_segment_id": ["book-1"] * 3,
-            "trade_connection_id": ["trade-1"] * 3,
+            "trade_observation_id": ["trade-1"] * 3,
             "ofi_100ms": [1.0, float("nan"), 2.0],
             "eligible": [True, True, False],
         }

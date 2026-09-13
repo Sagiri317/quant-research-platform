@@ -1,5 +1,6 @@
 """Immutable per-symbol funding observations with separate known forecasts."""
 
+import hashlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,6 +20,10 @@ from quant_research_platform.runtime.resources import runtime_resource_policy_sc
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     RESEARCH_SYMBOLS,
+)
+from quant_research_platform.storage.identity import (
+    dataset_file_identity,
+    require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_manifest
 from quant_research_platform.storage.raw_snapshots import (
@@ -45,12 +50,6 @@ class FundingObservations:
     forecasts: Iterator[FundingForecast]
 
 
-def _funding_root(raw_root, symbol):
-    if symbol not in RESEARCH_SYMBOLS:
-        raise ValueError("binance_funding_symbol_invalid")
-    return Path(raw_root).parent / "funding" / symbol
-
-
 def _manifest(root, symbol):
     if not all(
         (root / name).is_file() for name in ("response.csv", "response.metadata.json")
@@ -68,6 +67,7 @@ def _manifest(root, symbol):
             "valuation_currency",
             "coverage",
             "provenance",
+            "settlement_source",
         }
         or metadata["schema_id"] != FUNDING_SCHEMA_ID
         or metadata["symbol"] != symbol
@@ -95,6 +95,48 @@ def _manifest(root, symbol):
         or not metadata["provenance"].strip()
     ):
         raise PortfolioTargetBlocked("binance_funding_coverage_unproven")
+    native = metadata["settlement_source"]
+    if native is not None:
+        if (
+            type(native) is not dict
+            or set(native)
+            != {
+                "source_id",
+                "endpoint",
+                "symbol",
+                "start_ms",
+                "end_ms",
+                "http_status",
+                "sha256",
+                "byte_count",
+            }
+            or native["source_id"] != "binance"
+            or native["endpoint"] != "https://fapi.binance.com/fapi/v1/fundingRate"
+            or native["symbol"] != symbol
+            or type(native["start_ms"]) is not int
+            or type(native["end_ms"]) is not int
+            or native["start_ms"] * 1_000_000 > coverage["start_ns"]
+            or (native["end_ms"] + 1) * 1_000_000 <= coverage["end_ns"]
+            or native["http_status"] != 200
+            or type(native["byte_count"]) is not int
+            or native["byte_count"] <= 0
+            or type(native["sha256"]) is not str
+            or len(native["sha256"]) != 64
+        ):
+            raise ValueError("binance_funding_settlement_source_invalid")
+        path = require_unaliased_path(
+            root.parent / "settlements.json",
+            error="binance_funding_settlement_source_invalid",
+        )
+        before = dataset_file_identity(path)
+        with path.open("rb") as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if (
+            before != dataset_file_identity(path)
+            or before.size != native["byte_count"]
+            or digest != native["sha256"]
+        ):
+            raise ValueError("binance_funding_settlement_source_changed")
     return manifest
 
 
@@ -133,9 +175,11 @@ def _records(root, manifest):
 
 
 @contextmanager
-def read_funding_observations(raw_root, *, symbol, resource_policy=None):
+def read_funding_observations(funding_root, *, symbol, resource_policy=None):
     """Empty events mean no settlements only with explicit complete source coverage."""
-    root = _funding_root(raw_root, symbol)
+    if symbol not in RESEARCH_SYMBOLS:
+        raise ValueError("binance_funding_symbol_invalid")
+    root = Path(funding_root)
     with (
         runtime_resource_policy_scope(resource_policy) as policy,
         policy.lease(
@@ -180,9 +224,9 @@ def read_funding_observations(raw_root, *, symbol, resource_policy=None):
                 raise ValueError("binance_funding_identity_changed")
 
 
-def funding_source_identity(raw_root, _target_id, *, symbol):
+def funding_source_identity(funding_root, _target_id, *, symbol):
     try:
-        with read_funding_observations(raw_root, symbol=symbol) as observations:
+        with read_funding_observations(funding_root, symbol=symbol) as observations:
             return observations.identity
     except PortfolioTargetBlocked:
         raise

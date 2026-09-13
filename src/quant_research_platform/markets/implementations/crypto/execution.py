@@ -22,7 +22,8 @@ from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
     TradeEvent,
-    tick_to_price,
+    index_to_price,
+    observation_order_key,
 )
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
@@ -485,19 +486,15 @@ def _book_value(event: BookState | OwnedValue[BookState]) -> BookState:
 
 def _book_key(
     event: BookState | OwnedValue[BookState] | BookBoundary,
-) -> tuple[int, int, int]:
+) -> tuple[int, ...]:
     value = event.value if isinstance(event, OwnedValue) else event
-    return (
-        value.observed_time_ns,
-        value.receive_monotonic_ns,
-        value.capture_seq,
-    )
+    return observation_order_key(value)
 
 
 def _checked_book_events(
     events: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
 ) -> Iterator[BookState | OwnedValue[BookState] | BookBoundary]:
-    previous: tuple[int, int, int] | None = None
+    previous: tuple[int, ...] | None = None
     active = iter(events)
     with closing_iterator(active):
         for event in active:
@@ -507,11 +504,7 @@ def _checked_book_events(
                 value = event
             if not isinstance(value, BookState | BookBoundary):
                 raise TypeError("hft_execution_book_event_invalid")
-            key = (
-                value.observed_time_ns,
-                value.receive_monotonic_ns,
-                value.capture_seq,
-            )
+            key = observation_order_key(value)
             if previous is not None and key < previous:
                 raise ValueError("hft_execution_time_non_monotonic")
             previous = key
@@ -538,8 +531,8 @@ def _checked_decisions(
 def _mid(state: BookState) -> float:
     if not state.bids or not state.asks:
         raise ValueError("hft_execution_one_sided_book")
-    bid = tick_to_price(state.bids[0][0], state.tick_size)
-    ask = tick_to_price(state.asks[0][0], state.tick_size)
+    bid = index_to_price(state.bids[0][0], state.price_unit)
+    ask = index_to_price(state.asks[0][0], state.price_unit)
     if ask <= bid:
         raise ValueError("hft_execution_crossed_book")
     return (bid + ask) / 2.0
@@ -589,7 +582,7 @@ def _taker_order_quantity(
             size = min(remaining, available)
             if size <= 0:
                 continue
-            price = tick_to_price(tick, state.tick_size)
+            price = index_to_price(tick, state.price_unit)
             gain += size * (
                 sign * (forecast - price + funding_per_unit)
                 - price * config.taker_fee_bps / 10_000.0
@@ -833,11 +826,11 @@ def simulate_taker(
                     )
                     notional = 0.0
                     levels_consumed = 0
-                    for price_tick, available in levels:
+                    for price_index, available in levels:
                         quantity = min(remaining, available)
                         if quantity <= 0:
                             continue
-                        price = tick_to_price(price_tick, latest_state.tick_size)
+                        price = index_to_price(price_index, latest_state.price_unit)
                         notional += quantity * price
                         remaining -= quantity
                         levels_consumed += 1
@@ -1251,13 +1244,13 @@ def simulate_taker(
 class _MakerOrder:
     order_id: int
     side: str
-    price_tick: int
+    price_index: int
     remaining: float
     queue_ahead: float
     initial_queue_ahead: float
     segment_id: str
-    trade_connection_id: str
-    tick_size: str
+    trade_observation_id: str
+    price_unit: str
     created_time_ns: int
     valid_until_ns: int
     effective_at_ns: int
@@ -1270,21 +1263,21 @@ def _maker_join(order, state, observed_coverage, trade_coverage):
         or state.segment_id != order.segment_id
         or not _covered(observed_coverage, order.segment_id, order.effective_at_ns)
         or not _covered(
-            trade_coverage, order.trade_connection_id, order.effective_at_ns
+            trade_coverage, order.trade_observation_id, order.effective_at_ns
         )
     ):
         return "activation_coverage_missing"
-    if (order.side == "buy" and order.price_tick >= state.asks[0][0]) or (
-        order.side == "sell" and order.price_tick <= state.bids[0][0]
+    if (order.side == "buy" and order.price_index >= state.asks[0][0]) or (
+        order.side == "sell" and order.price_index <= state.bids[0][0]
     ):
         return "post_only_crossing_rejected"
     levels = state.bids if order.side == "buy" else state.asks
-    if (order.side == "buy" and order.price_tick < levels[-1][0]) or (
-        order.side == "sell" and order.price_tick > levels[-1][0]
+    if (order.side == "buy" and order.price_index < levels[-1][0]) or (
+        order.side == "sell" and order.price_index > levels[-1][0]
     ):
         return "activation_queue_depth_unknown"
     order.queue_ahead = sum(
-        quantity for tick, quantity in levels if tick == order.price_tick
+        quantity for tick, quantity in levels if tick == order.price_index
     )
     order.initial_queue_ahead = order.queue_ahead
     return None
@@ -1293,18 +1286,18 @@ def _maker_join(order, state, observed_coverage, trade_coverage):
 def _maker_trade_fill(order, trade):
     if trade.visible_quantity <= 0:
         return 0.0, "zero_visible_trade_quantity"
-    if trade.connection_id != order.trade_connection_id:
+    if trade.observation_id != order.trade_observation_id:
         return 0.0, "trade_connection_mismatch"
     same_direction = (order.side == "buy") == trade.buyer_is_maker
     if not same_direction:
         return 0.0, "opposite_trade_direction"
-    through = (order.side == "buy" and trade.price_tick < order.price_tick) or (
-        order.side == "sell" and trade.price_tick > order.price_tick
+    through = (order.side == "buy" and trade.price_index < order.price_index) or (
+        order.side == "sell" and trade.price_index > order.price_index
     )
     if through:
         order.queue_ahead = 0.0
         return order.remaining, "trade_through"
-    if trade.price_tick != order.price_tick:
+    if trade.price_index != order.price_index:
         return 0.0, "different_trade_price"
     consumed = min(order.queue_ahead, trade.visible_quantity)
     order.queue_ahead -= consumed
@@ -1352,18 +1345,18 @@ def _maker_new_order(
     return _MakerOrder(
         order_id=order_id,
         side=side,
-        price_tick=(state.bids if side == "buy" else state.asks)[0][0],
+        price_index=(state.bids if side == "buy" else state.asks)[0][0],
         remaining=quantity,
         queue_ahead=0.0,
         initial_queue_ahead=0.0,
         segment_id=row["book_segment_id"],
-        trade_connection_id=row["trade_connection_id"],
-        tick_size=state.tick_size,
+        trade_observation_id=row["trade_observation_id"],
+        price_unit=state.price_unit,
         created_time_ns=timestamp,
         valid_until_ns=min(
             timestamp + HFT_MODEL_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND,
             observed_coverage[row["book_segment_id"]][1],
-            trade_coverage[row["trade_connection_id"]][1],
+            trade_coverage[row["trade_observation_id"]][1],
         ),
         effective_at_ns=timestamp + config.latency_ms * _NANOSECONDS_PER_MILLISECOND,
     )
@@ -1400,21 +1393,21 @@ class MakerCalibration:
         side = new_order.side
         start = int(sample["decision_at"])
         end = start + lifetime_ns
-        origin = sample["initial_bid_tick" if side == "buy" else "initial_ask_tick"]
+        origin = sample["initial_bid_index" if side == "buy" else "initial_ask_index"]
         current_origin = (state.bids if side == "buy" else state.asks)[0][0]
         book_context = sample["book_segment_id"]
-        trade_context = sample["trade_connection_id"]
+        trade_context = sample["trade_observation_id"]
 
         def mapped(order):
             return replace(
                 order,
-                price_tick=int(origin + order.price_tick - current_origin),
+                price_index=int(origin + order.price_index - current_origin),
                 segment_id=book_context
                 if order.segment_id == new_order.segment_id
                 else order.segment_id,
-                trade_connection_id=trade_context
-                if order.trade_connection_id == new_order.trade_connection_id
-                else order.trade_connection_id,
+                trade_observation_id=trade_context
+                if order.trade_observation_id == new_order.trade_observation_id
+                else order.trade_observation_id,
                 created_time_ns=start + order.created_time_ns - decision_ns,
                 effective_at_ns=start + order.effective_at_ns - decision_ns,
                 valid_until_ns=start + order.valid_until_ns - decision_ns,
@@ -1498,9 +1491,11 @@ class MakerCalibration:
                             ):
                                 quantity, _reason = _maker_trade_fill(order, event)
                                 if quantity > 0:
-                                    price = tick_to_price(
-                                        int(current_origin + order.price_tick - origin),
-                                        new_order.tick_size,
+                                    price = index_to_price(
+                                        int(
+                                            current_origin + order.price_index - origin
+                                        ),
+                                        new_order.price_unit,
                                     )
                                     yield (
                                         stamp - start,
@@ -1643,7 +1638,7 @@ class MakerCalibration:
                             error_sum += error
                         yield quantity, count, error_sum
 
-            price = tick_to_price(new_order.price_tick, new_order.tick_size)
+            price = index_to_price(new_order.price_index, new_order.price_unit)
             edge = sign * (forecast - price) - price * fee_bps / 10000.0
 
             def responses(namespace, *, with_error):
@@ -1767,10 +1762,10 @@ def replay_maker_calibration(
                 quote_quantity=config.order_quantity,
                 terminal_reason=sample["terminal_reason"] or "expired",
                 book_segment_id=order.segment_id,
-                trade_connection_id=order.trade_connection_id,
+                trade_observation_id=order.trade_observation_id,
                 initial_book_event_id=sample["initial_book_event_id"],
-                initial_bid_tick=sample["initial_bid_tick"],
-                initial_ask_tick=sample["initial_ask_tick"],
+                initial_bid_index=sample["initial_bid_index"],
+                initial_ask_index=sample["initial_ask_index"],
                 event_start=sample["event_start"],
                 event_end=event_count,
             )
@@ -1869,8 +1864,8 @@ def replay_maker_calibration(
                     and latest_state.segment_id == row["book_segment_id"]
                     and _covered(observed_coverage, row["book_segment_id"], timestamp)
                     and _covered(observed_coverage, row["book_segment_id"], end)
-                    and _covered(trade_coverage, row["trade_connection_id"], timestamp)
-                    and _covered(trade_coverage, row["trade_connection_id"], end)
+                    and _covered(trade_coverage, row["trade_observation_id"], timestamp)
+                    and _covered(trade_coverage, row["trade_observation_id"], end)
                 )
                 if not valid or row["proxy_prediction"] < 0.5:
                     excluded += 1
@@ -1900,8 +1895,8 @@ def replay_maker_calibration(
                             "attempted": False,
                             "terminal_reason": None,
                             "initial_book_event_id": latest_book_id,
-                            "initial_bid_tick": latest_state.bids[0][0],
-                            "initial_ask_tick": latest_state.asks[0][0],
+                            "initial_bid_index": latest_state.bids[0][0],
+                            "initial_ask_index": latest_state.asks[0][0],
                             "event_start": event_count,
                         }
                     )
@@ -1921,17 +1916,13 @@ def replay_maker_calibration(
 def _checked_trades(
     trades: Iterable[TradeEvent],
 ) -> Iterator[TradeEvent]:
-    previous: tuple[int, int, int] | None = None
+    previous: tuple[int, ...] | None = None
     active = iter(trades)
     with closing_iterator(active):
         for trade in active:
             if not isinstance(trade, TradeEvent):
                 raise TypeError("hft_execution_trade_event_invalid")
-            key = (
-                trade.observed_time_ns,
-                trade.receive_monotonic_ns,
-                trade.capture_seq,
-            )
+            key = observation_order_key(trade)
             if previous is not None and key < previous:
                 raise ValueError("hft_execution_time_non_monotonic")
             previous = key
@@ -1950,7 +1941,7 @@ def _checked_trades(
 def _market_events(
     books: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
     trades: Iterable[TradeEvent],
-) -> Iterator[tuple[tuple[int, int, int], object]]:
+) -> Iterator[tuple[tuple[int, ...], object]]:
     book_events = iter(_checked_book_events(books))
     trade_events = iter(_checked_trades(trades))
     book_next: BookState | OwnedValue[BookState] | BookBoundary | None = None
@@ -1963,12 +1954,7 @@ def _market_events(
             while book_next is not None or trade_next is not None:
                 if trade_next is None or (
                     book_next is not None
-                    and _book_key(book_next)
-                    <= (
-                        trade_next.observed_time_ns,
-                        trade_next.receive_monotonic_ns,
-                        trade_next.capture_seq,
-                    )
+                    and _book_key(book_next) <= observation_order_key(trade_next)
                 ):
                     pending_event = book_next
                     assert book_next is not None
@@ -1977,11 +1963,7 @@ def _market_events(
                 else:
                     pending_event = trade_next
                     assert trade_next is not None
-                    key = (
-                        trade_next.observed_time_ns,
-                        trade_next.receive_monotonic_ns,
-                        trade_next.capture_seq,
-                    )
+                    key = observation_order_key(trade_next)
                     trade_next = next(trade_events, None)
                 yield key, pending_event
                 pending_event = None
@@ -2005,7 +1987,7 @@ def _checked_quote_schedule(
             for key in (
                 "asset_id",
                 "book_segment_id",
-                "trade_connection_id",
+                "trade_observation_id",
             ):
                 if not isinstance(row.get(key), str) or not row[key]:
                     raise ValueError("hft_maker_quote_schedule_identity_invalid")
@@ -2170,7 +2152,7 @@ def simulate_maker(
                     observed_coverage, latest_state.segment_id, trade.observed_time_ns
                 )
                 or not _covered(
-                    trade_coverage, trade.connection_id, trade.observed_time_ns
+                    trade_coverage, trade.observation_id, trade.observed_time_ns
                 )
             ):
                 return
@@ -2181,7 +2163,7 @@ def simulate_maker(
                 quantity, reason = _maker_trade_fill(order, trade)
                 if quantity <= 0:
                     continue
-                price = tick_to_price(order.price_tick, order.tick_size)
+                price = index_to_price(order.price_index, order.price_unit)
                 sign = 1.0 if side == "buy" else -1.0
                 fee = quantity * price * config.maker_fee_bps / 10_000.0
                 mid = _mid(latest_state)
@@ -2390,7 +2372,7 @@ def simulate_maker(
                     mid is not None
                     and latest_state.segment_id == row["book_segment_id"]
                     and _covered(
-                        trade_coverage, row["trade_connection_id"], decision_time_ns
+                        trade_coverage, row["trade_observation_id"], decision_time_ns
                     )
                 )
                 if not valid:
@@ -2486,7 +2468,7 @@ def simulate_maker(
                     keep = (
                         current is not None
                         and quantity > 0
-                        and current.price_tick == desired_price
+                        and current.price_index == desired_price
                         and current.remaining == quantity
                         and current.valid_until_ns > decision_time_ns
                     )

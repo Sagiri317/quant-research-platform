@@ -36,11 +36,11 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
         {"timestamp_ms": 80, "prediction": -0.02},
     ]
     books = [
-        _state(stamp, bid_tick=995 + step * 10, ask_tick=1005 + step * 10)
+        _state(stamp, bid_index=995 + step * 10, ask_index=1005 + step * 10)
         for step, stamp in enumerate((0, 20, 30, 40, 60, 80, 100))
     ]
     # This future book must never supply an earlier boundary valuation.
-    books.append(_state(1000, bid_tick=9995, ask_tick=10005))
+    books.append(_state(1000, bid_index=9995, ask_index=10005))
     forecasts = (
         FundingForecast(
             0,

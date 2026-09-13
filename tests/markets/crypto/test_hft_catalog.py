@@ -46,3 +46,41 @@ def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> N
     assert all(model.max_train_rows == 100 for model in models)
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
     assert all(not model.model_id.startswith("hft_model_framework") for model in models)
+
+
+def test_ridge_asset_scopes_share_dimensionless_inputs_and_new_spec_identity():
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.models import model_spec_payload
+    from quant_research_platform.research.protocols.crypto_hft import HFT_FACTOR_COLUMNS
+
+    comparable = (
+        "relative_spread",
+        "imbalance_1",
+        "imbalance_5",
+        "imbalance_10",
+        "return_100ms",
+        "realized_volatility_1s",
+    )
+    models = build_hft_model_catalog(training_row_bound=None).list()
+    ridge = [model for model in models if model.model_algorithm == "ridge_regression"]
+    assert len(ridge) == 5
+    for model in ridge:
+        assert model.input_columns == comparable
+        old = replace(model, input_factor_columns=HFT_FACTOR_COLUMNS)
+        assert canonical_json_hash(model_spec_payload(model)) != canonical_json_hash(
+            model_spec_payload(old)
+        )
+        assert model.label_column == "future_mid_return_500ms"
+    assert len(models) == 9
+    for model in models:
+        if model.model_algorithm != "ridge_regression":
+            assert model.input_columns == (
+                ("ofi_100ms",)
+                if model.model_algorithm == "linear_regression"
+                else HFT_FACTOR_COLUMNS
+            )
+    dataset = build_hft_research_dataset_catalog().get(HFT_RESEARCH_DATASET_ID)
+    assert dataset.factor_columns == HFT_FACTOR_COLUMNS
+    assert len(dataset.factor_columns) == 14

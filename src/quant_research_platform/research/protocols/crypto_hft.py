@@ -85,6 +85,14 @@ HFT_MODEL_ALGORITHMS = (
 )
 HFT_PRICE_MODEL_ALGORITHMS = HFT_MODEL_ALGORITHMS[:3]
 HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID = "crypto_hft_maker_bid_sell_pressure_proxy"
+HFT_RIDGE_FACTOR_COLUMNS = (
+    "relative_spread",
+    "imbalance_1",
+    "imbalance_5",
+    "imbalance_10",
+    "return_100ms",
+    "realized_volatility_1s",
+)
 HFT_MULTI_ASSET_SCOPES = {
     "btc_independent": (("btc_usdt",), ("btc_usdt",)),
     "eth_independent": (("eth_usdt",), ("eth_usdt",)),
@@ -101,7 +109,7 @@ HFT_MAKER_CALIBRATION_MODEL_IDS = (
 )
 HFT_EXECUTION_CONTEXT_COLUMNS = (
     "book_segment_id",
-    "trade_connection_id",
+    "trade_observation_id",
     "segment_id",
 )
 
@@ -708,7 +716,7 @@ def build_hft_model_catalog(*, training_row_bound: int | None) -> ModelCatalog:
                 ModelSpec(
                     model_id=f"crypto_hft_{mode}",
                     model_algorithm="ridge_regression",
-                    input_factor_columns=HFT_FACTOR_COLUMNS,
+                    input_factor_columns=HFT_RIDGE_FACTOR_COLUMNS,
                     label_column=HFT_MODEL_LABEL_COLUMN,
                     random_seed=ROOT_SEED,
                     max_train_rows=training_row_bound,
@@ -808,15 +816,15 @@ def build_hft_research_dataset_catalog() -> ResearchDatasetCatalog:
         *HFT_LABEL_AVAILABILITY_COLUMNS,
         "segment_id",
         "book_segment_id",
-        "book_connection_id",
-        "trade_connection_id",
-        "book_capture_seq",
-        "trade_capture_seq_min",
-        "trade_capture_seq_max",
+        "book_observation_id",
+        "trade_observation_id",
+        "book_source_sequence",
+        "trade_source_sequence_min",
+        "trade_source_sequence_max",
         "book_observed_time_ms",
         "exchange_event_time_ms",
         "transaction_time_ms",
-        "local_receive_time",
+        "observed_utc",
         "book_receive_monotonic_ns",
         "update_id",
         "best_bid_price",

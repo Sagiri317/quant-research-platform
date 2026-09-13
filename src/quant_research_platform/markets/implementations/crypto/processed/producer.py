@@ -69,16 +69,7 @@ def produce_hft_processed_data(
             run = readers.enter_context(open_run(raw_root, resource_policy))
             if canonical_json_hash(run.source_identity) != expected_source_identity:
                 raise ValueError("hft_recorder_source_identity_changed")
-            if run.manifest["market_data_status"] == "FAIL":
-                raise ValueError("hft_recorder_run_failed")
-            if (
-                run.manifest["recording_scope"]
-                != binance_ids.FUTURES_HFT_RECORDING_SCOPE
-                or binance_ids.FUTURES_MARKET_TYPE not in run.manifest["market_types"]
-            ):
-                raise ValueError("hft_futures_run_missing")
-            if tuple(run.manifest["symbols"]) != binance_ids.RESEARCH_SYMBOLS:
-                raise ValueError("hft_symbols_incomplete")
+            source_info = run.hft_source_info()
             start_ms, end_ms = (
                 _milliseconds(time_window.start, ceil=True),
                 _milliseconds(time_window.end),
@@ -99,6 +90,7 @@ def produce_hft_processed_data(
                         binance_ids.FUTURES_MARKET_TYPE,
                         symbol=symbol,
                         stats=active,
+                        end_ns=end_ms * 1_000_000,
                     ),
                     read_trades(
                         run,
@@ -109,7 +101,7 @@ def produce_hft_processed_data(
                     start_ms=start_ms,
                     end_ms=end_ms,
                     book_coverage=active.coverage_segments,
-                    trade_coverage=run.connection_coverage(
+                    trade_coverage=run.observation_coverage(
                         market_type=binance_ids.FUTURES_MARKET_TYPE,
                         data_kind="agg_trades",
                         symbol=symbol,
@@ -135,10 +127,7 @@ def produce_hft_processed_data(
                     )
                 metadata["producer_diagnostics"] = {
                     "observation_grid": "common_btc_eth_observed_timestamps",
-                    "raw_record_count": sum(
-                        item["record_count"] for item in run.manifest["files"]
-                    ),
-                    "recorder_file_count": len(run.manifest["files"]),
+                    **source_info,
                     "reconstruction": {
                         symbol: asdict(value) for symbol, value in stats.items()
                     },

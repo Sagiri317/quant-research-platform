@@ -134,10 +134,10 @@ def maker_calibration_tables():
                 "quote_quantity": sample["quote_quantity"],
                 "terminal_reason": sample["terminal_reason"],
                 "book_segment_id": sample["book_segment_id"],
-                "trade_connection_id": sample["trade_connection_id"],
+                "trade_observation_id": sample["trade_observation_id"],
                 "initial_book_event_id": sample["initial_book_event_id"],
-                "initial_bid_tick": sample["initial_bid_tick"],
-                "initial_ask_tick": sample["initial_ask_tick"],
+                "initial_bid_index": sample["initial_bid_index"],
+                "initial_ask_index": sample["initial_ask_index"],
                 "event_start": sample["event_start"],
                 "event_end": sample["event_end"],
             }
@@ -319,7 +319,7 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
         elif mutation == "book_zero":
             tables["crypto_maker_events"].loc[0, "quantity"] = 0.0
         elif mutation == "level_order":
-            tables["crypto_maker_events"].loc[1, "price_tick"] = 1000
+            tables["crypto_maker_events"].loc[1, "price_index"] = 1000
         elif mutation == "reference":
             tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
         else:
@@ -816,7 +816,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                 "timestamp": pd.to_datetime([2100, 2200], unit="ms"),
                 "label_available_at": pd.to_datetime([2600, 2700], unit="ms"),
                 "book_segment_id": ["s1"] * 2,
-                "trade_connection_id": ["trade-connection-1"] * 2,
+                "trade_observation_id": ["trade-connection-1"] * 2,
                 "segment_id": ["segment"] * 2,
                 "prediction_score": [
                     0.0 if model_id == HFT_MAKER_CALIBRATION_MODEL_IDS[0] else 1.0
@@ -1016,7 +1016,7 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
                         [stamp + 500 for stamp in stamps], unit="ms"
                     ),
                     "book_segment_id": ["s1"] * len(stamps),
-                    "trade_connection_id": ["trade-connection-1"] * len(stamps),
+                    "trade_observation_id": ["trade-connection-1"] * len(stamps),
                     "segment_id": ["segment"] * len(stamps),
                     "prediction_score": [
                         0.0 if model_id == HFT_MAKER_CALIBRATION_MODEL_IDS[0] else 1.0

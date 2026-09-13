@@ -51,6 +51,16 @@ def _depth_payload(market_type: str) -> dict[str, object]:
     return payload
 
 
+def _snapshot_payload(update_id, mid_tick=1000):
+    return {
+        "lastUpdateId": update_id,
+        "E": 1_700_000_000_001,
+        "T": 1_700_000_000_000,
+        "bids": [[f"{(mid_tick - i) / 10:.1f}", "1.0"] for i in range(12)],
+        "asks": [[f"{(mid_tick + 1 + i) / 10:.1f}", "2.0"] for i in range(12)],
+    }
+
+
 def _validate_stream(stream, payload):  # noqa: ANN001, ANN202
     return validate_market_payload(
         stream.market_type,
@@ -475,60 +485,75 @@ def test_recorder_rejects_aliased_output_root_before_access(tmp_path: Path) -> N
         RecorderConfig(alias, duration_seconds=1).validate()
 
 
-def test_depth_reader_waits_for_same_generation_snapshot_ack(
+def test_depth_reader_waits_for_snapshot_before_receiving(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    stream = FUTURES_STREAMS[0]
+    policy = capture_test_policy(available_memory_bytes=2 * 1024**3)
+    requested = threading.Event()
+    release_snapshot = threading.Event()
+    written = threading.Event()
+    stop = threading.Event()
+    writes = []
     payload = _depth_payload(FUTURES_MARKET_TYPE)
     payload.update({"U": 1, "u": 1, "pu": 0})
-    writes: list[dict[str, object]] = []
 
     class Writer:
-        def write(self, **kwargs: object) -> int:
+        def write(self, **kwargs):
             writes.append(kwargs)
+            if kwargs["data_kind"] == "depth":
+                written.set()
             return len(writes)
 
     class Websocket:
-        def __init__(self) -> None:
-            self.sent = False
-            self.release = threading.Event()
+        received = False
 
-        def recv(self, timeout: float) -> str:
-            del timeout
-            if not self.sent:
-                self.sent = True
+        def recv(self, timeout):
+            if not self.received:
+                self.received = True
                 return json.dumps(payload)
-            self.release.wait(1)
+            stop.wait(timeout)
             raise TimeoutError
 
-        def close(self) -> None:
-            self.release.set()
+        def close(self):
+            stop.set()
+
+    def snapshot(*_args, **_kwargs):
+        requested.set()
+        assert release_snapshot.wait(2)
+        return _snapshot_payload(1), recorder._utc_now(), recorder.time.monotonic_ns()
 
     websocket = Websocket()
-    monkeypatch.setattr(
-        recorder,
-        "_connect_websocket",
-        lambda *_args, **_kwargs: websocket,
-    )
+    monkeypatch.setattr(recorder, "_connect_websocket", lambda *_a, **_k: websocket)
+    monkeypatch.setattr(recorder, "_http_get_json", snapshot)
     reader = recorder._StreamReader(
-        stream=stream,
+        stream=FUTURES_STREAMS[0],
         writer=Writer(),
         stats=recorder._CaptureStats(),
-        stop=threading.Event(),
+        stop=stop,
         config=RecorderConfig(Path("unused"), 1),
+        resource_policy=policy,
+        tick_size="0.1",
     )
-    reader.start()
-    assert reader.ready.wait(1)
-    try:
-        assert writes == []
-        generation, _connection_id, _segment_id = reader.current_identity()
-        assert reader.acknowledge_snapshot(generation)
-        assert reader.stop.wait(0.05) is False
-    finally:
-        reader.stop.set()
-        websocket.release.set()
-        reader.join(1)
-    assert len(writes) == 1
+    with runtime_resource_policy_scope(policy):
+        reader.start()
+        try:
+            assert requested.wait(2)
+            assert not reader.ready.is_set()
+            assert not websocket.received
+            assert writes == []
+            release_snapshot.set()
+            assert reader.ready.wait(2)
+            assert written.wait(2)
+        finally:
+            release_snapshot.set()
+            stop.set()
+            reader.join(3)
+        assert not reader.is_alive()
+        assert reader.failure is None
+        assert policy.used_memory_bytes == 0
+    assert [row["data_kind"] for row in writes] == ["depth_snapshot", "depth"]
+    assert writes[0]["connection_id"] == writes[1]["connection_id"]
+    assert writes[0]["segment_id"] == writes[1]["segment_id"]
 
 
 def test_connection_interval_freezes_before_websocket_cleanup(
@@ -564,6 +589,8 @@ def test_connection_interval_freezes_before_websocket_cleanup(
         stats=stats,
         stop=threading.Event(),
         config=RecorderConfig(tmp_path / "run", 1),
+        resource_policy=capture_test_policy(available_memory_bytes=64 * 1024**2),
+        tick_size="0.1",
     )
     with pytest.raises(recorder._ConnectionProblem):
         reader._read_connection(reconnect=False)
@@ -599,6 +626,8 @@ def test_connection_stats_close_failure_still_closes_websocket(
         stats=stats,
         stop=threading.Event(),
         config=RecorderConfig(tmp_path / "run", 1),
+        resource_policy=capture_test_policy(available_memory_bytes=64 * 1024**2),
+        tick_size="0.1",
     )
     reader.stop.set()
 
@@ -651,6 +680,8 @@ def test_connection_close_time_is_frozen_at_error_detection(
         stats=stats,
         stop=threading.Event(),
         config=RecorderConfig(tmp_path / "run", 1),
+        resource_policy=capture_test_policy(available_memory_bytes=64 * 1024**2),
+        tick_size="0.1",
     )
 
     with pytest.raises(LateConnectionProblem):
@@ -777,7 +808,9 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
     monkeypatch.setattr(
         recorder,
         "_record_market_metadata",
-        lambda *_args, **_kwargs: {},
+        lambda *_args, **_kwargs: {
+            stream.symbol: {stream.market_type: {"tick_size": "0.1"}}
+        },
     )
     monkeypatch.setattr(recorder, "_StreamReader", Reader)
 
@@ -842,7 +875,9 @@ def test_recorder_abort_failure_preserves_reader_failure(
     monkeypatch.setattr(
         recorder,
         "_record_market_metadata",
-        lambda *_args, **_kwargs: {},
+        lambda *_args, **_kwargs: {
+            stream.symbol: {stream.market_type: {"tick_size": "0.1"}}
+        },
     )
     monkeypatch.setattr(recorder, "_StreamReader", Reader)
     monkeypatch.setattr(recorder._RunWriter, "abort", abort)
@@ -872,3 +907,191 @@ def test_connection_interval_retention_is_admitted_and_released() -> None:
         )
         stats.close()
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("failure_type", [TimeoutError, OSError])
+def test_snapshot_network_failure_preserves_cause_and_closes_connection(
+    tmp_path, monkeypatch, failure_type
+):
+    policy = capture_test_policy(available_memory_bytes=2 * 1024**3)
+    primary = failure_type("snapshot network failure")
+
+    class Websocket:
+        closed = False
+
+        def close(self):
+            self.closed = True
+            raise OSError("close secondary")
+
+    def fail_snapshot(*_args, **_kwargs):
+        raise primary
+
+    websocket = Websocket()
+    stats = recorder._CaptureStats()
+    monkeypatch.setattr(recorder, "_connect_websocket", lambda *_a, **_k: websocket)
+    monkeypatch.setattr(recorder, "_http_get_json", fail_snapshot)
+    reader = recorder._StreamReader(
+        stream=FUTURES_STREAMS[0],
+        writer=recorder._RunWriter(tmp_path),
+        stats=stats,
+        stop=threading.Event(),
+        config=RecorderConfig(tmp_path / "run", 1),
+        resource_policy=policy,
+        tick_size="0.1",
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(recorder._ConnectionProblem) as raised:
+            reader._read_connection(reconnect=False)
+        assert raised.value.__cause__ is primary
+        assert "Binance websocket close also failed: OSError" in raised.value.__notes__
+        assert websocket.closed
+        assert not reader.ready.is_set()
+        assert stats.connection_intervals == {}
+        assert policy.used_memory_bytes == 0
+
+
+def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapshot(
+    tmp_path, monkeypatch
+):
+    from collections import Counter
+
+    from quant_research_platform.contracts.order_book import BookBoundary
+    from quant_research_platform.sources.binance.replay import (
+        ReconstructionStats,
+        iter_reconstructed_depth,
+        open_recorder_run,
+    )
+
+    policy = capture_test_policy(available_memory_bytes=4 * 1024**3)
+    connections = Counter()
+    snapshots = Counter()
+    sockets = []
+
+    def http(_base, endpoint, *, params=None):
+        if endpoint.endswith("exchangeInfo"):
+            payload = {
+                "symbols": [
+                    {
+                        "symbol": symbol,
+                        "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.1"}],
+                    }
+                    for symbol in recorder.RESEARCH_SYMBOLS
+                ]
+            }
+        else:
+            symbol = params["symbol"]
+            snapshots[symbol] += 1
+            recovered = symbol == "BTCUSDT" and snapshots[symbol] > 1
+            payload = _snapshot_payload(
+                102 if recovered else 100, 900 if recovered else 1000
+            )
+        return payload, recorder._utc_now(), recorder.time.monotonic_ns()
+
+    class Websocket:
+        def __init__(self, messages):
+            self.messages = iter(messages)
+            self.closed = threading.Event()
+
+        def recv(self, timeout):
+            try:
+                return json.dumps(next(self.messages))
+            except StopIteration:
+                self.closed.wait(timeout)
+                raise TimeoutError from None
+
+        def close(self):
+            self.closed.set()
+
+    def connect(url, **_kwargs):
+        symbol = "BTCUSDT" if "btcusdt" in url else "ETHUSDT"
+        if "depth" in url:
+            connections[symbol] += 1
+            recovered = symbol == "BTCUSDT" and connections[symbol] > 1
+            initial = _depth_payload(FUTURES_MARKET_TYPE)
+            initial.update(
+                s=symbol,
+                ps=symbol,
+                U=102 if recovered else 100,
+                u=102 if recovered else 100,
+                pu=101 if recovered else 99,
+            )
+            if recovered:
+                initial.update(b=[["90.0", "1.0"]], a=[["90.1", "2.0"]])
+            messages = [initial]
+            if symbol == "BTCUSDT" and not recovered:
+                old = _snapshot_payload(100)
+                fresh = _snapshot_payload(102, 900)
+                depleted = dict(initial, U=101, u=101, pu=100)
+                depleted["b"] = [[p, "0"] for p, _q in old["bids"]] + fresh["bids"]
+                depleted["a"] = [[p, "0"] for p, _q in old["asks"]] + fresh["asks"]
+                messages.append(depleted)
+        else:
+            messages = [
+                {
+                    "e": "aggTrade",
+                    "E": 1_700_000_000_001,
+                    "T": 1_700_000_000_000,
+                    "s": symbol,
+                    "st": 1,
+                    "a": 10,
+                    "f": 20,
+                    "l": 22,
+                    "p": "100.1",
+                    "q": "2.5",
+                    "nq": "2.0",
+                    "m": False,
+                }
+            ]
+        socket = Websocket(messages)
+        sockets.append(socket)
+        return socket
+
+    monkeypatch.setattr(recorder, "_http_get_json", http)
+    monkeypatch.setattr(recorder, "_connect_websocket", connect)
+    monkeypatch.setattr(
+        recorder,
+        "runtime_resource_policy_scope",
+        lambda *_a, **_k: runtime_resource_policy_scope(policy),
+    )
+    root = tmp_path / "recording"
+    result = recorder.record(RecorderConfig(root, duration_seconds=0.2))
+    assert result["status"] == "PARTIAL"
+    assert result["capture"]["sequence_gaps"] == 0
+    assert result["capture"]["cleanup_errors"] == []
+    assert connections == {"BTCUSDT": 2, "ETHUSDT": 1}
+    assert snapshots == connections
+    assert all(socket.closed.is_set() for socket in sockets)
+    assert policy.used_memory_bytes == 0
+    stats = ReconstructionStats()
+    states = []
+    boundaries = []
+    with open_recorder_run(root) as run:
+        records = list(
+            run.iter_records(
+                symbol="BTCUSDT",
+                market_type=FUTURES_MARKET_TYPE,
+                data_kinds=("depth_snapshot", "depth"),
+            )
+        )
+        assert [r["payload"]["u"] for r in records if r["data_kind"] == "depth"] == [
+            100,
+            101,
+            102,
+        ]
+        snapshot_records = [r for r in records if r["data_kind"] == "depth_snapshot"]
+        assert len({r["connection_id"] for r in snapshot_records}) == 2
+        assert len({r["segment_id"] for r in snapshot_records}) == 2
+        for event in iter_reconstructed_depth(
+            run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+        ):
+            if isinstance(event, BookBoundary):
+                boundaries.append(event.reason)
+            else:
+                states.append(event.value.update_id)
+                event.release(owner="test.recorder.recovery")
+    assert states == [100, 102]
+    assert boundaries == ["one_sided_book"]
+    assert stats.valid_segments == 2
+    assert stats.recovered_segments == 1
+    assert stats.one_sided_books == 1
+    assert len(stats.coverage_segments) == 2
