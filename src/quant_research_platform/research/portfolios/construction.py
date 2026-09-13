@@ -8,6 +8,11 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.validation import (
+    strict_finite_float,
+    strict_real_numeric_series,
+)
+
 TargetMethod = Literal["equal_weight", "float_cap_weight"]
 PortfolioMode = Literal["long_only", "long_short"]
 
@@ -106,11 +111,7 @@ def _canonical_assets(signal: pd.Series, eligible: pd.Series) -> pd.Index:
 
 
 def _numeric_series(values: pd.Series, assets: pd.Index, error: str) -> pd.Series:
-    try:
-        result = pd.to_numeric(values.reindex(assets), errors="raise").astype("float64")
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
-    return result
+    return strict_real_numeric_series(values.reindex(assets), error=error)
 
 
 def _bool_series(values: pd.Series, assets: pd.Index, error: str) -> pd.Series:
@@ -149,13 +150,9 @@ def _selected_capitals(
         raise ValueError("target_float_market_cap_required")
     if not isinstance(values, pd.Series) or not values.index.is_unique:
         raise ValueError("target_float_market_cap_invalid")
-    try:
-        capitals = pd.to_numeric(
-            values.reindex(assets),
-            errors="raise",
-        ).astype("float64")
-    except (TypeError, ValueError) as exc:
-        raise ValueError("target_float_market_cap_invalid") from exc
+    capitals = strict_real_numeric_series(
+        values.reindex(assets), error="target_float_market_cap_invalid"
+    )
     selected_values = capitals.reindex(selected)
     if (
         selected_values.isna().any()
@@ -191,12 +188,7 @@ def _assign_leg(
 
 
 def _validate_quantile(value: float, error: str) -> float:
-    if isinstance(value, bool):
-        raise ValueError(error)
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
-    if not np.isfinite(numeric) or not 0.0 < numeric <= 1.0:
+    numeric = strict_finite_float(value, error=error)
+    if not 0.0 < numeric <= 1.0:
         raise ValueError(error)
     return numeric

@@ -9,6 +9,11 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_real_numeric_series,
+)
+
 
 @dataclass(frozen=True)
 class OptimizerConfig:
@@ -80,7 +85,9 @@ def optimize_portfolio(
         or tuple(factor_covariance.columns) != columns
     ):
         raise ValueError("optimizer_covariance_columns_invalid")
-    covariance = factor_covariance.to_numpy(dtype="float64")
+    covariance = factor_covariance.apply(
+        strict_finite_numeric_series, error="optimizer_covariance_invalid"
+    ).to_numpy(dtype="float64")
     if not np.isfinite(covariance).all() or not np.allclose(covariance, covariance.T):
         raise ValueError("optimizer_covariance_invalid")
     if float(np.linalg.eigvalsh(covariance).min(initial=0.0)) < -1e-12:
@@ -96,7 +103,9 @@ def optimize_portfolio(
         "adv",
         *columns,
     ):
-        data[column] = pd.to_numeric(data[column], errors="raise").astype("float64")
+        data[column] = strict_real_numeric_series(
+            data[column], error="optimizer_numeric_invalid"
+        )
     for column in (eligibility_column, financial_column, cash_column):
         if column is not None and (
             not pd.api.types.is_bool_dtype(data[column]) or data[column].isna().any()

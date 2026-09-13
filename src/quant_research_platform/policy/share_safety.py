@@ -11,13 +11,6 @@ from typing import Any
 from quant_research_platform.contracts.outputs import validate_output_identifier
 from quant_research_platform.contracts.run_id import validate_run_id
 
-LOCAL_ONLY_ROOTS: tuple[str, ...] = (
-    "data/raw",
-    "data/interim",
-    "data/processed",
-    "data/research",
-    "outputs",
-)
 _RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES: tuple[str, ...] = (
     "private_real",
     "private_data",

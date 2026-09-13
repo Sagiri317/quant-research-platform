@@ -836,7 +836,22 @@ def _portfolio_statistics_tables(
         robustness_rows,
     ) = [], [], [], [], [], []
     exposure_rows, factor_rows = [], []
+    benchmarks = {}
     try:
+        lease.grow(
+            3 * pandas_frame_payload_bytes(benchmark_opens) + 64 * len(benchmark_opens)
+        )
+        for benchmark_id in dict.fromkeys(
+            candidate.benchmark_id
+            for candidate in candidates
+            if candidate.benchmark_id is not None
+        ):
+            benchmark = benchmark_opens.loc[
+                benchmark_opens.benchmark_id.eq(benchmark_id), ["timestamp", "open"]
+            ].set_index("timestamp")["open"]
+            if benchmark.index.has_duplicates:
+                raise ValueError("benchmark_return_duplicate_keys")
+            benchmarks[benchmark_id] = benchmark
         previous = {
             candidate_id: (None, ledgers[candidate_id].capital.initial_capital)
             for candidate_id in ids
@@ -937,15 +952,7 @@ def _portfolio_statistics_tables(
                                     access_window=access,
                                 )
                                 if candidate.benchmark_id is not None:
-                                    benchmark = benchmark_opens.loc[
-                                        benchmark_opens.benchmark_id.eq(
-                                            candidate.benchmark_id
-                                        )
-                                    ].set_index("timestamp")["open"]
-                                    if benchmark.index.has_duplicates:
-                                        raise ValueError(
-                                            "benchmark_return_duplicate_keys"
-                                        )
+                                    benchmark = benchmarks[candidate.benchmark_id]
                                     values = benchmark.reindex(
                                         [row["entry_at"], row["end_at"]]
                                     )
@@ -1414,11 +1421,15 @@ def _portfolio_statistics_tables(
         )
         if output_bytes > lease.reserved_bytes:
             raise MemoryError("portfolio_statistics_output_bound_exceeded")
+        benchmarks.clear()
+        benchmark = None
         lease.shrink_to(max(1, output_bytes))
         lease.transfer("research.portfolio.statistics.output")
         return OwnedValue(tables, lease)
     except BaseException as error:
         clear_exception_frames(error)
+        benchmarks.clear()
+        benchmark = None
         daily_rows.clear()
         capacity_rows.clear()
         summary_rows.clear()

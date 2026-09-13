@@ -174,6 +174,15 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             for index, value in enumerate((100.0, 101.0, 103.0, 104.0))
         ]
     )
+    benchmark_scans = []
+    original_eq = pd.Series.eq
+
+    def counted_eq(series, other, *args, **kwargs):
+        if series.name == "benchmark_id" and len(series) == len(benchmark):
+            benchmark_scans.append(len(series))
+        return original_eq(series, other, *args, **kwargs)
+
+    monkeypatch.setattr(pd.Series, "eq", counted_eq)
     with runtime_resource_policy_scope() as policy:
         owned = _portfolio_statistics_tables(
             ledgers=artifacts,
@@ -190,6 +199,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
                 frame.calendar_date
             ),
         )
+        assert benchmark_scans == [len(benchmark), len(benchmark)]
         try:
             root = write_statistics_artifact(
                 tmp_path / "statistics",

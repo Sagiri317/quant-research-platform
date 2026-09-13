@@ -44,7 +44,7 @@ def _validate_non_empty_string(value: object, error: str) -> str:
 
 
 def strict_finite_float(value: object, *, error: str) -> float:
-    if isinstance(value, bool):
+    if isinstance(value, (bool, np.bool_, complex, np.complexfloating)):
         raise ValueError(error)
     try:
         number = float(value)
@@ -327,38 +327,36 @@ def strict_integer_series(
     return pd.Series(output, index=series.index, name=series.name, dtype=dtype)
 
 
+def strict_real_numeric_series(values: pd.Series, *, error: str) -> pd.Series:
+    """Parse real observations, retaining missing and infinite values for the caller."""
+    series = pd.Series(values, copy=True)
+    if pd.api.types.is_bool_dtype(series.dtype) or pd.api.types.is_complex_dtype(
+        series.dtype
+    ):
+        raise ValueError(error)
+    null_mask = _null_mask(series)
+    if not pd.api.types.is_numeric_dtype(series.dtype):
+        for value, is_null in zip(series, null_mask, strict=True):
+            if isinstance(value, (bool, np.bool_, complex, np.complexfloating)) or (
+                not is_null and not _is_hashable(value)
+            ):
+                raise ValueError(error)
+    numeric = pd.to_numeric(series, errors="coerce")
+    if (numeric.isna() & ~null_mask).any():
+        raise ValueError(error)
+    return numeric.astype("float64")
+
+
 def strict_finite_numeric_series(
     values: pd.Series,
     *,
     error: str,
     allow_null: bool = False,
 ) -> pd.Series:
-    series = pd.Series(values, copy=True)
-    null_mask = _null_mask(series)
-    if bool(null_mask.any()) and not allow_null:
-        raise ValueError(error)
-    is_native_numeric = pd.api.types.is_numeric_dtype(
-        series.dtype
-    ) and not pd.api.types.is_bool_dtype(series.dtype)
-    if is_native_numeric:
-        numeric = pd.to_numeric(series, errors="coerce")
-        non_null = numeric.loc[~null_mask]
-        if not bool(np.isfinite(non_null.to_numpy()).all()):
-            raise ValueError(error)
-        return numeric.astype("Float64" if allow_null else "float64")
-    for value, is_null in zip(series.tolist(), null_mask.tolist(), strict=True):
-        if is_null:
-            if allow_null:
-                continue
-            raise ValueError(error)
-        if isinstance(value, bool) or not _is_hashable(value):
-            raise ValueError(error)
-    numeric = pd.to_numeric(series, errors="coerce")
-    invalid = numeric.isna() & ~(null_mask & allow_null)
-    if bool(invalid.any()):
-        raise ValueError(error)
-    non_null = numeric.dropna()
-    if not bool(np.isfinite(non_null).all()):
+    numeric = strict_real_numeric_series(values, error=error)
+    if (numeric.isna().any() and not allow_null) or not np.isfinite(
+        numeric.dropna()
+    ).all():
         raise ValueError(error)
     return numeric.astype("Float64" if allow_null else "float64")
 

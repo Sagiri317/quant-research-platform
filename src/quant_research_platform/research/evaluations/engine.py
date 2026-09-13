@@ -7,6 +7,7 @@ import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -31,6 +32,7 @@ from quant_research_platform.contracts.evaluations import (
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.signals.materialization import (
     _signal_normalization_working_bytes,
     normalize_signal_frame,
@@ -91,7 +93,7 @@ class _EvaluationStreamingState:
         self._skipped_timestamp_count = 0
         self._ic: dict[tuple[str, str], dict[str, float | int]] = {}
         self._coverage: dict[tuple[str, str], dict[str, float | int]] = {}
-        self._spread: dict[tuple[str, str], dict[str, float | int]] = {}
+        self._spread: dict[tuple[str, str], dict[str, float | int | Fraction]] = {}
 
     def close(self) -> None:
         if self._closed:
@@ -192,7 +194,6 @@ class _EvaluationStreamingState:
                 signal, label, _timestamp = current_key
                 bottom = math.nan if first_value is None else first_value
                 top = math.nan if last_value is None else last_value
-                spread_value = top - bottom
                 monotonicity = (
                     None
                     if monotonicity_count == 0
@@ -204,8 +205,7 @@ class _EvaluationStreamingState:
                     str(label),
                     top,
                     bottom,
-                    spread_value,
-                    float(spread_value > 0),
+                    float(top > bottom),
                     monotonicity,
                 )
 
@@ -233,7 +233,9 @@ class _EvaluationStreamingState:
                 if first_value is None:
                     first_value = value
                 if previous_value is not None:
-                    monotonicity_sum += float(np.sign(value - previous_value))
+                    monotonicity_sum += float(
+                        (value > previous_value) - (value < previous_value)
+                    )
                     monotonicity_count += 1
                 previous_value = value
                 last_value = value
@@ -281,14 +283,17 @@ class _EvaluationStreamingState:
         for (signal, label), stats in sorted(self._spread.items()):
             count = int(stats["count"])
             monotonicity_count = int(stats["monotonicity_count"])
+            try:
+                spread_mean = float((stats["top_sum"] - stats["bottom_sum"]) / count)
+            except OverflowError as error:
+                raise ValueError("invalid_evaluation_numeric_values") from error
             records.append(
                 {
                     "signal": signal,
                     "label": label,
-                    "top_group_mean_label_value": float(stats["top_sum"]) / count,
-                    "bottom_group_mean_label_value": float(stats["bottom_sum"]) / count,
-                    "top_bottom_label_value_spread_mean": float(stats["spread_sum"])
-                    / count,
+                    "top_group_mean_label_value": float(stats["top_sum"] / count),
+                    "bottom_group_mean_label_value": float(stats["bottom_sum"] / count),
+                    "top_bottom_label_value_spread_mean": spread_mean,
                     "top_bottom_label_value_spread_hit_rate": float(stats["hit_sum"])
                     / count,
                     "group_monotonicity_score": (
@@ -484,12 +489,11 @@ def _correlation_summary(
 
 
 def _add_group_spread_observation(
-    spread_state: dict[tuple[str, str], dict[str, float | int]],
+    spread_state: dict[tuple[str, str], dict[str, float | int | Fraction]],
     signal: str,
     label: str,
     top: float,
     bottom: float,
-    spread_value: float,
     hit_rate: float,
     monotonicity: float | None,
 ) -> None:
@@ -498,18 +502,16 @@ def _add_group_spread_observation(
     if spread is None:
         spread = {
             "count": 0,
-            "top_sum": 0.0,
-            "bottom_sum": 0.0,
-            "spread_sum": 0.0,
+            "top_sum": Fraction(),
+            "bottom_sum": Fraction(),
             "hit_sum": 0.0,
             "monotonicity_sum": 0.0,
             "monotonicity_count": 0,
         }
         spread_state[key] = spread
     spread["count"] += 1
-    spread["top_sum"] += top
-    spread["bottom_sum"] += bottom
-    spread["spread_sum"] += spread_value
+    spread["top_sum"] += Fraction(top)
+    spread["bottom_sum"] += Fraction(bottom)
     spread["hit_sum"] += hit_rate
     if monotonicity is not None:
         spread["monotonicity_sum"] += monotonicity
@@ -538,7 +540,7 @@ def _iter_single_asset_time_series_output_chunks(
         "research.evaluation.time_series.state",
         max(
             64 * 1024,
-            pair_count * 512
+            pair_count * 768
             + _TIME_SERIES_MOMENT_BLOCK_ROWS * numeric_column_count * 8,
         ),
     )
@@ -547,6 +549,10 @@ def _iter_single_asset_time_series_output_chunks(
             "count": 0,
             "left_mean": 0.0,
             "right_mean": 0.0,
+            "left_origin": 0.0,
+            "right_origin": 0.0,
+            "left_scale": 0.0,
+            "right_scale": 0.0,
             "left_m2": 0.0,
             "right_m2": 0.0,
             "covariance": 0.0,
@@ -617,74 +623,81 @@ def _iter_single_asset_time_series_output_chunks(
                 mode=spec.filter_mode,
                 metadata_key="filter_mode",
             ) as (filtered, filter_metadata):
-                rows_input += strict_non_negative_count_value(
-                    filter_metadata["rows_input"]
-                )
-                rows_after_filter += strict_non_negative_count_value(
-                    filter_metadata["rows_after_filter_mode"]
-                )
-                filter_columns_used = tuple(
-                    str(column) for column in filter_metadata["filter_columns_used"]
-                )
-                filter_definition_value = str(filter_metadata["filter_definition"])
-                if filtered.empty:
-                    continue
-                kernel_lease = resource_policy.lease(
-                    "research.evaluation.time_series.kernel",
-                    max(
-                        64 * 1024,
-                        len(filtered) * (numeric_column_count * 8 + 32)
-                        + 2 * _TIME_SERIES_MOMENT_BLOCK_ROWS * numeric_column_count * 8,
-                    ),
-                )
                 try:
-                    assets = filtered[asset_column]
-                    unique_assets = assets.drop_duplicates()
-                    if len(unique_assets) != 1 or bool(assets.isna().any()):
-                        raise ValueError(
-                            "single_asset_time_series_evaluation_requires_one_asset"
-                        )
-                    chunk_asset = unique_assets.iloc[0]
-                    if asset is None:
-                        asset = chunk_asset
-                    elif chunk_asset != asset:
-                        raise ValueError(
-                            "single_asset_time_series_evaluation_requires_one_asset"
-                        )
-                    timestamps = strict_timestamp_series(
-                        filtered["timestamp"],
-                        error="invalid_evaluation_timestamp_values",
+                    rows_input += strict_non_negative_count_value(
+                        filter_metadata["rows_input"]
                     )
-                    if bool(timestamps.duplicated().any()):
-                        raise ValueError(
-                            "single_asset_time_series_evaluation_duplicate_timestamp"
-                        )
-                    chunk_minimum = pd.Timestamp(timestamps.min())
-                    chunk_maximum = pd.Timestamp(timestamps.max())
-                    if (
-                        maximum_timestamp is not None
-                        and chunk_minimum <= maximum_timestamp
-                    ):
-                        raise ValueError(
-                            "single_asset_time_series_evaluation_time_non_monotonic"
-                        )
-                    timestamp_count += len(timestamps)
-                    minimum_timestamp = (
-                        chunk_minimum
-                        if minimum_timestamp is None
-                        else min(minimum_timestamp, chunk_minimum)
+                    rows_after_filter += strict_non_negative_count_value(
+                        filter_metadata["rows_after_filter_mode"]
                     )
-                    maximum_timestamp = chunk_maximum
-                    values = filtered.loc[:, list(numeric_columns)].to_numpy(
-                        dtype="float64",
-                        copy=True,
+                    filter_columns_used = tuple(
+                        str(column) for column in filter_metadata["filter_columns_used"]
                     )
-                    consume_values(values)
+                    filter_definition_value = str(filter_metadata["filter_definition"])
+                    if filtered.empty:
+                        continue
+                    kernel_lease = resource_policy.lease(
+                        "research.evaluation.time_series.kernel",
+                        max(
+                            64 * 1024,
+                            len(filtered) * (numeric_column_count * 8 + 32)
+                            + 2
+                            * _TIME_SERIES_MOMENT_BLOCK_ROWS
+                            * numeric_column_count
+                            * 8,
+                        ),
+                    )
+                    try:
+                        assets = filtered[asset_column]
+                        unique_assets = assets.drop_duplicates()
+                        if len(unique_assets) != 1 or bool(assets.isna().any()):
+                            raise ValueError(
+                                "single_asset_time_series_evaluation_requires_one_asset"
+                            )
+                        chunk_asset = unique_assets.iloc[0]
+                        if asset is None:
+                            asset = chunk_asset
+                        elif chunk_asset != asset:
+                            raise ValueError(
+                                "single_asset_time_series_evaluation_requires_one_asset"
+                            )
+                        timestamps = strict_timestamp_series(
+                            filtered["timestamp"],
+                            error="invalid_evaluation_timestamp_values",
+                        )
+                        if bool(timestamps.duplicated().any()):
+                            raise ValueError(
+                                "single_asset_time_series_evaluation_duplicate_timestamp"
+                            )
+                        chunk_minimum = pd.Timestamp(timestamps.min())
+                        chunk_maximum = pd.Timestamp(timestamps.max())
+                        if (
+                            maximum_timestamp is not None
+                            and chunk_minimum <= maximum_timestamp
+                        ):
+                            raise ValueError(
+                                "single_asset_time_series_evaluation_time_non_monotonic"
+                            )
+                        timestamp_count += len(timestamps)
+                        minimum_timestamp = (
+                            chunk_minimum
+                            if minimum_timestamp is None
+                            else min(minimum_timestamp, chunk_minimum)
+                        )
+                        maximum_timestamp = chunk_maximum
+                        values = filtered.loc[:, list(numeric_columns)].to_numpy(
+                            dtype="float64",
+                            copy=True,
+                        )
+                        consume_values(values)
+                    finally:
+                        values = timestamps = assets = unique_assets = None
+                        _close_lease_preserving_primary(
+                            kernel_lease,
+                            owner="research.evaluation.time_series.kernel",
+                        )
                 finally:
-                    _close_lease_preserving_primary(
-                        kernel_lease,
-                        owner="research.evaluation.time_series.kernel",
-                    )
+                    filtered = chunk = None
         if pending_values is not None:
             with resource_policy.lease(
                 "research.evaluation.time_series.kernel",
@@ -767,8 +780,27 @@ def _merge_time_series_moments(
     count = int(valid.sum())
     if count == 0:
         return 0
-    left_values = left[valid]
-    right_values = right[valid]
+    old_count = int(stats["count"])
+    normalized = []
+    for name, values in (("left", left[valid]), ("right", right[valid])):
+        if old_count == 0:
+            stats[f"{name}_origin"] = float(values[0])
+        origin = float(stats[f"{name}_origin"])
+        old_scale = float(stats[f"{name}_scale"])
+        with np.errstate(over="ignore"):
+            differences = values - origin
+        if np.isfinite(differences).all():
+            scale = max(old_scale, float(np.max(np.abs(differences))))
+            normalized.append(differences / scale if scale else differences)
+        else:
+            scale = max(old_scale, abs(origin), float(np.max(np.abs(values))))
+            normalized.append(values / scale - origin / scale)
+        ratio = old_scale / scale if scale else 1.0
+        stats[f"{name}_mean"] *= ratio
+        stats[f"{name}_m2"] *= ratio * ratio
+        stats["covariance"] *= ratio
+        stats[f"{name}_scale"] = scale
+    left_values, right_values = normalized
     left_mean = float(left_values.mean())
     right_mean = float(right_values.mean())
     left_centered = left_values - left_mean
@@ -891,9 +923,12 @@ def _iter_evaluation_output_chunks(
                 ):
                     if summary_state is not None:
                         summary_state.consume(*output.value)
-                    yield output
+                    try:
+                        yield output
+                    finally:
+                        output = None
             finally:
-                filtered = None
+                filtered = chunk = None
 
 
 def _iter_evaluation_filtered_chunks(
@@ -1213,6 +1248,10 @@ def _evaluation_kernel_bytes(
         + (index_bytes + row_count)
         + row_count * (3 * 1 + 10 * 8)
         + output_record_count * _EVALUATION_RECORD_WORKING_BYTES
+        # Pandas objects and one sequential exact-mean workspace.
+        # Finite float64 denominators range from 1 through 2**1074.
+        + 64 * 1024
+        + 256 * min(row_count, 1075)
     )
 
 
@@ -1355,65 +1394,68 @@ def _iter_evaluation_work_frames(
             )
         )
     )
-    for frame in iter_complete_time_sized_frames(
+    complete_frames = iter_complete_time_sized_frames(
         iter(frames),
         timestamp_column="timestamp",
         resource_policy=resource_policy,
-    ):
-        missing = sorted(required.difference(frame.columns))
-        if missing:
-            raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
-        selected = [column for column in work_columns if column in frame.columns]
-        projection_bytes = _selected_frame_payload_bytes(frame, selected)
-        selected_set = set(selected)
-        added_signal_bytes = (
-            8
-            * len(frame)
-            * sum(signal.signal_id not in selected_set for signal in spec.signals)
-        )
-        normalized_bound = projection_bytes + added_signal_bytes
-        resource_policy.require_working_set(
-            projection_bytes,
-            error="research_evaluation_working_set_exceeds_task_memory_budget",
-        )
-        normalized_lease = resource_policy.lease(
-            "research.evaluation.projection",
-            projection_bytes,
-        )
-        try:
-            projected = frame.loc[:, selected]
-            normalization_bytes = _signal_normalization_working_bytes(
-                projected, spec.signals
+    )
+    with closing_iterator(complete_frames) as active_frames:
+        for frame in active_frames:
+            missing = sorted(required.difference(frame.columns))
+            if missing:
+                raise ValueError(f"missing_evaluation_columns: {', '.join(missing)}")
+            selected = [column for column in work_columns if column in frame.columns]
+            projection_bytes = _selected_frame_payload_bytes(frame, selected)
+            selected_set = set(selected)
+            added_signal_bytes = (
+                8
+                * len(frame)
+                * sum(signal.signal_id not in selected_set for signal in spec.signals)
             )
+            normalized_bound = projection_bytes + added_signal_bytes
             resource_policy.require_working_set(
-                normalization_bytes,
+                projection_bytes,
                 error="research_evaluation_working_set_exceeds_task_memory_budget",
             )
-            normalized_lease.grow(normalization_bytes)
-            normalized = normalize_signal_frame(
-                projected,
-                signals=spec.signals,
-                timestamp_column="timestamp",
-                source_columns_by_kind=source_columns_by_kind,
-                resource_lease=normalized_lease,
+            normalized_lease = resource_policy.lease(
+                "research.evaluation.projection",
+                projection_bytes,
             )
-            del projected
-            normalized_bytes = pandas_frame_payload_bytes(normalized)
-            if normalized_bytes > normalized_bound:
-                raise ValueError(
-                    "research_evaluation_working_set_exceeds_task_memory_budget"
-                )
-            normalized_lease.shrink_to(normalized_bytes)
-            normalized_lease.transfer("research.evaluation.input")
-            yield normalized
-        finally:
-            primary = sys.exception()
             try:
-                normalized_lease.close()
-            except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "evaluation input lease release also failed: "
-                    f"{type(close_error).__name__}"
+                projected = frame.loc[:, selected]
+                normalization_bytes = _signal_normalization_working_bytes(
+                    projected, spec.signals
                 )
+                resource_policy.require_working_set(
+                    normalization_bytes,
+                    error="research_evaluation_working_set_exceeds_task_memory_budget",
+                )
+                normalized_lease.grow(normalization_bytes)
+                normalized = normalize_signal_frame(
+                    projected,
+                    signals=spec.signals,
+                    timestamp_column="timestamp",
+                    source_columns_by_kind=source_columns_by_kind,
+                    resource_lease=normalized_lease,
+                )
+                projected = None
+                normalized_bytes = pandas_frame_payload_bytes(normalized)
+                if normalized_bytes > normalized_bound:
+                    raise ValueError(
+                        "research_evaluation_working_set_exceeds_task_memory_budget"
+                    )
+                normalized_lease.shrink_to(normalized_bytes)
+                normalized_lease.transfer("research.evaluation.input")
+                yield normalized
+            finally:
+                projected = normalized = frame = None
+                primary = sys.exception()
+                try:
+                    normalized_lease.close()
+                except BaseException as close_error:
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "evaluation input lease release also failed: "
+                        f"{type(close_error).__name__}"
+                    )

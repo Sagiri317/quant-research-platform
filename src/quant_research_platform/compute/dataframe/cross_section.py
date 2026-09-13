@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from statistics import mean
+
 import numpy as np
 import pandas as pd
 
@@ -82,7 +84,7 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
                             "signal": signal,
                             "label": spec.label_column,
                             "group": group,
-                            "mean_label_value": float(label_valid[group_mask].mean()),
+                            "mean_label_value": float(mean(label_valid[group_mask])),
                             "n_obs": int(group_mask.sum()),
                         }
                     )
@@ -165,15 +167,17 @@ def _pearson_correlation_from_moments(
 def _scaled_centered_values(values: np.ndarray) -> np.ndarray | None:
     values = np.asarray(values, dtype="float64")
     reference = values[0]
-    differences = values - reference
+    with np.errstate(over="ignore"):
+        differences = values - reference
     if np.isfinite(differences).all():
-        centered = differences - differences.mean()
-    else:
-        scale = float(np.max(np.abs(values)))
+        scale = float(np.max(np.abs(differences)))
         if scale == 0:
             return None
+        normalized = differences / scale
+    else:
+        scale = float(np.max(np.abs(values)))
         normalized = values / scale
-        centered = normalized - normalized.mean()
+    centered = normalized - normalized.mean()
     scale = float(np.max(np.abs(centered)))
     if scale == 0:
         return None

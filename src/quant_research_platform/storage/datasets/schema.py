@@ -977,6 +977,17 @@ def _typed_category_value_payload(value: object) -> dict[str, Any]:
             raise ValueError("dataset_categorical_value_invalid")
         if value.is_zero():
             value = Decimal(0)
+        # A category cannot exceed the control manifest that must contain it.
+        from quant_research_platform.storage.manifests import _MAX_QRP_JSON_BYTES
+
+        sign, digits, exponent = value.as_tuple()
+        size = sign + (
+            len(digits) + exponent
+            if exponent >= 0
+            else max(len(digits), 1 - exponent) + 1
+        )
+        if size > _MAX_QRP_JSON_BYTES:
+            raise ValueError("dataset_logical_dtype_metadata_exceeds_payload_target")
         return {"type": "decimal", "value": format(value, "f")}
     if type(value) is date and type(value) is not datetime:
         return {"type": "date", "value": value.isoformat()}
@@ -1012,6 +1023,8 @@ def _typed_category_value(value: Mapping[str, Any]) -> object:
         except ValueError as exc:
             raise ValueError("dataset_logical_dtypes_invalid") from exc
     if kind == "decimal" and type(payload) is str:
+        if "e" in payload.lower():
+            raise ValueError("dataset_logical_dtypes_invalid")
         try:
             result = Decimal(payload)
         except (ValueError, InvalidOperation) as exc:

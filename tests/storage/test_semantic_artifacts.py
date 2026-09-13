@@ -124,7 +124,9 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
         )
     assert (old / "manifest.json").read_bytes() == before
 
-    real_sha256 = storage.hashlib.sha256
+    import hashlib
+
+    real_sha256 = hashlib.sha256
 
     class Collision:
         def update(self, _value):
@@ -135,7 +137,7 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
 
     # Only streaming member hashes collide; the semantic envelope hash is genuine.
     monkeypatch.setattr(
-        storage.hashlib,
+        hashlib,
         "sha256",
         lambda value=b"": real_sha256(value) if value else Collision(),
     )

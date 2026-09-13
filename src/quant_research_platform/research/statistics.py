@@ -15,8 +15,13 @@ from scipy.stats import kurtosis, norm, skew
 from statsmodels.stats.diagnostic import het_white
 from statsmodels.stats.multitest import multipletests
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _average_ranks,
+    _pearson_correlation_result,
+)
 from quant_research_platform.contracts.validation import (
     strict_hashable_key_series,
+    strict_real_numeric_series,
     strict_timestamp_series,
 )
 from quant_research_platform.runtime.resources import current_runtime_resource_policy
@@ -651,8 +656,8 @@ def cross_sectional_rank_ic(
     if bool(selected.duplicated(["timestamp", "asset_id"]).any()):
         raise ValueError("rank_ic_primary_key_duplicate")
     for column in (label_column, *value_columns):
-        selected[column] = pd.to_numeric(selected[column], errors="raise").astype(
-            "float64"
+        selected[column] = strict_real_numeric_series(
+            selected[column], error="rank_ic_numeric_invalid"
         )
     records: list[dict[str, object]] = []
     for timestamp, group in selected.groupby("timestamp", sort=True):
@@ -661,11 +666,13 @@ def cross_sectional_rank_ic(
             valid = group[[column, label_column]].dropna()
             values = valid[column].to_numpy(dtype="float64")
             labels = valid[label_column].to_numpy(dtype="float64")
-            record[column] = (
-                float(pd.Series(values).corr(pd.Series(labels), method="spearman"))
-                if len(valid) >= 2 and np.std(values) > 0.0 and np.std(labels) > 0.0
-                else np.nan
+            if not np.isfinite(values).all() or not np.isfinite(labels).all():
+                record[column] = np.nan
+                continue
+            correlation, _reason = _pearson_correlation_result(
+                _average_ranks(values), _average_ranks(labels)
             )
+            record[column] = np.nan if correlation is None else correlation
         records.append(record)
     return pd.DataFrame.from_records(
         records,

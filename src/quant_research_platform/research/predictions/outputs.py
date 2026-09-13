@@ -357,7 +357,7 @@ def _iter_prediction_output_frames(
                     if test_frame.empty:
                         test_frame = None
                         usable_mask = None
-                        filtered = None
+                        filtered = chunk = None
                         if working_lease is not None:
                             working_lease.close()
                         continue
@@ -414,6 +414,8 @@ def _iter_prediction_output_frames(
                         ).all():
                             raise ValueError("invalid_prediction_alpha_scores")
                     build_state.record_prediction_output(output, spec=spec)
+                    raw_prediction = timestamps = ranks = counts = None
+                    test_frame = usable_mask = None
                     retained_bytes = pandas_frame_payload_bytes(output)
                     if working_lease is not None:
                         working_lease.shrink_to(retained_bytes)
@@ -426,14 +428,14 @@ def _iter_prediction_output_frames(
                         yield owned_output if owned_output is not None else output
                     finally:
                         output = None
-                        filtered = None
+                        filtered = chunk = None
                         if owned_output is not None and owned_output.lease.active:
                             owned_output.release(owner="research.prediction.result")
                 except BaseException as primary:
                     output = None
                     test_frame = None
                     usable_mask = None
-                    filtered = None
+                    filtered = chunk = None
                     if owned_output is not None and owned_output.lease.active:
                         try:
                             owned_output.release(owner="research.prediction.result")
@@ -451,6 +453,9 @@ def _iter_prediction_output_frames(
                                 f"{type(cleanup_error).__name__}"
                             )
                     raise
+                finally:
+                    raw_prediction = timestamps = ranks = counts = None
+                    chunk = None
 
 
 def _iter_prediction_work_frames(
@@ -500,6 +505,8 @@ def _iter_prediction_work_frames(
             else:
                 if projection_lease is not None:
                     projection_lease.close()
+            finally:
+                frame = None
 
 
 def _strict_non_negative_prediction_count(value: object) -> int:

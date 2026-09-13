@@ -26,6 +26,11 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
     TradeCostComponents,
 )
+from quant_research_platform.contracts.validation import (
+    strict_finite_float,
+    strict_finite_numeric_series,
+    strict_real_numeric_series,
+)
 from quant_research_platform.research.portfolios.schedules import is_rebalance_session
 
 _LEDGER_COLUMNS = (
@@ -71,7 +76,9 @@ def continuous_ledger_batch(
         asset = str(row["asset_id"])
         timestamp = int(pd.Timestamp(row["execution_date"]).value)
         fill_id = None
-        delta = float(row["executed_delta_notional"])
+        delta = strict_finite_float(
+            row["executed_delta_notional"], error="portfolio_ledger_numeric_invalid"
+        )
         if asset != PORTFOLIO_CASH_ASSET_ID and delta:
             fill_id = f"{sequence}:{asset}"
             trades.append(
@@ -88,7 +95,9 @@ def continuous_ledger_batch(
                 )
             )
         for cost in PORTFOLIO_LEDGER_COST_COLUMNS:
-            amount = float(row[cost])
+            amount = strict_finite_float(
+                row[cost], error="portfolio_ledger_numeric_invalid"
+            )
             if amount:
                 if fill_id is None:
                     raise ValueError("portfolio_ledger_phantom_cost_invalid")
@@ -107,9 +116,24 @@ def continuous_ledger_batch(
             ("after", "post_trade_notional"),
             ("end", "end_notional"),
         ):
-            value = float(row[column])
-            quantity = float(row["post_trade_notional"]) if phase == "end" else value
-            mark = 1.0 + float(row["holding_return"]) if phase == "end" else 1.0
+            value = strict_finite_float(
+                row[column], error="portfolio_ledger_numeric_invalid"
+            )
+            quantity = (
+                strict_finite_float(
+                    row["post_trade_notional"], error="portfolio_ledger_numeric_invalid"
+                )
+                if phase == "end"
+                else value
+            )
+            mark = (
+                1.0
+                + strict_finite_float(
+                    row["holding_return"], error="portfolio_ledger_numeric_invalid"
+                )
+                if phase == "end"
+                else 1.0
+            )
             valuations.append(
                 PortfolioValuation(
                     int(end_timestamp.value) if phase == "end" else timestamp,
@@ -136,7 +160,11 @@ def continuous_ledger_batch(
                     asset,
                     fill_id,
                     name,
-                    number=float(value) if not isinstance(value, str) else None,
+                    number=strict_finite_float(
+                        value, error="portfolio_ledger_numeric_invalid"
+                    )
+                    if not isinstance(value, str)
+                    else None,
                     text=value if isinstance(value, str) else None,
                 )
             )
@@ -383,18 +411,11 @@ class ExecutionAccounting:
                 *PORTFOLIO_LEDGER_COST_COLUMNS,
             ),
         ]
-        if (
-            raw_numeric.map(lambda value: isinstance(value, (bool, np.bool_)))
-            .any()
-            .any()
-        ):
-            raise ValueError("execution_ledger_numeric_invalid")
-        numeric = raw_numeric.apply(pd.to_numeric, errors="raise")
+        numeric = raw_numeric.apply(
+            strict_finite_numeric_series, error="execution_ledger_numeric_invalid"
+        )
         for column in numeric.columns:
-            ledger[column] = numeric[column].astype("float64")
-        numeric_values = numeric.to_numpy(dtype="float64")
-        if not np.isfinite(numeric_values).all():
-            raise ValueError("execution_ledger_numeric_invalid")
+            ledger[column] = numeric[column]
         if (
             (
                 numeric.loc[
@@ -677,8 +698,12 @@ def calibrate_expected_alpha(
             "timestamp",
         ]
     )
-    alpha = pd.to_numeric(frame[alpha_column], errors="raise").astype("float64")
-    returns = pd.to_numeric(frame[return_column], errors="raise").astype("float64")
+    alpha = strict_real_numeric_series(
+        frame[alpha_column], error="alpha_calibration_numeric_invalid"
+    )
+    returns = strict_real_numeric_series(
+        frame[return_column], error="alpha_calibration_numeric_invalid"
+    )
     valid = alpha.notna() & returns.notna() & np.isfinite(alpha) & np.isfinite(returns)
     valid_dates = dates.loc[valid].isin(scheduled)
     date_count = 0 if scheduled.empty else int(dates.loc[valid & valid_dates].nunique())
@@ -1061,16 +1086,7 @@ def _weight_values(values: pd.Series, assets: pd.Index, error: str) -> pd.Series
 
 
 def _numeric_series(values: pd.Series, assets: pd.Index, error: str) -> pd.Series:
-    raw = values.reindex(assets)
-    if raw.map(lambda value: isinstance(value, (bool, np.bool_))).any():
-        raise ValueError(error)
-    try:
-        result = pd.to_numeric(raw, errors="raise").astype("float64")
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
-    if result.isna().any() or not np.isfinite(result.to_numpy()).all():
-        raise ValueError(error)
-    return result
+    return strict_finite_numeric_series(values.reindex(assets), error=error)
 
 
 def _asset_values(
@@ -1082,13 +1098,9 @@ def _asset_values(
 ) -> pd.Series:
     if not isinstance(values, pd.Series) or not values.index.is_unique:
         raise ValueError(error)
-    raw = values.reindex(assets)
-    if raw.dropna().map(lambda value: isinstance(value, (bool, np.bool_))).any():
-        raise ValueError(error)
-    try:
-        result = pd.to_numeric(raw, errors="raise").astype("float64")
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
+    result = strict_finite_numeric_series(
+        values.reindex(assets), error=error, allow_null=True
+    ).astype("float64")
     present = pd.Series(assets.isin(values.index), index=assets)
     required_missing = result.isna() & present.index.to_series().isin(required_assets)
     if required_missing.any():
@@ -1147,21 +1159,15 @@ def _validated_trade_cost(
 
 
 def _finite_positive(value: float, error: str) -> float:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
-    if isinstance(value, bool) or not np.isfinite(numeric) or numeric <= 0.0:
+    numeric = strict_finite_float(value, error=error)
+    if numeric <= 0.0:
         raise ValueError(error)
     return numeric
 
 
 def _finite_nonnegative(value: float, error: str) -> float:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError) as exc:
-        raise ValueError(error) from exc
-    if isinstance(value, bool) or not np.isfinite(numeric) or numeric < 0.0:
+    numeric = strict_finite_float(value, error=error)
+    if numeric < 0.0:
         raise ValueError(error)
     return numeric
 
@@ -1173,7 +1179,9 @@ def _scaled_tolerance(nav: float) -> float:
 def capacity_quantiles(
     capacity_by_rebalance_date: pd.Series,
 ) -> dict[str, object]:
-    values = pd.to_numeric(capacity_by_rebalance_date, errors="raise").dropna()
+    values = strict_real_numeric_series(
+        capacity_by_rebalance_date, error="capacity_numeric_invalid"
+    ).dropna()
     if values.empty:
         raise ValueError("capacity_observations_empty")
     annual = values.groupby(values.index.year).quantile(0.05).to_dict()

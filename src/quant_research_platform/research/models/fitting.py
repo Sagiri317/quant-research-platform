@@ -639,7 +639,7 @@ def _collect_training_frame_owned(
                     )
                 if usable.empty:
                     usable = None
-                    filtered = None
+                    filtered = chunk = None
                     if projection_lease is not None:
                         projection_lease.close()
                         projection_lease = None
@@ -655,7 +655,7 @@ def _collect_training_frame_owned(
                 retained_rows += len(usable)
                 retained_bytes += usable_payload_bytes
                 usable = None
-                filtered = None
+                filtered = chunk = None
                 if spec.max_train_rows is not None:
                     while retained_rows - len(retained[0][0]) >= spec.max_train_rows:
                         removed, removed_lease, removed_bytes = retained.popleft()
@@ -948,43 +948,47 @@ def iter_model_work_frames(
     required: set[str],
     work_columns: tuple[str, ...],
 ) -> Iterable[pd.DataFrame]:
-    for frame in iter_complete_time_sized_frames(
+    complete_frames = iter_complete_time_sized_frames(
         iter(frames),
         timestamp_column="timestamp",
         resource_policy=current_runtime_resource_policy(),
-    ):
-        missing = sorted(required.difference(frame.columns))
-        if missing:
-            raise ValueError(f"missing_model_columns: {', '.join(missing)}")
-        selected = [column for column in work_columns if column in frame.columns]
-        selected_bytes = _selected_frame_payload_bytes(frame, selected)
-        policy = current_runtime_resource_policy()
-        if policy is not None:
-            policy.require_working_set(
-                selected_bytes,
-                error="model_training_working_set_exceeds_task_memory_budget",
-            )
-        projection_lease = None
-        if policy is not None:
-            projection_lease = policy.lease(
-                "research.model.projection",
-                selected_bytes,
-            )
-        try:
-            yield frame.loc[:, selected]
-        except BaseException as primary:
-            if projection_lease is not None:
-                try:
+    )
+    with closing_iterator(complete_frames) as active_frames:
+        for frame in active_frames:
+            missing = sorted(required.difference(frame.columns))
+            if missing:
+                raise ValueError(f"missing_model_columns: {', '.join(missing)}")
+            selected = [column for column in work_columns if column in frame.columns]
+            selected_bytes = _selected_frame_payload_bytes(frame, selected)
+            policy = current_runtime_resource_policy()
+            if policy is not None:
+                policy.require_working_set(
+                    selected_bytes,
+                    error="model_training_working_set_exceeds_task_memory_budget",
+                )
+            projection_lease = None
+            if policy is not None:
+                projection_lease = policy.lease(
+                    "research.model.projection",
+                    selected_bytes,
+                )
+            try:
+                yield frame.loc[:, selected]
+            except BaseException as primary:
+                if projection_lease is not None:
+                    try:
+                        projection_lease.close()
+                    except BaseException as cleanup_error:
+                        primary.add_note(
+                            "model projection lease release also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                raise
+            else:
+                if projection_lease is not None:
                     projection_lease.close()
-                except BaseException as cleanup_error:
-                    primary.add_note(
-                        "model projection lease release also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-            raise
-        else:
-            if projection_lease is not None:
-                projection_lease.close()
+            finally:
+                frame = None
 
 
 def _estimator_fit_working_set_bytes(
@@ -1258,6 +1262,8 @@ def iter_legal_training_chunks(
                         f"{type(cleanup_error).__name__}"
                     )
             raise
+        finally:
+            chunk = None
 
 
 def training_scope_chunks(
@@ -1270,7 +1276,10 @@ def training_scope_chunks(
     with closing_iterator(iter(chunks)) as active_chunks:
         for chunk in active_chunks:
             if not asset_ids:
-                yield chunk
+                try:
+                    yield chunk
+                finally:
+                    chunk = None
                 continue
             if "asset_id" not in chunk.columns:
                 raise ValueError("model_training_asset_id_missing")
@@ -1298,7 +1307,7 @@ def training_scope_chunks(
                 primary_error = exc
                 raise
             finally:
-                scoped = None
+                scoped = chunk = None
                 if scope_lease is not None and scope_lease.active:
                     try:
                         scope_lease.close()

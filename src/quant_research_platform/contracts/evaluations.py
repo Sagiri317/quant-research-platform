@@ -24,7 +24,7 @@ from quant_research_platform.contracts.time import TimeWindow, time_value_isofor
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
-    strict_finite_numeric_series,
+    strict_integer_series,
 )
 
 if TYPE_CHECKING:
@@ -249,12 +249,10 @@ def strict_non_negative_count_series(
     *,
     error: str = "invalid_evaluation_observation_counts",
 ) -> pd.Series:
-    numeric = strict_finite_numeric_series(values, error=error)
-    if numeric.lt(0).any() or numeric.mod(1).ne(0).any():
+    numeric = strict_integer_series(values, error=error)
+    if numeric.lt(0).any():
         raise ValueError(error)
-    if values.map(lambda value: isinstance(value, bool)).any():
-        raise ValueError(error)
-    return numeric.astype("int64")
+    return numeric
 
 
 def strict_positive_group_series(

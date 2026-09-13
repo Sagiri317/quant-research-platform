@@ -8,7 +8,10 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_real_numeric_series,
+)
 from quant_research_platform.research.features.transforms import _mad_winsorize
 
 
@@ -38,7 +41,6 @@ class MarketModelRiskState:
         self._returns: dict[str, array] = {}
         self._market_returns: dict[str, array] = {}
         self._residuals: dict[str, array] = {}
-        self._sums: dict[str, list[float]] = {}
         self._previous_weights: dict[str, float] = {}
 
     def observe(self, panel: pd.DataFrame) -> MarketModelRiskStyles:
@@ -78,7 +80,6 @@ class MarketModelRiskState:
             del self._returns[asset]
             del self._market_returns[asset]
             del self._residuals[asset]
-            del self._sums[asset]
 
         weighted = [
             (
@@ -118,38 +119,33 @@ class MarketModelRiskState:
             returns = self._returns.setdefault(asset, array("d"))
             markets = self._market_returns.setdefault(asset, array("d"))
             residuals = self._residuals.setdefault(asset, array("d"))
-            totals = self._sums.setdefault(asset, [0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
             if np.isfinite(market_return) and np.isfinite(return_value):
                 returns.append(return_value)
                 markets.append(market_return)
-                totals[0] += 1.0
-                totals[1] += return_value
-                totals[2] += market_return
-                totals[3] += return_value * return_value
-                totals[4] += return_value * market_return
-                totals[5] += market_return * market_return
                 if len(returns) > self.window:
-                    old_return = float(returns.pop(0))
-                    old_market = float(markets.pop(0))
-                    totals[0] -= 1.0
-                    totals[1] -= old_return
-                    totals[2] -= old_market
-                    totals[3] -= old_return * old_return
-                    totals[4] -= old_return * old_market
-                    totals[5] -= old_market * old_market
+                    returns.pop(0)
+                    markets.pop(0)
             else:
                 del returns[:]
                 del markets[:]
-                totals[:] = [0.0] * 6
             beta = np.nan
             residual = np.nan
-            if totals[0] == self.window:
-                market_variance = totals[5] - totals[2] * totals[2] / totals[0]
-                if market_variance > 0.0 and max(markets) != min(markets):
-                    covariance = totals[4] - totals[1] * totals[2] / totals[0]
-                    beta = covariance / market_variance
-                    alpha = (totals[1] - beta * totals[2]) / totals[0]
-                    residual = return_value - alpha - beta * market_return
+            if len(returns) == self.window:
+                market_values = np.asarray(markets)
+                return_values = np.asarray(returns)
+                market_differences = market_values - market_values[0]
+                return_differences = return_values - return_values[0]
+                market_centered = market_differences - market_differences.mean()
+                return_centered = return_differences - return_differences.mean()
+                scale = float(np.max(np.abs(market_centered)))
+                if scale > 0.0:
+                    market_centered /= scale
+                    beta = float(
+                        np.dot(return_centered, market_centered)
+                        / np.dot(market_centered, market_centered)
+                        / scale
+                    )
+                    residual = return_centered[-1] - beta * market_centered[-1] * scale
             residuals.append(residual)
             if len(residuals) > self.residual_window:
                 residuals.pop(0)
@@ -196,7 +192,9 @@ def preprocess_risk_styles(
             raise ValueError("factor_risk_eligibility_invalid")
         eligible = result.eligible
     for column in style_columns:
-        values = pd.to_numeric(result[column], errors="raise").astype("float64")
+        values = strict_real_numeric_series(
+            result[column], error="risk_style_numeric_invalid"
+        )
         grouped = values.where(eligible).groupby(timestamps, sort=False)
         clipped = _mad_winsorize(values, grouped)
         fitting_values = clipped.where(eligible)
@@ -404,8 +402,8 @@ class FactorRiskState:
             frame = frame.loc[frame.eligible].copy()
         frame["asset_id"] = frame.asset_id.astype("string")
         for column in (self.weight_column, *self.style_columns):
-            frame[column] = pd.to_numeric(frame[column], errors="raise").astype(
-                "float64"
+            frame[column] = strict_real_numeric_series(
+                frame[column], error="factor_risk_numeric_invalid"
             )
         return (
             frame.dropna(subset=list(required))
@@ -424,9 +422,9 @@ class FactorRiskState:
         if "asset_return" not in cross:
             raise ValueError("factor_risk_columns_invalid")
         frame = self.prepare_exposures(cross)
-        frame["asset_return"] = pd.to_numeric(
-            frame.asset_return, errors="raise"
-        ).astype("float64")
+        frame["asset_return"] = strict_real_numeric_series(
+            frame.asset_return, error="factor_risk_numeric_invalid"
+        )
         if require_complete and (
             frame.asset_return.isna().any() or not np.isfinite(frame.asset_return).all()
         ):

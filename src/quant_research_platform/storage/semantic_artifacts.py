@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import os
 import stat
 from collections.abc import Callable, Mapping
@@ -38,6 +37,7 @@ from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.experiments import read_trial_ledger_reference
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
+    _hash_file_content,
     dataset_file_identity_from_stat,
     native_filesystem_path,
     open_filesystem_file,
@@ -126,6 +126,13 @@ def compare_semantic_artifacts(
             same_bytes = False
             if member == candidate_member:
                 with (
+                    runtime_resource_policy_scope(
+                        current_runtime_resource_policy()
+                    ) as policy,
+                    policy.lease(
+                        "storage.semantic.comparison.bytes",
+                        min(2 * _HASH_BUFFER_BYTES, policy.operation_headroom_bytes),
+                    ) as lease,
                     handle_preserving_primary(open_filesystem_file(old_path)) as old,
                     handle_preserving_primary(
                         open_filesystem_file(candidate_path)
@@ -139,10 +146,17 @@ def compare_semantic_artifacts(
                     ):
                         raise ValueError("semantic_artifact_member_identity_changed")
                     same_bytes = True
-                    while left := old.read(_HASH_BUFFER_BYTES):
-                        if left != candidate.read(_HASH_BUFFER_BYTES):
+                    chunk_size = lease.reserved_bytes // 2
+                    if chunk_size == 0:
+                        raise ValueError(
+                            "semantic_artifact_comparison_memory_insufficient"
+                        )
+                    while left := old.read(chunk_size):
+                        if left != candidate.read(chunk_size):
                             same_bytes = False
+                            del left
                             break
+                        del left
                     if same_bytes and candidate.read(1):
                         same_bytes = False
                     if (
@@ -320,6 +334,7 @@ def read_semantic_artifact_record(
         _directory_identity(root)
     except ValueError as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
+    manifest_identity = _member_identity(root / "manifest.json")
     payload = read_manifest(root / "manifest.json")
     if set(payload) != {
         "schema_id",
@@ -344,16 +359,23 @@ def read_semantic_artifact_record(
         root, expected_paths={str(member["path"]) for member in members}
     ):
         raise ValueError("semantic_artifact_member_integrity_invalid")
+    if _member_identity(root / "manifest.json") != manifest_identity:
+        raise ValueError("semantic_artifact_member_identity_changed")
     return envelope, members
 
 
 def read_semantic_artifact_operational_metadata(
     instance_root: Path,
 ) -> dict[str, object]:
+    manifest_path = instance_root / "manifest.json"
+    identity = _member_identity(manifest_path)
     read_semantic_artifact_record(instance_root)
-    return _operational_metadata(
-        read_manifest(instance_root / "manifest.json")["operational_metadata"]
+    metadata = _operational_metadata(
+        read_manifest(manifest_path)["operational_metadata"]
     )
+    if _member_identity(manifest_path) != identity:
+        raise ValueError("semantic_artifact_member_identity_changed")
+    return metadata
 
 
 def _operational_metadata(value: object) -> dict[str, object]:
@@ -434,6 +456,7 @@ def _member_inventory(
     root: Path, *, expected_paths: set[str] | None = None
 ) -> tuple[dict[str, object], ...]:
     members: list[dict[str, object]] = []
+    identities: dict[str, DatasetFileIdentity] = {}
 
     encoded_bytes = 0
 
@@ -441,6 +464,7 @@ def _member_inventory(
         nonlocal encoded_bytes
         if expected_paths is not None and relative not in expected_paths:
             raise ValueError("semantic_artifact_member_integrity_invalid")
+        identities[relative] = _member_identity(child)
         member = _member_record(relative, child)
         encoded_bytes += len(render_qrp_json_object(member).encode("utf-8"))
         if encoded_bytes > _MAX_QRP_JSON_BYTES:
@@ -454,6 +478,8 @@ def _member_inventory(
         if relative not in remaining:
             raise ValueError("semantic_artifact_member_set_changed")
         remaining.remove(relative)
+        if _member_identity(_child) != identities[relative]:
+            raise ValueError("semantic_artifact_member_identity_changed")
 
     _visit_member_paths(root, verify)
     if remaining:
@@ -531,24 +557,21 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
 
 def _member_record(relative: str, path: Path) -> dict[str, object]:
     identity = _member_identity(path)
-    digest = hashlib.sha256()
     try:
-        with handle_preserving_primary(open_filesystem_file(path)) as handle:
-            opened = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-            if opened != identity:
-                raise ValueError("semantic_artifact_member_identity_changed")
-            while chunk := handle.read(_HASH_BUFFER_BYTES):
-                digest.update(chunk)
-            closed = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+        with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
+            with policy.lease(
+                "storage.semantic.member_hash",
+                min(_HASH_BUFFER_BYTES, policy.operation_headroom_bytes),
+            ) as lease:
+                digest = _hash_file_content(
+                    path,
+                    identity,
+                    "semantic_artifact_member_identity_changed",
+                    chunk_size=lease.reserved_bytes,
+                )
     except OSError as exc:
         raise ValueError("semantic_artifact_member_invalid") from exc
-    if closed != identity or _member_identity(path) != identity:
-        raise ValueError("semantic_artifact_member_identity_changed")
-    return {
-        "path": relative,
-        "size": identity.size,
-        "sha256": digest.hexdigest(),
-    }
+    return {"path": relative, "size": identity.size, "sha256": digest}
 
 
 def _validate_member_payload(value: object) -> tuple[dict[str, object], ...]:

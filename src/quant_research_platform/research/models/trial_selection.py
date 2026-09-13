@@ -1049,7 +1049,10 @@ def iter_validation_prediction_chunks(
                             usable,
                             output,
                         )
-                        yield item
+                        try:
+                            yield item
+                        finally:
+                            item = None
             except BaseException as primary:
                 if chunk_lease is not None and chunk_lease.active:
                     try:
@@ -1063,3 +1066,6 @@ def iter_validation_prediction_chunks(
             else:
                 if chunk_lease is not None and chunk_lease.active:
                     chunk_lease.close()
+            finally:
+                chunk = timestamps = validation = filtered = None
+                prediction_rows = predictions = usable = output = None

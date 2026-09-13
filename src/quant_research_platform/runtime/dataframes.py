@@ -126,6 +126,8 @@ def iter_complete_session_frames(
                         yield frame
                     except GeneratorExit:
                         return
+                    finally:
+                        frame = None
                     continue
                 policy = current_runtime_resource_policy()
                 if policy is None:
@@ -185,7 +187,7 @@ def iter_complete_session_frames(
                         finally:
                             output = None
                     finally:
-                        timestamps = values = stops = None
+                        timestamps = values = stops = frame = None
 
     return activate()
 
@@ -225,138 +227,144 @@ def _iter_complete_time_sized_frames_impl(
                 frame_work.enter_context(
                     resource_policy.lease("research.time.inspect", operation_bytes)
                 )
-                timestamps = strict_timestamp_series(
-                    frame[timestamp_column],
-                    error="invalid_time_chunk_timestamp_values",
-                )
-                if not timestamps.is_monotonic_increasing:
-                    sort_bytes = _time_sort_working_set_bytes(frame)
-                    resource_policy.require_working_set(
-                        sort_bytes,
-                        error="research_indivisible_time_unit_exceeds_task_memory_budget",
-                    )
-                    frame_work.enter_context(
-                        resource_policy.lease("research.time.sort", sort_bytes)
-                    )
-                    frame = frame.sort_values(
-                        timestamp_column,
-                        kind="mergesort",
-                        ignore_index=True,
-                    )
-                    if pandas_frame_payload_bytes(frame) > sort_bytes:
-                        raise ValueError(
-                            "research_indivisible_time_unit_exceeds_task_memory_budget"
-                        )
+                try:
                     timestamps = strict_timestamp_series(
                         frame[timestamp_column],
                         error="invalid_time_chunk_timestamp_values",
                     )
-                current_min = pd.Timestamp(timestamps.iloc[0])
-                if emitted_max is not None and current_min <= emitted_max:
-                    raise ValueError("non_monotonic_time_chunk_order")
-                start = 0
-                if pending is not None:
-                    if pending_timestamp is None or current_min < pending_timestamp:
-                        raise ValueError("non_monotonic_time_chunk_order")
-                    if current_min == pending_timestamp:
-                        first_stop = 1
-                        while (
-                            first_stop < len(frame)
-                            and timestamps.iloc[first_stop] == current_min
-                        ):
-                            first_stop += 1
-                        right = frame.iloc[:first_stop]
-                        combined_bound = pandas_frame_payload_bytes(
-                            pending.value
-                        ) + pandas_frame_payload_bytes(right)
+                    if not timestamps.is_monotonic_increasing:
+                        sort_bytes = _time_sort_working_set_bytes(frame)
                         resource_policy.require_working_set(
-                            combined_bound,
-                            error="research_time_boundary_payloads_exceed_task_memory_budget",
+                            sort_bytes,
+                            error="research_indivisible_time_unit_exceeds_task_memory_budget",
                         )
-                        pending.lease.grow(combined_bound)
-                        combined = pd.concat(
-                            [pending.value, right],
+                        frame_work.enter_context(
+                            resource_policy.lease("research.time.sort", sort_bytes)
+                        )
+                        frame = frame.sort_values(
+                            timestamp_column,
+                            kind="mergesort",
                             ignore_index=True,
                         )
-                        combined_bytes = pandas_frame_payload_bytes(combined)
-                        if combined_bytes > combined_bound:
+                        if pandas_frame_payload_bytes(frame) > sort_bytes:
                             raise ValueError(
-                                "research_time_boundary_payloads_exceed_task_memory_budget"
+                                "research_indivisible_time_unit_exceeds_task_memory_budget"
                             )
-                        pending.value = combined
-                        pending.lease.shrink_to(combined_bytes)
-                        if first_stop == len(frame):
-                            continue
-                        try:
-                            yield pending.value
-                        except GeneratorExit:
-                            return
-                        emitted_max = pending_timestamp
-                        pending.release(owner="research.time.pending")
-                        pending = None
-                        pending_timestamp = None
-                        start = first_stop
-                    else:
-                        try:
-                            yield pending.value
-                        except GeneratorExit:
-                            return
-                        emitted_max = pending_timestamp
-                        pending.release(owner="research.time.pending")
-                        pending = None
-                        pending_timestamp = None
-
-                last_timestamp = pd.Timestamp(timestamps.iloc[-1])
-                last_start = len(frame) - 1
-                while (
-                    last_start > start
-                    and timestamps.iloc[last_start - 1] == last_timestamp
-                ):
-                    last_start -= 1
-                if last_start > start:
-                    prefix = frame.iloc[start:last_start]
-                    prefix_timestamps = timestamps.iloc[start:last_start]
-                    with closing_iterator(
-                        _iter_contiguous_session_frames(
-                            prefix,
-                            timestamps=prefix_timestamps,
+                        timestamps = strict_timestamp_series(
+                            frame[timestamp_column],
+                            error="invalid_time_chunk_timestamp_values",
                         )
-                    ) as prefix_frames:
-                        for output in prefix_frames:
+                    current_min = pd.Timestamp(timestamps.iloc[0])
+                    if emitted_max is not None and current_min <= emitted_max:
+                        raise ValueError("non_monotonic_time_chunk_order")
+                    start = 0
+                    if pending is not None:
+                        if pending_timestamp is None or current_min < pending_timestamp:
+                            raise ValueError("non_monotonic_time_chunk_order")
+                        if current_min == pending_timestamp:
+                            first_stop = 1
+                            while (
+                                first_stop < len(frame)
+                                and timestamps.iloc[first_stop] == current_min
+                            ):
+                                first_stop += 1
+                            right = frame.iloc[:first_stop]
+                            combined_bound = pandas_frame_payload_bytes(
+                                pending.value
+                            ) + pandas_frame_payload_bytes(right)
+                            resource_policy.require_working_set(
+                                combined_bound,
+                                error="research_time_boundary_payloads_exceed_task_memory_budget",
+                            )
+                            pending.lease.grow(combined_bound)
+                            combined = pd.concat(
+                                [pending.value, right],
+                                ignore_index=True,
+                            )
+                            combined_bytes = pandas_frame_payload_bytes(combined)
+                            if combined_bytes > combined_bound:
+                                raise ValueError(
+                                    "research_time_boundary_payloads_exceed_task_memory_budget"
+                                )
+                            pending.value = combined
+                            combined = right = None
+                            pending.lease.shrink_to(combined_bytes)
+                            if first_stop == len(frame):
+                                continue
                             try:
-                                yield output
+                                yield pending.value
                             except GeneratorExit:
                                 return
-                            finally:
-                                output = None
-                    emitted_max = pd.Timestamp(prefix_timestamps.iloc[-1])
-                tail = frame.iloc[last_start:]
-                tail_bytes = pandas_frame_payload_bytes(tail)
-                resource_policy.require_working_set(
-                    tail_bytes,
-                    error="research_indivisible_time_unit_exceeds_task_memory_budget",
-                )
-                pending_lease = resource_policy.lease(
-                    "research.time.pending",
-                    tail_bytes,
-                )
-                try:
-                    pending_value = tail.copy()
-                    if pandas_frame_payload_bytes(pending_value) > tail_bytes:
-                        raise ValueError(
-                            "research_indivisible_time_unit_exceeds_task_memory_budget"
-                        )
-                    pending = OwnedValue(pending_value, pending_lease)
-                except BaseException as primary:
+                            emitted_max = pending_timestamp
+                            pending.release(owner="research.time.pending")
+                            pending = None
+                            pending_timestamp = None
+                            start = first_stop
+                        else:
+                            try:
+                                yield pending.value
+                            except GeneratorExit:
+                                return
+                            emitted_max = pending_timestamp
+                            pending.release(owner="research.time.pending")
+                            pending = None
+                            pending_timestamp = None
+
+                    last_timestamp = pd.Timestamp(timestamps.iloc[-1])
+                    last_start = len(frame) - 1
+                    while (
+                        last_start > start
+                        and timestamps.iloc[last_start - 1] == last_timestamp
+                    ):
+                        last_start -= 1
+                    if last_start > start:
+                        prefix = frame.iloc[start:last_start]
+                        prefix_timestamps = timestamps.iloc[start:last_start]
+                        with closing_iterator(
+                            _iter_contiguous_session_frames(
+                                prefix,
+                                timestamps=prefix_timestamps,
+                            )
+                        ) as prefix_frames:
+                            for output in prefix_frames:
+                                try:
+                                    yield output
+                                except GeneratorExit:
+                                    return
+                                finally:
+                                    output = None
+                        emitted_max = pd.Timestamp(prefix_timestamps.iloc[-1])
+                    tail = frame.iloc[last_start:]
+                    tail_bytes = pandas_frame_payload_bytes(tail)
+                    resource_policy.require_working_set(
+                        tail_bytes,
+                        error="research_indivisible_time_unit_exceeds_task_memory_budget",
+                    )
+                    pending_lease = resource_policy.lease(
+                        "research.time.pending",
+                        tail_bytes,
+                    )
                     try:
-                        pending_lease.close()
-                    except BaseException as cleanup_error:
-                        primary.add_note(
-                            "research pending lease release also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                    raise
-                pending_timestamp = last_timestamp
+                        pending_value = tail.copy()
+                        if pandas_frame_payload_bytes(pending_value) > tail_bytes:
+                            raise ValueError(
+                                "research_indivisible_time_unit_exceeds_task_memory_budget"
+                            )
+                        pending = OwnedValue(pending_value, pending_lease)
+                        pending_value = None
+                    except BaseException as primary:
+                        try:
+                            pending_lease.close()
+                        except BaseException as cleanup_error:
+                            primary.add_note(
+                                "research pending lease release also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                        raise
+                    pending_timestamp = last_timestamp
+                finally:
+                    frame = timestamps = right = combined = None
+                    prefix = prefix_timestamps = tail = pending_value = None
 
         if pending is None:
             if saw_empty and first_empty is not None:
