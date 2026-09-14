@@ -144,6 +144,7 @@ def import_funding_history(
                         day.root / member["path"],
                         date=day.manifest["date"],
                         offset_minutes=member["offset_minutes"],
+                        expected_sha256=member["sha256"],
                         resource_policy=policy,
                     )
                     with closing_iterator(records):

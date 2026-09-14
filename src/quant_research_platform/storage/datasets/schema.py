@@ -82,6 +82,7 @@ _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
         "row_count",
         "file_count",
         "file_size_bytes",
+        "content_hash",
         "columns",
         "physical_schema",
         "schema_hash",
@@ -147,6 +148,7 @@ _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
         "row_count",
         "file_count",
         "file_size_bytes",
+        "content_hash",
         "columns",
         "physical_schema",
         "schema_hash",
@@ -1408,6 +1410,9 @@ def validate_dataset_manifest_payload(
         value = manifest.get(key)
         if not _is_exact_int(value) or value < 0:
             raise ValueError(f"manifest_{key}_invalid")
+    _require_identity_hash(
+        manifest.get("content_hash"), "manifest_content_hash_invalid"
+    )
     columns = _require_string_list(
         manifest.get("columns"), "manifest_columns_invalid", allow_empty=False
     )

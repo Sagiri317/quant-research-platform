@@ -1586,3 +1586,157 @@ def test_special_treatment_rejects_non_provider_transition(code):
             ),
             "special_treatment_changes",
         )
+
+
+@pytest.mark.parametrize("chunksize,bad_numeric", ((1, False), (8, False), (1, True)))
+def test_index_membership_raw_text_survives_public_materialization(
+    tmp_path, chunksize, bad_numeric
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    raw.mkdir(parents=True)
+    rows = [
+        {
+            "Indexcd": "000905",
+            "Chgsmp01": effective,
+            "Chgsmp02": code,
+            "Chgsmp03": name,
+            "Chgsmp04": "invalid" if bad_numeric else "1",
+            "Chgsmp05": "1",
+            "Chgsmp06": announced,
+            "Chgsmp07": "SZSE",
+        }
+        for effective, code, name, announced in (
+            ("2020-01-06", "000001", "示例甲", "2020-01-03"),
+            ("2020-01-07", "000002", "示例乙", "2020-01-04"),
+        )
+    ]
+    _write_csmar(raw, "index_membership", rows)
+    path = next(raw.glob("*.csv"))
+    original = path.read_bytes()
+    with runtime_resource_policy_scope() as policy:
+        if bad_numeric:
+            with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
+                interim.materialize_interim_data(
+                    layout=layout,
+                    raw_root=raw,
+                    data_ids=("index_membership",),
+                    chunksize=chunksize,
+                    resource_policy=policy,
+                )
+        else:
+            result = interim.materialize_interim_data(
+                layout=layout,
+                raw_root=raw,
+                data_ids=("index_membership",),
+                chunksize=chunksize,
+                resource_policy=policy,
+            )
+            frame = read_dataset(
+                result.artifact_roots["index_membership"], resource_policy=policy
+            )
+            frame = frame.sort_values("constituent_stock_code")
+            assert frame.constituent_stock_code.tolist() == ["000001", "000002"]
+            assert frame.constituent_asset_id.nunique() == 2
+            assert frame.constituent_name.tolist() == ["示例甲", "示例乙"]
+            assert frame.market_code.tolist() == ["SZSE", "SZSE"]
+            assert frame.effective_date.dt.strftime("%Y-%m-%d").tolist() == [
+                "2020-01-06",
+                "2020-01-07",
+            ]
+            assert frame.announcement_date.dt.strftime("%Y-%m-%d").tolist() == [
+                "2020-01-03",
+                "2020-01-04",
+            ]
+        assert policy.used_memory_bytes == 0
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("chunksize", [1, 10])
+def test_index_membership_preserves_native_codes_and_venue_type_identity(
+    tmp_path, chunksize
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    raw.mkdir(parents=True)
+    identities = [
+        ("000001", "SSE", 1),
+        ("000001", "SZSE", 1),
+        ("000001", "SSE", 3),
+        ("123456789", "CFETS", 3),
+        ("DEMO", "NASDAQ", 1),
+        ("DEMO", "", 1),
+    ]
+    _write_csmar(
+        raw,
+        "index_membership",
+        [
+            {
+                "Indexcd": "source_index",
+                "Chgsmp01": "2020-01-06",
+                "Chgsmp02": code,
+                "Chgsmp03": "Synthetic",
+                "Chgsmp04": "1",
+                "Chgsmp05": str(kind),
+                "Chgsmp06": "2020-01-03",
+                "Chgsmp07": market,
+            }
+            for code, market, kind in identities
+        ],
+    )
+    with runtime_resource_policy_scope() as policy:
+        imported = interim.materialize_interim_data(
+            layout=layout,
+            raw_root=raw,
+            data_ids=("index_membership",),
+            chunksize=chunksize,
+            resource_policy=policy,
+        )
+        saved = read_dataset(
+            imported.artifact_roots["index_membership"], resource_policy=policy
+        )
+        actual = {
+            (code, "" if pd.isna(market) else market, int(kind))
+            for code, market, kind in saved[
+                ["constituent_stock_code", "market_code", "security_type"]
+            ].itertuples(index=False, name=None)
+        }
+        assert actual == set(identities)
+        assert len(saved) == saved.constituent_asset_id.nunique() == len(identities)
+        assert saved.market_code.isna().sum() == 1
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("kind", [1, 1.0, None])
+def test_index_membership_identity_uses_normalized_provider_types(kind):
+    row = {
+        "Indexcd": "source_index",
+        "Chgsmp01": "2020-01-06",
+        "Chgsmp02": "CODE123",
+        "Chgsmp03": "Synthetic",
+        "Chgsmp04": 1,
+        "Chgsmp05": kind,
+        "Chgsmp06": "2020-01-03",
+        "Chgsmp07": None,
+    }
+    actual = interim.normalize_raw_frame(pd.DataFrame([row]), "index_membership")
+    baseline = interim.normalize_raw_frame(
+        pd.DataFrame([{**row, "Chgsmp05": None if kind is None else 1}]),
+        "index_membership",
+    )
+    assert actual.constituent_asset_id.equals(baseline.constituent_asset_id)
+    assert actual.market_code.isna().all()
+    assert actual.constituent_stock_code.iloc[0] == "CODE123"
+    if kind is None:
+        assert actual.security_type.isna().all()
+    else:
+        assert actual.security_type.iloc[0] == 1
+        assert pd.api.types.is_integer_dtype(actual.security_type.dtype)

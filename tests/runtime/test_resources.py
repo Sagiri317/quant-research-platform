@@ -422,7 +422,7 @@ def test_lease_context_manager_closes_and_preserves_body_primary(
 
 
 def test_leaked_child_keeps_machine_lock_until_process_exit() -> None:
-    child = subprocess.Popen(
+    with subprocess.Popen(
         (
             sys.executable,
             "-c",
@@ -443,21 +443,21 @@ def test_leaked_child_keeps_machine_lock_until_process_exit() -> None:
         stderr=subprocess.PIPE,
         text=True,
         env=_child_environment(),
-    )
-    try:
-        assert child.stdout is not None
-        assert child.stdout.readline() == "leak-handled\n"
-        with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
-            with runtime_resource_policy_scope(explicit_cap_bytes=MIB):
-                pass
-        assert child.stdin is not None
-        child.stdin.write("\n")
-        child.stdin.flush()
-        child.wait(timeout=5)
-    finally:
-        if child.poll() is None:
-            child.kill()
+    ) as child:
+        try:
+            assert child.stdout is not None
+            assert child.stdout.readline() == "leak-handled\n"
+            with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
+                with runtime_resource_policy_scope(explicit_cap_bytes=MIB):
+                    pass
+            assert child.stdin is not None
+            child.stdin.write("\n")
+            child.stdin.flush()
             child.wait(timeout=5)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
 
     with runtime_resource_policy_scope(explicit_cap_bytes=MIB) as policy:
         assert policy.state == "ACTIVE"
@@ -483,7 +483,7 @@ def test_two_process_busy_then_crash_reentry(
         monkeypatch.setenv(name, str(parent_temp))
     monkeypatch.setattr(tempfile, "tempdir", None)
     assert Path(tempfile.gettempdir()) == parent_temp
-    child = subprocess.Popen(
+    with subprocess.Popen(
         (
             sys.executable,
             "-c",
@@ -498,16 +498,16 @@ def test_two_process_busy_then_crash_reentry(
         stderr=subprocess.PIPE,
         text=True,
         env=environment,
-    )
-    try:
-        assert child.stdout is not None
-        assert child.stdout.readline() == "held\n"
-        with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
-            with runtime_resource_policy_scope(explicit_cap_bytes=MIB):
-                pass
-    finally:
-        child.kill()
-        child.wait(timeout=5)
+    ) as child:
+        try:
+            assert child.stdout is not None
+            assert child.stdout.readline() == "held\n"
+            with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
+                with runtime_resource_policy_scope(explicit_cap_bytes=MIB):
+                    pass
+        finally:
+            child.kill()
+            child.wait(timeout=5)
 
     with runtime_resource_policy_scope(explicit_cap_bytes=MIB) as policy:
         assert policy.state == "ACTIVE"

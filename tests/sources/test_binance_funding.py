@@ -11,6 +11,7 @@ from quant_research_platform.sources.binance.funding import (
     read_funding_observations,
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+from quant_research_platform.storage.manifests import read_manifest
 from quant_research_platform.storage.raw_snapshots import (
     iter_csv_snapshot,
     write_csv_snapshot,
@@ -30,8 +31,12 @@ def _write(raw, *, rows=(), metadata_changes=None):
     metadata.update(metadata_changes or {})
 
     def validate(root):
+        manifest = read_manifest(root / "response.metadata.json")
+        assert manifest["metadata"] == metadata
         for _row in iter_csv_snapshot(
-            root, expected_metadata=metadata, max_bytes=1024 * 1024
+            root,
+            expected_manifest=manifest,
+            max_bytes=1024 * 1024,
         ):
             pass
 
@@ -131,7 +136,7 @@ def test_funding_changed_during_consumption_is_rejected_and_primary_preserved(tm
     changed = tmp_path / "changed" / "raw"
     _write(changed, rows=(("forecast", 0, 100, None, None, [[50, 1.0]]),))
     with runtime_resource_policy_scope() as policy:
-        with pytest.raises(ValueError, match="binance_funding_identity_changed"):
+        with pytest.raises(ValueError, match="raw_csv_metadata_invalid"):
             with read_funding_observations(
                 raw.parent / "funding" / "BTCUSDT", symbol="BTCUSDT"
             ) as source:

@@ -23,6 +23,24 @@ class DatasetFileIdentity:
     modified_ns: int
 
 
+class _DigestingReader:
+    def __init__(self, handle) -> None:
+        self._handle = handle
+        self._digest = hashlib.sha256()
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._handle.read(size)
+        self._digest.update(chunk)
+        return chunk
+
+    def drain(self) -> None:
+        while self.read(64 * 1024):
+            pass
+
+    def hexdigest(self) -> str:
+        return self._digest.hexdigest()
+
+
 def validate_instance_identity(value: object) -> str:
     if type(value) is not str or _INSTANCE_IDENTITY_RE.fullmatch(value) is None:
         raise ValueError("invalid_instance_identity")

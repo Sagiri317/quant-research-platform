@@ -163,3 +163,22 @@ def test_prediction_spec_binds_paired_train_and_evaluation_asset_scopes() -> Non
             test_start="2024-02-01T00:00:00",
             training_asset_ids=("eth_usdt",),
         )
+
+
+@pytest.mark.parametrize(
+    "order",
+    (("other",), ("base",), ("base", "other", "extra"), ("base", "other", "other")),
+)
+def test_explicit_tie_order_rejects_incomplete_or_nonunique_universe(order):
+    with pytest.raises(ValueError, match="selection_tie_break_order"):
+        PredictionSpec(
+            prediction_id="tie",
+            model_id="base",
+            candidate_model_ids=("other",),
+            research_dataset_id="fixture",
+            train_end="2020-01-01",
+            test_start="2020-01-03",
+            model_selection_validation_start="2020-01-02",
+            model_selection_validation_end="2020-01-02",
+            selection_tie_break_order=order,
+        )

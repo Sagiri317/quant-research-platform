@@ -607,9 +607,24 @@ def research_run_record_from_payload(value: object) -> ResearchRunRecord:
         raise ValueError("research_run_record_invalid")
     if value["schema_id"] != "qrp-research-run":
         raise ValueError("research_run_record_invalid")
-    raw_results = value["target_results"]
-    if type(raw_results) is not list:
+    if (
+        any(
+            type(value[key]) is not list
+            for key in ("target_results", "terminal_targets", "trial_ledgers")
+        )
+        or any(
+            type(value[key]) is not dict
+            for key in (
+                "protocol",
+                "research_window",
+                "holdout_evidence",
+                "operation_evidence",
+            )
+        )
+        or any(type(reference) is not dict for reference in value["trial_ledgers"])
+    ):
         raise ValueError("research_run_record_invalid")
+    raw_results = value["target_results"]
     try:
         results = tuple(
             ResearchRunTargetResult(

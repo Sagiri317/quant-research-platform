@@ -461,3 +461,34 @@ def test_run_ledger_references_have_no_arbitrary_member_limit(tmp_path):
     (root / "invalid").write_text("not a ledger")
     with pytest.raises(ValueError, match="trial_run_members_invalid"):
         research_run_trial_references(layout, "run_test")
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "factor_definition_ids",
+        "artifact_lineage",
+        "normalized_parameters",
+        "backend_versions",
+        "thread_settings",
+        "validation_metrics",
+        "development_test_metrics",
+        "undefined_reasons",
+        "cost_assumptions",
+        "risk_assumptions",
+    ),
+)
+def test_trial_json_container_types_are_not_normalized(field):
+    record = _record(
+        _plan(), event_id="event-shape", attempt_index=1, status="attempted"
+    )
+    payload = record.payload()
+    assert TrialRecord.from_payload(payload).payload() == payload
+    value = payload[field]
+    payload[field] = (
+        list(value.items())
+        if isinstance(value, dict)
+        else {str(item): "discarded" for item in value}
+    )
+    with pytest.raises(ValueError, match="trial_record_payload_invalid"):
+        TrialRecord.from_payload(payload)

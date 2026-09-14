@@ -608,6 +608,7 @@ def read_research_report_artifact(
         expected_schema_id=schema_id,
         error="research_report_payload_invalid",
         lease=report_lease,
+        expected_member=by_path["report.json"],
     ) as payload:
         _validate_report_payload(payload)
         _validate_report_semantics(envelope, payload)

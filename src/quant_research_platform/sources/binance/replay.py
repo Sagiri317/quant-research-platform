@@ -46,6 +46,7 @@ from quant_research_platform.sources.binance.ids import (
     RECORDING_SCOPE_MARKET_TYPES,
     RESEARCH_SYMBOLS,
     SPOT_MARKET_TYPE,
+    WS_STREAM_SUFFIXES,
 )
 from quant_research_platform.sources.binance.validation import (
     strict_boolean,
@@ -58,6 +59,7 @@ from quant_research_platform.sources.binance.validation import (
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
+    _DigestingReader,
     dataset_file_identity,
     dataset_file_identity_from_stat,
     require_unaliased_path,
@@ -79,6 +81,7 @@ _FILE_MANIFEST_KEYS = frozenset(
         "sha256",
     }
 )
+_FILE_STREAM_IDENTITY_KEYS = ("market", "symbol", "data_kind", "stream")
 _LOWER_HEX = frozenset("0123456789abcdef")
 _HASH_BUFFER_BYTES = 64 * 1024
 _RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
@@ -107,24 +110,6 @@ _COVERAGE_SQLITE_PAGE_BYTES = 4096
 _COVERAGE_DISK_BATCH_ROWS = 256
 _COVERAGE_SQLITE_STARTUP_BYTES = 1024 * 1024
 _COVERAGE_SQLITE_ROW_BYTES = _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 4096
-
-
-class _DigestingReader:
-    def __init__(self, handle: Any) -> None:
-        self._handle = handle
-        self._digest = hashlib.sha256()
-
-    def read(self, size: int = -1) -> bytes:
-        chunk = self._handle.read(size)
-        self._digest.update(chunk)
-        return chunk
-
-    def drain(self) -> None:
-        while self.read(_HASH_BUFFER_BYTES):
-            pass
-
-    def hexdigest(self) -> str:
-        return self._digest.hexdigest()
 
 
 @dataclass
@@ -377,13 +362,15 @@ class ObservationCoverageIndex:
         self,
         observation_id: object,
         *,
+        symbol: str,
         market_type: str,
         data_kind: str,
     ) -> tuple[int, int] | None:
         row = self._database.execute(
             "SELECT opened_ns, closed_ns FROM coverage "
-            "WHERE observation_id = ? AND market = ? AND data_kind = ?",
-            (observation_id, market_type, data_kind),
+            "WHERE observation_id = ? AND market = ? AND data_kind = ? "
+            "AND stream LIKE ?",
+            (observation_id, market_type, data_kind, symbol.lower() + "@%"),
         ).fetchone()
         return None if row is None else (int(row[0]), int(row[1]))
 
@@ -625,11 +612,9 @@ class RecorderRun:
 
         previous_capture_seq: int | None = None
         for group in _overlapping_capture_groups(selected):
-            by_owner: dict[tuple[str, str, str], list[_RunFile]] = {}
+            by_owner: dict[tuple[str, str, str, str], list[_RunFile]] = {}
             for item in group:
-                owner = tuple(
-                    item.metadata[key] for key in ("market", "data_kind", "stream")
-                )
+                owner = tuple(item.metadata[key] for key in _FILE_STREAM_IDENTITY_KEYS)
                 by_owner.setdefault(owner, []).append(item)
             with ExitStack() as stack:
                 streams = [
@@ -1083,6 +1068,10 @@ def _validate_file_manifest(
         not in {"metadata", "depth", "depth_snapshot", "agg_trades"}
     ):
         raise ValueError("binance_replay_file_manifest_invalid")
+    if value["data_kind"] in WS_STREAM_SUFFIXES and value["stream"] != (
+        f"{value['symbol'].lower()}@{WS_STREAM_SUFFIXES[value['data_kind']]}"
+    ):
+        raise ValueError("binance_replay_file_manifest_invalid")
     for key in (
         "record_count",
         "capture_seq_min",
@@ -1160,6 +1149,11 @@ def _validate_connection_interval(
             or not value["connection_id"]
         ):
             raise ValueError("binance_replay_connection_intervals_invalid")
+        if value["stream"] not in {
+            f"{symbol.lower()}@{WS_STREAM_SUFFIXES[value['data_kind']]}"
+            for symbol in RESEARCH_SYMBOLS
+        }:
+            raise ValueError("binance_replay_connection_intervals_invalid")
         if value["data_kind"] == "depth":
             if not isinstance(value.get("segment_id"), str) or not value["segment_id"]:
                 raise ValueError("binance_replay_connection_intervals_invalid")
@@ -1220,6 +1214,7 @@ def _validate_record_coverage(
     connection_id = record.get("connection_id")
     bounds = coverage_index.bounds(
         connection_id,
+        symbol=record["symbol"],
         market_type=record["market_type"],
         data_kind=interval_kind,
     )
@@ -1340,14 +1335,10 @@ def _overlapping_capture_groups(files: list[_RunFile]) -> Iterator[list[_RunFile
     ordered = sorted(files, key=lambda item: item.metadata["capture_seq_min"])
     group: list[_RunFile] = []
     group_max = -1
-    owner_ends: dict[tuple[str, str, str], int] = {}
+    owner_ends: dict[tuple[str, str, str, str], int] = {}
     for item in ordered:
         start = item.metadata["capture_seq_min"]
-        owner = (
-            item.metadata["market"],
-            item.metadata["data_kind"],
-            item.metadata["stream"],
-        )
+        owner = tuple(item.metadata[key] for key in _FILE_STREAM_IDENTITY_KEYS)
         if group and start > group_max:
             yield group
             group = []
@@ -1982,6 +1973,7 @@ def iter_reconstructed_depth(
                         reconstructor = None
                     bounds = run._coverage_index.bounds(  # noqa: SLF001
                         observation_id,
+                        symbol=symbol,
                         market_type=market_type,
                         data_kind="depth",
                     )

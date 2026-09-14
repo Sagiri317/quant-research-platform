@@ -211,7 +211,7 @@ def _validate_model_selection_contract(spec: PredictionSpec) -> None:
             spec.selection_tie_break_order,
             "selection_tie_break_order",
         )
-        if set(spec.selection_tie_break_order) != set(candidate_model_ids):
+        if set(spec.selection_tie_break_order) != {spec.model_id, *candidate_model_ids}:
             raise ValueError("selection_tie_break_order_mismatch")
     if spec.model_id in candidate_model_ids:
         raise ValueError("candidate_model_ids_must_not_include_model_id")

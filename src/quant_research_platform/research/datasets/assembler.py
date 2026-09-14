@@ -466,14 +466,14 @@ def _iter_research_chunk_windows_from_base_input(
     *,
     time_window: TimeWindow,
 ) -> Iterator[TimeWindow]:
-    """Drive one bounded assembly window at a time from ordered base chunks."""
+    """Partition the complete request domain using ordered base-chunk boundaries."""
 
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
     intraday = is_intraday_time_window(time_window)
     last_timestamp: pd.Timestamp | None = None
-    saw_timestamp = False
+    pending: TimeWindow | None = None
     with base_session.filtered_view(time_window) as session:
         with closing_iterator(
             iter_dataset_chunks(
@@ -504,10 +504,14 @@ def _iter_research_chunk_windows_from_base_input(
                         ]
                     if chunk_timestamps.empty:
                         continue
-                    start = pd.Timestamp(chunk_timestamps[0])
+                    start = (
+                        pd.Timestamp(time_window.start)
+                        if last_timestamp is None
+                        else last_timestamp
+                        + pd.Timedelta(1, unit="ns" if intraday else "D")
+                    )
                     end = pd.Timestamp(chunk_timestamps[-1])
                     last_timestamp = end
-                    saw_timestamp = True
                     if intraday:
                         window = TimeWindow(
                             start,
@@ -515,9 +519,12 @@ def _iter_research_chunk_windows_from_base_input(
                         )
                     else:
                         window = TimeWindow(start.date(), end.date())
-                yield window
-    if not saw_timestamp:
+                if pending is not None:
+                    yield pending
+                pending = window
+    if pending is None:
         raise ValueError("no_research_dataset_sessions")
+    yield TimeWindow(pending.start, time_window.end)
 
 
 def _base_input_data_id(dataset_spec: ResearchDatasetSpec) -> str:

@@ -46,6 +46,7 @@ from quant_research_platform.sources.binance.ids import (
     RESEARCH_SYMBOLS,
     SPOT_L2_RECORDING_SCOPE,
     SPOT_MARKET_TYPE,
+    WS_STREAM_SUFFIXES,
 )
 from quant_research_platform.sources.binance.replay import (
     RECONSTRUCTION_MAX_BOOK_LEVELS,
@@ -100,13 +101,13 @@ RECORDER_STREAMS_BY_SCOPE = {
             symbol,
             FUTURES_MARKET_TYPE,
             data_kind,
-            f"{symbol.lower()}@{stream_suffix}",
-            f"wss://fstream.binance.com/{channel}/ws/{symbol.lower()}@{stream_suffix}",
+            f"{symbol.lower()}@{WS_STREAM_SUFFIXES[data_kind]}",
+            f"wss://fstream.binance.com/{channel}/ws/{symbol.lower()}@{WS_STREAM_SUFFIXES[data_kind]}",
         )
         for symbol in RESEARCH_SYMBOLS
-        for data_kind, stream_suffix, channel in (
-            ("depth", "depth@100ms", "public"),
-            ("agg_trades", "aggTrade", "market"),
+        for data_kind, channel in (
+            ("depth", "public"),
+            ("agg_trades", "market"),
         )
     ),
     SPOT_L2_RECORDING_SCOPE: tuple(
@@ -114,8 +115,8 @@ RECORDER_STREAMS_BY_SCOPE = {
             symbol,
             SPOT_MARKET_TYPE,
             "depth",
-            f"{symbol.lower()}@depth@100ms",
-            f"wss://stream.binance.com:9443/ws/{symbol.lower()}@depth@100ms",
+            f"{symbol.lower()}@{WS_STREAM_SUFFIXES['depth']}",
+            f"wss://stream.binance.com:9443/ws/{symbol.lower()}@{WS_STREAM_SUFFIXES['depth']}",
         )
         for symbol in RESEARCH_SYMBOLS
     ),

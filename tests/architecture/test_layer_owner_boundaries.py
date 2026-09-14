@@ -300,3 +300,27 @@ def _active_module_names() -> tuple[str, ...]:
         )
         names.append(".".join((PACKAGE_PREFIX, *module_parts)))
     return tuple(dict.fromkeys(names))
+
+
+@pytest.mark.parametrize("filename", ("__init__.py", "example.py"))
+@pytest.mark.parametrize(
+    "source,binding,forbidden",
+    (
+        ("from ..storage import datasets", "datasets", True),
+        ("from . import time", "time", False),
+    ),
+)
+def test_relative_import_edges_match_python_package_resolution(
+    filename, source, binding, forbidden
+):
+    package = importlib.import_module("quant_research_platform.contracts")
+    namespace = {"__package__": package.__package__}
+    exec(source, namespace)
+    actual_module = namespace[binding].__name__
+    path = SOURCE_ROOT / "contracts" / filename
+    (edge,) = _import_edges_from_trees({path: ast.parse(source)})
+    assert edge.module == actual_module
+    assert (
+        any(edge.module.startswith(prefix) for prefix in LAYER_BOUNDARIES["contracts"])
+        is forbidden
+    )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sqlite3
@@ -14,6 +15,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     require_free_disk_headroom,
@@ -26,6 +28,7 @@ from quant_research_platform.storage._scratch_ownership import (
 from quant_research_platform.storage.datasets.paths import parse_year_partition_label
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
+    _hash_file_content,
     dataset_file_identity,
     native_filesystem_path,
     path_is_filesystem_alias,
@@ -486,6 +489,28 @@ class DatasetSessionInventory:
                 )
         finally:
             _close_cursor_preserving_primary(cursor)
+
+    def content_hash(self, *, resource_policy: RuntimeResourcePolicy) -> str:
+        """Bind all ordered physical members without expanding the control manifest."""
+        digest = hashlib.sha256()
+        buffer_bytes = min(64 * 1024, max(1, resource_policy.operation_headroom_bytes))
+        with resource_policy.lease("storage.dataset.content_hash", buffer_bytes):
+            with closing_iterator(self.iter_entries()) as entries:
+                for path, metadata in entries:
+                    member_hash = _hash_file_content(
+                        path,
+                        metadata.identity,
+                        "dataset_content_identity_changed",
+                        chunk_size=buffer_bytes,
+                    )
+                    for text in (
+                        path.relative_to(self.data_root).as_posix(),
+                        member_hash,
+                    ):
+                        raw = text.encode("utf-8")
+                        digest.update(len(raw).to_bytes(8, "big"))
+                        digest.update(raw)
+        return digest.hexdigest()
 
     def iter_paths(
         self,

@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import os
+import sys
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
@@ -147,7 +148,7 @@ def write_csv_snapshot(
 def iter_csv_snapshot(
     root: Path,
     *,
-    expected_metadata: dict[str, object],
+    expected_manifest: dict[str, object],
     max_bytes: int,
 ) -> Iterator[tuple[object, ...]]:
     """Consume fully before exposing results; borrowed rows verify at exhaustion."""
@@ -173,7 +174,7 @@ def iter_csv_snapshot(
         }
         or manifest["schema_id"] != SCHEMA_ID
         or manifest["encoding"] != "utf-8-json-cells"
-        or manifest["metadata"] != expected_metadata
+        or manifest != expected_manifest
         or type(manifest["row_count"]) is not int
         or manifest["row_count"] < 0
     ):
@@ -206,16 +207,39 @@ def iter_csv_snapshot(
         stream = records()
         if next(stream, None) != manifest["columns"]:
             raise ValueError("raw_csv_columns_invalid")
-        for row in stream:
-            if len(row) != len(manifest["columns"]):
-                raise ValueError("raw_csv_row_width_invalid")
-            yield tuple(decode_raw_cell(value) for value in row)
-            count += 1
-        if (
-            count != manifest["row_count"]
-            or digest.hexdigest() != manifest["sha256"]
-            or dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity
-            or dataset_file_identity(path) != identity
-            or dataset_file_identity(sidecar) != sidecar_identity
-        ):
-            raise ValueError("raw_csv_content_invalid")
+
+        def decoded_rows():
+            nonlocal count
+            for row in stream:
+                if len(row) != len(manifest["columns"]):
+                    raise ValueError("raw_csv_row_width_invalid")
+                value = tuple(decode_raw_cell(cell) for cell in row)
+                count += 1
+                yield value
+
+        rows = decoded_rows()
+        try:
+            # Keep the inner iterator open on GeneratorExit so verification drains it.
+            for row in rows:  # noqa: UP028
+                yield row
+        finally:
+            primary = sys.exception()
+            try:
+                for _row in rows:
+                    pass
+                if (
+                    count != manifest["row_count"]
+                    or digest.hexdigest() != manifest["sha256"]
+                    or dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+                    != identity
+                    or dataset_file_identity(path) != identity
+                    or dataset_file_identity(sidecar) != sidecar_identity
+                ):
+                    raise ValueError("raw_csv_content_invalid")
+            except BaseException as error:
+                if primary is None or isinstance(primary, GeneratorExit):
+                    raise
+                primary.add_note(
+                    "Raw CSV consumed-content verification also failed: "
+                    + type(error).__name__
+                )

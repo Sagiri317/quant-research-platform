@@ -2114,3 +2114,207 @@ def test_live_depth_advance_preserves_unknown_future_coverage_and_validity():
             finally:
                 book.close()
         assert policy.used_memory_bytes == 0
+
+
+def test_default_multisymbol_reader_merges_same_named_rest_streams(tmp_path):
+    root = tmp_path / "combined"
+    manifests = []
+    for symbol, offset in (("BTCUSDT", 0), ("ETHUSDT", 1)):
+        source = root if offset == 0 else tmp_path / "eth"
+        snapshots, deltas = [], []
+        for sequence in (1 + offset, 5 + offset):
+            segment = f"{symbol}-{sequence}"
+            connection = f"connection-{segment}"
+            snapshots.append(
+                _snapshot(
+                    sequence,
+                    market_type=FUTURES_MARKET_TYPE,
+                    segment_id=segment,
+                    last_update_id=100,
+                    connection_id=connection,
+                )
+            )
+            delta = _futures_delta(
+                sequence + 2,
+                100,
+                101,
+                previous=99,
+                transaction_time=101,
+                segment_id=segment,
+                connection_id=connection,
+            )
+            delta["payload"]["s"] = symbol
+            delta["payload"]["ps"] = symbol
+            deltas.append(delta)
+        manifest = _write_run(
+            source,
+            [
+                (
+                    FUTURES_MARKET_TYPE,
+                    "depth_snapshot",
+                    "REST:/fapi/v1/depth",
+                    snapshots,
+                ),
+                (FUTURES_MARKET_TYPE, "depth", symbol.lower() + "@depth@100ms", deltas),
+            ],
+        )
+        for item in manifest["files"]:
+            item["symbol"] = symbol
+            if offset:
+                original = source / item["path"]
+                item["path"] = "eth/" + item["path"]
+                target = root / item["path"]
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(original.read_bytes())
+        manifests.append(manifest)
+    intervals = []
+    for source in (root, tmp_path / "eth"):
+        with gzip.open(source / "connection_intervals.jsonl.gz", "rt") as handle:
+            intervals.extend(json.loads(line) for line in handle)
+    sidecar = root / "connection_intervals.jsonl.gz"
+    with gzip.open(sidecar, "wt") as handle:
+        for row in intervals:
+            handle.write(json.dumps(row) + "\n")
+    manifest = manifests[0]
+    manifest["files"].extend(manifests[1]["files"])
+    payload = sidecar.read_bytes()
+    manifest["capture"]["connection_intervals"].update(
+        record_count=len(intervals),
+        compressed_bytes=len(payload),
+        sha256=hashlib.sha256(payload).hexdigest(),
+    )
+    (root / "run.json").write_text(json.dumps(manifest))
+    with runtime_resource_policy_scope() as policy:
+        with open_recorder_run(root, policy) as run:
+            assert [row["capture_seq"] for row in run.iter_records()] == list(
+                range(1, 9)
+            )
+            assert [
+                row["capture_seq"] for row in run.iter_records(symbol="BTCUSDT")
+            ] == [1, 3, 5, 7]
+            assert [
+                row["capture_seq"] for row in run.iter_records(symbol="ETHUSDT")
+            ] == [2, 4, 6, 8]
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("kind", ["depth", "agg_trades"])
+@pytest.mark.parametrize(
+    "wrong_stream", ["other_symbol", "other_kind", "other_frequency"]
+)
+def test_native_connection_must_match_record_symbol_and_stream(
+    tmp_path, kind, wrong_stream
+):
+    root = tmp_path / "run"
+    if kind == "depth":
+        rows = [
+            (
+                FUTURES_MARKET_TYPE,
+                "depth_snapshot",
+                "https://fapi.binance.com/fapi/v1/depth",
+                [
+                    _snapshot(
+                        1,
+                        market_type=FUTURES_MARKET_TYPE,
+                        segment_id="s",
+                        last_update_id=100,
+                    )
+                ],
+            ),
+            (
+                FUTURES_MARKET_TYPE,
+                "depth",
+                "btcusdt@depth@100ms",
+                [
+                    _futures_delta(
+                        2, 100, 101, previous=99, transaction_time=100, segment_id="s"
+                    )
+                ],
+            ),
+        ]
+    else:
+        rows = [
+            (FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])
+        ]
+    manifest = _write_run(root, rows)
+    with open_recorder_run(root) as run:
+        if kind == "depth":
+            count = 0
+            for event in iter_reconstructed_depth(
+                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=2
+            ):
+                assert isinstance(event, OwnedValue)
+                event.release(owner="test.native_stream_binding")
+                count += 1
+            assert count == 1
+        else:
+            assert (
+                len(list(iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT")))
+                == 1
+            )
+    sidecar = root / "connection_intervals.jsonl.gz"
+    with gzip.open(sidecar, "rt") as handle:
+        intervals = [json.loads(line) for line in handle]
+    interval = intervals[0]
+    interval["stream"] = {
+        "other_symbol": interval["stream"].replace("btcusdt", "ethusdt"),
+        "other_kind": "btcusdt@aggTrade" if kind == "depth" else "btcusdt@depth@100ms",
+        "other_frequency": "btcusdt@depth@0ms",
+    }[wrong_stream]
+    with gzip.open(sidecar, "wt") as handle:
+        for interval in intervals:
+            handle.write(json.dumps(interval) + "\n")
+    member = manifest["capture"]["connection_intervals"]
+    member["compressed_bytes"] = sidecar.stat().st_size
+    member["sha256"] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+    (root / "run.json").write_text(json.dumps(manifest))
+    with runtime_resource_policy_scope() as policy:
+        error = (
+            "binance_replay_connection_coverage_invalid"
+            if wrong_stream == "other_symbol"
+            else "binance_replay_connection_intervals_invalid"
+        )
+        with (
+            pytest.raises(ValueError, match=error),
+            open_recorder_run(root, resource_policy=policy) as run,
+        ):
+            if kind == "depth":
+                list(
+                    iter_reconstructed_depth(
+                        run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=2
+                    )
+                )
+            else:
+                list(iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "stream", ["ethusdt@depth@100ms", "btcusdt@aggTrade", "btcusdt@depth@0ms"]
+)
+def test_native_file_stream_matches_symbol_and_kind(tmp_path, stream):
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root,
+        [
+            (
+                FUTURES_MARKET_TYPE,
+                "depth",
+                "btcusdt@depth@100ms",
+                [
+                    _futures_delta(
+                        1, 100, 101, previous=99, transaction_time=100, segment_id="s"
+                    )
+                ],
+            )
+        ],
+    )
+    manifest["files"][0]["stream"] = stream
+    (root / "run.json").write_text(json.dumps(manifest))
+    with runtime_resource_policy_scope() as policy:
+        with (
+            pytest.raises(ValueError, match="binance_replay_file_manifest_invalid"),
+            open_recorder_run(root, resource_policy=policy),
+        ):
+            pass
+        assert policy.used_memory_bytes == 0

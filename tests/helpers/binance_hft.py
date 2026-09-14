@@ -77,6 +77,7 @@ def write_hft_funding_fixture(raw_root: Path) -> None:
         FUNDING_COLUMNS,
         FUNDING_SCHEMA_ID,
     )
+    from quant_research_platform.storage.manifests import read_manifest
     from quant_research_platform.storage.raw_snapshots import (
         iter_csv_snapshot,
         write_csv_snapshot,
@@ -116,8 +117,12 @@ def write_hft_funding_fixture(raw_root: Path) -> None:
             )
 
             def validate(root, metadata=metadata):
+                manifest = read_manifest(root / "response.metadata.json")
+                assert manifest["metadata"] == metadata
                 for _row in iter_csv_snapshot(
-                    root, expected_metadata=metadata, max_bytes=1024 * 1024
+                    root,
+                    expected_manifest=manifest,
+                    max_bytes=1024 * 1024,
                 ):
                     pass
 

@@ -39,6 +39,7 @@ from quant_research_platform.storage.atomic import (
     atomic_write_json,
 )
 from quant_research_platform.storage.identity import (
+    _DigestingReader,
     dataset_file_identity,
     dataset_file_identity_from_stat,
     require_unaliased_path,
@@ -92,19 +93,24 @@ def _filename(date: str, offset: int) -> str:
 
 
 @contextmanager
-def _verified_file(path: Path):
+def _verified_file(path: Path, *, expected_sha256=None):
     require_unaliased_path(path, error="tardis_raw_identity_changed")
     identity = dataset_file_identity(path)
     with handle_preserving_primary(path.open("rb")) as handle:
         if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity:
             raise ValueError("tardis_raw_identity_changed")
+        reader = _DigestingReader(handle) if expected_sha256 is not None else handle
         try:
-            yield handle
+            yield reader
         finally:
             import sys
 
             primary = sys.exception()
             try:
+                if expected_sha256 is not None:
+                    reader.drain()
+                    if reader.hexdigest() != expected_sha256:
+                        raise ValueError("tardis_raw_identity_changed")
                 if (
                     dataset_file_identity_from_stat(os.fstat(handle.fileno()))
                     != identity
@@ -112,7 +118,7 @@ def _verified_file(path: Path):
                 ):
                     raise ValueError("tardis_raw_identity_changed")
             except BaseException as error:
-                if primary is None:
+                if primary is None or isinstance(primary, GeneratorExit):
                     raise
                 primary.add_note(
                     "Tardis raw identity verification also failed: "
@@ -120,7 +126,9 @@ def _verified_file(path: Path):
                 )
 
 
-def iter_native_slice(path: Path, *, date: str, offset_minutes: int, resource_policy):
+def iter_native_slice(
+    path: Path, *, date: str, offset_minutes: int, resource_policy, expected_sha256=None
+):
     """Yield borrowed native rows, including disconnect markers, in file order."""
     day = _date(date)
     start = int(dt.datetime.combine(day, dt.time(), dt.UTC).timestamp()) * 10**9
@@ -128,14 +136,15 @@ def iter_native_slice(path: Path, *, date: str, offset_minutes: int, resource_po
     upper = lower + SLICE_MINUTES * 60 * 10**9
     previous = lower
     with (
-        _verified_file(path) as raw,
+        resource_policy.lease("tardis.native_stream", _COPY_BYTES),
+        _verified_file(path, expected_sha256=expected_sha256) as raw,
         handle_preserving_primary(gzip.GzipFile(fileobj=raw, mode="rb")) as stream,
     ):
         number = 0
         while True:
             with resource_policy.lease(
                 "tardis.native_record",
-                json_record_working_set_bytes(MAX_RECORD_BYTES) + _COPY_BYTES,
+                json_record_working_set_bytes(MAX_RECORD_BYTES),
             ):
                 line = value = payload = native = parts = timestamp = None
                 try:

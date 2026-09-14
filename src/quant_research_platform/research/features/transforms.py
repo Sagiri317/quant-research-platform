@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import sys
 from contextlib import nullcontext
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -248,6 +250,74 @@ def _mad_winsorize(
     return values.clip(lower=median - bound, upper=median + bound)
 
 
+def _industry_size_residuals(target, industries, sizes):
+    """Project binary64 inputs exactly onto industry intercepts and one size slope."""
+    counts = industries.value_counts(sort=False)
+    nbits = len(target).bit_length()
+    # Binary64 dyadics span at most 1075 bits. Products/sums need at most
+    # four such spans; centering introduces group counts into denominators.
+    group_bits = 4 * 1075 + 2 * nbits
+    pooled_bits = group_bits + 2 * sum(int(count).bit_length() for count in counts)
+    residual_bits = 2 * pooled_bits + 2 * 1075
+    fraction_bytes = sys.getsizeof(Fraction()) + 2 * sys.getsizeof(1 << group_bits)
+    working_bytes = (
+        int(counts.memory_usage(deep=True))
+        + len(counts) * (4 * fraction_bytes + 256)
+        + 32 * (sys.getsizeof(Fraction()) + 2 * sys.getsizeof(1 << residual_bits))
+        + len(target) * 8
+    )
+    policy = current_runtime_resource_policy()
+    reservation = (
+        policy.lease("research.neutralization.exact", working_bytes)
+        if policy is not None
+        else nullcontext()
+    )
+    with reservation:
+        sums = {
+            group: [Fraction(), Fraction(), Fraction(), Fraction()]
+            for group in counts.index
+        }
+        for index, (group, value) in enumerate(zip(industries, target, strict=True)):
+            y = Fraction(float(value))
+            x = Fraction() if sizes is None else Fraction(float(sizes[index]))
+            totals = sums[group]
+            totals[0] += y
+            totals[1] += x
+            totals[2] += x * x
+            totals[3] += x * y
+        slope = Fraction()
+        if sizes is not None:
+            xx = sum(
+                (
+                    values[2] - values[1] ** 2 / int(counts[group])
+                    for group, values in sums.items()
+                ),
+                Fraction(),
+            )
+            xy = sum(
+                (
+                    values[3] - values[0] * values[1] / int(counts[group])
+                    for group, values in sums.items()
+                ),
+                Fraction(),
+            )
+            slope = xy / xx
+        for group, values in sums.items():
+            count = int(counts[group])
+            values[0] /= count
+            values[1] /= count
+        residuals = np.empty(len(target), dtype="float64")
+        for index, (group, value) in enumerate(zip(industries, target, strict=True)):
+            y = Fraction(float(value)) - sums[group][0]
+            x = (
+                Fraction()
+                if sizes is None
+                else Fraction(float(sizes[index])) - sums[group][1]
+            )
+            residuals[index] = float(y - slope * x)
+        return residuals
+
+
 def neutralize_cross_section(
     frame: pd.DataFrame,
     *,
@@ -306,11 +376,11 @@ def neutralize_cross_section(
             if np.linalg.matrix_rank(matrix) != matrix.shape[1]:
                 continue
             target = values.loc[design.index].to_numpy(dtype="float64", copy=False)
-            if np.all(target == target[0]):
-                result.loc[design.index, factor] = 0.0
-                continue
-            beta, *_ = np.linalg.lstsq(matrix, target, rcond=None)
-            result.loc[design.index, factor] = target - matrix @ beta
+            result.loc[design.index, factor] = _industry_size_residuals(
+                target,
+                industry.loc[design.index],
+                None if factor == size_column else size.loc[design.index].to_numpy(),
+            )
     return result
 
 

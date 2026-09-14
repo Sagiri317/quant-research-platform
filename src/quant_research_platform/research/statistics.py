@@ -11,8 +11,7 @@ import numpy as np
 import pandas as pd
 import statsmodels.api as sm
 from arch.bootstrap import MCS, SPA, StationaryBootstrap, StepM
-from scipy.stats import kurtosis, norm, skew
-from statsmodels.stats.diagnostic import het_white
+from scipy.stats import chi2, kurtosis, norm, skew
 from statsmodels.stats.multitest import multipletests
 
 from quant_research_platform.compute.dataframe.cross_section import (
@@ -628,7 +627,15 @@ def fama_macbeth_period(
     white_p_value = None
     if residual_scale > 32 * np.finfo("float64").eps * fit_scale:
         try:
-            white_p_value = float(het_white(fit.resid, x)[1])
+            # White LM needs the auxiliary R-squared, not its unused F statistic.
+            left, right = np.triu_indices(x.shape[1])
+            regressors = x.to_numpy(dtype="float64", copy=False)
+            auxiliary = sm.OLS(
+                np.square(fit.resid), regressors[:, left] * regressors[:, right]
+            ).fit()
+            white_p_value = float(
+                chi2.sf(len(numeric) * auxiliary.rsquared, auxiliary.df_model)
+            )
             if not np.isfinite(white_p_value) or not 0 <= white_p_value <= 1:
                 white_p_value = None
         except (AssertionError, ValueError):

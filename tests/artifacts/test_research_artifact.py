@@ -273,3 +273,33 @@ def test_run_evidence_preserves_json_file_boundary_error(tmp_path, directory):
             with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
                 reader(path)
         assert policy.used_memory_bytes == 0
+
+
+def test_report_parser_binds_actual_bytes_to_verified_member(tmp_path, monkeypatch):
+    from quant_research_platform.artifacts import research
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    envelope, payload = _report()
+    payload["sections"][REQUIRED_REPORT_SECTIONS[0]]["metric"] = 0.25
+    root = write_research_report_artifact(
+        tmp_path / "report", envelope=envelope, payload=payload
+    )
+    member = root / "report.json"
+    original = member.read_bytes()
+    replacement = original.replace(b"0.25", b"0.75")
+    assert replacement != original and len(replacement) == len(original)
+    original_reader = research.read_json_evidence
+
+    def interleaved_reader(path, **kwargs):
+        assert path == member
+        member.write_bytes(replacement)
+        return original_reader(path, **kwargs)
+
+    monkeypatch.setattr(research, "read_json_evidence", interleaved_reader)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="report_payload_invalid"):
+            read_research_report_artifact(root, expected_identity=root.name)
+        assert policy.used_memory_bytes == 0
+    member.write_bytes(original)
+    monkeypatch.setattr(research, "read_json_evidence", original_reader)
+    assert read_research_report_artifact(root, expected_identity=root.name) == payload

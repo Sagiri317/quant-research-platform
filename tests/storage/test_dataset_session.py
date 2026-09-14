@@ -774,3 +774,33 @@ def test_writer_receipt_reuses_observed_metadata_without_reopening_parts(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("receipt_no_reopen"),
     )
+
+
+@pytest.mark.parametrize(
+    "operation", (read_dataset, inspect_dataset, fingerprint_dataset)
+)
+def test_persisted_identity_rejects_same_statistics_member_replacement(
+    tmp_path, operation
+):
+    root = make_dataset_artifact_root(tmp_path, "content_bound")
+    replacement = make_dataset_artifact_root(tmp_path / "replacement", "content_bound")
+    frame = make_default_dataset_frame()
+    frame["timestamp"] = pd.date_range("2020-01-01", periods=3)
+    frame["value"] = [0.0, 10.0, 100.0]
+    changed = frame.copy()
+    changed.loc[changed.index[1], "value"] = 40.0
+    spec = make_processed_dataset_spec("content_bound")
+    write_dataset(root, frame, spec=spec)
+    write_dataset(replacement, changed, spec=spec)
+    pd.testing.assert_frame_equal(read_dataset(root), frame, check_dtype=False)
+    (member,) = (root / "data").rglob("*.parquet")
+    (other,) = (replacement / "data").rglob("*.parquet")
+    original = member.read_bytes()
+    substituted = other.read_bytes()
+    assert len(original) == len(substituted) and original != substituted
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = manifest_path.read_bytes()
+    member.write_bytes(substituted)
+    with pytest.raises(ValueError, match="dataset_content_identity_changed"):
+        operation(root)
+    assert manifest_path.read_bytes() == manifest

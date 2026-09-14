@@ -7,6 +7,13 @@
 所有来源共用 data/raw，各 owner 只在 data/raw/<source_id> 内递归发现和验证输入。
 来源家族由供应商/表标识及结构证明，不从目录名猜测，不探测备用根。
 CSMAR 提供 A 股市场、指数、行业和分析师事实；其财务只作验证。
+
+CSMAR `index_membership` 是供应商指数成分事件，包含不同市场及证券类型，不能将所有
+成分强制解释为六位 A 股股票代码。`constituent_stock_code` 保留供应商代码字符串；
+`constituent_asset_id` 是原码、`market_code`、`security_type` 三项规范 JSON 的内容哈希，
+用于区分同指数、同日期的跨市场或证券类型同码事件。缺失市场/类型仍保留缺失事实，
+在该来源身份中表示为 null，不补造交易所。它不表示可交易 A 股身份。已有基准消费者
+使用的 `index_weights` 仍按其 A 股代码合同处理。
 Choice 是正式财务 PIT 唯一来源；原生响应先不可变保存，再由已有 owner 离线处理。
 Binance 当前仅消费录制清单声明的 gzip JSONL 成员和显式资金费归档，
 没有旧独立 JSONL 封装或分钟线适配入口；详细合同见 [Crypto](crypto.md)。
@@ -43,6 +50,9 @@ Binance 当前仅消费录制清单声明的 gzip JSONL 成员和显式资金费
 数据层分为 raw、interim、processed、research、artifacts、runs，由 storage 布局派生路径。
 每个 QRP 数据集有 spec.json 和 _manifest/manifest.json，
 schema_id 分别为 qrp-dataset-spec 与 qrp-dataset-manifest；运行索引使用 run.json。
+数据集 manifest 的 `content_hash` 按规范物理顺序绑定全部成员路径与原始字节摘要；
+新会话在暴露数据前有界核对全部成员，不能把同大小、同统计的替换文件当作旧实例。
+未保存该内容证明的历史实例不静默补证或改写；需要从已验证上游重建新的实例。
 物理 IO、发布和精确比较见 [架构合同](architecture.md)。
 
 raw 存在、供应商接口成功、字段齐全、范围内 PIT 适用、质量合格及正式研究验收是不同事实。

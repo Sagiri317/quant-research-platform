@@ -255,3 +255,65 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         assert path.stat().st_size > 1024 * 1024
         assert read_research_run_record(path).payload() == original
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "terminal_targets",
+        "target_results",
+        "trial_ledgers",
+        "protocol",
+        "research_window",
+        "operation_evidence",
+        "holdout_evidence",
+    ),
+)
+def test_run_record_reader_rejects_wrong_json_container(tmp_path, field):
+    import json
+
+    from quant_research_platform.artifacts.research import (
+        read_research_run_record,
+        write_research_run_record,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    protocol = {"scenario_id": "scenario", "access_window": "development"}
+    record = ResearchRunRecord(
+        run_id="shape-run",
+        profile_id="profile",
+        scenario_id="scenario",
+        protocol=protocol,
+        protocol_identity=canonical_json_hash(protocol),
+        research_window={
+            "start": "2020-01-01",
+            "end": "2020-01-02",
+            "access": "development",
+        },
+        software_identity="a" * 64,
+        terminal_targets=("target",),
+        target_results=(
+            ResearchRunTargetResult(
+                target_id="target",
+                producer_kind=ProducerKind.MODEL,
+                status=TargetStatus.BLOCKED,
+                reason="fixture_missing",
+            ),
+        ),
+        status=RunStatus.BLOCKED,
+        operation_evidence=unmeasured_operation_evidence("fixture_record"),
+    )
+    path = tmp_path / "shape-run.json"
+    with runtime_resource_policy_scope():
+        write_research_run_record(path, record)
+        assert read_research_run_record(path).payload() == record.payload()
+        payload = record.payload()
+        value = payload[field]
+        payload[field] = (
+            list(value.items())
+            if isinstance(value, dict)
+            else {str(item): "discarded" for item in value}
+        )
+        path.write_text(json.dumps(payload))
+        with pytest.raises(ValueError, match="research_run_record_invalid"):
+            read_research_run_record(path)

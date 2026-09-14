@@ -55,15 +55,12 @@ def _import_edges_from_trees(ast_trees: dict[Path, ast.AST]) -> tuple[ImportEdge
             if isinstance(node, ast.ImportFrom):
                 module = node.module or ""
                 if node.level:
-                    parts = path.with_suffix("").parts
+                    parts = path.parent.parts
                     try:
                         package_root = parts.index("quant_research_platform")
                     except ValueError:
                         continue
-                    package_end = (
-                        len(parts) if path.stem == "__init__" else len(parts) - 1
-                    )
-                    package = ".".join(parts[package_root:package_end])
+                    package = ".".join(parts[package_root:])
                     try:
                         module = resolve_name("." * node.level + module, package)
                     except ImportError:

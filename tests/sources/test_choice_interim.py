@@ -795,13 +795,13 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
     active = 0
 
     @contextmanager
-    def observed_index(root, financial, policy):
+    def observed_index(root, financial, policy, *, members):
         nonlocal active
         active += 1
         assert active == 1
         opened.append(financial)
         try:
-            with original_index(root, financial, policy) as index:
+            with original_index(root, financial, policy, members=members) as index:
                 yield index
         finally:
             active -= 1

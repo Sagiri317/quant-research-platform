@@ -189,12 +189,13 @@ def _raw_requests(raw_root: Path, *, financial: bool):
             yield directory, request, options, disclosure
 
 
-def source_content_identity(raw_root: Path, data_id: str) -> str | None:
+@contextmanager
+def _source_snapshot(raw_root: Path, data_id: str):
     interim_catalog().get(data_id)
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    members = []
+    members = {}
     with (
         policy.lease("source.choice.identity.members", 1) as retained,
         closing_iterator(
@@ -209,12 +210,25 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
                     member_identity = dataset_file_identity(path)
                 except ValueError as error:
                     raise ValueError("choice_raw_identity_changed") from error
-                members.append((f"css/{root.name}/{name}", path, member_identity))
-        if not members:
-            return None
-        return content_hash_for_files(
-            members, error="choice_raw_identity_changed", resource_policy=policy
+                members[path] = member_identity
+        identity = (
+            content_hash_for_files(
+                (
+                    (f"css/{path.parent.name}/{path.name}", path, expected)
+                    for path, expected in members.items()
+                ),
+                error="choice_raw_identity_changed",
+                resource_policy=policy,
+            )
+            if members
+            else None
         )
+        yield identity, members
+
+
+def source_content_identity(raw_root: Path, data_id: str) -> str | None:
+    with _source_snapshot(raw_root, data_id) as (identity, _members):
+        return identity
 
 
 def _encode(value: object) -> bytes:
@@ -280,7 +294,7 @@ def _values(cells):
 
 
 @contextmanager
-def _raw_index(raw_root, financial, policy):
+def _raw_index(raw_root, financial, policy, *, members):
     index = ExactPrimaryKeyIndex(
         primary_key=("source_coordinate",),
         timestamp_columns=(),
@@ -293,8 +307,15 @@ def _raw_index(raw_root, financial, policy):
             ) as requests:
                 for root, request, options, disclosure in requests:
                     period = options["reportdate"]
+                    try:
+                        expected_metadata = members[root / "response.metadata.json"]
+                    except KeyError:
+                        raise ValueError("choice_raw_identity_changed") from None
                     with read_choice_response(
-                        root, request, resource_policy=policy
+                        root,
+                        request,
+                        resource_policy=policy,
+                        expected_metadata_identity=expected_metadata,
                     ) as response:
                         if not response["Data"]:
                             continue
@@ -611,45 +632,49 @@ def materialize_interim_data(
             specs, key=lambda spec: spec.data_id != FIRST_DISCLOSURE_DATA_ID
         ):
             group = tuple(grouped)
-            identity = source_content_identity(root, group[0].data_id)
-            if (
-                instance_metadata is not None
-                and COMMON_MANIFEST_METADATA_KEY in instance_metadata
-            ):
-                envelope = validate_business_manifest_envelope(
-                    instance_metadata[COMMON_MANIFEST_METADATA_KEY]
-                )
-                if envelope["semantic_metadata"]["raw_content_identity"] != identity:
-                    raise ValueError("choice_raw_identity_changed")
-
-            with _raw_index(root, financial, policy) as index:
-                for spec in group:
-
-                    def verify_source(
-                        _receipt, data_id=spec.data_id, expected=identity
-                    ):
-                        if source_content_identity(root, data_id) != expected:
-                            raise ValueError("choice_raw_identity_changed")
-
-                    rows = _rows(index, spec.data_id, start, end)
-                    frames = _frames(rows, spec, policy)
-                    target = layout.target_root(
-                        spec.data_id, layout.interim_data_root(SOURCE_ID, spec.data_id)
+            with _source_snapshot(root, group[0].data_id) as (identity, members):
+                if (
+                    instance_metadata is not None
+                    and COMMON_MANIFEST_METADATA_KEY in instance_metadata
+                ):
+                    envelope = validate_business_manifest_envelope(
+                        instance_metadata[COMMON_MANIFEST_METADATA_KEY]
                     )
-                    with closing_iterator(rows), closing_iterator(frames):
-                        try:
-                            write_dataset(
-                                target,
-                                frames,
-                                spec=spec,
-                                resource_policy=policy,
-                                instance_metadata=instance_metadata,
-                                staged_validator=verify_source,
-                            )
-                        except ValueError as error:
-                            if str(error) != "empty_dataset_schema_missing":
-                                raise
-                            skipped.append(spec.data_id)
-                            continue
-                    written[spec.data_id] = target
+                    if (
+                        envelope["semantic_metadata"]["raw_content_identity"]
+                        != identity
+                    ):
+                        raise ValueError("choice_raw_identity_changed")
+
+                with _raw_index(root, financial, policy, members=members) as index:
+                    for spec in group:
+
+                        def verify_source(
+                            _receipt, data_id=spec.data_id, expected=identity
+                        ):
+                            if source_content_identity(root, data_id) != expected:
+                                raise ValueError("choice_raw_identity_changed")
+
+                        rows = _rows(index, spec.data_id, start, end)
+                        frames = _frames(rows, spec, policy)
+                        target = layout.target_root(
+                            spec.data_id,
+                            layout.interim_data_root(SOURCE_ID, spec.data_id),
+                        )
+                        with closing_iterator(rows), closing_iterator(frames):
+                            try:
+                                write_dataset(
+                                    target,
+                                    frames,
+                                    spec=spec,
+                                    resource_policy=policy,
+                                    instance_metadata=instance_metadata,
+                                    staged_validator=verify_source,
+                                )
+                            except ValueError as error:
+                                if str(error) != "empty_dataset_schema_missing":
+                                    raise
+                                skipped.append(spec.data_id)
+                                continue
+                        written[spec.data_id] = target
     return ChoiceInterimImportResult(written, tuple(skipped))

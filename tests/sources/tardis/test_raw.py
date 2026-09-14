@@ -157,3 +157,41 @@ def test_bad_native_decode_releases_payload_inside_record_lease(tmp_path, monkey
             next(records)
         assert released and released[0] > 0
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("changed", [False, True])
+@pytest.mark.parametrize("termination", ["exhaust", "close", "primary"])
+def test_native_consumed_digest_is_verified_on_every_exit(
+    tmp_path, changed, termination
+):
+    path = tmp_path / "native.gz"
+    original = gzip.compress(_snapshot() + b"\n", mtime=0)
+    expected = hashlib.sha256(original).hexdigest()
+    path.write_bytes(
+        gzip.compress(_snapshot().replace(b'"2"', b'"9"') + b"\n", mtime=0)
+        if changed
+        else original
+    )
+    with runtime_resource_policy_scope() as policy:
+        rows = iter_native_slice(
+            path,
+            date="2026-09-01",
+            offset_minutes=0,
+            resource_policy=policy,
+            expected_sha256=expected,
+        )
+        next(rows)
+        if termination == "primary":
+            primary = KeyboardInterrupt("body_primary")
+            with pytest.raises(KeyboardInterrupt) as caught:
+                rows.throw(primary)
+            assert caught.value is primary
+            assert bool(getattr(primary, "__notes__", [])) == changed
+        elif changed:
+            with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
+                list(rows) if termination == "exhaust" else rows.close()
+        elif termination == "exhaust":
+            list(rows)
+        else:
+            rows.close()
+        assert policy.used_memory_bytes == 0

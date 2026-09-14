@@ -110,3 +110,39 @@ def test_experiment_plan_rejects_holdout_overlap_and_keeps_no_purge_surface() ->
                 replace(plan.folds[-1], final_holdout_start_step=24),
             ),
         )
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "folds",
+        "input_lineage",
+        "candidate_ids",
+        "tie_break_order",
+        "final_holdout",
+        "backend_versions",
+        "thread_settings",
+        "cost_assumptions",
+        "risk_assumptions",
+        "candidate_parameters",
+    ),
+)
+def test_experiment_plan_json_container_types_are_not_normalized(field):
+    plan = _plan()
+    payload = plan.protocol_payload()
+    assert ExperimentPlan.from_payload(payload).protocol_hash == plan.protocol_hash
+    value = payload[field]
+    payload[field] = (
+        list(value.items())
+        if isinstance(value, dict)
+        else {str(item): "discarded" for item in value}
+    )
+    with pytest.raises(ValueError, match="experiment_plan_payload_invalid"):
+        ExperimentPlan.from_payload(payload)
+
+
+def test_experiment_fold_json_object_is_not_a_pairs_array():
+    payload = _plan().protocol_payload()
+    payload["folds"][0] = list(payload["folds"][0].items())
+    with pytest.raises(ValueError, match="experiment_plan_payload_invalid"):
+        ExperimentPlan.from_payload(payload)

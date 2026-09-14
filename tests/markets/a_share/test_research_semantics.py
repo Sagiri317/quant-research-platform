@@ -305,3 +305,89 @@ def test_neutralization_constant_has_no_artificial_alpha_and_keeps_small_variati
     else:
         assert actual.feature_factor.std(ddof=0) == pytest.approx(1.0)
         assert actual.feature_factor.nunique() > 100
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+@pytest.mark.parametrize(
+    "origin,step,groups", ((0.0, 1.0, 1), (15.0, 0.125, 2), (20.0, 0.0625, 3))
+)
+def test_exact_industry_size_span_is_zero_but_one_ulp_signal_survives(
+    reverse, origin, step, groups
+):
+    from quant_research_platform.research.features.transforms import (
+        canonical_feature_pipeline,
+        neutralize_cross_section,
+    )
+
+    index = np.arange(120)
+    size = origin + index * step
+    industry = index % groups
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-02"),
+            "asset_id": [f"asset_{i}" for i in index],
+            "industry_level1_code": industry.astype(str),
+            "log_float_market_cap": size,
+            "factor": 3.0 + 4.0 * industry + 2.0 * size,
+            "eligible": True,
+        }
+    )
+    if reverse:
+        frame = frame.iloc[::-1]
+    residual = neutralize_cross_section(frame, factor_columns=("factor",))
+    assert residual.factor.eq(0.0).all()
+    actual = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    assert actual.feature_factor.eq(0.0).all()
+    assert actual.feature_observed_factor.eq(1).all()
+    assert actual.feature_missing_factor.eq(0).all()
+    changed = frame.copy()
+    changed.loc[60, "factor"] = np.nextafter(changed.loc[60, "factor"], np.inf)
+    perturbed = canonical_feature_pipeline(changed, factor_columns=("factor",))
+    assert perturbed.feature_factor.ne(0.0).any()
+    assert perturbed.feature_observed_factor.eq(1).all()
+
+
+@pytest.mark.parametrize("offset", [0.0, 1024.0])
+@pytest.mark.parametrize("changed", [0, 64, 127])
+def test_neutralization_preserves_single_ulp_projection(offset, changed):
+    from fractions import Fraction
+
+    from quant_research_platform.research.features.transforms import (
+        canonical_feature_pipeline,
+        neutralize_cross_section,
+    )
+
+    n = 128
+    size = np.arange(1, n + 1, dtype=float)
+    values = size + offset
+    values[changed] = np.nextafter(values[changed], np.inf)
+    centered_size = [Fraction(2 * i - n + 1, 2) for i in range(n)]
+    exact_y = [Fraction(float(value)) for value in values]
+    mean = sum(exact_y) / n
+    slope = sum(x * y for x, y in zip(centered_size, exact_y, strict=True)) / sum(
+        x * x for x in centered_size
+    )
+    residuals = np.array(
+        [
+            float(y - mean - slope * x)
+            for x, y in zip(centered_size, exact_y, strict=True)
+        ]
+    )
+    expected = (residuals - residuals.mean()) / residuals.std()
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-02"),
+            "industry_level1_code": "A",
+            "log_float_market_cap": size,
+            "factor": values,
+            "eligible": True,
+        }
+    )
+    actual = neutralize_cross_section(frame, factor_columns=("factor",))
+    np.testing.assert_array_equal(actual["factor"], residuals)
+    features = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    np.testing.assert_allclose(
+        features["feature_factor"], expected, rtol=1e-14, atol=1e-14
+    )
+    assert features["feature_observed_factor"].eq(1).all()
+    assert features["feature_missing_factor"].eq(0).all()

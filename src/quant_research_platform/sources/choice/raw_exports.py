@@ -24,7 +24,10 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.choice.ids import SOURCE_ID
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import read_manifest
+from quant_research_platform.storage.manifests import (
+    read_bounded_qrp_json,
+    read_manifest,
+)
 from quant_research_platform.storage.raw_snapshots import (
     MAX_RECORD_BYTES,
     iter_csv_snapshot,
@@ -194,11 +197,13 @@ class ChoiceRawSession:
                 raise MemoryError("choice_request_exceeds_memory_plan")
             with self.policy.lease("choice.raw.request", bound):
                 if root.exists():
-                    metadata = read_manifest(root / "response.metadata.json")[
-                        "metadata"
-                    ]
+                    manifest = read_manifest(root / "response.metadata.json")
+                    metadata = manifest["metadata"]
                     try:
-                        deque(_validated_rows(root, request, metadata), maxlen=0)
+                        deque(
+                            _validated_rows(root, request, metadata, manifest=manifest),
+                            maxlen=0,
+                        )
                         return root
                     finally:
                         metadata.clear()
@@ -264,6 +269,7 @@ def read_choice_response(
     request: ChoiceRequest,
     *,
     resource_policy: RuntimeResourcePolicy | None = None,
+    expected_metadata_identity=None,
 ) -> Iterator[dict[str, object]]:
     """Restore a fully verified SDK response; payload is borrowed in this scope."""
     request.payload()
@@ -276,9 +282,13 @@ def read_choice_response(
             data = [] if request.endpoint == "sector" else {}
             row = value = None
             try:
-                metadata = read_manifest(root / "response.metadata.json")["metadata"]
+                manifest = read_bounded_qrp_json(
+                    root / "response.metadata.json",
+                    expected_identity=expected_metadata_identity,
+                )[1]
+                metadata = manifest["metadata"]
                 with handle_preserving_primary(
-                    _validated_rows(root, request, metadata)
+                    _validated_rows(root, request, metadata, manifest=manifest)
                 ) as rows:
                     for count, row in enumerate(rows):
                         header = metadata["response"]
@@ -435,6 +445,7 @@ def _validated_rows(
     metadata: dict[str, object],
     *,
     require_complete: bool = True,
+    manifest=None,
 ) -> Iterator[tuple[object, ...]]:
     if type(metadata) is not dict or set(metadata) != {
         "request",
@@ -464,7 +475,10 @@ def _validated_rows(
         or metadata["types"] != "JSON_cell_types; SDK_null=None; bytes_hex_for_char"
     ):
         raise ValueError("choice_saved_representation_invalid")
-    manifest = read_manifest(root / "response.metadata.json")
+    if manifest is None:
+        manifest = read_manifest(root / "response.metadata.json")
+    if manifest["metadata"] != metadata:
+        raise ValueError("raw_csv_metadata_invalid")
     if manifest["columns"] != [*_PREFIX, *response["Indicators"]]:
         raise ValueError("choice_saved_columns_invalid")
     if (
@@ -481,7 +495,7 @@ def _validated_rows(
     count = 0
     with handle_preserving_primary(
         iter_csv_snapshot(
-            root, expected_metadata=metadata, max_bytes=request.max_response_bytes
+            root, expected_manifest=manifest, max_bytes=request.max_response_bytes
         )
     ) as rows:
         for row in rows:

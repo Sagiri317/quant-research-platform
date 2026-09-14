@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import stat
+import sys
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from quant_research_platform.contracts.data import (
     InterimDataSpec,
 )
 from quant_research_platform.contracts.ids import SourceId
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
@@ -188,6 +190,7 @@ TRADING_CALENDAR_INTERIM_COLUMNS: tuple[str, ...] = (
 INDEX_MEMBERSHIP_INTERIM_COLUMNS: tuple[str, ...] = (
     "source_asset_id",
     "constituent_asset_id",
+    "constituent_stock_code",
     "timestamp",
     "effective_date",
     "announcement_date",
@@ -660,9 +663,31 @@ def normalize_raw_frame(
         return _normalize_trading_calendar_frame(mapped)
     if data_id == "index_membership":
         result = mapped
-        result["constituent_asset_id"] = normalize_provider_stock_code_series(
-            result["constituent_stock_code"]
+        result["constituent_stock_code"] = strict_string_series(
+            result["constituent_stock_code"], error="invalid_index_membership_code"
         )
+        result["market_code"] = strict_string_series(
+            result["market_code"],
+            error="invalid_index_membership_market_code",
+            allow_null=True,
+        ).astype("string")
+        result["security_type"] = strict_integer_series(
+            result["security_type"],
+            error="invalid_index_membership_security_type",
+            allow_null=True,
+        )
+        result["constituent_asset_id"] = [
+            canonical_json_hash(
+                {
+                    "code": code,
+                    "market_code": None if pd.isna(market) else market,
+                    "security_type": None if pd.isna(kind) else int(kind),
+                }
+            )
+            for code, market, kind in result[
+                ["constituent_stock_code", "market_code", "security_type"]
+            ].itertuples(index=False, name=None)
+        ]
         for column in ("effective_date", "announcement_date"):
             result[column] = strict_timestamp_series(
                 result[column], error=f"invalid_index_membership_{column}"
@@ -1828,6 +1853,11 @@ def _normalization_preallocation_bytes(frame: pd.DataFrame, *, data_id: str) -> 
     variable_width_bytes = pandas_frame_payload_bytes(frame)
     primary_key_columns = len(interim_catalog().get(data_id).primary_key)
     ordering_bytes = len(frame) * (primary_key_columns + 2) * pointer_bytes
+    if data_id == "index_membership":
+        # Hash strings coexist with the construction list and assigned object array.
+        variable_width_bytes += len(frame) * (
+            sys.getsizeof("0" * 64) + 2 * pointer_bytes
+        )
     return variable_width_bytes + ordering_bytes
 
 

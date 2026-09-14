@@ -284,7 +284,10 @@ class PortfolioLedgerBatch:
         assets = before.keys() - {PORTFOLIO_CASH_ASSET_ID}
         if any(row.asset_id not in assets for row in (*self.trades, *self.cashflows)):
             raise ValueError("portfolio_ledger_orphan_economic_fact")
-        if any(row.asset_id not in before for row in self.diagnostics):
+        if any(
+            row.asset_id not in before and row.fill_id is None
+            for row in self.diagnostics
+        ):
             raise ValueError("portfolio_ledger_orphan_diagnostic")
         fill_assets = {row.fill_id: row.asset_id for row in self.trades}
         if any(
@@ -340,6 +343,10 @@ class PortfolioLedgerBatch:
         if any(
             type(row.name) is not str
             or not row.name
+            or (
+                row.fill_id is not None
+                and (type(row.fill_id) is not str or not row.fill_id)
+            )
             or (row.number is not None and not isfinite(row.number))
             or (row.text is not None and type(row.text) is not str)
             or (row.number is not None and row.text is not None)

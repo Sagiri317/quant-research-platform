@@ -424,3 +424,43 @@ def test_nav_roundoff_is_explicit_and_retains_resolvable_variation():
     assert (
         result.dsr is None and result.dsr_reason == "trial_sharpe_dispersion_undefined"
     )
+
+
+def test_white_lm_preserves_exact_auxiliary_fit_without_unused_f_warning():
+    from scipy.stats import chi2
+
+    from quant_research_platform.research.statistics_production import (
+        _fama_macbeth_period_records,
+    )
+
+    x = np.array([-3.0, -2.0, -1.0, 1.0, 2.0, 3.0])
+    z = np.array([1.0, -1.0, 0.0, 0.0, -1.0, 1.0])
+    for day in range(40):
+        frame = pd.DataFrame(
+            {
+                "timestamp": pd.Timestamp("2020-01-01") + pd.Timedelta(days=day),
+                "asset_id": list("abcdef"),
+                "x": x,
+                "z": z,
+                "return": 2 + day * x + 3 * z,
+            }
+        )
+        result = fama_macbeth_period(
+            frame, return_column="return", factor_columns=("x",)
+        )
+        auxiliary_y = (3 * z) ** 2
+        auxiliary_x = np.column_stack((np.ones(6), x, x * x))
+        residual = (
+            auxiliary_y
+            - auxiliary_x @ np.linalg.lstsq(auxiliary_x, auxiliary_y, rcond=None)[0]
+        )
+        lm = 6 * (
+            1
+            - np.dot(residual, residual)
+            / np.sum((auxiliary_y - auxiliary_y.mean()) ** 2)
+        )
+        assert result.white_p_value == pytest.approx(chi2.sf(lm, 2), abs=1e-12)
+        records = _fama_macbeth_period_records(
+            frame, return_column="return", factors=("x", "z"), core_factors=("x", "z")
+        )
+        assert records and all(row["status"] == "DEFINED" for row in records)

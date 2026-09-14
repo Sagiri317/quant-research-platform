@@ -282,7 +282,7 @@ def test_research_time_window_driver_normalizes_and_deduplicates_dates(
         result = list(
             assembler_module._iter_research_chunk_windows_from_base_input(
                 session,
-                time_window=TimeWindow("2026-01-01", "2026-01-02"),
+                time_window=TimeWindow("2026-01-01", "2026-01-03"),
             )
         )
 
@@ -1421,3 +1421,92 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
                 ),
             )
         )
+
+
+@pytest.mark.parametrize("coverage", ("strict", "sparse"))
+@pytest.mark.parametrize("physical_rows", (1, 2))
+@pytest.mark.parametrize(
+    "extra_date", (None, "2023-12-31", "2024-01-02", "2024-01-04", "2024-01-06")
+)
+def test_full_request_key_domain_is_independent_of_base_file_boundaries(
+    tmp_path, coverage, physical_rows, extra_date
+):
+    import hashlib
+
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.research_specs import (
+        DEMO_FACTOR_COLUMN,
+        DEMO_LABEL_COLUMN,
+        make_demo_research_dataset_spec,
+    )
+
+    layout = StorageLayout(tmp_path)
+    processed = make_demo_processed_catalog()
+    spec = make_demo_research_dataset_spec(key_coverage={"demo_factors": coverage})
+    rows = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset_a",
+            "timestamp": pd.to_datetime(["2024-01-01", "2024-01-03"]),
+            DEMO_FACTOR_COLUMN: 1.0,
+            DEMO_LABEL_COLUMN: 0.01,
+            "eligible": True,
+            "can_enter": True,
+            "can_exit": True,
+            "market_type": 1,
+        }
+    )
+    factors = (
+        rows
+        if extra_date is None
+        else pd.concat(
+            (rows, rows.iloc[:1].assign(timestamp=pd.Timestamp(extra_date))),
+            ignore_index=True,
+        ).sort_values("timestamp")
+    )
+    roots = []
+    for data_id, frame in (
+        ("demo_annotations", rows),
+        ("demo_labels", rows),
+        ("demo_factors", factors),
+    ):
+        definition = processed.get(data_id)
+        root = layout.processed_data_root(
+            definition.market_id, definition.kind, data_id
+        )
+        selected = frame.loc[:, list(definition.required_columns)]
+        chunks = tuple(
+            selected.iloc[start : start + physical_rows]
+            for start in range(0, len(selected), physical_rows)
+        )
+        write_dataset(root, chunks, spec=definition)
+        roots.append(root)
+    before = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for root in roots
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+    def assemble():
+        return assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=ResearchDatasetCatalog((spec,)),
+            processed_catalog=processed,
+            dataset_id=spec.data_id,
+            time_window=TimeWindow("2023-12-31", "2024-01-04"),
+        )
+
+    if extra_date in {"2023-12-31", "2024-01-02", "2024-01-04"}:
+        with pytest.raises(
+            ValueError, match="extra_research_input_keys: demo_factors: 1"
+        ):
+            assemble()
+        assert not layout.research_dataset_root(spec.market_id, spec.data_id).exists()
+    else:
+        frame = read_dataset(assemble())
+        assert frame.timestamp.tolist() == rows.timestamp.tolist()
+    assert all(
+        hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        for path, digest in before.items()
+    )

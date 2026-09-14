@@ -929,6 +929,11 @@ def open_dataset_session(
                     selected=selected,
                 )
                 session_lease.shrink_to(metadata_bound)
+            if (
+                inventory.content_hash(resource_policy=issued_policy)
+                != manifest["content_hash"]
+            ):
+                raise ValueError("dataset_content_identity_changed")
             if session_lease.reserved_bytes < metadata_bound:
                 session_lease.grow(metadata_bound - session_lease.reserved_bytes)
             session = _build_dataset_session(

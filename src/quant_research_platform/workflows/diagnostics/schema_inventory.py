@@ -15,7 +15,6 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.logical_paths import RUN_RESULT_DATASET_LAYERS
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     runtime_resource_policy_scope,
@@ -31,6 +30,8 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
 )
 from quant_research_platform.storage.identity import require_unaliased_path
+
+_RUN_RESULT_DATASET_LAYERS = frozenset({"interim", "processed", "research"})
 
 _INVENTORY_ITEM_KEYS = frozenset(
     {
@@ -81,7 +82,7 @@ def iter_schema_inventory_items(
         for candidate in (
             root,
             data_root,
-            *(data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)),
+            *(data_root / layer for layer in sorted(_RUN_RESULT_DATASET_LAYERS)),
         ):
             require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
 
@@ -147,7 +148,7 @@ def _validate_schema_inventory_item(value: object) -> dict[str, Any]:
     for key in ("artifact_id", "layer", "kind", "logical_relative_root"):
         if type(value[key]) is not str or not value[key]:
             raise ValueError("schema_inventory_dataset_invalid")
-    if value["layer"] not in RUN_RESULT_DATASET_LAYERS:
+    if value["layer"] not in _RUN_RESULT_DATASET_LAYERS:
         raise ValueError("schema_inventory_dataset_invalid")
     logical_root = value["logical_relative_root"]
     logical_path = PurePosixPath(logical_root)
@@ -310,7 +311,7 @@ def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
     require_unaliased_path(project_root, error="schema_inventory_dataset_invalid")
     require_unaliased_path(data_root, error="schema_inventory_dataset_invalid")
     allowed_roots = tuple(
-        data_root / layer for layer in sorted(RUN_RESULT_DATASET_LAYERS)
+        data_root / layer for layer in sorted(_RUN_RESULT_DATASET_LAYERS)
     )
     for layer_root in allowed_roots:
         require_unaliased_path(layer_root, error="schema_inventory_dataset_invalid")

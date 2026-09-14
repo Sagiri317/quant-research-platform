@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
@@ -44,9 +45,13 @@ def write_json_evidence(path: Path, payload: dict[str, Any]) -> Path:
 
 
 @contextmanager
-def read_json_evidence(path: Path, *, expected_schema_id: str, error: str, lease=None):
+def read_json_evidence(
+    path: Path, *, expected_schema_id: str, error: str, lease=None, expected_member=None
+):
     """Keep decoded evidence admitted until its consumer exits or releases its lease."""
     identity = _qrp_json_file_identity(path)
+    if expected_member is not None and identity.size != expected_member["size"]:
+        raise ValueError(error)
     with runtime_resource_policy_scope() as policy:
         with (
             policy.lease("evidence.json.read", 0)
@@ -54,9 +59,15 @@ def read_json_evidence(path: Path, *, expected_schema_id: str, error: str, lease
             else nullcontext(lease)
         ) as owned:
             owned.grow(json_record_working_set_bytes(identity.size))
-            payload = read_bounded_qrp_json(
+            raw, payload = read_bounded_qrp_json(
                 path, expected_identity=identity, max_bytes=identity.size
-            )[1]
+            )
+            if (
+                expected_member is not None
+                and hashlib.sha256(raw).hexdigest() != expected_member["sha256"]
+            ):
+                raise ValueError(error)
+            del raw
             if payload.get("schema_id") != expected_schema_id:
                 raise ValueError(error)
             yield payload

@@ -1357,3 +1357,108 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         "alpha_calibration_zero_standard_error"
         in (report_root / "report.md").read_text()
     )
+
+
+@pytest.mark.parametrize("engine", ("taker", "maker"))
+@pytest.mark.parametrize("end_ms", (70, 75, 100))
+def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
+    tmp_path, engine, end_ms
+):
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        TakerConfig,
+        simulate_maker,
+        simulate_taker,
+    )
+    from tests.markets.crypto.test_hft_execution import (
+        _maker_config,
+        _quote,
+        _state,
+        _trade,
+    )
+
+    capital = PortfolioCapital("flat_eof", 1000.0, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="flat_eof",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01T00:00:00",
+            "end": "1970-01-01T00:00:01",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+    batches = []
+    with runtime_resource_policy_scope() as policy:
+
+        def produce(emit):
+            def observe(batch):
+                batches.append(batch)
+                emit(batch)
+
+            shared = dict(
+                observed_coverage={"s1": (0, 75_000_000)},
+                resource_policy=policy,
+                capital=capital,
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_forecasts=(FundingForecast(0, 1_000_000_000, ()),),
+                decision_windows_ns=((0, end_ms * 1_000_000),),
+                on_ledger=observe,
+            )
+            if engine == "taker":
+                return simulate_taker(
+                    [_state(0)],
+                    [
+                        {
+                            "timestamp_ms": 10,
+                            "prediction": 0.05,
+                            "book_segment_id": "s1",
+                        },
+                        {
+                            "timestamp_ms": 20,
+                            "prediction": -0.05,
+                            "book_segment_id": "s1",
+                        },
+                    ],
+                    prediction_column="prediction",
+                    prediction_horizon_ms=500,
+                    config=TakerConfig(1.0, 1.0, 0, 0.0, 500),
+                    **shared,
+                )
+            return simulate_maker(
+                [_state(0)],
+                [
+                    _trade(50, price="99.4", quantity="1", maker_buyer=True),
+                    _trade(60, price="100.6", quantity="1", maker_buyer=False),
+                ],
+                [_quote(0, book_segment_id="s1")],
+                config=_maker_config(),
+                trade_coverage={"trade-connection-1": (0, 101_000_000)},
+                **shared,
+            )
+
+        published = ledger_artifact.write_portfolio_ledger_artifact(
+            tmp_path / "flat_eof", envelope=envelope, produce=produce
+        )
+        artifact = read_portfolio_ledger_artifact(
+            published, expected_identity=envelope.instance_identity
+        )
+        persisted = list(artifact.iter_chunks())
+        trades = [trade for batch in persisted for trade in batch.trades]
+        assert len(trades) == 2 and sum(trade.quantity for trade in trades) == 0
+        summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+        assert summary["net_pnl"] == pytest.approx(-1.0 if engine == "taker" else 1.02)
+        diagnostics = [
+            row
+            for batch in persisted
+            for row in batch.diagnostics
+            if row.fill_id is not None
+        ]
+        assert diagnostics and {row.fill_id for row in diagnostics} == {
+            row.fill_id for row in trades
+        }
+        assert len(persisted) == len(batches)
+        assert policy.used_memory_bytes == 0

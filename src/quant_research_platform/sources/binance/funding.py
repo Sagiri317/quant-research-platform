@@ -143,7 +143,7 @@ def _manifest(root, symbol):
 def _records(root, manifest):
     previous = {"settlement": -1, "forecast": -1}
     rows = iter_csv_snapshot(
-        root, expected_metadata=manifest["metadata"], max_bytes=manifest["byte_count"]
+        root, expected_manifest=manifest, max_bytes=manifest["byte_count"]
     )
     with closing_iterator(rows):
         for kind, timestamp, known_until, rate, mark, cashflows in rows:

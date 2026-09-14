@@ -227,9 +227,38 @@ class ExperimentPlan:
 
     @classmethod
     def from_payload(cls, value: dict[str, object]) -> ExperimentPlan:
+        if (
+            type(value) is not dict
+            or any(
+                type(value.get(key)) is not list
+                for key in (
+                    "folds",
+                    "input_lineage",
+                    "candidate_ids",
+                    "tie_break_order",
+                )
+            )
+            or any(
+                type(value.get(key)) is not dict
+                for key in (
+                    "final_holdout",
+                    "backend_versions",
+                    "thread_settings",
+                    "cost_assumptions",
+                    "risk_assumptions",
+                    "candidate_parameters",
+                )
+            )
+        ):
+            raise ValueError("experiment_plan_payload_invalid")
         payload = dict(value)
         folds = []
         for item in payload["folds"]:
+            if type(item) is not dict or any(
+                type(item.get(key)) is not dict
+                for key in ("train", "validation", "development_test")
+            ):
+                raise ValueError("experiment_plan_payload_invalid")
             fold = dict(item)
             for key in ("train", "validation", "development_test"):
                 fold[key] = TimeWindow(**fold[key])
@@ -558,6 +587,27 @@ class TrialRecord:
 
     @classmethod
     def from_payload(cls, payload: dict[str, object]) -> TrialRecord:
+        if (
+            type(payload) is not dict
+            or any(
+                type(payload.get(key)) is not list
+                for key in ("factor_definition_ids", "artifact_lineage")
+            )
+            or any(
+                type(payload.get(key)) is not dict
+                for key in (
+                    "normalized_parameters",
+                    "backend_versions",
+                    "thread_settings",
+                    "validation_metrics",
+                    "development_test_metrics",
+                    "undefined_reasons",
+                    "cost_assumptions",
+                    "risk_assumptions",
+                )
+            )
+        ):
+            raise ValueError("trial_record_payload_invalid")
         value = dict(payload)
         value["factor_definition_ids"] = tuple(value["factor_definition_ids"])
         value["artifact_lineage"] = tuple(value["artifact_lineage"])

@@ -241,6 +241,7 @@ class TardisDay:
     def _check_interval(self, row):
         if self._coverage_index.bounds(
             row["observation_id"],
+            symbol=row["symbol"],
             market_type=FUTURES_MARKET_TYPE,
             data_kind=row["data_kind"],
         ) != (row["start_ns"], row["end_ns"]):
@@ -270,6 +271,7 @@ class TardisDay:
                         self.root / member["path"],
                         date=self.manifest["date"],
                         offset_minutes=member["offset_minutes"],
+                        expected_sha256=member["sha256"],
                         resource_policy=self.resource_policy,
                     )
                     with closing_iterator(records):

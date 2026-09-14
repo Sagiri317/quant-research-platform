@@ -545,6 +545,9 @@ def _write_dataset_body(
                             )
                         ),
                         "schema_id": "qrp-dataset-manifest",
+                        "content_hash": inventory.content_hash(
+                            resource_policy=resource_policy
+                        ),
                     },
                     instance_metadata,
                     spec=data_spec_payload(spec),

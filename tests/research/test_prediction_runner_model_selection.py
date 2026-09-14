@@ -786,3 +786,68 @@ def _development_frame(*, filter_flip: bool = False) -> pd.DataFrame:
     for column in ("timestamp", "label_available_at"):
         frame[column] = frame[column] - pd.DateOffset(years=1)
     return frame
+
+
+@pytest.mark.parametrize(
+    "order,expected",
+    (((), "base"), (("other", "base"), "other"), (("base", "other"), "base")),
+)
+def test_explicit_tie_order_uses_the_full_fitted_candidate_universe(order, expected):
+    from quant_research_platform.research.models.supervised import preflight_model_specs
+
+    specs = tuple(
+        ModelSpec(
+            model_id=name,
+            model_algorithm="ridge_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+            hyperparameters={"alpha": 1.0},
+        )
+        for name in ("base", "other")
+    )
+    preflight_model_specs(specs)
+    prediction = PredictionSpec(
+        prediction_id="tie",
+        model_id="base",
+        candidate_model_ids=("other",),
+        research_dataset_id="fixture",
+        train_end="2020-01-01",
+        test_start="2020-01-03",
+        test_end="2020-01-03",
+        model_selection_validation_start="2020-01-02",
+        model_selection_validation_end="2020-01-02",
+        selection_tie_break_order=order,
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "timestamp": pd.Timestamp(day),
+                "label_available_at": pd.Timestamp(day),
+                "asset_id": asset,
+                "market_id": "a_share",
+                "eligible": True,
+                "x": float(i),
+                "label": float(2 * i),
+            }
+            for day in ("2020-01-01", "2020-01-02", "2020-01-03")
+            for i, asset in enumerate("abc")
+        ]
+    )
+    dataset = make_demo_research_dataset_spec(
+        data_id="fixture",
+        factor_columns=("x",),
+        label_columns=("label", "label_available_at"),
+        filter_columns=("eligible",),
+        context_columns=(),
+    )
+    with runtime_resource_policy_scope() as policy:
+        model, metadata = model_selection_owner.select_prediction_model_spec(
+            prediction_spec=prediction,
+            dataset_spec=dataset,
+            model_catalog=ModelCatalog(specs),
+            chunks=lambda columns, **kwargs: (frame.loc[:, list(columns)],),
+        )
+        assert model.model_id == expected
+        assert metadata["candidate_model_ids"] == ["base", "other"]
+        assert metadata["tie_break_order"] == list(order or ("base", "other"))
+        assert policy.used_memory_bytes == 0
