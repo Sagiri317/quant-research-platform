@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import weakref
 from contextlib import ExitStack, contextmanager
@@ -39,6 +40,7 @@ from tests.storage.dataset_test_support import (
     _writer_test_policy,
 )
 from tests.storage.low_level_fixtures import (
+    fixture_dataset_content_hash,
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
@@ -348,6 +350,10 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
     part_indices = tuple(range(998, 998 + len(parts)))
     for path, part_index in zip(parts, part_indices, strict=True):
         path.rename(path.with_name(f"part-{part_index}.parquet"))
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["content_hash"] = fixture_dataset_content_hash(root)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with dataset_reading.open_dataset_session(
         root,

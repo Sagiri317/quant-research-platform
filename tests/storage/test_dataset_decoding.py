@@ -42,6 +42,7 @@ from tests.storage.dataset_test_support import (
     _issued_test_policy,
 )
 from tests.storage.low_level_fixtures import (
+    fixture_dataset_content_hash,
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
@@ -1952,6 +1953,7 @@ def test_reads_reject_nonnull_category_outside_declared_domain(
     manifest["file_size_bytes"] = sum(
         path.stat().st_size for path in (root / "data").rglob("part-*.parquet")
     )
+    manifest["content_hash"] = fixture_dataset_content_hash(root)
     manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
@@ -2085,6 +2087,7 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
         manifest["logical_dtypes"] = logical
         manifest["logical_dtype_hash"] = canonical_json_hash(logical)
         manifest["file_size_bytes"] = part.stat().st_size
+        manifest["content_hash"] = fixture_dataset_content_hash(root)
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
         policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
         with runtime_resource_policy_scope(policy):
@@ -2190,6 +2193,7 @@ def test_nonnullable_boolean_rejects_physical_null_values(
     manifest_path = root / "_manifest" / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     manifest["file_size_bytes"] = part.stat().st_size
+    manifest["content_hash"] = fixture_dataset_content_hash(root)
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="dataset_nonnullable_value_missing"):
         result = read_dataset(root, mode=mode)

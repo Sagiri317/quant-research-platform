@@ -219,10 +219,16 @@ def test_unobserved_next_session_is_unknown_not_forbidden():
 def test_perfect_fit_white_test_is_undefined_without_backend_division(monkeypatch):
     from quant_research_platform.research import statistics
 
-    def forbidden(*args):
-        raise AssertionError("zero_residual_has_no_variance_test")
+    original_ols = statistics.sm.OLS
+    calls = 0
 
-    monkeypatch.setattr(statistics, "het_white", forbidden)
+    def main_fit_only(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        assert calls == 1, "zero_residual_has_no_variance_test"
+        return original_ols(*args, **kwargs)
+
+    monkeypatch.setattr(statistics.sm, "OLS", main_fit_only)
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2020-01-01"),
@@ -234,6 +240,7 @@ def test_perfect_fit_white_test_is_undefined_without_backend_division(monkeypatc
     result = statistics.fama_macbeth_period(
         frame, return_column="return", factor_columns=("factor",)
     )
+    assert calls == 1
     assert result.coefficients.tolist() == pytest.approx([1.0, 2.0])
     assert (
         result.white_p_value is None and result.white_reason == "white_test_undefined"

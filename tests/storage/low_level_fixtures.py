@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
     render_qrp_json_object,
 )
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.storage.datasets.inventory import DatasetSessionInventory
 from quant_research_platform.storage.datasets.paths import relative_partition_label
 from quant_research_platform.storage.datasets.schema import (
     logical_dtype_metadata_bytes,
@@ -30,6 +33,7 @@ from quant_research_platform.storage.datasets.schema import (
     physical_schema_columns,
     physical_schema_from_schema,
 )
+from quant_research_platform.storage.parquet import inspect_dataset_part
 
 
 def make_default_dataset_frame(
@@ -170,6 +174,19 @@ def make_dataset_artifact_root(
     return tmp_path / "data" / "processed" / market_id / kind.value / data_id
 
 
+def fixture_dataset_content_hash(root: Path) -> str:
+    """Give crafted physical fixtures an honest outer content binding."""
+    spec = json.loads((root / "spec.json").read_text(encoding="utf-8"))
+    with runtime_resource_policy_scope() as policy:
+        with DatasetSessionInventory(
+            data_root=root / "data", resource_policy=policy
+        ) as inventory:
+            inventory.discover(spec)
+            for path in inventory.iter_candidate_paths():
+                inventory.observe(path, inspect_dataset_part(path), selected=True)
+            return inventory.content_hash(resource_policy=policy)
+
+
 def write_low_level_parquet_artifact(
     artifact_root: Path,
     frame: pd.DataFrame,
@@ -266,6 +283,7 @@ def _write_runtime_manifest(
         "schema_hash": canonical_json_hash(first_schema),
         "logical_dtypes": logical_dtypes,
         "logical_dtype_hash": canonical_json_hash(logical_dtypes),
+        "content_hash": fixture_dataset_content_hash(root),
         "partition_row_counts": dict(sorted(partition_row_counts.items())),
         "partition_count": len(partition_row_counts),
         "partitions": sorted(partition_row_counts),

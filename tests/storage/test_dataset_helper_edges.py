@@ -728,6 +728,7 @@ def test_manifest_spec_binding_is_typed_exact_recursively(
         "row_count": 0,
         "file_count": 1,
         "file_size_bytes": 0,
+        "content_hash": "0" * 64,
         "columns": list(spec["required_columns"]),
         "physical_schema": physical_schema,
         "schema_hash": canonical_json_hash(physical_schema),

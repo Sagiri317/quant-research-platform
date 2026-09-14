@@ -48,6 +48,7 @@ from tests.storage.dataset_test_support import (
     _persisted_table,
 )
 from tests.storage.low_level_fixtures import (
+    fixture_dataset_content_hash,
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
@@ -481,6 +482,11 @@ def test_inspect_and_fingerprint_detect_schema_mismatch_across_parts(
         _persisted_table(bad_frame),
         bad_part,
     )
+
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["content_hash"] = fixture_dataset_content_hash(root)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="dataset_schema_mismatch"):
         inspect_dataset(root)

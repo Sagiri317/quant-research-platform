@@ -639,7 +639,7 @@ def _patch_open_session_metadata_preflight(
     root: Path,
 ) -> tuple[dict[str, str], dict[str, str]]:
     spec = {"schema_id": "qrp-dataset-spec"}
-    manifest = {"schema_id": "qrp-dataset-manifest"}
+    manifest = {"schema_id": "qrp-dataset-manifest", "content_hash": "0" * 64}
     (root / "data").mkdir(parents=True)
     (root / "_manifest").mkdir()
     (root / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
@@ -732,6 +732,10 @@ def test_open_session_build_rejection_closes_lease_inside_same_root(
 
         def observe(self, *_args: object, **_kwargs: object) -> None:
             return None
+
+        def content_hash(self, *, resource_policy) -> str:
+            assert resource_policy is policy
+            return "0" * 64
 
         def close(self) -> None:
             return None
@@ -970,6 +974,11 @@ def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
             assert selected
             record("observe")
 
+        def content_hash(self, *, resource_policy) -> str:
+            assert resource_policy is policy
+            record("content-hash")
+            return "0" * 64
+
         def close(self) -> None:
             record("inventory-close")
 
@@ -1033,6 +1042,7 @@ def test_open_session_keeps_exact_policy_active_through_owned_lifecycle(
         "candidate-iteration",
         "inspect",
         "observe",
+        "content-hash",
         "build",
         "session-enter",
         "body",
