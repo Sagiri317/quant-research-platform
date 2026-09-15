@@ -15,9 +15,22 @@ def validate_market_payload(
     data_kind: str,
     symbol: str,
     payload: object,
+    *,
+    source_schema: str = "qrp-binance-recorder",
+    observed_time_ns: int | None = None,
 ) -> dict[str, Any]:
     """Validate one public stream payload without endpoint ownership."""
 
+    if source_schema not in {"qrp-binance-recorder", "qrp-tardis-native-day"}:
+        raise ValueError("binance_native_source_schema_invalid")
+    historical_time = None
+    if source_schema == "qrp-tardis-native-day":
+        historical_time = (
+            strict_non_negative_integer(
+                observed_time_ns, error="binance_native_schema_time_invalid"
+            )
+            // 1_000_000
+        )
     if not isinstance(payload, dict):
         raise ValueError("binance_recorder_payload_object_required")
     expected_event = "depthUpdate" if data_kind == "depth" else "aggTrade"
@@ -27,8 +40,14 @@ def validate_market_payload(
         payload.get("E"), error="binance_recorder_event_time_invalid"
     )
     if market_type == FUTURES_MARKET_TYPE:
-        if payload.get("st") != 1 or (
-            data_kind == "depth" and payload.get("ps") != symbol
+        # CM/UM integration added st/ps on 2026-06-30. Archive observation
+        # time is bound by the native day/slice reader, never by download time.
+        integrated = historical_time is None or historical_time >= 1782777600000
+        if (
+            (integrated or "st" in payload)
+            and (type(payload.get("st")) is not int or payload["st"] != 1)
+            or (data_kind == "depth" and (integrated or "ps" in payload))
+            and payload.get("ps") != symbol
         ):
             raise ValueError("binance_recorder_market_payload_identity_invalid")
     if data_kind == "depth":
@@ -59,18 +78,33 @@ def validate_market_payload(
     strict_positive_float(
         payload.get("p"), error="binance_recorder_trade_price_invalid"
     )
+    _visible_trade_quantity(market_type, payload, historical_time=historical_time)
+    strict_boolean(payload.get("m"), error="binance_recorder_trade_side_invalid")
+    return payload
+
+
+def _visible_trade_quantity(
+    market_type: str, payload: dict, *, historical_time: int | None = None
+) -> float | None:
     quantity = strict_positive_float(
         payload.get("q"), error="binance_recorder_trade_quantity_invalid"
     )
-    if market_type == FUTURES_MARKET_TYPE:
-        visible_quantity = strict_non_negative_float(
-            payload.get("nq"),
-            error="binance_recorder_trade_visible_quantity_invalid",
-        )
-        if visible_quantity > quantity:
-            raise ValueError("binance_recorder_trade_visible_quantity_invalid")
-    strict_boolean(payload.get("m"), error="binance_recorder_trade_side_invalid")
-    return payload
+    if market_type != FUTURES_MARKET_TYPE:
+        return quantity
+    # nq first appeared on 2025-12-31; absence before that date is unknown,
+    # not total quantity and not zero. A supplied nq always remains validated.
+    if (
+        "nq" not in payload
+        and historical_time is not None
+        and historical_time < 1767139200000
+    ):
+        return None
+    visible = strict_non_negative_float(
+        payload.get("nq"), error="binance_recorder_trade_visible_quantity_invalid"
+    )
+    if visible > quantity:
+        raise ValueError("binance_recorder_trade_visible_quantity_invalid")
+    return visible
 
 
 def strict_positive_float(value: object, *, error: str) -> float:

@@ -180,16 +180,14 @@ def iter_panel_frames(
                         trade.quantity,
                         error="hft_trade_quantity_invalid",
                     )
-                    visible = strict_finite_float(
-                        trade.visible_quantity,
-                        error="hft_trade_visible_quantity_invalid",
-                    )
-                    if (
-                        quantity <= 0
-                        or visible < 0
-                        or visible > quantity
-                        or not isinstance(trade.buyer_is_maker, bool)
-                    ):
+                    if trade.visible_quantity is not None:
+                        visible = strict_finite_float(
+                            trade.visible_quantity,
+                            error="hft_trade_visible_quantity_invalid",
+                        )
+                        if visible < 0 or visible > quantity:
+                            raise ValueError("hft_trade_values_invalid")
+                    if quantity <= 0 or not isinstance(trade.buyer_is_maker, bool):
                         raise ValueError("hft_trade_values_invalid")
                     if (
                         current_state is not None

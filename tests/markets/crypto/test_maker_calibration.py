@@ -653,3 +653,47 @@ def test_decisions_reuse_captured_sample_origins_without_initial_book_reads():
             model.close()
         assert policy.used_memory_bytes == 0
     assert len(reads) == 12
+
+
+def test_unknown_historical_visible_quantity_blocks_maker_without_faking_fill():
+    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        _checked_trades,
+    )
+
+    trade = replace(
+        _trade(100, price="99.5", quantity="2", maker_buyer=True),
+        visible_quantity=None,
+    )
+    # Shared trade iteration remains usable for total-volume research.
+    assert list(_checked_trades([trade])) == [trade]
+    with runtime_resource_policy_scope() as policy:
+        model = calibration_from_paths([([_state(0)], [trade])], [0.0], policy)
+        try:
+            order = _maker_new_order(
+                0,
+                "buy",
+                1.0,
+                _state(0),
+                _quote(0, book_segment_id="s1"),
+                _maker_config(),
+                {"s1": (0, 1000000000)},
+                {"trade-connection-1": (0, 1000000000)},
+            )
+            with pytest.raises(
+                PortfolioTargetBlocked, match="visible_quantity_unknown"
+            ):
+                model.select(
+                    state=_state(0),
+                    decision_ns=0,
+                    new_order=order,
+                    active_order=None,
+                    commands=(),
+                    lifetime_ns=500000000,
+                    prediction=0.0,
+                    fee_bps=0.0,
+                    funding=[],
+                )
+        finally:
+            model.close()
+        assert policy.used_memory_bytes == 0

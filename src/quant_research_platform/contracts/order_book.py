@@ -68,7 +68,7 @@ class TradeEvent:
     price_unit: str
     price_index: int
     quantity: float
-    visible_quantity: float
+    visible_quantity: float | None
     buyer_is_maker: bool
 
     @property

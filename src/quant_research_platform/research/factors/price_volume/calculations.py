@@ -171,7 +171,7 @@ def _calculate_values(
         valid &= (np.ptp(matrix, axis=1) != 0) & (
             np.ptp(extra[extra_names[0]], axis=1) != 0
         )
-    if factor == "kurtosis_60d":
+    if factor in {"skewness_60d", "kurtosis_60d"}:
         valid &= np.min(matrix, axis=1) != np.max(matrix, axis=1)
     if shift:
         valid &= np.isfinite(source[first:stop])
@@ -181,7 +181,11 @@ def _calculate_values(
         "amount_volatility_20d",
         "turnover_volatility_20d",
     }:
-        result = np.std(current, axis=1, ddof=1)
+        result = np.where(
+            np.min(current, axis=1) == np.max(current, axis=1),
+            0.0,
+            np.std(current, axis=1, ddof=1),
+        )
     elif factor.startswith("downside_volatility_"):
         result = np.sqrt(np.mean(np.minimum(current, 0.0) ** 2, axis=1))
     elif factor == "upside_volatility_20d":

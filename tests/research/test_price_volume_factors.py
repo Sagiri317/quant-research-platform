@@ -272,3 +272,56 @@ def test_price_volume_skew_preserves_native_single_window_rounding():
     )
     pd.testing.assert_series_equal(actual["skewness_60d"], expected, check_exact=True)
     pd.testing.assert_frame_equal(panel, original, check_exact=True)
+
+
+@pytest.mark.parametrize("value", [0.0, 0.01, -0.125])
+@pytest.mark.parametrize("count", [1, 59, 60, 61])
+def test_standardized_moments_require_nonzero_variance(value, count, tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=count),
+            "period_return": value,
+        }
+    )
+    names = ("skewness_60d", "kurtosis_60d", "volatility_60d")
+    result = calculate_price_volume_factors(panel, factor_columns=names)
+    # Both standardized moments divide by a power of the zero second moment.
+    assert result.skewness_60d.isna().all()
+    assert result.kurtosis_60d.isna().all()
+    assert result.volatility_60d.iloc[:59].isna().all()
+    if count >= 60:
+        assert result.volatility_60d.iloc[-1] == 0.0
+    path = tmp_path / "moments.parquet"
+    pq.write_table(pa.Table.from_pandas(result, preserve_index=False), path)
+    restored = pq.read_table(path).to_pandas()
+    pd.testing.assert_frame_equal(restored, result)
+
+
+@pytest.mark.parametrize("missing", [None, 0, "all"])
+@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10])
+def test_skewness_independent_central_moment_oracle(missing, scale):
+    from fractions import Fraction
+
+    values = [-scale] * 40 + [2 * scale] * 20
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=60),
+            "period_return": values,
+        }
+    )
+    if missing == "all":
+        panel["period_return"] = np.nan
+    elif missing is not None:
+        panel.loc[missing, "period_return"] = np.nan
+    result = calculate_price_volume_factors(panel, factor_columns=("skewness_60d",))
+    if missing is not None:
+        assert result.skewness_60d.isna().all()
+    else:
+        # Exact mean=0, m2=2, m3=2; adjusted Fisher-Pearson sample skew.
+        expected = (60 * 59) ** 0.5 / 58 * float(Fraction(2)) / 2**1.5
+        assert result.skewness_60d.iloc[-1] == pytest.approx(expected, rel=1e-14)

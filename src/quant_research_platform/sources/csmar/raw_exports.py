@@ -782,9 +782,11 @@ def _require_index_info_reconstruction_headroom(
     resource_policy: RuntimeResourcePolicy,
     payload_lease: MemoryLease | None = None,
 ) -> None:
-    live_source_span_bytes = source_bytes
-    string_builder_span_bytes = result_bytes
-    returned_string_span_bytes = result_bytes
+    # UTF-8 byte lengths bound codepoint counts, not Python Unicode storage.
+    # StringIO's mutable builder uses UCS4; its getvalue may coexist with it.
+    live_source_span_bytes = 4 * source_bytes
+    string_builder_span_bytes = 4 * result_bytes
+    returned_string_span_bytes = 4 * result_bytes
     if payload_lease is None:
         available_bytes = resource_policy.operation_headroom_bytes
     elif payload_lease.active:
@@ -869,10 +871,12 @@ def iter_private_export_chunks_with_policy(
                 payload_lease_ref[0] = lease
                 pending: list[object] = []
                 pending_bytes = 0
+                pending_source_bytes = 0
                 header: list[str] | None = None
                 while len(pending) < chunksize:
                     if pending and (
                         pending_bytes
+                        + 2 * pending_source_bytes
                         + _raw_frame_owner_known_bytes(pending, header)
                         + _CSV_RECORD_LEASE_BOUND_BYTES
                         + 64 * 1024
@@ -886,9 +890,11 @@ def iter_private_export_chunks_with_policy(
                     if header is None:
                         header = next_header
                     pending.append(row)
-                    pending_bytes += row_bytes
+                    pending_bytes += sum(map(sys.getsizeof, row))
+                    pending_source_bytes += row_bytes
                     if (
                         pending_bytes
+                        + 2 * pending_source_bytes
                         + _raw_frame_owner_known_bytes(pending, header)
                         + 64 * 1024
                         > producer_bound
@@ -905,6 +911,7 @@ def iter_private_export_chunks_with_policy(
                     )
                 _require_raw_conversion_headroom(
                     logical_bytes=pending_bytes
+                    + 2 * pending_source_bytes
                     + _raw_frame_owner_known_bytes(pending, header),
                     resource_policy=resource_policy,
                     payload_lease=lease,

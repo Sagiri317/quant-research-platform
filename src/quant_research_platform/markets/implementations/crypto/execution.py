@@ -1284,6 +1284,8 @@ def _maker_join(order, state, observed_coverage, trade_coverage):
 
 
 def _maker_trade_fill(order, trade):
+    if trade.visible_quantity is None:
+        raise PortfolioTargetBlocked("hft_trade_visible_quantity_unknown")
     if trade.visible_quantity <= 0:
         return 0.0, "zero_visible_trade_quantity"
     if trade.observation_id != order.trade_observation_id:
@@ -1927,12 +1929,13 @@ def _checked_trades(
                 raise ValueError("hft_execution_time_non_monotonic")
             previous = key
             _positive(trade.quantity, "hft_execution_trade_quantity_invalid")
-            visible = strict_finite_float(
-                trade.visible_quantity,
-                error="hft_execution_trade_visible_quantity_invalid",
-            )
-            if visible < 0 or visible > trade.quantity:
-                raise ValueError("hft_execution_trade_visible_quantity_invalid")
+            if trade.visible_quantity is not None:
+                visible = strict_finite_float(
+                    trade.visible_quantity,
+                    error="hft_execution_trade_visible_quantity_invalid",
+                )
+                if visible < 0 or visible > trade.quantity:
+                    raise ValueError("hft_execution_trade_visible_quantity_invalid")
             if not isinstance(trade.buyer_is_maker, bool):
                 raise ValueError("hft_execution_trade_side_invalid")
             yield trade

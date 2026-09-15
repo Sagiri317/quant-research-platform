@@ -549,7 +549,9 @@ momentum_252_20 = P_{t-20} / P_{t-252} - 1
 
 `sqrt(mean(min(r, 0)^2))`
 
-`skewness_60d` 使用 bias=False。
+`skewness_60d` 使用 bias=False；常值窗口的标准化三阶矩未定义，保持 NaN，
+不采用库函数返回的伪零值。完整窗口、bias=False 及原有非退化数值核不变；
+常值收益的样本波动率为合法的零。
 
 `drawdown_60d` 使用复权收盘价从峰值到谷值的最小回撤。
 

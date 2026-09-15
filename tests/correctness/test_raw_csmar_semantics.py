@@ -1740,3 +1740,116 @@ def test_index_membership_identity_uses_normalized_provider_types(kind):
     else:
         assert actual.security_type.iloc[0] == 1
         assert pd.api.types.is_integer_dtype(actual.security_type.dtype)
+
+
+@pytest.mark.parametrize("size", [46080, 460800])
+@pytest.mark.parametrize("suffix", ["", "中", "中😀"])
+@pytest.mark.parametrize("finish", ["normal", "early", "invalid"])
+@pytest.mark.parametrize("quoted", [False, True])
+def test_csv_unicode_fast_heap_is_covered_by_live_leases(
+    tmp_path, monkeypatch, size, suffix, finish, quoted
+):
+    import tempfile
+    import tracemalloc
+
+    import psutil
+
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    expected = ["a" * size + suffix, "b" * size + suffix]
+    encoded_fields = [f'"{value}"' for value in expected] if quoted else expected
+    payload = (",".join(encoded_fields) + "\n").encode()
+    if finish == "invalid":
+        payload = payload[:-1] + b"\xff\n"
+    path = tmp_path / "unicode.csv"
+    path.write_bytes(payload)
+    process = psutil.Process()
+    descriptors = (
+        process.num_fds if hasattr(process, "num_fds") else process.num_handles
+    )
+    fd_before, threads_before = descriptors(), process.num_threads()
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2)
+    ) as policy:
+        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+        tracemalloc.start()
+        try:
+            if finish == "invalid":
+                with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
+                    next(records)
+            else:
+                record, raw_bytes = next(records)
+                assert raw_bytes == len(payload)
+                actual = record.materialize(max_fields=160)
+                peak = tracemalloc.get_traced_memory()[1]
+                # Input/expected are allocated before tracing. RSS is deliberately
+                # not substituted for the Python heap covered by these owners.
+                assert peak <= policy.used_memory_bytes
+                assert actual == expected
+                if finish == "normal":
+                    del actual, record
+                    with pytest.raises(StopIteration):
+                        next(records)
+        finally:
+            records.close()
+            tracemalloc.stop()
+        assert policy.used_memory_bytes == 0
+    assert descriptors() == fd_before
+    assert process.num_threads() == threads_before
+    assert list(scratch.iterdir()) == []
+
+
+def test_csv_unicode_insufficient_budget_fails_before_decode_and_releases(tmp_path):
+    from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    path = tmp_path / "unicode.csv"
+    path.write_text("a" * 460800 + "😀," + "b" * 460800 + "😀\n", encoding="utf-8")
+    with runtime_resource_policy_scope(
+        capture_test_policy(
+            available_memory_bytes=64 * 1024**2, explicit_cap_bytes=4 * 1024**2
+        )
+    ) as policy:
+        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+        try:
+            with pytest.raises(DatasetReadCapacityExceeded):
+                next(records)
+        finally:
+            records.close()
+        assert policy.used_memory_bytes == 0
+
+
+def test_expired_csv_records_do_not_retain_previous_unicode_payload(tmp_path):
+    import tracemalloc
+
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    text = "a" * 460800 + "😀," + "b" * 460800 + "😀\n"
+    path = tmp_path / "records.csv"
+    path.write_text(text * 3, encoding="utf-8")
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2)
+    ) as policy:
+        rows = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+        expired = []
+        tracemalloc.start()
+        try:
+            for record, _ in rows:
+                assert tracemalloc.get_traced_memory()[1] <= policy.used_memory_bytes
+                fields = record.iter_fields()
+                next(fields)
+                expired.append((record, fields))
+            assert tracemalloc.get_traced_memory()[0] < 128 * 1024
+            for record, fields in expired:
+                with pytest.raises(RuntimeError, match="csmar_csv_record_expired"):
+                    record.materialize()
+                with pytest.raises(RuntimeError, match="csmar_csv_record_expired"):
+                    next(fields)
+        finally:
+            rows.close()
+            tracemalloc.stop()
+        assert policy.used_memory_bytes == 0

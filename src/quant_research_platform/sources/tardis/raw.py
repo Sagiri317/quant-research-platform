@@ -203,6 +203,8 @@ def iter_native_slice(
                             "depth" if channel == "depth" else "agg_trades",
                             parts[0].upper(),
                             native,
+                            source_schema=SCHEMA_ID,
+                            observed_time_ns=observed,
                         )
                     elif channel == "depthSnapshot":
                         if (

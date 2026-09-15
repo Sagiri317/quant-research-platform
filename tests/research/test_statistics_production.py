@@ -820,3 +820,34 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         read_statistics_artifact(
             wrong_root, expected_identity=envelope.instance_identity
         )
+
+
+@pytest.mark.parametrize(
+    "values", [[], [0.1], [np.nan], [np.nan, np.nan], [0.1, np.nan]]
+)
+def test_sample_risk_undefined_inputs_do_not_emit_finite_values_or_warnings(values):
+    import warnings
+
+    from quant_research_platform.research.statistics import return_standard_deviation
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = return_standard_deviation(values)
+    assert np.isnan(result)
+
+
+@pytest.mark.parametrize("value", [0.0, 0.01, -0.125])
+def test_constant_risk_and_sharpe_have_distinct_definition_status(value):
+    from quant_research_platform.research.statistics import (
+        probabilistic_and_deflated_sharpe,
+        return_standard_deviation,
+    )
+
+    # Exact constant observations have variance zero; Sharpe divides by that zero.
+    assert return_standard_deviation([value] * 60) == 0
+    with pytest.raises(ValueError, match="sharpe_zero_variance"):
+        probabilistic_and_deflated_sharpe(
+            [value] * 60, benchmark_sharpe=0.0, trial_sharpes=[0.1, 0.2]
+        )
+    # Hand-calculated sample variance for [-1, 0, 1] is 1.
+    assert return_standard_deviation([-1.0, 0.0, 1.0]) == 1.0

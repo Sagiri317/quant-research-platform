@@ -49,6 +49,7 @@ from quant_research_platform.sources.binance.ids import (
     WS_STREAM_SUFFIXES,
 )
 from quant_research_platform.sources.binance.validation import (
+    _visible_trade_quantity,
     strict_boolean,
     strict_iso_timestamp,
     strict_non_negative_float,
@@ -2141,16 +2142,24 @@ def iter_agg_trades(
                 payload.get("q"),
                 error="binance_replay_trade_quantity_invalid",
             )
-            visible_quantity = (
-                strict_non_negative_float(
-                    payload.get("nq"),
-                    error="binance_replay_trade_visible_quantity_invalid",
-                )
-                if market_type == FUTURES_MARKET_TYPE
-                else quantity
+            schema = run.source_identity["schema_id"]
+            validate_market_payload(
+                market_type,
+                "agg_trades",
+                symbol,
+                payload,
+                source_schema=schema,
+                observed_time_ns=observed_time,
             )
-            if visible_quantity > quantity:
-                raise ValueError("binance_replay_trade_visible_quantity_invalid")
+            visible_quantity = _visible_trade_quantity(
+                market_type,
+                payload,
+                historical_time=(
+                    observed_time // 1_000_000
+                    if schema == "qrp-tardis-native-day"
+                    else None
+                ),
+            )
             trade = TradeEvent(
                 source_sequence=record["source_sequence"],
                 event_time_ms=event_time,

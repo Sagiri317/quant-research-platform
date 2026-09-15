@@ -533,6 +533,10 @@ def produce_maker_calibration(
 
                 def observe_event(*, event_id, event, fold_id=fold["fold_id"]):
                     if isinstance(event, TradeEvent):
+                        if event.visible_quantity is None:
+                            raise PortfolioTargetBlocked(
+                                "hft_trade_visible_quantity_unknown"
+                            )
                         kind, context = "trade", event.observation_id
                         rows = (
                             (

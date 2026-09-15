@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.runtime.resources import (
     MIB,
     MemoryLease,
@@ -149,40 +150,48 @@ class BoundedCsvRecord:
         source_bytes: int,
         canonical_bytes: int,
         decoded_fields: list[str] | None = None,
-        largest_field_bytes: int = 0,
+        decoded_output_bytes: int = 0,
+        decoder_workspace_bytes: int = 0,
     ) -> None:
         self._owner = owner
         self._generation = generation
         self.field_count = field_count
         self.source_bytes = source_bytes
         self.canonical_bytes = canonical_bytes
-        self._decoded_fields = decoded_fields
-        self._largest_field_bytes = largest_field_bytes
+        self._owner._decoded_fields = decoded_fields
+        self._decoded_output_bytes = decoded_output_bytes
+        self._decoder_workspace_bytes = decoder_workspace_bytes
 
     def iter_fields(self) -> Iterator[str]:
         self._require_live()
-        if self._decoded_fields is not None:
-            yield from self._decoded_fields
+        if self._owner._decoded_fields is not None:
+            for position in range(self.field_count):
+                self._require_live()
+                yield self._owner._decoded_fields[position]
             return
         spool = self._owner._spool
         if spool is None:
             raise RuntimeError("csmar_csv_record_expired")
         spool.seek(0)
         for _ in range(self.field_count):
+            self._require_live()
             encoded_length = spool.read(4)
             if len(encoded_length) != 4:
                 raise ValueError("malformed_csmar_csv_row")
             length = struct.unpack(">I", encoded_length)[0]
             self._require_materialization_capacity(
-                current_encoded_field_bytes=length,
-                total_decoded_output_bytes=length,
+                current_encoded_field_bytes=self._decoder_workspace_bytes,
+                total_decoded_output_bytes=0,
                 decoded_list_slot_bytes=0,
             )
             payload = spool.read(length)
             if len(payload) != length:
                 raise ValueError("malformed_csmar_csv_row")
             try:
-                yield payload.decode("utf-8")
+                decoded = payload.decode("utf-8")
+                payload = None
+                yield decoded
+                decoded = None
             except UnicodeDecodeError as exc:
                 raise ValueError("malformed_csmar_csv_row") from exc
 
@@ -192,22 +201,25 @@ class BoundedCsvRecord:
         max_fields: int | None = None,
         field_count_error: str = "malformed_csmar_csv_row",
     ) -> list[str]:
+        self._require_live()
         if max_fields is not None and self.field_count > max_fields:
             raise ValueError(field_count_error)
-        if self._decoded_fields is not None:
+        if self._owner._decoded_fields is not None:
             original_decoded_list_slot_bytes = self.field_count * struct.calcsize("P")
             copied_decoded_list_slot_bytes = self.field_count * struct.calcsize("P")
             self._require_materialization_capacity(
                 current_encoded_field_bytes=0,
-                total_decoded_output_bytes=self.canonical_bytes,
+                total_decoded_output_bytes=sum(
+                    map(sys.getsizeof, self._owner._decoded_fields)
+                ),
                 decoded_list_slot_bytes=(
                     original_decoded_list_slot_bytes + copied_decoded_list_slot_bytes
                 ),
             )
-            return self._decoded_fields.copy()
+            return self._owner._decoded_fields.copy()
         self._require_materialization_capacity(
-            current_encoded_field_bytes=self._largest_field_bytes,
-            total_decoded_output_bytes=self.canonical_bytes,
+            current_encoded_field_bytes=self._decoder_workspace_bytes,
+            total_decoded_output_bytes=self._decoded_output_bytes,
             decoded_list_slot_bytes=self.field_count * struct.calcsize("P"),
         )
         return list(self.iter_fields())
@@ -227,16 +239,18 @@ class BoundedCsvRecord:
         )
         parser_lease = owner._parser_lease
         lease = owner._record_lease
+        required = (
+            current_encoded_field_bytes
+            + total_decoded_output_bytes
+            + decoded_list_slot_bytes
+        )
+        owner._admit_record_bytes(required)
         if (
             parser_lease is None
             or not parser_lease.active
             or materialization_control_span_bytes > parser_lease.reserved_bytes
             or lease is None
             or not lease.active
-            or current_encoded_field_bytes
-            + total_decoded_output_bytes
-            + decoded_list_slot_bytes
-            > lease.reserved_bytes
         ):
             raise DatasetReadCapacityExceeded(
                 "csmar_raw_working_set_exceeds_task_memory_budget"
@@ -288,6 +302,7 @@ class _BoundedCsvRecords:
             self._resource_policy = resource_policy
             self._payload_lease_ref = payload_lease_ref
             self._record_lease: MemoryLease | None = None
+            self._decoded_fields: list[str] | None = None
             self._parser_lease: MemoryLease | None = None
             self._owns_record_lease = payload_lease_ref is None
             read_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
@@ -298,7 +313,9 @@ class _BoundedCsvRecords:
             self._spool_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
             self._validation_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
             self._validation_input_copy_span_bytes = io.DEFAULT_BUFFER_SIZE
-            self._validation_decoded_output_span_bytes = io.DEFAULT_BUFFER_SIZE
+            # UTF-8 validation can hold both the widened UCS4 allocation and
+            # its resized result, even though the decoded chunk is discarded.
+            self._validation_decoded_output_span_bytes = 8 * io.DEFAULT_BUFFER_SIZE
             self._field_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
             self._slow_control_span_bytes = (
                 self._source_buffer_span_bytes
@@ -355,9 +372,14 @@ class _BoundedCsvRecords:
             self._spool.truncate(0)
             return self._parse_record()
         except UnicodeDecodeError as exc:
+            clear_exception_frames(exc)
             raise ValueError("malformed_csmar_csv_row") from exc
+        except BaseException as exc:
+            clear_exception_frames(exc)
+            raise
 
     def _start_record(self) -> None:
+        self._decoded_fields = None
         if self._parser_lease is not None:
             _close_lease_preserving_primary(
                 self._parser_lease,
@@ -394,7 +416,7 @@ class _BoundedCsvRecords:
         available = self._resource_policy.operation_headroom_bytes
         parser_bound = min(_CSV_PARSER_WORKSPACE_BOUND_BYTES, available)
         record_bound = min(
-            _CSV_RECORD_LEASE_BOUND_BYTES,
+            2 * self._limit_bytes + 1024,
             max(0, available - parser_bound),
         )
         try:
@@ -458,6 +480,7 @@ class _BoundedCsvRecords:
         if not line:
             raise StopIteration
         source_bytes = len(line)
+        ascii_record = line.isascii()
         if source_bytes > self._limit_bytes:
             raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
         comma_count = line.count(b",")
@@ -484,33 +507,68 @@ class _BoundedCsvRecords:
         content_bytes = content_end - content_start
         field_count = 0 if content_bytes == 0 else comma_count + 1
         canonical_bytes = content_bytes - max(0, field_count - 1)
-        source_line_span_bytes = source_bytes
-        content_span_bytes = (
-            content_bytes if content_start != 0 or content_end != source_bytes else 0
-        )
-        decoded_record_source_span_bytes = content_bytes
-        decoded_fields_source_span_bytes = canonical_bytes
-        decoded_list_slot_span_bytes = field_count * struct.calcsize("P")
-        if (
-            lease is None
-            or source_line_span_bytes
-            + content_span_bytes
-            + decoded_record_source_span_bytes
-            + decoded_fields_source_span_bytes
-            + decoded_list_slot_span_bytes
-            > lease.reserved_bytes
-        ):
+        # Decode byte spans individually, without a whole Unicode record copy.
+        # CPython may widen its UTF-8 output and resize it before returning.
+        fields: list[str] = []
+        retained = sys.getsizeof(fields) + field_count * (struct.calcsize("P") + 16)
+        start = content_start
+        with memoryview(line) as view:
+            for _ in range(field_count):
+                end = line.find(b",", start, content_end)
+                if end == -1:
+                    end = content_end
+                field = view[start:end]
+                characters = len(field)
+                width = 1
+                for byte in () if ascii_record else field:
+                    if 128 <= byte < 192:
+                        characters -= 1
+                    elif byte >= 240:
+                        width = 4
+                    elif byte >= 196:
+                        width = max(width, 2)
+                output_bytes = 80 + width * (characters + 1)
+                decoder_bytes = (
+                    max(
+                        (1 + width) * len(field),
+                        width * len(field) + output_bytes,
+                    )
+                    + 256
+                )
+                required = sys.getsizeof(line) + retained + decoder_bytes
+                self._admit_record_bytes(required)
+                fields.append(codecs.decode(field, "utf-8"))
+                retained += sys.getsizeof(fields[-1])
+                field.release()
+                start = end + 1
+        self._first_record = False
+        return fields, source_bytes, canonical_bytes
+
+    def _admit_record_bytes(self, required: int) -> None:
+        lease, parser = self._record_lease, self._parser_lease
+        if lease is None or not lease.active or parser is None or not parser.active:
             raise DatasetReadCapacityExceeded(
                 "csmar_raw_working_set_exceeds_task_memory_budget"
             )
-        self._first_record = False
-        content = line[content_start:content_end]
         try:
-            decoded = content.decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise ValueError("malformed_csmar_csv_row") from exc
-        fields = [] if not decoded else decoded.split(",")
-        return fields, source_bytes, canonical_bytes
+            if self._owns_record_lease:
+                if required > lease.reserved_bytes:
+                    lease.grow(required - lease.reserved_bytes)
+            else:
+                # The producer reserves the ordinary record span between batches.
+                # Wider Unicode overlap belongs to this parser, not to its already
+                # occupied batch lease; release it when advancing the record.
+                overlap = max(
+                    0,
+                    required - min(lease.reserved_bytes, _CSV_RECORD_LEASE_BOUND_BYTES),
+                )
+                needed = _CSV_PARSER_WORKSPACE_BOUND_BYTES + overlap
+                if needed > parser.reserved_bytes:
+                    parser.grow(needed - parser.reserved_bytes)
+        except MemoryError:
+            raise DatasetReadCapacityExceeded(
+                "csmar_raw_working_set_exceeds_task_memory_budget"
+            ) from None
 
     def _parse_record(self) -> BoundedCsvRecord:
         state = self._START_FIELD
@@ -519,7 +577,10 @@ class _BoundedCsvRecords:
         field_count = 0
         field_prefix = 0
         field_bytes = 0
-        largest_field_bytes = 0
+        decoded_output_bytes = 0
+        decoder_workspace_bytes = 0
+        field_characters = 0
+        field_width = 1
         record_has_content = False
         decoder = codecs.getincrementaldecoder("utf-8")("strict")
         validation = bytearray()
@@ -540,7 +601,13 @@ class _BoundedCsvRecords:
             validate(byte)
 
         def write_field(byte: int) -> None:
-            nonlocal field_bytes, canonical_bytes
+            nonlocal field_bytes, canonical_bytes, field_characters, field_width
+            if not 128 <= byte < 192:
+                field_characters += 1
+            if byte >= 240:
+                field_width = 4
+            elif byte >= 196:
+                field_width = max(field_width, 2)
             field_buffer.append(byte)
             if len(field_buffer) == io.DEFAULT_BUFFER_SIZE:
                 self._require_capacity(self._slow_control_span_bytes)
@@ -550,7 +617,21 @@ class _BoundedCsvRecords:
             canonical_bytes += 1
 
         def finish_field() -> None:
-            nonlocal field_count, field_prefix, field_bytes, largest_field_bytes
+            nonlocal field_count, field_prefix, field_bytes
+            nonlocal decoded_output_bytes, decoder_workspace_bytes
+            nonlocal field_characters, field_width
+            output_bytes = 80 + field_width * (field_characters + 1)
+            decoded_output_bytes += output_bytes
+            decoder_workspace_bytes = max(
+                decoder_workspace_bytes,
+                field_bytes
+                + max(
+                    (1 + field_width) * field_bytes,
+                    field_width * field_bytes + output_bytes,
+                )
+                + 256,
+            )
+            field_characters, field_width = 0, 1
             if field_buffer:
                 self._require_capacity(self._slow_control_span_bytes)
                 self._spool.write(field_buffer)
@@ -561,7 +642,6 @@ class _BoundedCsvRecords:
             self._spool.write(struct.pack(">I", field_bytes))
             self._spool.seek(end)
             field_count += 1
-            largest_field_bytes = max(largest_field_bytes, field_bytes)
             field_prefix = end
             self._spool.write(b"\0\0\0\0")
             field_bytes = 0
@@ -653,20 +733,14 @@ class _BoundedCsvRecords:
                 state = self._IN_UNQUOTED
 
         self._spool.flush()
-        decoded_field_input_span_bytes = largest_field_bytes
-        decoded_field_output_source_span_bytes = largest_field_bytes
-        self._require_capacity(
-            self._slow_control_span_bytes,
-            decoded_field_input_span_bytes,
-            decoded_field_output_source_span_bytes,
-        )
         return BoundedCsvRecord(
             self,
             generation=self.generation,
             field_count=field_count,
             source_bytes=record_bytes,
             canonical_bytes=canonical_bytes,
-            largest_field_bytes=largest_field_bytes,
+            decoded_output_bytes=decoded_output_bytes,
+            decoder_workspace_bytes=decoder_workspace_bytes,
         )
 
     def _take_byte(self) -> int | None:
@@ -711,6 +785,7 @@ class _BoundedCsvRecords:
         primary = sys.exception()
         failure: BaseException | None = None
         self.generation += 1
+        self._decoded_fields = None
         self._buffer = b""
         self._buffer_position = 0
         self._pushback.clear()

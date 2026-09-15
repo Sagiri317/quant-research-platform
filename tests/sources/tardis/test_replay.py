@@ -120,7 +120,10 @@ def test_late_snapshot_has_no_early_book_or_coverage(tmp_path, bridge):
         assert policy.used_memory_bytes == 0
 
 
-def test_vendor_clock_panel_persists_nullable_monotonic_and_native_identity(tmp_path):
+@pytest.mark.parametrize("date", ["2025-01-01", "2026-09-01"])
+def test_vendor_clock_panel_persists_nullable_monotonic_and_native_identity(
+    tmp_path, date
+):
     import pyarrow as pa
     import pyarrow.parquet as pq
 
@@ -168,13 +171,29 @@ def test_vendor_clock_panel_persists_nullable_monotonic_and_native_identity(tmp_
         + _delta(4, 103, 103, 102)
         + trade(4, 3)
     )
+    if date != "2026-09-01":
+        original_midnight = midnight
+        midnight = pd.Timestamp(date, tz="UTC").value // 1_000_000
+        converted = []
+        for line in native.splitlines():
+            timestamp, body = line.decode().split(" ", 1)
+            value = json.loads(body)
+            for key in ("st", "ps", "nq"):
+                value["data"].pop(key, None)
+            for key in ("E", "T"):
+                if key in value["data"]:
+                    value["data"][key] += midnight - original_midnight
+            converted.append(
+                timestamp.replace("2026-09-01", date) + " " + json.dumps(value) + "\n"
+            )
+        native = "".join(converted).encode()
     slices = _slices(tmp_path / "native", native)
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
         import_day(
             tmp_path / "published",
-            date="2026-09-01",
+            date=date,
             slices=slices,
             byte_budget=1024**2,
             resource_policy=policy,
@@ -200,7 +219,7 @@ def test_vendor_clock_panel_persists_nullable_monotonic_and_native_identity(tmp_
             )
             panel = pd.concat(frames, ignore_index=True)
             assert not panel.empty
-            assert panel.timestamp.min() >= pd.Timestamp("2026-09-01T00:00:03")
+            assert panel.timestamp.min() >= pd.Timestamp(date + "T00:00:03")
             assert panel.book_receive_monotonic_ns.isna().all()
             assert str(panel.book_receive_monotonic_ns.dtype) == "Int64"
             assert set(panel.book_source_sequence) <= {4, 6}
@@ -299,4 +318,124 @@ def test_execution_end_stops_inside_invalid_book_segment(tmp_path, monkeypatch):
                 if isinstance(event, OwnedValue):
                     event.release(owner="tardis execution bound test")
             assert seen == [(0, number) for number in range(1, 7)]
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "date,extensions,expected_visible",
+    [
+        ("2025-01-01", {}, None),
+        ("2025-12-30", {}, None),
+        ("2025-12-31", {"nq": "0.25"}, 0.25),
+        ("2026-06-30", {"nq": "0.25", "st": 1}, 0.25),
+        ("2026-09-01", {"nq": "0.25", "st": 1}, 0.25),
+    ],
+)
+def test_native_schema_full_import_and_shared_trade_replay(
+    tmp_path, date, extensions, expected_visible
+):
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+
+    midnight = pd.Timestamp(date, tz="UTC")
+    payload = {
+        "e": "aggTrade",
+        "E": midnight.value // 1_000_000 + 1000,
+        "T": midnight.value // 1_000_000 + 1000,
+        "s": "BTCUSDT",
+        "a": 1,
+        "f": 1,
+        "l": 2,
+        "p": "100",
+        "q": "2",
+        "m": True,
+        **extensions,
+    }
+    snapshot = {
+        "stream": "btcusdt@depthSnapshot",
+        "generated": True,
+        "data": {"lastUpdateId": 1, "bids": [["100", "2"]], "asks": [["101", "2"]]},
+    }
+    trade = {"stream": "btcusdt@aggTrade", "data": payload}
+    native = (
+        date
+        + "T00:00:00Z "
+        + json.dumps(snapshot)
+        + "\n"
+        + date
+        + "T00:00:01Z "
+        + json.dumps(trade)
+        + "\n"
+    ).encode()
+    slices = _slices(tmp_path / "native", native)
+    original = slices[0].read_bytes()
+    published = tmp_path / "published"
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2)
+    ) as policy:
+        result = import_day(
+            published,
+            date=date,
+            slices=slices,
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        assert len(result["files"]) == 144
+        assert (published / result["files"][0]["path"]).read_bytes() == original
+        with open_market_source(published, resource_policy=policy) as source:
+            actual = list(
+                iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT")
+            )
+            assert len(actual) == 1
+            assert actual[0].quantity == 2.0
+            assert actual[0].visible_quantity == expected_visible
+            assert actual[0].receive_monotonic_ns is None
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "date,changes",
+    [
+        ("2025-12-31", {}),
+        ("2026-06-30", {"nq": "1"}),
+        ("2025-01-01", {"nq": None}),
+        ("2025-01-01", {"nq": "3"}),
+        ("2025-01-01", {"st": 2}),
+        ("2025-01-01", {"st": True}),
+        ("2025-01-01", {"q": "0"}),
+    ],
+)
+def test_native_schema_invalid_fields_fail_atomic_full_import(tmp_path, date, changes):
+    payload = {
+        "e": "aggTrade",
+        "E": pd.Timestamp(date, tz="UTC").value // 1_000_000,
+        "T": pd.Timestamp(date, tz="UTC").value // 1_000_000,
+        "s": "BTCUSDT",
+        "a": 1,
+        "f": 1,
+        "l": 1,
+        "p": "100",
+        "q": "2",
+        "m": False,
+        **changes,
+    }
+    native = (
+        date
+        + "T00:00:00Z "
+        + json.dumps({"stream": "btcusdt@aggTrade", "data": payload})
+        + "\n"
+    ).encode()
+    slices = _slices(tmp_path / "native", native)
+    published = tmp_path / "published"
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2)
+    ) as policy:
+        with pytest.raises(ValueError):
+            import_day(
+                published,
+                date=date,
+                slices=slices,
+                byte_budget=1024**2,
+                resource_policy=policy,
+            )
+        assert not published.exists()
         assert policy.used_memory_bytes == 0

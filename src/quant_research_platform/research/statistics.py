@@ -904,6 +904,8 @@ def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.n
     """
     data = np.asarray(values, dtype="float64")
     errors = _return_roundoff(data, roundoff)
+    if len(data) < 2:
+        return np.full(data.shape[1:], np.nan)
     unresolved = np.max(data - errors, axis=0) <= np.min(data + errors, axis=0)
     return np.where(unresolved & (len(data) > 1), 0.0, np.std(data, axis=0, ddof=1))
 
