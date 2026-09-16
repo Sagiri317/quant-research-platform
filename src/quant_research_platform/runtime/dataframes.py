@@ -243,6 +243,7 @@ def _iter_complete_time_sized_frames_impl(
                         )
                         frame = frame.sort_values(
                             timestamp_column,
+                            key=lambda _column: timestamps,
                             kind="mergesort",
                             ignore_index=True,
                         )
@@ -399,7 +400,7 @@ def _time_chunk_operation_bytes(
     *,
     timestamp_column: str,
 ) -> int:
-    return int(frame[timestamp_column].memory_usage(index=False, deep=True)) + 40 * len(
+    return int(frame[timestamp_column].memory_usage(index=False, deep=True)) + 64 * len(
         frame
     )
 

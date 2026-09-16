@@ -703,14 +703,14 @@ class CanonicalIdentityWriter:
 def _compare_identity_ranges(
     buffer: bytearray, left_start: int, left_end: int, right_start: int, right_end: int
 ) -> int:
-    left = memoryview(buffer)[left_start:left_end]
-    right = memoryview(buffer)[right_start:right_end]
-    for left_byte, right_byte in zip(left, right, strict=False):
+    left_len = left_end - left_start
+    right_len = right_end - right_start
+    for offset in range(min(left_len, right_len)):
+        left_byte = buffer[left_start + offset]
+        right_byte = buffer[right_start + offset]
         if left_byte != right_byte:
             return -1 if left_byte < right_byte else 1
-    return (left_end - left_start > right_end - right_start) - (
-        left_end - left_start < right_end - right_start
-    )
+    return (left_len > right_len) - (left_len < right_len)
 
 
 def _heap_sort_identity_ranges(

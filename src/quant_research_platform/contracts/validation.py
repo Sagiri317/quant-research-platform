@@ -139,7 +139,7 @@ def strict_timestamp_series(
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
-    if any(
+    if not pd.api.types.is_datetime64_any_dtype(series.dtype) and any(
         not is_null and not _is_supported_timestamp_scalar(value)
         for value, is_null in zip(
             series.tolist(),
@@ -182,7 +182,7 @@ def strict_timestamp_series(
         local_naive = parsed.dt.tz_localize(None)
         utc_naive = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
         offsets = local_naive - utc_naive
-        if offsets.dropna().nunique() > 1:
+        if offsets.min() < offsets.max():
             raise ValueError(error)
         parsed = utc_naive
     try:
@@ -330,8 +330,10 @@ def strict_integer_series(
 def strict_real_numeric_series(values: pd.Series, *, error: str) -> pd.Series:
     """Parse real observations, retaining missing and infinite values for the caller."""
     series = pd.Series(values, copy=True)
-    if pd.api.types.is_bool_dtype(series.dtype) or pd.api.types.is_complex_dtype(
-        series.dtype
+    if (
+        pd.api.types.is_bool_dtype(series.dtype)
+        or pd.api.types.is_complex_dtype(series.dtype)
+        or series.dtype.kind in "mM"
     ):
         raise ValueError(error)
     null_mask = _null_mask(series)

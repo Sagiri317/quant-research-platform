@@ -531,3 +531,100 @@ def test_group_spread_aggregates_before_float_conversion(
             assert summary.top_bottom_label_value_spread_mean == expected_spread
     finally:
         state.close()
+
+
+@pytest.mark.parametrize("timezone", [None, "UTC"])
+@pytest.mark.parametrize("count", [100_000, 500_000])
+def test_timestamp_validation_fits_time_operation_reservation(timezone, count):
+    from quant_research_platform.contracts.validation import strict_timestamp_series
+    from quant_research_platform.runtime.dataframes import _time_chunk_operation_bytes
+
+    frame = pd.DataFrame(
+        {"timestamp": pd.date_range("2020", periods=count, freq="s", tz=timezone)}
+    )
+    bound = _time_chunk_operation_bytes(frame, timestamp_column="timestamp")
+    gc.collect()
+    tracemalloc.start()
+    try:
+        result = strict_timestamp_series(frame.timestamp, error="timestamp_invalid")
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert len(result) == len(frame)
+    assert result.dtype == np.dtype("datetime64[ns]")
+    assert peak <= bound + 65536
+
+
+@pytest.mark.parametrize(
+    "dtype", ["datetime64[ns]", "datetime64[ns, UTC]", "timedelta64[ns]"]
+)
+def test_persisted_temporal_values_cannot_become_portfolio_signals(tmp_path, dtype):
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_default_dataset_frame,
+        make_processed_dataset_spec,
+    )
+
+    frame = make_default_dataset_frame(
+        asset_ids=("a", "b"),
+        dates=("2024-01-02", "2024-01-02"),
+        values=(1, 2),
+    )
+    frame["value"] = pd.Series([1, 2], dtype=dtype)
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, frame, spec=make_processed_dataset_spec())
+    restored = read_dataset(root).set_index("asset_id")
+    assert restored.value.dtype == frame.value.dtype
+    with pytest.raises(ValueError, match="target_signal_invalid"):
+        build_simple_target_weights(
+            restored.value, eligible=pd.Series(True, index=restored.index)
+        )
+
+
+def test_evaluation_mixed_timestamp_strings_follow_chronological_order():
+    from quant_research_platform.research.evaluations.engine import (
+        build_evaluation_result_from_frames,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": ["2024-2-01"] * 3 + ["2024-10-01"] * 3 + ["2024-1-01"] * 3,
+            "asset_id": ["a", "b", "c"] * 3,
+            "feature": [1.0, 2.0, 3.0] * 3,
+            "label": [1.0, 2.0, 3.0] * 3,
+            "eligible": True,
+        }
+    )
+    spec = EvaluationSpec(
+        evaluation_id="time_order",
+        market_id=MarketId("a_share"),
+        research_dataset_id="dataset",
+        signals=(
+            SignalSpec(
+                signal_id="signal", source_column="feature", source_kind="feature"
+            ),
+        ),
+        label_columns=("label",),
+        n_groups=2,
+    )
+    observed = []
+    with runtime_resource_policy_scope() as policy:
+        with build_evaluation_result_from_frames(
+            [frame],
+            spec=spec,
+            signal_columns=("signal",),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+            resource_policy=policy,
+            source_columns_by_kind={"feature": ("feature",)},
+        ) as result:
+            for output in result.output_chunks:
+                metrics, _groups, _metadata = output.value
+                observed.extend(metrics.timestamp.drop_duplicates().tolist())
+                output.release(owner="test.evaluation")
+        assert policy.used_memory_bytes == 0
+    assert list(pd.to_datetime(observed, format="mixed")) == list(
+        pd.to_datetime(["2024-01-01", "2024-02-01", "2024-10-01"])
+    )

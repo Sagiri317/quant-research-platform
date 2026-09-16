@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
 import sys
 from datetime import UTC, date, datetime
 from decimal import MAX_EMAX, MIN_EMIN, Decimal
 from enum import IntEnum
+from itertools import permutations
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
@@ -585,3 +587,72 @@ def test_strict_json_requires_exact_native_scalar_and_container_types() -> None:
     for value in noncanonical_identity_values:
         with pytest.raises(ValueError, match="canonical_json_unsupported_value"):
             canonical_identity_bytes(value)
+
+
+def _identity_frame(tag: bytes, payload: bytes) -> bytes:
+    return tag + len(payload).to_bytes(8, "big") + payload
+
+
+@pytest.mark.parametrize("keys", [("a", "b"), ("a", "aa"), ("é", "量化")])
+def test_mapping_identity_matches_independent_framing(keys) -> None:
+    first, second = keys
+    integer = _identity_frame(b"i", b"1")
+    nested = _identity_frame(
+        b"m",
+        (2).to_bytes(8, "big")
+        + _identity_frame(b"k", b"a")
+        + integer
+        + _identity_frame(b"k", b"aa")
+        + _identity_frame(b"l", (1).to_bytes(8, "big") + integer),
+    )
+    for value, encoded in (
+        (2, _identity_frame(b"i", b"2")),
+        ({"aa": [1], "a": 1}, nested),
+    ):
+        expected = _identity_frame(
+            b"m",
+            (2).to_bytes(8, "big")
+            + _identity_frame(b"k", first.encode("utf-8"))
+            + integer
+            + _identity_frame(b"k", second.encode("utf-8"))
+            + encoded,
+        )
+        for pairs in permutations(((first, 1), (second, value))):
+            mapping = dict(pairs)
+            assert canonical_identity_bytes(mapping) == expected
+            assert canonical_json_hash(mapping) == hashlib.sha256(expected).hexdigest()
+        if keys == ("a", "b") and value == 2:
+            assert hashlib.sha256(expected).hexdigest() == (
+                "651bc9a60bd86e22fe01cfc417fb52be35c9c8e4c3085aa4b82b1af05905f56c"
+            )
+
+
+@pytest.mark.parametrize(
+    "exception_type", [KeyboardInterrupt, SystemExit, GeneratorExit]
+)
+@pytest.mark.parametrize("encode", [canonical_identity_bytes, canonical_json_hash])
+def test_mapping_comparison_preserves_primary_exception(exception_type, encode) -> None:
+    codec = importlib.import_module("quant_research_platform.contracts.json_codec")
+    primary = exception_type("comparison interrupted")
+    injected = False
+
+    def trace(frame, event, arg):
+        nonlocal injected
+        if (
+            frame.f_code is codec._compare_identity_ranges.__code__
+            and event == "return"
+        ):
+            injected = True
+            raise primary
+        return trace
+
+    previous = sys.gettrace()
+    try:
+        sys.settrace(trace)
+        with pytest.raises(exception_type) as caught:
+            encode({"aa": [{"量化": 1, "é": 2}], "a": 1})
+        assert caught.value is primary
+        assert injected
+    finally:
+        sys.settrace(previous)
+    assert sys.gettrace() is previous
