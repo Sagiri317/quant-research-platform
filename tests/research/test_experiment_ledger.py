@@ -105,6 +105,25 @@ def test_trial_ledger_is_append_only_and_retains_failed_and_abandoned(
     assert [record.attempt_index for record in records] == [1, 2]
     with pytest.raises(ValueError, match="^trial_attempt_not_next$"):
         append_trial_record(root, plan, failed)
+    completed = _record(plan, event_id="event-3", attempt_index=3, status="completed")
+    append_trial_record(root, plan, completed)
+    original = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    with pytest.raises(ValueError, match="^trial_budget_exceeded$"):
+        append_trial_record(
+            root,
+            plan,
+            _record(plan, event_id="event-4", attempt_index=4, status="attempted"),
+        )
+    assert read_trial_ledger(root, plan) == (failed, abandoned, completed)
+    assert {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    } == original
 
 
 def test_trial_record_never_allows_holdout_access() -> None:
@@ -352,6 +371,11 @@ def test_model_trial_read_validates_metrics_without_restricting_generic_experime
             {key: value for key, value in valid.items() if key != "validation_rows"},
             {**valid, "validation_rankic_reason": "not_a_reason"},
             {**valid, "validation_mse": -1.0},
+            *(
+                {**valid, field: sign * float.fromhex("0x1.0000000000001p+0")}
+                for field in ("validation_ic", "validation_rankic")
+                for sign in (-1.0, 1.0)
+            ),
         )
     ):
         plan = replace(_plan(), experiment_id=f"experiment_{index}")

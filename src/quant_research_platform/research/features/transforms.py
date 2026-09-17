@@ -195,14 +195,14 @@ def _transform_values(
 ) -> pd.Series:
     grouped = values.groupby(timestamps, sort=False)
     if transform.transform == "cross_sectional_zscore":
-        return _zscore(values, grouped)
+        return grouped.transform(_stable_zscore)
     if transform.transform == "cross_sectional_rank":
         return grouped.rank(method="average", pct=True)
     if transform.transform == "winsorize":
         return _winsorize(values, grouped, transform.winsorize_quantiles)
     if transform.transform == "winsorized_zscore":
         winsorized = _winsorize(values, grouped, transform.winsorize_quantiles)
-        return _zscore(winsorized, winsorized.groupby(timestamps, sort=False))
+        return winsorized.groupby(timestamps, sort=False).transform(_stable_zscore)
     if transform.transform == "winsorized_rank":
         winsorized = _winsorize(values, grouped, transform.winsorize_quantiles)
         return winsorized.groupby(timestamps, sort=False).rank(
@@ -213,7 +213,7 @@ def _transform_values(
         return _mad_winsorize(values, grouped)
     if transform.transform == "mad_winsorized_zscore":
         clipped = _mad_winsorize(values, grouped)
-        return _zscore(clipped, clipped.groupby(timestamps, sort=False))
+        return clipped.groupby(timestamps, sort=False).transform(_stable_zscore)
     if transform.transform == "mad_winsorized_rank":
         clipped = _mad_winsorize(values, grouped)
         return clipped.groupby(timestamps, sort=False).rank(method="average", pct=True)
@@ -442,14 +442,6 @@ def canonical_feature_pipeline(
         feature_values[f"feature_missing_{factor}"] = missing
         feature_values[f"feature_observed_{factor}"] = observed
     return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)
-
-
-def _zscore(
-    values: pd.Series,
-    grouped: pd.core.groupby.SeriesGroupBy,
-) -> pd.Series:
-    del values
-    return grouped.transform(_stable_zscore)
 
 
 def _apply_fillna(

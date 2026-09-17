@@ -29,6 +29,8 @@ from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
 from quant_research_platform.sources.reference.a_share_fees import (
+    A_SHARE_FEE_CSV_NAME,
+    A_SHARE_FEE_SIDECAR_NAME,
     FEE_CSV_COLUMNS,
     load_a_share_fee_source,
 )
@@ -168,10 +170,7 @@ def _zero_cost_transition():
 
 def _real_fee_schedule(tmp_path: Path) -> FeeSchedule:
     csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    source = load_a_share_fee_source(
-        csv_path=csv_path,
-        sidecar_path=sidecar_path,
-    )
+    source = load_a_share_fee_source(reference_root=csv_path.parent.parent)
     frame = pd.DataFrame(
         [
             {
@@ -198,9 +197,10 @@ def _real_fee_schedule(tmp_path: Path) -> FeeSchedule:
 
 
 def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    csv_path = tmp_path / "fees.csv"
-    sidecar_path = tmp_path / "fees.metadata.json"
+    source_root = tmp_path / "a_share_fee_schedule"
+    source_root.mkdir(parents=True, exist_ok=True)
+    csv_path = source_root / A_SHARE_FEE_CSV_NAME
+    sidecar_path = source_root / A_SHARE_FEE_SIDECAR_NAME
     row_specs = [
         (
             "BROKER_COMMISSION",
@@ -330,10 +330,7 @@ def test_fee_source_preserves_identity_and_exact_counts(
     tmp_path: Path,
 ) -> None:
     csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    source = load_a_share_fee_source(
-        csv_path=csv_path,
-        sidecar_path=sidecar_path,
-    )
+    source = load_a_share_fee_source(reference_root=csv_path.parent.parent)
 
     assert len(source.rows) == 14
     assert len(source.csv_sha256) == 64
@@ -378,14 +375,14 @@ def test_fee_source_rejects_sidecar_count_and_byte_mutations(
     _rewrite_sidecar(sidecar_path, **{field: metadata[field] + 1})
 
     with pytest.raises(ValueError, match="a_share_fee_source_(row_count|metadata)"):
-        load_a_share_fee_source(csv_path=_csv_path, sidecar_path=sidecar_path)
+        load_a_share_fee_source(reference_root=_csv_path.parent.parent)
 
 
 def test_fee_source_rejects_csv_hash_and_schema_mutations(tmp_path: Path) -> None:
     csv_path, sidecar_path = _copy_fee_source(tmp_path)
     csv_path.write_bytes(csv_path.read_bytes() + b"\n")
     with pytest.raises(ValueError, match="a_share_fee_source_metadata_invalid"):
-        load_a_share_fee_source(csv_path=csv_path, sidecar_path=sidecar_path)
+        load_a_share_fee_source(reference_root=csv_path.parent.parent)
 
     csv_path, sidecar_path = _copy_fee_source(tmp_path / "schema")
     raw = csv_path.read_text(encoding="utf-8-sig")
@@ -397,14 +394,14 @@ def test_fee_source_rejects_csv_hash_and_schema_mutations(tmp_path: Path) -> Non
         file_bytes=csv_path.stat().st_size,
     )
     with pytest.raises(ValueError, match="a_share_fee_source_schema_invalid"):
-        load_a_share_fee_source(csv_path=csv_path, sidecar_path=sidecar_path)
+        load_a_share_fee_source(reference_root=csv_path.parent.parent)
 
 
 def test_fee_source_sidecar_change_changes_combined_identity(tmp_path: Path) -> None:
     csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    first = load_a_share_fee_source(csv_path=csv_path, sidecar_path=sidecar_path)
+    first = load_a_share_fee_source(reference_root=csv_path.parent.parent)
     _rewrite_sidecar(sidecar_path, notes="sidecar identity mutation")
-    second = load_a_share_fee_source(csv_path=csv_path, sidecar_path=sidecar_path)
+    second = load_a_share_fee_source(reference_root=csv_path.parent.parent)
 
     assert first.csv_sha256 == second.csv_sha256
     assert first.source_identity != second.source_identity
@@ -608,10 +605,12 @@ def test_zero_cost_sell_buy_transition_is_exact_and_normalized() -> None:
     result = _zero_cost_transition()
     assert result.nav_after == pytest.approx(100.0)
     assert result.post_trade_cash == pytest.approx(0.0)
-    assert result.realized_weights.to_dict() == {"a": 0.0, "b": 1.0, "c": 0.0}
+    assert (
+        result.asset_ledger.set_index("asset_id")["post_trade_notional"]
+        / result.nav_after
+    ).to_dict() == {"a": 0.0, "b": 1.0, "c": 0.0}
     assert result.cash_weight == pytest.approx(0.0)
     assert result.total_cost == pytest.approx(0.0)
-    assert result.session_totals["post_trade_cash"] == pytest.approx(0.0)
     ledger = result.asset_ledger
     assert ledger["asset_id"].tolist() == ["a", "b", "c"]
     assert (
@@ -621,9 +620,11 @@ def test_zero_cost_sell_buy_transition_is_exact_and_normalized() -> None:
     assert ledger.loc[ledger["asset_id"].eq("b"), "executed_delta_notional"].iloc[
         0
     ] == pytest.approx(100.0)
-    view = result.realized_weights
-    view.loc["b"] = 0.0
-    assert result.realized_weights["b"] == pytest.approx(1.0)
+    view = result.asset_ledger
+    view.loc[view.asset_id.eq("b"), "post_trade_notional"] = 0.0
+    assert result.asset_ledger.set_index("asset_id").loc[
+        "b", "post_trade_notional"
+    ] == pytest.approx(100.0)
 
 
 @pytest.mark.parametrize("mutation", ("wrong_direction", "overshoot", "phantom_cost"))
@@ -744,7 +745,10 @@ def test_blocked_sell_cannot_fund_buy_and_cash_partial_is_pro_rata() -> None:
         cost_source_identity="0" * 64,
     )
     assert blocked.post_trade_cash == pytest.approx(0.0)
-    assert blocked.realized_weights["b"] == pytest.approx(0.5)
+    assert (
+        blocked.asset_ledger.set_index("asset_id")["post_trade_notional"]
+        / blocked.nav_after
+    )["b"] == pytest.approx(0.5)
     assert (
         blocked.asset_ledger.loc[
             blocked.asset_ledger["asset_id"].eq("a"), "reason"
@@ -767,7 +771,10 @@ def test_blocked_sell_cannot_fund_buy_and_cash_partial_is_pro_rata() -> None:
         ),
         cost_source_identity="0" * 64,
     )
-    assert blocked_without_cash.realized_weights["b"] == pytest.approx(0.0)
+    assert (
+        blocked_without_cash.asset_ledger.set_index("asset_id")["post_trade_notional"]
+        / blocked_without_cash.nav_after
+    )["b"] == pytest.approx(0.0)
     assert (
         blocked_without_cash.asset_ledger.loc[
             blocked_without_cash.asset_ledger["asset_id"].eq("b"), "reason"
@@ -880,7 +887,10 @@ def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
         cost_source_identity="0" * 64,
     )
     assert not second.asset_ledger["executed_delta_notional"].eq(0.0).all()
-    assert second.pre_trade_weights["a"] == pytest.approx(66.0 / 103.0)
+    assert (
+        second.asset_ledger.set_index("asset_id")["pre_trade_notional"]
+        / second.nav_before
+    )["a"] == pytest.approx(66.0 / 103.0)
     assert second.pre_trade_cash == pytest.approx(drift_cash)
 
 
@@ -923,7 +933,13 @@ def test_future_mask_mutation_changes_execution_not_past_target() -> None:
             top_quantile=0.5,
         ),
     )
-    assert allowed.realized_weights["b"] > blocked.realized_weights["b"]
+    assert (
+        allowed.asset_ledger.set_index("asset_id")["post_trade_notional"]
+        / allowed.nav_after
+    )["b"] > (
+        blocked.asset_ledger.set_index("asset_id")["post_trade_notional"]
+        / blocked.nav_after
+    )["b"]
 
 
 def test_cash_constrained_buy_fills_are_asset_order_invariant() -> None:
@@ -964,8 +980,14 @@ def test_cash_constrained_buy_fills_are_asset_order_invariant() -> None:
     )
 
     pd.testing.assert_series_equal(
-        first.realized_weights.sort_index(),
-        second.realized_weights.sort_index(),
+        (
+            first.asset_ledger.set_index("asset_id")["post_trade_notional"]
+            / first.nav_after
+        ).sort_index(),
+        (
+            second.asset_ledger.set_index("asset_id")["post_trade_notional"]
+            / second.nav_after
+        ).sort_index(),
     )
 
 
@@ -1099,3 +1121,65 @@ def test_cash_search_stops_at_float_stagnation_and_preserves_old_low_exactly():
         0.0, 100.0 - expected_amount - expected_cost.total_cost
     )
     assert len(calls) <= np.finfo(float).nmant + 3
+
+
+@pytest.mark.parametrize(
+    "notional,adv,bps",
+    (
+        (1e307, 1e307, 25.0),
+        (1e308, 1e308, 25.0),
+        (1e-308, 1e-308, 1e308),
+        (1e308, 1e308, 1e-320),
+        (1e-100, 1e308, 1e308),
+        (1e308, 1e-100, 1e-320),
+        (1e308, 1e-100, 0.0),
+    ),
+)
+def test_trade_cost_preserves_representable_scaled_costs(notional, adv, bps):
+    from decimal import Decimal, localcontext
+
+    assumptions = replace(_assumptions(), slippage_bps=bps, impact_bps=bps)
+    with localcontext() as context:
+        context.prec = 100
+        amount = Decimal.from_float(notional)
+        rate = Decimal.from_float(bps) / 10000
+        expected_slippage = float(amount * rate)
+        expected_impact = float(
+            amount * rate * (amount / Decimal.from_float(adv)).sqrt()
+        )
+    result = trade_cost(
+        date(2023, 8, 28),
+        "shanghai",
+        "buy",
+        notional,
+        adv,
+        _schedule(broker_rate=0.0, transfer_rate=0.0, stamp_rate=0.0),
+        assumptions,
+    )
+    assert result.slippage_cost == pytest.approx(expected_slippage, rel=1e-14, abs=0)
+    assert result.impact_cost == pytest.approx(expected_impact, rel=1e-14, abs=0)
+
+
+@pytest.mark.parametrize("nav", (1e8, 1e307))
+def test_scaled_execution_costs_reconcile_cash(nav):
+    assumptions = replace(
+        _assumptions(), initial_nav=nav, slippage_bps=5.0, impact_bps=25.0
+    )
+    schedule = _schedule(broker_rate=0.0, transfer_rate=0.0, stamp_rate=0.0)
+    result = execute_continuous_target(
+        pd.Series({"a": 1.0}),
+        pd.Series({"a": 0.0}),
+        nav=nav,
+        average_daily_volume=pd.Series({"a": nav}),
+        can_enter=pd.Series({"a": True}),
+        can_exit=pd.Series({"a": True}),
+        execution_date=date(2023, 8, 28),
+        assumptions=assumptions,
+        cost_for_trade=_a_share_cost(schedule, {"a": "shanghai"}),
+        cost_source_identity=schedule.content_identity,
+    )
+    # Full liquidation at unit participation costs 5 + 25 bps, leaving cash only.
+    assert result.total_cost / nav == pytest.approx(0.003, rel=1e-14, abs=0)
+    assert result.nav_after / nav == pytest.approx(0.997, rel=1e-14, abs=0)
+    assert result.post_trade_cash == result.nav_after
+    assert result.asset_ledger["post_trade_notional"].tolist() == [0.0]

@@ -1268,9 +1268,10 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
         frozen_alpha_calibration(artifact, cutoff=pd.Timestamp("2023-12-31"))
 
 
+@pytest.mark.parametrize("alpha_exponent", (0, 600, -600))
 @pytest.mark.parametrize("slope,intercept", [(0.0, 0.0), (0.0, 0.25), (0.125, 0.0)])
 def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
-    tmp_path, slope, intercept
+    tmp_path, slope, intercept, alpha_exponent
 ):
     from quant_research_platform.research.portfolios.accounting import (
         calibrate_expected_alpha,
@@ -1285,6 +1286,8 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         {"timestamp": dates.repeat(2), "alpha_score": [-0.5, 0.5] * 6}
     )
     inputs["holding_return"] = intercept + slope * inputs.alpha_score
+    alpha_scale = float(np.ldexp(1.0, alpha_exponent))
+    inputs["alpha_score"] *= alpha_scale
     intervals = pd.DataFrame(
         {
             "timestamp": dates,
@@ -1296,7 +1299,7 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         inputs, as_of=pd.Timestamp("2019-01-01"), scheduled_intervals=intervals
     )
     assert calibration.status == "DEFINED"
-    assert calibration.slope == pytest.approx(slope)
+    assert calibration.slope == pytest.approx(slope / alpha_scale, rel=1e-12, abs=0)
     assert calibration.slope_standard_error == 0.0
     assert (
         calibration.slope_t_statistic
@@ -1462,3 +1465,133 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
         }
         assert len(persisted) == len(batches)
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("scale", [1.0, 2.0**-700])
+@pytest.mark.parametrize("direction", [1.0, -1.0])
+@pytest.mark.parametrize("closing_units", [0.5, 1.0, 2.0])
+def test_perpetual_close_sign_is_independent_of_quantity_units(
+    tmp_path, scale, direction, closing_units
+):
+    from quant_research_platform.research.portfolios.accounting import (
+        PortfolioEconomics,
+    )
+
+    capital = PortfolioCapital("units", 1000.0, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="units",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01",
+            "end": "1970-01-02",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+    expected_realized = direction * min(1.0, closing_units)
+    expected_basis = (
+        direction * (1.0 - closing_units) * (1.0 if closing_units < 1.0 else 2.0)
+    )
+
+    def produce(emit):
+        economics = PortfolioEconomics(capital, "asset", emit)
+        economics.fill(
+            timestamp_ns=1,
+            order_id="open",
+            quantity=direction * scale,
+            price=1.0 / scale,
+            mark_price=1.0 / scale,
+            fee=0.0,
+        )
+        economics.fill(
+            timestamp_ns=2,
+            order_id="close",
+            quantity=-direction * closing_units * scale,
+            price=2.0 / scale,
+            mark_price=2.0 / scale,
+            fee=0.0,
+        )
+        # Open price=1, closing price=2 in economic units; no fees or funding.
+        assert economics.cash == 1000.0 + expected_realized
+        assert economics.quantity == direction * (1.0 - closing_units) * scale
+        assert economics.cost_basis == expected_basis
+
+    with runtime_resource_policy_scope() as policy:
+        root = ledger_artifact.write_portfolio_ledger_artifact(
+            tmp_path / "units", envelope=envelope, produce=produce
+        )
+        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        batches = tuple(artifact.iter_chunks())
+        assert (
+            sum(
+                flow.amount
+                for batch in batches
+                for flow in batch.cashflows
+                if flow.kind == "realized_pnl"
+            )
+            == expected_realized
+        )
+        end = {
+            row.asset_id: row for row in batches[-1].valuations if row.phase == "end"
+        }
+        assert end["__cash__"].value == 1000.0 + expected_realized
+        assert end["asset"].cost_basis == expected_basis
+        summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+        assert summary["net_pnl"] == summary["gross_pnl"] == direction
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("direction", [1.0, -1.0])
+def test_tiny_trade_validity_uses_sign_without_multiplication(direction):
+    from quant_research_platform.research.portfolios.accounting import (
+        PortfolioEconomics,
+    )
+
+    batches = []
+    economics = PortfolioEconomics(
+        PortfolioCapital("tiny", 1000.0, "USDT", "linear_perpetual"),
+        "asset",
+        batches.append,
+    )
+    quantity = direction * 2.0**-700
+    economics.fill(
+        timestamp_ns=1,
+        order_id="open",
+        quantity=quantity,
+        price=1.0,
+        mark_price=1.0,
+        fee=0.0,
+    )
+    batch = batches[0]
+    assert batch.trades[0].quantity == batch.trades[0].notional == quantity
+    for q, n in ((0.0, quantity), (quantity, 0.0), (quantity, -quantity)):
+        with pytest.raises(ValueError, match="portfolio_ledger_trade_invalid"):
+            replace(batch, trades=(replace(batch.trades[0], quantity=q, notional=n),))
+
+
+def test_tiny_adjusted_notional_trade_cannot_reverse_target_direction(tmp_path):
+    value = 2.0**-700
+    frame = _session(
+        "2019-01-01",
+        "2019-01-02",
+        pre_asset=2 * value,
+        target_asset=value,
+        post_asset=3 * value,
+        pre_cash=1.0,
+        target_cash=1.0,
+        post_cash=1.0,
+    )
+    payload = _envelope().payload()
+    del payload["instance_identity"], payload["status"]
+    payload["semantic_metadata"]["portfolio_capital"]["initial_capital"] = 1.0
+    envelope = build_business_manifest_envelope(**payload)
+    with pytest.raises(ValueError, match="portfolio_ledger_direction_invalid"):
+        write_test_sessions(
+            tmp_path / "wrong_direction", envelope=envelope, ledger_chunks=(frame,)
+        )
+    assert not (
+        tmp_path / "wrong_direction" / "instances" / envelope.instance_identity
+    ).exists()

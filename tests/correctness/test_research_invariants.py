@@ -389,7 +389,13 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
     assert inverse.slope < 0.0
 
 
-def test_calibration_weighted_cluster_reference_and_true_mature_coverage():
+@pytest.mark.parametrize(
+    "alpha_exponent,return_exponent",
+    [(0, 0), (600, 0), (-600, 0), (0, 600), (0, -600), (600, 600), (-600, -600)],
+)
+def test_calibration_weighted_cluster_reference_and_true_mature_coverage(
+    alpha_exponent, return_exponent
+):
     import statsmodels.api as sm
     from statsmodels.stats.sandwich_covariance import cov_cluster
 
@@ -414,8 +420,16 @@ def test_calibration_weighted_cluster_reference_and_true_mature_coverage():
             for i, x in enumerate((-1.0, 0.0, 1.0))
         ]
     )
+    alpha_scale = float(np.ldexp(1.0, alpha_exponent))
+    return_scale = float(np.ldexp(1.0, return_exponent))
+    coefficient_scale = float(np.ldexp(1.0, return_exponent - alpha_exponent))
     result = calibrate_expected_alpha(
-        frame, as_of=sessions[-1], scheduled_intervals=intervals
+        frame.assign(
+            alpha_score=frame.alpha_score * alpha_scale,
+            holding_return=frame.holding_return * return_scale,
+        ),
+        as_of=sessions[-1],
+        scheduled_intervals=intervals,
     )
     x = sm.add_constant(frame.alpha_score)
     weights = np.full(len(frame), 1 / 18)
@@ -423,7 +437,16 @@ def test_calibration_weighted_cluster_reference_and_true_mature_coverage():
     # Same uncorrected date-cluster sandwich as production; no df policy change.
     covariance = cov_cluster(fit, frame.timestamp, use_correction=False)
     assert result.slope_standard_error == pytest.approx(
-        np.sqrt(covariance[1, 1]), rel=1e-12
+        np.sqrt(covariance[1, 1]) * coefficient_scale, rel=1e-12, abs=0
+    )
+    assert result.slope == pytest.approx(
+        fit.params.iloc[1] * coefficient_scale, rel=1e-12, abs=0
+    )
+    assert result.intercept == pytest.approx(
+        fit.params.iloc[0] * return_scale, rel=1e-12, abs=0
+    )
+    assert result.slope_t_statistic == pytest.approx(
+        fit.params.iloc[1] / np.sqrt(covariance[1, 1]), rel=1e-12, abs=0
     )
     assert result.weighted_r2 == pytest.approx(fit.rsquared, rel=1e-12)
     assert result.scheduled_rebalance_dates == 6
@@ -1330,3 +1353,146 @@ def test_decimal_constant_scaler_freezes_exact_training_value(count):
     )
     training.loc[0, "constant"] = np.nextafter(0.1, 1.0)
     assert ModelMatrixScaler.fit(training).scale_[0] != 1.0
+
+
+@pytest.mark.parametrize("alpha_exponent", (0, 600, -600))
+@pytest.mark.parametrize("case", ("exact_zero", "small_positive"))
+def test_alpha_cluster_variance_preserves_zero_and_binary64_signal(
+    case, alpha_exponent
+):
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    counts = (3,) * 6 if case == "exact_zero" else (2, 3, 4, 5, 2, 7)
+    rows = [
+        {
+            "timestamp": day,
+            "alpha_score": x,
+            "holding_return": 0.125 + 0.25 * x + (group - 2) * 0.0078125 * (x * x + 1),
+        }
+        for group, (day, count) in enumerate(zip(dates, counts, strict=True))
+        for x in np.linspace(-1, 1, count)
+    ]
+    frame = pd.DataFrame(rows)
+    scale = float(np.ldexp(1.0, alpha_exponent))
+    frame["alpha_score"] *= scale
+    intervals = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "entry_at": dates + pd.Timedelta(days=1),
+            "available_at": dates + pd.Timedelta(days=2),
+        }
+    )
+    result = calibrate_expected_alpha(
+        frame, as_of=pd.Timestamp("2024-07-01"), scheduled_intervals=intervals
+    )
+    assert result.status == "DEFINED" and not result.benchmark_only
+    assert result.slope == pytest.approx(0.25 / scale, rel=1e-12, abs=0)
+    if case == "exact_zero":
+        # Symmetric binary inputs give exactly zero date-cluster slope scores.
+        assert result.slope_standard_error == 0.0
+        assert result.slope_t_statistic is result.slope_pvalue is None
+        assert result.slope_ci_low is result.slope_ci_high is None
+    else:
+        # Exact rational WLS and uncorrected six-date sandwich on binary64 inputs.
+        standard_error = 1.3003283717694013e-18
+        assert result.slope_standard_error == pytest.approx(
+            standard_error / scale, rel=1e-12, abs=0
+        )
+        assert result.slope_t_statistic == pytest.approx(
+            0.25 / standard_error, rel=1e-12, abs=0
+        )
+
+
+@pytest.mark.parametrize("quantity", ("slope", "standard_error"))
+def test_alpha_calibration_rejects_nonzero_unrepresentable_coefficients(quantity):
+    dates = pd.date_range("2024-01-01", periods=6, freq="MS")
+    if quantity == "slope":
+        alpha = float(np.ldexp(1.0, 600))
+        targets = [float(np.ldexp(1.0, -600))] * 6
+    else:
+        alpha = float(np.ldexp(1.0, 1020))
+        targets = [
+            float(np.ldexp(1.0, -20) + group * np.ldexp(1.0, -72)) for group in range(6)
+        ]
+    frame = pd.DataFrame(
+        [
+            {
+                "timestamp": day,
+                "alpha_score": sign * alpha,
+                "holding_return": sign * target,
+            }
+            for day, target in zip(dates, targets, strict=True)
+            for sign in (-1.0, 1.0)
+        ]
+    )
+    intervals = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "entry_at": dates + pd.Timedelta(days=1),
+            "available_at": dates + pd.Timedelta(days=2),
+        }
+    )
+    with pytest.raises(
+        ValueError, match=f"^alpha_calibration_{quantity}_unrepresentable$"
+    ):
+        calibrate_expected_alpha(
+            frame, as_of=pd.Timestamp("2024-07-01"), scheduled_intervals=intervals
+        )
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e308, 5e-324])
+def test_compound_fundamental_ratios_round_only_the_final_result(scale) -> None:
+    from quant_research_platform.research.factors.fundamental.definitions import (
+        FUNDAMENTAL_INPUT_COLUMNS,
+    )
+
+    values = dict.fromkeys(FUNDAMENTAL_INPUT_COLUMNS, scale)
+    values.update(
+        operating_cost_ttm=-scale,
+        operating_cash_flow_ttm=-scale,
+        prior_year_parent_net_income_ttm=-scale,
+    )
+    frame = pd.DataFrame(
+        [dict(asset_id="asset", timestamp=pd.Timestamp("2024-05-02"), **values)]
+    )
+    expected = dict(
+        gross_profitability=2.0,
+        gross_margin=2.0,
+        accruals=2.0,
+        earnings_change_to_assets=2.0,
+        debt_to_assets=4.0,
+        net_debt_to_assets=3.0,
+    )
+    actual = calculate_fundamental_factors(frame)
+    for column, value in expected.items():
+        assert actual[column].iloc[0] == value
+
+    # Missing constituents, nonpositive denominators and final overflow stay undefined.
+    frame["short_term_borrowings"] = float("nan")
+    frame["average_total_assets"] = 0.0
+    frame["operating_revenue_ttm"] = -scale
+    actual = calculate_fundamental_factors(frame)
+    assert actual[list(expected)].isna().all().all()
+    frame["average_total_assets"] = 5e-324
+    frame["consolidated_net_income_ttm"] = 1e308
+    assert pd.isna(calculate_fundamental_factors(frame)["accruals"].iloc[0])
+
+
+def test_compound_fundamental_ratio_preserves_cancellation() -> None:
+    from quant_research_platform.research.factors.fundamental.definitions import (
+        FUNDAMENTAL_INPUT_COLUMNS,
+    )
+
+    values = dict.fromkeys(FUNDAMENTAL_INPUT_COLUMNS, 1.0)
+    values.update(
+        short_term_borrowings=1e308,
+        current_portion_noncurrent_liabilities=1.0,
+        long_term_borrowings=-1e308,
+        bonds_payable=0.0,
+        cash=0.0,
+    )
+    frame = pd.DataFrame(
+        [dict(asset_id="asset", timestamp=pd.Timestamp("2024-05-02"), **values)]
+    )
+    actual = calculate_fundamental_factors(frame)
+    assert actual["debt_to_assets"].iloc[0] == 1.0
+    assert actual["net_debt_to_assets"].iloc[0] == 1.0

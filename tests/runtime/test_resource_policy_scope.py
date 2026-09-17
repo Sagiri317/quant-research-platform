@@ -32,6 +32,8 @@ def test_scope_reuses_exact_context_and_rejects_other_root() -> None:
         with runtime_resource_policy_scope() as nested:
             assert nested is outer
             assert current_runtime_resource_policy() is outer
+        with runtime_resource_policy_scope(outer) as same:
+            assert same is outer
         with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
             with runtime_resource_policy_scope(other):
                 pass

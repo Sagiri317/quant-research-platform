@@ -153,3 +153,32 @@ def test_funding_changed_during_consumption_is_rejected_and_primary_preserved(tm
                 raise primary
         assert raised.value is primary
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("failure", ("io", "permission", "memory", "interrupt"))
+def test_funding_identity_preserves_fatal_file_failure(tmp_path, monkeypatch, failure):
+    import errno
+    from pathlib import Path
+
+    raw = tmp_path / "raw"
+    _write(raw)
+    root = raw.parent / "funding" / "BTCUSDT"
+    primary = {
+        "io": OSError(errno.EIO, "controlled_io_failure"),
+        "permission": PermissionError(errno.EACCES, "controlled_access_failure"),
+        "memory": MemoryError("controlled_memory_failure"),
+        "interrupt": KeyboardInterrupt("controlled_interrupt"),
+    }[failure]
+    original = Path.stat
+
+    def fail(path, *args, **kwargs):
+        if path == root / "response.metadata.json":
+            raise primary
+        return original(path, *args, **kwargs)
+
+    with runtime_resource_policy_scope() as policy:
+        monkeypatch.setattr(Path, "stat", fail)
+        with pytest.raises(type(primary)) as caught:
+            funding_source_identity(root, "ledger", symbol="BTCUSDT")
+        assert caught.value is primary
+        assert policy.used_memory_bytes == 0

@@ -12,6 +12,7 @@ import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
+from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
@@ -902,13 +903,9 @@ def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
         if len(valid) < 2:
             continue
         valid_values = values.loc[valid].to_numpy(dtype="float64", copy=False)
-        if np.ptp(valid_values) == 0.0:
+        if (valid_values == valid_values[0]).all():
             continue
-        centered = valid_values - float(valid_values.mean())
-        scale = float(np.sqrt(np.mean(centered**2)))
-        if scale == 0.0 or not np.isfinite(scale):
-            continue
-        target.loc[valid] = centered / scale
+        target.loc[valid] = _stable_zscore(values.loc[valid])
     return target
 
 

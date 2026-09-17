@@ -88,9 +88,7 @@ def build_simple_target_weights(
     if (
         not np.isfinite(result.to_numpy()).all()
         or not np.isclose(result.sum(), 0.0 if portfolio_mode == "long_short" else 1.0)
-        or not np.isclose(
-            result.abs().sum(), 1.0 if portfolio_mode == "long_short" else 1.0
-        )
+        or not np.isclose(result.abs().sum(), 1.0)
     ):
         raise ValueError("target_weights_invalid")
     return result
@@ -183,6 +181,9 @@ def _assign_leg(
     else:
         assert capitals is not None
         selected_capitals = capitals.reindex(selected)
+        selected_capitals = np.ldexp(
+            selected_capitals, -np.frexp(selected_capitals.max())[1]
+        )
         weights = gross * selected_capitals / float(selected_capitals.sum())
     result.loc[selected] = sign * weights
 

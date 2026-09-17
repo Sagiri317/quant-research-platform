@@ -49,7 +49,6 @@ from quant_research_platform.storage.datasets.paths import (
 )
 from quant_research_platform.storage.datasets.schema import (
     logical_dtype_metadata_bytes,
-    manifest_has_runtime_metadata,
     merge_logical_dtype_payloads,
     pandas_dtype_overrides_from_logical_payload,
     parse_logical_dtype_metadata,
@@ -870,7 +869,7 @@ def open_dataset_session(
     try:
         spec_identity = dataset_file_identity(spec_path)
         manifest_identity = dataset_file_identity(manifest_path)
-    except (OSError, ValueError) as exc:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     with runtime_resource_policy_scope(resource_policy) as issued_policy:
         spec_stat_span_bytes = spec_identity.size
@@ -910,8 +909,6 @@ def open_dataset_session(
             validate_dataset_manifest_payload(manifest, spec=spec_payload)
             if require_consumable:
                 validate_dataset_manifest_consumable(manifest)
-            if not manifest_has_runtime_metadata(manifest):
-                raise ValueError("manifest_runtime_metadata_missing")
             inventory = DatasetSessionInventory(
                 data_root=data_root,
                 resource_policy=issued_policy,
@@ -949,7 +946,6 @@ def open_dataset_session(
                 columns=columns,
                 time_window=time_window,
                 row_filters=row_filters,
-                require_consumable=require_consumable,
                 resource_policy=issued_policy,
                 owns_inventory=True,
                 session_lease=session_lease,
@@ -1010,7 +1006,7 @@ def dataset_session_from_inventory(
         manifest_identity = dataset_file_identity(manifest_path)
         spec_stat_span_bytes = spec_identity.size
         manifest_stat_span_bytes = manifest_identity.size
-    except (OSError, ValueError) as exc:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     spec_identity_bytes = _file_identity_bytes(spec_identity)
     manifest_identity_bytes = _file_identity_bytes(manifest_identity)
@@ -1033,6 +1029,8 @@ def dataset_session_from_inventory(
         )
         if len(manifest_bytes) != manifest_stat_span_bytes:
             raise ValueError("dataset_metadata_file_identity_changed")
+        validate_dataset_manifest_payload(manifest, spec=spec_payload)
+        validate_dataset_manifest_consumable(manifest)
         inventory.verify_filesystem(spec_payload)
         session = _build_dataset_session(
             root=root,
@@ -1047,7 +1045,6 @@ def dataset_session_from_inventory(
             columns=columns,
             time_window=time_window,
             row_filters=(),
-            require_consumable=True,
             resource_policy=resource_policy,
             owns_inventory=False,
             session_lease=session_lease,
@@ -1088,21 +1085,10 @@ def _build_dataset_session(
     columns: tuple[str, ...] | list[str] | None,
     time_window: TimeWindow | None,
     row_filters: tuple[tuple[str, str, Any], ...],
-    require_consumable: bool,
     resource_policy: RuntimeResourcePolicy,
     owns_inventory: bool,
     session_lease: MemoryLease,
 ) -> DatasetSession:
-    if spec_payload.get("schema_id") != "qrp-dataset-spec":
-        raise ValueError("dataset_spec_schema_id_invalid")
-    validate_dataset_spec_payload(spec_payload)
-    if manifest.get("schema_id") != "qrp-dataset-manifest":
-        raise ValueError("dataset_manifest_schema_id_invalid")
-    validate_dataset_manifest_payload(manifest, spec=spec_payload)
-    if require_consumable:
-        validate_dataset_manifest_consumable(manifest)
-    if not manifest_has_runtime_metadata(manifest):
-        raise ValueError("manifest_runtime_metadata_missing")
     if inventory.path_count(selected=False) == 0:
         raise ValueError("dataset_data_dir_missing")
     first_path = inventory.path_at(0, selected=False)

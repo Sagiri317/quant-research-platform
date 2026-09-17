@@ -532,7 +532,6 @@ def test_exact_key_index_does_not_claim_all_free_disk_at_startup(
 
     with dataset_key_tracking.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         assert index._connection is not None
         page_limit = index._connection.execute("PRAGMA main.max_page_count").fetchone()[
@@ -560,7 +559,6 @@ def test_exact_key_index_admits_combined_main_and_temp_growth(
 
     with dataset_key_tracking.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         index._admit_physical_write(4096)
 
@@ -1252,7 +1250,7 @@ def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
             def open_owner():
                 if kind == "keys":
                     return dataset_key_tracking.ExactPrimaryKeyIndex(
-                        primary_key=("key",), timestamp_columns=()
+                        primary_key=("key",),
                     )
                 return dataset_inventory.DatasetSessionInventory(
                     data_root=data, resource_policy=policy

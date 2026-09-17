@@ -383,15 +383,9 @@ def _inventory_item_from_session(
     inspection = owned.value
     logical_root = artifact_root.relative_to(project_root).as_posix()
     spec_payload = inspection.spec
-    warnings: list[str] = []
     columns = inspection.columns
-    primary_key = tuple(spec_payload.get("primary_key", ()))
-    partition_columns = tuple(spec_payload.get("partition_columns", ()))
-    if not primary_key:
-        primary_key = _infer_primary_key(columns)
-        warnings.append(
-            "primary_key_inferred" if primary_key else "primary_key_missing"
-        )
+    primary_key = tuple(spec_payload["primary_key"])
+    partition_columns = tuple(spec_payload["partition_columns"])
     build_bound = _inventory_item_upper_bound_bytes(
         logical_root=logical_root,
         columns=columns,
@@ -442,7 +436,7 @@ def _inventory_item_from_session(
                 primary_key=primary_key,
                 partition_columns=partition_columns,
             ),
-            "warnings": sorted(set(warnings)),
+            "warnings": [],
         }
         try:
             bounded_rendered_qrp_json_object_size(
@@ -557,22 +551,6 @@ def _logical_identifiers(logical_root: str) -> tuple[str, str, str, str]:
     if not _matches_artifact_path(parts, prefix, artifact_id):
         raise ValueError("invalid_inventory_root")
     return layer, parts[2], kind, artifact_id
-
-
-def _infer_primary_key(columns: tuple[str, ...]) -> tuple[str, ...]:
-    canonical_key = ("market_id", "asset_id", "timestamp")
-    source_asset_timestamp_key = ("source_asset_id", "timestamp")
-    source_asset_key = ("source_asset_id",)
-    calendar_key = ("timestamp",)
-    for candidate in (
-        canonical_key,
-        source_asset_timestamp_key,
-        source_asset_key,
-        calendar_key,
-    ):
-        if all(column in columns for column in candidate):
-            return candidate
-    return ()
 
 
 def _schema_hash(

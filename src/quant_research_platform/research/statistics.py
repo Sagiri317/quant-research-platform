@@ -873,8 +873,10 @@ def _loss_inputs(
     if not isinstance(model_losses, pd.DataFrame):
         raise ValueError("loss_matrix_candidate_id_invalid")
     models = model_losses
-    if not isinstance(benchmark_losses, pd.Series) and len(benchmark) != len(models):
-        raise ValueError("loss_matrix_length_mismatch")
+    if not isinstance(benchmark_losses, pd.Series):
+        if len(benchmark) != len(models):
+            raise ValueError("loss_matrix_length_mismatch")
+        benchmark.index = models.index
     if "__benchmark_loss__" in models.columns:
         raise ValueError("loss_matrix_candidate_id_invalid")
     if models.columns.has_duplicates or not all(
@@ -907,7 +909,10 @@ def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.n
     if len(data) < 2:
         return np.full(data.shape[1:], np.nan)
     unresolved = np.max(data - errors, axis=0) <= np.min(data + errors, axis=0)
-    return np.where(unresolved & (len(data) > 1), 0.0, np.std(data, axis=0, ddof=1))
+    _, exponent = np.frexp(np.max(np.abs(data), axis=0))
+    scaled = np.ldexp(data, -exponent)
+    deviation = np.ldexp(np.std(scaled, axis=0, ddof=1), exponent)
+    return np.where(unresolved, 0.0, deviation)
 
 
 def _candidate_sharpes(values: np.ndarray, roundoff: object) -> np.ndarray | None:

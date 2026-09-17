@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from array import array
 from dataclasses import dataclass
+from math import frexp, ldexp
 
 import numpy as np
 import pandas as pd
@@ -13,6 +14,7 @@ from quant_research_platform.contracts.validation import (
     strict_real_numeric_series,
 )
 from quant_research_platform.research.features.transforms import _mad_winsorize
+from quant_research_platform.research.models.scaler import ModelMatrixScaler
 
 
 @dataclass(frozen=True)
@@ -91,14 +93,23 @@ class MarketModelRiskState:
             )
             for row in frame.itertuples(index=False)
         ]
+        market_scale = max(
+            (
+                weight
+                for _asset, _return, weight, _current, eligible in weighted
+                if eligible and weight is not None
+            ),
+            default=1.0,
+        )
+        market_exponent = frexp(market_scale)[1]
         market_denominator = sum(
-            weight
+            ldexp(weight, -market_exponent)
             for _asset, _return_value, weight, _current_weight, eligible in weighted
             if eligible and weight is not None
         )
         market_return = (
             sum(
-                weight * return_value
+                ldexp(weight, -market_exponent) * return_value
                 for _asset, return_value, weight, _current_weight, eligible in weighted
                 if eligible and weight is not None
             )
@@ -197,16 +208,22 @@ def preprocess_risk_styles(
         )
         grouped = values.where(eligible).groupby(timestamps, sort=False)
         clipped = _mad_winsorize(values, grouped)
-        fitting_values = clipped.where(eligible)
-        means = fitting_values.groupby(timestamps, sort=False).transform("mean")
-        scales = fitting_values.groupby(timestamps, sort=False).transform(
-            lambda values: (
-                float(np.sqrt(np.mean((values.dropna() - values.mean()) ** 2)))
-                if len(values.dropna())
-                else np.nan
-            )
-        )
-        result[column] = ((clipped - means) / scales).where(scales.ne(0.0), 0.0)
+        result[column] = np.nan
+        for positions in timestamps.groupby(timestamps, sort=False).indices.values():
+            current = clipped.iloc[positions]
+            fitting = current.loc[eligible.iloc[positions]].dropna()
+            if fitting.empty:
+                continue
+            if fitting.nunique() == 1:
+                result.iloc[positions, result.columns.get_loc(column)] = 0.0
+                continue
+            scaler = ModelMatrixScaler.fit(fitting.to_frame(name=column))
+            scaled = pd.Series(np.nan, index=current.index, dtype="float64")
+            observed = current.notna()
+            scaled.loc[observed] = scaler.transform(
+                current.loc[observed].to_frame(name=column)
+            )[column].to_numpy()
+            result.iloc[positions, result.columns.get_loc(column)] = scaled.to_numpy()
     return result
 
 

@@ -679,3 +679,107 @@ def test_prediction_bundle_preserves_fatal_and_primary_on_close(
                 pytest.fail("fatal source failure was swallowed")
         assert caught.value is primary
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("intraday", (False, True))
+@pytest.mark.parametrize("end_shift", (-1, 0, 1))
+def test_prediction_effective_end_matches_all_rows_before_filtering(
+    tmp_path, monkeypatch, intraday, end_shift
+):
+    from dataclasses import replace
+
+    import pandas as pd
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.artifacts.outputs import write_prediction_outputs
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.layout import StorageLayout
+
+    step = pd.Timedelta(1, unit="ns" if intraday else "D")
+    times = [pd.Timestamp("2014-01-03") + i * step for i in (1, 2, 3)]
+
+    def stamp(value):
+        return value.isoformat() if intraday else value.date().isoformat()
+
+    frame = make_price_volume_prediction_output_frame()
+    frame = frame.loc[frame.index.repeat(3)].reset_index(drop=True)
+    frame["timestamp"] = times
+    frame["prediction_score"] = [1.0, 2.0, 3.0]
+    spec = replace(
+        make_price_volume_prediction_spec(),
+        train_end="2014-01-02T00:00:00" if intraday else "2014-01-02",
+        test_start=stamp(times[0]),
+        test_end=stamp(times[-1] + step),
+    )
+    model = dict(frame.attrs["model_metadata"])
+    model.update(
+        train_start=spec.train_end,
+        train_end=spec.train_end,
+        test_start=spec.test_start,
+        test_end=spec.test_end,
+        oos_start=spec.test_start,
+        oos_end=stamp(times[-1]),
+    )
+    prediction = dict(frame.attrs["prediction_metadata"])
+    prediction.update(
+        train_end=spec.train_end,
+        rows_input=3,
+        rows_after_filter_mode=3,
+        rows_after_input_dropna=3,
+        prediction_rows=3,
+        test_start=spec.test_start,
+        requested_test_end=spec.test_end,
+        effective_test_end=stamp(times[-1]),
+    )
+    with runtime_resource_policy_scope() as policy:
+        root = write_prediction_outputs(
+            spec=spec,
+            output_spec=make_prediction_report_spec(),
+            layout=StorageLayout(tmp_path),
+            output_chunks=(frame,),
+            model_metadata=model,
+            prediction_metadata_factory=lambda: prediction,
+            resource_policy=policy,
+        )
+        path = root / "manifest.json"
+        payload = json.loads(path.read_text())
+        declared = stamp(times[-1] + end_shift * step)
+        payload["metadata"]["prediction_metadata"]["effective_test_end"] = declared
+        payload["metadata"]["model_metadata"]["oos_end"] = declared
+        path.write_text(json.dumps(payload))
+        original_batches = pq.ParquetFile.iter_batches
+        scans = []
+
+        def one_row_batches(parquet, **kwargs):
+            scans.append(True)
+            kwargs["batch_size"] = 1
+            yield from original_batches(parquet, **kwargs)
+
+        monkeypatch.setattr(pq.ParquetFile, "iter_batches", one_row_batches)
+        for window in (None, TimeWindow(times[0], times[0])):
+            reader = bundle_validation.read_prediction_output_bundle(
+                root, expected_output_id=spec.prediction_id, time_window=window
+            )
+            if end_shift:
+                with (
+                    pytest.raises(
+                        ValueError,
+                        match="^persisted_prediction_effective_end_mismatch$",
+                    ),
+                    reader,
+                ):
+                    pytest.fail("inconsistent effective end reached consumer")
+            else:
+                with reader as (_manifest, lookup):
+                    assert lookup.row_count == (3 if window is None else 1)
+                    with lookup.values_for_frame(frame, mark_matched=False) as (
+                        values,
+                        found,
+                    ):
+                        assert list(found) == (
+                            [1, 1, 1] if window is None else [1, 0, 0]
+                        )
+                        assert values[0] == 1.0
+            assert policy.used_memory_bytes == 0
+        assert len(scans) == 2

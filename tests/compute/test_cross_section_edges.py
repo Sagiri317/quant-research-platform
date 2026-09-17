@@ -92,7 +92,7 @@ def test_pearson_moments_preserve_exact_boundaries(
 
 
 @pytest.mark.parametrize("expected", (1.0, -1.0))
-def test_pearson_moments_normalize_only_one_ulp_overflow(expected: float) -> None:
+def test_pearson_moments_preserve_one_ulp_invalid_covariance(expected: float) -> None:
     overflow = float(np.copysign(np.nextafter(1.0, np.inf), expected))
 
     assert _pearson_correlation_from_moments(
@@ -100,7 +100,7 @@ def test_pearson_moments_normalize_only_one_ulp_overflow(expected: float) -> Non
         left_m2=1.0,
         right_m2=1.0,
         covariance=overflow,
-    ) == (expected, None)
+    ) == (overflow, None)
 
 
 def test_pearson_moments_preserve_materially_invalid_result() -> None:

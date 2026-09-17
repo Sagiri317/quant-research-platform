@@ -147,9 +147,7 @@ def _crypto_ledger_observations(ledger, windows, limit):
                 state["mean"] += delta * weight / new_duration
                 state["m2"] += weight * delta * (previous_position - state["mean"])
                 state["duration"] = new_duration
-                state["at_limit"] += weight * int(
-                    np.isclose(abs(previous_position), limit, rtol=0.0, atol=1e-12)
-                )
+                state["at_limit"] += weight * int(abs(previous_position) >= limit)
                 state["max_abs"] = max(state["max_abs"], abs(previous_position))
             for diagnostic in batch.diagnostics:
                 if diagnostic.name == "utc_day_boundary":

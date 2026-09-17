@@ -464,7 +464,7 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
     frame = pd.DataFrame(
         {
             "market_id": ["a_share"] * 3,
-            "asset_id": ["a", "b", "c"],
+            "asset_id": ["000001", "000002", "000003"],
             "timestamp": pd.to_datetime(["2019-02-01"] * 3),
             "x": [1.0, 2.0, 3.0],
             "y": [np.nan] * 3,
@@ -496,13 +496,45 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
     assert table["alpha_score"].tolist() == pytest.approx([-1.0 / 3.0, 0.0, 1.0 / 3.0])
     assert float(table["alpha_score"].mean()) == pytest.approx(0.0)
 
+    from quant_research_platform.research.predictions.alignment import (
+        _iter_prediction_joined_chunks,
+    )
+
+    requested = frame.iloc[[2, 0, 1]].reset_index(drop=True)
     with runtime_resource_policy_scope(None):
-        with read_prediction_output_bundle(
-            bundle,
-            expected_output_id="prediction",
-            expected_run_id="test_run",
-        ) as (_manifest, lookup):
-            assert lookup.prediction_column == "alpha_score"
+        for mutation in (None, "asset", "timestamp"):
+            selected = requested.copy()
+            if mutation == "asset":
+                selected.loc[selected.asset_id.eq("000001"), "asset_id"] = "1"
+            if mutation == "timestamp":
+                selected.loc[0, "timestamp"] += pd.Timedelta(days=1)
+            with read_prediction_output_bundle(
+                bundle,
+                expected_output_id="prediction",
+                expected_run_id="test_run",
+                family_selection="champion",
+            ) as (_manifest, lookup):
+                assert lookup.prediction_column == "alpha_score"
+                joined = _iter_prediction_joined_chunks(
+                    (selected.iloc[:1], selected.iloc[1:]),
+                    prediction_lookup=lookup,
+                    input_columns=("x",),
+                    sample_filter_mode=prediction_spec.sample_filter_mode,
+                    test_start=prediction_spec.test_start,
+                    test_end=prediction_spec.test_end,
+                )
+                if mutation is None:
+                    matched = pd.concat(joined, ignore_index=True)
+                    assert matched.asset_id.tolist() == ["000003", "000001", "000002"]
+                    assert matched.alpha_score.tolist() == pytest.approx(
+                        [1.0 / 3.0, -1.0 / 3.0, 0.0]
+                    )
+                    assert lookup.coverage_counts() == (0, 0)
+                else:
+                    with pytest.raises(
+                        ValueError, match="misaligned_persisted_prediction_keys"
+                    ):
+                        list(joined)
 
     shuffled = frame.iloc[[2, 0, 1]].reset_index(drop=True)
     _mock_prediction_dataset(monkeypatch, shuffled)
@@ -1450,8 +1482,17 @@ def test_two_level_selection_mutations_are_rejected() -> None:
             validate_model_selection_metadata(mutation)
 
 
+@pytest.mark.parametrize(
+    "max_train_rows,train_rows,refit_rows,trial_alpha,refit_alpha",
+    ((None, 3, 6, 30.0, 60.0), (2, 2, 2, 20.0, 20.0), (3, 3, 3, 30.0, 30.0)),
+)
 def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted(
     tmp_path: Path,
+    max_train_rows,
+    train_rows,
+    refit_rows,
+    trial_alpha,
+    refit_alpha,
 ) -> None:
     import json
     from dataclasses import replace
@@ -1484,6 +1525,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         input_factor_columns=("x",),
         label_column="label",
         random_seed=42,
+        max_train_rows=max_train_rows,
     )
     preflight_model_specs((base,))
     frame = pd.DataFrame(
@@ -1557,8 +1599,8 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         )
         selected, index = winners["ridge"], indices["ridge"]
         assert (
-            index == 3 and selected.hyperparameters["alpha"] == 30.0
-        )  # 3 * lambda 10.
+            index == 3 and selected.hyperparameters["alpha"] == trial_alpha
+        )  # Retained training rows times the selected lambda 10.
         result, lease = _fit_selected_model_result(
             dataset_spec=dataset,
             selected_spec=selected,
@@ -1568,7 +1610,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             root_seed=42,
             config_index=index,
         )
-        assert result.prediction_model.estimator.alpha == 60.0  # 6 * same lambda 10.
+        assert result.prediction_model.estimator.alpha == refit_alpha
         quarterly = QuarterlyModelResult(
             _fold(1), selected.model_id, result, "ridge", metadata, refs
         )
@@ -1584,21 +1626,23 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         assert pd.Timestamp(saved["train_start"]) > pd.Timestamp(
             artifact.quarterly_models[0]["training_window"]["start"]
         )
-        assert saved["rows_after_input_label_dropna"] == 6
-        assert saved["resolved_hyperparameters"]["alpha"] == 60.0
+        assert saved["rows_after_input_label_dropna"] == refit_rows
+        assert saved["resolved_hyperparameters"]["alpha"] == refit_alpha
         plan, trials = read_trial_ledger_reference(layout, artifact.trial_ledgers[0])
         assert plan.candidate_ids[index] == selected.model_id
         assert (
             next(
                 record for record in trials if record.candidate_id == selected.model_id
             ).normalized_parameters["hyperparameters"]["alpha"]
-            == 30.0
+            == trial_alpha
         )
-        assert all(record.validation_metrics["n_train"] == 3 for record in trials)
+        assert all(
+            record.validation_metrics["n_train"] == train_rows for record in trials
+        )
         with read_quarterly_predictor(
             artifact, "2019Q1", "ridge", resource_policy=policy
         ) as predictor:
-            assert predictor.estimator.alpha == 60.0
+            assert predictor.estimator.alpha == refit_alpha
             probe = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
             before = predictor.predict(probe).copy()
         original_bytes = {
@@ -2536,3 +2580,222 @@ def test_training_admits_materialized_filter_index_without_changing_rows(
         finally:
             owned.release(owner="test.sparse_training")
     assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("consumer", ("quarterly", "crypto", "staged"))
+@pytest.mark.parametrize(
+    "failure", ("open", "load", "close", "missing", "notdir", "corrupt")
+)
+def test_model_member_io_preserves_failure_class(
+    tmp_path, monkeypatch, consumer, failure
+):
+    import pickle
+
+    from quant_research_platform.research.models import persisted
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact_record,
+        write_semantic_artifact,
+    )
+
+    layout = StorageLayout(tmp_path)
+    bound = fitting._linear_model_state_upper_bound_bytes(
+        ModelSpec(
+            model_id="linear",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        )
+    )
+    with runtime_resource_policy_scope() as policy:
+        item = _quarterly_result(
+            1, trial_layout=layout, model_id="linear", columns=("x",)
+        )
+        root = write_quarterly_model_artifact(
+            tmp_path / "model",
+            model_id="model-artifact",
+            trial_layout=layout,
+            envelope=_envelope(),
+            quarterly_results=(OwnedValue(item, policy.lease("test.model", bound)),),
+        )
+        item = None
+        artifact = read_quarterly_model_artifact(root, trial_layout=layout)
+        metadata = artifact.quarterly_models[0]["model_metadata"]
+        if consumer == "crypto":
+
+            def write_crypto_member(stage):
+                directory = stage / "models/fold_1"
+                directory.mkdir(parents=True)
+                with persisted.read_quarterly_predictor(
+                    artifact, "2019Q1", "linear_regression", resource_policy=policy
+                ) as model:
+                    persisted._write_model_member(
+                        directory / "linear.pkl", model, state_bytes=bound
+                    )
+
+            crypto_root = write_semantic_artifact(
+                tmp_path / "crypto", _envelope(), write_crypto_member
+            )
+            _, members = read_semantic_artifact_record(crypto_root)
+            crypto_artifact = SimpleNamespace(
+                instance_root=crypto_root, member_records=members
+            )
+            entry = dict(fold_id="fold_1", model_id="linear", model_metadata=metadata)
+        staged_layout = StorageLayout(tmp_path / "staged-trials")
+        staged_item = (
+            _quarterly_result(
+                1, trial_layout=staged_layout, model_id="linear", columns=("x",)
+            )
+            if consumer == "staged"
+            else None
+        )
+        original_bytes = {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        primary = (
+            FileNotFoundError("model_missing")
+            if failure == "missing"
+            else NotADirectoryError("model_not_directory")
+            if failure == "notdir"
+            else pickle.UnpicklingError("model_corrupt")
+            if failure == "corrupt"
+            else OSError(5, "model_system_io")
+        )
+        native_open = persisted.open_filesystem_file
+        native_load = persisted.pickle.load
+        handles = []
+
+        class CloseFailure:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+            def close(self):
+                self.handle.close()
+                raise primary
+
+        def open_member(path, mode="rb", **kwargs):
+            if Path(path).suffix != ".pkl" or mode != "rb":
+                return native_open(path, mode, **kwargs)
+            if failure in {"open", "missing", "notdir"}:
+                raise primary
+            handle = native_open(path, mode, **kwargs)
+            handles.append(handle)
+            return CloseFailure(handle) if failure == "close" else handle
+
+        def load_member(handle):
+            if failure in {"load", "corrupt"}:
+                raise primary
+            return native_load(handle)
+
+        monkeypatch.setattr(persisted, "open_filesystem_file", open_member)
+        monkeypatch.setattr(persisted.pickle, "load", load_member)
+        invalid = failure in {"missing", "notdir", "corrupt"}
+        with pytest.raises(ValueError if invalid else OSError) as caught:
+            if consumer == "staged":
+                write_quarterly_model_artifact(
+                    tmp_path / "staged",
+                    model_id="model-artifact",
+                    trial_layout=staged_layout,
+                    envelope=_envelope(),
+                    quarterly_results=(
+                        OwnedValue(staged_item, policy.lease("test.model", bound)),
+                    ),
+                )
+            else:
+                context = (
+                    persisted.read_crypto_model_member(
+                        crypto_artifact, entry, resource_policy=policy
+                    )
+                    if consumer == "crypto"
+                    else persisted.read_quarterly_predictor(
+                        artifact, "2019Q1", "linear_regression", resource_policy=policy
+                    )
+                )
+                with context:
+                    pytest.fail("model I/O failure was swallowed")
+        staged_item = None
+        if invalid:
+            assert str(caught.value) == "model_artifact_model_invalid"
+            assert caught.value.__cause__ is primary
+        else:
+            assert caught.value is primary
+        assert all(handle.closed for handle in handles)
+        assert policy.used_memory_bytes == 0
+        assert {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        } == original_bytes
+        if consumer == "staged":
+            assert not (
+                tmp_path / "staged/instances" / _envelope().instance_identity
+            ).exists()
+            assert not tuple((tmp_path / "staged").rglob(".a-*"))
+
+
+@pytest.mark.parametrize(
+    "failure_type", (FileNotFoundError, NotADirectoryError, OSError)
+)
+def test_quarterly_model_final_stat_preserves_system_error(
+    tmp_path, monkeypatch, failure_type
+):
+    from quant_research_platform.research.models import persisted
+
+    layout = StorageLayout(tmp_path)
+    with runtime_resource_policy_scope() as policy:
+        item = _quarterly_result(
+            1, trial_layout=layout, model_id="linear", columns=("x",)
+        )
+        bound = fitting._linear_model_state_upper_bound_bytes(
+            ModelSpec(
+                model_id="linear",
+                model_algorithm="linear_regression",
+                input_factor_columns=("x",),
+                label_column="label",
+            )
+        )
+        root = write_quarterly_model_artifact(
+            tmp_path / "model",
+            model_id="model-artifact",
+            trial_layout=layout,
+            envelope=_envelope(),
+            quarterly_results=(OwnedValue(item, policy.lease("test.model", bound)),),
+        )
+        item = None
+        primary = failure_type("model_stat_failure")
+        native_stat = persisted.os.stat
+        native_validate = persisted._validate_trial_references
+        armed = False
+
+        def validate_then_arm(*args, **kwargs):
+            nonlocal armed
+            result = native_validate(*args, **kwargs)
+            armed = True
+            return result
+
+        def fail_stat(path, *args, **kwargs):
+            if armed and not isinstance(path, int) and Path(path).suffix == ".pkl":
+                raise primary
+            return native_stat(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(persisted, "_validate_trial_references", validate_then_arm)
+            patch.setattr(persisted.os, "stat", fail_stat)
+            missing = failure_type in (FileNotFoundError, NotADirectoryError)
+            with pytest.raises(ValueError if missing else OSError) as caught:
+                read_quarterly_model_artifact(root, trial_layout=layout)
+            assert armed
+            if missing:
+                assert str(caught.value) == "model_artifact_quarterly_invalid"
+                assert caught.value.__cause__ is primary
+            else:
+                assert caught.value is primary
+        assert policy.used_memory_bytes == 0
+        assert (
+            read_quarterly_model_artifact(root, trial_layout=layout).model_id
+            == "model-artifact"
+        )

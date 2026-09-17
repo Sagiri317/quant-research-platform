@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.cross_section import (
+    _CorrelationMoments,
     _pearson_correlation_result,
     _stable_zscore,
     compute_ic_and_grouped_label_values,
@@ -35,7 +36,6 @@ from quant_research_platform.contracts.validation import (
 from quant_research_platform.research.evaluations.engine import (
     _add_group_spread_observation,
     _EvaluationStreamingState,
-    _merge_time_series_moments,
     _time_series_metrics_frame,
 )
 from quant_research_platform.research.portfolios.construction import (
@@ -80,28 +80,17 @@ def test_centered_kernels_preserve_finite_variation(values, expected):
 
 @pytest.mark.parametrize("scale", [1e308, 1e-200, 1e-320])
 @pytest.mark.parametrize("block_size", [1, 3, 11])
-def test_online_pearson_rescales_previous_moments(scale, block_size):
+def test_online_pearson_preserves_units_across_chunks(scale, block_size):
     left = np.array([0, 0, 0.1, 0.2, 0.2, -0.2, -1, 1, 1, 0, -1]) * scale
     right = left / scale
-    stats = dict.fromkeys(
-        (
-            "count",
-            "left_mean",
-            "right_mean",
-            "left_origin",
-            "right_origin",
-            "left_scale",
-            "right_scale",
-            "left_m2",
-            "right_m2",
-            "covariance",
-        ),
-        0.0,
-    )
+    stats = _CorrelationMoments()
     for start in range(0, len(left), block_size):
-        _merge_time_series_moments(
-            stats, left[start : start + block_size], right[start : start + block_size]
-        )
+        for x, y in zip(
+            left[start : start + block_size],
+            right[start : start + block_size],
+            strict=True,
+        ):
+            stats.update(float(x), float(y))
     result = _time_series_metrics_frame(
         {("signal", "label"): stats}, timestamp=pd.Timestamp("2023-01-01")
     )
@@ -438,27 +427,39 @@ def test_prediction_releases_previous_model_array():
         assert policy.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize(
+    "error_type", (OSError, PermissionError, FileNotFoundError, NotADirectoryError)
+)
 def test_semantic_hash_io_failure_preserves_error_and_releases_budget(
-    tmp_path, monkeypatch
+    tmp_path, monkeypatch, error_type
 ):
     root = semantic_artifacts.write_semantic_artifact(
         tmp_path,
         _envelope(),
         lambda path: (path / "payload.bin").write_bytes(b"payload"),
     )
-    primary = OSError("synthetic_io_failure")
+    primary = error_type("synthetic_io_failure")
+    before = {
+        p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
 
     def failed_hash(*args, **kwargs):
         raise primary
 
     monkeypatch.setattr(semantic_artifacts, "_hash_file_content", failed_hash)
     with runtime_resource_policy_scope(explicit_cap_bytes=65536) as policy:
-        with pytest.raises(
-            ValueError, match="semantic_artifact_member_invalid"
-        ) as caught:
+        missing = error_type in (FileNotFoundError, NotADirectoryError)
+        with pytest.raises(ValueError if missing else error_type) as caught:
             semantic_artifacts.read_semantic_artifact_record(root)
-        assert caught.value.__cause__ is primary
+        if missing:
+            assert str(caught.value) == "semantic_artifact_member_invalid"
+            assert caught.value.__cause__ is primary
+        else:
+            assert caught.value is primary
         assert policy.used_memory_bytes == 0
+    assert before == {
+        p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()
+    }
 
 
 @pytest.mark.parametrize(
@@ -628,3 +629,466 @@ def test_evaluation_mixed_timestamp_strings_follow_chronological_order():
     assert list(pd.to_datetime(observed, format="mixed")) == list(
         pd.to_datetime(["2024-01-01", "2024-02-01", "2024-10-01"])
     )
+
+
+@pytest.mark.parametrize("magnitude", (1e-200, 1.0, 1e200))
+def test_weighted_scaler_preserves_representable_nonconstant_scales(magnitude):
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+
+    frame = pd.DataFrame({"x": [magnitude, 2 * magnitude]})
+    scaler = ModelMatrixScaler.fit(frame, sample_weight=[1.0, 3.0])
+    # Weighted mean=7a/4; population variance=3a**2/16.
+    assert scaler.mean_[0] / magnitude == pytest.approx(1.75)
+    assert scaler.scale_[0] / magnitude == pytest.approx(3**0.5 / 4)
+    assert scaler.transform(frame).x.tolist() == pytest.approx([-(3**0.5), 1 / 3**0.5])
+    assert scaler.to_payload()["weighted_population_scale"] == list(scaler.scale_)
+
+
+def test_scaler_opposite_extremes_and_true_constant_remain_distinct():
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+
+    frame = pd.DataFrame({"x": [-1e308, 1e308], "constant": [1e308, 1e308]})
+    with np.errstate(all="raise"):
+        scaler = ModelMatrixScaler.fit(frame)
+        actual = scaler.transform(frame)
+    assert scaler.scale_ == (1e308, 1.0)
+    assert actual.x.tolist() == [-1.0, 1.0]
+    assert actual.constant.tolist() == [0.0, 0.0]
+
+
+def test_scaler_retains_small_variation_on_large_origin():
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+
+    base = float(2**50)
+    frame = pd.DataFrame({"x": [base, base + 1, base + 2]})
+    scaler = ModelMatrixScaler.fit(frame)
+    assert scaler.mean_ == (base + 1,)
+    assert scaler.scale_[0] == pytest.approx((2 / 3) ** 0.5)
+    assert scaler.transform(frame).x.tolist() == pytest.approx(
+        [-(1.5**0.5), 0.0, 1.5**0.5]
+    )
+
+
+@pytest.mark.parametrize("sign", (1.0, -1.0))
+@pytest.mark.parametrize(
+    "kind,left_hex,right_hex",
+    [
+        (
+            "cross_sectional",
+            [
+                "0x1.4d489c7ab1fddp-2",
+                "-0x1.439b67fea8c87p-4",
+                "0x1.027bd64d3a282p-2",
+                "0x1.4d7bad9271bd5p-5",
+            ],
+            [
+                "0x1.33be61f8bf1f0p+1",
+                "0x1.d0bb531a38568p-1",
+                "0x1.1126131d514c2p+1",
+                "0x1.59c24cde8859ep+0",
+            ],
+        ),
+        (
+            "single_asset_time_series",
+            [
+                "-0x1.4d2b664445e02p-2",
+                "-0x1.60c52dde47a0dp-1",
+                "-0x1.a8dd49eb30280p-6",
+                "0x1.84e88830c7852p-2",
+            ],
+            [
+                "-0x1.f6b064b478400p-9",
+                "-0x1.596cc80e6ae99p+0",
+                "0x1.1aa334ed34041p+0",
+                "0x1.4d7858968f7a6p+1",
+            ],
+        ),
+        (
+            "trial",
+            ["-0x1.8cefdae3b868ep-2", "0x1.8f11590f3e18fp-1", "0x1.43bfa7fd829f1p-3"],
+            ["-0x1.dfbbba2ebb088p-3", "0x1.055e6c63d9852p+2", "0x1.c8ef0a7ed9366p+0"],
+        ),
+    ],
+)
+def test_pearson_rounding_counterexamples_reach_published_consumers(
+    tmp_path, kind, left_hex, right_hex, sign
+):
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        validate_output_bundle,
+    )
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.research.evaluations.engine import (
+        build_evaluation_result_from_frames,
+    )
+    from quant_research_platform.research.models.trial_selection import (
+        evaluate_model_trial_metrics_from_chunks,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    left = [float.fromhex(value) for value in left_hex]
+    right = [sign * float.fromhex(value) for value in right_hex]
+    with localcontext() as context:
+        context.prec = 90
+        x = [Decimal.from_float(value) for value in left]
+        y = [Decimal.from_float(value) for value in right]
+        mx, my = sum(x) / len(x), sum(y) / len(y)
+        xx, yy = [v - mx for v in x], [v - my for v in y]
+        expected = float(
+            sum(u * v for u, v in zip(xx, yy, strict=True))
+            / (sum(u * u for u in xx) * sum(v * v for v in yy)).sqrt()
+        )
+    frame = pd.DataFrame(
+        {
+            "timestamp": (
+                pd.date_range("2020-01-01", periods=len(left))
+                if kind == "single_asset_time_series"
+                else pd.Timestamp("2020-01-01")
+            ),
+            "asset_id": (
+                "synthetic"
+                if kind == "single_asset_time_series"
+                else [f"synthetic_{i}" for i in range(len(left))]
+            ),
+            "x": right if kind == "trial" else left,
+            "label": left if kind == "trial" else right,
+            "eligible": True,
+        }
+    )
+    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024 * 1024) as policy:
+        if kind == "trial":
+            actual = evaluate_model_trial_metrics_from_chunks(
+                (frame.iloc[:1], frame.iloc[1:]),
+                model_id="rounding",
+                label_column="label",
+                prediction_column="x",
+            )
+            assert actual["validation_ic"] == expected
+            assert abs(actual["validation_ic"]) <= 1.0
+        else:
+            spec = EvaluationSpec(
+                evaluation_id="rounding",
+                market_id=MarketId(
+                    "crypto" if kind == "single_asset_time_series" else "a_share"
+                ),
+                research_dataset_id="synthetic",
+                signals=(
+                    SignalSpec(signal_id="x", source_column="x", source_kind="factor"),
+                ),
+                label_columns=("label",),
+                evaluation_axis=kind,
+                n_groups=2,
+            )
+            with build_evaluation_result_from_frames(
+                (frame.iloc[:1], frame.iloc[1:]),
+                spec=spec,
+                signal_columns=("x",),
+                label_columns=("label",),
+                n_groups=2,
+                asset_column="asset_id",
+                resource_policy=policy,
+            ) as result:
+                bundle = write_evaluation_outputs_from_chunks(
+                    result.output_chunks,
+                    summary_factory=result.summaries,
+                    spec=spec,
+                    output_spec=OutputSpec(
+                        output_id="rounding",
+                        output_definition_id="evaluation_outputs",
+                        run_id="test_run",
+                        market_id=spec.market_id,
+                        run_type="evaluation",
+                        scope=OutputScope.LOCAL_ONLY,
+                    ),
+                    layout=StorageLayout(tmp_path),
+                    n_groups=2,
+                )
+            validate_output_bundle(bundle)
+            assert pd.read_parquet(bundle / "metrics.parquet").ic.tolist() == [expected]
+            assert pd.read_parquet(bundle / "ic_summary.parquet").mean_ic.tolist() == [
+                expected
+            ]
+            assert (
+                (bundle / "summary.md").read_text().startswith("# Evaluation Summary")
+            )
+        assert policy.used_memory_bytes == 0
+
+
+def test_scaler_transform_preserves_representable_extreme_difference():
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+
+    frame = pd.DataFrame({"x": [-1e308, 1e308]})
+    with np.errstate(all="raise"):
+        scaler = ModelMatrixScaler.fit(frame, sample_weight=[1.0, 9.0])
+        actual = scaler.transform(frame)
+    assert scaler.mean_[0] / 1e308 == pytest.approx(0.8)
+    assert scaler.scale_[0] / 1e308 == pytest.approx(0.6)
+    assert actual.x.tolist() == pytest.approx([-3.0, 1 / 3])
+
+
+@pytest.mark.parametrize("capital", [1.0, 1e308, 5e-324])
+@pytest.mark.parametrize("mode", ["long_only", "long_short"])
+def test_capital_weight_units_do_not_change_targets(capital, mode):
+    signal = pd.Series({"a": 1.0, "b": 2.0, "c": 3.0, "d": 4.0})
+    target = build_simple_target_weights(
+        signal,
+        eligible=pd.Series(True, index=signal.index),
+        method="float_cap_weight",
+        portfolio_mode=mode,
+        top_quantile=0.5,
+        bottom_quantile=0.5,
+        float_market_cap=pd.Series(capital, index=signal.index),
+    )
+    expected = (
+        [0.0, 0.0, 0.5, 0.5] if mode == "long_only" else [-0.25, -0.25, 0.25, 0.25]
+    )
+    assert target.tolist() == expected
+
+
+@pytest.mark.parametrize("capital", [1.0, 1e308, 5e-324])
+def test_capital_weight_units_do_not_change_market_beta(capital):
+    state = MarketModelRiskState(window=2, residual_window=1)
+    for daily_return in (0.0, 0.01, 0.02):
+        result = state.observe(
+            pd.DataFrame(
+                {
+                    "asset_id": ["a", "b"],
+                    "period_return": [daily_return, daily_return],
+                    "float_market_cap": [capital, capital],
+                }
+            )
+        )
+    # Identical asset and market returns have slope one and zero residuals.
+    assert result.beta.tolist() == [1.0, 1.0]
+    assert result.residual_volatility.tolist() == [0.0, 0.0]
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
+def test_risk_style_population_scale_is_unit_invariant(scale):
+    from quant_research_platform.research.portfolios.risk import preprocess_risk_styles
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2020-01-01"] * 2),
+            "style": [scale, 2 * scale],
+        }
+    )
+    result = preprocess_risk_styles(frame, style_columns=("style",))
+    # Equal weights: mean 3a/2, population standard deviation a/2.
+    np.testing.assert_allclose(result["style"], [-1.0, 1.0], rtol=1e-14)
+
+
+@pytest.mark.parametrize("kind", ("taker", "maker"))
+@pytest.mark.parametrize("depth", (2, 4096))
+@pytest.mark.parametrize(
+    "failure", ("none", "consumer", "consumer_and_cleanup", "mid", "funding")
+)
+def test_execution_previous_book_stays_owned_through_markout(
+    monkeypatch, kind, depth, failure
+):
+    import quant_research_platform.markets.implementations.crypto.execution as execution
+    from quant_research_platform.runtime.resources import MemoryLease, OwnedValue
+    from tests.helpers.binance_hft import KNOWN_NO_FUNDING
+    from tests.helpers.runtime_resources import capture_test_policy
+    from tests.markets.crypto.test_hft_execution import (
+        _maker_config,
+        _state,
+        _taker_config,
+    )
+
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    leases, seen, closed = {}, [], []
+    primary = KeyboardInterrupt("markout_consumer_failure")
+    original_resolve = execution._resolve_observed_markouts
+    original_close = MemoryLease.close
+    original_mid = execution._mid
+    original_funding = execution.PortfolioEconomics.funding
+
+    def books():
+        try:
+            for stamp in (0, 100, 200):
+                lease = policy.lease("fixture.book", 4096 + 512 * depth)
+                leases[stamp * 1_000_000] = lease
+                yield OwnedValue(
+                    _state(
+                        stamp,
+                        bid_levels=tuple((10000 - i, 1.0) for i in range(depth)),
+                        ask_levels=tuple((10001 + i, 1.0) for i in range(depth)),
+                    ),
+                    lease,
+                )
+        finally:
+            closed.append(True)
+
+    def resolve(pending, state, coverage, *, previous_state):
+        if previous_state is not None:
+            previous = leases[previous_state.observed_time_ns]
+            current = leases[state.observed_time_ns]
+            assert previous.active and current.active
+            assert (
+                policy.used_memory_bytes
+                >= previous.reserved_bytes + current.reserved_bytes
+            )
+            assert len(previous_state.bids) == len(previous_state.asks) == depth
+            seen.append(True)
+            if failure not in {"none", "mid", "funding"}:
+                raise primary
+        return original_resolve(pending, state, coverage, previous_state=previous_state)
+
+    def mid(state):
+        if failure == "mid" and state.observed_time_ns == 100_000_000:
+            raise primary
+        return original_mid(state)
+
+    def funding(economics, event):
+        if failure == "funding":
+            raise primary
+        return original_funding(economics, event)
+
+    def close(lease):
+        original_close(lease)
+        if failure == "consumer_and_cleanup" and lease is leases.get(0):
+            raise OSError("previous_book_close_failure")
+
+    monkeypatch.setattr(execution, "_resolve_observed_markouts", resolve)
+    monkeypatch.setattr(MemoryLease, "close", close)
+    monkeypatch.setattr(execution, "_mid", mid)
+    monkeypatch.setattr(execution.PortfolioEconomics, "funding", funding)
+    with runtime_resource_policy_scope(policy):
+        options = dict(
+            observed_coverage={"s1": (0, 300_000_000)},
+            resource_policy=policy,
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            funding_events=(execution.FundingEvent(100_000_000, 0.01, 100.0),),
+            funding_forecasts=KNOWN_NO_FUNDING,
+        )
+
+        def run():
+            if kind == "taker":
+                return execution.simulate_taker(
+                    books(),
+                    (),
+                    prediction_column="prediction",
+                    prediction_horizon_ms=500,
+                    config=_taker_config(),
+                    **options,
+                )
+            return execution.simulate_maker(
+                books(),
+                (),
+                (),
+                config=_maker_config(),
+                trade_coverage={"trade-connection-1": (0, 300_000_000)},
+                **options,
+            )
+
+        if failure == "none":
+            assert run()["net_pnl"] == 0.0
+            assert len(seen) == 2
+        else:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                try:
+                    run()
+                finally:
+                    leaked = [lease for lease in leases.values() if lease.active]
+                    for lease in leaked:
+                        lease.close()
+            assert not leaked
+            assert caught.value is primary
+            assert len(seen) == (
+                0
+                if failure == "funding" or (kind == "taker" and failure == "mid")
+                else 1
+            )
+            if failure == "consumer_and_cleanup":
+                assert any("OSError" in note for note in primary.__notes__)
+        assert closed == [True]
+        assert all(not lease.active for lease in leases.values())
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("kind", ("taker", "maker", "calibration"))
+@pytest.mark.parametrize("failure", ("type", "order"))
+def test_execution_rejected_book_releases_transferred_ownership(kind, failure):
+    import quant_research_platform.markets.implementations.crypto.execution as execution
+    from quant_research_platform.runtime.resources import OwnedValue
+    from tests.helpers.binance_hft import KNOWN_NO_FUNDING
+    from tests.helpers.runtime_resources import capture_test_policy
+    from tests.markets.crypto.test_hft_execution import (
+        _maker_config,
+        _state,
+        _taker_config,
+    )
+
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    leases, closed = [], []
+
+    def books():
+        try:
+            for value in (
+                (_state(100), _state(0)) if failure == "order" else (object(),)
+            ):
+                lease = policy.lease("fixture.book", 4096)
+                leases.append(lease)
+                yield OwnedValue(value, lease)
+        finally:
+            closed.append(True)
+
+    with runtime_resource_policy_scope(policy):
+        options = dict(
+            observed_coverage={"s1": (0, 300_000_000)},
+            resource_policy=policy,
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            funding_events=(),
+            funding_forecasts=KNOWN_NO_FUNDING,
+        )
+        error = TypeError if failure == "type" else ValueError
+        message = (
+            "hft_execution_book_event_invalid"
+            if failure == "type"
+            else "hft_execution_time_non_monotonic"
+        )
+        try:
+            with pytest.raises(error, match=message):
+                if kind == "taker":
+                    execution.simulate_taker(
+                        books(),
+                        (),
+                        prediction_column="prediction",
+                        prediction_horizon_ms=500,
+                        config=_taker_config(),
+                        **options,
+                    )
+                elif kind == "calibration":
+                    execution.replay_maker_calibration(
+                        books(),
+                        (),
+                        (),
+                        config=_maker_config(),
+                        observed_coverage=options["observed_coverage"],
+                        trade_coverage={"trade-connection-1": (0, 300_000_000)},
+                        cutoff_ns=300_000_000,
+                        resource_policy=policy,
+                        on_sample=lambda **sample: None,
+                        on_event=lambda **event: None,
+                    )
+                else:
+                    execution.simulate_maker(
+                        books(),
+                        (),
+                        (),
+                        config=_maker_config(),
+                        trade_coverage={"trade-connection-1": (0, 300_000_000)},
+                        **options,
+                    )
+            assert closed == [True]
+            assert policy.used_memory_bytes == 0
+            assert all(not lease.active for lease in leases)
+        finally:
+            # Keep a failing regression from poisoning the rest of the test process.
+            for lease in leases:
+                lease.close()

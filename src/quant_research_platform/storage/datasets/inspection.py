@@ -236,18 +236,12 @@ def _inspection_runtime_metadata(
     timestamp_column = context.timestamp_column
     if context.time_window is not None and timestamp_column is None:
         raise ValueError("time_window_not_supported")
-    timestamp_columns = tuple(
-        column
-        for column in primary_key
-        if spec["column_roles"].get(column) == "timestamp"
-    )
     del spec
     partition_row_counts: dict[str, int] = {}
     selected_file_count = 0
     last_observed_path: Path | None = None
     with ExactPrimaryKeyIndex(
         primary_key=primary_key,
-        timestamp_columns=timestamp_columns,
         key_schema=dataset_primary_key_schema(context, primary_key),
     ) as key_index:
         observer = DatasetSummaryObserver(

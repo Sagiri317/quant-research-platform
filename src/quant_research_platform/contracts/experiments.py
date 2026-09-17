@@ -222,9 +222,6 @@ class ExperimentPlan:
             "holdout_status": self.holdout_status,
         }
 
-    def development_windows(self) -> tuple[TimeWindow, ...]:
-        return tuple(fold.development_test for fold in self.folds)
-
     @classmethod
     def from_payload(cls, value: dict[str, object]) -> ExperimentPlan:
         if (

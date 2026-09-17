@@ -507,11 +507,6 @@ def _write_dataset_body(
         try:
             if resource_policy.operation_headroom_bytes <= 0:
                 raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-            timestamp_columns = tuple(
-                column
-                for column in spec.primary_key
-                if spec.column_roles.get(column) is ColumnRole.TIMESTAMP
-            )
             with (
                 DatasetSessionInventory(
                     data_root=temp_root / "data",
@@ -519,7 +514,6 @@ def _write_dataset_body(
                 ) as inventory,
                 ExactPrimaryKeyIndex(
                     primary_key=spec.primary_key,
-                    timestamp_columns=timestamp_columns,
                 ) as key_tracker,
             ):
                 accumulator = _write_contents(

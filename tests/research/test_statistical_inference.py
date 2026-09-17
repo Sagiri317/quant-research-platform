@@ -464,3 +464,61 @@ def test_white_lm_preserves_exact_auxiliary_fit_without_unused_f_warning():
             frame, return_column="return", factors=("x", "z"), core_factors=("x", "z")
         )
         assert records and all(row["status"] == "DEFINED" for row in records)
+
+
+@pytest.mark.parametrize("exponent", [-700, 0, 700])
+def test_sample_risk_and_sharpe_are_invariant_to_binary_units(exponent):
+    import warnings
+
+    from quant_research_platform.research.statistics import return_standard_deviation
+
+    scale = 2.0**exponent
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        # Sample variance of [-a, 0, a] is a squared, hence sample risk is a.
+        assert return_standard_deviation([-scale, 0.0, scale]) == scale
+        matrix = np.array([[-1.0, 0.0], [0.0, 2.0], [1.0, 4.0]]) * scale
+        np.testing.assert_array_equal(
+            return_standard_deviation(matrix), [scale, 2 * scale]
+        )
+        assert return_standard_deviation([scale] * 60) == 0.0
+        result = probabilistic_and_deflated_sharpe(
+            np.array([0.02, -0.01, 0.03, 0.01, 0.0, 0.04, -0.02, 0.01]) * scale,
+            benchmark_sharpe=0.0,
+            trial_sharpes=[0.1, 0.2, 0.3, 0.4, 0.5],
+        )
+    assert result.observed_sharpe == pytest.approx(0.5)
+    assert result.psr == pytest.approx(0.8983492642265651)
+    assert result.dsr == pytest.approx(0.7859405033926591)
+
+
+@pytest.mark.parametrize(
+    "entry,native", [(spa_reality_check, SPA), (stepm_superior_models, StepM)]
+)
+@pytest.mark.parametrize("container", [np.asarray, list])
+def test_multiple_comparison_aligns_unlabeled_benchmark_to_model_rows(
+    entry, native, container
+):
+    rng = np.random.default_rng(17)
+    benchmark = rng.normal(0.0, 0.01, 32)
+    models = pd.DataFrame(
+        {
+            "a": benchmark + rng.normal(0.001, 0.003, 32),
+            "b": benchmark + rng.normal(-0.001, 0.004, 32),
+        },
+        index=pd.date_range("2020-01-01", periods=32),
+    )
+    expected = native(benchmark, models, block_size=4, reps=99, seed=17)
+    expected.compute()
+    result = entry(container(benchmark), models, block_size=4, repetitions=99, seed=17)
+    assert result.status == "DEFINED"
+    assert result.observation_count == 32
+    if entry is spa_reality_check:
+        np.testing.assert_array_equal(
+            [result.lower_p_value, result.consistent_p_value, result.upper_p_value],
+            expected.pvalues[["lower", "consistent", "upper"]],
+        )
+    else:
+        assert result.superior_models == tuple(expected.superior_models)
+    with pytest.raises(ValueError, match="^loss_matrix_length_mismatch$"):
+        entry(container(benchmark[:-1]), models, block_size=4, repetitions=99, seed=17)

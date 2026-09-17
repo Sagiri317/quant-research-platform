@@ -360,7 +360,6 @@ def _iter_batches(
         key_index = stack.enter_context(
             ExactPrimaryKeyIndex(
                 primary_key=("fill_id",),
-                timestamp_columns=(),
             )
         )
         readers = {

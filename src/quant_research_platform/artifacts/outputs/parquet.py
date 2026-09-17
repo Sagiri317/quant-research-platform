@@ -130,11 +130,6 @@ def write_parquet_chunks(
                         ) as write_table,
                         ExactPrimaryKeyIndex(
                             primary_key=key_columns,
-                            timestamp_columns=tuple(
-                                column
-                                for column in key_columns
-                                if column == "timestamp"
-                            ),
                         ) as key_index,
                     ):
                         first_pending = True

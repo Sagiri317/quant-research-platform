@@ -215,7 +215,9 @@ def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
         receipt.session.close()
         receipt.session.verify()
         receipt_checks.append(receipt.exact_primary_key_index.database_path.is_file())
-        assert receipt.exact_primary_key_index.add_frame(frame) == len(frame)
+        assert receipt.exact_primary_key_index.add_table(
+            pa.Table.from_pandas(frame, preserve_index=False)
+        ) == len(frame)
 
     monkeypatch.setattr(
         dataset_writing,
@@ -400,10 +402,12 @@ def test_open_dataset_session_preserves_missing_manifest_preflight(
 
 
 @pytest.mark.parametrize("entrypoint", ("owned", "borrowed"))
+@pytest.mark.parametrize("failure", ("missing", "not_directory", "io", "permission"))
 def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     entrypoint: str,
+    failure: str,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, f"metadata_stat_{entrypoint}")
     write_dataset(
@@ -416,9 +420,15 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
         explicit_cap_bytes=4 * 1024 * 1024,
     )
     metadata_reads = 0
+    primary = {
+        "missing": FileNotFoundError("metadata_missing"),
+        "not_directory": NotADirectoryError("metadata_parent_invalid"),
+        "io": OSError(5, "metadata_io"),
+        "permission": PermissionError("metadata_permission"),
+    }[failure]
 
     def fail_owner_preflight_identity(_path: Path):  # noqa: ANN202
-        raise OSError("metadata_stat_failed")
+        raise primary
 
     def reject_metadata_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
         nonlocal metadata_reads
@@ -442,7 +452,11 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
                 "read_bounded_qrp_json",
                 reject_metadata_read,
             )
-            with pytest.raises(ValueError, match="dataset_metadata_file_invalid"):
+            fatal = failure in {"io", "permission"}
+            with pytest.raises(
+                type(primary) if fatal else ValueError,
+                match=None if fatal else "dataset_metadata_file_invalid",
+            ) as caught:
                 if entrypoint == "owned":
                     with dataset_reading.open_dataset_session(
                         root,
@@ -461,6 +475,9 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
                     )
 
     assert metadata_reads == 0
+    if fatal:
+        assert caught.value is primary
+    assert policy.used_memory_bytes == 0
 
 
 def test_writer_bounds_raw_pandas_arrow_and_persisted_conversion(
@@ -602,7 +619,6 @@ def test_exact_primary_key_index_supports_nested_arrow_key_identity(
     )
     with dataset_writing.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
     ) as index:
         assert index.add_table(table) == 0
         assert index.add_table(table) == 2

@@ -41,9 +41,10 @@ from quant_research_platform.storage.software_identity import (
 from quant_research_platform.workflows.research import _target_envelope_for_spec
 
 
+@pytest.mark.parametrize("quantity_scale", (1.0, 2.0**-50))
 @pytest.mark.parametrize("missing_boundary", (False, True))
 def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
-    tmp_path, missing_boundary
+    tmp_path, missing_boundary, quantity_scale
 ):
     plan = {
         "folds": [
@@ -76,7 +77,10 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
         "initial_capital": 1000.0,
         "valuation_currency": "USDT",
         "exposure_limits": {
-            asset: {"max_order_quantity": 1.0, "max_position_quantity": 2.0}
+            asset: {
+                "max_order_quantity": quantity_scale,
+                "max_position_quantity": 2.0 * quantity_scale,
+            }
             for asset in ("btc_usdt", "eth_usdt")
         },
         "execution": {
@@ -135,19 +139,23 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                             ),
                         )
                     )
-                    economic.mark(start + offset, price, diagnostics=diagnostics)
+                    economic.mark(
+                        start + offset, price / quantity_scale, diagnostics=diagnostics
+                    )
 
                 mark(0, 100.0, "oos_window_start", 0.0)
                 economic.fill(
                     timestamp_ns=start,
                     order_id="first",
-                    quantity=1.0,
-                    price=100.0,
-                    mark_price=100.0,
+                    quantity=quantity_scale,
+                    price=100.0 / quantity_scale,
+                    mark_price=100.0 / quantity_scale,
                     fee=0.0,
                 )
                 mark(day, 200.0, "oos_window_end", 0.0)
-                economic.funding(FundingEvent(start + day + day // 2, -0.5, 200.0))
+                economic.funding(
+                    FundingEvent(start + day + day // 2, -0.5, 200.0 / quantity_scale)
+                )
                 mark(2 * day, 500.0, "oos_window_start", 1.0)
                 mark(
                     3 * day,
@@ -162,9 +170,9 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                 economic.fill(
                     timestamp_ns=start + 5 * day,
                     order_id="terminal",
-                    quantity=1.0,
-                    price=350.0,
-                    mark_price=350.0,
+                    quantity=quantity_scale,
+                    price=350.0 / quantity_scale,
+                    mark_price=350.0 / quantity_scale,
                     fee=0.0,
                 )
                 mark(5 * day, 350.0, "oos_window_end", 1.0)
@@ -178,7 +186,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                         "selection_status": "COMPLETE",
                     },
                     start + 5 * day,
-                    350.0,
+                    350.0 / quantity_scale,
                 )
 
             roots[candidate.target_id] = write_portfolio_ledger_artifact(
@@ -237,8 +245,13 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                 )
                 assert metrics.loc["gap_net_pnl", "value"] == 400.0
                 assert metrics.loc["oos_net_pnl", "value"] == -50.0
-                assert metrics.loc["oos_inventory_max_abs", "value"] == 2.0
-                assert metrics.loc["oos_inventory_mean", "value"] == pytest.approx(1.0)
+                assert (
+                    metrics.loc["oos_inventory_max_abs", "value"]
+                    == 2.0 * quantity_scale
+                )
+                assert metrics.loc["oos_inventory_mean", "value"] == pytest.approx(
+                    quantity_scale, abs=0.0
+                )
                 assert (
                     metrics.loc["oos_inventory_time_at_limit_fraction", "value"] == 0.0
                 )
@@ -267,4 +280,65 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                     & intervals.kind.eq("gap")
                 ].iloc[0]
                 assert gap.funding == 100.0 and gap.net_pnl == 400.0
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("scale", (1.0, 2.0**-50))
+@pytest.mark.parametrize("direction", (-1.0, 1.0))
+@pytest.mark.parametrize(
+    "fraction,expected_fraction",
+    ((0.0, 0.0), (0.5, 0.0), (float.fromhex("0x1.fffffffffffffp-1"), 0.0), (1.0, 1.0)),
+)
+def test_inventory_limit_duration_has_exact_execution_boundary(
+    tmp_path, scale, direction, fraction, expected_fraction
+):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _crypto_ledger_observations,
+    )
+
+    capital = PortfolioCapital("limit", 1000.0, "USDT", "linear_perpetual")
+    window = TimeWindow("1970-01-01T00:00:00", "1970-01-01T00:00:10")
+    duration = 10_000_000_000
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="limit",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": window.start.isoformat(),
+            "end": window.end.isoformat(),
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+
+    def produce(emit):
+        economics = PortfolioEconomics(capital, "btc_usdt", emit)
+        economics.mark(0, 1.0 / scale)
+        if fraction:
+            economics.fill(
+                timestamp_ns=0,
+                order_id="open",
+                quantity=direction * fraction * scale,
+                price=1.0 / scale,
+                mark_price=1.0 / scale,
+                fee=0.0,
+            )
+        economics.mark(duration, 1.0 / scale)
+
+    with runtime_resource_policy_scope() as policy:
+        root = write_portfolio_ledger_artifact(
+            tmp_path / "limit", envelope=envelope, produce=produce
+        )
+        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        _daily, inventory, _drawdown = _crypto_ledger_observations(
+            artifact, (("test", window),), scale
+        )
+        assert inventory["oos"]["duration"] == duration
+        assert inventory["oos"]["at_limit"] / duration == expected_fraction
+        assert inventory["gap"]["duration"] == 0
         assert policy.used_memory_bytes == 0

@@ -876,3 +876,63 @@ def test_last_session_revision_preserves_processed_pit_ttm_and_factor_prefix():
         pd.testing.assert_frame_equal(full.iloc[:2].reset_index(drop=True), prefix)
     assert clipped[2].book_to_market.tolist() == [0.1, 0.1]
     assert extended[2].book_to_market.tolist() == [0.1, 0.1, 0.11]
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e308, 5e-324])
+def test_financial_ttm_and_stock_mean_preserve_finite_results(scale) -> None:
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import research_profile
+
+    events = pd.DataFrame(
+        dict(
+            asset_id="asset",
+            metric_id="operating_revenue",
+            report_period=pd.to_datetime(["2023-03-31", "2023-12-31", "2024-03-31"]),
+            available_at=pd.to_datetime(["2023-05-01", "2024-03-01", "2024-05-01"]),
+            is_corrected=False,
+            version_identity="original",
+            value=scale,
+        )
+    )
+    ttm = construct_ttm_events(events)
+    assert ttm.iloc[-1].ttm_value == scale
+    observations = pd.DataFrame(
+        dict(asset_id=["asset"], timestamp=pd.to_datetime(["2024-05-02"]))
+    )
+    materialized = materialize_pit_fundamentals(
+        observations, ttm.assign(value=ttm.ttm_value)
+    )
+    assert materialized.iloc[0].value == scale
+    stocks = pd.concat(
+        [
+            events.assign(metric_id=metric)
+            for metric in ("total_assets", "parent_equity")
+        ],
+        ignore_index=True,
+    )
+    facts = producer._fundamental_pit_frame(
+        research_profile().processed.get("fundamental_pit"),
+        source={},
+        panel=observations.assign(market_id="a_share"),
+        events=stocks,
+    )
+    assert facts["average_total_assets"].iloc[0] == scale
+    assert facts["average_parent_equity"].iloc[0] == scale
+
+
+def test_financial_ttm_rejects_unrepresentable_final_value() -> None:
+    events = pd.DataFrame(
+        dict(
+            asset_id="asset",
+            metric_id="operating_revenue",
+            report_period=pd.to_datetime(["2023-03-31", "2023-12-31", "2024-03-31"]),
+            available_at=pd.to_datetime(["2023-05-01", "2024-03-01", "2024-05-01"]),
+            is_corrected=False,
+            version_identity="original",
+            value=[-1e308, 1e308, 1e308],
+        )
+    )
+    with pytest.raises(ValueError, match="invalid_ttm_value"):
+        construct_ttm_events(events)

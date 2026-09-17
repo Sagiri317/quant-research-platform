@@ -2318,3 +2318,96 @@ def test_native_file_stream_matches_symbol_and_kind(tmp_path, stream):
         ):
             pass
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    (
+        "root_stat",
+        "manifest_stat",
+        "manifest_open",
+        "coverage_stat",
+        "coverage_open",
+        "member_open",
+        "member_fstat",
+        "scandir",
+        "raw_open",
+    ),
+)
+def test_recorder_file_boundaries_preserve_serious_io(tmp_path, monkeypatch, boundary):
+    import errno
+
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
+    )
+    member = root / manifest["files"][0]["path"]
+    target = {
+        "root_stat": root,
+        "manifest_stat": root / "run.json",
+        "manifest_open": root / "run.json",
+        "coverage_stat": root / "connection_intervals.jsonl.gz",
+        "coverage_open": root / "connection_intervals.jsonl.gz",
+    }.get(boundary, member)
+    primary = OSError(errno.EIO, "controlled_io_failure")
+    owner = os if boundary in ("member_fstat", "scandir") else Path
+    operation = (
+        "fstat"
+        if boundary == "member_fstat"
+        else "scandir"
+        if boundary == "scandir"
+        else "lstat"
+        if boundary.endswith("stat")
+        else "open"
+    )
+    original = getattr(owner, operation)
+
+    def fail(candidate, *args, **kwargs):
+        selected = (
+            Path(os.readlink(f"/proc/self/fd/{candidate}")) == member
+            if boundary == "member_fstat"
+            else Path(candidate) == (root if boundary == "scandir" else target)
+        )
+        if selected:
+            raise primary
+        return original(candidate, *args, **kwargs)
+
+    if boundary == "member_fstat" and not Path("/proc/self/fd").exists():
+        pytest.skip("POSIX file descriptor path required for targeted fstat fault")
+    with runtime_resource_policy_scope() as policy:
+        if boundary == "raw_open":
+            with open_recorder_run(root, policy) as run:
+                with monkeypatch.context() as patch:
+                    patch.setattr(owner, operation, fail)
+                    with pytest.raises(OSError) as caught:
+                        next(run.iter_records())
+        else:
+            with monkeypatch.context() as patch:
+                patch.setattr(owner, operation, fail)
+                with pytest.raises(OSError) as caught, open_recorder_run(root, policy):
+                    pytest.fail("fatal file error was accepted")
+        assert caught.value is primary
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("replace_parent", (False, True))
+def test_raw_identity_rejects_disappearance_after_initial_stat(
+    tmp_path, monkeypatch, replace_parent
+):
+    parent = tmp_path / "parent"
+    parent.mkdir()
+    path = parent / "member"
+    path.write_bytes(b"synthetic")
+    capture = replay.dataset_file_identity
+
+    def remove_before_capture(candidate):
+        assert candidate == path
+        path.unlink()
+        if replace_parent:
+            parent.rmdir()
+            parent.write_bytes(b"synthetic")
+        return capture(candidate)
+
+    monkeypatch.setattr(replay, "dataset_file_identity", remove_before_capture)
+    with pytest.raises(ValueError, match="^binance_raw_export_identity_changed$"):
+        replay._capture_raw_file_identity(path)

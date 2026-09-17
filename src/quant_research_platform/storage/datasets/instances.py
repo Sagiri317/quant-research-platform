@@ -66,7 +66,7 @@ def discover_dataset_instances(
             envelope = validate_business_manifest_envelope(
                 manifest[COMMON_MANIFEST_METADATA_KEY]
             )
-        except (KeyError, OSError, ValueError) as exc:
+        except (KeyError, FileNotFoundError, NotADirectoryError, ValueError) as exc:
             raise ValueError("dataset_instance_invalid") from exc
         if envelope["instance_identity"] != name:
             raise ValueError("dataset_instance_identity_mismatch")
@@ -100,7 +100,7 @@ def _instance_names(
                 if len(names) >= max_instances:
                     raise ValueError("dataset_instance_limit_exceeded")
                 names.append(entry.name)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_instance_root_invalid") from exc
     if (
         _directory_identity(instances_root, "dataset_instance_root_invalid")
@@ -113,7 +113,7 @@ def _instance_names(
 def _directory_identity(path: Path, error: str) -> tuple[int, int, int, int]:
     try:
         value = os.stat(native_filesystem_path(path), follow_symlinks=False)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError(error) from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
         raise ValueError(error)

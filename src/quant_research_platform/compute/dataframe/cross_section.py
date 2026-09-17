@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from decimal import Decimal, localcontext
+from fractions import Fraction
+from math import isfinite
 from statistics import mean
 
 import numpy as np
@@ -122,45 +125,100 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
     return metrics, grouped
 
 
+class _CorrelationMoments:
+    """Exact sufficient statistics for finite binary floating-point observations."""
+
+    __slots__ = (
+        "count",
+        "left_sum",
+        "right_sum",
+        "left_square",
+        "right_square",
+        "product",
+    )
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.left_sum = self.right_sum = 0
+        self.left_square = self.right_square = self.product = 0
+
+    def update(self, left: float, right: float) -> None:
+        # Every binary64 value is an integer multiple of 2**-1074. The common
+        # scale cancels from Pearson, so no rational reduction is needed per row.
+        left_numerator, left_denominator = left.as_integer_ratio()
+        right_numerator, right_denominator = right.as_integer_ratio()
+        x = left_numerator << (1074 - (left_denominator.bit_length() - 1))
+        y = right_numerator << (1074 - (right_denominator.bit_length() - 1))
+        self.count += 1
+        self.left_sum += x
+        self.right_sum += y
+        self.left_square += x * x
+        self.right_square += y * y
+        self.product += x * y
+
+    def averages(self) -> tuple[Fraction, Fraction, Fraction, Fraction, Fraction]:
+        """Return exact first and second raw moments in observation units."""
+        unit = 1 << 1074
+        return (
+            Fraction(self.left_sum, self.count * unit),
+            Fraction(self.right_sum, self.count * unit),
+            Fraction(self.left_square, self.count * unit * unit),
+            Fraction(self.right_square, self.count * unit * unit),
+            Fraction(self.product, self.count * unit * unit),
+        )
+
+    def result(self) -> tuple[float | None, str | None]:
+        # Multiplying centered moments by count avoids division until the ratio.
+        return _pearson_correlation_from_moments(
+            count=self.count,
+            left_m2=self.count * self.left_square - self.left_sum * self.left_sum,
+            right_m2=self.count * self.right_square - self.right_sum * self.right_sum,
+            covariance=self.count * self.product - self.left_sum * self.right_sum,
+        )
+
+
 def _pearson_correlation_result(
     left_values: np.ndarray,
     right_values: np.ndarray,
 ) -> tuple[float | None, str | None]:
     if len(left_values) < 2:
         return None, "insufficient_observations"
-    left_centered = _scaled_centered_values(left_values)
-    right_centered = _scaled_centered_values(right_values)
-    if left_centered is None or right_centered is None:
-        return None, "zero_variance"
-    return _pearson_correlation_from_moments(
-        count=len(left_values),
-        left_m2=float(np.dot(left_centered, left_centered)),
-        right_m2=float(np.dot(right_centered, right_centered)),
-        covariance=float(np.dot(left_centered, right_centered)),
-    )
+    if not np.isfinite(left_values).all() or not np.isfinite(right_values).all():
+        return None, "nonfinite_result"
+    moments = _CorrelationMoments()
+    for left, right in zip(left_values, right_values, strict=True):
+        moments.update(float(left), float(right))
+    return moments.result()
 
 
 def _pearson_correlation_from_moments(
     *,
     count: int,
-    left_m2: float,
-    right_m2: float,
-    covariance: float,
+    left_m2: float | int | Fraction,
+    right_m2: float | int | Fraction,
+    covariance: float | int | Fraction,
 ) -> tuple[float | None, str | None]:
     if count < 2:
         return None, "insufficient_observations"
     if left_m2 <= 0 or right_m2 <= 0:
         return None, "zero_variance"
-    denominator = np.sqrt(left_m2 * right_m2)
-    if denominator == 0:
-        return None, "zero_variance"
-    if not np.isfinite(denominator):
+    if any(
+        isinstance(value, float) and not isfinite(value)
+        for value in (left_m2, right_m2, covariance)
+    ):
         return None, "nonfinite_result"
-    value = float(covariance / denominator)
+    squared = Fraction(covariance) ** 2 / (Fraction(left_m2) * Fraction(right_m2))
+    # Decimal avoids intermediate float underflow/overflow; only the result is
+    # rounded to binary64. Invalid moments remain outside the correlation domain.
+    with localcontext() as context:
+        context.prec = 80
+        value = float(
+            (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
+        )
+    if covariance < 0:
+        value = -value
     if not np.isfinite(value):
         return None, "nonfinite_result"
-    if abs(value) == np.nextafter(1.0, np.inf):
-        value = float(np.copysign(1.0, value))
     return value, None
 
 

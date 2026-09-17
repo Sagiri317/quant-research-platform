@@ -14,7 +14,7 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _add_correlation_aggregate,
-    _pearson_correlation_from_moments,
+    _CorrelationMoments,
     _summarize_correlation_aggregates,
     compute_ic_and_grouped_label_values,
 )
@@ -51,7 +51,6 @@ from quant_research_platform.runtime.resources import (
 
 _EVALUATION_RECORD_WORKING_BYTES = 512
 _EVALUATION_TIMESTAMP_FACT_BYTES = 128
-_TIME_SERIES_MOMENT_BLOCK_ROWS = 4096
 
 type _EvaluationOutputChunk = tuple[
     pd.DataFrame,
@@ -540,23 +539,13 @@ def _iter_single_asset_time_series_output_chunks(
         "research.evaluation.time_series.state",
         max(
             64 * 1024,
-            pair_count * 768
-            + _TIME_SERIES_MOMENT_BLOCK_ROWS * numeric_column_count * 8,
+            # Five exact sums of binary64 values/products, with int64 row counts,
+            # fit in 4 KiB including the largest products and count growth.
+            pair_count * 4096,
         ),
     )
     stats = {
-        (signal, label): {
-            "count": 0,
-            "left_mean": 0.0,
-            "right_mean": 0.0,
-            "left_origin": 0.0,
-            "right_origin": 0.0,
-            "left_scale": 0.0,
-            "right_scale": 0.0,
-            "left_m2": 0.0,
-            "right_m2": 0.0,
-            "covariance": 0.0,
-        }
+        (signal, label): _CorrelationMoments()
         for signal in signal_columns
         for label in label_columns
     }
@@ -571,43 +560,19 @@ def _iter_single_asset_time_series_output_chunks(
     maximum_timestamp: pd.Timestamp | None = None
     output_lease: MemoryLease | None = None
     owned_output: OwnedValue[_EvaluationOutputChunk] | None = None
-    pending_values: np.ndarray | None = None
 
-    def consume_block(values: np.ndarray) -> None:
+    def consume_values(values: np.ndarray) -> None:
         nonlocal rows_after_signal_label_dropna
         label_offset = len(signal_columns)
         for signal_index, signal in enumerate(signal_columns):
             left = values[:, signal_index]
             for label_index, label in enumerate(label_columns):
-                rows_after_signal_label_dropna += _merge_time_series_moments(
-                    stats[(signal, label)],
-                    left,
-                    values[:, label_offset + label_index],
-                )
-
-    def consume_values(values: np.ndarray) -> None:
-        nonlocal pending_values
-        offset = 0
-        if pending_values is not None:
-            needed = _TIME_SERIES_MOMENT_BLOCK_ROWS - len(pending_values)
-            take = min(needed, len(values))
-            if take:
-                pending_values = np.concatenate(
-                    (pending_values, values[:take]),
-                    axis=0,
-                )
-                offset = take
-            if len(pending_values) == _TIME_SERIES_MOMENT_BLOCK_ROWS:
-                consume_block(pending_values)
-                pending_values = None
-            elif offset == len(values):
-                return
-        while len(values) - offset >= _TIME_SERIES_MOMENT_BLOCK_ROWS:
-            stop = offset + _TIME_SERIES_MOMENT_BLOCK_ROWS
-            consume_block(values[offset:stop])
-            offset = stop
-        if offset < len(values):
-            pending_values = values[offset:].copy()
+                right = values[:, label_offset + label_index]
+                valid = np.isfinite(left) & np.isfinite(right)
+                moments = stats[(signal, label)]
+                for x, y in zip(left[valid], right[valid], strict=True):
+                    moments.update(float(x), float(y))
+                rows_after_signal_label_dropna += int(valid.sum())
 
     try:
         for chunk in _iter_evaluation_work_frames(
@@ -640,11 +605,7 @@ def _iter_single_asset_time_series_output_chunks(
                         "research.evaluation.time_series.kernel",
                         max(
                             64 * 1024,
-                            len(filtered) * (numeric_column_count * 8 + 32)
-                            + 2
-                            * _TIME_SERIES_MOMENT_BLOCK_ROWS
-                            * numeric_column_count
-                            * 8,
+                            len(filtered) * (numeric_column_count * 8 + 32),
                         ),
                     )
                     try:
@@ -698,16 +659,6 @@ def _iter_single_asset_time_series_output_chunks(
                         )
                 finally:
                     filtered = chunk = None
-        if pending_values is not None:
-            with resource_policy.lease(
-                "research.evaluation.time_series.kernel",
-                max(
-                    64 * 1024,
-                    len(pending_values) * (numeric_column_count * 8 + 32),
-                ),
-            ):
-                consume_block(pending_values)
-                pending_values = None
         if asset is None or maximum_timestamp is None:
             raise ValueError("single_asset_time_series_evaluation_rows_required")
         output_bound = max(64 * 1024, pair_count * 2048)
@@ -771,81 +722,14 @@ def _iter_single_asset_time_series_output_chunks(
         )
 
 
-def _merge_time_series_moments(
-    stats: dict[str, float | int],
-    left: np.ndarray,
-    right: np.ndarray,
-) -> int:
-    valid = np.isfinite(left) & np.isfinite(right)
-    count = int(valid.sum())
-    if count == 0:
-        return 0
-    old_count = int(stats["count"])
-    normalized = []
-    for name, values in (("left", left[valid]), ("right", right[valid])):
-        if old_count == 0:
-            stats[f"{name}_origin"] = float(values[0])
-        origin = float(stats[f"{name}_origin"])
-        old_scale = float(stats[f"{name}_scale"])
-        with np.errstate(over="ignore"):
-            differences = values - origin
-        if np.isfinite(differences).all():
-            scale = max(old_scale, float(np.max(np.abs(differences))))
-            normalized.append(differences / scale if scale else differences)
-        else:
-            scale = max(old_scale, abs(origin), float(np.max(np.abs(values))))
-            normalized.append(values / scale - origin / scale)
-        ratio = old_scale / scale if scale else 1.0
-        stats[f"{name}_mean"] *= ratio
-        stats[f"{name}_m2"] *= ratio * ratio
-        stats["covariance"] *= ratio
-        stats[f"{name}_scale"] = scale
-    left_values, right_values = normalized
-    left_mean = float(left_values.mean())
-    right_mean = float(right_values.mean())
-    left_centered = left_values - left_mean
-    right_centered = right_values - right_mean
-    old_count = int(stats["count"])
-    total = old_count + count
-    if old_count == 0:
-        stats["count"] = count
-        stats["left_mean"] = left_mean
-        stats["right_mean"] = right_mean
-        stats["left_m2"] = float(np.dot(left_centered, left_centered))
-        stats["right_m2"] = float(np.dot(right_centered, right_centered))
-        stats["covariance"] = float(np.dot(left_centered, right_centered))
-        return count
-    left_delta = left_mean - float(stats["left_mean"])
-    right_delta = right_mean - float(stats["right_mean"])
-    correction = old_count * count / total
-    stats["left_mean"] += left_delta * count / total
-    stats["right_mean"] += right_delta * count / total
-    stats["left_m2"] += float(np.dot(left_centered, left_centered)) + (
-        left_delta * left_delta * correction
-    )
-    stats["right_m2"] += float(np.dot(right_centered, right_centered)) + (
-        right_delta * right_delta * correction
-    )
-    stats["covariance"] += float(np.dot(left_centered, right_centered)) + (
-        left_delta * right_delta * correction
-    )
-    stats["count"] = total
-    return count
-
-
 def _time_series_metrics_frame(
-    stats: Mapping[tuple[str, str], Mapping[str, float | int]],
+    stats: Mapping[tuple[str, str], _CorrelationMoments],
     *,
     timestamp: pd.Timestamp,
 ) -> pd.DataFrame:
     records: list[dict[str, object]] = []
     for (signal, label), values in sorted(stats.items()):
-        correlation, reason = _pearson_correlation_from_moments(
-            count=int(values["count"]),
-            left_m2=float(values["left_m2"]),
-            right_m2=float(values["right_m2"]),
-            covariance=float(values["covariance"]),
-        )
+        correlation, reason = values.result()
         records.append(
             {
                 "timestamp": timestamp,
@@ -853,7 +737,7 @@ def _time_series_metrics_frame(
                 "label": label,
                 "ic": correlation,
                 "rankic": None,
-                "n_obs": int(values["count"]),
+                "n_obs": values.count,
                 "ic_reason": reason,
                 "rankic_reason": "not_applicable",
             }

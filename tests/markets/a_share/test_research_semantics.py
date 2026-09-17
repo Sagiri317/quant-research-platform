@@ -27,7 +27,8 @@ from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def test_a_share_assembler_owns_eligibility_and_population_model_target() -> None:
+@pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
+def test_a_share_assembler_owns_eligibility_and_population_model_target(scale) -> None:
     spec = research_dataset_specs()[0]
     assert (
         "model_target"
@@ -54,7 +55,7 @@ def test_a_share_assembler_owns_eligibility_and_population_model_target() -> Non
             "volume": 100.0,
             "amount": 1_000.0,
             "turnover": 0.1,
-            "forward_return_20d": [0.10, 0.20, np.nan],
+            "forward_return_20d": [0.10 * scale, 0.20 * scale, np.nan],
         }
     )
 

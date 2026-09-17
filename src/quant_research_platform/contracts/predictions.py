@@ -169,10 +169,6 @@ class PredictionSpec:
         if bool(self.training_asset_ids) != bool(self.evaluation_asset_ids):
             raise ValueError("prediction_asset_scopes_must_be_paired")
 
-    @property
-    def model_selection_enabled(self) -> bool:
-        return bool(self.candidate_model_ids)
-
 
 def _validate_prediction_output_values(
     frame: pd.DataFrame,

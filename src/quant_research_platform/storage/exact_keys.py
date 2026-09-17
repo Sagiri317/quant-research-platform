@@ -20,7 +20,6 @@ from uuid import uuid4
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
@@ -66,11 +65,9 @@ class ExactPrimaryKeyIndex:
         self,
         *,
         primary_key: Sequence[str],
-        timestamp_columns: Sequence[str],
         key_schema: pa.Schema | None = None,
     ) -> None:
         self._primary_key = tuple(str(column) for column in primary_key)
-        self._timestamp_columns = frozenset(str(column) for column in timestamp_columns)
         self._scratch_parent = Path(gettempdir())
         self._key_schema = key_schema
         self._sqlite_cache_kib = EXACT_KEY_SQLITE_CACHE_BYTES // 1024
@@ -233,19 +230,6 @@ class ExactPrimaryKeyIndex:
                     )
         if first_error is not None:
             raise first_error
-
-    def add_frame(self, frame: pd.DataFrame, *, namespace: str = "dataset") -> int:
-        missing = [column for column in self._primary_key if column not in frame]
-        if missing:
-            raise ValueError("missing_dataset_primary_key_column")
-        keys = frame.loc[:, list(self._primary_key)].copy()
-        for column in self._timestamp_columns:
-            keys[column] = strict_timestamp_series(
-                keys[column],
-                error="invalid_dataset_timestamp_value",
-            )
-        table = pa.Table.from_pandas(keys, preserve_index=False)
-        return self.add_table(table, namespace=namespace)
 
     def add_table(self, table: pa.Table, *, namespace: str = "dataset") -> int:
         connection = self._connection

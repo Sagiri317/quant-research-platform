@@ -36,6 +36,7 @@ from quant_research_platform.contracts.validation import (
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
@@ -1210,10 +1211,11 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                 symbols=config.symbols,
             )
             websocket_reserve = len(streams) * _WS_STREAM_WORKING_SET_BYTES
-            with policy.lease(
+            websocket_lease = policy.lease(
                 "binance.recorder.websocket_buffers",
                 websocket_reserve,
-            ):
+            )
+            try:
                 try:
                     readers = [
                         _StreamReader(
@@ -1293,6 +1295,13 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                         reader.failure is not None for reader in readers
                     ):
                         raise RuntimeError("binance_recorder_reader_failure")
+            finally:
+                # Live readers still own these buffers. Retaining their lease
+                # poisons the existing root and keeps its machine lock held.
+                if not any(reader.is_alive() for reader in readers):
+                    _close_lease_preserving_primary(
+                        websocket_lease, owner="binance.recorder.websocket_buffers"
+                    )
         captured = stats.payload()
 
     ended_at = _utc_now()

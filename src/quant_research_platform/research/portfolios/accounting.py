@@ -5,11 +5,14 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal, localcontext
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
 from scipy.stats import t as student_t
 
+from quant_research_platform.compute.dataframe.cross_section import _CorrelationMoments
 from quant_research_platform.contracts.portfolios import (
     CONTINUOUS_EXECUTION_COLUMNS,
     PORTFOLIO_BLOCK_REASONS,
@@ -241,7 +244,7 @@ class PortfolioEconomics:
             fill_id, order_id, timestamp_ns, self.asset_id, quantity, quantity * price
         )
         realized = 0.0
-        if self.quantity and self.quantity * quantity < 0:
+        if self.quantity and (self.quantity > 0) != (quantity > 0):
             closed = min(abs(self.quantity), abs(quantity))
             realized = (
                 closed
@@ -251,7 +254,7 @@ class PortfolioEconomics:
             remaining = self.quantity + quantity
             self.cost_basis = remaining * (
                 self.cost_basis / self.quantity
-                if remaining * self.quantity > 0
+                if remaining != 0 and (remaining > 0) == (self.quantity > 0)
                 else price
             )
         else:
@@ -531,24 +534,6 @@ class ExecutionAccounting:
         )
 
     @property
-    def pre_trade_weights(self) -> pd.Series:
-        return (
-            self._asset_ledger.set_index("asset_id")["pre_trade_notional"]
-            .div(self.nav_before)
-            .rename("pre_trade_weight")
-            .copy(deep=True)
-        )
-
-    @property
-    def realized_weights(self) -> pd.Series:
-        return (
-            self._asset_ledger.set_index("asset_id")["post_trade_notional"]
-            .div(self.nav_after)
-            .rename("realized_weight")
-            .copy(deep=True)
-        )
-
-    @property
     def total_cost(self) -> float:
         return float(
             self._asset_ledger.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum()
@@ -572,18 +557,6 @@ class ExecutionAccounting:
         return float(
             0.5 * (deltas.abs().sum() + abs(float(deltas.sum()))) / self.nav_before
         )
-
-    @property
-    def session_totals(self) -> dict[str, float]:
-        return {
-            "nav_before": self.nav_before,
-            "nav_after": self.nav_after,
-            "pre_trade_cash": self.pre_trade_cash,
-            "post_trade_cash": self.post_trade_cash,
-            "total_cost": self.total_cost,
-            "target_turnover": self.target_turnover,
-            "realized_turnover": self.realized_turnover,
-        }
 
 
 @dataclass(frozen=True)
@@ -729,78 +702,79 @@ def calibrate_expected_alpha(
     if not enough_coverage:
         return undefined("alpha_calibration_insufficient_coverage")
     selected = valid & valid_dates
-    counts = dates.loc[selected].groupby(dates.loc[selected]).transform("size")
-    weights = 1.0 / (date_count * counts.to_numpy(dtype="float64"))
-    design = np.column_stack(
-        (
-            np.ones(int(selected.sum()), dtype="float64"),
-            alpha.loc[selected].to_numpy(dtype="float64"),
-        )
-    )
-    fit = np.sqrt(weights)[:, None] * design
-    target = np.sqrt(weights) * returns.loc[selected].to_numpy(dtype="float64")
-    coefficients, _, rank, _ = np.linalg.lstsq(fit, target, rcond=None)
-    if rank != design.shape[1]:
+    left = alpha.loc[selected].to_numpy(dtype="float64")
+    right = returns.loc[selected].to_numpy(dtype="float64")
+    _, cluster_codes = np.unique(dates.loc[selected].to_numpy(), return_inverse=True)
+    order = np.argsort(cluster_codes, kind="stable")
+    boundaries = np.flatnonzero(np.diff(cluster_codes[order])) + 1
+    groups = np.split(order, boundaries)
+    del cluster_codes, boundaries
+
+    def cluster_averages():
+        for positions in groups:
+            moments = _CorrelationMoments()
+            for position in positions:
+                moments.update(float(left[position]), float(right[position]))
+            yield moments.averages()
+
+    pooled = [Fraction(0)] * 5
+    for averages in cluster_averages():
+        for index, value in enumerate(averages):
+            pooled[index] += value
+    sx, sy, sxx, syy, sxy = pooled
+    cluster_count = len(groups)
+    determinant = cluster_count * sxx - sx * sx
+    if determinant == 0:
         return undefined("alpha_calibration_rank_deficient")
-    slope = float(coefficients[1])
-    intercept = float(coefficients[0])
-    bread = np.zeros((2, 2), dtype="float64")
-    cluster_scores = []
-    actual = returns.loc[selected].to_numpy(dtype="float64")
-    if np.ptp(actual) == 0.0:
-        slope, intercept = 0.0, float(actual[0])
-        coefficients = np.array([intercept, slope])
-    residual = actual - design @ coefficients
-    # Treat a fit within floating-point roundoff as zero residual variance.
-    roundoff = (
-        8
-        * np.finfo(float).eps
-        * max(
-            float(np.max(np.abs(actual))), float(np.max(np.abs(design @ coefficients)))
+    slope = (cluster_count * sxy - sx * sy) / determinant
+    intercept = (sy - slope * sx) / cluster_count
+    variance = Fraction(0)
+    # A second pass retains one cluster's moments instead of all exact matrices.
+    for x, y, xx, _yy, xy in cluster_averages():
+        score_intercept = y - intercept - slope * x
+        score_slope = xy - intercept * x - slope * xx
+        influence = (cluster_count * score_slope - sx * score_intercept) / determinant
+        variance += influence * influence
+    slope_value = float(slope)
+    if slope and slope_value == 0.0:
+        raise ValueError("alpha_calibration_slope_unrepresentable")
+    with localcontext() as context:
+        context.prec = 80
+        standard_error_decimal = (
+            Decimal(variance.numerator) / Decimal(variance.denominator)
+        ).sqrt()
+        standard_error = float(standard_error_decimal)
+        if variance and standard_error == 0.0:
+            raise ValueError("alpha_calibration_standard_error_unrepresentable")
+        t_statistic = (
+            float(
+                (Decimal(slope.numerator) / Decimal(slope.denominator))
+                / standard_error_decimal
+            )
+            if variance
+            else None
         )
-    )
-    if np.max(np.abs(residual)) <= roundoff:
-        residual = np.zeros_like(residual)
-    selected_dates = dates.loc[selected].to_numpy()
-    _, cluster_codes = np.unique(selected_dates, return_inverse=True)
-    for cluster in np.unique(cluster_codes):
-        rows = np.flatnonzero(cluster_codes == cluster)
-        score = design[rows].T @ (weights[rows] * residual[rows])
-        cluster_scores.append(score)
-        bread += design[rows].T @ (weights[rows, None] * design[rows])
-    meat = sum(score[:, None] @ score[None, :] for score in cluster_scores)
-    covariance = np.linalg.pinv(bread) @ meat @ np.linalg.pinv(bread)
-    standard_error = float(np.sqrt(max(0.0, covariance[1, 1])))
-    degrees_freedom = max(1, len(cluster_scores) - 2)
-    if standard_error > 0.0:
-        statistic = slope / standard_error
-        pvalue = float(2.0 * student_t.sf(abs(statistic), df=degrees_freedom))
+    if t_statistic is not None:
+        degrees_freedom = max(1, cluster_count - 2)
+        pvalue = float(2.0 * student_t.sf(abs(t_statistic), df=degrees_freedom))
         critical = float(student_t.ppf(0.975, df=degrees_freedom))
-        ci_low = slope - critical * standard_error
-        ci_high = slope + critical * standard_error
-        t_statistic = statistic
+        ci_low = slope_value - critical * standard_error
+        ci_high = slope_value + critical * standard_error
     else:
-        pvalue = None
-        ci_low = ci_high = None
-        t_statistic = None
-    centered = actual - np.average(actual, weights=weights)
-    denominator = (
-        0.0 if np.ptp(actual) == 0.0 else float(np.dot(weights, centered * centered))
-    )
-    weighted_r2 = (
-        1.0 - float(np.dot(weights, residual * residual)) / denominator
-        if denominator > 0.0
-        else None
-    )
+        pvalue = ci_low = ci_high = None
+    total_variation = syy - sy * sy / cluster_count
+    residual_variation = syy - intercept * sy - slope * sxy
     return AlphaCalibration(
-        slope=slope,
-        intercept=intercept,
+        slope=slope_value,
+        intercept=float(intercept),
         slope_standard_error=standard_error,
         slope_t_statistic=t_statistic,
         slope_pvalue=pvalue,
         slope_ci_low=ci_low,
         slope_ci_high=ci_high,
-        weighted_r2=weighted_r2,
+        weighted_r2=float(1 - residual_variation / total_variation)
+        if total_variation
+        else None,
         coverage=coverage,
         valid_rebalance_dates=date_count,
         scheduled_rebalance_dates=len(scheduled),

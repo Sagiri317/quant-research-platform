@@ -82,8 +82,9 @@ def test_experiment_plan_is_locked_immutable_and_hash_stable() -> None:
     assert plan.protocol_hash == reordered.protocol_hash
     assert len(plan.protocol_hash) == 64
     assert "protocol_version" not in plan.protocol_payload()
-    assert plan.development_windows() == tuple(
-        fold.development_test for fold in plan.folds
+    assert tuple(fold.development_test for fold in plan.folds) == (
+        TimeWindow(date(2021, 8, 1), date(2022, 1, 31)),
+        TimeWindow(date(2022, 8, 1), date(2023, 1, 31)),
     )
     with pytest.raises(PermissionError, match="^final_holdout_locked$"):
         plan.window("final_holdout")

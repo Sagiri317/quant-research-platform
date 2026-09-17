@@ -64,7 +64,6 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     index_root.mkdir()
     index = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id", "timestamp"),
-        timestamp_columns=("timestamp",),
     )
     first = pd.DataFrame(
         {
@@ -82,8 +81,13 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     with index:
         database_path = index.database_path
         assert database_path.is_file()
-        assert index.add_frame(first) == 0
-        assert index.add_frame(duplicate_same_instant) == 1
+        assert index.add_table(pa.Table.from_pandas(first, preserve_index=False)) == 0
+        assert (
+            index.add_table(
+                pa.Table.from_pandas(duplicate_same_instant, preserve_index=False)
+            )
+            == 1
+        )
         for suffix in ("-journal", "-wal", "-shm"):
             Path(f"{database_path}{suffix}").write_bytes(b"scratch")
 
@@ -92,16 +96,28 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
 
     numeric = module.ExactPrimaryKeyIndex(
         primary_key=("numeric_key",),
-        timestamp_columns=(),
     )
     with numeric:
-        assert numeric.add_frame(pd.DataFrame({"numeric_key": [-0.0]})) == 0
-        assert numeric.add_frame(pd.DataFrame({"numeric_key": [0.0]})) == 1
+        assert (
+            numeric.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"numeric_key": [-0.0]}), preserve_index=False
+                )
+            )
+            == 0
+        )
+        assert (
+            numeric.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"numeric_key": [0.0]}), preserve_index=False
+                )
+            )
+            == 1
+        )
     assert list(index_root.iterdir()) == []
 
     exceptional = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     )
     with pytest.raises(RuntimeError, match="stop"):
         with exceptional:
@@ -121,7 +137,6 @@ def test_exact_key_index_cleans_scratch_when_sqlite_connect_fails(
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     index = module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
     )
 
     def fail_connect(*_args, **_kwargs):
@@ -142,10 +157,21 @@ def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk(
 
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
     ) as index:
-        assert index.add_frame(pd.DataFrame({"key": ["a", "a", "b"]})) == 1
-        assert index.add_frame(pd.DataFrame({"key": ["b"]})) == 1
+        assert (
+            index.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": ["a", "a", "b"]}), preserve_index=False
+                )
+            )
+            == 1
+        )
+        assert (
+            index.add_table(
+                pa.Table.from_pandas(pd.DataFrame({"key": ["b"]}), preserve_index=False)
+            )
+            == 1
+        )
 
 
 def test_exact_key_index_spills_sqlite_temp_state_to_disk(
@@ -155,12 +181,21 @@ def test_exact_key_index_spills_sqlite_temp_state_to_disk(
 
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
     ) as index:
         assert index._connection is not None
         temp_store = int(index._connection.execute("PRAGMA temp_store").fetchone()[0])
-        index.add_frame(pd.DataFrame({"key": ["a", "b"]}), namespace="left")
-        index.add_frame(pd.DataFrame({"key": ["b", "c"]}), namespace="right")
+        index.add_table(
+            pa.Table.from_pandas(
+                pd.DataFrame({"key": ["a", "b"]}), preserve_index=False
+            ),
+            namespace="left",
+        )
+        index.add_table(
+            pa.Table.from_pandas(
+                pd.DataFrame({"key": ["b", "c"]}), preserve_index=False
+            ),
+            namespace="right",
+        )
 
         assert temp_store == 1
         assert index.difference_counts(
@@ -176,38 +211,93 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
 
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
         key_schema=pa.schema([pa.field("key", pa.float64())]),
     ) as numeric:
-        assert numeric.add_frame(pd.DataFrame({"key": [Decimal("1.0")]})) == 0
-        assert numeric.add_frame(pd.DataFrame({"key": [1.0]})) == 1
-        assert numeric.add_frame(pd.DataFrame({"key": [-0.0]})) == 0
-        assert numeric.add_frame(pd.DataFrame({"key": [0.0]})) == 1
+        assert (
+            numeric.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": [Decimal("1.0")]}), preserve_index=False
+                )
+            )
+            == 0
+        )
+        assert (
+            numeric.add_table(
+                pa.Table.from_pandas(pd.DataFrame({"key": [1.0]}), preserve_index=False)
+            )
+            == 1
+        )
+        assert (
+            numeric.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": [-0.0]}), preserve_index=False
+                )
+            )
+            == 0
+        )
+        assert (
+            numeric.add_table(
+                pa.Table.from_pandas(pd.DataFrame({"key": [0.0]}), preserve_index=False)
+            )
+            == 1
+        )
         for infinite_value in (math.inf, -math.inf):
             with pytest.raises(
                 ValueError,
                 match="invalid_dataset_primary_key_value",
             ):
-                numeric.add_frame(pd.DataFrame({"key": [infinite_value]}))
+                numeric.add_table(
+                    pa.Table.from_pandas(
+                        pd.DataFrame({"key": [infinite_value]}), preserve_index=False
+                    )
+                )
         for null_value in (None, math.nan):
             with pytest.raises(ValueError, match="dataset_primary_key_null"):
-                numeric.add_frame(pd.DataFrame({"key": [null_value]}))
+                numeric.add_table(
+                    pa.Table.from_pandas(
+                        pd.DataFrame({"key": [null_value]}), preserve_index=False
+                    )
+                )
 
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=("key",),
         key_schema=pa.schema([pa.field("key", pa.timestamp("ns"))]),
     ) as timestamps:
-        assert timestamps.add_frame(pd.DataFrame({"key": [date(2026, 1, 1)]})) == 0
-        assert timestamps.add_frame(pd.DataFrame({"key": [datetime(2026, 1, 1)]})) == 1
+        assert (
+            timestamps.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": [date(2026, 1, 1)]}), preserve_index=False
+                )
+            )
+            == 0
+        )
+        assert (
+            timestamps.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": [datetime(2026, 1, 1)]}), preserve_index=False
+                )
+            )
+            == 1
+        )
 
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
         key_schema=pa.schema([pa.field("key", pa.string())]),
     ) as strings:
-        assert strings.add_frame(pd.DataFrame({"key": ["é"]})) == 0
-        assert strings.add_frame(pd.DataFrame({"key": ["e\u0301"]})) == 0
+        assert (
+            strings.add_table(
+                pa.Table.from_pandas(pd.DataFrame({"key": ["é"]}), preserve_index=False)
+            )
+            == 0
+        )
+        assert (
+            strings.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": ["e\u0301"]}), preserve_index=False
+                )
+            )
+            == 0
+        )
 
 
 def test_exact_primary_key_accepts_timestamp_outside_nanosecond_range(
@@ -219,7 +309,6 @@ def test_exact_primary_key_accepts_timestamp_outside_nanosecond_range(
     table = pa.table({"key": pa.array([out_of_nanosecond_range], type=timestamp_type)})
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
         key_schema=pa.schema([pa.field("key", timestamp_type)]),
     ) as timestamps:
         assert timestamps.add_table(table) == 0

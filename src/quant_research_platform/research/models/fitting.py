@@ -46,6 +46,7 @@ from quant_research_platform.research.models.scaler import (
     equal_date_sample_weights,
 )
 from quant_research_platform.runtime.dataframes import (
+    _concat_frame_payload_bytes,
     _selected_frame_payload_bytes,
     iter_complete_time_sized_frames,
 )
@@ -564,7 +565,6 @@ def _collect_training_frame_owned(
     filter_definition = ""
     retained: deque[tuple[pd.DataFrame, MemoryLease | None, int]] = deque()
     retained_rows = 0
-    retained_bytes = 0
     training_lease: MemoryLease | None = None
     projection_lease: MemoryLease | None = None
     try:
@@ -665,14 +665,12 @@ def _collect_training_frame_owned(
                 retained.append((usable, projection_lease, usable_payload_bytes))
                 projection_lease = None
                 retained_rows += len(usable)
-                retained_bytes += usable_payload_bytes
                 usable = None
                 filtered = chunk = None
                 if spec.max_train_rows is not None:
                     while retained_rows - len(retained[0][0]) >= spec.max_train_rows:
-                        removed, removed_lease, removed_bytes = retained.popleft()
+                        removed, removed_lease, _ = retained.popleft()
                         retained_rows -= len(removed)
-                        retained_bytes -= removed_bytes
                         removed = None
                         if removed_lease is not None:
                             removed_lease.close()
@@ -695,7 +693,6 @@ def _collect_training_frame_owned(
                         retained[0] = (trimmed, projection_lease, trimmed_bytes)
                         projection_lease = None
                         retained_rows -= excess
-                        retained_bytes += trimmed_bytes - oldest_bytes
                         oldest = trimmed = None
                         if oldest_lease is not None:
                             oldest_lease.close()
@@ -703,15 +700,18 @@ def _collect_training_frame_owned(
         if len(retained) == 1:
             training, training_lease, _ = retained.popleft()
         elif retained:
+            parts = [part for part, _, _ in retained]
+            concat_bytes = _concat_frame_payload_bytes(parts)
             if resource_policy is not None:
                 resource_policy.require_working_set(
-                    retained_bytes,
+                    concat_bytes,
                     error="model_training_working_set_exceeds_task_memory_budget",
                 )
                 training_lease = resource_policy.lease(
-                    "research.model.training_concat", retained_bytes
+                    "research.model.training_concat", concat_bytes
                 )
-            training = pd.concat([part for part, _, _ in retained], ignore_index=True)
+            training = pd.concat(parts, ignore_index=True)
+            parts = None
             while retained:
                 removed, removed_lease, _ = retained.popleft()
                 removed = None
@@ -770,6 +770,7 @@ def _collect_training_frame_owned(
                     )
             raise
     except BaseException as primary:
+        parts = None
         filtered = None
         usable = None
         training = None

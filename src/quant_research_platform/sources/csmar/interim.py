@@ -11,6 +11,7 @@ from itertools import chain, groupby, islice
 from pathlib import Path
 from types import MappingProxyType
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 
@@ -602,7 +603,6 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
         return None
     index = ExactPrimaryKeyIndex(
         primary_key=("dataset_path",),
-        timestamp_columns=(),
     )
     with (
         policy.lease(
@@ -791,9 +791,18 @@ def normalize_raw_frame(
         close = strict_finite_numeric_series(
             result["close"], error="invalid_csmar_close", allow_null=True
         )
-        result["adj_open"] = (result["open"] * result["adj_close"] / close).where(
-            close.ne(0.0)
+        # Keep the adjustment ratio bounded before restoring the price exponent.
+        opening, opening_exponent = np.frexp(
+            result["open"].to_numpy(dtype="float64", na_value=np.nan)
         )
+        adjusted, adjusted_exponent = np.frexp(result["adj_close"])
+        closing, closing_exponent = np.frexp(close.where(close.ne(0.0)))
+        result["adj_open"] = np.ldexp(
+            opening * (adjusted / closing),
+            opening_exponent + adjusted_exponent - closing_exponent,
+        )
+        del opening, adjusted, closing
+        del opening_exponent, adjusted_exponent, closing_exponent
         result["float_market_cap"] = result["float_market_cap_thousand"] * 1000.0
         result["total_market_cap"] = result["total_market_cap_thousand"] * 1000.0
         market_type = strict_integer_series(
@@ -1042,17 +1051,7 @@ def normalize_raw_frame(
 
 def _normalize_state_change_frame(frame: pd.DataFrame, data_id: str) -> pd.DataFrame:
     result = frame
-    result["source_asset_id"] = (
-        result["stock_code"].map(
-            lambda value: value if isinstance(value, str) else str(value)
-        )
-        if "stock_code" in result
-        else result.get("source_asset_id")
-    )
-    if "source_asset_id" in result:
-        result["source_asset_id"] = strict_string_series(
-            result["source_asset_id"], error="invalid_state_change_asset_id"
-        )
+    result["source_asset_id"] = result["stock_code"]
     if data_id == "listing_status_changes":
         result["announcement_date"] = _parse_optional_csmar_date(
             result["announcement_date"],
@@ -1227,7 +1226,6 @@ def _iter_interim_frames(
 
     def activate() -> Iterator[object]:
         operation_reports: list[dict[str, object]] = []
-        raw_dataset = data_id
         inputs = iter(input_files)
         with closing_iterator(inputs):
             try:
@@ -1247,9 +1245,6 @@ def _iter_interim_frames(
                 spec = interim_catalog().get(data_id)
                 index = ExactPrimaryKeyIndex(
                     primary_key=spec.primary_key,
-                    timestamp_columns=tuple(
-                        column for column in spec.primary_key if column == "timestamp"
-                    ),
                 )
                 with (
                     policy.lease(
@@ -1259,7 +1254,6 @@ def _iter_interim_frames(
                 ):
                     frames = _iter_pruned_interim_frames(
                         data_id=data_id,
-                        raw_dataset=raw_dataset,
                         input_files=prepared_inputs,
                         start_date=start_date,
                         end_date=end_date,
@@ -1332,10 +1326,6 @@ def _materialize_interim_data(
     written: dict[str, Path] = {}
     skipped: set[str] = set()
     pruning_reports: list[dict[str, object]] = []
-    requested_by_raw: dict[str, str] = {}
-    for data_id in data_ids:
-        requested_by_raw[data_id] = data_id
-    requested_raw_datasets = tuple(requested_by_raw)
     pending = set(data_ids)
     require_unaliased_path(
         source_raw_root,
@@ -1343,7 +1333,6 @@ def _materialize_interim_data(
     )
     identity_index = ExactPrimaryKeyIndex(
         primary_key=("dataset_path",),
-        timestamp_columns=(),
     )
     with (
         resource_policy.lease(
@@ -1356,21 +1345,18 @@ def _materialize_interim_data(
             source_raw_root,
             resource_policy=resource_policy,
             identity_index=identity_index,
-            requested_datasets=requested_raw_datasets,
+            requested_datasets=data_ids,
         )
 
         def verify_members() -> None:
             _verify_csmar_member_set(
                 source_raw_root,
                 identity_index,
-                requested_datasets=requested_raw_datasets,
+                requested_datasets=data_ids,
             )
 
         with closing_iterator(indexed_files):
-            for raw_dataset, group in groupby(indexed_files, key=lambda item: item[0]):
-                data_id = requested_by_raw.get(raw_dataset)
-                if data_id is None:
-                    continue
+            for data_id, group in groupby(indexed_files, key=lambda item: item[0]):
                 selected = tuple(group)
                 identity = content_hash_for_files(
                     selected,
@@ -1460,7 +1446,6 @@ def _materialize_interim_data(
 def _iter_pruned_interim_frames(
     *,
     data_id: str,
-    raw_dataset: str,
     input_files: Iterable[Path | tuple[Path, DatasetFileIdentity]],
     start_date: str | None,
     end_date: str | None,
@@ -1487,7 +1472,7 @@ def _iter_pruned_interim_frames(
         chunks = iter(
             iter_private_export_chunks_with_policy(
                 input_file,
-                dataset=raw_dataset,
+                dataset=data_id,
                 chunksize=chunksize,
                 resource_policy=policy,
                 expected_identity=expected_identity,
@@ -1662,27 +1647,15 @@ def _iter_pruned_interim_frames(
                         next_pending_bound: int | None = None
                         next_pending_span: int | None = None
                         if stop < len(chunk):
-                            remainder_bound = min(
-                                lease.reserved_bytes,
-                                max(1, policy.operation_headroom_bytes),
+                            remainder_bytes = pandas_frame_payload_bytes(
+                                chunk.iloc[stop:]
                             )
                             next_pending_lease = policy.lease(
-                                "source.csmar.interim.pending",
-                                remainder_bound,
+                                "source.csmar.interim.pending", remainder_bytes
                             )
                             try:
                                 next_pending_frame = chunk.iloc[stop:].copy()
-                                remainder_bytes = pandas_frame_payload_bytes(
-                                    next_pending_frame
-                                )
-                                pending_headroom = min(
-                                    64 * 1024,
-                                    max(1, remainder_bound // 2),
-                                )
-                                next_pending_lease.shrink_to(
-                                    remainder_bytes + pending_headroom
-                                )
-                                next_pending_bound = remainder_bound
+                                next_pending_bound = lease.reserved_bytes
                                 next_pending_span = span
                             except BaseException:
                                 _close_lease_preserving_primary(
@@ -1768,7 +1741,6 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + chunk_bytes + normalization_preallocation_bytes,
-        policy.operation_headroom_bytes,
     )
     normalized = normalize_raw_frame(chunk, data_id)
     source_row_counts = normalized.attrs.pop("source_row_counts", None)
@@ -1781,7 +1753,6 @@ def _transform_interim_chunk(
     )
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filter_preallocation_bytes,
-        policy.operation_headroom_bytes,
     )
     filtered = _filter_normalized_frame(
         normalized,
@@ -1792,7 +1763,6 @@ def _transform_interim_chunk(
     filtered_bytes = pandas_frame_payload_bytes(filtered)
     _require_interim_transform_headroom(
         retained_previous_bytes + normalized_bytes + filtered_bytes,
-        policy.operation_headroom_bytes,
     )
     del normalized
     if source_row_counts is not None:
@@ -1808,7 +1778,6 @@ def _transform_interim_chunk(
         )
     _require_interim_transform_headroom(
         retained_previous_bytes + filtered_bytes + filtered_bytes,
-        policy.operation_headroom_bytes,
     )
     pruned, report = _apply_output_column_rules_validated(
         filtered,
@@ -1819,7 +1788,6 @@ def _transform_interim_chunk(
         retained_previous_bytes
         + filtered_bytes
         + _deduplication_working_set_bytes(pruned),
-        policy.operation_headroom_bytes,
     )
     del filtered
     if source_row_counts is not None:
@@ -1835,8 +1803,7 @@ def _deduplication_working_set_bytes(frame: pd.DataFrame) -> int:
     )
 
 
-def _require_interim_transform_headroom(required_bytes: int, budget_bytes: int) -> None:
-    del budget_bytes
+def _require_interim_transform_headroom(required_bytes: int) -> None:
     policy = current_runtime_resource_policy()
     explicit = None if policy is None else policy.explicit_memory_cap_bytes
     if explicit is not None and policy is not None:
@@ -1911,7 +1878,7 @@ def _iter_source_inputs(
         )
         try:
             metadata = parent.lstat()
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("csmar_interim_source_parent_invalid") from exc
         if not stat.S_ISDIR(metadata.st_mode):
             raise ValueError("csmar_interim_source_parent_invalid")

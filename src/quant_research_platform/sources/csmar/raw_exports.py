@@ -521,9 +521,6 @@ def _iter_index_info_rows_under_policy(
                         pending_row,
                         len(header),
                         pending_start,
-                        resource_policy=policy,
-                        payload_lease=payload_lease,
-                        source_bytes=next_bytes,
                     )
                     complete_bytes = pending_bytes
                     continuations.clear()
@@ -609,9 +606,6 @@ def _iter_index_info_rows_under_policy(
                 row,
                 len(header),
                 row_number,
-                resource_policy=policy,
-                payload_lease=payload_lease,
-                source_bytes=source_bytes,
             )
             del row
             continuations.clear()
@@ -632,22 +626,8 @@ def _iter_index_info_rows_under_policy(
 
 
 def _normalize_index_info_row(
-    row: list[str],
-    column_count: int,
-    row_number: int | None,
-    *,
-    resource_policy: RuntimeResourcePolicy | None = None,
-    payload_lease: MemoryLease | None = None,
-    source_bytes: int = 0,
+    row: list[str], column_count: int, row_number: int | None
 ) -> list[str]:
-    if len(row) > column_count:
-        row = _normalize_long_index_info_row(
-            row,
-            row_number,
-            resource_policy=resource_policy,
-            payload_lease=payload_lease,
-            source_bytes=source_bytes,
-        )
     if len(row) != column_count or not _looks_like_index_info_record_start(row):
         raise ValueError(f"malformed_csmar_csv_row: {row_number}")
     return row
@@ -725,54 +705,6 @@ def _normalize_bounded_index_info_record(
     )
     continuation_spool.clear()
     return [*fixed, sample, *codes, formula]
-
-
-def _normalize_long_index_info_row(
-    row: list[str],
-    row_number: int | None,
-    *,
-    resource_policy: RuntimeResourcePolicy | None = None,
-    payload_lease: MemoryLease | None = None,
-    source_bytes: int = 0,
-) -> list[str]:
-    candidate_start: int | None = None
-    for code_start in range(6, len(row) - 5):
-        if not all(
-            _looks_like_source_category_code(
-                row[code_start + offset],
-                allowed_values,
-            )
-            for offset, allowed_values in enumerate(INDEX_INFO_SOURCE_CODE_ENUMS)
-        ):
-            continue
-        if candidate_start is not None:
-            raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-        candidate_start = code_start
-    if candidate_start is None:
-        raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-    if resource_policy is not None:
-        _require_index_info_reconstruction_headroom(
-            source_bytes=source_bytes,
-            result_bytes=source_bytes,
-            resource_policy=resource_policy,
-            payload_lease=payload_lease,
-        )
-    sample_scope = ",".join(row[5:candidate_start])
-    formula = ",".join(row[candidate_start + 5 :])
-    return [
-        row[0],
-        row[1],
-        row[2],
-        row[3],
-        row[4],
-        sample_scope,
-        row[candidate_start],
-        row[candidate_start + 1],
-        row[candidate_start + 2],
-        row[candidate_start + 3],
-        row[candidate_start + 4],
-        formula,
-    ]
 
 
 def _require_index_info_reconstruction_headroom(
@@ -1079,7 +1011,6 @@ def dataset_files_with_identity_by_id(
                     if identity_index is None:
                         index = ExactPrimaryKeyIndex(
                             primary_key=("dataset_path",),
-                            timestamp_columns=(),
                         )
                         index_owner.enter_context(
                             policy.lease(

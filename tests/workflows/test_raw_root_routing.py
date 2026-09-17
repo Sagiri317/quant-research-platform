@@ -107,3 +107,87 @@ def test_a_share_target_windows_are_shared_by_plan_build_and_reuse() -> None:
         )
         == requested_window
     )
+
+
+def test_crypto_plan_preserves_source_system_io_failure(tmp_path, monkeypatch):
+    import errno
+
+    import pytest
+
+    from quant_research_platform.markets.implementations.crypto.ids import (
+        HFT_PANEL_DATA_ID,
+    )
+    from quant_research_platform.profiles.research import CRYPTO_PROFILE_ID
+    from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+    from tests.sources.binance.test_replay import _agg_trade, _write_run
+
+    root = tmp_path / "native"
+    _write_run(
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
+    )
+    primary = OSError(errno.EIO, "controlled_io_failure")
+    original = Path.lstat
+
+    def fail(path, *args, **kwargs):
+        if path == root / "run.json":
+            raise primary
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", fail)
+    with pytest.raises(OSError) as caught:
+        research.plan_targets(
+            profile=research_profile(CRYPTO_PROFILE_ID),
+            action="data materialize",
+            terminal_targets=(HFT_PANEL_DATA_ID,),
+            layout=StorageLayout(tmp_path / "project"),
+            raw_root=root,
+            research_window={
+                "start": "2026-08-27T00:00:00",
+                "end": "2026-08-27T00:00:01",
+                "access": "development",
+            },
+        )
+    assert caught.value is primary
+
+
+def test_plan_preserves_persisted_instance_system_io_failure(tmp_path, monkeypatch):
+    import os
+
+    import pytest
+
+    from tests.sources.reference.test_interim import _write_reference_root
+
+    raw = _write_reference_root(tmp_path / "raw")
+    layout = StorageLayout(tmp_path)
+    profile = research_profile()
+    data_id = "a_share_fee_schedule"
+    built = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw,
+        start_date=None,
+        end_date=None,
+        data_ids=(data_id,),
+    )
+    assert built["target_results"][0]["status"] == "BUILT"
+    arguments = dict(
+        profile=profile,
+        action="data materialize",
+        terminal_targets=(data_id,),
+        layout=layout,
+        raw_root=raw,
+    )
+    assert research.plan_targets(**arguments)["targets"][0]["decision"] == "REUSE"
+    target = layout.interim_data_root("reference", data_id) / "instances"
+    primary = OSError(5, "synthetic_storage_io")
+    original = os.scandir
+
+    def scan(path):
+        if str(path) == str(target):
+            raise primary
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", scan)
+    with pytest.raises(OSError) as caught:
+        research.plan_targets(**arguments)
+    assert caught.value is primary

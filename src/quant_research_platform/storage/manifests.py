@@ -18,7 +18,6 @@ from quant_research_platform.policy.share_safety import (
 from quant_research_platform.storage.atomic import atomic_write_text
 from quant_research_platform.storage.datasets.schema import (
     validate_dataset_manifest_payload,
-    validate_dataset_spec_payload,
 )
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -160,7 +159,6 @@ def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
         expected_schema_id="qrp-dataset-manifest",
         error="dataset_manifest_schema_id_invalid",
     )
-    validate_dataset_spec_payload(spec)
     validate_dataset_manifest_payload(payload, spec=spec)
     return payload
 

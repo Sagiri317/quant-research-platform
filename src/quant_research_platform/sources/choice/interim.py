@@ -297,7 +297,6 @@ def _values(cells):
 def _raw_index(raw_root, financial, policy, *, members):
     index = ExactPrimaryKeyIndex(
         primary_key=("source_coordinate",),
-        timestamp_columns=(),
     )
     with policy.lease("source.choice.index", index.retained_memory_bytes), index:
 

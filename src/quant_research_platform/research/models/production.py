@@ -660,7 +660,11 @@ def _count_training_rows(
         count += len(frame)
     if count <= 0:
         raise ValueError("model_training_sample_empty")
-    return count
+    return (
+        min(count, model_spec.max_train_rows)
+        if model_spec.max_train_rows is not None
+        else count
+    )
 
 
 @dataclass(frozen=True)

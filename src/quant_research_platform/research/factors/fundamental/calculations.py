@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -52,15 +53,14 @@ def calculate_fundamental_factors(
     cfo = values["operating_cash_flow_ttm"]
     capex = values["capex_cash_paid_ttm"]
 
-    gross_profit = _finite(revenue - operating_cost)
-    debt = _finite(
-        values["short_term_borrowings"]
-        + values["current_portion_noncurrent_liabilities"]
-        + values["long_term_borrowings"]
-        + values["bonds_payable"]
+    gross_profit = (revenue, -operating_cost)
+    debt = (
+        values["short_term_borrowings"],
+        values["current_portion_noncurrent_liabilities"],
+        values["long_term_borrowings"],
+        values["bonds_payable"],
     )
     cash = values["cash"]
-    net_debt = _finite(debt - cash)
 
     formulas = {
         "earnings_yield": _ratio(parent_income, market_cap),
@@ -72,31 +72,42 @@ def calculate_fundamental_factors(
         "gross_profitability": _ratio(gross_profit, avg_assets),
         "gross_margin": _ratio(gross_profit, revenue),
         "cfo_to_assets": _ratio(cfo, avg_assets),
-        "accruals": _ratio(_finite(consolidated_income - cfo), avg_assets),
+        "accruals": _ratio((consolidated_income, -cfo), avg_assets),
         "asset_growth_yoy": _ratio(assets, prior_assets) - 1.0,
         "revenue_growth_ttm_yoy": _ratio(revenue, prior_revenue) - 1.0,
         "earnings_change_to_assets": _ratio(
-            _finite(parent_income - prior_parent_income), avg_assets
+            (parent_income, -prior_parent_income), avg_assets
         ),
         "parent_equity_growth_yoy": _ratio(parent_equity, prior_equity) - 1.0,
         "capex_to_assets": _ratio(capex.where(capex.ge(0.0)), avg_assets),
         "liabilities_to_assets": _ratio(values["total_liabilities"], assets),
         "debt_to_assets": _ratio(debt, assets),
         "cash_to_assets": _ratio(cash, assets),
-        "net_debt_to_assets": _ratio(net_debt, assets),
+        "net_debt_to_assets": _ratio((*debt, -cash), assets),
     }
     for column in requested:
-        result[column] = _finite(formulas[column]).astype("float64")
+        result[column] = (
+            formulas[column].replace([np.inf, -np.inf], np.nan).astype("float64")
+        )
     return result
 
 
 def _ratio(
-    numerator: pd.Series,
+    numerator: pd.Series | tuple[pd.Series, ...],
     denominator: pd.Series,
 ) -> pd.Series:
-    valid_denominator = _finite(denominator).where(_finite(denominator).gt(0.0))
-    return _finite(numerator).div(valid_denominator)
-
-
-def _finite(values: pd.Series) -> pd.Series:
-    return values.replace([np.inf, -np.inf], np.nan)
+    if isinstance(numerator, pd.Series):
+        return numerator.div(denominator.where(denominator.gt(0.0)))
+    result = np.full(len(denominator), np.nan)
+    for index, (divisor, *terms) in enumerate(
+        zip(denominator, *numerator, strict=True)
+    ):
+        if not divisor > 0.0 or any(pd.isna(term) for term in terms):
+            continue
+        # Round the complete ratio once, without an overflowing intermediate sum.
+        ratio = sum(map(Fraction, terms), Fraction()) / Fraction(divisor)
+        try:
+            result[index] = float(ratio)
+        except OverflowError:
+            result[index] = np.nan  # An unrepresentable final factor is undefined.
+    return pd.Series(result, index=denominator.index)

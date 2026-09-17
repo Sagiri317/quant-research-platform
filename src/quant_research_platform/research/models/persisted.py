@@ -453,7 +453,7 @@ def read_quarterly_model_artifact(
                 native_filesystem_path(predictor_path),
                 follow_symlinks=False,
             )
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("model_artifact_quarterly_invalid") from exc
         if not stat.S_ISREG(predictor_stat.st_mode):
             raise ValueError("model_artifact_quarterly_invalid")
@@ -662,7 +662,8 @@ def _read_model_member(
                     if handle.read(1):
                         raise ValueError("model_artifact_model_invalid")
             except (
-                OSError,
+                FileNotFoundError,
+                NotADirectoryError,
                 pickle.PickleError,
                 EOFError,
                 AttributeError,
@@ -1081,6 +1082,8 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
                 or plan.research_dataset_id != protocol.scenario_id
                 or plan.data_snapshot_id
                 != envelope["upstream_identities"][protocol.scenario_id]
+                or plan.input_lineage != (plan.data_snapshot_id,)
+                or plan.candidate_family_id != entry["model_id"]
                 or plan.target_id != envelope["logical_artifact_id"]
                 or plan.folds != (fold,)
                 or plan.candidate_ids != (entry["model_id"],)

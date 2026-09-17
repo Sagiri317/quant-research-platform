@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import ExitStack
 
 import numpy as np
@@ -270,9 +270,9 @@ def _iter_complete_time_sized_frames_impl(
                             ):
                                 first_stop += 1
                             right = frame.iloc[:first_stop]
-                            combined_bound = pandas_frame_payload_bytes(
-                                pending.value
-                            ) + pandas_frame_payload_bytes(right)
+                            combined_bound = _concat_frame_payload_bytes(
+                                (pending.value, right)
+                            )
                             resource_policy.require_working_set(
                                 combined_bound,
                                 error="research_time_boundary_payloads_exceed_task_memory_budget",
@@ -409,3 +409,36 @@ def _time_sort_working_set_bytes(frame: pd.DataFrame) -> int:
     row_count = len(frame)
     index_bytes = row_count * np.dtype(np.intp).itemsize
     return 2 * pandas_frame_payload_bytes(frame) + 2 * index_bytes
+
+
+def _concat_frame_payload_bytes(frames: Sequence[pd.DataFrame]) -> int:
+    """Account for Pandas' output dtype and replacement index before concatenation."""
+    rows = sum(len(frame) for frame in frames)
+    prototype = frames[0].iloc[:0]
+    for frame in frames[1:]:
+        if not prototype.dtypes.equals(frame.dtypes):
+            prototype = pd.concat((prototype, frame.iloc[:0]), ignore_index=True)
+    payload = int(pd.RangeIndex(rows).memory_usage(deep=True))
+    for column, dtype in prototype.dtypes.items():
+        if isinstance(dtype, pd.CategoricalDtype):
+            payload += int(prototype[column].memory_usage(index=False, deep=True))
+            payload += rows * prototype[column].cat.codes.dtype.itemsize
+            continue
+        for frame in frames:
+            if column not in frame:
+                payload += len(frame) * int(
+                    pd.Series([np.nan], dtype=dtype).memory_usage(
+                        index=False, deep=True
+                    )
+                )
+            elif frame[column].dtype == dtype:
+                payload += int(frame[column].memory_usage(index=False, deep=True))
+            elif isinstance(dtype, np.dtype) and not dtype.hasobject:
+                payload += len(frame) * dtype.itemsize
+            else:
+                # Measure promoted variable-width/extension values one at a time;
+                # this keeps planning memory independent of the number of rows.
+                for position in range(len(frame)):
+                    promoted = frame[column].iloc[position : position + 1].astype(dtype)
+                    payload += int(promoted.memory_usage(index=False, deep=True))
+    return payload

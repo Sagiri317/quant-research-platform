@@ -86,17 +86,13 @@ class AShareFeeSource:
 
 def load_a_share_fee_source(
     *,
-    reference_root: Path | None = None,
-    csv_path: Path | None = None,
-    sidecar_path: Path | None = None,
+    reference_root: Path,
 ) -> AShareFeeSource:
-    """Read the exact reference member or explicit test paths."""
+    """Read the designated reference CSV and its metadata sidecar."""
 
-    csv_path, sidecar_path = _resolve_paths(
-        reference_root=reference_root,
-        csv_path=csv_path,
-        sidecar_path=sidecar_path,
-    )
+    root = Path(reference_root) / "a_share_fee_schedule"
+    csv_path = root / A_SHARE_FEE_CSV_NAME
+    sidecar_path = root / A_SHARE_FEE_SIDECAR_NAME
     csv_sha256, csv_identity = _sha256_file(csv_path)
     sidecar_identity = _file_identity(sidecar_path)
     metadata = _read_sidecar(sidecar_path, sidecar_identity)
@@ -117,28 +113,6 @@ def load_a_share_fee_source(
         csv_sha256=csv_sha256,
         source_identity=source_identity,
     )
-
-
-def _resolve_paths(
-    *,
-    reference_root: Path | None,
-    csv_path: Path | None,
-    sidecar_path: Path | None,
-) -> tuple[Path, Path]:
-    if reference_root is not None and csv_path is not None:
-        raise ValueError("a_share_fee_source_path_ambiguous")
-    if csv_path is None:
-        if reference_root is None:
-            raise ValueError("a_share_fee_source_path_required")
-        root = Path(reference_root)
-        csv_path = root / "a_share_fee_schedule" / A_SHARE_FEE_CSV_NAME
-    else:
-        csv_path = Path(csv_path)
-    if sidecar_path is None:
-        sidecar_path = csv_path.with_suffix(".metadata.json")
-    else:
-        sidecar_path = Path(sidecar_path)
-    return csv_path, sidecar_path
 
 
 def _file_identity(path: Path):

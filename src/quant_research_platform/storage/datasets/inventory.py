@@ -43,10 +43,10 @@ _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES = 32 * DATASET_INVENTORY_RESERVE
 
 
 def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
-    """Map filesystem failures before yielding entries to business callbacks."""
+    """Map vanished directories before yielding entries to business callbacks."""
     try:
         entries = os.scandir(native_filesystem_path(directory))
-    except OSError as error:
+    except (FileNotFoundError, NotADirectoryError) as error:
         raise ValueError("invalid_dataset_part_files") from error
     with handle_preserving_primary(entries):
         while True:
@@ -57,7 +57,7 @@ def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
                 is_alias = is_directory and path_is_filesystem_alias(path)
             except StopIteration:
                 return
-            except OSError as error:
+            except (FileNotFoundError, NotADirectoryError) as error:
                 raise ValueError("invalid_dataset_part_files") from error
             yield path, is_directory, is_alias
 

@@ -719,7 +719,7 @@ def _validate_model_selection_trial_record(
         if metric_value is not None and (
             type(metric_value) not in {int, float}
             or not np.isfinite(float(metric_value))
-            or abs(float(metric_value)) > 1.0 + 1e-12
+            or abs(float(metric_value)) > 1.0
         ):
             raise ValueError("invalid_model_metadata")
         if rows < 2:

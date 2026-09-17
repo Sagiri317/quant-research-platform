@@ -649,7 +649,8 @@ def build_portfolio_ledger(
                         len(holdings),
                         resource_policy,
                     ):
-                        _validate_session_alignment(dataset, panel, execution)
+                        _validate_input_keys(dataset, panel)
+                        _validate_input_keys(dataset, execution)
                         if not enhanced:
                             alpha = _prediction_alpha(dataset, prediction_lookup)
                             retained.enter_context(
@@ -1547,20 +1548,6 @@ def _bool_series(values: pd.Series, error: str) -> pd.Series:
     if values.isna().any():
         raise ValueError(error)
     return values.astype(bool)
-
-
-def _validate_session_alignment(
-    dataset: pd.DataFrame,
-    panel: pd.DataFrame,
-    execution: pd.DataFrame,
-) -> None:
-    keys = _session_keys(dataset)
-    for frame in (panel, execution):
-        other = _session_keys(frame)
-        if keys != other:
-            if keys.difference(other):
-                raise PortfolioTargetBlocked("portfolio_session_key_missing")
-            raise ValueError("portfolio_input_key_alignment_invalid")
 
 
 def _validate_input_keys(dataset: pd.DataFrame, panel: pd.DataFrame) -> None:

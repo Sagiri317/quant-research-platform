@@ -25,6 +25,10 @@ from quant_research_platform.contracts.predictions import (
     ALPHA_SCORE_COLUMN,
     prediction_output_columns,
 )
+from quant_research_platform.contracts.time import (
+    is_intraday_time_value,
+    time_value_isoformat,
+)
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
@@ -290,9 +294,6 @@ def read_prediction_output_bundle(
         try:
             key_index = ExactPrimaryKeyIndex(
                 primary_key=primary_key,
-                timestamp_columns=tuple(
-                    column for column in primary_key if column == "timestamp"
-                ),
             )
             stack.enter_context(
                 policy.lease(
@@ -327,6 +328,7 @@ def read_prediction_output_bundle(
                     raise ValueError("persisted_prediction_row_count_mismatch")
                 test_start = metadata.get("test_start")
                 test_end = metadata.get("test_end")
+                effective_test_end = None
                 decoded_row_bytes, decode_fixed_bytes = (
                     parquet_decoded_working_set_bounds(parquet, expected_columns)
                 )
@@ -402,6 +404,13 @@ def read_prediction_output_bundle(
                             )
                             if duplicates:
                                 raise ValueError("duplicate_persisted_prediction_keys")
+                            if table.num_rows:
+                                batch_end = pd.Timestamp(pc.max(timestamps).as_py())
+                                effective_test_end = (
+                                    batch_end
+                                    if effective_test_end is None
+                                    else max(effective_test_end, batch_end)
+                                )
                             if family_selection is not None:
                                 selected_families = (
                                     frame["quarter_id"].map(
@@ -448,6 +457,14 @@ def read_prediction_output_bundle(
                             batch = table = timestamps = keep = frame = None
                 if lookup.row_count == 0:
                     raise ValueError("empty_prediction_window")
+                if (
+                    time_value_isoformat(
+                        effective_test_end,
+                        date_only=not is_intraday_time_value(test_start),
+                    )
+                    != metadata["prediction_metadata"]["effective_test_end"]
+                ):
+                    raise ValueError("persisted_prediction_effective_end_mismatch")
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("prediction_output_unreadable") from exc
 

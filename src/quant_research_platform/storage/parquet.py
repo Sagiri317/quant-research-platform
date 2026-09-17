@@ -611,23 +611,14 @@ def _opened_parquet(
 
 
 def _parquet_footer_length(handle: Any) -> int:
-    try:
-        position = handle.tell()
-        handle.seek(0, os.SEEK_END)
-        file_size = handle.tell()
-        if file_size < 8:
-            raise ValueError("dataset_parquet_footer_invalid")
-        handle.seek(-8, os.SEEK_END)
-        trailer = handle.read(8)
-    except (OSError, ValueError, TypeError) as exc:
-        if isinstance(exc, ValueError) and str(exc) == "dataset_parquet_footer_invalid":
-            raise
-        raise ValueError("dataset_parquet_footer_invalid") from exc
-    finally:
-        try:
-            handle.seek(position)
-        except (OSError, UnboundLocalError):
-            pass
+    position = handle.tell()
+    handle.seek(0, os.SEEK_END)
+    file_size = handle.tell()
+    if file_size < 8:
+        raise ValueError("dataset_parquet_footer_invalid")
+    handle.seek(-8, os.SEEK_END)
+    trailer = handle.read(8)
+    handle.seek(position)
     if len(trailer) != 8 or trailer[4:] != b"PAR1":
         raise ValueError("dataset_parquet_footer_invalid")
     footer_length = int.from_bytes(trailer[:4], "little")

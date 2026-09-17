@@ -230,5 +230,11 @@ def funding_source_identity(funding_root, _target_id, *, symbol):
             return observations.identity
     except PortfolioTargetBlocked:
         raise
-    except (OSError, KeyError, TypeError, ValueError) as error:
+    except (
+        FileNotFoundError,
+        NotADirectoryError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
         raise ValueError("binance_funding_input_invalid") from error

@@ -108,9 +108,10 @@ def _normalize_benchmark_weight_snapshots(
     key = ["benchmark_id", "asset_id", "timestamp"]
     if bool(weights.duplicated(key, keep=False).any()):
         raise ValueError("a_share_benchmark_weight_key_duplicate")
-    totals = weights.groupby(["benchmark_id", "timestamp"])["weight"].sum()
+    totals = weights.groupby(["benchmark_id", "timestamp"])["weight"].transform("sum")
     if not bool(np.isclose(totals.to_numpy(), 1.0, atol=1e-6, rtol=0.0).all()):
         raise ValueError("a_share_benchmark_weight_sum_invalid")
+    weights["weight"] = weights["weight"].div(totals)
     return (
         weights.assign(market_id="a_share")
         .loc[:, list(_WEIGHT_COLUMNS)]

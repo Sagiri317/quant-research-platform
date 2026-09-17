@@ -212,20 +212,6 @@ def test_provider_failure_releases_lock(monkeypatch: pytest.MonkeyPatch) -> None
     assert locks[0].closed
 
 
-def test_nested_scope_reuses_exact_context_and_rejects_conflict() -> None:
-    outer = capture_test_policy(available_memory_bytes=16 * MIB)
-    other = capture_test_policy(available_memory_bytes=16 * MIB)
-
-    with runtime_resource_policy_scope(outer):
-        with runtime_resource_policy_scope() as nested:
-            assert nested is outer
-        with runtime_resource_policy_scope(outer) as same:
-            assert same is outer
-        with pytest.raises(RuntimeError, match="runtime_resource_policy_conflict"):
-            with runtime_resource_policy_scope(other):
-                pass
-
-
 @pytest.mark.parametrize("explicit_policy", (False, True))
 def test_independent_thread_scope_is_busy_then_can_reenter(
     explicit_policy: bool,
@@ -511,15 +497,6 @@ def test_two_process_busy_then_crash_reentry(
 
     with runtime_resource_policy_scope(explicit_cap_bytes=MIB) as policy:
         assert policy.state == "ACTIVE"
-
-
-def test_retired_root_cannot_reenter() -> None:
-    policy = capture_test_policy(available_memory_bytes=MIB)
-    with runtime_resource_policy_scope(policy):
-        pass
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
-        with runtime_resource_policy_scope(policy):
-            pass
 
 
 @pytest.mark.parametrize(

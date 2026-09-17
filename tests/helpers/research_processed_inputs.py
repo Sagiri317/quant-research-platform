@@ -64,48 +64,6 @@ def make_demo_processed_catalog() -> ProcessedDataCatalog:
     )
 
 
-def make_filter_processed_catalog() -> ProcessedDataCatalog:
-    return ProcessedDataCatalog(
-        (
-            _processed_spec(
-                data_id="demo_factor",
-                market_id=MarketId("a_share"),
-                kind=ProcessedDataKind.FACTOR,
-                column_roles={
-                    "market_id": ColumnRole.KEY,
-                    "asset_id": ColumnRole.KEY,
-                    "timestamp": ColumnRole.TIMESTAMP,
-                    "factor": ColumnRole.FACTOR,
-                },
-            ),
-            _processed_spec(
-                data_id="demo_label",
-                market_id=MarketId("a_share"),
-                kind=ProcessedDataKind.LABEL,
-                column_roles={
-                    "market_id": ColumnRole.KEY,
-                    "asset_id": ColumnRole.KEY,
-                    "timestamp": ColumnRole.TIMESTAMP,
-                    "label": ColumnRole.LABEL,
-                },
-            ),
-            _processed_spec(
-                data_id="demo_annotation",
-                market_id=MarketId("a_share"),
-                kind=ProcessedDataKind.ANNOTATION,
-                column_roles={
-                    "market_id": ColumnRole.KEY,
-                    "asset_id": ColumnRole.KEY,
-                    "timestamp": ColumnRole.TIMESTAMP,
-                    "eligible": ColumnRole.UNIVERSE,
-                    "can_enter": ColumnRole.MASK,
-                    "can_exit": ColumnRole.MASK,
-                },
-            ),
-        )
-    )
-
-
 def make_dummy_processed_catalog(
     *,
     include_extensions: bool = False,
@@ -249,81 +207,6 @@ def write_demo_processed_inputs(
                 ],
             ],
         },
-    )
-
-
-def research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    for date_index, timestamp in enumerate(pd.to_datetime(dates), start=1):
-        for asset_index, asset_id in enumerate(("000001", "000002"), start=1):
-            rows.append(
-                {
-                    "market_id": "a_share",
-                    "asset_id": asset_id,
-                    "timestamp": timestamp,
-                    DEMO_FACTOR_COLUMN: float(date_index + asset_index),
-                    DEMO_LABEL_COLUMN: 0.01 * (date_index + asset_index),
-                    "eligible": True,
-                    "can_enter": True,
-                    "can_exit": True,
-                    "market_type": 4,
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-def write_correctness_processed_inputs(
-    layout: StorageLayout,
-    processed_catalog: ProcessedDataCatalog,
-    *,
-    frame: pd.DataFrame,
-) -> None:
-    columns_by_id = {
-        "demo_factors": ["market_id", "asset_id", "timestamp", DEMO_FACTOR_COLUMN],
-        "demo_annotations": [
-            "market_id",
-            "asset_id",
-            "timestamp",
-            "eligible",
-            "can_enter",
-            "can_exit",
-            "market_type",
-        ],
-        "demo_labels": [
-            "market_id",
-            "asset_id",
-            "timestamp",
-            DEMO_LABEL_COLUMN,
-        ],
-    }
-    _write_processed_frames(
-        layout,
-        processed_catalog,
-        {data_id: frame.loc[:, columns] for data_id, columns in columns_by_id.items()},
-    )
-
-
-def write_filter_processed_inputs(
-    layout: StorageLayout,
-    processed_catalog: ProcessedDataCatalog,
-    frame: pd.DataFrame,
-) -> None:
-    columns_by_id = {
-        "demo_factor": ["market_id", "asset_id", "timestamp", "factor"],
-        "demo_label": ["market_id", "asset_id", "timestamp", "label"],
-        "demo_annotation": [
-            "market_id",
-            "asset_id",
-            "timestamp",
-            "eligible",
-            "can_enter",
-            "can_exit",
-        ],
-    }
-    _write_processed_frames(
-        layout,
-        processed_catalog,
-        {data_id: frame.loc[:, columns] for data_id, columns in columns_by_id.items()},
     )
 
 

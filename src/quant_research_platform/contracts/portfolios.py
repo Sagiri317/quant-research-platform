@@ -230,7 +230,9 @@ class PortfolioLedgerBatch:
             or not row.order_id
             or not isfinite(row.quantity)
             or not isfinite(row.notional)
-            or row.quantity * row.notional <= 0
+            or row.quantity == 0
+            or row.notional == 0
+            or (row.quantity > 0) != (row.notional > 0)
             for row in self.trades
         ):
             raise ValueError("portfolio_ledger_trade_invalid")
@@ -525,7 +527,9 @@ def validate_portfolio_transition(
                 desired = target.number - initial.value
                 executed = sum(row.notional for row in trades)
                 if (
-                    desired * executed < 0
+                    (desired > 0 and executed < 0)
+                    or (desired < 0 and executed > 0)
+                    or (desired == 0 and executed != 0)
                     or abs(executed) > abs(desired) + tolerance
                     or (abs(target.number - post.value) > tolerance)
                     != (reason is not None)

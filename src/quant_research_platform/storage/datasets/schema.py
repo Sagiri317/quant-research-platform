@@ -1861,17 +1861,3 @@ def _validate_date_range(
 def _require_exact_keys(value: Mapping[str, Any], expected: set[str]) -> None:
     if set(value) != expected:
         raise ValueError("manifest_physical_schema_invalid")
-
-
-def manifest_has_runtime_metadata(manifest: Mapping[str, Any]) -> bool:
-    return all(
-        key in manifest
-        for key in (
-            "columns",
-            "physical_schema",
-            "schema_hash",
-            "partition_row_counts",
-            "file_count",
-            "row_count",
-        )
-    )

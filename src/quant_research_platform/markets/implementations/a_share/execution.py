@@ -282,9 +282,19 @@ def trade_cost(
         else:
             base = notional_value
         fee_values[code] = base * rule.rate
-    participation = notional_value / adv_value
-    slippage = notional_value * assumptions.slippage_bps / 10_000.0
-    impact = notional_value * assumptions.impact_bps / 10_000.0 * np.sqrt(participation)
+    amount, amount_exponent = np.frexp(notional_value)
+    adv_amount, adv_exponent = np.frexp(adv_value)
+    slippage_rate, slippage_exponent = np.frexp(assumptions.slippage_bps)
+    impact_rate, impact_exponent = np.frexp(assumptions.impact_bps)
+    root_exponent, odd_exponent = divmod(amount_exponent - adv_exponent, 2)
+    participation_root = np.sqrt(np.ldexp(amount / adv_amount, odd_exponent))
+    slippage = np.ldexp(
+        amount * slippage_rate / 10_000.0, amount_exponent + slippage_exponent
+    )
+    impact = np.ldexp(
+        amount * impact_rate / 10_000.0 * participation_root,
+        amount_exponent + impact_exponent + root_exponent,
+    )
     commission = fee_values["BROKER_COMMISSION"]
     stamp_duty = fee_values.get("STAMP_DUTY", 0.0)
     transfer_fee = fee_values["TRANSFER_FEE"]

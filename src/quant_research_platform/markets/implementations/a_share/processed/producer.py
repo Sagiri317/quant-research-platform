@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
+from statistics import mean
 
 import numpy as np
 import pandas as pd
@@ -791,12 +792,11 @@ def _fundamental_pit_frame(
                 error=f"invalid_fundamental_pit_value: {column}",
                 allow_null=True,
             ).astype("float64")
-    output["average_total_assets"] = (
-        output["total_assets"] + output["beginning_total_assets"]
-    ) / 2.0
-    output["average_parent_equity"] = (
-        output["parent_equity"] + output["beginning_parent_equity"]
-    ) / 2.0
+    for column in ("total_assets", "parent_equity"):
+        output[f"average_{column}"] = [
+            mean(pair)
+            for pair in zip(output[column], output[f"beginning_{column}"], strict=True)
+        ]
     for column in FLOW_METRIC_IDS:
         output[f"{column}_ttm"] = output[column]
     output["has_legal_fundamental_pit"] = (

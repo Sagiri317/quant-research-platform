@@ -106,7 +106,7 @@ def _package_content_hash(root: Path) -> str:
             with open_filesystem_file(path) as handle:
                 while content := handle.read(1024 * 1024):
                     digest.update(content)
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("production_package_file_unreadable") from exc
         if _file_identity(path) != expected_identity:
             raise ValueError("production_package_identity_changed")
@@ -149,7 +149,7 @@ def _package_inventory(root: Path):
                                 _file_identity(entry_path),
                             )
                         )
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("production_package_enumeration_failed") from exc
         if _directory_identity(directory) != directories[directory]:
             raise ValueError("production_package_identity_changed")
@@ -163,7 +163,7 @@ def _package_inventory(root: Path):
 def _file_identity(path: Path) -> tuple[int, int, int, int]:
     try:
         value = os.stat(native_filesystem_path(path), follow_symlinks=False)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("production_package_file_unreadable") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
         raise ValueError("production_package_alias")
@@ -173,7 +173,7 @@ def _file_identity(path: Path) -> tuple[int, int, int, int]:
 def _directory_identity(path: Path) -> tuple[int, int, int, int]:
     try:
         value = os.stat(native_filesystem_path(path), follow_symlinks=False)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("production_package_root_invalid") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
         raise ValueError("production_package_root_invalid")

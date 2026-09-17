@@ -502,11 +502,17 @@ def _checked_book_events(
                 value = event.value
             else:
                 value = event
-            if not isinstance(value, BookState | BookBoundary):
-                raise TypeError("hft_execution_book_event_invalid")
-            key = observation_order_key(value)
-            if previous is not None and key < previous:
-                raise ValueError("hft_execution_time_non_monotonic")
+            try:
+                if not isinstance(value, BookState | BookBoundary):
+                    raise TypeError("hft_execution_book_event_invalid")
+                key = observation_order_key(value)
+                if previous is not None and key < previous:
+                    raise ValueError("hft_execution_time_non_monotonic")
+            except BaseException:
+                value = None
+                if isinstance(event, OwnedValue):
+                    event.release(owner="crypto.execution.book_validation")
+                raise
             previous = key
             yield event
 
@@ -757,23 +763,27 @@ def simulate_taker(
                     pending.expire_all()
                     return
                 previous_state = latest_state
+                previous_owned = latest_owned
                 state = _book_value(event)
-                if latest_owned is not None:
-                    latest_owned.release(owner="crypto.execution.book")
                 latest_owned = event if isinstance(event, OwnedValue) else None
                 latest_state = state
-                if _covered(
-                    observed_coverage,
-                    state.segment_id,
-                    state.observed_time_ns,
-                ):
-                    terminal_mid = _mid(state)
-                _resolve_observed_markouts(
-                    pending,
-                    state,
-                    observed_coverage,
-                    previous_state=previous_state,
-                )
+                try:
+                    if _covered(
+                        observed_coverage,
+                        state.segment_id,
+                        state.observed_time_ns,
+                    ):
+                        terminal_mid = _mid(state)
+                    _resolve_observed_markouts(
+                        pending,
+                        state,
+                        observed_coverage,
+                        previous_state=previous_state,
+                    )
+                finally:
+                    previous_state = None
+                    if previous_owned is not None:
+                        previous_owned.release(owner="crypto.execution.book")
                 if (
                     decision_windows_ns is not None
                     and decision_windows_ns[0][0]
@@ -789,7 +799,6 @@ def simulate_taker(
                 nonlocal market_event_count, next_event
                 while next_event is not None and _book_key(next_event)[0] <= target:
                     event = next_event
-                    next_event = None
                     market_event_count += 1
                     consume_event(event)
                     next_event = next(events, None)
@@ -1546,7 +1555,9 @@ class MakerCalibration:
                 ),
             ),
             self.policy.lease("storage.exact_keys", EXACT_KEY_SQLITE_CACHE_BYTES),
-            ExactPrimaryKeyIndex(primary_key=(), timestamp_columns=()) as spill,
+            ExactPrimaryKeyIndex(
+                primary_key=(),
+            ) as spill,
         ):
             sign = 1.0 if new_order.side == "buy" else -1.0
             mid = _mid(state)
@@ -2131,13 +2142,17 @@ def simulate_maker(
             state = _book_value(event)
             if previous is not None and previous.segment_id != state.segment_id:
                 cancel_all(state.observed_time_ns)
-            if latest_owned is not None:
-                latest_owned.release(owner="crypto.execution.book")
+            previous_owned = latest_owned
             latest_owned = event if isinstance(event, OwnedValue) else None
             latest_state = state
-            _resolve_observed_markouts(
-                pending, state, observed_coverage, previous_state=previous
-            )
+            try:
+                _resolve_observed_markouts(
+                    pending, state, observed_coverage, previous_state=previous
+                )
+            finally:
+                previous = None
+                if previous_owned is not None:
+                    previous_owned.release(owner="crypto.execution.book")
             if (
                 decision_windows_ns is None
                 or decision_windows_ns[0][0]

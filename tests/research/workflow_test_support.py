@@ -2,15 +2,11 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pandas as pd
 
-from quant_research_platform.artifacts.outputs.prediction import (
-    write_prediction_outputs,
-)
 from quant_research_platform.contracts.experiments import (
     ExperimentFold,
     ExperimentPlan,
@@ -20,7 +16,6 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
-from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.models.fitting import ModelFitResult
 from quant_research_platform.research.models.production import QuarterlyModelResult
@@ -307,38 +302,6 @@ def _passthrough_session(**attributes):
 
     session.filtered_view = filtered_view
     return session
-
-
-def _output_spec(
-    *,
-    output_definition_id: str,
-    output_id: str,
-    run_type: str,
-    market_id: MarketId | None = None,
-) -> OutputSpec:
-    return OutputSpec(
-        output_id=output_id,
-        output_definition_id=output_definition_id,
-        run_id="test_run",
-        market_id=market_id or MarketId("a_share"),
-        run_type=run_type,
-        scope=OutputScope.LOCAL_ONLY,
-    )
-
-
-def _write_prediction_result(layout: StorageLayout, result) -> Path:
-    return write_prediction_outputs(
-        spec=result.spec,
-        output_spec=_output_spec(
-            output_definition_id="prediction_outputs",
-            output_id=result.spec.prediction_id,
-            run_type=result.spec.run_type,
-        ),
-        layout=layout,
-        output_chunks=result.output_chunks,
-        model_metadata=result.model_metadata,
-        prediction_metadata_factory=result.prediction_metadata_factory,
-    )
 
 
 def _research_rows() -> pd.DataFrame:

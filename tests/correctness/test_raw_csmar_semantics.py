@@ -1109,18 +1109,30 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(
     assert pd.isna(by_asset.loc["000999", "market_belonging"])
 
 
-def test_ambiguous_index_info_long_row_fails_closed(tmp_path: Path) -> None:
-    index_path = tmp_path / "index_info_ambiguous.csv"
+@pytest.mark.parametrize(
+    "tail,expected",
+    [
+        ("scope,extra,1,2,3,4,5,formula,tail", ("scope,extra", "formula,tail")),
+        ("scope,1,2,3,4,5,ambiguous,1,2,3,4,5,tail", None),
+    ],
+)
+def test_index_info_long_row_requires_one_unambiguous_field_split(
+    tmp_path: Path, tail, expected
+) -> None:
+    index_path = tmp_path / "index_info_long.csv"
     index_path.write_text(
         "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
         "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
-        "000985,benchmark,2014-01-02,2013-12-31,1000,scope,"
-        "1,2,3,4,5,ambiguous,1,2,3,4,5,tail\n",
+        "000985,benchmark,2014-01-02,2013-12-31,1000," + tail + "\n",
         encoding="utf-8",
     )
-
-    with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
-        _collect_raw_export(index_path, "index_info")
+    if expected is None:
+        with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
+            _collect_raw_export(index_path, "index_info")
+    else:
+        actual = _collect_raw_export(index_path, "index_info")
+        assert len(actual) == 1
+        assert (actual.iloc[0]["Idxinfo04"], actual.iloc[0]["Idxinfo10"]) == expected
 
 
 def test_index_info_parser_streams_bounded_chunks_without_a_full_frame_surface(
@@ -1853,3 +1865,324 @@ def test_expired_csv_records_do_not_retain_previous_unicode_payload(tmp_path):
             rows.close()
             tracemalloc.stop()
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "failure_type", (FileNotFoundError, NotADirectoryError, OSError, PermissionError)
+)
+def test_csmar_parent_failure_keeps_workflow_semantics(
+    tmp_path, monkeypatch, failure_type
+):
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows import research
+
+    raw = tmp_path / "raw/csmar"
+    raw.mkdir(parents=True)
+    source = raw / "native-calendar.csv"
+    source.write_text("Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n")
+    arguments = dict(
+        profile=research_profile(),
+        raw_root=raw.parent,
+        start_date="2020-01-01",
+        end_date="2020-01-03",
+        data_ids=("trading_calendar",),
+    )
+    normal_layout = StorageLayout(tmp_path / "normal")
+    failed_layout = StorageLayout(tmp_path / "failed")
+    with runtime_resource_policy_scope() as policy:
+        result = research.data_materialize(layout=normal_layout, **arguments)
+        assert result["status"] == "COMPLETE"
+        originals = {
+            path: path.read_bytes()
+            for path in normal_layout.project_root.rglob("*")
+            if path.is_file()
+        }
+        primary = failure_type("parent_failure")
+        native_check = interim.require_unaliased_path
+        native_stat = Path.lstat
+        armed = False
+        calls = []
+
+        def checked(path, *, error):
+            nonlocal armed
+            result = native_check(path, error=error)
+            if error == "csmar_interim_source_parent_invalid":
+                armed = True
+            return result
+
+        def failed_stat(path, *args, **kwargs):
+            nonlocal armed
+            if armed and path == raw:
+                armed = False
+                calls.append(path)
+                raise primary
+            return native_stat(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(interim, "require_unaliased_path", checked)
+            patch.setattr(Path, "lstat", failed_stat)
+            if failure_type in (FileNotFoundError, NotADirectoryError):
+                failed = research.data_materialize(layout=failed_layout, **arguments)
+                assert failed["status"] == "FAILED"
+                assert failed["target_results"][0]["reason"] == (
+                    "interim_build_failed:csmar_interim_source_parent_invalid"
+                )
+            else:
+                with pytest.raises(failure_type) as caught:
+                    research.data_materialize(layout=failed_layout, **arguments)
+                assert caught.value is primary
+        assert calls == [raw]
+        assert policy.used_memory_bytes == 0
+        assert all(path.read_bytes() == content for path, content in originals.items())
+        assert not tuple(failed_layout.project_root.rglob(".a-*"))
+        assert not tuple(failed_layout.project_root.rglob("manifest.json"))
+
+
+@pytest.mark.parametrize("exponent", (0, 600, -600))
+def test_adjusted_open_preserves_units_through_storage_and_labels(tmp_path, exponent):
+    import math
+
+    import numpy as np
+
+    from quant_research_platform.research.labels.forward_returns import (
+        add_forward_return_labels,
+    )
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    raw.mkdir(parents=True)
+    sessions = pd.date_range("2019-08-01", periods=3)
+    prices = [math.ldexp(multiplier, exponent) for multiplier in (1.0, 1.0, 1.5)]
+    rows = []
+    for timestamp, price in zip(sessions, prices, strict=True):
+        row = dict.fromkeys(
+            raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
+        )
+        row.update(
+            Stkcd="000001",
+            Trddt=timestamp.date().isoformat(),
+            Markettype=32,
+            Filling=0,
+            Opnprc=price,
+            Clsprc=price,
+            Adjprcwd=price,
+            Hiprc=price,
+            Loprc=price,
+        )
+        rows.append(row)
+    _write_csmar(raw, "market_bars_1d", rows)
+    with runtime_resource_policy_scope() as policy:
+        built = interim.materialize_interim_data(
+            layout=layout, data_ids=("market_bars_1d",), resource_policy=policy
+        )
+        loaded = read_dataset(
+            built.artifact_roots["market_bars_1d"], resource_policy=policy
+        )
+        # open == close == adjusted close: the exact adjusted open is that price.
+        np.testing.assert_array_equal(loaded.adj_open, loaded.open)
+        panel = loaded.rename(columns={"source_asset_id": "asset_id"}).assign(
+            can_enter=True
+        )
+        labeled = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
+        assert labeled.forward_return_1d.iloc[0] == pytest.approx(0.5)
+        assert labeled.forward_return_1d_available_at.iloc[0] == sessions[2]
+        assert labeled.forward_return_1d.iloc[1:].isna().all()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "opening,adjusted,closing",
+    [
+        (2.0**600, 2.0**-600, 2.0**-600),
+        (2.0**-600, 2.0**600, 2.0**600),
+        (2.0**600, 2.0**600, 2.0**600),
+        (2.0**-600, 2.0**-600, 2.0**-600),
+    ],
+)
+def test_adjusted_open_avoids_intermediate_product_and_ratio_loss(
+    opening, adjusted, closing
+):
+    from fractions import Fraction
+
+    row = dict.fromkeys(
+        raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
+    )
+    row.update(
+        Stkcd="000001",
+        Trddt="2019-08-01",
+        Markettype=32,
+        Filling=0,
+        Opnprc=opening,
+        Clsprc=closing,
+        Adjprcwd=adjusted,
+    )
+    expected = float(Fraction(opening) * Fraction(adjusted) / Fraction(closing))
+    actual = interim.normalize_raw_frame(pd.DataFrame([row]), "market_bars_1d")
+    assert actual.adj_open.iloc[0] == expected
+
+
+@pytest.mark.parametrize(
+    "opening,adjusted,closing,expected",
+    [
+        (1.0, 1.0, 0.0, None),
+        (1.0, 1.0, None, None),
+        (None, 1.0, 1.0, None),
+        (1.0, None, 1.0, None),
+        (0.0, 1.0, 1.0, 0.0),
+        (1.0, 0.0, 1.0, 0.0),
+    ],
+)
+def test_adjusted_open_keeps_missing_and_zero_close_semantics(
+    opening, adjusted, closing, expected
+):
+    row = dict.fromkeys(
+        raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
+    )
+    row.update(
+        Stkcd="000001",
+        Trddt="2019-08-01",
+        Markettype=32,
+        Filling=0,
+        Opnprc=opening,
+        Clsprc=closing,
+        Adjprcwd=adjusted,
+    )
+    actual = interim.normalize_raw_frame(
+        pd.DataFrame([row]), "market_bars_1d"
+    ).adj_open.iloc[0]
+    if expected is None:
+        assert pd.isna(actual)
+    else:
+        assert actual == expected
+
+
+def test_csmar_pending_copy_admits_payload_before_concurrent_allocation(
+    tmp_path, monkeypatch
+):
+    import sys
+    import threading
+
+    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    raw.mkdir(parents=True)
+    _write_csmar(
+        raw,
+        "index_weights",
+        [
+            dict(
+                Indexcd="000852",
+                Enddt="2019-03-01",
+                Stkcd=f"{i + 1:06d}",
+                Constdnme="synthetic",
+                Weight=25.0,
+            )
+            for i in range(4)
+        ],
+    )
+    transform = interim._transform_interim_chunk
+    classify = ExactPrimaryKeyIndex.classify_comparison_table
+    copy = pd.DataFrame.copy
+    workers, releases, worker_errors, copies, refusals = [], [], [], [], []
+    armed = False
+    first = True
+    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
+
+        def hold_remaining_capacity():
+            ready, release = threading.Event(), threading.Event()
+
+            def worker():
+                _payload = None
+                lease = None
+                try:
+                    size = (
+                        policy.explicit_memory_cap_bytes - policy.used_memory_bytes - 1
+                    )
+                    lease = policy.lease("test.concurrent_payload", size)
+                    _payload = bytearray(size)
+                    ready.set()
+                    if not release.wait(10):
+                        raise AssertionError("concurrent_payload_timeout")
+                except BaseException as error:
+                    worker_errors.append(type(error).__name__)
+                    ready.set()
+                finally:
+                    _payload = None
+                    if lease is not None:
+                        lease.close()
+
+            thread = threading.Thread(target=worker)
+            workers.append(thread)
+            releases.append(release)
+            thread.start()
+            assert ready.wait(10)
+            assert not worker_errors
+            return release, thread
+
+        def transform_under_pressure(frame, **kwargs):
+            nonlocal first, armed
+            if not first:
+                return transform(frame, **kwargs)
+            first = False
+            release, thread = hold_remaining_capacity()
+            try:
+                return transform(frame, **kwargs)
+            except interim._InterimCapacityExceeded:
+                refusals.append(True)
+                armed = True
+                raise
+            finally:
+                release.set()
+                thread.join(10)
+                assert not thread.is_alive()
+
+        def classify_then_contend(self, *args, **kwargs):
+            nonlocal armed
+            result = classify(self, *args, **kwargs)
+            if armed:
+                armed = False
+                hold_remaining_capacity()
+            return result
+
+        def observe_copy(frame, *args, **kwargs):
+            caller = sys._getframe(1)
+            if (
+                caller.f_code.co_name == "_iter_pruned_interim_frames"
+                and caller.f_locals.get("next_pending_lease") is not None
+            ):
+                copies.append(len(frame))
+            return copy(frame, *args, **kwargs)
+
+        monkeypatch.setattr(
+            interim, "_transform_interim_chunk", transform_under_pressure
+        )
+        monkeypatch.setattr(
+            ExactPrimaryKeyIndex, "classify_comparison_table", classify_then_contend
+        )
+        monkeypatch.setattr(pd.DataFrame, "copy", observe_copy)
+        try:
+            with pytest.raises(MemoryError, match="^runtime_memory_budget_exceeded$"):
+                interim.materialize_interim_data(
+                    layout=layout,
+                    data_ids=("index_weights",),
+                    chunksize=2,
+                    resource_policy=policy,
+                )
+        finally:
+            for release in releases:
+                release.set()
+            for worker in workers:
+                worker.join(10)
+                assert not worker.is_alive()
+        assert refusals == [True]
+        assert not copies
+        assert not worker_errors
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.rglob("manifest.json"))

@@ -263,10 +263,4 @@ def _role(
         "can_exit",
     }:
         return ColumnRole.MASK
-    if column in {
-        "industry_standard_id",
-        "industry_level1_code",
-        "industry_level1_name",
-    }:
-        return ColumnRole.CONTEXT
     return ColumnRole.CONTEXT

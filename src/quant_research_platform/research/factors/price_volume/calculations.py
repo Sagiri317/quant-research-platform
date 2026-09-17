@@ -8,6 +8,9 @@ import numpy as np
 import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
+from quant_research_platform.compute.dataframe.cross_section import (
+    _pearson_correlation_result,
+)
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -168,8 +171,9 @@ def _calculate_values(
     if factor.startswith("amihud_"):
         valid &= (extra["amount"] > 0).all(axis=1)
     if factor.endswith("_corr_20d"):
-        valid &= (np.ptp(matrix, axis=1) != 0) & (
-            np.ptp(extra[extra_names[0]], axis=1) != 0
+        other = extra[extra_names[0]]
+        valid &= (np.min(matrix, axis=1) != np.max(matrix, axis=1)) & (
+            np.min(other, axis=1) != np.max(other, axis=1)
         )
     if factor in {"skewness_60d", "kurtosis_60d"}:
         valid &= np.min(matrix, axis=1) != np.max(matrix, axis=1)
@@ -235,10 +239,9 @@ def _calculate_values(
             - 1.0
         )
     elif factor.endswith("_corr_20d"):
-        # Retain the exact native covariance/normalization kernel.
         result = np.fromiter(
             (
-                np.corrcoef(a, b)[0, 1]
+                _pearson_correlation_result(a, b)[0]
                 for a, b in zip(current, extra[extra_names[0]], strict=True)
             ),
             dtype=float,

@@ -295,7 +295,6 @@ def _exact_comparison_counts(
     ):
         with ExactPrimaryKeyIndex(
             primary_key=primary_key,
-            timestamp_columns=(),
         ) as index:
             _index_dataset_rows(
                 left_root,

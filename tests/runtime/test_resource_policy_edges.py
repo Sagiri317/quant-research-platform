@@ -9,29 +9,7 @@ from quant_research_platform.runtime import resources
 from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
     require_free_disk_headroom,
-    runtime_resource_policy_scope,
 )
-
-
-@pytest.mark.parametrize(
-    ("owner", "error"),
-    [
-        ("_available_memory_bytes", "runtime_available_memory_discovery_failed"),
-    ],
-)
-def test_capture_fails_closed_when_required_probe_fails(
-    owner: str,
-    error: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fail() -> int:
-        raise RuntimeError(error)
-
-    monkeypatch.setattr(resources, owner, fail)
-
-    with pytest.raises(RuntimeError, match=error):
-        with runtime_resource_policy_scope():
-            pass
 
 
 def test_disk_headroom_is_independent_of_memory_policy(

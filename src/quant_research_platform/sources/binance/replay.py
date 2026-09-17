@@ -185,7 +185,7 @@ class ObservationCoverageIndex:
                 self._path,
                 missing_is_file_not_found=False,
             )
-        except (OSError, ValueError) as exc:
+        except ValueError as exc:
             raise ValueError("binance_replay_connection_intervals_invalid") from exc
         if self.identity.size != descriptor["compressed_bytes"]:
             raise ValueError("binance_replay_connection_intervals_invalid")
@@ -236,7 +236,7 @@ class ObservationCoverageIndex:
     ) -> None:
         try:
             raw_handle = self._path.open("rb")
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("binance_replay_connection_intervals_invalid") from exc
         digesting_handle = _DigestingReader(raw_handle)
         try:
@@ -684,7 +684,7 @@ def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
             metadata = raw_root.lstat()
         except FileNotFoundError:
             return None
-        except OSError as error:
+        except NotADirectoryError as error:
             raise ValueError(_RAW_IDENTITY_ERROR) from error
         _reject_raw_reparse(metadata)
         if not stat.S_ISDIR(metadata.st_mode):
@@ -701,10 +701,7 @@ def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
             return
         if current is None:
             raise ValueError(_RAW_IDENTITY_ERROR)
-        try:
-            unchanged = os.path.samestat(root_identity, current)
-        except OSError as error:
-            raise ValueError(_RAW_IDENTITY_ERROR) from error
+        unchanged = os.path.samestat(root_identity, current)
         if not unchanged:
             raise ValueError(_RAW_IDENTITY_ERROR)
 
@@ -737,11 +734,11 @@ def _capture_raw_file_identity(
         if missing_is_file_not_found and expected_identity is None:
             raise FileNotFoundError(raw_path) from error
         raise ValueError(_RAW_IDENTITY_ERROR) from error
-    except OSError as error:
+    except NotADirectoryError as error:
         raise ValueError(_RAW_IDENTITY_ERROR) from error
     try:
         identity = dataset_file_identity(raw_path)
-    except ValueError as error:
+    except (FileNotFoundError, NotADirectoryError, ValueError) as error:
         raise ValueError(_RAW_IDENTITY_ERROR) from error
     if expected_identity is not None and identity != expected_identity:
         raise ValueError(_RAW_IDENTITY_ERROR)
@@ -755,7 +752,7 @@ def _verify_raw_file_handle(
 ) -> None:
     try:
         handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-    except (OSError, ValueError) as error:
+    except ValueError as error:
         raise ValueError(_RAW_IDENTITY_ERROR) from error
     if handle_identity != expected_identity:
         raise ValueError(_RAW_IDENTITY_ERROR)
@@ -937,7 +934,12 @@ def _read_run_manifest(
             try:
                 raw = path.read_bytes()
                 manifest = parse_qrp_json_object(raw)
-            except (OSError, UnicodeError, ValueError) as exc:
+            except (
+                FileNotFoundError,
+                NotADirectoryError,
+                UnicodeError,
+                ValueError,
+            ) as exc:
                 raise ValueError("binance_replay_run_manifest_invalid") from exc
             if _capture_raw_file_identity(path) != identity:
                 raise ValueError("binance_replay_run_identity_changed")
@@ -1272,7 +1274,7 @@ def _verify_exact_run_tree(root: Path, declared_paths: set[str]) -> None:
         require_unaliased_path(directory, error="binance_replay_file_path_invalid")
         try:
             entries = os.scandir(directory)
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("binance_replay_file_manifest_mismatch") from exc
         with entries:
             for entry in entries:
@@ -1309,7 +1311,7 @@ def _sha256_file(
     with policy.lease("binance.replay.file_hash", _HASH_BUFFER_BYTES + 64 * 1024):
         try:
             handle = path.open("rb")
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("binance_replay_file_identity_mismatch") from exc
         try:
             _verify_raw_file_handle(handle, expected_identity=identity)
@@ -1366,7 +1368,7 @@ def _iter_raw_file(
     bound = json_record_working_set_bytes(metadata["max_record_bytes"]) + 64 * 1024
     try:
         raw_handle = path.open("rb")
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("binance_replay_raw_file_open_failed") from exc
     try:
         _verify_raw_file_handle(raw_handle, expected_identity=item.identity)
@@ -1841,12 +1843,7 @@ class DepthReconstructor:
             market_type=self.market_type,
         )
         segment_id, observation_id = _record_identity(record)
-        if segment_id in self.stats.coverage_segments:
-            start, end = self.stats.coverage_segments[segment_id]
-            self.stats.coverage_segments[segment_id] = (
-                start,
-                min(end, observed_time),
-            )
+        self._close_coverage(observed_time)
         self._invalid = True
         self._bootstrapped = False
         self._bids.clear()

@@ -202,7 +202,6 @@ def test_exact_key_index_classifies_typed_exact_duplicates_and_conflicts(
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         keep_positions, duplicate_count = index.classify_comparison_table(
             table,
@@ -265,7 +264,6 @@ def test_exact_key_classifier_batches_sql_and_returns_compact_positions(
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         statements: list[str] = []
         assert index._connection is not None
@@ -298,7 +296,6 @@ def test_exact_key_classifier_uses_one_sorter_free_staging_transaction(
 ) -> None:
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         index.classify_comparison_table(
             pa.table({"asset_id": ["existing"], "value": [1]}),
@@ -359,7 +356,6 @@ def test_exact_key_classifier_preflights_compact_positions_before_mutation(
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         with pytest.raises(
             ValueError,
@@ -398,7 +394,6 @@ def test_exact_key_classifier_validates_grammar_before_position_admission(
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         with pytest.raises(ValueError, match=error):
             index.classify_comparison_table(
@@ -427,7 +422,6 @@ def test_exact_key_classifier_gates_disk_overlap_before_exact_mutation(
     table = pa.table({"asset_id": ["a", "b"]})
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         with pytest.raises(OSError, match="disk_headroom_exhausted"):
             index.classify_comparison_table(
@@ -453,7 +447,6 @@ def test_exact_key_classifier_renews_disk_gate_for_secondary_index_before_mutati
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         reserves: list[int] = []
 
@@ -490,7 +483,6 @@ def test_exact_key_classifier_gates_exact_insert_physical_growth_before_mutation
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         reserves: list[int] = []
 
@@ -523,7 +515,6 @@ def test_exact_key_classifier_batches_large_duplicate_group(tmp_path: Path) -> N
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         statements: list[str] = []
         assert index._connection is not None
@@ -552,7 +543,6 @@ def test_exact_key_classifier_requires_positive_non_bool_payload_target(
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         with pytest.raises(
             ValueError,
@@ -1037,7 +1027,6 @@ def test_exact_key_index_stores_primary_keys_once_and_category_values_only(
 ) -> None:
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         index.add_table(pa.table({"asset_id": ["a", "b"]}))
         assert index._connection is not None
@@ -1073,7 +1062,6 @@ def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
     with pytest.raises(KeyboardInterrupt):
         ExactPrimaryKeyIndex(
             primary_key=("asset_id",),
-            timestamp_columns=(),
         ).__enter__()
 
     assert tuple(tmp_path.iterdir()) == ()
@@ -1103,7 +1091,6 @@ def test_exact_key_index_preserves_open_failure_when_close_also_fails(
     with pytest.raises(RuntimeError, match="index_initialization_failed"):
         ExactPrimaryKeyIndex(
             primary_key=("asset_id",),
-            timestamp_columns=(),
         ).__enter__()
 
     assert tuple(tmp_path.iterdir()) == ()
@@ -1129,7 +1116,6 @@ def test_exact_key_index_compares_persisted_row_values(
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         assert (
             index.add_comparison_table(
@@ -1241,7 +1227,6 @@ def test_nested_float_primary_key_zero_keeps_bit_identity(
 
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
     ) as index:
         assert index.add_table(table, namespace="writer") == 0
         index.add_comparison_table(
@@ -1286,14 +1271,12 @@ def test_nested_primary_key_nonfinite_rejects_but_nested_value_allows(
     nested = pa.array([[nonfinite]], type=pa.list_(pa.float64()))
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
     ) as index:
         with pytest.raises(ValueError, match="dataset_primary_key|null|invalid"):
             index.add_table(pa.Table.from_arrays([nested], names=("key",)))
 
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
     ) as index:
         assert (
             index.add_comparison_table(
@@ -1313,7 +1296,6 @@ def test_exact_comparison_payload_target_has_an_exact_encoded_boundary(
 
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         _, key_payload, value_payload = next(
             index._prepared_comparison_rows(
@@ -1350,7 +1332,6 @@ def test_exact_comparison_primary_key_only_projection_has_empty_value(
 ) -> None:
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         assert (
             index.add_comparison_table(
@@ -1396,7 +1377,6 @@ def test_exact_comparison_nested_payload_stops_at_remaining_target(
     )
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         with pytest.raises(
             ValueError,
@@ -1425,7 +1405,6 @@ def test_exact_comparison_python_allocation_diagnostic_uses_one_bounded_row_buff
     )
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         _, key_payload, value_payload = next(
             index._prepared_comparison_rows(
@@ -1509,7 +1488,6 @@ def test_exact_variable_width_columns_share_the_row_payload_target(
     )
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     ) as index:
         _, key_payload, value_payload = next(
             index._prepared_comparison_rows(
@@ -1627,7 +1605,6 @@ def test_exact_key_index_close_failure_does_not_replace_primary(
 
     index = ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
-        timestamp_columns=(),
     )
     with pytest.raises(RuntimeError, match="primary_failure"):
         with index:
@@ -1666,7 +1643,6 @@ def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
         runtime_resource_policy_scope(policy),
         ExactPrimaryKeyIndex(
             primary_key=spec.primary_key,
-            timestamp_columns=("timestamp",),
         ) as tracker,
         DatasetSessionInventory(
             data_root=Path("data"),
@@ -1710,7 +1686,6 @@ def test_exact_index_preserves_decimal_values_beyond_context_precision(
 
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
         key_schema=schema,
     ) as index:
         assert index.add_table(pa.table({"key": [first]})) == 0
@@ -1731,7 +1706,6 @@ def test_exact_index_preserves_unclaimed_key_scratch_directory(
 
     with ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
     ):
         pass
 
@@ -1745,7 +1719,6 @@ def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
         runtime_resource_policy_scope(policy),
         ExactPrimaryKeyIndex(
             primary_key=spec.primary_key,
-            timestamp_columns=("timestamp",),
         ) as tracker,
         DatasetSessionInventory(
             data_root=Path("data"),
@@ -2282,20 +2255,34 @@ def test_inventory_discovery_does_not_descend_nested_junction(
     assert _discovered_paths(data_root, spec={"partition_columns": []}) == []
 
 
-def test_inventory_discovery_maps_scan_error(
+@pytest.mark.parametrize(
+    "failure_type", (FileNotFoundError, NotADirectoryError, OSError, PermissionError)
+)
+def test_inventory_discovery_classifies_scan_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    failure_type: type[OSError],
 ) -> None:
     data_root = tmp_path / "data"
     data_root.mkdir()
+    primary = failure_type("scan_failed")
+    native_scan = os.scandir
 
-    def fail_scan(_path):
-        raise OSError("scan_failed")
+    def fail_scan(path):
+        if not isinstance(path, int) and Path(path) == data_root:
+            raise primary
+        return native_scan(path)
 
     monkeypatch.setattr(os, "scandir", fail_scan)
-
-    with pytest.raises(ValueError, match="invalid_dataset_part_files"):
+    missing = failure_type in (FileNotFoundError, NotADirectoryError)
+    with pytest.raises(ValueError if missing else failure_type) as caught:
         _discovered_paths(data_root, spec={"partition_columns": []})
+    if missing:
+        assert str(caught.value) == "invalid_dataset_part_files"
+        assert caught.value.__cause__ is primary
+    else:
+        assert caught.value is primary
+    assert not getattr(caught.value, "__notes__", ())
 
 
 def test_directory_scan_processes_first_entry_before_enumerating_siblings(

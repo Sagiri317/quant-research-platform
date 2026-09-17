@@ -187,3 +187,107 @@ def test_package_inventory_and_read_support_native_long_paths(tmp_path: Path) ->
             handle.write(b"synthetic = 1\n")
     assert len(str(long / "module.py")) > 260
     assert _identity(short).identity_hash == _identity(long).identity_hash
+
+
+@pytest.mark.parametrize(
+    ("boundary", "failure_type"),
+    [
+        (boundary, failure_type)
+        for boundary in (
+            "directory_stat",
+            "file_stat",
+            "inventory",
+            "open",
+            "read",
+            "close",
+        )
+        for failure_type in (
+            (OSError, PermissionError)
+            if boundary in {"read", "close"}
+            else (FileNotFoundError, NotADirectoryError, OSError, PermissionError)
+        )
+    ],
+)
+def test_software_identity_preserves_system_io(
+    tmp_path, monkeypatch, boundary, failure_type
+):
+    import io
+
+    from quant_research_platform.storage import software_identity as owner
+
+    package = tmp_path / "package"
+    package.mkdir()
+    member = package / "module.py"
+    member.write_bytes(b"synthetic = 1\n")
+    expected = _identity(package)
+    primary = failure_type("synthetic_package_failure")
+    native_stat = owner.os.stat
+    native_directory_identity = owner._directory_identity
+    native_scan = owner.os.scandir
+    native_open = owner.open_filesystem_file
+    handles = []
+
+    def stat(path, *args, **kwargs):
+        target = package if boundary == "directory_stat" else member
+        if not isinstance(path, int) and Path(path) == target:
+            raise primary
+        return native_stat(path, *args, **kwargs)
+
+    def scan(path):
+        if not isinstance(path, int) and Path(path) == package:
+            raise primary
+        return native_scan(path)
+
+    class ObservedFile(io.BufferedReader):
+        def read(self, *args):
+            if boundary == "read":
+                raise primary
+            return super().read(*args)
+
+        def close(self):
+            was_open = not self.closed
+            super().close()
+            if was_open and boundary == "close":
+                raise primary
+
+    def open_member(path):
+        if Path(path) != member:
+            return native_open(path)
+        if boundary == "open":
+            raise primary
+        handle = ObservedFile(io.FileIO(path, "r"))
+        handles.append(handle)
+        return handle
+
+    with monkeypatch.context() as patch:
+        if boundary == "directory_stat":
+
+            def directory_identity(path):
+                with monkeypatch.context() as scoped:
+                    scoped.setattr(owner.os, "stat", stat)
+                    return native_directory_identity(path)
+
+            patch.setattr(owner, "_directory_identity", directory_identity)
+        elif boundary == "file_stat":
+            patch.setattr(owner.os, "stat", stat)
+        elif boundary == "inventory":
+            patch.setattr(owner.os, "scandir", scan)
+        else:
+            patch.setattr(owner, "open_filesystem_file", open_member)
+        missing = failure_type in (FileNotFoundError, NotADirectoryError)
+        with pytest.raises(ValueError if missing else failure_type) as caught:
+            _identity(package)
+        if missing:
+            assert str(caught.value) == (
+                "production_package_root_invalid"
+                if boundary == "directory_stat"
+                else "production_package_enumeration_failed"
+                if boundary == "inventory"
+                else "production_package_file_unreadable"
+            )
+            assert caught.value.__cause__ is primary
+        else:
+            assert caught.value is primary
+    assert all(handle.closed for handle in handles)
+    assert member.read_bytes() == b"synthetic = 1\n"
+    assert _identity(package) == expected

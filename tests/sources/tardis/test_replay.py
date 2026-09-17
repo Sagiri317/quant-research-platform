@@ -439,3 +439,47 @@ def test_native_schema_invalid_fields_fail_atomic_full_import(tmp_path, date, ch
             )
         assert not published.exists()
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("boundary", ("manifest_stat", "member_open", "coverage_open"))
+def test_tardis_identity_preserves_shared_owner_io_failure(
+    tmp_path, monkeypatch, boundary
+):
+    import errno
+    from pathlib import Path
+
+    from quant_research_platform.sources.binance.replay import market_source_identity
+    from tests.sources.tardis.test_raw import _snapshot
+
+    root = tmp_path / "published"
+    with runtime_resource_policy_scope() as policy:
+        manifest = import_day(
+            root,
+            date="2026-09-01",
+            slices=_slices(tmp_path / "native", _snapshot()),
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        assert market_source_identity(root, "panel")
+        target = root / (
+            "manifest.json"
+            if boundary == "manifest_stat"
+            else manifest["observation_intervals"]["path"]
+            if boundary == "coverage_open"
+            else manifest["files"][0]["path"]
+        )
+        operation = "lstat" if boundary == "manifest_stat" else "open"
+        original = getattr(Path, operation)
+        primary = OSError(errno.EIO, "controlled_io_failure")
+
+        def fail(path, *args, **kwargs):
+            if path == target:
+                raise primary
+            return original(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, operation, fail)
+            with pytest.raises(OSError) as caught:
+                market_source_identity(root, "panel")
+        assert caught.value is primary
+        assert policy.used_memory_bytes == 0

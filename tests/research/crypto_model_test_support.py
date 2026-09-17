@@ -354,6 +354,83 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 np.testing.assert_array_equal(before, predict(probe))
         assert policy.used_memory_bytes == 0
         with policy.lease("test.crypto.model_corruption", 8 * 1024**2):
+            from dataclasses import replace
+            from uuid import uuid4
+
+            from quant_research_platform.contracts.experiments import (
+                trial_ledger_semantic_identity,
+            )
+            from quant_research_platform.storage.experiments import (
+                append_trial_record,
+                read_model_trial_ledger_reference,
+            )
+
+            plan, terminals = read_model_trial_ledger_reference(layout, references[0])
+            for kind, changes in (
+                ("lineage", {"input_lineage": ("e" * 64,)}),
+                ("family", {"candidate_family_id": "different_family"}),
+            ):
+                changed_plan = replace(
+                    plan, experiment_id=f"experiment_{uuid4().hex}", **changes
+                )
+                terminal = replace(
+                    terminals[0],
+                    event_id=f"event_{uuid4().hex}",
+                    run_id=f"run_{uuid4().hex}",
+                    experiment_id=changed_plan.experiment_id,
+                    protocol_hash=changed_plan.protocol_hash,
+                    candidate_family_id=changed_plan.candidate_family_id,
+                    artifact_lineage=changed_plan.input_lineage,
+                )
+                append_trial_record(
+                    layout.trial_ledger_root(
+                        terminal.run_id, changed_plan.experiment_id
+                    ),
+                    changed_plan,
+                    terminal,
+                )
+                reference = {
+                    "run_id": terminal.run_id,
+                    "experiment_id": changed_plan.experiment_id,
+                    "protocol_hash": changed_plan.protocol_hash,
+                    "semantic_identity": trial_ledger_semantic_identity(
+                        changed_plan, (terminal,)
+                    ),
+                }
+                # The replacement trial is valid by itself, but belongs elsewhere.
+                read_model_trial_ledger_reference(layout, reference)
+                copied = (
+                    layout.project_root / f"wrong-{kind}" / saved.instance_root.name
+                )
+                shutil.copytree(
+                    native_filesystem_path(saved.instance_root),
+                    native_filesystem_path(copied),
+                )
+                manifest_path = Path(native_filesystem_path(copied / "manifest.json"))
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["operational_metadata"]["model_trial_ledgers"][0] = reference
+                relative = f"models/{saved.models[0]['fold_id']}/metadata.json"
+                metadata_path = Path(native_filesystem_path(copied / relative))
+                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata["models"][0]["trial_semantic_identity"] = reference[
+                    "semantic_identity"
+                ]
+                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+                raw = metadata_path.read_bytes()
+                member = next(
+                    row for row in manifest["members"] if row["path"] == relative
+                )
+                member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                with pytest.raises(
+                    ValueError, match="crypto_model_trial_binding_invalid"
+                ):
+                    persisted.read_crypto_model_artifact(
+                        copied,
+                        expected_identity=saved.envelope["instance_identity"],
+                        trial_layout=layout,
+                    )
+                assert read_semantic_artifact_record(saved.instance_root) == original
             entry = saved.models[0]
             columns = entry["model_metadata"]["input_columns"]
             probe = pd.DataFrame(np.zeros((2, len(columns))), columns=columns)
@@ -494,7 +571,18 @@ def check_crypto_model_staging(*, layout, profile, saved):
             } == previous_instances
             assert not tuple(logical_root.glob(".*staging*"))
         validation = None
-        for index, failure in enumerate(("seed", "missing_fold", "disk", "primary")):
+        for index, failure in enumerate(
+            (
+                "seed",
+                "missing_fold",
+                "training_assets",
+                "evaluation_assets",
+                "refit_window",
+                "trial_reference",
+                "disk",
+                "primary",
+            )
+        ):
             envelope = build_business_manifest_envelope(
                 **{
                     key: (
@@ -532,6 +620,8 @@ def check_crypto_model_staging(*, layout, profile, saved):
                         metadata = deepcopy(entry["model_metadata"])
                         if failure == "seed" and number == 0:
                             metadata["random_seed"] += 1
+                        if failure == "refit_window" and number == 0:
+                            metadata["train_end"] = entry["prediction_window"]["end"]
                         member = production.CryptoFoldModelResult(
                             next(
                                 f
@@ -540,9 +630,15 @@ def check_crypto_model_staging(*, layout, profile, saved):
                             ),
                             profile.models.get(entry["model_id"]),
                             fitting.ModelFitResult(metadata, payload),
-                            tuple(entry["training_asset_ids"]),
-                            tuple(entry["evaluation_asset_ids"]),
-                            references[number],
+                            ("outside_scope",)
+                            if failure == "training_assets" and number == 0
+                            else tuple(entry["training_asset_ids"]),
+                            ("outside_scope",)
+                            if failure == "evaluation_assets" and number == 0
+                            else tuple(entry["evaluation_asset_ids"]),
+                            references[1]
+                            if failure == "trial_reference" and number == 0
+                            else references[number],
                         )
                         owned.value = member
                         member = payload = None
@@ -552,11 +648,16 @@ def check_crypto_model_staging(*, layout, profile, saved):
                             assert owned.value is None
                             assert not owned.lease.active
 
-            error = (
-                "crypto_model_parameters_misaligned"
-                if failure == "seed"
-                else "crypto_model_fold_coverage_invalid"
-            )
+            message = {
+                "seed": "crypto_model_parameters_misaligned",
+                "missing_fold": "crypto_model_fold_coverage_invalid",
+                "training_assets": "crypto_model_fold_binding_invalid",
+                "evaluation_assets": "crypto_model_fold_binding_invalid",
+                "refit_window": "crypto_model_refit_window_invalid",
+                "trial_reference": "crypto_model_trial_binding_invalid",
+                "disk": "insufficient_free_disk",
+                "primary": "model_pickle_primary",
+            }[failure]
             primary = KeyboardInterrupt("model_pickle_primary")
             with pytest.MonkeyPatch.context() as patch:
                 if failure == "disk":
@@ -589,13 +690,6 @@ def check_crypto_model_staging(*, layout, profile, saved):
                     else KeyboardInterrupt
                     if failure == "primary"
                     else ValueError
-                )
-                message = (
-                    "insufficient_free_disk"
-                    if failure == "disk"
-                    else "model_pickle_primary"
-                    if failure == "primary"
-                    else error
                 )
                 with pytest.raises(expected, match=message) as raised:
                     write_crypto_model_artifact(

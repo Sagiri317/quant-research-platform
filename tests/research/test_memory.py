@@ -673,3 +673,139 @@ def test_complete_time_frames_early_close_reports_cleanup_failures(
     assert closed == [policy]
     assert failed == ([] if failure == "upstream" else [failure])
     assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("rows", (3, 30))
+@pytest.mark.parametrize(
+    "entry", (iter_complete_time_sized_frames, iter_complete_session_frames)
+)
+def test_session_concat_accounts_for_replacement_range_index(rows, entry):
+    frames = [
+        pd.DataFrame(
+            {
+                "timestamp": pd.Timestamp("2020-01-01"),
+                "value": list(range(offset, offset + rows)),
+            },
+            index=pd.Index([i * i + offset for i in range(rows)]),
+        )
+        for offset in (0, rows)
+    ]
+    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024 * 1024) as policy:
+        chunks = entry(
+            iter(frames), timestamp_column="timestamp", resource_policy=policy
+        )
+        try:
+            values = [value for chunk in chunks for value in chunk["value"]]
+        finally:
+            chunks.close()
+        assert values == list(range(2 * rows))
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("chunk_rows", (1, 4, 8))
+def test_model_training_concat_keeps_irregularly_selected_rows(chunk_rows):
+    from quant_research_platform.contracts.models import ModelSpec
+    from quant_research_platform.research.models.fitting import (
+        _fit_model_result_owned_from_frames,
+    )
+    from quant_research_platform.research.models.supervised import (
+        build_estimator_from_model_spec,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2020-01-01"] * 4 + ["2020-01-02"] * 4),
+            "label_available_at": pd.Timestamp("2020-01-03"),
+            "x": [float(i) for i in range(8)],
+            "label": [2.0 * i + 1.0 for i in range(8)],
+            "eligible": [True, False, True, True] * 2,
+        }
+    )
+    spec = ModelSpec(
+        model_id="concat_index",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+    )
+    estimator = build_estimator_from_model_spec(spec)
+    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024 * 1024) as policy:
+        fitted = _fit_model_result_owned_from_frames(
+            (frame.iloc[i : i + chunk_rows] for i in range(0, 8, chunk_rows)),
+            spec,
+            estimator=estimator,
+            fitting_cutoff="2020-01-04",
+        )
+        try:
+            assert fitted.value.metadata["rows_after_input_label_dropna"] == 6
+            actual = fitted.value.prediction_model.predict(
+                pd.DataFrame({"x": [0.0, 1.0, 4.0]})
+            )
+            assert actual.tolist() == pytest.approx([1.0, 3.0, 9.0])
+        finally:
+            fitted.release(owner="test.concat_index")
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("kind", ("numeric", "categorical"))
+def test_session_concat_accounts_for_promoted_column_representation(kind):
+    if kind == "numeric":
+        left = pd.Series(range(1000), dtype="float32")
+        right = pd.Series(range(1000), dtype="float64")
+        expected = [float(i) for i in range(1000)] * 2
+    else:
+        left = pd.Series(pd.Categorical(["synthetic_a"] * 1000))
+        right = pd.Series(pd.Categorical(["synthetic_b"] * 1000))
+        expected = ["synthetic_a"] * 1000 + ["synthetic_b"] * 1000
+    frames = [
+        pd.DataFrame({"timestamp": pd.Timestamp("2020-01-01"), "value": values})
+        for values in (left, right)
+    ]
+    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024 * 1024) as policy:
+        stream = iter_complete_time_sized_frames(
+            iter(frames), timestamp_column="timestamp", resource_policy=policy
+        )
+        try:
+            actual = [value for frame in stream for value in frame.value]
+        finally:
+            stream.close()
+        assert actual == expected
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("chunk_count", (2, 20))
+def test_session_concat_counts_shared_categories_once(monkeypatch, chunk_count):
+    from quant_research_platform.runtime.resources import MemoryLease
+
+    frames = [
+        pd.DataFrame(
+            {
+                "timestamp": pd.Timestamp("2020-01-01"),
+                "value": pd.Categorical(["a", "b"], categories=["a", "b"]),
+            }
+        )
+        for _ in range(chunk_count)
+    ]
+    expected = [
+        int(pd.concat(frames[:count], ignore_index=True).memory_usage(deep=True).sum())
+        for count in range(2, chunk_count + 1)
+    ]
+    increments = []
+    original = MemoryLease.grow
+
+    def observed_grow(lease, byte_count):
+        if lease.owner == "research.time.pending":
+            increments.append(byte_count)
+        return original(lease, byte_count)
+
+    monkeypatch.setattr(MemoryLease, "grow", observed_grow)
+    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024 * 1024) as policy:
+        stream = iter_complete_time_sized_frames(
+            iter(frames), timestamp_column="timestamp", resource_policy=policy
+        )
+        try:
+            actual = [value for frame in stream for value in frame.value]
+        finally:
+            stream.close()
+        assert actual == ["a", "b"] * chunk_count
+        assert increments == expected
+        assert policy.used_memory_bytes == 0

@@ -30,13 +30,24 @@ class ModelMatrixScaler:
             raise ValueError("model_scaler_columns_invalid")
         values = _finite_matrix(frame, columns)
         weights = _weights(sample_weight, len(values))
+        weights = weights / weights.max()
         total = float(weights.sum())
-        mean = (weights[:, None] * values).sum(axis=0) / total
-        constant = np.ptp(values, axis=0) == 0.0
-        mean[constant] = values[0, constant]
-        variance = (weights[:, None] * (values - mean) ** 2).sum(axis=0) / total
-        scale = np.sqrt(variance)
-        scale[scale == 0.0] = 1.0
+        with np.errstate(over="ignore"):
+            differences = values - values[0]
+        shifted = np.isfinite(differences).all(axis=0)
+        origin = np.where(shifted, values[0], 0.0)
+        differences[:, ~shifted] = values[:, ~shifted]
+        magnitude = np.max(np.abs(differences), axis=0)
+        constant = magnitude == 0.0
+        magnitude[constant] = 1.0
+        normalized = differences / magnitude
+        center = (weights[:, None] * normalized).sum(axis=0) / total
+        mean = origin + center * magnitude
+        variance = (weights[:, None] * (normalized - center) ** 2).sum(axis=0) / total
+        scale = np.sqrt(variance) * magnitude
+        scale[constant] = 1.0
+        if np.any(scale == 0.0):
+            raise ValueError("model_scaler_scale_unrepresentable")
         return cls(
             columns=columns,
             mean_=tuple(float(value) for value in mean),
@@ -47,7 +58,17 @@ class ModelMatrixScaler:
         if tuple(str(column) for column in frame.columns) != self.columns:
             raise ValueError("model_scaler_columns_mismatch")
         values = _finite_matrix(frame, self.columns)
-        scaled = (values - np.asarray(self.mean_)) / np.asarray(self.scale_)
+        mean = np.asarray(self.mean_)
+        scale = np.asarray(self.scale_)
+        with np.errstate(over="ignore"):
+            differences = values - mean
+        scaled = differences / scale
+        overflow = ~np.isfinite(differences)
+        if overflow.any():
+            rows, columns = np.nonzero(overflow)
+            scaled[rows, columns] = (
+                values[rows, columns] / scale[columns] - mean[columns] / scale[columns]
+            )
         return pd.DataFrame(scaled, index=frame.index, columns=self.columns)
 
     def to_payload(self) -> dict[str, object]:
@@ -122,6 +143,6 @@ def _weights(sample_weight: object | None, row_count: int) -> np.ndarray:
     values = np.asarray(sample_weight, dtype="float64")
     if values.ndim != 1 or len(values) != row_count or not np.isfinite(values).all():
         raise ValueError("sample_weights_invalid")
-    if (values <= 0.0).any() or float(values.sum()) <= 0.0:
+    if (values <= 0.0).any():
         raise ValueError("sample_weights_invalid")
     return values

@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import quant_research_platform.runtime.resources as resources
 import quant_research_platform.sources.binance.recorder as recorder
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.ids import (
@@ -771,6 +772,8 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
     join_completes: bool,
     late_failure: bool,
 ) -> None:
+    # The fake policy has no OS lock; restore only its expected process poison.
+    monkeypatch.setattr(resources, "_PROCESS_POISONED", resources._PROCESS_POISONED)
     policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
     output_root = tmp_path / "run"
     stream = FUTURES_STREAMS[1]
@@ -832,13 +835,19 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
         with pytest.raises(RuntimeError, match="quiescence_timeout"):
             recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
         assert not output_root.exists()
-    assert policy.used_memory_bytes == 0
+    if join_completes:
+        assert policy.used_memory_bytes == 0
+    else:
+        assert policy.used_memory_bytes == recorder._WS_STREAM_WORKING_SET_BYTES
+        assert policy.state == "POISONED"
 
 
 def test_recorder_abort_failure_preserves_reader_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
+    # The fake policy has no OS lock; restore only its expected process poison.
+    monkeypatch.setattr(resources, "_PROCESS_POISONED", resources._PROCESS_POISONED)
     policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
     output_root = tmp_path / "run"
     stream = FUTURES_STREAMS[1]
@@ -1095,3 +1104,102 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
     assert stats.recovered_segments == 1
     assert stats.one_sided_books == 1
     assert len(stats.coverage_segments) == 2
+
+
+def test_recorder_unquiesced_real_threads_keep_budget_and_machine_lock(tmp_path):
+    script = r'''
+import contextlib, json, sys, threading, time
+from pathlib import Path
+from quant_research_platform.sources.binance import recorder
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from tests.sources.binance.test_recorder import _snapshot_payload
+import subprocess
+
+release = threading.Event()
+sockets, policies = [], []
+class Socket:
+    def __init__(self):
+        self.buffer = bytearray(1024**2)
+    def recv(self, timeout):
+        time.sleep(.01)
+        raise TimeoutError
+    def close(self):
+        release.wait(10)
+        self.buffer = None
+
+def connect(*args, **kwargs):
+    socket = Socket()
+    sockets.append(socket)
+    return socket
+
+def http(_base, endpoint, *, params=None):
+    payload = ({"symbols": [{"symbol": s, "filters": [
+        {"filterType": "PRICE_FILTER", "tickSize": "0.1"}
+    ]} for s in recorder.RESEARCH_SYMBOLS]}
+        if endpoint.endswith("exchangeInfo") else _snapshot_payload(100))
+    return payload, recorder._utc_now(), time.monotonic_ns()
+
+@contextlib.contextmanager
+def scope(*args, **kwargs):
+    with runtime_resource_policy_scope(*args, **kwargs) as policy:
+        policies.append(policy)
+        yield policy
+
+join = recorder._StreamReader.join
+recorder._connect_websocket = connect
+recorder._http_get_json = http
+recorder.runtime_resource_policy_scope = scope
+recorder._StreamReader.join = lambda self, timeout=None: join(self, .03)
+root = Path(sys.argv[1])
+try:
+    try:
+        recorder.record(recorder.RecorderConfig(root, duration_seconds=.02))
+    except RuntimeError as error:
+        assert str(error) == "binance_recorder_reader_quiescence_timeout"
+    else:
+        raise AssertionError("unquiesced_recording_published")
+    alive = [t for t in threading.enumerate() if t.name.startswith("binance-")]
+    assert len(alive) == 4 and not root.exists()
+    assert sum(len(s.buffer) for s in sockets) == 4 * 1024**2
+    assert policies[0].used_memory_bytes == 4 * recorder._WS_STREAM_WORKING_SET_BYTES
+    assert policies[0].state == "POISONED"
+    try:
+        with runtime_resource_policy_scope():
+            raise AssertionError("poisoned_root_reused")
+    except RuntimeError as error:
+        assert str(error) == "runtime_data_scale_process_poisoned"
+    competitor = subprocess.run([sys.executable, "-c", """
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+try:
+    with runtime_resource_policy_scope(): print("ACQUIRED")
+except RuntimeError as error: print(str(error))
+"""], text=True, capture_output=True, timeout=10)
+    assert competitor.returncode == 0
+    assert competitor.stdout.strip() == "runtime_data_scale_lock_busy"
+finally:
+    release.set()
+    for thread in threading.enumerate():
+        if thread.name.startswith("binance-"):
+            join(thread, 3)
+            assert not thread.is_alive()
+print(json.dumps({"live_threads_at_failure": 4, "new_root": "REJECTED"}))
+'''
+    # The worker is a fresh process; an intentionally poisoned root cannot leak
+    # into pytest. Only network boundaries and join duration are controlled.
+    repository = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path / "recording")],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((str(repository / "src"), str(repository))),
+        },
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "live_threads_at_failure": 4,
+        "new_root": "REJECTED",
+    }

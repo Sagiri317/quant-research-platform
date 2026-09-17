@@ -216,7 +216,9 @@ def _parquet_members_match(old_path, candidate_path, old_identity, candidate_ide
         if not schemas[0].equals(schemas[1], check_metadata=True):
             return False
         payload_target = max(1, policy.operation_headroom_bytes // 8)
-        codec = ExactPrimaryKeyIndex(primary_key=(), timestamp_columns=())
+        codec = ExactPrimaryKeyIndex(
+            primary_key=(),
+        )
 
         def rows(path, identity):
             with closing_iterator(
@@ -418,7 +420,7 @@ def discover_semantic_artifact_instances(
                     if len(names) >= max_instances:
                         raise ValueError("semantic_artifact_instance_limit_exceeded")
                     names.append(entry.name)
-        except OSError as exc:
+        except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("semantic_artifact_root_invalid") from exc
         if _directory_identity(instances_root) != before:
             raise ValueError("semantic_artifact_instance_identity_changed")
@@ -445,7 +447,7 @@ def discover_semantic_artifact_instances(
 def _directory_identity(path: Path) -> tuple[int, int, int, int]:
     try:
         value = os.stat(native_filesystem_path(path), follow_symlinks=False)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
         raise ValueError("semantic_artifact_root_invalid")
@@ -551,7 +553,7 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
                         f"{type(close_error).__name__}"
                     )
             raise
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("semantic_artifact_member_invalid") from exc
 
 
@@ -569,7 +571,7 @@ def _member_record(relative: str, path: Path) -> dict[str, object]:
                     "semantic_artifact_member_identity_changed",
                     chunk_size=lease.reserved_bytes,
                 )
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("semantic_artifact_member_invalid") from exc
     return {"path": relative, "size": identity.size, "sha256": digest}
 
@@ -608,7 +610,7 @@ def _validate_member_payload(value: object) -> tuple[dict[str, object], ...]:
 def _member_identity(path: Path) -> DatasetFileIdentity:
     try:
         value = os.stat(native_filesystem_path(path), follow_symlinks=False)
-    except OSError as exc:
+    except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("semantic_artifact_member_invalid") from exc
     if not stat.S_ISREG(value.st_mode) or int(value.st_ino) <= 0:
         raise ValueError("semantic_artifact_member_invalid")

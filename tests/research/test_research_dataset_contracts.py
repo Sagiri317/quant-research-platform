@@ -24,7 +24,7 @@ from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
     make_demo_processed_catalog,
     make_dummy_processed_catalog,
-    write_correctness_processed_inputs,
+    write_demo_processed_inputs,
     write_dummy_processed_inputs,
 )
 from tests.helpers.research_specs import (
@@ -279,7 +279,7 @@ def test_persisted_research_sessions_are_complete_across_small_read_batches(
     layout = StorageLayout(project_root=tmp_path)
     processed = make_demo_processed_catalog()
     datasets = make_research_dataset_catalog()
-    write_correctness_processed_inputs(layout, processed, frame=frame)
+    write_demo_processed_inputs(layout, processed, frame=frame)
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=datasets,

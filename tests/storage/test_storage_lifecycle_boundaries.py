@@ -151,7 +151,6 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
         ),
         lambda: key_owner.ExactPrimaryKeyIndex(
             primary_key=("value",),
-            timestamp_columns=(),
         ).__enter__(),
         lambda: _open_inventory_for_failure(tmp_path / "data"),
     )
@@ -169,7 +168,6 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
             key_owner,
             lambda scratch: key_owner.ExactPrimaryKeyIndex(
                 primary_key=("value",),
-                timestamp_columns=(),
             ).__enter__(),
         ),
         (
@@ -221,7 +219,6 @@ def test_scratch_owner_cleans_retained_temp_after_post_create_gate_failure(
             key_owner,
             lambda scratch: key_owner.ExactPrimaryKeyIndex(
                 primary_key=("value",),
-                timestamp_columns=(),
             ).__enter__(),
         ),
         (
@@ -660,11 +657,6 @@ def _patch_open_session_metadata_preflight(
         dataset_reading,
         "validate_dataset_manifest_consumable",
         lambda *_a, **_k: None,
-    )
-    monkeypatch.setattr(
-        dataset_reading,
-        "manifest_has_runtime_metadata",
-        lambda *_a, **_k: True,
     )
     return spec, manifest
 
@@ -1996,3 +1988,172 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
                 owner.source_content_identity(root, data_id)
             assert caught.value is primary
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "boundary",
+    (
+        "dataset_inventory",
+        "dataset_inventory_next",
+        "dataset_instances_scan",
+        "dataset_instances_stat",
+        "dataset_instances_manifest",
+        "semantic_instances_scan",
+        "semantic_instances_stat",
+        "semantic_members_scan",
+        "semantic_member_stat",
+        "semantic_member_hash",
+    ),
+)
+@pytest.mark.parametrize("error_type", (OSError, PermissionError))
+def test_persisted_storage_boundaries_preserve_serious_io(
+    tmp_path, monkeypatch, boundary, error_type
+):
+    from quant_research_platform.storage import semantic_artifacts as semantic
+    from quant_research_platform.storage.datasets import instances
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_processed_dataset_spec,
+    )
+    from tests.storage.test_dataset_instances import _envelope, _write_instance
+    from tests.storage.test_semantic_artifacts import _write_artifact
+
+    primary = error_type(5, "synthetic_storage_io")
+    if boundary.startswith("dataset"):
+        logical = make_dataset_artifact_root(tmp_path, "io")
+        spec = make_processed_dataset_spec("io")
+        root = _write_instance(logical, spec, _envelope(spec, seed=1))
+    else:
+        root = _write_artifact(tmp_path)
+        logical = root.parent.parent
+    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    def fail(*args, **kwargs):
+        raise primary
+
+    with runtime_resource_policy_scope() as policy:
+        with monkeypatch.context() as patch:
+            if boundary.endswith("instances_stat"):
+                owner = instances if boundary.startswith("dataset") else semantic
+                directory_identity = owner._directory_identity
+
+                def checked_identity(path, *args):
+                    if path == logical / "instances":
+                        with monkeypatch.context() as stat_failure:
+                            stat_failure.setattr(os, "stat", fail)
+                            return directory_identity(path, *args)
+                    return directory_identity(path, *args)
+
+                patch.setattr(owner, "_directory_identity", checked_identity)
+            elif boundary == "dataset_inventory_next":
+                original = os.scandir
+
+                class BrokenEntries:
+                    def __init__(self, entries):
+                        self.entries = entries
+
+                    def __next__(self):
+                        raise primary
+
+                    def close(self):
+                        self.entries.close()
+
+                def scan(path):
+                    entries = original(path)
+                    return (
+                        BrokenEntries(entries)
+                        if str(path) == str(root / "data")
+                        else entries
+                    )
+
+                patch.setattr(os, "scandir", scan)
+            elif boundary == "dataset_instances_manifest":
+                patch.setattr(instances, "read_dataset_manifest_evidence", fail)
+            elif boundary == "semantic_member_hash":
+                patch.setattr(semantic, "_hash_file_content", fail)
+            else:
+                attribute = "stat" if boundary.endswith("stat") else "scandir"
+                original = getattr(os, attribute)
+                target = (
+                    root / "data"
+                    if boundary in {"dataset_inventory", "dataset_inventory_next"}
+                    else root / "model.pkl"
+                    if boundary == "semantic_member_stat"
+                    else root
+                    if boundary == "semantic_members_scan"
+                    else logical / "instances"
+                )
+
+                def selected(path, *args, **kwargs):
+                    if str(path) == str(target):
+                        raise primary
+                    return original(path, *args, **kwargs)
+
+                patch.setattr(os, attribute, selected)
+            with pytest.raises(type(primary)) as caught:
+                if boundary in {"dataset_inventory", "dataset_inventory_next"}:
+                    read_dataset(root, resource_policy=policy)
+                elif boundary.startswith("dataset"):
+                    instances.discover_dataset_instances(logical)
+                elif "instances" in boundary:
+                    semantic.discover_semantic_artifact_instances(logical)
+                else:
+                    semantic.read_semantic_artifact(root)
+            assert caught.value is primary
+        assert policy.used_memory_bytes == 0
+    assert all(path.read_bytes() == value for path, value in before.items())
+
+
+@pytest.mark.parametrize("operation", ("read", "inspect", "fingerprint"))
+@pytest.mark.parametrize("failure", ("tell", "seek", "read"))
+def test_public_parquet_footer_preserves_system_io(
+    tmp_path, monkeypatch, operation, failure
+):
+    import io
+
+    from quant_research_platform.storage import datasets
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_default_dataset_frame,
+        make_processed_dataset_spec,
+    )
+
+    root = make_dataset_artifact_root(tmp_path, "footer_io")
+    datasets.write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("footer_io"),
+    )
+    primary = OSError(5, "synthetic_footer_io")
+    opened = []
+    original = physical.open_filesystem_file
+
+    class FailingHandle(io.BufferedReader):
+        def tell(self):
+            if failure == "tell":
+                raise primary
+            return super().tell()
+
+        def seek(self, offset, whence=0):
+            if failure == "seek" and whence == os.SEEK_END:
+                raise primary
+            return super().seek(offset, whence)
+
+        def read(self, size=-1):
+            if failure == "read" and size == 8:
+                raise primary
+            return super().read(size)
+
+    def open_member(path):
+        if path.suffix == ".parquet":
+            handle = FailingHandle(io.FileIO(path, "rb"))
+            opened.append(handle)
+            return handle
+        return original(path)
+
+    monkeypatch.setattr(physical, "open_filesystem_file", open_member)
+    with pytest.raises(OSError) as caught:
+        getattr(datasets, operation + "_dataset")(root)
+    assert caught.value is primary
+    assert opened and all(handle.closed for handle in opened)

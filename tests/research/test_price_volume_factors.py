@@ -325,3 +325,47 @@ def test_skewness_independent_central_moment_oracle(missing, scale):
         # Exact mean=0, m2=2, m3=2; adjusted Fisher-Pearson sample skew.
         expected = (60 * 59) ** 0.5 / 58 * float(Fraction(2)) / 2**1.5
         assert result.skewness_60d.iloc[-1] == pytest.approx(expected, rel=1e-14)
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
+@pytest.mark.parametrize("kind", ["amount", "volume", "turnover"])
+def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
+    from decimal import Decimal, localcontext
+
+    x = np.arange(1.0, 21.0) * scale
+    y = np.arange(1.0, 21.0) ** 2
+    with localcontext() as context:
+        context.prec = 90
+        left = [Decimal.from_float(float(value)) for value in x]
+        right = [Decimal.from_float(float(value)) for value in y]
+        left_mean, right_mean = sum(left) / 20, sum(right) / 20
+        dx = [value - left_mean for value in left]
+        dy = [value - right_mean for value in right]
+        expected = float(
+            sum(u * v for u, v in zip(dx, dy, strict=True))
+            / (sum(v * v for v in dx) * sum(v * v for v in dy)).sqrt()
+        )
+    name = f"return_{kind}_corr_20d"
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=20),
+            "period_return": x,
+            "amount": y,
+            "volume": y,
+            "close": 1.0,
+            "float_market_cap": 1.0,
+        }
+    )
+    definitions = price_volume_factor_definitions(
+        market_id=MarketId("a_share"),
+        required_input_data_id="price_volume",
+        factor_columns=(name,),
+    )
+    result = calculate_factors_for_panel(panel, definitions=definitions)
+    assert result[name].iloc[:19].isna().all()
+    assert result[name].iloc[-1] == expected
+    path = tmp_path / "correlation.parquet"
+    result.to_parquet(path, index=False)
+    pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)

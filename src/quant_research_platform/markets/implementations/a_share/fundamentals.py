@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -364,7 +365,10 @@ def _ttm_value_at_cutoff(
     )
     if prior_fy is None or prior_ytd is None:
         return None
-    return current + prior_fy - prior_ytd
+    try:
+        return float(Fraction(current) + Fraction(prior_fy) - Fraction(prior_ytd))
+    except OverflowError as exc:
+        raise ValueError("invalid_ttm_value") from exc
 
 
 def _latest_legal_event_value(

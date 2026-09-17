@@ -9,33 +9,13 @@ from quant_research_platform.contracts.columns import (
 )
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 
 DEMO_FACTOR_COLUMN = "momentum_20d"
-DEMO_FACTOR_ZSCORE_COLUMN = f"{DEMO_FACTOR_COLUMN}_zscore"
 DEMO_LABEL_COLUMN = forward_return_label_column(20)
-
-
-def make_signal_spec(
-    column: str,
-    *,
-    signal_id: str | None = None,
-    source_kind: str = "factor",
-    direction: str = "higher_is_better",
-    transform: str = "identity",
-) -> SignalSpec:
-    return SignalSpec(
-        signal_id=signal_id or column,
-        source_column=column,
-        source_kind=source_kind,
-        direction=direction,
-        transform=transform,
-    )
 
 
 def make_demo_research_dataset_spec(
@@ -82,13 +62,6 @@ def make_demo_research_dataset_spec(
 def make_dummy_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec:
     return _research_dataset_spec_from_defaults(
         _dummy_research_dataset_defaults(),
-        **overrides,
-    )
-
-
-def make_portfolio_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec:
-    return _research_dataset_spec_from_defaults(
-        _portfolio_research_dataset_defaults(),
         **overrides,
     )
 
@@ -173,33 +146,6 @@ def make_research_dataset_catalog(
     return ResearchDatasetCatalog(registered_specs)
 
 
-def correctness_research_dataset_catalog(
-    *,
-    include_feature_transform: bool = False,
-) -> ResearchDatasetCatalog:
-    feature_columns = (DEMO_FACTOR_ZSCORE_COLUMN,) if include_feature_transform else ()
-    feature_transforms = (
-        (
-            FeatureTransformSpec(
-                transform_id=DEMO_FACTOR_ZSCORE_COLUMN,
-                source_columns=(DEMO_FACTOR_COLUMN,),
-                output_columns=(DEMO_FACTOR_ZSCORE_COLUMN,),
-                transform="cross_sectional_zscore",
-            ),
-        )
-        if include_feature_transform
-        else ()
-    )
-    return ResearchDatasetCatalog(
-        (
-            make_demo_research_dataset_spec(
-                feature_columns=feature_columns,
-                feature_transforms=feature_transforms,
-            ),
-        )
-    )
-
-
 def _demo_research_dataset_defaults() -> dict[str, object]:
     return {
         "data_id": "demo",
@@ -227,19 +173,6 @@ def _dummy_research_dataset_defaults() -> dict[str, object]:
         "label_columns": ("label_1",),
         "filter_columns": ("eligible",),
         "context_columns": ("context_1",),
-    }
-
-
-def _portfolio_research_dataset_defaults() -> dict[str, object]:
-    return {
-        "data_id": "demo",
-        "market_id": "a_share",
-        "input_data_ids": ("factor", "label"),
-        "base_input_data_id": "factor",
-        "factor_columns": ("raw_risk",),
-        "label_columns": ("forward_return",),
-        "filter_columns": (),
-        "context_columns": (),
     }
 
 

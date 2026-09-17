@@ -131,3 +131,28 @@ def test_model_selection_mse_rejects_unrepresentable_final_value() -> None:
             label_column="label",
             prediction_column="prediction",
         )
+
+
+@pytest.mark.parametrize("field", ["validation_ic", "validation_rankic"])
+@pytest.mark.parametrize("sign", [-1.0, 1.0])
+def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
+    import math
+
+    from quant_research_platform.contracts.models import (
+        validate_completed_model_trial_metrics,
+    )
+
+    metrics = {
+        "validation_rows": 2,
+        "validation_ic": 1.0,
+        "validation_ic_reason": None,
+        "validation_rankic": 1.0,
+        "validation_rankic_reason": None,
+        "validation_mse": 0.0,
+        "n_train": 2,
+    }
+    metrics[field] = sign
+    validate_completed_model_trial_metrics("model", metrics)
+    metrics[field] = sign * math.nextafter(1.0, math.inf)
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        validate_completed_model_trial_metrics("model", metrics)

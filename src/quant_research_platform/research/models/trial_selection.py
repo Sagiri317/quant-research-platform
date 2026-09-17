@@ -14,7 +14,7 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import (
     _add_correlation_aggregate,
-    _pearson_correlation_from_moments,
+    _CorrelationMoments,
     _summarize_correlation_aggregates,
 )
 from quant_research_platform.contracts.experiments import (
@@ -419,8 +419,8 @@ class _TimestampMetricState:
 
     def __init__(self) -> None:
         self.count = 0
-        self.ic = _ScaledCorrelation()
-        self.rank = _ScaledCorrelation()
+        self.ic = _CorrelationMoments()
+        self.rank = _CorrelationMoments()
 
     def update(
         self,
@@ -435,64 +435,6 @@ class _TimestampMetricState:
 
     def correlation(self) -> tuple[float | None, str | None]:
         return self.ic.result()
-
-
-class _ScaledCorrelation:
-    __slots__ = (
-        "count",
-        "left_scale",
-        "right_scale",
-        "left_mean",
-        "right_mean",
-        "left_m2",
-        "right_m2",
-        "covariance",
-    )
-
-    def __init__(self) -> None:
-        self.count = 0
-        self.left_scale = 0.0
-        self.right_scale = 0.0
-        self.left_mean = 0.0
-        self.right_mean = 0.0
-        self.left_m2 = 0.0
-        self.right_m2 = 0.0
-        self.covariance = 0.0
-
-    def update(self, left: float, right: float) -> None:
-        left_magnitude = abs(left)
-        if left_magnitude > self.left_scale:
-            ratio = self.left_scale / left_magnitude if self.left_scale else 0.0
-            self.left_mean *= ratio
-            self.left_m2 *= ratio * ratio
-            self.covariance *= ratio
-            self.left_scale = left_magnitude
-        right_magnitude = abs(right)
-        if right_magnitude > self.right_scale:
-            ratio = self.right_scale / right_magnitude if self.right_scale else 0.0
-            self.right_mean *= ratio
-            self.right_m2 *= ratio * ratio
-            self.covariance *= ratio
-            self.right_scale = right_magnitude
-        normalized_left = left / self.left_scale if self.left_scale else 0.0
-        normalized_right = right / self.right_scale if self.right_scale else 0.0
-        count = self.count + 1
-        left_delta = normalized_left - self.left_mean
-        right_delta = normalized_right - self.right_mean
-        self.left_mean += left_delta / count
-        self.right_mean += right_delta / count
-        self.left_m2 += left_delta * (normalized_left - self.left_mean)
-        self.right_m2 += right_delta * (normalized_right - self.right_mean)
-        self.covariance += left_delta * (normalized_right - self.right_mean)
-        self.count = count
-
-    def result(self) -> tuple[float | None, str | None]:
-        return _pearson_correlation_from_moments(
-            count=self.count,
-            left_m2=self.left_m2,
-            right_m2=self.right_m2,
-            covariance=self.covariance,
-        )
 
 
 class _ScaledSquareAccumulator:

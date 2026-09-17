@@ -121,18 +121,42 @@ def test_exact_key_decimal_zero_and_numpy_scalar_identity(
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
         key_schema=pa.schema([pa.field("key", pa.decimal128(18, 4))]),
     ) as decimals:
-        assert decimals.add_frame(pd.DataFrame({"key": [Decimal("-0.0000")]})) == 0
-        assert decimals.add_frame(pd.DataFrame({"key": [Decimal("0.0000")]})) == 1
+        assert (
+            decimals.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": [Decimal("-0.0000")]}), preserve_index=False
+                )
+            )
+            == 0
+        )
+        assert (
+            decimals.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": [Decimal("0.0000")]}), preserve_index=False
+                )
+            )
+            == 1
+        )
     with module.ExactPrimaryKeyIndex(
         primary_key=("key",),
-        timestamp_columns=(),
         key_schema=pa.schema([pa.field("key", pa.int64())]),
     ) as integers:
-        assert integers.add_frame(pd.DataFrame({"key": [np.int64(7)]})) == 0
-        assert integers.add_frame(pd.DataFrame({"key": [7]})) == 1
+        assert (
+            integers.add_table(
+                pa.Table.from_pandas(
+                    pd.DataFrame({"key": [np.int64(7)]}), preserve_index=False
+                )
+            )
+            == 0
+        )
+        assert (
+            integers.add_table(
+                pa.Table.from_pandas(pd.DataFrame({"key": [7]}), preserve_index=False)
+            )
+            == 1
+        )
 
 
 def test_staged_validator_wrong_keys_rejects_and_cleans_atomic_state(
@@ -144,7 +168,9 @@ def test_staged_validator_wrong_keys_rejects_and_cleans_atomic_state(
     def reject_wrong_keys(receipt: dataset_writing.DatasetWriteReceipt) -> None:
         wrong = frame.copy()
         wrong["asset_id"] = ["WRONG-A", "WRONG-B", "WRONG-C"]
-        receipt.exact_primary_key_index.add_frame(wrong, namespace="expected")
+        receipt.exact_primary_key_index.add_table(
+            pa.Table.from_pandas(wrong, preserve_index=False), namespace="expected"
+        )
         missing, extra = receipt.exact_primary_key_index.difference_counts(
             expected_namespace="expected",
             actual_namespace="dataset",
