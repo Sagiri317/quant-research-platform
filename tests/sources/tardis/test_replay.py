@@ -16,7 +16,7 @@ from quant_research_platform.sources.binance.replay import (
     iter_reconstructed_depth,
     open_market_source,
 )
-from quant_research_platform.sources.tardis.raw import import_day
+from quant_research_platform.sources.tardis.raw import import_slices
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.sources.tardis.test_raw import _slices
 
@@ -71,7 +71,7 @@ def test_late_snapshot_has_no_early_book_or_coverage(tmp_path, bridge):
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
-        import_day(
+        import_slices(
             published,
             date="2026-09-01",
             slices=slices,
@@ -191,7 +191,7 @@ def test_vendor_clock_panel_persists_nullable_monotonic_and_native_identity(
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
-        import_day(
+        import_slices(
             tmp_path / "published",
             date=date,
             slices=slices,
@@ -285,7 +285,7 @@ def test_execution_end_stops_inside_invalid_book_segment(tmp_path, monkeypatch):
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
-        import_day(
+        import_slices(
             tmp_path / "published",
             date="2026-09-01",
             slices=slices,
@@ -372,7 +372,7 @@ def test_native_schema_full_import_and_shared_trade_replay(
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
-        result = import_day(
+        result = import_slices(
             published,
             date=date,
             slices=slices,
@@ -430,7 +430,7 @@ def test_native_schema_invalid_fields_fail_atomic_full_import(tmp_path, date, ch
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
         with pytest.raises(ValueError):
-            import_day(
+            import_slices(
                 published,
                 date=date,
                 slices=slices,
@@ -453,7 +453,7 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
 
     root = tmp_path / "published"
     with runtime_resource_policy_scope() as policy:
-        manifest = import_day(
+        manifest = import_slices(
             root,
             date="2026-09-01",
             slices=_slices(tmp_path / "native", _snapshot()),
@@ -482,4 +482,167 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
             with pytest.raises(OSError) as caught:
                 market_source_identity(root, "panel")
         assert caught.value is primary
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("midnight_snapshot", [False, True])
+def test_midnight_preserves_native_book_factor_and_label_continuity(
+    tmp_path, midnight_snapshot
+):
+    import gzip
+
+    from quant_research_platform.markets.implementations.crypto.hft import (
+        iter_factor_frames,
+        iter_label_frames,
+        iter_panel_frames,
+    )
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+
+    base = pd.Timestamp("2026-12-31T23:59:56Z")
+
+    def at(native, seconds):
+        _, body = native.decode().split(" ", 1)
+        row = json.loads(body)
+        timestamp = base + pd.Timedelta(seconds=seconds)
+        for key in ("E", "T"):
+            if key in row["data"]:
+                row["data"][key] = timestamp.value // 1_000_000
+        return (
+            timestamp.isoformat().replace("+00:00", "Z") + " " + json.dumps(row) + "\n"
+        ).encode()
+
+    records = [(0, at(_delta(0, 99, 101, 98), 0))]
+    records.append(
+        (
+            1,
+            at(
+                _line(
+                    0,
+                    "depthSnapshot",
+                    {
+                        "lastUpdateId": 100,
+                        "bids": [[str(100 - i), "2"] for i in range(12)],
+                        "asks": [[str(101 + i), "2"] for i in range(12)],
+                    },
+                ),
+                1,
+            ),
+        )
+    )
+    for second in range(2, 8):
+        records.append(
+            (second, at(_delta(0, 100 + second, 100 + second, 99 + second), second))
+        )
+        records.append(
+            (
+                second,
+                at(
+                    _line(
+                        0,
+                        "aggTrade",
+                        {
+                            "e": "aggTrade",
+                            "E": 0,
+                            "T": 0,
+                            "s": "BTCUSDT",
+                            "st": 1,
+                            "a": second,
+                            "f": second,
+                            "l": second,
+                            "p": "100",
+                            "q": "1",
+                            "nq": "1",
+                            "m": False,
+                        },
+                    ),
+                    second,
+                ),
+            )
+        )
+    if midnight_snapshot:
+        records.append(
+            (
+                4,
+                at(
+                    _line(
+                        0,
+                        "depthSnapshot",
+                        {
+                            "lastUpdateId": 104,
+                            "bids": [[str(100 - i), "2"] for i in range(12)],
+                            "asks": [[str(101 + i), "2"] for i in range(12)],
+                        },
+                    ),
+                    4,
+                ),
+            )
+        )
+        records.sort(key=lambda item: item[0])
+    slices = []
+    for index in range(2):
+        path = tmp_path / f"native-{index}.gz"
+        path.write_bytes(
+            gzip.compress(
+                b"".join(row for second, row in records if (second >= 4) == bool(index))
+            )
+        )
+        slices.append(path)
+
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2)
+    ) as policy:
+        import_slices(
+            tmp_path / "published",
+            date="2026-12-31",
+            offset_minutes=1430,
+            slices=slices,
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        with open_market_source(tmp_path / "published", policy) as source:
+            stats = ReconstructionStats()
+            panel = pd.concat(
+                iter_panel_frames(
+                    iter_reconstructed_depth(
+                        source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+                    ),
+                    iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"),
+                    market_id="crypto",
+                    asset_id="btc_usdt",
+                    start_ms=base.value // 1_000_000,
+                    end_ms=base.value // 1_000_000 + 7000,
+                    book_coverage=stats.coverage_segments,
+                    trade_coverage=source.observation_coverage(
+                        market_type=FUTURES_MARKET_TYPE,
+                        data_kind="agg_trades",
+                        symbol="BTCUSDT",
+                    ).covering,
+                    batch_rows=7,
+                ),
+                ignore_index=True,
+            )
+            assert panel.timestamp.dt.date.nunique() == 2
+            assert panel.segment_id.nunique() == 1
+            assert stats.gaps == 0
+            assert panel.book_source_sequence.is_monotonic_increasing
+            midnight = pd.Timestamp("2027-01-01")
+            chunks = [
+                panel.loc[panel.timestamp < midnight],
+                panel.loc[panel.timestamp >= midnight],
+            ]
+            factors = pd.concat(iter_factor_frames(chunks), ignore_index=True)
+            labels = pd.concat(
+                iter_label_frames(chunks, horizons_ms=(500,)), ignore_index=True
+            )
+            assert (
+                factors.loc[factors.timestamp == midnight, "return_100ms"].iloc[0] == 0
+            )
+            before = labels.loc[
+                labels.timestamp == midnight - pd.Timedelta(milliseconds=100)
+            ].iloc[0]
+            assert before.future_mid_return_500ms == 0
+            assert (
+                before.future_mid_return_500ms_available_at
+                == midnight + pd.Timedelta(milliseconds=400)
+            )
         assert policy.used_memory_bytes == 0

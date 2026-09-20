@@ -50,7 +50,7 @@ from quant_research_platform.sources.tardis.raw import (
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
-_DAY_KEYS = {
+_MANIFEST_KEYS = {
     "schema_id",
     "source_id",
     "venue",
@@ -107,7 +107,7 @@ def _file_identity_fields(value):
 def _validate_manifest(value):
     if (
         type(value) is not dict
-        or set(value) != _DAY_KEYS
+        or set(value) != _MANIFEST_KEYS
         or value["schema_id"] != SCHEMA_ID
         or value["source_id"] != "tardis"
         or value["venue"] != "binance"
@@ -119,14 +119,23 @@ def _validate_manifest(value):
     ):
         raise ValueError("tardis_manifest_invalid")
     _date(value["date"])
-    if type(value["files"]) is not list or len(value["files"]) != 144:
+    if type(value["files"]) is not list or not value["files"]:
         raise ValueError("tardis_manifest_invalid")
     streams = {
         f"{symbol}@{channel}"
         for symbol in SYMBOLS
         for channel in ("depth@0ms", "depthSnapshot", "aggTrade", "markPrice@1s")
     }
-    for offset, item in zip(range(0, 1440, SLICE_MINUTES), value["files"], strict=True):
+    first = value["files"][0]
+    if (
+        type(first) is not dict
+        or type(first.get("offset_minutes")) is not int
+        or first["offset_minutes"] < 0
+        or first["offset_minutes"] % SLICE_MINUTES
+    ):
+        raise ValueError("tardis_manifest_invalid")
+    for number, item in enumerate(value["files"]):
+        offset = first["offset_minutes"] + number * SLICE_MINUTES
         if (
             type(item) is not dict
             or set(item) != _FILE_KEYS
@@ -199,7 +208,7 @@ def _decode_interval(value, *, markets):
 
 
 @dataclass
-class TardisDay:
+class TardisArchive:
     root: Path
     manifest: dict
     source_identity: dict
@@ -335,9 +344,9 @@ class TardisDay:
                                     snapshot_ready = False
                                 if kind == "depth_snapshot":
                                     if snapshot_ready:
-                                        raise ValueError(
-                                            "tardis_snapshot_identity_duplicate"
-                                        )
+                                        # Keep the already initialized stream.
+                                        record = value = None
+                                        continue
                                     yield record
                                     spool.seek(0)
                                     while header := spool.read(8):
@@ -401,7 +410,7 @@ class TardisDay:
 
 
 @contextmanager
-def open_tardis_day(root, resource_policy=None):
+def open_tardis_archive(root, resource_policy=None):
     root = Path(root)
     with (
         runtime_resource_policy_scope(resource_policy) as policy,
@@ -447,12 +456,12 @@ def open_tardis_day(root, resource_policy=None):
                     resource_policy=policy,
                     decode_interval=_decode_interval,
                 )
-                run = TardisDay(
+                run = TardisArchive(
                     root,
                     manifest,
                     {
                         "schema_id": SCHEMA_ID,
-                        "artifact_id": "native_day_" + manifest_hash[:24],
+                        "artifact_id": "native_archive_" + manifest_hash[:24],
                         "manifest_hash": manifest_hash,
                     },
                     policy,

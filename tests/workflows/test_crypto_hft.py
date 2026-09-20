@@ -659,3 +659,259 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         insufficient_targets[model_id]["instance_identity"]
         != targets[model_id]["instance_identity"]
     )
+
+
+@pytest.mark.complete_chain
+def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tmp_path):
+    import gzip
+    import hashlib
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.artifacts.research import read_research_run_record
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
+    )
+    from quant_research_platform.workflows import research
+    from tests.helpers.binance_hft import (
+        write_binance_hft_run,
+        write_hft_funding_fixture,
+    )
+
+    prefixes = {}
+    for name, count in (("complete", 90), ("future_gap", 83)):
+        layout = StorageLayout(tmp_path / name)
+        raw = layout.project_root / "raw/recorder"
+        manifest = write_binance_hft_run(raw, count=count, maker_liquidity=True)
+        if name == "future_gap":
+            sidecar = raw / "connection_intervals.jsonl.gz"
+            with gzip.open(sidecar, "rt") as stream:
+                intervals = [json.loads(line) for line in stream]
+            for interval in intervals:
+                interval["closed_at"] = "1970-01-01T00:00:08.350000Z"
+                interval["closed_monotonic_ns"] = 8_350_000_000
+                interval["close_reason"] = "connection_problem"
+            with gzip.open(sidecar, "wt") as stream:
+                for interval in intervals:
+                    stream.write(json.dumps(interval) + "\n")
+            descriptor = manifest["capture"]["connection_intervals"]
+            descriptor["compressed_bytes"] = sidecar.stat().st_size
+            descriptor["sha256"] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
+            (raw / "run.json").write_text(json.dumps(manifest))
+        write_hft_funding_fixture(raw)
+        profile = research_profile(CRYPTO_PROFILE_ID)
+        plan = hft_research_plan()
+        plan["folds"][-1]["development_test"]["end"] = "1970-01-01T00:00:08.200000"
+        result = research.research_run(
+            profile=profile,
+            layout=layout,
+            scenario_id=HFT_RESEARCH_DATASET_ID,
+            start_date="1970-01-01T00:00:04",
+            end_date="1970-01-01T00:00:08.200000",
+            raw_root=raw,
+            research_plan=plan,
+        )
+        assert result["status"] == "COMPLETE"
+        report = research.report_build(
+            profile=profile, layout=layout, run_id=result["run_id"]
+        )
+        assert report["target_result"]["status"] == "BUILT"
+        record = read_research_run_record(layout.research_run_path(result["run_id"]))
+        observed = {}
+        for target in record.target_results:
+            if target.target_id not in {
+                "crypto_hft_maker_baseline_ledger",
+                "crypto_hft_maker_ledger",
+            }:
+                continue
+            assert target.status.value == "BUILT"
+            artifact = read_portfolio_ledger_artifact(
+                layout.instance_root(
+                    layout.project_root / target.artifact_root,
+                    target.instance_identity,
+                ),
+                expected_identity=target.instance_identity,
+            )
+            decisions = []
+            for batch in artifact.iter_chunks():
+                timestamp = max(
+                    (row.timestamp_ns for row in batch.valuations), default=0
+                )
+                if timestamp < 8_100_000_000:
+                    decisions.extend(
+                        (timestamp, row.asset_id, row.name, row.number, row.text)
+                        for row in batch.diagnostics
+                        if row.name.startswith("maker_")
+                    )
+            observed[target.target_id] = decisions
+        assert len(observed) == 2 and all(observed.values())
+        prefixes[name] = observed
+    assert prefixes["future_gap"] == prefixes["complete"]
+
+
+@pytest.mark.parametrize("gap_kind", [None, "depth", "agg_trades"])
+def test_tardis_cross_midnight_research_publishes_models_ledgers_and_report(
+    tmp_path, gap_kind
+):
+    import gzip
+
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
+    )
+    from quant_research_platform.sources.binance.replay import open_market_source
+    from quant_research_platform.sources.tardis.funding import import_funding_history
+    from quant_research_platform.sources.tardis.raw import import_slices
+    from quant_research_platform.workflows import research
+    from tests.helpers.binance_hft import write_binance_hft_run
+
+    origin = pd.Timestamp("2026-09-01T23:59:55.500000Z")
+    origin_ms = origin.value // 1_000_000
+    recorder = tmp_path / "fixture"
+    manifest = write_binance_hft_run(recorder, count=100, maker_liquidity=True)
+    native = []
+    for member in manifest["files"]:
+        kind = member["data_kind"]
+        if kind == "metadata":
+            continue
+        channel = {
+            "depth_snapshot": "depthSnapshot",
+            "depth": "depth@0ms",
+            "agg_trades": "aggTrade",
+        }[kind]
+        with gzip.open(recorder / member["path"], "rt") as stream:
+            for line in stream:
+                record = json.loads(line)
+                stamp = origin + pd.Timedelta(record["observed_time_ns"], unit="ns")
+                payload = record["payload"]
+                if kind == gap_kind and record["observed_time_ns"] >= 7_300_000_000:
+                    for key in ("U", "u", "pu") if kind == "depth" else ("a", "f", "l"):
+                        payload[key] += 1
+                for key in ("E", "T"):
+                    if key in payload:
+                        payload[key] += origin_ms
+                value = {
+                    "stream": member["symbol"].lower() + "@" + channel,
+                    "data": payload,
+                }
+                if kind == "depth_snapshot":
+                    value["generated"] = True
+                native.append((stamp, record["capture_seq"], value))
+    for symbol, price in (("BTCUSDT", "100"), ("ETHUSDT", "200")):
+        native.append(
+            (
+                origin,
+                0,
+                {
+                    "stream": symbol.lower() + "@markPrice@1s",
+                    "data": {
+                        "e": "markPriceUpdate",
+                        "s": symbol,
+                        "E": origin_ms,
+                        "p": price,
+                        "r": "0",
+                        "T": origin_ms + 3_600_000,
+                    },
+                },
+            )
+        )
+    native.sort(key=lambda item: item[:2])
+    boundary = origin.ceil("D")
+    slices = []
+    for index in range(2):
+        path = tmp_path / f"native-{index}.gz"
+        rows = b"".join(
+            (
+                stamp.isoformat().replace("+00:00", "Z")
+                + " "
+                + json.dumps(value)
+                + "\n"
+            ).encode()
+            for stamp, _, value in native
+            if (stamp >= boundary) == bool(index)
+        )
+        path.write_bytes(gzip.compress(rows, mtime=0))
+        slices.append(path)
+    raw = tmp_path / "archive"
+    import_slices(
+        raw, date="2026-09-01", offset_minutes=1430, slices=slices, byte_budget=1024**2
+    )
+    settlements = tmp_path / "settlements.json"
+    settlements.write_text("[]")
+    start_ms = pd.Timestamp("2026-09-01T23:50:00Z").value // 1_000_000
+    with open_market_source(raw) as source:
+        for symbol in ("BTCUSDT", "ETHUSDT"):
+            import_funding_history(
+                source,
+                symbol=symbol,
+                response_path=settlements,
+                http_status=200,
+                start_ms=start_ms,
+                end_ms=start_ms + 1_200_000 - 1,
+                byte_budget=1024**2,
+            )
+    plan = hft_research_plan()
+    for window in [
+        *(
+            fold[key]
+            for fold in plan["folds"]
+            for key in ("train", "validation", "development_test")
+        ),
+        plan["final_holdout"],
+    ]:
+        for key, value in window.items():
+            window[key] = (
+                pd.Timestamp(value) + pd.Timedelta(origin.value, unit="ns")
+            ).isoformat()
+    layout = StorageLayout(tmp_path / "project")
+    profile = research_profile(CRYPTO_PROFILE_ID)
+    result = research.research_run(
+        profile=profile,
+        layout=layout,
+        scenario_id=HFT_RESEARCH_DATASET_ID,
+        start_date=plan["folds"][0]["development_test"]["start"],
+        end_date=plan["folds"][-1]["development_test"]["end"],
+        raw_root=raw,
+        research_plan=plan,
+    )
+    targets = {target["target_id"]: target for target in result["target_results"]}
+    if gap_kind is None:
+        assert result["status"] == "COMPLETE"
+        assert all(target["status"] == "BUILT" for target in targets.values())
+    else:
+        for target_id, target in targets.items():
+            if target_id.endswith("_ledger"):
+                assert target["status"] == "BLOCKED"
+                assert target["reason"] == (
+                    "crypto_execution_book_coverage_incomplete"
+                    if gap_kind == "depth"
+                    else "crypto_execution_trade_coverage_incomplete"
+                )
+        assert targets[f"{HFT_RESEARCH_DATASET_ID}_models"]["status"] == "BUILT"
+        assert targets[f"{HFT_RESEARCH_DATASET_ID}_predictions"]["status"] == "BUILT"
+    report = research.report_build(
+        profile=profile, layout=layout, run_id=result["run_id"]
+    )
+    assert report["target_result"]["status"] == "BUILT"
+
+
+def test_crypto_plan_preserves_multi_day_windows_without_calendar_alignment():
+    from quant_research_platform.research.protocols.crypto_hft import protocol
+
+    plan = hft_research_plan()
+    plan["folds"] = [plan["folds"][0]]
+    fold = plan["folds"][0]
+    fold["train"] = {"start": "2026-08-01T13:17:00", "end": "2026-09-02T11:29:00"}
+    fold["validation"] = {"start": "2026-09-03T01:02:00", "end": "2026-09-05T05:06:00"}
+    fold["development_test"] = {
+        "start": "2026-09-06T07:08:00",
+        "end": "2026-09-08T09:10:00",
+    }
+    plan["final_holdout"] = {
+        "start": "2026-09-09T11:12:00",
+        "end": "2026-09-15T13:14:00",
+    }
+    parsed = protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan)
+    assert parsed.research_plan.payload() == plan

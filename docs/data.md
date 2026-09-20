@@ -18,12 +18,13 @@ Choice 是正式财务 PIT 唯一来源；原生响应先不可变保存，再�
 Binance 当前仅消费录制清单声明的 gzip JSONL 成员和显式资金费归档，
 没有旧独立 JSONL 封装或分钟线适配入口；详细合同见 [Crypto](crypto.md)。
 
-已批准新增 Tardis 按日期的历史下载与导入，保留 Binance 官方实时采集；
+Tardis 历史下载与导入按连续切片范围运行，保留 Binance 官方实时采集；
 实现就绪状态与输入资格分别记录，不能把下载完成写成研究链已接入。
 公开免费数据可直接请求；需要 API key 而没有授权时明确权限不足，不自动注册或购买。
 历史归档的不可变原始字节正式保存在
-`data/raw/tardis/binance-futures/YYYY-MM-DD/`；清单绑定供应商、
-交易场所、日期、原生频道及频率、文件路径与字节哈希、稳定行序和可证明的缺口/有效区间。
+`data/raw/tardis/binance-futures/<archive-id>/`；清单绑定供应商、
+交易场所、UTC 起始日期与连续切片范围、原生频道及频率、文件路径与字节哈希、
+稳定行序和可证明的缺口/有效区间。归档和研究均不限制为一天；原件文件名中的日期仅用于寻址。
 原生行是供应商 UTC 前缀与 JSON，空行表示供应商断线，因此压缩原件使用
 `tardis__binance-futures__YYYY-MM-DD__minutes-HHHH-HHHH.txt.gz`，不称为 JSONL。
 原生压缩字节不改写，清单、缺口与观察区间旁文件各有精确哈希。

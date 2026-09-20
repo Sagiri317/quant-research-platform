@@ -181,7 +181,9 @@ def _rank_directions(
             if correlation is not None:
                 correlations.append(correlation)
         if not correlations:
-            raise ValueError("all_ensemble_correlations_undefined")
+            raise ValueError(
+                f"ensemble_direction_undefined:{column}:no_valid_training_rankic"
+            )
         directions.append(1.0 if float(np.mean(correlations)) >= 0.0 else -1.0)
     return tuple(directions)
 

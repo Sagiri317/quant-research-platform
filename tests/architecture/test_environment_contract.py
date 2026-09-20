@@ -4,8 +4,6 @@ import re
 import tomllib
 from pathlib import Path
 
-from tests.helpers.root_config_contract import python_minor_from_requires
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
@@ -47,7 +45,7 @@ BUILD_SYSTEM_TO_CONDA_PACKAGES = {
 def test_python_and_ruff_contracts_follow_root_config() -> None:
     pyproject = _load_pyproject()
     requires_python = pyproject["project"]["requires-python"]
-    python_minor = python_minor_from_requires(requires_python)
+    python_minor = _python_minor_from_requires(requires_python)
 
     assert python_minor
     assert pyproject["tool"]["ruff"]["target-version"] == (
@@ -108,7 +106,9 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
 def test_environment_python_pin_matches_requires_python_lower_bound() -> None:
     pyproject = _load_pyproject()
     environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
-    expected_minor = python_minor_from_requires(pyproject["project"]["requires-python"])
+    expected_minor = _python_minor_from_requires(
+        pyproject["project"]["requires-python"]
+    )
 
     assert _environment_python_pin(environment) == expected_minor
 
@@ -147,6 +147,11 @@ def test_build_system_requires_conda_managed_frontend_and_backend() -> None:
     assert "build" in dev
     assert missing == {}
     assert loose_bounds == {}
+
+
+def _python_minor_from_requires(spec: str) -> str:
+    match = re.search(r">=\s*(\d+\.\d+)", spec)
+    return match.group(1) if match else ""
 
 
 def _load_pyproject() -> dict[str, object]:

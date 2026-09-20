@@ -8,14 +8,14 @@ from pathlib import Path
 import pytest
 
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.sources.tardis.raw import import_day, iter_native_slice
+from quant_research_platform.sources.tardis.raw import import_slices, iter_native_slice
 from tests.helpers.runtime_resources import capture_test_policy
 
 
-def _slices(root: Path, first: bytes = b""):
+def _slices(root: Path, first: bytes = b"", *, count=144):
     root.mkdir()
     result = []
-    for offset in range(0, 1440, 10):
+    for offset in range(0, count * 10, 10):
         path = root / f"native-{offset:04d}.gz"
         path.write_bytes(gzip.compress(first if offset == 0 else b"", mtime=0))
         result.append(path)
@@ -37,7 +37,7 @@ def test_import_preserves_native_compressed_bytes_and_disconnect_line(tmp_path):
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
-        result = import_day(
+        result = import_slices(
             destination,
             date="2026-09-01",
             slices=slices,
@@ -79,7 +79,7 @@ def test_bad_native_input_is_not_published(tmp_path, first):
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
         with pytest.raises(ValueError):
-            import_day(
+            import_slices(
                 destination,
                 date="2026-09-01",
                 slices=slices,
@@ -97,7 +97,7 @@ def test_byte_budget_failure_preserves_input_and_removes_staging(tmp_path):
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
         with pytest.raises(ValueError, match="tardis_download_budget_exceeded"):
-            import_day(
+            import_slices(
                 tmp_path / "published",
                 date="2026-09-01",
                 slices=slices,
@@ -195,3 +195,77 @@ def test_native_consumed_digest_is_verified_on_every_exit(
         else:
             rows.close()
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("count", [1, 2, 289])
+def test_archive_duration_and_source_identity_are_not_limited_to_one_day(
+    tmp_path, count
+):
+    from quant_research_platform.sources.binance.replay import open_market_source
+
+    slices = _slices(tmp_path / "native", count=count)
+    with runtime_resource_policy_scope() as policy:
+        manifest = import_slices(
+            tmp_path / "published",
+            date="2026-12-31",
+            offset_minutes=1430,
+            slices=slices,
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        assert len(manifest["files"]) == count
+        assert manifest["files"][-1]["offset_minutes"] == 1430 + (count - 1) * 10
+        with open_market_source(tmp_path / "published", policy) as source:
+            assert source.hft_source_info()["source_file_count"] == count
+        assert policy.used_memory_bytes == 0
+
+
+def test_download_crosses_midnight_using_native_calendar_addresses(
+    tmp_path, monkeypatch
+):
+    import io
+    from urllib.parse import parse_qs, urlparse
+
+    from quant_research_platform.sources.tardis.raw import download_slices
+
+    requests = []
+
+    class Response(io.BytesIO):
+        status = 200
+        headers = {"Content-Encoding": "gzip"}
+
+    def receive(request, *, timeout):
+        assert timeout == 60
+        requests.append(parse_qs(urlparse(request.full_url).query))
+        return Response(gzip.compress(b"", mtime=0))
+
+    monkeypatch.setattr("urllib.request.urlopen", receive)
+    with runtime_resource_policy_scope() as policy:
+        download_slices(
+            tmp_path / "published",
+            date="2026-12-31",
+            offset_minutes=1430,
+            slice_count=3,
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        assert policy.used_memory_bytes == 0
+    assert [(r["from"][0], r["offset"][0]) for r in requests] == [
+        ("2026-12-31", "1430"),
+        ("2027-01-01", "0"),
+        ("2027-01-01", "10"),
+    ]
+
+
+@pytest.mark.parametrize("offset,count", [(-10, 1), (1, 1), (0, 0), (True, 1)])
+def test_invalid_slice_range_is_not_published(tmp_path, offset, count):
+    slices = _slices(tmp_path / "native", count=count)
+    with pytest.raises(ValueError, match="tardis_slice_range_invalid"):
+        import_slices(
+            tmp_path / "published",
+            date="2026-09-01",
+            offset_minutes=offset,
+            slices=slices,
+            byte_budget=1024**2,
+        )
+    assert not (tmp_path / "published").exists()

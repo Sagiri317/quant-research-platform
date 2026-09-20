@@ -30,7 +30,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_non_negative_integer,
     strict_positive_float,
 )
-from quant_research_platform.sources.tardis.raw import iter_native_slice
+from quant_research_platform.sources.tardis.raw import SLICE_MINUTES, iter_native_slice
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
@@ -40,21 +40,25 @@ from quant_research_platform.storage.raw_snapshots import write_csv_snapshot
 
 
 def import_funding_history(
-    day, *, symbol, response_path, http_status, start_ms, end_ms, byte_budget
+    archive, *, symbol, response_path, http_status, start_ms, end_ms, byte_budget
 ):
     """Preserve the official bytes and publish forecasts with vendor availability."""
     if symbol not in RESEARCH_SYMBOLS:
         raise ValueError("binance_funding_symbol_invalid")
     midnight = strict_iso_timestamp(
-        day.manifest["date"] + "T00:00:00Z", error="tardis_funding_date_invalid"
+        archive.manifest["date"] + "T00:00:00Z", error="tardis_funding_date_invalid"
     ).value
+    first = archive.manifest["files"][0]["offset_minutes"]
+    stop = archive.manifest["files"][-1]["offset_minutes"] + SLICE_MINUTES
+    start_ns = midnight + first * 60 * 10**9
+    end_ns = midnight + stop * 60 * 10**9
     if (
         type(http_status) is not int
         or http_status != 200
         or type(start_ms) is not int
-        or start_ms * 1_000_000 != midnight
+        or start_ms * 1_000_000 != start_ns
         or type(end_ms) is not int
-        or end_ms != start_ms + 86_400_000 - 1
+        or (end_ms + 1) * 1_000_000 != end_ns
     ):
         raise ValueError("tardis_funding_request_coverage_invalid")
     if type(byte_budget) is not int or byte_budget <= 0:
@@ -63,7 +67,7 @@ def import_funding_history(
         Path(response_path), error="tardis_funding_source_invalid"
     )
     identity = dataset_file_identity(path)
-    policy = day.resource_policy
+    policy = archive.resource_policy
     with policy.lease(
         "tardis.funding.native",
         json_record_working_set_bytes(identity.size) + 64 * 1024,
@@ -119,12 +123,12 @@ def import_funding_history(
                 "market_type": FUTURES_MARKET_TYPE,
                 "valuation_currency": "USDT",
                 "coverage": {
-                    "start_ns": midnight,
+                    "start_ns": start_ns,
                     "end_ns": (end_ms + 1) * 1_000_000 - 1,
                     "status": "COMPLETE",
                 },
                 "provenance": "tardis_market_manifest:"
-                + canonical_json_hash(day.source_identity),
+                + canonical_json_hash(archive.source_identity),
                 "settlement_source": native,
             }
 
@@ -139,10 +143,10 @@ def import_funding_history(
                         None,
                     )
                 previous_observed = -1
-                for member in day.manifest["files"]:
+                for member in archive.manifest["files"]:
                     records = iter_native_slice(
-                        day.root / member["path"],
-                        date=day.manifest["date"],
+                        archive.root / member["path"],
+                        date=archive.manifest["date"],
                         offset_minutes=member["offset_minutes"],
                         expected_sha256=member["sha256"],
                         resource_policy=policy,
@@ -228,7 +232,7 @@ def import_funding_history(
                         validate=validate,
                     )
 
-            atomic_write_directory(day.funding_root(symbol).parent, publish)
+            atomic_write_directory(archive.funding_root(symbol).parent, publish)
         except BaseException as error:
             clear_exception_frames(error)
             raise

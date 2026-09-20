@@ -90,7 +90,7 @@ class _EvaluationStreamingState:
         self._min_timestamp: pd.Timestamp | None = None
         self._max_timestamp: pd.Timestamp | None = None
         self._skipped_timestamp_count = 0
-        self._ic: dict[tuple[str, str], dict[str, float | int]] = {}
+        self._ic: dict[tuple[str, str], dict[str, int | Fraction]] = {}
         self._coverage: dict[tuple[str, str], dict[str, float | int]] = {}
         self._spread: dict[tuple[str, str], dict[str, float | int | Fraction]] = {}
 
@@ -163,17 +163,13 @@ class _EvaluationStreamingState:
                 if stats is None:
                     stats = {
                         "ic_count": 0,
-                        "ic_mean": 0.0,
-                        "ic_m2": 0.0,
+                        "ic_mean": Fraction(),
+                        "ic_m2": Fraction(),
                         "ic_positive": 0,
-                        "ic_min": None,
-                        "ic_max": None,
                         "rankic_count": 0,
-                        "rankic_mean": 0.0,
-                        "rankic_m2": 0.0,
+                        "rankic_mean": Fraction(),
+                        "rankic_m2": Fraction(),
                         "rankic_positive": 0,
-                        "rankic_min": None,
-                        "rankic_max": None,
                     }
                     self._ic[key] = stats
                 _add_correlation_aggregate(stats, "ic", ic)
@@ -471,17 +467,15 @@ def build_evaluation_result_from_frames(
 
 
 def _correlation_summary(
-    stats: Mapping[str, float | int],
+    stats: Mapping[str, int | Fraction],
     prefix: str,
 ) -> dict[str, float | int | str | None]:
     count = int(stats[f"{prefix}_count"])
     result = _summarize_correlation_aggregates(
         count=count,
-        mean=float(stats[f"{prefix}_mean"]),
-        m2=float(stats[f"{prefix}_m2"]),
+        mean=stats[f"{prefix}_mean"],
+        m2=stats[f"{prefix}_m2"],
         positive_count=int(stats[f"{prefix}_positive"]),
-        minimum=stats[f"{prefix}_min"],
-        maximum=stats[f"{prefix}_max"],
     )
     result["count"] = result["valid_count"]
     return result

@@ -140,12 +140,9 @@ def test_dataset_session_tuple_in_filter_matches_materialized_and_chunked_reads(
         time_window=None,
         row_filters=(("asset_id", "in", ("A", "A", "C")),),
     ) as session:
-        materialized = pd.concat(
-            dataset_reading.iter_dataset_chunks(
-                session,
-                target_chunk_bytes=1024**2,
-            ),
-            ignore_index=True,
+        materialized = dataset_reading.materialize_dataset_session(
+            session,
+            target_chunk_bytes=512,
         )
 
     pd.testing.assert_frame_equal(materialized, expected)

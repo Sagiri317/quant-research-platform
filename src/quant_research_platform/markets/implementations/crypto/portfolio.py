@@ -45,6 +45,7 @@ from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
+from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
@@ -172,6 +173,16 @@ def _prediction_rows(
                         }
 
 
+def _market_coverage_check(coverage, trade_coverage, bounds):
+    if not any(
+        start <= bounds[0][0] and bounds[-1][1] < end
+        for start, end in coverage.values()
+    ):
+        raise PortfolioTargetBlocked("crypto_execution_book_coverage_incomplete")
+    if len(trade_coverage.covering(bounds[0][0], bounds[-1][1])) != 1:
+        raise PortfolioTargetBlocked("crypto_execution_trade_coverage_incomplete")
+
+
 def _funding_check(funding, expected_identity, bounds):
     if funding.identity != expected_identity:
         raise ValueError("crypto_execution_funding_identity_mismatch")
@@ -244,6 +255,15 @@ def produce_taker_ledger(
         if run.source_identity != panel["source_artifact_identity"]:
             raise ValueError("crypto_execution_recorder_identity_mismatch")
         _funding_check(funding, expected_funding_identity, bounds)
+        _market_coverage_check(
+            coverage,
+            run.observation_coverage(
+                market_type=binance_ids.FUTURES_MARKET_TYPE,
+                data_kind="agg_trades",
+                symbol=symbol,
+            ),
+            bounds,
+        )
 
         def decisions():
             rows = _prediction_rows(
@@ -764,6 +784,10 @@ def produce_maker_ledger(
             if run.source_identity != panel["source_artifact_identity"]:
                 raise ValueError("crypto_execution_recorder_identity_mismatch")
             _funding_check(funding, expected_funding_identity, bounds)
+            trade_coverage = run.observation_coverage(
+                market_type=market_type, data_kind="agg_trades", symbol=symbol
+            )
+            _market_coverage_check(coverage, trade_coverage, bounds)
             result = simulate_maker(
                 _books_until(
                     run,
@@ -775,9 +799,7 @@ def produce_maker_ledger(
                 quotes(),
                 config=config,
                 observed_coverage=coverage,
-                trade_coverage=run.observation_coverage(
-                    market_type=market_type, data_kind="agg_trades", symbol=symbol
-                ),
+                trade_coverage=trade_coverage,
                 resource_policy=resource_policy,
                 capital=PortfolioCapital(
                     candidate.candidate_id,

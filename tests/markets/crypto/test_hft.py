@@ -740,3 +740,49 @@ def test_persisted_depth_ratios_keep_scale_invariance_and_one_ulp_change(
         scaler.transform(restored.loc[9:, columns]).iloc[0, 0]
         == restored.imbalance_1.iloc[-1] - 1 / 3
     )
+
+
+@pytest.mark.parametrize(
+    "unit,bid,ask,expected",
+    [
+        ("1e300", 100000000, 150000000, 1.25e308),
+        ("0.0000000000000001", 10000000000000000, 10000000000000001, 1.0),
+    ],
+)
+@pytest.mark.parametrize("owner", ["execution", "panel"])
+def test_panel_and_execution_midpoint_round_only_final_exact_price(
+    unit, bid, ask, expected, tmp_path, owner
+):
+    from quant_research_platform.markets.implementations.crypto.execution import _mid
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    state = replace(_state(0, bid_index=bid, ask_index=ask), price_unit=unit)
+    if owner == "execution":
+        assert _mid(state) == expected
+        return
+    with runtime_resource_policy_scope():
+        panel = pd.concat(
+            iter_panel_frames(
+                [state],
+                [],
+                market_id="crypto",
+                asset_id="btc_usdt",
+                batch_rows=2,
+                start_ms=0,
+                end_ms=0,
+                book_coverage={"s1": _coverage(0, 1001)},
+                trade_coverage=coverage_lookup(
+                    {"trade-connection-1": _coverage(0, 1001)}
+                ),
+            ),
+            ignore_index=True,
+        )
+    assert panel.mid.tolist() == [expected]
+    spec = hft_processed_catalog().get("binance_futures_l2_panel_100ms")
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, panel, spec=spec)
+    assert read_dataset(root).mid.tolist() == [expected]

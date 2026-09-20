@@ -1861,19 +1861,13 @@ def _merge_pruning_report(
     reports.append(report)
 
 
-def _input_file_path(
-    value: Path | tuple[Path, DatasetFileIdentity],
-) -> Path:
-    return Path(value[0] if isinstance(value, tuple) else value)
-
-
 def _iter_source_inputs(
     first: Path | tuple[Path, DatasetFileIdentity],
     remaining: Iterator[Path | tuple[Path, DatasetFileIdentity]],
 ) -> Iterator[Path | tuple[Path, DatasetFileIdentity]]:
     for value in chain((first,), remaining):
         parent = require_unaliased_path(
-            _input_file_path(value).parent,
+            Path(value[0] if isinstance(value, tuple) else value).parent,
             error="csmar_interim_source_parent_invalid",
         )
         try:

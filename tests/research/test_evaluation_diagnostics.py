@@ -644,3 +644,78 @@ def test_evaluation_initialization_error_releases_operation_with_traceback_retai
                     trace.tb_frame.f_locals["operation"].close()
                     break
                 trace = trace.tb_next
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        (1.0, float(np.nextafter(1.0, 0.0))),
+        (1e-200, 2e-200, 3e-200),
+        (0.0, float(np.nextafter(0.0, 1.0))),
+        (0.0, 0.0, float(np.nextafter(0.0, 1.0))),
+    ],
+)
+@pytest.mark.parametrize("reverse", [False, True])
+@pytest.mark.parametrize("chunk_size", [1, 3])
+def test_ic_summary_nonzero_variance_survives_rounding_and_persistence(
+    values, reverse, chunk_size, tmp_path
+):
+    from statistics import mean, pstdev
+
+    values = values[::-1] if reverse else values
+    metrics = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-02", periods=len(values)),
+            "signal": "signal",
+            "label": "label",
+            "ic": values,
+            "rankic": values,
+            "n_obs": 2,
+            "ic_reason": None,
+            "rankic_reason": None,
+        }
+    )
+    spec = EvaluationSpec(
+        evaluation_id="stable_ic_summary",
+        market_id=MarketId("a_share"),
+        research_dataset_id="research_demo",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+    )
+    state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+    try:
+        for start in range(0, len(metrics), chunk_size):
+            state.consume(
+                metrics.iloc[start : start + chunk_size],
+                pd.DataFrame(),
+                {
+                    "rows_input": 2,
+                    "rows_after_filter_mode": 2,
+                    "filter_columns_used": ["eligible"],
+                    "filter_definition": "eligible",
+                    "timestamp_count": 1,
+                    "min_timestamp": "2024-01-02",
+                    "max_timestamp": "2024-01-04",
+                    "skipped_timestamp_count": 0,
+                },
+            )
+        summary = state.ic_summary()
+    finally:
+        state.close()
+    path = tmp_path / "summary.parquet"
+    summary.to_parquet(path, index=False)
+    restored = pd.read_parquet(path)
+    pd.testing.assert_frame_equal(restored, summary, check_exact=True)
+    row = restored.iloc[0]
+    expected_std = pstdev(values)
+    for prefix in ("ic", "rankic"):
+        if expected_std == 0.0:
+            assert len(set(values)) > 1
+            assert pd.isna(row[f"std_{prefix}"])
+            assert pd.isna(row[f"{prefix}ir"])
+            assert row[f"{prefix}ir_reason"] == "nonfinite_result"
+        else:
+            assert row[f"std_{prefix}"] == pytest.approx(expected_std, rel=1e-15, abs=0)
+            assert row[f"{prefix}ir"] == pytest.approx(
+                mean(values) / expected_std, rel=1e-15
+            )

@@ -6,6 +6,7 @@ import sqlite3
 import tempfile
 from collections.abc import Callable, Collection, Iterable, Iterator
 from contextlib import ExitStack, closing, contextmanager
+from fractions import Fraction
 from math import log
 from pathlib import Path
 
@@ -335,19 +336,15 @@ def evaluate_model_trial_metrics_from_chunks(
 def _cross_sectional_metric_summary(
     database: sqlite3.Connection,
 ) -> tuple[int, float, float | None, str | None, float | None, str | None]:
-    stats: dict[str, float | int] = {
+    stats: dict[str, int | Fraction] = {
         "ic_count": 0,
-        "ic_mean": 0.0,
-        "ic_m2": 0.0,
+        "ic_mean": Fraction(),
+        "ic_m2": Fraction(),
         "ic_positive": 0,
-        "ic_min": None,
-        "ic_max": None,
         "rankic_count": 0,
-        "rankic_mean": 0.0,
-        "rankic_m2": 0.0,
+        "rankic_mean": Fraction(),
+        "rankic_m2": Fraction(),
         "rankic_positive": 0,
-        "rankic_min": None,
-        "rankic_max": None,
     }
     row_count = 0
     squared_errors = _ScaledSquareAccumulator()
@@ -475,16 +472,14 @@ class _ScaledSquareAccumulator:
 
 
 def _trial_correlation_summary(
-    stats: dict[str, float | int],
+    stats: dict[str, int | Fraction],
     prefix: str,
 ) -> tuple[float | None, str | None]:
     result = _summarize_correlation_aggregates(
         count=int(stats[f"{prefix}_count"]),
-        mean=float(stats[f"{prefix}_mean"]),
-        m2=float(stats[f"{prefix}_m2"]),
+        mean=stats[f"{prefix}_mean"],
+        m2=stats[f"{prefix}_m2"],
         positive_count=int(stats[f"{prefix}_positive"]),
-        minimum=stats[f"{prefix}_min"],
-        maximum=stats[f"{prefix}_max"],
     )
     if int(result["valid_count"]) == 0:
         return None, str(result["reason"])

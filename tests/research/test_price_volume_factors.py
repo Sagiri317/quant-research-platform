@@ -369,3 +369,66 @@ def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
     path = tmp_path / "correlation.parquet"
     result.to_parquet(path, index=False)
     pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
+
+
+@pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "volatility_20d",
+        "volatility_60d",
+        "amount_volatility_20d",
+        "turnover_volatility_20d",
+        "downside_volatility_20d",
+        "downside_volatility_60d",
+        "upside_volatility_20d",
+    ],
+)
+def test_volatility_representable_result_with_extreme_units(name, scale, tmp_path):
+    from math import sqrt
+
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_processed_dataset_spec,
+    )
+
+    count = 60 if name.endswith("60d") else 20
+    values = np.array([-scale, 0, scale, scale] * (count // 4))
+    # Each four-value block has mean 1/4 and centered sum of squares 11/4.
+    # Negative and positive squared sums per observation are 1/4 and 1/2.
+    oracle = scale * (
+        0.5
+        if name.startswith("downside")
+        else sqrt(0.5)
+        if name.startswith("upside")
+        else sqrt(11 * count / (16 * (count - 1)))
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=count).as_unit("ns"),
+            "period_return": values,
+            "amount": values + 2 * scale,
+            "volume": values + 2 * scale,
+            "close": 1.0,
+            "float_market_cap": 1.0,
+        }
+    )
+    definitions = price_volume_factor_definitions(
+        market_id=MarketId("a_share"),
+        required_input_data_id="price_volume",
+        factor_columns=(name,),
+    )
+    result = calculate_factors_for_panel(panel, definitions=definitions)
+    assert result[name].iloc[-1] == pytest.approx(oracle, rel=2e-15, abs=0)
+    root = make_dataset_artifact_root(tmp_path, "volatility")
+    write_dataset(
+        root,
+        result,
+        spec=make_processed_dataset_spec("volatility", value_column=name),
+    )
+    persisted = read_dataset(root)
+    pd.testing.assert_frame_equal(persisted, result, check_exact=True)
+    assert persisted[name].iloc[-1] == pytest.approx(oracle, rel=2e-15, abs=0)

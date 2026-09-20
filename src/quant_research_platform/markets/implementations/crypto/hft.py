@@ -348,7 +348,7 @@ def _append_panel_columns(
     bid_quantity = bids[0][1]
     ask_price = index_to_price(asks[0][0], state.price_unit)
     ask_quantity = asks[0][1]
-    mid = index_to_price(bids[0][0] + asks[0][0], state.price_unit) / 2.0
+    mid = float((bids[0][0] + asks[0][0]) * Fraction(state.price_unit) / 2)
     spread = index_to_price(asks[0][0] - bids[0][0], state.price_unit)
     bid_depth_1 = sum(quantity for _price, quantity in bids[:1])
     ask_depth_1 = sum(quantity for _price, quantity in asks[:1])

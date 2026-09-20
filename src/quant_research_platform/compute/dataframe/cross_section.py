@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from decimal import Decimal, localcontext
 from fractions import Fraction
-from math import isfinite
+from math import isfinite, ulp
 from statistics import mean
 
 import numpy as np
@@ -300,11 +300,9 @@ def _safe_ratio(numerator: float, denominator: float, *, valid_count: int) -> fl
 def _summarize_correlation_aggregates(
     *,
     count: int,
-    mean: float,
-    m2: float,
+    mean: Fraction,
+    m2: Fraction,
     positive_count: int,
-    minimum: float | None = None,
-    maximum: float | None = None,
 ) -> dict[str, float | int | str | None]:
     if count == 0:
         return {
@@ -316,13 +314,16 @@ def _summarize_correlation_aggregates(
             "reason": "no_valid_observations",
             "ratio_reason": "no_valid_observations",
         }
-    if minimum is not None and maximum is not None and minimum == maximum:
-        std = 0.0
-    elif not np.isfinite(mean) or not np.isfinite(m2):
+    variance = m2 / count
+    with localcontext() as context:
+        context.prec = 80
+        std = float(
+            (Decimal(variance.numerator) / Decimal(variance.denominator)).sqrt()
+        )
+    # A nonzero scale that rounds to zero is unrepresentable, not constant.
+    if 0 < variance <= (Fraction(ulp(0.0)) / 2) ** 2:
         std = np.nan
-    else:
-        variance = m2 / count
-        std = float(np.sqrt(max(0.0, variance))) if np.isfinite(variance) else np.nan
+    mean = float(mean)
     ratio = _safe_ratio(mean, std, valid_count=count)
     return {
         "mean": mean,
@@ -341,7 +342,7 @@ def _summarize_correlation_aggregates(
 
 
 def _add_correlation_aggregate(
-    stats: dict[str, float | int],
+    stats: dict[str, int | Fraction],
     prefix: str,
     value: object,
 ) -> None:
@@ -351,22 +352,14 @@ def _add_correlation_aggregate(
     count = int(stats[f"{prefix}_count"]) + 1
     mean_key = f"{prefix}_mean"
     m2_key = f"{prefix}_m2"
-    delta = numeric - float(stats[mean_key])
-    mean = float(stats[mean_key]) + delta / count
+    # Exact updates preserve adjacent binary64 values and tiny variances.
+    value = Fraction(numeric)
+    delta = value - stats[mean_key]
+    mean = stats[mean_key] + delta / count
     stats[mean_key] = mean
-    stats[m2_key] += delta * (numeric - mean)
+    stats[m2_key] += delta * (value - mean)
     stats[f"{prefix}_count"] = count
     stats[f"{prefix}_positive"] += int(numeric > 0)
-    stats[f"{prefix}_min"] = (
-        numeric
-        if stats[f"{prefix}_min"] is None
-        else min(float(stats[f"{prefix}_min"]), numeric)
-    )
-    stats[f"{prefix}_max"] = (
-        numeric
-        if stats[f"{prefix}_max"] is None
-        else max(float(stats[f"{prefix}_max"]), numeric)
-    )
 
 
 def _correlation_ratio_reason(

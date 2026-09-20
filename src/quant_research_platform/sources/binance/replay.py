@@ -771,7 +771,7 @@ def _reject_raw_reparse(metadata: os.stat_result) -> None:
 @contextmanager
 def open_market_source(root, resource_policy=None):
     """Select one immutable native format; never fall back after validation fails."""
-    from quant_research_platform.sources.tardis.replay import open_tardis_day
+    from quant_research_platform.sources.tardis.replay import open_tardis_archive
 
     root = require_unaliased_path(root, error="crypto_source_path_invalid")
     official = (root / "run.json").is_file()
@@ -780,7 +780,7 @@ def open_market_source(root, resource_policy=None):
         if official:
             raise ValueError("crypto_source_identity_ambiguous")
         raise FileNotFoundError("crypto_source_manifest_missing")
-    opener = open_recorder_run if official else open_tardis_day
+    opener = open_recorder_run if official else open_tardis_archive
     with opener(root, resource_policy) as source:
         yield source
 
@@ -2153,7 +2153,7 @@ def iter_agg_trades(
                 payload,
                 historical_time=(
                     observed_time // 1_000_000
-                    if schema == "qrp-tardis-native-day"
+                    if schema == "qrp-tardis-native-archive"
                     else None
                 ),
             )

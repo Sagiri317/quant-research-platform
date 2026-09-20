@@ -79,14 +79,7 @@ def test_action_quantity_stays_inside_limit_after_float_fill_accumulation():
     )
     inputs = calibration_inputs([([state], trades)], [0.0])
     new_order = _maker_new_order(
-        0,
-        "buy",
-        0.3,
-        state,
-        _quote(0, book_segment_id="s1"),
-        _maker_config(),
-        {"s1": (0, 1000000000)},
-        {"trade-connection-1": (0, 1000000000)},
+        0, "buy", 0.3, state, _quote(0, book_segment_id="s1"), _maker_config()
     )
     with runtime_resource_policy_scope() as policy:
         model = MakerCalibration(*inputs, resource_policy=policy)
@@ -121,14 +114,7 @@ def test_query_admits_deep_book_temporaries_before_materialization(monkeypatch, 
         [0.0],
     )
     new_order = _maker_new_order(
-        0,
-        "buy",
-        1.0,
-        state,
-        _quote(0, book_segment_id="s1"),
-        _maker_config(),
-        {"s1": (0, 1000000000)},
-        {"trade-connection-1": (0, 1000000000)},
+        0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
     )
     materialized = []
     with runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy:
@@ -351,14 +337,7 @@ def test_many_known_funding_offsets_complete_under_one_small_query_budget():
     with runtime_resource_policy_scope(policy):
         model = calibration_from_paths(paths, [-0.002, 0.003], policy)
         new_order = _maker_new_order(
-            0,
-            "buy",
-            1.0,
-            state,
-            _quote(0, book_segment_id="s1"),
-            _maker_config(),
-            {"s1": (0, 1000000000)},
-            {"trade-connection-1": (0, 1000000000)},
+            0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
         )
         try:
             for index in range(2048):
@@ -397,14 +376,7 @@ def test_paired_event_response_has_interior_optimum_and_keeps_zero_samples(
     with runtime_resource_policy_scope() as policy:
         model = calibration_from_paths(paths, errors, policy)
         new_order = _maker_new_order(
-            0,
-            "buy",
-            1.0,
-            state,
-            _quote(0, book_segment_id="s1"),
-            _maker_config(),
-            {"s1": (0, 1000000000)},
-            {"trade-connection-1": (0, 1000000000)},
+            0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
         )
         query = dict(
             state=state,
@@ -623,14 +595,7 @@ def test_decisions_reuse_captured_sample_origins_without_initial_book_reads():
         yield from events(start, stop)
 
     order = _maker_new_order(
-        0,
-        "buy",
-        0.3,
-        state,
-        _quote(0, book_segment_id="s1"),
-        _maker_config(),
-        {"s1": (0, 1000000000)},
-        {"trade-connection-1": (0, 1000000000)},
+        0, "buy", 0.3, state, _quote(0, book_segment_id="s1"), _maker_config()
     )
     with runtime_resource_policy_scope() as policy:
         model = MakerCalibration(samples, window, resource_policy=policy)
@@ -677,8 +642,6 @@ def test_unknown_historical_visible_quantity_blocks_maker_without_faking_fill():
                 _state(0),
                 _quote(0, book_segment_id="s1"),
                 _maker_config(),
-                {"s1": (0, 1000000000)},
-                {"trade-connection-1": (0, 1000000000)},
             )
             with pytest.raises(
                 PortfolioTargetBlocked, match="visible_quantity_unknown"
@@ -697,3 +660,73 @@ def test_unknown_historical_visible_quantity_blocks_maker_without_faking_fill():
         finally:
             model.close()
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("calibrated", [False, True])
+@pytest.mark.parametrize("short_source", ["book", "trade"])
+def test_future_coverage_end_cannot_change_earlier_maker_decision(
+    calibrated, short_source
+):
+    def run(end):
+        batches = []
+        with runtime_resource_policy_scope() as policy:
+            model = calibration_from_paths(
+                [
+                    (
+                        [_state(0)],
+                        [_trade(400, price="99.5", quantity="5", maker_buyer=True)],
+                    )
+                ],
+                [0.0],
+                policy,
+            )
+            try:
+                simulate_maker(
+                    [_state(0), _state(100)],
+                    [],
+                    [
+                        {
+                            **_quote(timestamp, book_segment_id="s1"),
+                            "fold_id": "fold",
+                            "price_prediction": 0.0,
+                            "proxy_prediction": 1.0,
+                        }
+                        for timestamp in (0, 100)
+                    ],
+                    config=replace(_maker_config(), maker_fee_bps=0.0, latency_ms=0),
+                    observed_coverage={
+                        "s1": (0, end if short_source == "book" else 1_000_000_000)
+                    },
+                    trade_coverage={
+                        "trade-connection-1": (
+                            0,
+                            end if short_source == "trade" else 1_000_000_000,
+                        )
+                    },
+                    resource_policy=policy,
+                    capital=PortfolioCapital(
+                        "fixture", 1000.0, "USDT", "linear_perpetual"
+                    ),
+                    asset_id="btc_usdt",
+                    funding_events=(),
+                    funding_forecasts=(FundingForecast(0, 2_000_000_000, ()),),
+                    calibrations={"fold": {"buy": model, "sell": model}}
+                    if calibrated
+                    else None,
+                    on_ledger=batches.append,
+                )
+            finally:
+                model.close()
+            assert policy.used_memory_bytes == 0
+        return [
+            row
+            for batch in batches
+            for row in batch.diagnostics
+            if row.name.startswith("maker_buy_") or row.name.startswith("maker_sell_")
+        ]
+
+    short, long = run(250_000_000), run(1_000_000_000)
+    assert short == long
+    assert any(
+        row.name == "maker_buy_requested_quantity" and row.number > 0 for row in long
+    )

@@ -309,7 +309,7 @@ def verify_semantic_artifact_member(
     candidate = Path(relative_path)
     if (
         not relative_path
-        or candidate.is_absolute()
+        or candidate.anchor
         or candidate.as_posix() != relative_path
         or any(part in {"", ".", ".."} for part in candidate.parts)
     ):
@@ -591,7 +591,7 @@ def _validate_member_payload(value: object) -> tuple[dict[str, object], ...]:
         if (
             candidate is None
             or not relative
-            or candidate.is_absolute()
+            or candidate.anchor
             or candidate.as_posix() != relative
             or any(part in {"", ".", ".."} for part in candidate.parts)
             or type(size) is not int

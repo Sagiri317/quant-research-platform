@@ -21,10 +21,10 @@ def validate_market_payload(
 ) -> dict[str, Any]:
     """Validate one public stream payload without endpoint ownership."""
 
-    if source_schema not in {"qrp-binance-recorder", "qrp-tardis-native-day"}:
+    if source_schema not in {"qrp-binance-recorder", "qrp-tardis-native-archive"}:
         raise ValueError("binance_native_source_schema_invalid")
     historical_time = None
-    if source_schema == "qrp-tardis-native-day":
+    if source_schema == "qrp-tardis-native-archive":
         historical_time = (
             strict_non_negative_integer(
                 observed_time_ns, error="binance_native_schema_time_invalid"
@@ -41,7 +41,7 @@ def validate_market_payload(
     )
     if market_type == FUTURES_MARKET_TYPE:
         # CM/UM integration added st/ps on 2026-06-30. Archive observation
-        # time is bound by the native day/slice reader, never by download time.
+        # time is bound by the native slice reader, never by download time.
         integrated = historical_time is None or historical_time >= 1782777600000
         if (
             (integrated or "st" in payload)

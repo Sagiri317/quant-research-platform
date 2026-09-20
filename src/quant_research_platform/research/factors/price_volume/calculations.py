@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from math import hypot, sqrt
+from statistics import stdev
 
 import numpy as np
 import pandas as pd
@@ -185,15 +187,22 @@ def _calculate_values(
         "amount_volatility_20d",
         "turnover_volatility_20d",
     }:
-        result = np.where(
-            np.min(current, axis=1) == np.max(current, axis=1),
-            0.0,
-            np.std(current, axis=1, ddof=1),
+        result = np.fromiter((stdev(row) for row in current), dtype=float)
+    elif factor.startswith("downside_volatility_") or factor == "upside_volatility_20d":
+        clipped = (
+            np.minimum(current, 0.0)
+            if factor.startswith("downside")
+            else np.maximum(current, 0.0)
         )
-    elif factor.startswith("downside_volatility_"):
-        result = np.sqrt(np.mean(np.minimum(current, 0.0) ** 2, axis=1))
-    elif factor == "upside_volatility_20d":
-        result = np.sqrt(np.mean(np.maximum(current, 0.0) ** 2, axis=1))
+        result = np.fromiter(
+            (
+                scale * (hypot(*(row / scale)) / sqrt(size))
+                if (scale := float(np.max(np.abs(row))))
+                else 0.0
+                for row in clipped
+            ),
+            dtype=float,
+        )
     elif factor == "max_return_20d":
         result = np.max(current, axis=1)
     elif factor == "min_return_20d":

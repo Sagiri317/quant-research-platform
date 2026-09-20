@@ -46,7 +46,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.raw_snapshots import MAX_RECORD_BYTES
 
-SCHEMA_ID = "qrp-tardis-native-day"
+SCHEMA_ID = "qrp-tardis-native-archive"
 EXCHANGE = "binance-futures"
 CHANNELS = ("depth", "depthSnapshot", "aggTrade", "markPrice")
 SYMBOLS = ("btcusdt", "ethusdt")
@@ -67,6 +67,8 @@ def _date(value: str) -> dt.date:
 
 
 def _request_url(date: str, offset: int) -> str:
+    date = (_date(date) + dt.timedelta(days=offset // 1440)).isoformat()
+    offset %= 1440
     return (
         "https://api.tardis.dev/v1/data-feeds/"
         + EXCHANGE
@@ -86,6 +88,8 @@ def _request_url(date: str, offset: int) -> str:
 
 
 def _filename(date: str, offset: int) -> str:
+    date = (_date(date) + dt.timedelta(days=offset // 1440)).isoformat()
+    offset %= 1440
     return (
         f"tardis__{EXCHANGE}__{date}__minutes-"
         f"{offset:04d}-{offset + SLICE_MINUTES:04d}.txt.gz"
@@ -294,8 +298,25 @@ class _ObservedStreams:
         return rows
 
 
-def _publish_day(output_root, date, open_slice, *, byte_budget, resource_policy):
+def _publish_slices(
+    output_root,
+    date,
+    open_slice,
+    *,
+    offset_minutes,
+    slice_count,
+    byte_budget,
+    resource_policy,
+):
     _date(date)
+    if (
+        type(offset_minutes) is not int
+        or offset_minutes < 0
+        or offset_minutes % SLICE_MINUTES
+        or type(slice_count) is not int
+        or slice_count <= 0
+    ):
+        raise ValueError("tardis_slice_range_invalid")
     if type(byte_budget) is not int or byte_budget <= 0:
         raise ValueError("tardis_download_budget_invalid")
 
@@ -316,7 +337,7 @@ def _publish_day(output_root, date, open_slice, *, byte_budget, resource_policy)
 
         with (
             runtime_resource_policy_scope(resource_policy) as policy,
-            policy.lease("tardis.day_metadata", 0) as metadata_lease,
+            policy.lease("tardis.archive_metadata", 0) as metadata_lease,
             ExitStack() as streams,
         ):
             gaps = streams.enter_context(
@@ -327,7 +348,11 @@ def _publish_day(output_root, date, open_slice, *, byte_budget, resource_policy)
                     gzip.open(interval_path, "wt", encoding="utf-8")
                 )
             )
-            for offset in range(0, 1440, SLICE_MINUTES):
+            for offset in range(
+                offset_minutes,
+                offset_minutes + slice_count * SLICE_MINUTES,
+                SLICE_MINUTES,
+            ):
                 target = root / _filename(date, offset)
                 digest = hashlib.sha256()
                 size = 0
@@ -473,39 +498,42 @@ def _publish_day(output_root, date, open_slice, *, byte_budget, resource_policy)
     return atomic_write_directory(Path(output_root), write)
 
 
-def import_day(
+def import_slices(
     output_root: Path,
     *,
     date: str,
     slices: Sequence[Path],
+    offset_minutes: int = 0,
     byte_budget: int,
     resource_policy=None,
 ):
-    """Publish an ordered full day without rewriting native bytes."""
-    if len(slices) != 144:
-        raise ValueError("tardis_day_slices_incomplete")
+    """Publish consecutive native slices of any duration without rewriting bytes."""
 
     def open_slice(offset):
-        return _verified_file(Path(slices[offset // SLICE_MINUTES]))
+        return _verified_file(Path(slices[(offset - offset_minutes) // SLICE_MINUTES]))
 
-    return _publish_day(
+    return _publish_slices(
         output_root,
         date,
         open_slice,
+        offset_minutes=offset_minutes,
+        slice_count=len(slices),
         byte_budget=byte_budget,
         resource_policy=resource_policy,
     )
 
 
-def download_day(
+def download_slices(
     output_root: Path,
     *,
     date: str,
+    slice_count: int,
+    offset_minutes: int = 0,
     byte_budget: int,
     api_key: str | None = None,
     resource_policy=None,
 ):
-    """Download an entitled day without creating accounts or purchasing access."""
+    """Download an entitled slice range without a calendar-day duration limit."""
     _date(date)
     if api_key is not None and (
         type(api_key) is not str
@@ -535,10 +563,12 @@ def download_day(
                 raise ValueError("tardis_http_response_invalid")
             yield response
 
-    return _publish_day(
+    return _publish_slices(
         output_root,
         date,
         open_slice,
+        offset_minutes=offset_minutes,
+        slice_count=slice_count,
         byte_budget=byte_budget,
         resource_policy=resource_policy,
     )

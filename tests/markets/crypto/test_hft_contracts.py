@@ -701,3 +701,31 @@ def test_price_coordinates_preserve_exact_integers_before_storage_admission():
 
     assert price_to_index(str(2**63 - 1), "1", error="price_invalid") == 2**63 - 1
     assert price_to_index(str(2**63), "1", error="price_invalid") == 2**63
+
+
+@pytest.mark.parametrize("latency", [0, 100])
+@pytest.mark.parametrize("trade_arrives_first", [False, True])
+def test_maker_observed_trade_gap_discards_active_and_pending_before_new_quote(
+    latency, trade_arrives_first
+):
+    from dataclasses import replace
+
+    result = simulate_maker(
+        [_state(0), _state(80)],
+        [_trade(80, quantity=5.0, price_index=994, observation_id="trade-connection-2")]
+        if trade_arrives_first
+        else [],
+        [_quote(0), _quote(80, trade_observation_id="trade-connection-2")],
+        config=replace(_maker_config(), latency_ms=latency),
+        observed_coverage={"book-1": (0, 200_000_000)},
+        trade_coverage={
+            "trade-connection-1": (0, 75_000_000),
+            "trade-connection-2": (75_000_000, 200_000_000),
+        },
+        capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        asset_id="btc_usdt",
+        funding_events=(),
+    )
+    assert result["fill_quantity"] == 0
+    assert result["created_orders"] == 4
+    assert result["average_order_lifetime_ms"] == 97.5

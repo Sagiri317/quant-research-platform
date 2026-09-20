@@ -580,3 +580,22 @@ def test_member_inventory_round_trips_more_than_256_declared_members(tmp_path):
     (root / "member-264.bin").write_bytes(b"changed")
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         storage.read_semantic_artifact_record(root)
+
+
+@pytest.mark.parametrize(
+    "value", ["/outside.json", "C:outside.json", "C:/outside.json", "../outside.json"]
+)
+def test_member_manifest_rejects_windows_anchored_paths(monkeypatch, value):
+    from pathlib import PureWindowsPath
+
+    import quant_research_platform.storage.semantic_artifacts as owner
+
+    monkeypatch.setattr(owner, "Path", PureWindowsPath)
+    with pytest.raises(ValueError, match="semantic_artifact_member_manifest_invalid"):
+        owner._validate_member_payload([{"path": value, "size": 0, "sha256": "0" * 64}])
+    assert (
+        owner._validate_member_payload(
+            [{"path": "safe/file.json", "size": 0, "sha256": "0" * 64}]
+        )[0]["path"]
+        == "safe/file.json"
+    )

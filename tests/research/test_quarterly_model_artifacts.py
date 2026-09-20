@@ -2799,3 +2799,31 @@ def test_quarterly_model_final_stat_preserves_system_error(
             read_quarterly_model_artifact(root, trial_layout=layout).model_id
             == "model-artifact"
         )
+
+
+def test_equal_rank_single_undefined_direction_names_required_input():
+    from quant_research_platform.research.models.rank_ensemble import (
+        EqualWeightRankEnsembleFactory,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-02"] * 3),
+            "valid": [1.0, 2.0, 3.0],
+            "constant": [1.0] * 3,
+            "label": [1.0, 2.0, 3.0],
+        }
+    )
+    estimator = EqualWeightRankEnsembleFactory(("valid", "constant"), "label")
+    with pytest.raises(
+        ValueError,
+        match="ensemble_direction_undefined:constant:no_valid_training_rankic",
+    ) as caught:
+        estimator.fit(frame, frame.label.to_numpy())
+    from quant_research_platform.workflows.research import _semantic_failure_code
+
+    assert _semantic_failure_code(caught.value) == str(caught.value)
+    frame["constant"] = [3.0, 2.0, 1.0]
+    fitted = estimator.fit(frame, frame.label.to_numpy())
+    assert fitted.columns == ("valid", "constant")
+    assert fitted.directions == (1.0, -1.0)

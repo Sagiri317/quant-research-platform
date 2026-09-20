@@ -20,7 +20,8 @@ def test_atomic_directory_writer_failure_removes_only_operation_temp(
     tmp_path: Path,
 ) -> None:
     final_root = tmp_path / "nested" / "bundle"
-    unrelated = tmp_path / ".a-user"
+    final_root.parent.mkdir()
+    unrelated = final_root.parent / ".a-user"
     unrelated.mkdir()
     (unrelated / "keep.txt").write_text("keep", encoding="utf-8")
 
@@ -33,7 +34,7 @@ def test_atomic_directory_writer_failure_removes_only_operation_temp(
 
     assert not final_root.exists()
     assert (unrelated / "keep.txt").read_text(encoding="utf-8") == "keep"
-    assert not list(tmp_path.glob(".a-[0-9a-f]*"))
+    assert set(final_root.parent.iterdir()) == {unrelated}
 
 
 @pytest.mark.parametrize("exception", [KeyboardInterrupt, SystemExit])
@@ -218,3 +219,10 @@ def test_atomic_long_paths_create_parents_keep_old_good_and_preserve_primary(
         kind,
         ".a-user",
     }
+
+
+def test_directory_cleanup_regression_kills_noop_mutation(tmp_path, monkeypatch):
+    monkeypatch.setattr(atomic, "remove_owned_scratch", lambda _path: None)
+    with pytest.raises(AssertionError):
+        test_atomic_directory_writer_failure_removes_only_operation_temp(tmp_path)
+    assert tuple((tmp_path / "nested").glob(".a-[0-9a-f]*"))

@@ -8,14 +8,17 @@ import pytest
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.funding import read_funding_observations
 from quant_research_platform.sources.tardis.funding import import_funding_history
-from quant_research_platform.sources.tardis.raw import import_day
-from quant_research_platform.sources.tardis.replay import open_tardis_day
+from quant_research_platform.sources.tardis.raw import import_slices
+from quant_research_platform.sources.tardis.replay import open_tardis_archive
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.sources.tardis.test_raw import _slices
 from tests.sources.tardis.test_replay import _line
 
 
-def test_forecast_does_not_use_future_settlement_and_original_is_verified(tmp_path):
+@pytest.mark.parametrize("slice_count", [1, 144, 289])
+def test_forecast_does_not_use_future_settlement_and_original_is_verified(
+    tmp_path, slice_count
+):
     start_ms = pd.Timestamp("2026-09-01T00:00:00Z").value // 1_000_000
     native = _line(
         1,
@@ -29,7 +32,7 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(tmp_pa
             "T": start_ms + 10000,
         },
     )
-    slices = _slices(tmp_path / "native", native)
+    slices = _slices(tmp_path / "native", native, count=slice_count)
     response = tmp_path / "official.json"
     original = json.dumps(
         [
@@ -45,21 +48,21 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(tmp_pa
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
-        import_day(
+        import_slices(
             tmp_path / "published",
             date="2026-09-01",
             slices=slices,
             byte_budget=1024**2,
             resource_policy=policy,
         )
-        with open_tardis_day(tmp_path / "published", policy) as day:
+        with open_tardis_archive(tmp_path / "published", policy) as day:
             import_funding_history(
                 day,
                 symbol="BTCUSDT",
                 response_path=response,
                 http_status=200,
                 start_ms=start_ms,
-                end_ms=start_ms + 86_400_000 - 1,
+                end_ms=start_ms + slice_count * 600_000 - 1,
                 byte_budget=1024**2,
             )
             with read_funding_observations(

@@ -9,6 +9,7 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
+from fractions import Fraction
 from itertools import groupby
 from pathlib import Path
 from types import SimpleNamespace
@@ -537,11 +538,12 @@ def _checked_decisions(
 def _mid(state: BookState) -> float:
     if not state.bids or not state.asks:
         raise ValueError("hft_execution_one_sided_book")
-    bid = index_to_price(state.bids[0][0], state.price_unit)
-    ask = index_to_price(state.asks[0][0], state.price_unit)
+    bid, ask = state.bids[0][0], state.asks[0][0]
+    index_to_price(bid, state.price_unit)
+    index_to_price(ask, state.price_unit)
     if ask <= bid:
         raise ValueError("hft_execution_crossed_book")
-    return (bid + ask) / 2.0
+    return float((bid + ask) * Fraction(state.price_unit) / 2)
 
 
 def _covered(
@@ -1349,9 +1351,7 @@ def _maker_apply_command(active, command, state, observed_coverage, trade_covera
     return old_order, reason
 
 
-def _maker_new_order(
-    order_id, side, quantity, state, row, config, observed_coverage, trade_coverage
-):
+def _maker_new_order(order_id, side, quantity, state, row, config):
     timestamp = row["timestamp_ms"] * _NANOSECONDS_PER_MILLISECOND
     return _MakerOrder(
         order_id=order_id,
@@ -1364,11 +1364,7 @@ def _maker_new_order(
         trade_observation_id=row["trade_observation_id"],
         price_unit=state.price_unit,
         created_time_ns=timestamp,
-        valid_until_ns=min(
-            timestamp + HFT_MODEL_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND,
-            observed_coverage[row["book_segment_id"]][1],
-            trade_coverage[row["trade_observation_id"]][1],
-        ),
+        valid_until_ns=timestamp + HFT_MODEL_HORIZON_MS * _NANOSECONDS_PER_MILLISECOND,
         effective_at_ns=timestamp + config.latency_ms * _NANOSECONDS_PER_MILLISECOND,
     )
 
@@ -1894,8 +1890,6 @@ def replay_maker_calibration(
                         latest_state,
                         row,
                         config,
-                        observed_coverage,
-                        trade_coverage,
                     )
                     samples.append(
                         {
@@ -2043,6 +2037,7 @@ def simulate_maker(
     economics = PortfolioEconomics(capital, asset_id, on_ledger)
     apply_funding = _funding_consumer(funding_events, economics)
     latest_state = latest_owned = next_event = None
+    trade_observation_id = None
     active_forecast = next_forecast = None
     forecast_timestamp = -1
     created_orders = filled_orders = cancelled_orders = 0
@@ -2066,10 +2061,19 @@ def simulate_maker(
         if on_fill is not None:
             on_fill(fill)
 
+    def observed_order_end(order):
+        return min(
+            order.valid_until_ns,
+            observed_coverage[order.segment_id][1],
+            trade_coverage[order.trade_observation_id][1],
+        )
+
     def finish_order(order, timestamp_ns, *, cancelled):
         nonlocal all_lifetime_count, all_lifetime_sum_ns, cancelled_orders
         nonlocal filled_lifetime_count, filled_lifetime_sum_ns
-        lifetime = max(0, timestamp_ns - order.created_time_ns)
+        lifetime = max(
+            0, min(timestamp_ns, observed_order_end(order)) - order.created_time_ns
+        )
         all_lifetime_count += 1
         all_lifetime_sum_ns += lifetime
         if order.had_fill:
@@ -2117,9 +2121,26 @@ def simulate_maker(
             commands.clear()
             update_command_lease()
 
-        def expire_active(timestamp):
-            for order in _maker_expired_orders(active, timestamp):
-                finish_order(order, order.valid_until_ns, cancelled=True)
+        def observe_trade_connection(identity, timestamp):
+            nonlocal trade_observation_id
+            if trade_observation_id is not None and trade_observation_id != identity:
+                cancel_all(timestamp)
+            trade_observation_id = identity
+
+        def expire_orders(timestamp):
+            # Only the decision-time TTL schedules expiry; observed events cancel gaps.
+            for side, order in tuple(active.items()):
+                if order.valid_until_ns <= timestamp:
+                    active.pop(side)
+                    finish_order(order, timestamp, cancelled=True)
+            for _ in range(len(commands)):
+                command = commands.popleft()
+                order = command[2]
+                if order is not None and order.valid_until_ns <= timestamp:
+                    finish_order(order, timestamp, cancelled=True)
+                else:
+                    commands.append(command)
+            update_command_lease()
 
         def observed_mark(timestamp):
             return (
@@ -2164,6 +2185,7 @@ def simulate_maker(
         def process_trade(trade):
             nonlocal filled_orders, partial_fill_events, trade_through_fill_events
             nonlocal max_abs_position
+            observe_trade_connection(trade.observation_id, trade.observed_time_ns)
             if (
                 latest_state is None
                 or not _covered(
@@ -2244,7 +2266,7 @@ def simulate_maker(
                 if stamp > target:
                     break
                 apply_funding(stamp)
-                expire_active(stamp)
+                expire_orders(stamp)
                 if event_time == stamp:
                     market_event_count += 1
                     last_event_time_ns = stamp
@@ -2254,6 +2276,8 @@ def simulate_maker(
                     else:
                         process_book(item)
                     next_event = next(events, None)
+                    continue
+                if not commands or commands[0][0] != stamp:
                     continue
                 command = commands.popleft()
                 _effective, side, new_order = command
@@ -2290,7 +2314,7 @@ def simulate_maker(
                             )
                 update_command_lease()
             apply_funding(target)
-            expire_active(target)
+            expire_orders(target)
 
         def process_until(target):
             nonlocal next_day
@@ -2385,6 +2409,7 @@ def simulate_maker(
                     active_forecast = next_forecast
                     forecast_timestamp = active_forecast.available_at_ns
                     next_forecast = next(forecasts, None)
+                observe_trade_connection(row["trade_observation_id"], decision_time_ns)
                 mid = observed_mark(decision_time_ns)
                 valid = (
                     mid is not None
@@ -2503,8 +2528,6 @@ def simulate_maker(
                                 latest_state,
                                 row,
                                 config,
-                                observed_coverage,
-                                trade_coverage,
                             )
                             keep, quantity, gain = calibrations[row["fold_id"]][
                                 side
@@ -2535,8 +2558,6 @@ def simulate_maker(
                                     latest_state,
                                     row,
                                     config,
-                                    observed_coverage,
-                                    trade_coverage,
                                 )
                             effective = (
                                 decision_time_ns
