@@ -255,6 +255,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         research_configuration(
             "crypto",
             "baseline",
+            small_models=True,
             development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
             plan=plan,
         ),
@@ -270,7 +271,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     expected_footer = 0
     multirow_callbacks = []
 
-    def one_row_groups(table, *, previous_metadata, retained_memory):
+    def small_row_groups(table, *, previous_metadata, retained_memory):
         nonlocal expected_footer
         if previous_metadata is None:
             expected_footer = 0
@@ -278,11 +279,11 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         converted, state, _batch_rows, retained = table_write_state(
             table, previous_metadata=previous_metadata, retained_memory=retained_memory
         )
-        expected_footer += table.num_rows * _parquet_row_group_footer_upper_bound(
-            converted.schema, rows=0
-        )
+        expected_footer += (
+            (table.num_rows + 1) // 2
+        ) * _parquet_row_group_footer_upper_bound(converted.schema, rows=0)
         multirow_callbacks.append(table.num_rows)
-        return converted, state, 1, retained
+        return converted, state, 2, retained
 
     def write_fragmented_validation(*args, model_results, **kwargs):
         def fragmented_results(*, on_validation):
@@ -298,7 +299,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
 
         with monkeypatch.context() as writing_patch:
             writing_patch.setattr(
-                parquet_storage, "_parquet_table_write_state", one_row_groups
+                parquet_storage, "_parquet_table_write_state", small_row_groups
             )
             return write_models(*args, model_results=fragmented_results, **kwargs)
 
@@ -370,7 +371,11 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             )
             assert len(expected_validation) > 1
             with pq.ParquetFile(native_filesystem_path(root / relative)) as parquet:
-                assert parquet.metadata.num_row_groups == len(expected_validation)
+                expected_groups = (
+                    2 * (len(expected_validation) // 3)
+                    + (len(expected_validation) % 3 + 1) // 2
+                )
+                assert parquet.metadata.num_row_groups == expected_groups > 1
             assert (
                 sum(member["path"] == relative for member in saved.member_records) == 1
             )
@@ -469,6 +474,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             research_plan=research_configuration(
                 "crypto",
                 "baseline",
+                small_models=True,
                 development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
                 plan=plan,
             ),
@@ -502,6 +508,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         research_plan=research_configuration(
             "crypto",
             "baseline",
+            small_models=True,
             development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
             plan={key: value for key, value in plan.items() if key != "execution"},
         ),
@@ -529,6 +536,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
                 research_plan=research_configuration(
                     "crypto",
                     "baseline",
+                    small_models=True,
                     development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
                     plan=plan,
                 ),
@@ -571,6 +579,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
                 research_plan=research_configuration(
                     "crypto",
                     "baseline",
+                    small_models=True,
                     development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
                     plan=plan,
                 ),
@@ -682,6 +691,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         research_plan=research_configuration(
             "crypto",
             "baseline",
+            small_models=True,
             development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
             plan=insufficient_plan,
         ),
@@ -802,7 +812,7 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tm
 
 
 @pytest.mark.parametrize("gap_kind", [None, "depth", "agg_trades"])
-def test_tardis_cross_midnight_research_publishes_models_ledgers_and_report(
+def test_tardis_cross_midnight_archive_keeps_research_within_one_episode(
     tmp_path, gap_kind
 ):
     import gzip
@@ -817,10 +827,10 @@ def test_tardis_cross_midnight_research_publishes_models_ledgers_and_report(
     from quant_research_platform.workflows import research
     from tests.helpers.binance_hft import write_binance_hft_run
 
-    origin = pd.Timestamp("2026-09-01T23:59:55.500000Z")
+    origin = pd.Timestamp("2026-09-01T23:59:49.500000Z")
     origin_ms = origin.value // 1_000_000
     recorder = tmp_path / "fixture"
-    manifest = write_binance_hft_run(recorder, count=100, maker_liquidity=True)
+    manifest = write_binance_hft_run(recorder, count=120, maker_liquidity=True)
     native = []
     for member in manifest["files"]:
         kind = member["data_kind"]

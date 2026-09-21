@@ -29,14 +29,21 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
     from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
     )
-    from quant_research_platform.research.protocols.a_share import protocol
     from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from tests.helpers.portfolio_ledger import write_test_sessions
+    from tests.helpers.research_configuration import research_configuration
 
-    candidates = protocol("pv_all").portfolio_candidates()
+    selected_protocol = bind_research_configuration(
+        research_profile(), research_configuration(name="pv25")
+    ).protocol("pv_all")
+    candidates = selected_protocol.portfolio_candidates()
     before, after, end, costs = (
         (1000.0, 1040.0, 1005.0),
         (990.0, 1020.0, 1005.0),
@@ -187,7 +194,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         owned = _portfolio_statistics_tables(
             ledgers=artifacts,
             candidates=candidates,
-            protocol_manifest=protocol("pv_all").manifest(),
+            protocol_manifest=selected_protocol.manifest(),
             time_window=TimeWindow("2023-01-02", "2023-01-06"),
             resource_policy=policy,
             benchmark_opens=benchmark,
@@ -291,7 +298,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         return _portfolio_statistics_tables(
             ledgers=artifacts,
             candidates=candidates,
-            protocol_manifest=protocol("pv_all").manifest(),
+            protocol_manifest=selected_protocol.manifest(),
             time_window=TimeWindow("2023-01-02", "2023-01-06"),
             resource_policy=policy,
             benchmark_opens=benchmark_frame,
@@ -397,7 +404,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     from quant_research_platform.reports.a_share import build_a_share_report
     from quant_research_platform.storage.layout import StorageLayout
 
-    manifest = protocol("pv_all").manifest()
+    manifest = selected_protocol.manifest()
     record = ResearchRunRecord(
         operation_evidence=unmeasured_operation_evidence("fixture_record"),
         run_id="run_portfolio_statistics",
@@ -661,16 +668,23 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
     from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
     )
     from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
-    from quant_research_platform.research.protocols.a_share import protocol
     from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from tests.helpers.portfolio_ledger import write_test_sessions
+    from tests.helpers.research_configuration import research_configuration
 
     dates = pd.bdate_range("2023-01-02", periods=75)
-    candidates = protocol("pv_all").portfolio_candidates()
+    selected_protocol = bind_research_configuration(
+        research_profile(), research_configuration(name="pv25")
+    ).protocol("pv_all")
+    candidates = selected_protocol.portfolio_candidates()
     returns = np.random.default_rng(802).normal(0.0002, 0.008, (73, 5))
     if constant:
         returns[:, 0] = 0.1
@@ -759,7 +773,7 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
         owned = _portfolio_statistics_tables(
             ledgers=ledgers,
             candidates=candidates,
-            protocol_manifest=protocol("pv_all").manifest(),
+            protocol_manifest=selected_protocol.manifest(),
             time_window=TimeWindow(dates[0], dates[-1]),
             resource_policy=policy,
             benchmark_opens=pd.DataFrame(columns=("benchmark_id", "timestamp", "open")),

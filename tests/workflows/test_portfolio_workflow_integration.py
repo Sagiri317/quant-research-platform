@@ -1418,6 +1418,51 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         "end": "2019-01-15",
         "access": "development",
     }
+    from functools import partial
+
+    from quant_research_platform.profiles import research as profile_module
+
+    configuration = research_configuration(
+        development=(request["start"], request["end"])
+    )
+    bound_library = profile_module.bind_research_configuration(
+        research_profile(), configuration
+    )
+    profile = replace(
+        profile,
+        producer_bindings={
+            **profile.producer_bindings,
+            **{
+                key: binding
+                for key, binding in bound_library.producer_bindings.items()
+                if binding.kind is ProducerKind.PORTFOLIO
+            },
+        },
+    )
+    for model in configuration["models"]:
+        spec = profile.models.get(model["model_id"])
+        model.update(
+            input_factor_columns=list(spec.input_factor_columns),
+            input_feature_columns=list(spec.input_feature_columns),
+            label_column=spec.label_column,
+            hyperparameters=dict(spec.hyperparameters),
+            random_seed=spec.random_seed,
+        )
+        model.pop("parameter_candidates", None)
+    profile = replace(
+        profile,
+        protocol=partial(
+            a_share.AShareProtocol,
+            configuration_json=json.dumps(configuration, sort_keys=True),
+        ),
+    )
+    # Keep the real persisted model/ledger chain over this synthetic catalog;
+    # the real-source acceptance test covers configuration binding end to end.
+    monkeypatch.setattr(
+        profile_module,
+        "bind_research_configuration",
+        lambda selected, configuration, **kwargs: selected,
+    )
     planned = research.plan_targets(
         profile=profile,
         action="research run",
@@ -1430,9 +1475,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     result = research.research_run(
         profile=profile,
         layout=layout,
-        research_plan=research_configuration(
-            development=(request["start"], request["end"])
-        ),
+        research_plan=configuration,
     )
     results = {item["target_id"]: item for item in result["target_results"]}
     assert result["status"] == "COMPLETE", result["target_results"]
@@ -1743,9 +1786,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     reused = research.research_run(
         profile=profile,
         layout=layout,
-        research_plan=research_configuration(
-            development=(request["start"], request["end"])
-        ),
+        research_plan=configuration,
     )
     reused_results = {item["target_id"]: item for item in reused["target_results"]}
     assert result["run_id"] != reused["run_id"]

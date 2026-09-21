@@ -47,7 +47,9 @@ def _write_raw(layout, policy):
     raw_root = layout.raw_source_root("csmar").parent
     root = Path(raw_root) / "csmar"
     root.mkdir(parents=True)
-    sessions = pd.bdate_range("2011-01-03", "2019-09-30")
+    # Preserve 312 warm-up sessions before formal training starts in 2014.
+    sessions = pd.bdate_range("2012-10-01", "2019-09-30")
+    # Active enhancement requires the risk owner's 100-asset cross-section floor.
     assets = tuple(f"{index:06}" for index in range(1, 101))
     rng = np.random.default_rng(91027)
     drift = np.linspace(-0.0006, 0.0014, len(assets))

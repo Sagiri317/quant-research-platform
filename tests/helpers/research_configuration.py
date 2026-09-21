@@ -9,7 +9,7 @@ CONFIG_ROOT = Path(__file__).resolve().parents[2] / "configs" / "research"
 
 
 def research_configuration(
-    market="a_share", name="core6", *, development=None, plan=None
+    market="a_share", name="core6", *, development=None, plan=None, small_models=False
 ):
     config = json.loads((CONFIG_ROOT / market / (name + ".json")).read_text())
     if development is not None:
@@ -19,6 +19,19 @@ def research_configuration(
     if plan is not None:
         config["research_plan"] = plan
         config["windows"]["holdout"] = dict(plan["final_holdout"])
+    if small_models:
+        for model in config["models"]:
+            if model["model_algorithm"] in {
+                "lightgbm_regressor",
+                "xgboost_regressor",
+                "gradient_boosting_regressor",
+                "random_forest_regressor",
+            }:
+                for parameters in (
+                    model["hyperparameters"],
+                    *model.get("parameter_candidates", ()),
+                ):
+                    parameters["n_estimators"] = 16
     return config
 
 

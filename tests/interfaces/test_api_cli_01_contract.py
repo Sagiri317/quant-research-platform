@@ -219,6 +219,7 @@ async def test_api_catalog_and_requirements_use_current_a_share_protocol(
             "market_panel_1d",
             "price_volume_facts",
             "forward_returns",
+            "market_model_factors",
         ]
         _assert_public_text_is_sanitized(
             "\n".join(str(response.json()) for response in responses)

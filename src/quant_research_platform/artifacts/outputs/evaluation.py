@@ -193,6 +193,7 @@ def _write_evaluation_artifact_chunks(
 ) -> dict[str, object]:
     batch_row_limit = 8_192
     writers: dict[str, pq.ParquetWriter] = {}
+    empty_frames: dict[str, pd.DataFrame] = {}
     writer_states: dict[str, ExitStack] = {}
     pending_states = {
         "metrics": ExitStack(),
@@ -303,6 +304,7 @@ def _write_evaluation_artifact_chunks(
 
     def write_frame(name: str, frame: pd.DataFrame) -> None:
         if frame.empty:
+            empty_frames[name] = frame.copy()
             return
         table = pa.Table.from_pandas(frame, preserve_index=False)
         policy = current_runtime_resource_policy()
@@ -477,7 +479,7 @@ def _write_evaluation_artifact_chunks(
         for name, columns in required.items():
             if row_counts[name] == 0:
                 write_parquet(
-                    pd.DataFrame(columns=list(columns)),
+                    empty_frames.get(name, pd.DataFrame(columns=list(columns))),
                     paths[name],
                     engine="pyarrow",
                     compression="zstd",

@@ -51,7 +51,7 @@ def run_a_share_acceptance(project_root: Path):
     raw_root = project_root / "data/raw"
     write_a_share_raw_fixture(layout)
     profile = research_profile()
-    configuration = research_configuration(name="core6")
+    configuration = research_configuration(name="core6", small_models=True)
     configuration["windows"]["development"] = {
         "start": "2019-03-04",
         "end": "2019-03-15",
@@ -78,6 +78,9 @@ def run_a_share_acceptance(project_root: Path):
         model_root, expected_identity=model.instance_identity, trial_layout=layout
     )
     assert set(artifact.quarterly_selections) == {"2019Q1"}
+    assert {item["family_id"] for item in artifact.quarterly_models} == {
+        model["model_id"] for model in configuration["models"]
+    }
     with runtime_resource_policy_scope() as policy:
         for candidate in profile.protocol("pv_all").portfolio_candidates():
             target = targets[f"pv_all_{candidate.candidate_id}_ledger"]
@@ -125,7 +128,7 @@ def run_crypto_acceptance(project_root: Path):
     write_binance_hft_run(raw, count=90, maker_liquidity=True)
     write_hft_funding_fixture(raw)
     profile = research_profile(CRYPTO_PROFILE_ID)
-    configuration = research_configuration("crypto", "baseline")
+    configuration = research_configuration("crypto", "baseline", small_models=True)
     configuration["research_plan"] = hft_research_plan()
     configuration["windows"] = {
         "development": {

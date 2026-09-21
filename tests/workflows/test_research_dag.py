@@ -231,17 +231,49 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
             "pv_all": ProducerBinding(ProducerKind.DATASET, dataset_producer),
         },
     )
+    from functools import partial
+
+    from quant_research_platform.profiles import research as profile_module
+
+    configuration = research_configuration(development=("2019-01-01", "2019-06-30"))
+    configuration["portfolios"] = []
+    configuration["evaluation"]["labels"] = ["label"]
+    configuration["evaluation"]["primary_label"] = "label"
+    for model in configuration["models"]:
+        spec = model_catalog.get(model["model_id"])
+        model.update(
+            input_factor_columns=list(spec.input_factor_columns),
+            input_feature_columns=list(spec.input_feature_columns),
+            label_column=spec.label_column,
+            hyperparameters=dict(spec.hyperparameters),
+            random_seed=spec.random_seed,
+        )
+        model.pop("parameter_candidates", None)
+    profile = replace(
+        profile,
+        protocol=partial(
+            a_share.AShareProtocol,
+            configuration_json=json.dumps(configuration, sort_keys=True),
+        ),
+    )
+    # Isolate DAG persistence over the deliberately incomplete synthetic catalog;
+    # configuration binding is covered separately with the real market catalog.
+    monkeypatch.setattr(
+        profile_module,
+        "bind_research_configuration",
+        lambda selected, configuration, **kwargs: selected,
+    )
     result = research.research_run(
         profile=profile,
         layout=StorageLayout(project_root=tmp_path),
-        research_plan=research_configuration(development=("2019-01-01", "2019-06-30")),
+        research_plan=configuration,
     )
     targets = {item["target_id"]: item for item in result["target_results"]}
     assert result["status"] == "FAILED"
     assert targets["pv_all_statistics"] == {
         "target_id": "pv_all_statistics",
         "status": "FAILED",
-        "reason": "statistics_build_failed:statistics_fdr_family_factors_missing",
+        "reason": "statistics_build_failed:dataset_column_not_found",
         "instance_identity": None,
     }
     assert targets["pv_all_evaluation"]["status"] == "BUILT"
@@ -269,7 +301,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     artifact = read_quarterly_model_artifact(
         model_root, trial_layout=StorageLayout(tmp_path)
     )
-    assert len(artifact.quarterly_models) == 16
+    assert len(artifact.quarterly_models) == 2 * len(model_catalog.list())
     assert set(item["family_id"] for item in artifact.quarterly_models) == set(
         protocol_family_ids := tuple(
             f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
@@ -370,7 +402,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     reused = research.research_run(
         profile=profile,
         layout=layout,
-        research_plan=research_configuration(development=("2019-01-01", "2019-06-30")),
+        research_plan=configuration,
     )
     reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
     assert not reused_record.trial_ledgers
@@ -386,7 +418,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         profile=profile,
         layout=layout,
         rebuild=True,
-        research_plan=research_configuration(development=("2019-01-01", "2019-06-30")),
+        research_plan=configuration,
     )
     rebuild_record = read_research_run_record(
         layout.research_run_path(rebuilt["run_id"])
@@ -408,7 +440,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
             for item in rebuilt["target_results"]
             if item["target_id"] == "pv_all_statistics"
         )["reason"]
-        == "statistics_build_failed:statistics_fdr_family_factors_missing"
+        == "statistics_build_failed:dataset_column_not_found"
     )
 
 
