@@ -28,13 +28,15 @@ qrp catalog labels --profile crypto_binance_hft
 qrp research-datasets requirements <dataset_id> --profile <profile>
 qrp data materialize --profile <profile> --project-root <project>
 qrp dataset build <dataset_id> --profile <profile> --project-root <project> --start-date <date> --end-date <date>
-qrp research run --profile <profile> --project-root <project> --start-date <date> --end-date <date>
+qrp research run --project-root <project> --research-plan <configuration.json>
 qrp status --profile <profile> --project-root <project> [--run-id <run_id>]
 qrp inspect <target_id> --profile <profile> --project-root <project> [--run-id <run_id>]
 qrp report build --profile <profile> --project-root <project> --run-id <run_id>
 ~~~
 
-Crypto 的 research run 还必须使用 --research-plan <plan.json> 提供显式研究/执行计划。
+两市场的 research run 均通过 --research-plan <configuration.json> 读取显式研究配置。
+profile、scenario、研究窗口、因子、模型与组合选择都来自该文件；示例位于 configs/research/。
+Crypto 配置的 research_plan 还须给出时间切分与执行假设，每个 UTC 日独立运行。
 研究运行返回不可变尝试标识 run_id；报告只消费指定运行引用的已发布产物。
 默认运行开发区间；没有合法开发冻结产物时，--holdout 必须明确拒绝。
 status 未指定 run_id 时只列已有运行；空目录返回空列表，不规划或启动研究。

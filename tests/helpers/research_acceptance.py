@@ -5,6 +5,8 @@ from __future__ import annotations
 from math import isclose
 from pathlib import Path
 
+import pandas as pd
+
 from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger_windows
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
@@ -18,6 +20,7 @@ from quant_research_platform.contracts.targets import ProducerKind
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
+    bind_research_configuration,
     research_profile,
 )
 from quant_research_platform.research.models.persisted import (
@@ -26,10 +29,11 @@ from quant_research_platform.research.models.persisted import (
 )
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_RESEARCH_DATASET_ID,
-    maker_candidates,
-    taker_candidates,
+    CryptoMakerCandidate,
+    CryptoTakerCandidate,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 from tests.helpers.a_share_raw import write_a_share_raw_fixture
@@ -38,6 +42,7 @@ from tests.helpers.binance_hft import (
     write_binance_hft_run,
     write_hft_funding_fixture,
 )
+from tests.helpers.research_configuration import research_configuration
 
 
 def run_a_share_acceptance(project_root: Path):
@@ -46,14 +51,18 @@ def run_a_share_acceptance(project_root: Path):
     raw_root = project_root / "data/raw"
     write_a_share_raw_fixture(layout)
     profile = research_profile()
+    configuration = research_configuration(name="core6")
+    configuration["windows"]["development"] = {
+        "start": "2019-03-04",
+        "end": "2019-03-15",
+    }
     result = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2019-03-04",
-        end_date="2019-03-15",
+        research_plan=configuration,
         raw_root=raw_root,
     )
+    profile = bind_research_configuration(profile, configuration)
     assert result["status"] == "COMPLETE", [
         (row["target_id"], row["status"], row["reason"])
         for row in result["target_results"]
@@ -116,15 +125,22 @@ def run_crypto_acceptance(project_root: Path):
     write_binance_hft_run(raw, count=90, maker_liquidity=True)
     write_hft_funding_fixture(raw)
     profile = research_profile(CRYPTO_PROFILE_ID)
+    configuration = research_configuration("crypto", "baseline")
+    configuration["research_plan"] = hft_research_plan()
+    configuration["windows"] = {
+        "development": {
+            "start": "1970-01-01T00:00:04",
+            "end": "1970-01-01T00:00:08.500000",
+        },
+        "holdout": configuration["research_plan"]["final_holdout"],
+    }
     result = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id=HFT_RESEARCH_DATASET_ID,
-        start_date="1970-01-01T00:00:04",
-        end_date="1970-01-01T00:00:08.500000",
         raw_root=raw,
-        research_plan=hft_research_plan(),
+        research_plan=configuration,
     )
+    profile = bind_research_configuration(profile, configuration)
     targets = {item["target_id"]: item for item in result["target_results"]}
     assert result["status"] == "COMPLETE", [
         (row["target_id"], row["status"], row["reason"])
@@ -135,10 +151,21 @@ def run_crypto_acceptance(project_root: Path):
     prediction_id = f"{HFT_RESEARCH_DATASET_ID}_predictions"
     assert targets[model_id]["status"] == targets[prediction_id]["status"] == "BUILT"
     evaluations = profile.evaluations.list()
-    assert len(evaluations) == 10
+    assert len(evaluations) == 17
     assert all(targets[item.evaluation_id]["status"] == "BUILT" for item in evaluations)
-    for suffix in ("maker_calibration", "portfolio_statistics"):
-        assert targets[f"{HFT_RESEARCH_DATASET_ID}_{suffix}"]["status"] == "BUILT"
+    candidates = profile.protocol(HFT_RESEARCH_DATASET_ID).portfolio_candidates()
+    makers = tuple(
+        item for item in candidates if isinstance(item, CryptoMakerCandidate)
+    )
+    takers = tuple(
+        item for item in candidates if isinstance(item, CryptoTakerCandidate)
+    )
+    for candidate in makers:
+        if candidate.calibrated:
+            assert targets[candidate.calibration_target_id]["status"] == "BUILT"
+    assert (
+        targets[f"{HFT_RESEARCH_DATASET_ID}_portfolio_statistics"]["status"] == "BUILT"
+    )
     report = research.report_build(
         profile=profile, layout=layout, run_id=result["run_id"]
     )
@@ -148,15 +175,38 @@ def run_crypto_acceptance(project_root: Path):
     assert len(sections["models and validation"]["fold_models"]) == 18
     assert len(sections["OOS prediction"]["outputs"]) == 9
     assert len(sections["factor diagnostics"]["evaluations"]) == 10
+    assert len(sections["model comparison"]["evaluations"]) == 7
+    for comparison in sections["model comparison"]["evaluations"]:
+        evaluation_id = comparison["evaluation_id"]
+        target = targets[evaluation_id]
+        evaluation_root = layout.instance_root(
+            layout.semantic_artifact_root("crypto", evaluation_id),
+            target["instance_identity"],
+        )
+        metrics = pd.read_parquet(
+            native_filesystem_path(
+                evaluation_root / "outputs" / evaluation_id / "metrics.parquet"
+            )
+        )
+        if metrics.empty:
+            assert comparison["status"] == "UNDEFINED"
+            assert (
+                comparison["metadata"]["evaluation_diagnostics"]["timestamp_count"] == 0
+            )
+        else:
+            counts = metrics.groupby("signal").n_obs.sum()
+            assert len(counts) == 2
+            assert counts.nunique() == 1
+
     assert sections["daily statistics"]["status"] == "UNDEFINED"
     assert all(
         row["status"] == "UNDEFINED"
         for row in sections["daily statistics"]["results"]
         if row["metric_id"] == "sharpe"
     )
-    assert len(taker_candidates()) == 12 and len(maker_candidates()) == 2
+    assert len(takers) == 12 and len(makers) == 2
     with runtime_resource_policy_scope() as policy:
-        for candidate in (*taker_candidates(), *maker_candidates()):
+        for candidate in (*takers, *makers):
             target = targets[candidate.target_id]
             assert target["status"] == "BUILT"
             root = layout.instance_root(

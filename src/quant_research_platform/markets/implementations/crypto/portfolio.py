@@ -35,8 +35,6 @@ from quant_research_platform.research.predictions.alignment import (
 )
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_EXECUTION_CONTEXT_COLUMNS,
-    HFT_MAKER_CALIBRATION_MODEL_IDS,
-    HFT_MODEL_HORIZON_MS,
     execution_windows,
 )
 from quant_research_platform.runtime.resources import (
@@ -291,7 +289,9 @@ def produce_taker_ledger(
             ),
             decisions(),
             prediction_column="prediction_score",
-            prediction_horizon_ms=HFT_MODEL_HORIZON_MS,
+            prediction_horizon_ms=protocol_manifest["model_scopes"][candidate.model_id][
+                "label_horizon_ms"
+            ],
             config=config,
             observed_coverage=coverage,
             resource_policy=resource_policy,
@@ -323,10 +323,10 @@ def _validation_rows(artifact, *, fold_id, model_id, asset_id):
                     yield row
 
 
-def _paired_validation(artifact, fold_id, asset_id):
+def _paired_validation(artifact, fold_id, asset_id, model_ids):
     streams = [
         _validation_rows(artifact, fold_id=fold_id, model_id=model, asset_id=asset_id)
-        for model in HFT_MAKER_CALIBRATION_MODEL_IDS
+        for model in model_ids
     ]
     with closing_iterator(streams[0]), closing_iterator(streams[1]):
         price, proxy = (next(stream, None) for stream in streams)
@@ -383,10 +383,12 @@ def produce_maker_calibration(
     read_trades,
     read_model_artifact,
     symbol,
+    asset_id,
+    model_ids,
     market_type,
 ):
     plan = protocol_manifest["research_plan"]
-    config = _maker_config(plan, "btc_usdt", calibration=True)
+    config = _maker_config(plan, asset_id, calibration=True)
     panel = _panel(layout, upstream_identities)
     model_target = f"{protocol_manifest['scenario_id']}_models"
     models = read_model_artifact(
@@ -602,7 +604,7 @@ def produce_maker_calibration(
                         end_ns=cutoff,
                     ),
                     read_trades(run, symbol=symbol, end_ms=cutoff // 1_000_000),
-                    _paired_validation(models, fold["fold_id"], "btc_usdt"),
+                    _paired_validation(models, fold["fold_id"], asset_id, model_ids),
                     config=config,
                     observed_coverage=coverage,
                     trade_coverage=trade_coverage,
@@ -677,7 +679,7 @@ def produce_maker_ledger(
     with handle_preserving_primary(ExitStack()) as resources:
         calibrations = None
         if candidate.calibrated:
-            target = f"{protocol_manifest['scenario_id']}_maker_calibration"
+            target = candidate.calibration_target_id
             artifact = read_statistics_artifact(
                 layout.target_root(target, Path("__missing_calibration__")),
                 expected_identity=upstream_identities[target],
@@ -714,7 +716,7 @@ def produce_maker_ledger(
                         read_prediction_bundle=read_prediction_bundle,
                         output_window=output_window,
                     )
-                    for model in HFT_MAKER_CALIBRATION_MODEL_IDS
+                    for model in candidate.model_ids
                 ]
                 with closing_iterator(streams[0]), closing_iterator(streams[1]):
                     for price, proxy in zip_longest(*streams):
@@ -1111,7 +1113,8 @@ def validate_maker_calibration(artifact, envelope):
                 expiry = buy.prediction_end.value
                 if not (
                     beginning <= decision <= cutoff
-                    and expiry == decision + protocol["label_horizon_ms"] * 1000000
+                    and expiry
+                    == decision + protocol["maker_quote_horizon_ms"] * 1000000
                     and expiry <= buy.label_available_at.value <= cutoff
                 ):
                     raise ValueError("crypto_calibration_outcome_not_mature")
@@ -1192,7 +1195,8 @@ def validate_maker_calibration(artifact, envelope):
                                     new_order=order,
                                     active_order=None,
                                     commands=(),
-                                    lifetime_ns=protocol["label_horizon_ms"] * 1000000,
+                                    lifetime_ns=protocol["maker_quote_horizon_ms"]
+                                    * 1000000,
                                     replace_quantity=row.quote_quantity,
                                 )
                             ) as response:

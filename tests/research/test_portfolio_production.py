@@ -12,6 +12,7 @@ import pytest
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
 )
+from quant_research_platform.compute.market_model import MarketModelRiskStyles
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
@@ -41,7 +42,6 @@ from quant_research_platform.research.portfolios.accounting import (
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskEstimate,
     FactorRiskState,
-    MarketModelRiskStyles,
 )
 from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope

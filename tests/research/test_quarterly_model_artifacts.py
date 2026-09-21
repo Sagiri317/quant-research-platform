@@ -41,8 +41,8 @@ from quant_research_platform.research.models.persisted import (
     write_quarterly_model_artifact,
 )
 from quant_research_platform.research.models.production import (
-    _a_share_trial_specs,
     _fit_selected_model_result,
+    _refit_model_spec,
 )
 from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
@@ -57,7 +57,6 @@ from quant_research_platform.research.models.trial_selection import (
 )
 from quant_research_platform.research.predictions import runner
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.research.protocols.a_share import resolve_trial_parameters
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -65,10 +64,12 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research as research_workflow
+from tests.helpers.research_configuration import configured_models
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.prediction_output_helpers import write_prediction_result
 from tests.research.workflow_test_support import (
+    QUARTERLY_FIXTURE_PROTOCOL,
     _column_predictor,
     _fold,
     _metadata,
@@ -120,11 +121,23 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     from quant_research_platform.research.models.supervised import preflight_model_specs
     from quant_research_platform.storage.manifests import read_qrp_json
 
-    protocol = a_share.protocol("fusion_nf_expectations", factor_scope="full")
+    protocol = a_share.protocol("fusion_nf_expectations")
     specs = tuple(
         replace(spec, label_column="label")
-        for spec in a_share.model_specs(protocol.scenario_id, factor_scope="full")
+        for spec in configured_models(protocol.scenario_id, factor_scope="full")
     )
+    protocol_payload = {
+        **protocol.manifest(),
+        "research_configuration": {
+            "models": [
+                {
+                    "model_id": spec.model_id,
+                    "hyperparameters": dict(spec.hyperparameters),
+                }
+                for spec in specs
+            ]
+        },
+    }
     preflight_model_specs(specs)
     inputs = tuple(
         dict.fromkeys(column for spec in specs for column in spec.input_columns)
@@ -147,7 +160,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
             _fold(1),
             family_id=spec.model_id,
             model_id=spec.model_id,
-            protocol=protocol.manifest(),
+            protocol=protocol_payload,
             model_spec=spec,
             root_seed=42,
         )
@@ -181,7 +194,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
         upstream_identities={"fixture": "d" * 64},
         semantic_metadata={
             "target_contract": {
-                "protocol": protocol.manifest(),
+                "protocol": protocol_payload,
                 "model_specs": [{"model_id": spec.model_id} for spec in specs],
             }
         },
@@ -195,11 +208,11 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
             result, lease = _fit_selected_model_result(
                 dataset_spec=dataset,
                 selected_spec=spec,
+                candidate_parameters=dict(spec.hyperparameters),
                 chunks=chunks,
                 fitting_cutoff="2018-12-31",
                 quarter_id="2019Q1",
                 root_seed=42,
-                config_index=0,
             )
             item = QuarterlyModelResult(
                 _fold(1), spec.model_id, result, spec.model_id, selection, (reference,)
@@ -303,14 +316,12 @@ def _envelope(*, software_identity="c" * 64) -> object:
         upstream_identities={"fixture": "d" * 64},
         semantic_metadata={
             "target_contract": {
-                "protocol": {"fixture": True},
+                "protocol": QUARTERLY_FIXTURE_PROTOCOL,
                 "model_specs": [
-                    {"model_id": name}
-                    for name in (
-                        "linear_regression",
-                        "equal_weight_rank_ensemble",
-                        "ic_weighted_rank_ensemble",
-                    )
+                    {"model_id": item["model_id"]}
+                    for item in QUARTERLY_FIXTURE_PROTOCOL["research_configuration"][
+                        "models"
+                    ]
                 ],
             }
         },
@@ -1349,22 +1360,19 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
         label_column="label",
         random_seed=999,
     )
-    q1_specs = _a_share_trial_specs(
-        base,
-        n_train=10,
-        resolve_trial_parameters=resolve_trial_parameters,
-        quarter_id="2019Q1",
-        root_seed=42,
-    )
-    q2_specs = _a_share_trial_specs(
-        base,
-        n_train=10,
-        resolve_trial_parameters=resolve_trial_parameters,
-        quarter_id="2019Q2",
-        root_seed=42,
-    )
-    assert q1_specs[0].random_seed != q2_specs[0].random_seed
-    assert q1_specs[0].random_seed != base.random_seed
+    refits = [
+        _refit_model_spec(
+            base,
+            n_train=10,
+            candidate_parameters={"regularization_strength": 0.1},
+            quarter_id=quarter,
+            root_seed=42,
+        )
+        for quarter in ("2019Q1", "2019Q2")
+    ]
+    assert refits[0].random_seed != refits[1].random_seed
+    assert refits[0].random_seed != base.random_seed
+    assert dict(refits[0].hyperparameters) == {"alpha": 1.0}
 
     captured: list[int] = []
 
@@ -1379,6 +1387,7 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
     _fit_selected_model_result(
         dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
         selected_spec=base,
+        candidate_parameters=dict(base.hyperparameters),
         chunks=lambda *_args, **_kwargs: (
             pd.DataFrame(
                 {
@@ -1394,7 +1403,6 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
         fitting_cutoff="2018-12-31",
         quarter_id="2019Q1",
         root_seed=42,
-        config_index=0,
     )
     assert captured == [
         derive_seed(
@@ -1406,6 +1414,7 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
 def test_a_share_evaluation_catalog_contains_all_formal_scenarios() -> None:
     assert {
         "pv_all_evaluation",
+        "pv_expanded_evaluation",
         "fusion_nf_core_evaluation",
         "fusion_nf_expectations_evaluation",
     } == {spec.evaluation_id for spec in research_profile().evaluations.list()}
@@ -1557,7 +1566,23 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         model_selection_validation_start="2018-01-01",
         model_selection_validation_end="2018-12-31",
     )
-    protocol = {"fixture": True}
+    from tests.helpers.research_configuration import research_configuration
+
+    declared_ridge = next(
+        item
+        for item in research_configuration()["models"]
+        if item["model_algorithm"] == "ridge_regression"
+    )
+    configuration = {
+        "models": [
+            {
+                "model_id": "ridge",
+                "hyperparameters": dict(base.hyperparameters),
+                "parameter_candidates": declared_ridge["parameter_candidates"],
+            }
+        ]
+    }
+    protocol = {"fixture": True, "research_configuration": configuration}
     envelope = build_business_manifest_envelope(
         logical_artifact_id="model-artifact",
         schema_identity=canonical_json_hash(
@@ -1596,19 +1621,22 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             quarter=_fold(1),
             holdout_window={"start": "2020-01-01", "end": "2020-12-31"},
             backend_versions={"sklearn": "test"},
+            research_configuration=configuration,
         )
         selected, index = winners["ridge"], indices["ridge"]
         assert (
-            index == 3 and selected.hyperparameters["alpha"] == trial_alpha
+            index == 0 and selected.hyperparameters["alpha"] == trial_alpha
         )  # Retained training rows times the selected lambda 10.
         result, lease = _fit_selected_model_result(
             dataset_spec=dataset,
             selected_spec=selected,
+            candidate_parameters=configuration["models"][0]["parameter_candidates"][
+                index
+            ],
             chunks=chunks,
             fitting_cutoff="2018-12-31",
             quarter_id="2019Q1",
             root_seed=42,
-            config_index=index,
         )
         assert result.prediction_model.estimator.alpha == refit_alpha
         quarterly = QuarterlyModelResult(
@@ -1718,7 +1746,11 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                     altered["hyperparameters"]["alpha"] *= 2
                     altered["resolved_hyperparameters"]["alpha"] *= 2
                 elif mutation == "winner":
-                    loser = plan.candidate_ids[0]
+                    loser = next(
+                        candidate
+                        for candidate in plan.candidate_ids
+                        if candidate != selected.model_id
+                    )
                     entry["model_id"] = loser
                     payload["selection"]["selected_model_id"] = loser
                     payload["selection"]["families"][0]["selected_config_id"] = loser
@@ -1817,6 +1849,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                 quarter=_fold(1),
                 holdout_window={"start": "2020-01-01", "end": "2020-12-31"},
                 backend_versions={"sklearn": "test"},
+                research_configuration=configuration,
             )
         )
         assert later_indices == indices
@@ -1825,11 +1858,13 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         later, later_lease = _fit_selected_model_result(
             dataset_spec=dataset,
             selected_spec=later_winners["ridge"],
+            candidate_parameters=configuration["models"][0]["parameter_candidates"][
+                later_indices["ridge"]
+            ],
             chunks=chunks,
             fitting_cutoff="2018-12-31",
             quarter_id="2019Q1",
             root_seed=42,
-            config_index=later_indices["ridge"],
         )
         try:
             np.testing.assert_array_equal(before, later.prediction_model.predict(probe))
@@ -2440,7 +2475,12 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                     tie_break_order=("linear",),
                     time_window=TimeWindow("2019-01-01", "2019-03-31"),
                     resource_policy=policy,
-                    protocol_manifest=a_share.protocol("pv_all").manifest(),
+                    protocol_manifest={
+                        **a_share.protocol("pv_all").manifest(),
+                        "research_configuration": {
+                            "models": [{"model_id": "linear", "hyperparameters": {}}]
+                        },
+                    },
                     run_id="snapshot",
                     research_protocol_identity="a" * 64,
                     model_target_id="snapshot_model",

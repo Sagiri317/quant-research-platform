@@ -894,7 +894,8 @@ def _json_native_mapping(
         for key, item in value.items():
             if type(key) is not str:
                 raise ValueError("qrp_json_non_string_key")
-            _utf8_bytes(key)
+            if not key.isascii():
+                _utf8_bytes(key)
             result[key] = _json_native_value(
                 item,
                 active=active,
@@ -908,19 +909,21 @@ def _json_native_mapping(
 def _json_native_value(value: object, *, active: set[int], depth: int) -> Any:
     if depth > _MAX_NESTING_DEPTH:
         raise ValueError("qrp_json_recursion_limit")
-    if value is None or type(value) is bool:
+    kind = type(value)
+    if kind is str:
+        if not value.isascii():
+            _utf8_bytes(value)
         return value
-    if type(value) is int:
+    if value is None or kind is bool:
+        return value
+    if kind is int:
         _validate_integer_size(value, error="qrp_json_integer_too_large")
         return value
-    if type(value) is float:
+    if kind is float:
         if not math.isfinite(value):
             raise ValueError("qrp_json_nonfinite_number")
         return value
-    if type(value) is str:
-        _utf8_bytes(value)
-        return value
-    if type(value) is list:
+    if kind is list:
         identity = id(value)
         if identity in active:
             raise ValueError("qrp_json_cycle")
@@ -932,7 +935,7 @@ def _json_native_value(value: object, *, active: set[int], depth: int) -> Any:
             ]
         finally:
             active.remove(identity)
-    if type(value) is dict:
+    if kind is dict:
         return _json_native_mapping(value, active=active, depth=depth)
     raise ValueError("qrp_json_unsupported_value")
 

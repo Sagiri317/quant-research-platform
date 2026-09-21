@@ -269,3 +269,133 @@ def test_invalid_slice_range_is_not_published(tmp_path, offset, count):
             byte_budget=1024**2,
         )
     assert not (tmp_path / "published").exists()
+
+
+@pytest.mark.parametrize(
+    "exchange,symbol,channels",
+    [
+        ("binance", "btcusdt", ("depth", "depthSnapshot", "aggTrade")),
+        (
+            "binance-futures",
+            "solusdt",
+            ("depth", "depthSnapshot", "aggTrade", "markPrice"),
+        ),
+        ("binance-futures", "ethusdt", ("openInterest",)),
+    ],
+)
+def test_approved_native_scopes_publish_and_reopen(
+    tmp_path, exchange, symbol, channels
+):
+    from quant_research_platform.sources.tardis.replay import open_tardis_archive
+
+    if channels == ("openInterest",):
+        native = (
+            "2026-09-01T00:00:01Z "
+            + json.dumps(
+                {
+                    "stream": symbol + "@openInterest",
+                    "generated": True,
+                    "data": {
+                        "symbol": symbol.upper(),
+                        "openInterest": "2",
+                        "time": 1788220801000,
+                    },
+                }
+            )
+            + "\n"
+        ).encode()
+    else:
+        native = _snapshot().replace(b"btcusdt", symbol.encode())
+    slices = _slices(tmp_path / "input", native, count=1)
+    root = tmp_path / "archive"
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2)
+    ) as policy:
+        result = import_slices(
+            root,
+            date="2026-09-01",
+            slices=slices,
+            exchange=exchange,
+            symbols=(symbol,),
+            channels=channels,
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        assert result["exchange"] == exchange
+        assert result["symbols"] == [symbol]
+        assert result["requested_channels"] == list(channels)
+        with open_tardis_archive(root, resource_policy=policy) as source:
+            assert source.manifest == result
+            assert source.source_identity["manifest_hash"]
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "exchange,symbols,channels",
+    [
+        ("bybit", ("btcusdt",), ("depth",)),
+        ("binance", ("solusdt",), ("depth",)),
+        ("binance", ("btcusdt",), ("markPrice",)),
+        ("binance-futures", ("xrpusdt",), ("depth",)),
+        ("binance-futures", ("btcusdt",), ("not_allowed",)),
+    ],
+)
+def test_native_scope_rejects_unapproved_requests(
+    tmp_path, exchange, symbols, channels
+):
+    with pytest.raises(ValueError, match="tardis_request_scope_invalid"):
+        import_slices(
+            tmp_path / "out",
+            date="2026-09-01",
+            slices=[],
+            exchange=exchange,
+            symbols=symbols,
+            channels=channels,
+            byte_budget=1024,
+        )
+    assert not (tmp_path / "out").exists()
+
+
+def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
+    from quant_research_platform.sources.tardis.raw import _ObservedStreams
+
+    with (
+        runtime_resource_policy_scope(
+            capture_test_policy(available_memory_bytes=64 * 1024**2)
+        ) as policy,
+        policy.lease("test.trade_identities", 0) as trade_lease,
+    ):
+        tracker = _ObservedStreams(exchange="binance", trade_lease=trade_lease)
+
+        def depth(last, first=None):
+            return {
+                "stream": "btcusdt@depth",
+                "data": {"U": last if first is None else first, "u": last},
+            }
+
+        first, _, gap = tracker.observe(0, 1, "2026-07-01T00:00:00Z", depth(10))
+        assert gap is None
+        for number, last in ((2, 10), (3, 9)):
+            identity, closed, gap = tracker.observe(
+                0, number, f"2026-07-01T00:00:0{number}Z", depth(last)
+            )
+            assert identity == first and closed == [] and gap is None
+            assert tracker.previous[("btcusdt", "depth")][0] == 10
+        identity, _, gap = tracker.observe(0, 4, "2026-07-01T00:00:04Z", depth(11))
+        assert identity == first and gap is None
+        _, closed, gap = tracker.observe(0, 5, "2026-07-01T00:00:05Z", None)
+        assert len(closed) == 1 and gap["reason"] == "vendor_disconnect"
+        identity, _, gap = tracker.observe(0, 6, "2026-07-01T00:00:06Z", depth(11))
+        assert identity != first and gap is None
+        _, closed, gap = tracker.observe(0, 7, "2026-07-01T00:00:07Z", depth(14))
+        assert len(closed) == 1
+        assert gap["reason"] == "native_sequence_gap"
+        assert gap["previous_id"] == 11
+        trade = {"stream": "btcusdt@aggTrade", "data": {"a": 1}}
+        tracker.observe(0, 8, "2026-07-01T00:00:08Z", trade)
+        trade["data"]["q"] = "2"
+        with pytest.raises(ValueError, match="sequence_non_monotonic"):
+            tracker.observe(0, 9, "2026-07-01T00:00:09Z", trade)
+
+        tracker.trade_fingerprints.clear()
+    assert policy.used_memory_bytes == 0

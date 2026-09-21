@@ -8,6 +8,7 @@ import sys
 import tempfile
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import (
@@ -25,7 +26,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
-    RESEARCH_SYMBOLS,
+    SPOT_MARKET_TYPE,
 )
 from quant_research_platform.sources.binance.replay import (
     ObservationCoverage,
@@ -36,15 +37,16 @@ from quant_research_platform.sources.binance.replay import (
 )
 from quant_research_platform.sources.binance.validation import strict_iso_timestamp
 from quant_research_platform.sources.tardis.raw import (
-    CHANNELS,
     EXCHANGE,
     SCHEMA_ID,
     SLICE_MINUTES,
-    SYMBOLS,
+    STATE_CHANNELS,
     _date,
     _filename,
     _ObservedStreams,
+    _request_scope,
     _request_url,
+    _stream_suffix,
     iter_native_slice,
 )
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
@@ -111,20 +113,22 @@ def _validate_manifest(value):
         or value["schema_id"] != SCHEMA_ID
         or value["source_id"] != "tardis"
         or value["venue"] != "binance"
-        or value["exchange"] != EXCHANGE
-        or value["symbols"] != list(SYMBOLS)
-        or value["requested_channels"] != list(CHANNELS)
+        or type(value["symbols"]) is not list
+        or type(value["requested_channels"]) is not list
         or value["observation_clock"] != "vendor_utc"
         or value["ordering"] != "slice_offset_then_native_line"
     ):
         raise ValueError("tardis_manifest_invalid")
     _date(value["date"])
+    _request_scope(
+        value["exchange"], tuple(value["symbols"]), tuple(value["requested_channels"])
+    )
     if type(value["files"]) is not list or not value["files"]:
         raise ValueError("tardis_manifest_invalid")
     streams = {
-        f"{symbol}@{channel}"
-        for symbol in SYMBOLS
-        for channel in ("depth@0ms", "depthSnapshot", "aggTrade", "markPrice@1s")
+        f"{symbol}@{_stream_suffix(channel, value['exchange'])}"
+        for symbol in value["symbols"]
+        for channel in value["requested_channels"]
     }
     first = value["files"][0]
     if (
@@ -142,8 +146,16 @@ def _validate_manifest(value):
             or type(item["offset_minutes"]) is not int
             or item["offset_minutes"] != offset
             or item["slice_minutes"] != SLICE_MINUTES
-            or item["path"] != _filename(value["date"], offset)
-            or item["request_url"] != _request_url(value["date"], offset)
+            or item["path"]
+            != _filename(value["date"], offset, exchange=value["exchange"])
+            or item["request_url"]
+            != _request_url(
+                value["date"],
+                offset,
+                exchange=value["exchange"],
+                symbols=tuple(value["symbols"]),
+                channels=tuple(value["requested_channels"]),
+            )
             or type(item["record_counts"]) is not dict
             or not set(item["record_counts"]) <= streams
             or any(type(n) is not int or n <= 0 for n in item["record_counts"].values())
@@ -167,7 +179,9 @@ def _validate_manifest(value):
         ):
             raise ValueError("tardis_manifest_invalid")
     for key in ("price_units", "snapshot_limits"):
-        if type(value[key]) is not dict or not set(value[key]) <= set(RESEARCH_SYMBOLS):
+        if type(value[key]) is not dict or not set(value[key]) <= {
+            symbol.upper() for symbol in value["symbols"]
+        }:
             raise ValueError("tardis_manifest_invalid")
     for unit in value["price_units"].values():
         validate_price_unit(unit)
@@ -177,7 +191,7 @@ def _validate_manifest(value):
     _descriptor(value["observation_intervals"], "observation_intervals.jsonl.gz")
 
 
-def _decode_interval(value, *, markets):
+def _decode_interval(value, *, markets, symbols):
     try:
         if (
             type(value) is not dict
@@ -185,18 +199,18 @@ def _decode_interval(value, *, markets):
             != {"observation_id", "symbol", "data_kind", "start_ns", "end_ns"}
             or type(value["observation_id"]) is not str
             or not value["observation_id"].startswith("tardis:")
-            or value["symbol"] not in RESEARCH_SYMBOLS
+            or value["symbol"] not in symbols
             or value["data_kind"] not in {"depth", "agg_trades"}
             or any(type(value[key]) is not int for key in ("start_ns", "end_ns"))
             or not 0 <= value["start_ns"] < value["end_ns"]
-            or markets != {FUTURES_MARKET_TYPE}
+            or markets not in ({FUTURES_MARKET_TYPE}, {SPOT_MARKET_TYPE})
         ):
             raise ValueError("tardis_observation_interval_invalid")
         identity = value["observation_id"]
         kind = value["data_kind"]
         return (
             identity,
-            FUTURES_MARKET_TYPE,
+            next(iter(markets)),
             kind,
             value["symbol"].lower() + "@" + kind,
             identity if kind == "depth" else None,
@@ -227,7 +241,12 @@ class TardisArchive:
         }
 
     def market_metadata(self, market_type, symbol):
-        if market_type != FUTURES_MARKET_TYPE or symbol not in RESEARCH_SYMBOLS:
+        expected = (
+            FUTURES_MARKET_TYPE
+            if self.manifest["exchange"] == EXCHANGE
+            else SPOT_MARKET_TYPE
+        )
+        if market_type != expected or symbol.lower() not in self.manifest["symbols"]:
             raise ValueError("tardis_market_identity_invalid")
         if symbol not in self.manifest["price_units"]:
             raise PortfolioTargetBlocked("tardis_price_observations_missing")
@@ -251,21 +270,61 @@ class TardisArchive:
         if self._coverage_index.bounds(
             row["observation_id"],
             symbol=row["symbol"],
-            market_type=FUTURES_MARKET_TYPE,
+            market_type=FUTURES_MARKET_TYPE
+            if self.manifest["exchange"] == EXCHANGE
+            else SPOT_MARKET_TYPE,
             data_kind=row["data_kind"],
         ) != (row["start_ns"], row["end_ns"]):
             raise ValueError("tardis_observation_interval_mismatch")
+
+    def iter_state_observations(self, *, symbol):
+        """Yield native states with observed clocks and disconnect generations."""
+        if (
+            self.manifest["exchange"] != EXCHANGE
+            or symbol.lower() not in self.manifest["symbols"]
+            or not set(STATE_CHANNELS) <= set(self.manifest["requested_channels"])
+        ):
+            raise ValueError("tardis_derivative_scope_invalid")
+        epoch = 0
+        for member in self.manifest["files"]:
+            records = iter_native_slice(
+                self.root / member["path"],
+                date=self.manifest["date"],
+                offset_minutes=member["offset_minutes"],
+                expected_sha256=member["sha256"],
+                resource_policy=self.resource_policy,
+                exchange=self.manifest["exchange"],
+                symbols=tuple(self.manifest["symbols"]),
+                channels=tuple(self.manifest["requested_channels"]),
+            )
+            with closing_iterator(records):
+                for _number, timestamp, value in records:
+                    if value is None:
+                        epoch += 1
+                        continue
+                    raw_symbol, channel, *_ = value["stream"].split("@")
+                    if raw_symbol.upper() == symbol and channel in STATE_CHANNELS:
+                        observed = strict_iso_timestamp(
+                            timestamp, error="tardis_observed_time_invalid"
+                        ).value
+                        yield observed, channel, dict(value["data"]), epoch
 
     def iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
         metadata = self.market_metadata(market_type, symbol)
         depth = tuple(data_kinds) == ("depth_snapshot", "depth")
         if not depth and tuple(data_kinds) != ("agg_trades",):
             raise ValueError("tardis_market_record_kind_invalid")
-        tracker = _ObservedStreams()
         prefix = 0
         active_observation = None
         snapshot_ready = False
         with ExitStack() as resources:
+            trade_lease = resources.enter_context(
+                self.resource_policy.lease("tardis.trade_identities", 0)
+            )
+            tracker = _ObservedStreams(
+                self.manifest["exchange"], trade_lease=trade_lease
+            )
+            resources.callback(tracker.trade_fingerprints.clear)
             spool = None
             if depth:
                 require_free_disk_headroom(
@@ -282,6 +341,9 @@ class TardisArchive:
                         offset_minutes=member["offset_minutes"],
                         expected_sha256=member["sha256"],
                         resource_policy=self.resource_policy,
+                        exchange=self.manifest["exchange"],
+                        symbols=tuple(self.manifest["symbols"]),
+                        channels=tuple(self.manifest["requested_channels"]),
                     )
                     with closing_iterator(records):
                         try:
@@ -300,13 +362,14 @@ class TardisArchive:
                                 )
                                 for interval in closed:
                                     self._check_interval(interval)
-                                if value is None:
+                                if value is None or identity is None:
                                     continue
                                 raw_symbol, channel, *_ = value["stream"].split("@")
-                                if (
-                                    raw_symbol.upper() != symbol
-                                    or channel == "markPrice"
-                                ):
+                                if raw_symbol.upper() != symbol or channel not in {
+                                    "depth",
+                                    "depthSnapshot",
+                                    "aggTrade",
+                                }:
                                     value = None
                                     continue
                                 if depth != (channel in ("depth", "depthSnapshot")):
@@ -319,11 +382,19 @@ class TardisArchive:
                                     if depth
                                     else "agg_trades"
                                 )
+                                payload = value["data"]
+                                if market_type == SPOT_MARKET_TYPE:
+                                    payload = dict(payload)
+                                    # Tardis maps native ms/us clocks by magnitude.
+                                    # Raw bytes retain exact provider clocks.
+                                    for clock in ("E", "T"):
+                                        if clock in payload and payload[clock] > 10**15:
+                                            payload[clock] //= 1000
                                 record = {
                                     "source_sequence": prefix + number,
                                     "market_type": market_type,
                                     "data_kind": kind,
-                                    "payload": value["data"],
+                                    "payload": payload,
                                     "receive_time": timestamp,
                                     "receive_monotonic_ns": None,
                                     "observation_id": identity,
@@ -452,9 +523,16 @@ def open_tardis_archive(root, resource_policy=None):
                 index = ObservationCoverageIndex(
                     root,
                     manifest["observation_intervals"],
-                    markets={FUTURES_MARKET_TYPE},
+                    markets={
+                        FUTURES_MARKET_TYPE
+                        if manifest["exchange"] == EXCHANGE
+                        else SPOT_MARKET_TYPE
+                    },
                     resource_policy=policy,
-                    decode_interval=_decode_interval,
+                    decode_interval=partial(
+                        _decode_interval,
+                        symbols={symbol.upper() for symbol in manifest["symbols"]},
+                    ),
                 )
                 run = TardisArchive(
                     root,
@@ -498,3 +576,18 @@ def open_tardis_archive(root, resource_policy=None):
                 if run is not None:
                     run.manifest = {}
                 _raw = manifest = members = identities = _after_raw = after = run = None
+
+
+def native_source_identity(root, _target_id, *, exchange, symbols, channels):
+    """Bind an exact approved native information-source scope."""
+    try:
+        with open_tardis_archive(root) as archive:
+            if (
+                archive.manifest["exchange"] != exchange
+                or set(archive.manifest["symbols"]) != set(symbols)
+                or not set(channels) <= set(archive.manifest["requested_channels"])
+            ):
+                raise ValueError("tardis_auxiliary_scope_invalid")
+            return canonical_json_hash(archive.source_identity)
+    except FileNotFoundError:
+        return None

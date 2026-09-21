@@ -375,8 +375,16 @@ def _write_evaluation_artifact_chunks(
                     skipped_timestamp_count += int(metadata["skipped_timestamp_count"])
                     chunk_min = metadata["min_timestamp"]
                     chunk_max = metadata["max_timestamp"]
-                    if (
-                        chunk_timestamp_count <= 0
+                    if chunk_timestamp_count == 0:
+                        if (
+                            not metrics.empty
+                            or not grouped.empty
+                            or chunk_min is not None
+                            or chunk_max is not None
+                        ):
+                            raise ValueError("evaluation_diagnostics_inconsistent")
+                    elif (
+                        chunk_timestamp_count < 0
                         or not isinstance(chunk_min, str)
                         or not isinstance(chunk_max, str)
                     ):

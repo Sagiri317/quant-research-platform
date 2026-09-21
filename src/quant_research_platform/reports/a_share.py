@@ -30,6 +30,7 @@ def build_a_share_report(
     *, record: ResearchRunRecord, evidence: Mapping[str, object]
 ) -> dict[str, object]:
     run_payload = record.payload()
+    configuration = run_payload["protocol"]["research_configuration"]
     references = evidence.get("references")
     statistics = evidence.get("statistics")
     portfolios = evidence.get("portfolios")
@@ -153,6 +154,13 @@ def build_a_share_report(
         sections["OOS prediction"]["reality_checks"] = statistics[
             "model_reality_checks"
         ]
+    if configuration["stage"] == "evaluation":
+        sections["factor diagnostics"] = dict(evidence["factor_evaluation"])
+        for name in ("model selection", "OOS prediction", "robustness"):
+            sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
+    if not configuration["portfolios"]:
+        for name in ("portfolio", "cost", "risk", "capacity", "attribution"):
+            sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
     return {
         "schema_id": REPORT_SCHEMA_ID,
         "run_id": record.run_id,

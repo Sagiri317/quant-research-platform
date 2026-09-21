@@ -15,10 +15,9 @@ from quant_research_platform.research.factors.price_volume.calculations import (
     calculate_price_volume_factors,
 )
 from quant_research_platform.research.factors.price_volume.definitions import (
-    FORMAL_CORE_PRICE_VOLUME_FACTORS,
-    FORMAL_PRICE_VOLUME_FACTORS,
     price_volume_factor_definitions,
 )
+from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 
 UNIQUE_FACTORS = (
     "momentum_20d",
@@ -42,14 +41,11 @@ UNIQUE_FACTORS = (
 
 def test_price_volume_selections_use_one_definition_and_minimum_inputs():
     binding = dict(market_id=MarketId("a_share"), required_input_data_id="price_volume")
-    standard = price_volume_factor_definitions(**binding)
-    assert standard == price_volume_factor_definitions(**binding, preset="formal")
+    standard = price_volume_factor_definitions(**binding, factor_columns=PV25_FACTORS)
     assert factor_lookback_bars(standard) == 252
-    assert tuple(item.output_column for item in standard) == FORMAL_PRICE_VOLUME_FACTORS
-    core = price_volume_factor_definitions(**binding, preset="core")
-    assert (
-        tuple(item.output_column for item in core) == FORMAL_CORE_PRICE_VOLUME_FACTORS
-    )
+    assert tuple(item.output_column for item in standard) == PV25_FACTORS
+    core = price_volume_factor_definitions(**binding, factor_columns=CORE6_FACTORS)
+    assert tuple(item.output_column for item in core) == CORE6_FACTORS
     reversal = price_volume_factor_definitions(
         **binding, factor_columns=("reversal_5d",)
     )
@@ -72,7 +68,7 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
             "total_market_cap": x * 2_000.0,
         }
     )
-    names = (*FORMAL_PRICE_VOLUME_FACTORS, *UNIQUE_FACTORS)
+    names = (*PV25_FACTORS, *UNIQUE_FACTORS)
     definitions = price_volume_factor_definitions(**binding, factor_columns=names)
     assert len(definitions) == 41
     window = TimeWindow(
@@ -250,8 +246,10 @@ def test_price_volume_rejects_removed_names_before_calculation():
             )
 
 
-def test_price_volume_skew_preserves_native_single_window_rounding():
-    values = np.random.default_rng(20260910).normal(size=320)
+@pytest.mark.parametrize("size", [20, 60])
+@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10])
+def test_price_volume_skew_preserves_native_single_window_rounding(size, scale):
+    values = np.random.default_rng(20260910).normal(size=320) * scale
     values[200] = np.nan
     dates = pd.bdate_range("2020-01-01", periods=len(values))
     panel = pd.DataFrame(
@@ -260,17 +258,19 @@ def test_price_volume_skew_preserves_native_single_window_rounding():
     original = panel.copy(deep=True)
     actual = calculate_price_volume_factors(
         panel,
-        factor_columns=("skewness_60d",),
-        output_window=TimeWindow(dates[59].date(), dates[-1].date()),
+        factor_columns=(f"skewness_{size}d",),
+        output_window=TimeWindow(dates[size - 1].date(), dates[-1].date()),
     )
     expected = pd.Series(
         [
-            pd.Series(values[start : start + 60]).skew(skipna=False)
-            for start in range(len(values) - 59)
+            pd.Series(values[start : start + size]).skew(skipna=False)
+            for start in range(len(values) - size + 1)
         ],
-        name="skewness_60d",
+        name=f"skewness_{size}d",
     )
-    pd.testing.assert_series_equal(actual["skewness_60d"], expected, check_exact=True)
+    pd.testing.assert_series_equal(
+        actual[f"skewness_{size}d"], expected, check_exact=True
+    )
     pd.testing.assert_frame_equal(panel, original, check_exact=True)
 
 
@@ -432,3 +432,222 @@ def test_volatility_representable_result_with_extreme_units(name, scale, tmp_pat
     persisted = read_dataset(root)
     pd.testing.assert_frame_equal(persisted, result, check_exact=True)
     assert persisted[name].iloc[-1] == pytest.approx(oracle, rel=2e-15, abs=0)
+
+
+def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
+    from math import sqrt
+
+    from quant_research_platform.research.factors.price_volume.definitions import (
+        PRICE_VOLUME_LIBRARY,
+    )
+
+    names = PRICE_VOLUME_LIBRARY[-9:]
+    x = np.arange(1.0, 251.0)
+    returns = np.resize(np.array([-0.02, 0.0, 0.01, 0.03]), len(x))
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=250),
+            "close": 10.0,
+            "amount": x,
+            "volume": x,
+            "float_market_cap": 1000.0,
+            "period_return": returns,
+        }
+    )
+    result = calculate_price_volume_factors(panel, factor_columns=names)
+    # Last 126 integers are 125..250, mean=187.5; sample variance=n(n+1)/12.
+    # Last 20 returns contain five copies of each of the four values.
+    ret = [-0.02, 0.0, 0.01, 0.03]
+    mu = sum(ret) / 4
+    m2 = sum((r - mu) ** 2 for r in ret) / 4
+    m3 = sum((r - mu) ** 3 for r in ret) / 4
+    expected = {
+        "share_price": 10.0,
+        "avg_amount_126d": 187.5,
+        "amount_cv_126d": sqrt(126 * 127 / 12) / 187.5,
+        "turnover_cv_126d": sqrt(126 * 127 / 12) / 187.5,
+        "amihud_126d": sum(abs(returns[i]) / x[i] for i in range(124, 250)) / 126,
+        "skewness_20d": sqrt(20 * 19) / 18 * m3 / m2**1.5,
+        "top5_return_mean_20d": 0.03,
+        "turnover_250d": 1.255,
+        "abnormal_turnover_20_250": 240.5 / 125.5,
+    }
+    for name, value in expected.items():
+        assert result[name].iloc[-1] == pytest.approx(value, abs=1e-14), name
+        count = (
+            1
+            if name == "share_price"
+            else 250
+            if name in {"turnover_250d", "abnormal_turnover_20_250"}
+            else 20
+            if name in {"skewness_20d", "top5_return_mean_20d"}
+            else 126
+        )
+        assert result[name].iloc[: count - 1].isna().all(), name
+    path = tmp_path / "expanded.parquet"
+    result.to_parquet(path, index=False)
+    pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
+    # A suspended market session stays in the window; absent facts cannot compress it.
+    missing = panel.copy()
+    missing.loc[240, ["amount", "volume", "period_return"]] = np.nan
+    observed = calculate_price_volume_factors(missing, factor_columns=names)
+    assert observed.loc[249, list(names[1:])].isna().all()
+    zero = calculate_price_volume_factors(
+        panel.assign(amount=0.0, volume=0.0, period_return=0.0), factor_columns=names
+    )
+    assert (
+        zero.loc[
+            249,
+            [
+                "amount_cv_126d",
+                "turnover_cv_126d",
+                "abnormal_turnover_20_250",
+                "amihud_126d",
+                "skewness_20d",
+            ],
+        ]
+        .isna()
+        .all()
+    )
+    # Suffix changes cannot affect earlier outputs.
+    future = panel.copy()
+    future.loc[249, ["amount", "volume", "period_return"]] *= 2
+    changed = calculate_price_volume_factors(future, factor_columns=names)
+    pd.testing.assert_frame_equal(changed.iloc[:-1], result.iloc[:-1], check_exact=True)
+
+
+def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
+    from quant_research_platform.compute.market_model import MarketModelRiskState
+    from quant_research_platform.research.protocols.a_share import factor_catalog
+
+    dates = pd.bdate_range("2020-01-01", periods=400)
+    rows = [
+        dict(
+            market_id="a_share",
+            asset_id=asset,
+            timestamp=date,
+            period_return=multiplier * ((i % 11) - 5) / 1000,
+            float_market_cap=1000.0,
+            is_a_share_scope=True,
+            is_trading=True,
+            is_st=False,
+            is_pt=False,
+            listing_age_trading_days=400,
+            close=10.0,
+            adj_close=10.0,
+            volume=10.0,
+            amount=100.0,
+            turnover=0.1,
+        )
+        for i, date in enumerate(dates)
+        for asset, multiplier in (("a", 1), ("b", 3))
+    ]
+    panel = pd.DataFrame(rows)
+    definitions = tuple(
+        d for d in factor_catalog().list() if d.family == "market_model"
+    )
+    result = calculate_factors_for_panel(panel, definitions=definitions)
+    assert result.loc[result.timestamp < dates[252], "beta_252d"].isna().all()
+    assert (
+        result.loc[result.timestamp < dates[311], "residual_volatility_60d"]
+        .isna()
+        .all()
+    )
+    for asset, beta in (("a", 0.5), ("b", 1.5)):
+        tail = result.loc[(result.asset_id == asset) & (result.timestamp >= dates[311])]
+        assert np.allclose(tail.beta_252d, beta, rtol=1e-14, atol=0)
+        assert np.allclose(tail.residual_volatility_60d, 0, atol=1e-16)
+    state = MarketModelRiskState()
+    for _, cross in panel.groupby("timestamp", sort=False):
+        expected = state.observe(cross.assign(eligible=True))
+    last = result.loc[result.timestamp == dates[-1]].set_index("asset_id")
+    assert np.array_equal(last.beta_252d, expected.beta)
+    assert np.array_equal(last.residual_volatility_60d, expected.residual_volatility)
+    # The producer's bounded warmup must equal full-history output.
+    bounded = calculate_factors_for_panel(
+        panel.loc[panel.timestamp >= dates[350 - 312]],
+        definitions=definitions,
+        output_window=TimeWindow(dates[350], dates[-1]),
+    )
+    pd.testing.assert_frame_equal(
+        bounded.reset_index(drop=True),
+        result.loc[result.timestamp >= dates[350]].reset_index(drop=True),
+        check_exact=True,
+    )
+    path = tmp_path / "market_model.parquet"
+    bounded.to_parquet(path, index=False)
+    pd.testing.assert_frame_equal(pd.read_parquet(path), bounded, check_exact=True)
+
+
+def test_batched_volatility_matches_scalar_reference_across_units_and_windows():
+    from statistics import stdev
+
+    rng = np.random.default_rng(7)
+    samples = [rng.normal(size=180) * scale for scale in (1.0, 1e-200, 1e200)]
+    samples.extend(
+        [
+            1.0 + np.arange(180) * np.spacing(1.0),
+            np.resize([-1e308, 1e308], 180),
+            np.full(180, 0.125),
+        ]
+    )
+    for values in samples:
+        values[90] = np.nan
+        panel = pd.DataFrame(
+            {
+                "asset_id": "asset",
+                "timestamp": pd.bdate_range("2020-01-01", periods=len(values)),
+                "period_return": values,
+            }
+        )
+        actual = calculate_price_volume_factors(
+            panel, factor_columns=("volatility_20d", "volatility_60d")
+        )
+        for size in (20, 60):
+            expected = np.full(len(values), np.nan)
+            for stop in range(size, len(values) + 1):
+                window = values[stop - size : stop]
+                if np.isfinite(window).all():
+                    expected[stop - 1] = stdev(window)
+            np.testing.assert_allclose(
+                actual[f"volatility_{size}d"],
+                expected,
+                rtol=2e-15,
+                atol=0,
+                equal_nan=True,
+            )
+
+
+def test_long_rolling_means_match_exact_scalar_windows():
+    from statistics import mean
+
+    values = np.resize(np.array([1e200, -1e200, 1e-200, 3.0, 0.0, 1e200, -1e200]), 400)
+    values[270] = np.nan
+    dates = pd.bdate_range("2020-01-01", periods=len(values))
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": dates,
+            "amount": values,
+            "volume": values,
+            "close": 1.0,
+            "float_market_cap": 1.0,
+        }
+    )
+    result = calculate_price_volume_factors(
+        panel, factor_columns=("avg_amount_126d", "turnover_250d")
+    )
+    for name, size in (("avg_amount_126d", 126), ("turnover_250d", 250)):
+        expected = np.full(len(values), np.nan)
+        for stop in range(size, len(values) + 1):
+            window = values[stop - size : stop]
+            if np.isfinite(window).all():
+                expected[stop - 1] = mean(window)
+        np.testing.assert_array_equal(result[name], expected)
+        bounded = calculate_price_volume_factors(
+            panel.iloc[20:],
+            factor_columns=(name,),
+            output_window=TimeWindow(dates[300], dates[-1]),
+        )
+        np.testing.assert_array_equal(bounded[name], result[name].iloc[300:])

@@ -156,9 +156,11 @@ def validate_evaluation_output_metadata_shape(
         if diagnostics["metric_rows"] < diagnostics["timestamp_count"]:
             raise ValueError("output_manifest_metadata_invalid")
     elif metadata["evaluation_axis"] == "single_asset_time_series":
+        expected_metric_rows = (
+            len(signals) * len(label_columns) if diagnostics["timestamp_count"] else 0
+        )
         if (
-            diagnostics["timestamp_count"] <= 0
-            or diagnostics["metric_rows"] != len(signals) * len(label_columns)
+            diagnostics["metric_rows"] != expected_metric_rows
             or diagnostics["grouped_label_value_rows"] != 0
             or diagnostics["group_spread_summary_rows"] != 0
         ):

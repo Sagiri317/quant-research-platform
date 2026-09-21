@@ -38,6 +38,7 @@ from tests.helpers.binance_hft import (
     _row_timestamp_ms,
     with_test_resource_policy,
 )
+from tests.helpers.research_configuration import research_configuration
 
 simulate_taker = with_test_resource_policy(_simulate_taker)
 simulate_maker = with_test_resource_policy(_simulate_maker)
@@ -646,7 +647,10 @@ def test_maker_quote_schedule_has_no_prediction_surface() -> None:
 
 def test_hft_grid_is_the_only_model_and_label_step_owner() -> None:
     assert HFT_GRID_MS == 100
-    models = build_hft_model_catalog(training_row_bound=1).list()
+    config = research_configuration("crypto", "baseline")
+    for item in config["models"]:
+        item["max_train_rows"] = 1
+    models = build_hft_model_catalog(configuration=config).list()
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
     rows = [
         {

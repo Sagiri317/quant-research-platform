@@ -237,7 +237,11 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
         def validation_chunks(self, *, fold_id, model_id):
             yield panel
 
-    quotes = list(_paired_validation(ValidationArtifact(), "fold", "btc_usdt"))
+    quotes = list(
+        _paired_validation(
+            ValidationArtifact(), "fold", "btc_usdt", ("price_model", "pressure_model")
+        )
+    )
     assert len(quotes) == 1
     assert "segment_id" not in quotes[0]
     fills = []

@@ -42,11 +42,6 @@ from quant_research_platform.research.models.trial_selection import (
     select_prediction_model_spec,
 )
 from quant_research_platform.research.protocols.a_share import (
-    HUBER_LAMBDAS,
-    LASSO_ALPHAS,
-    RF_CONFIGS,
-    RIDGE_LAMBDAS,
-    XGB_CONFIGS,
     model_folds,
     quarter_id_for_fold,
 )
@@ -176,6 +171,7 @@ def build_model_selection_result(
         model_target_id=model_target_id,
         backend_versions=backend_versions,
         holdout_window=protocol_manifest["holdout_window"],
+        research_configuration=protocol_manifest["research_configuration"],
     )
 
 
@@ -199,6 +195,7 @@ def _build_a_share_quarterly_models(
     model_target_id: str,
     backend_versions: Mapping[str, str],
     holdout_window: Mapping[str, object],
+    research_configuration,
 ) -> Iterable[QuarterlyModelResult | OwnedValue[QuarterlyModelResult]]:
     quarters = model_folds(
         sessions,
@@ -261,10 +258,16 @@ def _build_a_share_quarterly_models(
                         quarter=quarter,
                         holdout_window=holdout_window,
                         backend_versions=backend_versions,
+                        research_configuration=research_configuration,
                     )
                 )
                 for family_id, reference in zip(model_ids, trial_ledgers, strict=True):
                     selected_spec = winner_specs[family_id]
+                    selected_configuration = next(
+                        item
+                        for item in research_configuration["models"]
+                        if item["model_id"] == family_id
+                    )
                     model_result, model_lease = _fit_selected_model_result(
                         dataset_spec=dataset_spec,
                         selected_spec=selected_spec,
@@ -274,7 +277,10 @@ def _build_a_share_quarterly_models(
                         ),
                         quarter_id=quarter_id_for_fold(quarter),
                         root_seed=root_seed,
-                        config_index=config_indices[family_id],
+                        candidate_parameters=selected_configuration.get(
+                            "parameter_candidates",
+                            [selected_configuration["hyperparameters"]],
+                        )[config_indices[family_id]],
                     )
                     item = QuarterlyModelResult(
                         quarter=quarter,
@@ -348,7 +354,7 @@ def _fit_selected_model_result(
     fitting_cutoff: str,
     quarter_id: str,
     root_seed: int,
-    config_index: int,
+    candidate_parameters,
 ) -> tuple[fitting.ModelFitResult, MemoryLease | None]:
     n_refit = _count_training_rows(
         dataset_spec, selected_spec, chunks=chunks, train_end=fitting_cutoff
@@ -358,7 +364,7 @@ def _fit_selected_model_result(
         n_train=n_refit,
         quarter_id=quarter_id,
         root_seed=root_seed,
-        config_index=config_index,
+        candidate_parameters=candidate_parameters,
     )
     refit_read_columns = model_training_read_columns(
         dataset_spec.primary_key,
@@ -387,11 +393,25 @@ def _fit_selected_model_result(
     ) else None
 
 
-def _refit_model_spec(selected_spec, *, n_train, quarter_id, root_seed, config_index):
-    from quant_research_platform.research.protocols.a_share import (
-        resolve_trial_parameters,
-    )
+def _resolve_candidate_parameters(algorithm, parameters, n_train):
+    values = dict(parameters)
+    if "regularization_strength" in values:
+        if (
+            algorithm not in {"ridge_regression", "huber_regression"}
+            or "alpha" in values
+        ):
+            raise ValueError("model_regularization_parameters_invalid")
+        values["alpha"] = n_train * values.pop("regularization_strength")
+    if "min_child_weight_fraction" in values:
+        if algorithm != "xgboost_regressor" or "min_child_weight" in values:
+            raise ValueError("model_child_weight_parameters_invalid")
+        values["min_child_weight"] = n_train * values.pop("min_child_weight_fraction")
+    return values
 
+
+def _refit_model_spec(
+    selected_spec, *, n_train, quarter_id, root_seed, candidate_parameters
+):
     return replace(
         selected_spec,
         random_seed=derive_seed(
@@ -401,8 +421,8 @@ def _refit_model_spec(selected_spec, *, n_train, quarter_id, root_seed, config_i
             selected_spec.model_id,
             quarter_id,
         ),
-        hyperparameters=resolve_trial_parameters(
-            selected_spec.model_algorithm, n_train=n_train, config_index=config_index
+        hyperparameters=_resolve_candidate_parameters(
+            selected_spec.model_algorithm, candidate_parameters, n_train
         ),
     )
 
@@ -424,11 +444,8 @@ def _select_model_family_winners(
     quarter: ExperimentFold,
     holdout_window: Mapping[str, object],
     backend_versions: Mapping[str, str],
+    research_configuration,
 ):
-    from quant_research_platform.research.protocols.a_share import (
-        resolve_trial_parameters,
-    )
-
     family_winners: list[dict[str, object]] = []
     trial_ledgers: list[dict[str, str]] = []
     winner_specs: dict[str, object] = {}
@@ -453,16 +470,37 @@ def _select_model_family_winners(
             chunks=chunks,
             train_end=selection_spec.train_end,
         )
-        trial_specs = _a_share_trial_specs(
-            base_spec,
-            n_train=n_train,
-            resolve_trial_parameters=resolve_trial_parameters,
-            quarter_id=quarter_id,
-            root_seed=root_seed,
+        selected = next(
+            item
+            for item in research_configuration["models"]
+            if item["model_id"] == family_id
+        )
+        parameters = selected.get("parameter_candidates", [selected["hyperparameters"]])
+        trial_specs = tuple(
+            replace(
+                base_spec,
+                model_id=base_spec.model_id
+                if len(parameters) == 1
+                else f"{base_spec.model_id}__config_{index}",
+                hyperparameters=_resolve_candidate_parameters(
+                    base_spec.model_algorithm, values, n_train
+                ),
+                random_seed=derive_seed(
+                    root_seed,
+                    "a_share_model_trial",
+                    base_spec.model_algorithm,
+                    base_spec.model_id
+                    if len(parameters) == 1
+                    else f"{base_spec.model_id}__config_{index}",
+                    quarter_id,
+                    index,
+                ),
+            )
+            for index, values in enumerate(parameters)
         )
         trial_catalog = ModelCatalog(trial_specs)
         trial_ids = tuple(spec.model_id for spec in trial_specs)
-        trial_order = _a_share_trial_tie_break(base_spec.model_algorithm, trial_ids)
+        trial_order = trial_ids
         family_prediction = replace(
             selection_spec,
             prediction_id=f"{selection_spec.prediction_id}_{family_id}",
@@ -571,61 +609,6 @@ def _select_model_family_winners(
     )
 
 
-def _a_share_trial_specs(
-    base_spec,
-    *,
-    n_train: int,
-    resolve_trial_parameters,
-    quarter_id: str,
-    root_seed: int,
-) -> tuple[object, ...]:
-    counts = {
-        "ridge_regression": len(RIDGE_LAMBDAS),
-        "huber_regression": len(HUBER_LAMBDAS),
-        "lasso_regression": len(LASSO_ALPHAS),
-        "random_forest_regressor": len(RF_CONFIGS),
-        "xgboost_regressor": len(XGB_CONFIGS),
-    }
-    count = counts.get(base_spec.model_algorithm, 1)
-    result = []
-    for config_index in range(count):
-        model_id = (
-            base_spec.model_id
-            if count == 1
-            else f"{base_spec.model_id}__config_{config_index}"
-        )
-        trial_seed = derive_seed(
-            root_seed,
-            "a_share_model_trial",
-            base_spec.model_algorithm,
-            model_id,
-            quarter_id,
-            config_index,
-        )
-        result.append(
-            replace(
-                base_spec,
-                model_id=model_id,
-                random_seed=trial_seed,
-                hyperparameters=resolve_trial_parameters(
-                    base_spec.model_algorithm,
-                    n_train=n_train,
-                    config_index=config_index,
-                ),
-            )
-        )
-    return tuple(result)
-
-
-def _a_share_trial_tie_break(
-    algorithm: str,
-    trial_ids: tuple[str, ...],
-) -> tuple[str, ...]:
-    if algorithm in {"ridge_regression", "huber_regression", "lasso_regression"}:
-        return tuple(reversed(trial_ids))
-    return trial_ids
-
-
 def _count_training_rows(
     dataset_spec,
     model_spec,
@@ -700,8 +683,8 @@ def build_crypto_fold_models(
     )
     from quant_research_platform.research.protocols.crypto_hft import (
         HFT_EXECUTION_CONTEXT_COLUMNS,
-        HFT_MAKER_CALIBRATION_MODEL_IDS,
         build_hft_prediction_catalog,
+        maker_model_ids,
     )
     from quant_research_platform.research.protocols.crypto_hft import (
         protocol as crypto_protocol,
@@ -710,6 +693,8 @@ def build_crypto_fold_models(
     protocol = crypto_protocol(
         dataset_id, research_plan=protocol_manifest["research_plan"]
     )
+    calibration_models = maker_model_ids(protocol_manifest["portfolio_candidates"])
+
     dataset = dataset_catalog.get(dataset_id)
     identity = layout.target_root(
         dataset_id, layout.research_dataset_root(dataset.market_id, dataset_id)
@@ -720,6 +705,7 @@ def build_crypto_fold_models(
         ) or pd.Timestamp(fold.development_test.start) > pd.Timestamp(time_window.end):
             continue
         prediction_catalog = build_hft_prediction_catalog(
+            configuration=protocol_manifest["research_configuration"],
             train_end=fold.train.end.isoformat(),
             test_start=fold.development_test.start.isoformat(),
             test_end=fold.development_test.end.isoformat(),
@@ -773,7 +759,7 @@ def build_crypto_fold_models(
                         ),
                         *(
                             HFT_EXECUTION_CONTEXT_COLUMNS
-                            if spec.model_id in HFT_MAKER_CALIBRATION_MODEL_IDS
+                            if spec.model_id in calibration_models
                             else ()
                         ),
                     ),
@@ -809,9 +795,9 @@ def build_crypto_fold_models(
                     model_result=trained,
                     validation_start=pd.Timestamp(fold.validation.start),
                     validation_end=pd.Timestamp(fold.validation.end),
-                    include_availability=model_id in HFT_MAKER_CALIBRATION_MODEL_IDS,
+                    include_availability=model_id in calibration_models,
                     extra_output_columns=HFT_EXECUTION_CONTEXT_COLUMNS
-                    if model_id in HFT_MAKER_CALIBRATION_MODEL_IDS
+                    if model_id in calibration_models
                     else (),
                 )
 
@@ -822,7 +808,7 @@ def build_crypto_fold_models(
                         for item in validation_source:
                             if (
                                 on_validation is not None
-                                and model_id in HFT_MAKER_CALIBRATION_MODEL_IDS
+                                and model_id in calibration_models
                             ):
                                 on_validation(
                                     fold,

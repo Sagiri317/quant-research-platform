@@ -25,6 +25,16 @@ from quant_research_platform.storage.manifests import read_manifest, write_manif
 SCHEMA_ID = "qrp-raw-csv-snapshot"
 MAX_RECORD_BYTES = 1024 * 1024
 _MAX_CELL_CHARACTERS = 64 * 1024
+_CELL_ENCODER = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
+
+
+def _decode_bytes(value: dict[str, object]) -> bytes:
+    if set(value) != {"bytes_hex"} or type(value["bytes_hex"]) is not str:
+        raise ValueError("raw_csv_value_type_invalid")
+    return bytes.fromhex(value["bytes_hex"])
+
+
+_CELL_DECODER = json.JSONDecoder(object_hook=_decode_bytes)
 
 
 def encode_raw_cell(value: object, *, _depth: int = 0) -> str:
@@ -34,7 +44,7 @@ def encode_raw_cell(value: object, *, _depth: int = 0) -> str:
     ):
         raise ValueError("raw_csv_cell_bound_exceeded")
     if type(value) is bytes:
-        return json.dumps({"bytes_hex": value.hex()}, separators=(",", ":"))
+        return _CELL_ENCODER.encode({"bytes_hex": value.hex()})
     if value is not None and type(value) not in (str, int, float, bool, list):
         raise ValueError("raw_csv_value_type_invalid")
     if type(value) is list:
@@ -48,16 +58,11 @@ def encode_raw_cell(value: object, *, _depth: int = 0) -> str:
                 raise ValueError("raw_csv_cell_bound_exceeded")
             parts.append(part)
         return "[" + ",".join(parts) + "]"
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return _CELL_ENCODER.encode(value)
 
 
 def decode_raw_cell(text: str) -> object:
-    def hook(value: dict[str, object]) -> bytes:
-        if set(value) != {"bytes_hex"} or type(value["bytes_hex"]) is not str:
-            raise ValueError("raw_csv_value_type_invalid")
-        return bytes.fromhex(value["bytes_hex"])
-
-    value = json.loads(text, object_hook=hook)
+    value = _CELL_DECODER.decode(text)
     if encode_raw_cell(value) != text:
         raise ValueError("raw_csv_cell_not_canonical")
     return value

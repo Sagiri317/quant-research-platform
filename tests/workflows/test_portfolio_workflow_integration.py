@@ -69,6 +69,11 @@ from quant_research_platform.storage.identity import (
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 from tests.helpers.portfolio_ledger import session_frame
+from tests.helpers.research_configuration import (
+    A_SHARE_MODEL_ALGORITHMS,
+    PV25_FACTORS,
+    research_configuration,
+)
 from tests.research.workflow_test_support import _quarterly_result, _trial_reference
 
 
@@ -200,7 +205,7 @@ def _processed_specs() -> ProcessedDataCatalog:
 
 
 def _dataset_spec() -> ResearchDatasetSpec:
-    statistical_factors = tuple(factor for factor in a_share.PV_FULL if factor != "x")
+    statistical_factors = tuple(factor for factor in PV25_FACTORS if factor != "x")
     return ResearchDatasetSpec(
         data_id="pv_all",
         frequency=DataFrequency.DAILY,
@@ -278,7 +283,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
                 "x": float(asset == "b"),
                 **{
                     factor: float(asset == "b")
-                    for factor in a_share.PV_FULL
+                    for factor in PV25_FACTORS
                     if factor != "x"
                 },
                 "label": float(asset == "b") * 0.01,
@@ -470,15 +475,16 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
         resource_policy: object,
         instance_metadata: dict[str, object],
     ) -> Path:
-        del dataset_catalog, processed_catalog, time_window
+        del processed_catalog, time_window
+        selected = dataset_catalog.get(dataset_id)
         root = layout.target_root(
             dataset_id,
-            layout.research_dataset_root(dataset.market_id, dataset_id),
+            layout.research_dataset_root(selected.market_id, dataset_id),
         )
         write_dataset(
             root,
-            frames[dataset_id].copy(),
-            spec=dataset,
+            frames[dataset_id].loc[:, list(selected.required_columns)].copy(),
+            spec=selected,
             instance_metadata=instance_metadata,
             resource_policy=resource_policy,
             borrowed_input=True,
@@ -548,7 +554,7 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
                     input_factor_columns=("x",),
                     label_column="label",
                 )
-                for algorithm in a_share.MODEL_FAMILY_ORDER
+                for algorithm in A_SHARE_MODEL_ALGORITHMS
             )
         ),
         producer_bindings=bindings,
@@ -565,7 +571,7 @@ def _prepare_model_artifacts(
     plans = {item["target_id"]: item for item in plan["targets"]}
     requested_window = plan["research_window"]
     champion_ids = tuple(
-        f"pv_all_{algorithm}" for algorithm in a_share.MODEL_FAMILY_ORDER
+        f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
     )
     target_id, model_ids = protocol.model_selection_target_id, champion_ids
     target = next(
@@ -660,11 +666,11 @@ def _prepare_model_artifacts(
             fitted, lease = _fit_selected_model_result(
                 dataset_spec=profile.research_datasets.get("pv_all"),
                 selected_spec=profile.models.get(model_id),
+                candidate_parameters=dict(profile.models.get(model_id).hyperparameters),
                 chunks=chunks,
                 fitting_cutoff="2018-12-31",
                 quarter_id="2019Q1",
                 root_seed=42,
-                config_index=0,
             )
             owned = OwnedValue(
                 replace(
@@ -684,7 +690,7 @@ def _prepare_model_artifacts(
                     owned.release(owner="test.model")
                 owned = None
 
-    for algorithm in a_share.MODEL_FAMILY_ORDER:
+    for algorithm in A_SHARE_MODEL_ALGORITHMS:
         preflight_model_dependency(algorithm)
     with runtime_resource_policy_scope(None):
         write_quarterly_model_artifact(
@@ -905,6 +911,98 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     )
     frames = _frames(dates)
     profile = _profile(frames)
+    base = research_profile()
+    configuration = research_configuration(development=("2023-12-01", "2023-12-31"))
+    for model in configuration["models"]:
+        model["input_factor_columns"] = ["reversal_1d"]
+        model["input_feature_columns"] = []
+        model["label_column"] = "forward_return_1d"
+        model["hyperparameters"] = {}
+        model.pop("parameter_candidates", None)
+        if model["model_algorithm"] == "ridge_regression":
+            model["hyperparameters"] = {"alpha": 0.1}
+            model["parameter_candidates"] = [{"regularization_strength": 0.1}]
+    facts = {
+        "is_a_share_scope": True,
+        "is_trading": True,
+        "is_st": False,
+        "is_pt": False,
+        "listing_age_trading_days": 252,
+        "close": 100.0,
+        "adj_close": 100.0,
+        "volume": 100.0,
+        "amount": 10_000.0,
+        "turnover": 0.1,
+        "industry_standard_id": "CSRC2012",
+        "industry_level1_code": "A01",
+        "industry_level1_name": "industry",
+        "total_market_cap": 4_000.0,
+    }
+    frames["pv_all"] = frames["pv_all"].assign(**facts)
+    sessions = pd.DatetimeIndex(frames["trading_calendar"]["timestamp"])
+    positions = sessions.get_indexer(frames["pv_all"]["timestamp"])
+    frames["pv_all"]["forward_return_1d"] = frames["pv_all"]["label"]
+    frames["pv_all"]["forward_return_1d_available_at"] = sessions.take(positions + 2)
+    from quant_research_platform.research.features.transforms import (
+        canonical_feature_pipeline,
+    )
+
+    frames["pv_all"] = canonical_feature_pipeline(
+        frames["pv_all"], factor_columns=PV25_FACTORS
+    )
+    key_roles = {
+        "market_id": ColumnRole.KEY,
+        "asset_id": ColumnRole.KEY,
+        "timestamp": ColumnRole.TIMESTAMP,
+    }
+    price = replace(
+        profile.processed.get("price_volume_facts"),
+        column_roles={
+            **key_roles,
+            **{name: ColumnRole.FACTOR for name in PV25_FACTORS},
+        },
+    )
+    forward = replace(
+        base.processed.get("forward_returns"),
+        column_roles={
+            **key_roles,
+            "forward_return_1d": ColumnRole.LABEL,
+            "forward_return_1d_available_at": ColumnRole.LABEL,
+            "forward_return_20d": ColumnRole.LABEL,
+            "forward_return_20d_available_at": ColumnRole.LABEL,
+        },
+        processed_input_data_ids=(),
+    )
+    frames["price_volume_facts"] = (
+        frames["pv_all"].loc[:, list(price.required_columns)].copy()
+    )
+    frames["forward_returns"] = (
+        frames["pv_all"].loc[:, list(forward.required_columns)].copy()
+    )
+    profile = replace(
+        profile,
+        factors=base.factors,
+        labels=base.labels,
+        processed=ProcessedDataCatalog(
+            (
+                *(
+                    item
+                    for item in profile.processed.list()
+                    if item.data_id != price.data_id
+                ),
+                price,
+                forward,
+            )
+        ),
+        producer_bindings={
+            **base.producer_bindings,
+            **profile.producer_bindings,
+            "forward_returns": profile.producer_bindings["price_volume_facts"],
+        },
+    )
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    profile = bind_research_configuration(profile, configuration)
     layout = StorageLayout(tmp_path)
     for spec in profile.interim.list():
         marker = (
@@ -916,9 +1014,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     development = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2023-12-01",
-        end_date="2023-12-31",
+        research_plan=configuration,
     )
     assert development["status"] == "COMPLETE", development
     assert_one_capture(previous)
@@ -986,9 +1082,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     request = dict(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2024-01-01",
-        end_date="2025-12-31",
+        research_plan=configuration,
         holdout=True,
         development_run_id=development["run_id"],
     )
@@ -1003,7 +1097,16 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         )
     assert_one_capture(previous)
     with pytest.raises(ValueError, match="holdout_development_run_invalid"):
-        research.research_run(**{**request, "scenario_id": "fusion_nf_core"}, plan=True)
+        research.research_run(
+            **{
+                **request,
+                "research_plan": research_configuration(
+                    name="fusion_nf_core",
+                    development=("2023-12-01", "2023-12-31"),
+                ),
+            },
+            plan=True,
+        )
     incomplete = replace(
         development_record,
         run_id="run_incomplete",
@@ -1094,7 +1197,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert {item["quarter_id"] for item in models} == {
         str(period) for period in pd.period_range("2024Q1", "2025Q4", freq="Q")
     }
-    assert len(models) == 8 * len(a_share.MODEL_FAMILY_ORDER)
+    assert len(models) == 8 * len(A_SHARE_MODEL_ALGORITHMS)
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
     )
@@ -1217,15 +1320,15 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     new_development = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2023-12-01",
-        end_date="2023-12-31",
+        research_plan=configuration,
     )
     assert new_development["status"] == "COMPLETE", new_development
     assert_one_capture(previous)
     assert new_development["run_id"] != development["run_id"]
     future = frames["pv_all"].timestamp.ge("2024-01-01")
-    frames["pv_all"].loc[future, ["label", "forward_return_20d"]] *= -100.0
+    frames["pv_all"].loc[
+        future, ["label", "forward_return_1d", "forward_return_20d"]
+    ] *= -100.0
     software_payload = research.production_software_identity().payload
     software_payload["package_content_hash"] = "f" * 64
     corrected_software = ProductionSoftwareIdentity(
@@ -1327,9 +1430,9 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     result = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date=request["start"],
-        end_date=request["end"],
+        research_plan=research_configuration(
+            development=(request["start"], request["end"])
+        ),
     )
     results = {item["target_id"]: item for item in result["target_results"]}
     assert result["status"] == "COMPLETE", result["target_results"]
@@ -1640,9 +1743,9 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     reused = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date=request["start"],
-        end_date=request["end"],
+        research_plan=research_configuration(
+            development=(request["start"], request["end"])
+        ),
     )
     reused_results = {item["target_id"]: item for item in reused["target_results"]}
     assert result["run_id"] != reused["run_id"]

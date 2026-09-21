@@ -458,3 +458,23 @@ def _apply_fillna(
         medians = values.groupby(timestamps, sort=False).transform("median")
         return values.fillna(medians)
     raise ValueError("unsupported_feature_transform_fillna_policy")
+
+
+def canonical_feature_transforms(factor_columns):
+    """Declare the same canonical feature pipeline used by dataset production."""
+    from quant_research_platform.contracts.features import FeatureTransformSpec
+
+    return tuple(
+        FeatureTransformSpec(
+            transform_id=prefix + column,
+            source_columns=(column,),
+            output_columns=(prefix + column,),
+            transform=transform,
+        )
+        for column in factor_columns
+        for prefix, transform in (
+            ("feature_", "mad_winsorized_zscore"),
+            ("feature_missing_", "missing_indicator"),
+            ("feature_observed_", "observed_indicator"),
+        )
+    )

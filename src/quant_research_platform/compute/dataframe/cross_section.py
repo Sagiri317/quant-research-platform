@@ -130,6 +130,7 @@ class _CorrelationMoments:
 
     __slots__ = (
         "count",
+        "exponent",
         "left_sum",
         "right_sum",
         "left_square",
@@ -139,16 +140,28 @@ class _CorrelationMoments:
 
     def __init__(self) -> None:
         self.count = 0
+        self.exponent = 0
         self.left_sum = self.right_sum = 0
         self.left_square = self.right_square = self.product = 0
 
     def update(self, left: float, right: float) -> None:
-        # Every binary64 value is an integer multiple of 2**-1074. The common
-        # scale cancels from Pearson, so no rational reduction is needed per row.
+        # Use only the binary scale actually observed. Fixed subnormal scaling
+        # adds thousands of zero bits to ordinary prices and every product.
         left_numerator, left_denominator = left.as_integer_ratio()
         right_numerator, right_denominator = right.as_integer_ratio()
-        x = left_numerator << (1074 - (left_denominator.bit_length() - 1))
-        y = right_numerator << (1074 - (right_denominator.bit_length() - 1))
+        left_exponent = left_denominator.bit_length() - 1
+        right_exponent = right_denominator.bit_length() - 1
+        exponent = max(self.exponent, left_exponent, right_exponent)
+        shift = exponent - self.exponent
+        if shift:
+            self.left_sum <<= shift
+            self.right_sum <<= shift
+            self.left_square <<= 2 * shift
+            self.right_square <<= 2 * shift
+            self.product <<= 2 * shift
+            self.exponent = exponent
+        x = left_numerator << (exponent - left_exponent)
+        y = right_numerator << (exponent - right_exponent)
         self.count += 1
         self.left_sum += x
         self.right_sum += y
@@ -158,7 +171,7 @@ class _CorrelationMoments:
 
     def averages(self) -> tuple[Fraction, Fraction, Fraction, Fraction, Fraction]:
         """Return exact first and second raw moments in observation units."""
-        unit = 1 << 1074
+        unit = 1 << self.exponent
         return (
             Fraction(self.left_sum, self.count * unit),
             Fraction(self.right_sum, self.count * unit),

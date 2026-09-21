@@ -12,10 +12,10 @@ from quant_research_platform.markets.implementations.crypto.processed.catalog im
     hft_processed_catalog,
 )
 from quant_research_platform.research.protocols.crypto_hft import (
-    HFT_MODEL_ALGORITHMS,
     build_hft_model_catalog,
     build_hft_research_dataset_catalog,
 )
+from tests.helpers.research_configuration import research_configuration
 
 
 def test_hft_catalog_has_one_panel_factor_label_and_research_path() -> None:
@@ -40,9 +40,14 @@ def test_hft_catalog_has_one_panel_factor_label_and_research_path() -> None:
 
 
 def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> None:
-    models = build_hft_model_catalog(training_row_bound=100).list()
+    config = research_configuration("crypto", "baseline")
+    for item in config["models"]:
+        item["max_train_rows"] = 100
+    models = build_hft_model_catalog(configuration=config).list()
 
-    assert {model.model_algorithm for model in models} == set(HFT_MODEL_ALGORITHMS)
+    assert {model.model_algorithm for model in models} == {
+        item["model_algorithm"] for item in config["models"]
+    }
     assert all(model.max_train_rows == 100 for model in models)
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
     assert all(not model.model_id.startswith("hft_model_framework") for model in models)
@@ -53,7 +58,9 @@ def test_ridge_asset_scopes_share_dimensionless_inputs_and_new_spec_identity():
 
     from quant_research_platform.contracts.json_codec import canonical_json_hash
     from quant_research_platform.contracts.models import model_spec_payload
-    from quant_research_platform.research.protocols.crypto_hft import HFT_FACTOR_COLUMNS
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_FACTOR_COLUMNS,
+    )
 
     comparable = (
         "relative_spread",
@@ -63,7 +70,10 @@ def test_ridge_asset_scopes_share_dimensionless_inputs_and_new_spec_identity():
         "return_100ms",
         "realized_volatility_1s",
     )
-    models = build_hft_model_catalog(training_row_bound=None).list()
+    config = research_configuration("crypto", "baseline")
+    for item in config["models"]:
+        item["max_train_rows"] = None
+    models = build_hft_model_catalog(configuration=config).list()
     ridge = [model for model in models if model.model_algorithm == "ridge_regression"]
     assert len(ridge) == 5
     for model in ridge:
@@ -79,8 +89,9 @@ def test_ridge_asset_scopes_share_dimensionless_inputs_and_new_spec_identity():
             assert model.input_columns == (
                 ("ofi_100ms",)
                 if model.model_algorithm == "linear_regression"
-                else HFT_FACTOR_COLUMNS
+                else tuple(config["evaluation"]["factors"])
             )
     dataset = build_hft_research_dataset_catalog().get(HFT_RESEARCH_DATASET_ID)
     assert dataset.factor_columns == HFT_FACTOR_COLUMNS
-    assert len(dataset.factor_columns) == 14
+    assert len(config["evaluation"]["factors"]) == 14
+    assert len(dataset.factor_columns) == 30

@@ -21,7 +21,7 @@ from quant_research_platform.research.protocols.a_share import label_definitions
 def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
     has_raw_history,
 ) -> None:
-    from quant_research_platform.research.datasets.assembler import _a_share_eligibility
+    from quant_research_platform.research.filtering import a_share_eligibility
 
     frame = pd.DataFrame(
         {
@@ -46,7 +46,7 @@ def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
     )
     actual = _apply_suspension_semantics(frame)
     assert actual.loc[1, ["close", "open", "high", "low", "adj_open"]].isna().all()
-    assert not _a_share_eligibility(actual, "pv_all").iloc[1]
+    assert not a_share_eligibility(actual, "pv_all").iloc[1]
     assert actual.loc[1, "period_return"] == 0.07
     assert actual.loc[2, "adj_close"] == actual.loc[2, "adj_open"] == 110.0
     raw = actual.loc[2, ["close", "open", "high", "low"]]

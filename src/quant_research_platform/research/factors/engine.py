@@ -36,6 +36,40 @@ def calculate_factors_for_panel(
         ]
     if not requested:
         return output_source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+    if families == ("market_model",):
+        from quant_research_platform.compute.market_model import MarketModelRiskState
+        from quant_research_platform.research.filtering import a_share_eligibility
+
+        state = MarketModelRiskState()
+        pieces = []
+        for _, cross in panel_frame.sort_values("timestamp", kind="mergesort").groupby(
+            "timestamp", sort=False
+        ):
+            cross = cross.assign(eligible=a_share_eligibility(cross, "pv_expanded"))
+            styles = state.observe(cross)
+            piece = cross.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+            piece["beta_252d"] = piece.asset_id.map(styles.beta)
+            piece["residual_volatility_60d"] = piece.asset_id.map(
+                styles.residual_volatility
+            )
+            pieces.append(piece)
+        calculated = (
+            pd.concat(pieces, ignore_index=True)
+            if pieces
+            else pd.DataFrame(
+                columns=(
+                    "asset_id",
+                    "timestamp",
+                    "beta_252d",
+                    "residual_volatility_60d",
+                )
+            )
+        )
+        return _with_keys(
+            output_source,
+            calculated,
+            output_columns=tuple(definition.output_column for definition in requested),
+        )
     if families == ("fundamental",):
         return _with_keys(
             output_source,

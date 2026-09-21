@@ -29,7 +29,10 @@ from quant_research_platform.contracts.evaluations import (
     strict_non_negative_count_series,
     strict_non_negative_count_value,
 )
-from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.filtering import (
+    filter_definition,
+    required_filter_columns,
+)
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -546,8 +549,8 @@ def _iter_single_asset_time_series_output_chunks(
     rows_input = 0
     rows_after_filter = 0
     rows_after_signal_label_dropna = 0
-    filter_columns_used: tuple[str, ...] = ()
-    filter_definition_value = ""
+    filter_columns_used = tuple(required_filter_columns(spec.filter_mode))
+    filter_definition_value = filter_definition(spec.filter_mode)
     asset: object | None = None
     timestamp_count = 0
     minimum_timestamp: pd.Timestamp | None = None
@@ -653,15 +656,13 @@ def _iter_single_asset_time_series_output_chunks(
                         )
                 finally:
                     filtered = chunk = None
-        if asset is None or maximum_timestamp is None:
-            raise ValueError("single_asset_time_series_evaluation_rows_required")
         output_bound = max(64 * 1024, pair_count * 2048)
         output_lease = resource_policy.lease(
             "research.evaluation.output",
             output_bound,
         )
         metrics = _time_series_metrics_frame(
-            stats,
+            stats if maximum_timestamp is not None else {},
             timestamp=maximum_timestamp,
         )
         grouped_label_values = _empty_grouped_label_values()
@@ -682,11 +683,15 @@ def _iter_single_asset_time_series_output_chunks(
             "min_timestamp": time_value_isoformat(
                 minimum_timestamp,
                 preserve_datetime=True,
-            ),
+            )
+            if minimum_timestamp is not None
+            else None,
             "max_timestamp": time_value_isoformat(
                 maximum_timestamp,
                 preserve_datetime=True,
-            ),
+            )
+            if maximum_timestamp is not None
+            else None,
             "skipped_timestamp_count": 0,
         }
         owned_output = OwnedValue(
@@ -719,7 +724,7 @@ def _iter_single_asset_time_series_output_chunks(
 def _time_series_metrics_frame(
     stats: Mapping[tuple[str, str], _CorrelationMoments],
     *,
-    timestamp: pd.Timestamp,
+    timestamp: pd.Timestamp | None,
 ) -> pd.DataFrame:
     records: list[dict[str, object]] = []
     for (signal, label), values in sorted(stats.items()):

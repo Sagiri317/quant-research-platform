@@ -84,9 +84,9 @@ def test_complete_cross_section_admits_kernel_against_capacity(monkeypatch, boun
         assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("valid_pairs", (0, 1))
+@pytest.mark.parametrize("valid_pairs", (None, 0, 1))
 def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
-    tmp_path: Path, valid_pairs: int
+    tmp_path: Path, valid_pairs: int | None
 ) -> None:
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
@@ -120,6 +120,8 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
             "eligible": True,
         }
     )
+    if valid_pairs is None:
+        frame = frame.iloc[:0]
     with runtime_resource_policy_scope() as policy:
         with evaluation_engine.build_evaluation_result_from_frames(
             (frame,),
@@ -140,7 +142,7 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
                 n_groups=2,
             )
         metrics = pd.read_parquet(root / "metrics.parquet")
-        assert metrics.n_obs.tolist() == [valid_pairs]
+        assert metrics.n_obs.tolist() == ([] if valid_pairs is None else [valid_pairs])
         assert (
             metrics.ic.isna().all()
             and metrics.ic_reason.eq("insufficient_observations").all()

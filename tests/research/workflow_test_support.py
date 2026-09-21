@@ -29,11 +29,24 @@ from quant_research_platform.research.models.scaler import (
 )
 from quant_research_platform.research.protocols.a_share import (
     quarter_id_for_fold,
-    resolve_trial_parameters,
 )
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.storage.experiments import append_trial_record
 from quant_research_platform.storage.layout import StorageLayout
+
+QUARTERLY_FIXTURE_PROTOCOL = {
+    "fixture": True,
+    "research_configuration": {
+        "models": [
+            {"model_id": algorithm, "hyperparameters": {}}
+            for algorithm in (
+                "linear_regression",
+                "equal_weight_rank_ensemble",
+                "ic_weighted_rank_ensemble",
+            )
+        ]
+    },
+}
 
 
 def _column_predictor(column: str, offset: float = 0.0) -> LinearScaledPredictor:
@@ -152,9 +165,7 @@ def _trial_reference(
             quarter_id_for_fold(fold),
             0,
         ),
-        hyperparameters=resolve_trial_parameters(
-            base.model_algorithm, n_train=2, config_index=0
-        ),
+        hyperparameters=dict(base.hyperparameters),
     )
     plan = ExperimentPlan(
         experiment_id=f"experiment_{uuid4().hex}",
@@ -165,7 +176,7 @@ def _trial_reference(
         data_snapshot_id=data_identity,
         input_lineage=(data_identity,),
         research_protocol_identity=canonical_json_hash(
-            {"fixture": True} if protocol is None else protocol
+            QUARTERLY_FIXTURE_PROTOCOL if protocol is None else protocol
         ),
         folds=(fold,),
         final_holdout=TimeWindow(

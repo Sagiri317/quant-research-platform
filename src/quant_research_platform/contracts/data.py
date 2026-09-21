@@ -14,6 +14,10 @@ from quant_research_platform.contracts.ids import (
     validate_market_id,
     validate_source_id,
 )
+from quant_research_platform.contracts.json_codec import (
+    parse_qrp_json_object,
+    render_qrp_json_object,
+)
 from quant_research_platform.contracts.validation import (
     _validate_column_tuple,
     _validate_non_empty_string,
@@ -172,11 +176,24 @@ class ProcessedDataSpec(DataSpec):
     kind: ProcessedDataKind | str
     source_input_data_ids: tuple[str, ...] = ()
     processed_input_data_ids: tuple[str, ...] = ()
+    parameters_json: str = "{}"
 
     def __post_init__(self) -> None:
         super().__post_init__()
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         object.__setattr__(self, "kind", normalize_processed_data_kind(self.kind))
+        if (
+            type(self.parameters_json) is not str
+            or len(self.parameters_json.encode("utf-8")) > 65536
+        ):
+            raise ValueError("processed_parameters_invalid")
+        object.__setattr__(
+            self,
+            "parameters_json",
+            render_qrp_json_object(
+                parse_qrp_json_object(self.parameters_json.encode("utf-8"))
+            ),
+        )
         for field_name, values in (
             ("source_input_data_ids", self.source_input_data_ids),
             ("processed_input_data_ids", self.processed_input_data_ids),

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 from quant_research_platform.contracts.targets import ProducerBinding, ProducerKind
 from quant_research_platform.markets.implementations.a_share.fundamentals import (
@@ -23,11 +24,18 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 
 
+@pytest.mark.parametrize("scenario", ["pv_all", "pv_expanded"])
 def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
     tmp_path: Path,
+    scenario: str,
 ) -> None:
-    sessions = pd.bdate_range("2020-01-02", periods=400)
+    sessions = pd.bdate_range(
+        "2020-01-02", periods=600 if scenario == "pv_expanded" else 400
+    )
     frames = _synthetic_interim_frames(sessions)
+    if scenario == "pv_expanded":
+        bars = frames["market_bars_1d"]
+        bars["period_return"] = np.sin(np.arange(len(bars)) / 3) * 0.01
     base = research_profile()
 
     def source_identity(_raw_root: Path, data_id: str) -> str:
@@ -72,7 +80,7 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
     result = research.dataset_build(
         profile=profile,
         layout=layout,
-        dataset_id="pv_all",
+        dataset_id=scenario,
         start_date=sessions[0].date().isoformat(),
         end_date=sessions[-1].date().isoformat(),
         raw_root=tmp_path / "synthetic-raw",
@@ -83,17 +91,29 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
     assert target_results["market_panel_1d"]["status"] == "BUILT"
     assert target_results["execution_mask"]["status"] == "BUILT"
     assert target_results["forward_returns"]["status"] == "BUILT"
-    assert target_results["pv_all"]["status"] == "BUILT"
-    logical_root = layout.research_dataset_root("a_share", "pv_all")
+    assert target_results[scenario]["status"] == "BUILT"
+    logical_root = layout.research_dataset_root("a_share", scenario)
     output = read_dataset(
         layout.instance_root(
-            logical_root, target_results["pv_all"]["instance_identity"]
+            logical_root, target_results[scenario]["instance_identity"]
         ),
     )
     assert {"eligible", "model_target"}.issubset(output.columns)
     assert {"scenario_universe", "can_enter", "can_exit"}.isdisjoint(output)
     assert output["eligible"].any()
     assert output.loc[output["eligible"], "model_target"].notna().any()
+
+    if scenario == "pv_expanded":
+        assert "fundamental_pit" not in target_results
+        assert "market_model_factors" in target_results
+        for name in (
+            "share_price",
+            "avg_amount_126d",
+            "turnover_250d",
+            "beta_252d",
+            "residual_volatility_60d",
+        ):
+            assert output[name].notna().any(), name
 
 
 def test_fundamental_pit_and_factors_reach_the_same_target_dag(

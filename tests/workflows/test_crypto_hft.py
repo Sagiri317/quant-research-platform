@@ -14,6 +14,7 @@ from quant_research_platform.research.predictions import alignment
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.binance_hft import hft_research_plan
+from tests.helpers.research_configuration import research_configuration
 
 
 class _PredictionLookup:
@@ -150,10 +151,14 @@ def test_crypto_valid_selected_windows_reach_training(tmp_path, selected_folds):
     from quant_research_platform.contracts.models import (
         CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
     )
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        bind_research_configuration,
+        research_profile,
+    )
     from quant_research_platform.research.models.persisted import (
         write_crypto_model_artifact,
     )
-    from quant_research_platform.research.protocols.crypto_hft import protocol
 
     plan = hft_research_plan()
     template = deepcopy(plan["folds"][0])
@@ -173,7 +178,19 @@ def test_crypto_valid_selected_windows_reach_training(tmp_path, selected_folds):
         "start": "1970-01-01T00:03:36",
         "end": "1970-01-01T00:03:37",
     }
-    manifest = protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan).manifest()
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        development=(
+            plan["folds"][0]["development_test"]["start"],
+            plan["folds"][selected_folds - 1]["development_test"]["end"],
+        ),
+        plan=plan,
+    )
+    profile = bind_research_configuration(
+        research_profile(CRYPTO_PROFILE_ID), configuration
+    )
+    manifest = profile.protocol(HFT_RESEARCH_DATASET_ID).manifest()
     envelope = build_business_manifest_envelope(
         logical_artifact_id=f"{HFT_RESEARCH_DATASET_ID}_models",
         schema_identity=canonical_json_hash(
@@ -230,8 +247,18 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
 
     layout = StorageLayout(tmp_path / "project")
     raw = layout.project_root / "raw/recorder"
-    profile = research_profile(CRYPTO_PROFILE_ID)
+    from quant_research_platform.profiles.research import bind_research_configuration
+
     plan = hft_research_plan()
+    profile = bind_research_configuration(
+        research_profile(CRYPTO_PROFILE_ID),
+        research_configuration(
+            "crypto",
+            "baseline",
+            development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+            plan=plan,
+        ),
+    )
     validation_rows = {}
     write_models = research.write_crypto_model_artifact
     from quant_research_platform.storage import parquet as parquet_storage
@@ -289,11 +316,22 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         read_portfolio_ledger_artifact,
     )
     from quant_research_platform.research.protocols.crypto_hft import (
-        maker_candidates,
-        taker_candidates,
+        CryptoMakerCandidate,
+        CryptoTakerCandidate,
+        portfolio_candidates,
     )
 
-    calibration_target = f"{HFT_RESEARCH_DATASET_ID}_maker_calibration"
+    candidates = portfolio_candidates(
+        research_configuration("crypto", "baseline")["portfolios"]
+    )
+    makers = tuple(
+        item for item in candidates if isinstance(item, CryptoMakerCandidate)
+    )
+    takers = tuple(
+        item for item in candidates if isinstance(item, CryptoTakerCandidate)
+    )
+
+    calibration_target = makers[1].calibration_target_id
     statistics_target = f"{HFT_RESEARCH_DATASET_ID}_portfolio_statistics"
     root = layout.instance_root(
         layout.semantic_artifact_root("crypto", model_id),
@@ -427,18 +465,20 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         reused = research.research_run(
             profile=profile,
             layout=layout,
-            scenario_id=HFT_RESEARCH_DATASET_ID,
-            start_date="1970-01-01T00:00:04",
-            end_date="1970-01-01T00:00:08.500000",
             raw_root=raw,
-            research_plan=plan,
+            research_plan=research_configuration(
+                "crypto",
+                "baseline",
+                development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+                plan=plan,
+            ),
         )
     observed = {item["target_id"]: item for item in reused["target_results"]}
     assert observed[model_id]["status"] == observed[prediction_id]["status"] == "REUSED"
     assert all(observed[target]["status"] == "REUSED" for target in evaluation_ids)
     assert all(
         observed[candidate.target_id]["status"] == "REUSED"
-        for candidate in (*taker_candidates(), *maker_candidates())
+        for candidate in (*takers, *makers)
     )
     assert observed[calibration_target]["status"] == "REUSED"
     assert observed[statistics_target]["status"] == "REUSED"
@@ -457,12 +497,14 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     missing_execution = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id=HFT_RESEARCH_DATASET_ID,
-        start_date="1970-01-01T00:00:04",
-        end_date="1970-01-01T00:00:08.500000",
         raw_root=raw,
-        research_plan={key: value for key, value in plan.items() if key != "execution"},
         plan=True,
+        research_plan=research_configuration(
+            "crypto",
+            "baseline",
+            development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+            plan={key: value for key, value in plan.items() if key != "execution"},
+        ),
     )
     missing_targets = {row["target_id"]: row for row in missing_execution["targets"]}
     assert all(
@@ -472,7 +514,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     assert all(
         missing_targets[candidate.target_id]["blocker"]
         == "crypto_execution_plan_missing"
-        for candidate in taker_candidates()
+        for candidate in takers
     )
     eth_metadata = raw.parent / "funding/ETHUSDT/response.metadata.json"
     saved_metadata = eth_metadata.read_bytes()
@@ -483,11 +525,13 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             missing_eth = research.research_run(
                 profile=profile,
                 layout=layout,
-                scenario_id=HFT_RESEARCH_DATASET_ID,
-                start_date="1970-01-01T00:00:04",
-                end_date="1970-01-01T00:00:08.500000",
                 raw_root=raw,
-                research_plan=plan,
+                research_plan=research_configuration(
+                    "crypto",
+                    "baseline",
+                    development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+                    plan=plan,
+                ),
             )
         missing_targets = {
             row["target_id"]: row for row in missing_eth["target_results"]
@@ -496,7 +540,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             missing_targets[target]["status"] == "REUSED"
             for target in (model_id, prediction_id, *evaluation_ids)
         )
-        for candidate in taker_candidates():
+        for candidate in takers:
             assert missing_targets[candidate.target_id]["status"] == (
                 "BLOCKED" if candidate.asset_id == "eth_usdt" else "REUSED"
             )
@@ -515,7 +559,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             )
             / "manifest.json"
         ).read_bytes()
-        for candidate in taker_candidates()
+        for candidate in takers
     }
     try:
         with monkeypatch.context() as patch:
@@ -523,11 +567,13 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             incomplete_run = research.research_run(
                 profile=profile,
                 layout=layout,
-                scenario_id=HFT_RESEARCH_DATASET_ID,
-                start_date="1970-01-01T00:00:04",
-                end_date="1970-01-01T00:00:08.500000",
                 raw_root=raw,
-                research_plan=plan,
+                research_plan=research_configuration(
+                    "crypto",
+                    "baseline",
+                    development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+                    plan=plan,
+                ),
             )
         incomplete_targets = {
             row["target_id"]: row for row in incomplete_run["target_results"]
@@ -537,7 +583,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             for target in (model_id, prediction_id, *evaluation_ids)
         )
         with runtime_resource_policy_scope() as policy:
-            for candidate in taker_candidates():
+            for candidate in takers:
                 incomplete_result = incomplete_targets[candidate.target_id]
                 assert incomplete_result["status"] == (
                     "BLOCKED" if candidate.asset_id == "btc_usdt" else "REUSED"
@@ -632,24 +678,26 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     insufficient = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id=HFT_RESEARCH_DATASET_ID,
-        start_date="1970-01-01T00:00:04",
-        end_date="1970-01-01T00:00:08.500000",
         raw_root=raw,
-        research_plan=insufficient_plan,
+        research_plan=research_configuration(
+            "crypto",
+            "baseline",
+            development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+            plan=insufficient_plan,
+        ),
     )
     insufficient_targets = {
         row["target_id"]: row for row in insufficient["target_results"]
     }
     assert insufficient["status"] == "BLOCKED"
     assert insufficient_targets[calibration_target]["status"] == "BUILT"
-    assert insufficient_targets[maker_candidates()[1].target_id]["reason"] == (
+    assert insufficient_targets[makers[1].target_id]["reason"] == (
         "maker_calibration_insufficient_samples"
     )
     assert insufficient_targets[statistics_target]["status"] == "BLOCKED"
     assert all(
         insufficient_targets[candidate.target_id]["status"] in {"BUILT", "REUSED"}
-        for candidate in (*taker_candidates(), maker_candidates()[0])
+        for candidate in (*takers, makers[0])
     )
     assert all(
         insufficient_targets[target]["status"] == "BUILT"
@@ -707,11 +755,13 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tm
         result = research.research_run(
             profile=profile,
             layout=layout,
-            scenario_id=HFT_RESEARCH_DATASET_ID,
-            start_date="1970-01-01T00:00:04",
-            end_date="1970-01-01T00:00:08.200000",
             raw_root=raw,
-            research_plan=plan,
+            research_plan=research_configuration(
+                "crypto",
+                "baseline",
+                development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.200000"),
+                plan=plan,
+            ),
         )
         assert result["status"] == "COMPLETE"
         report = research.report_build(
@@ -846,6 +896,7 @@ def test_tardis_cross_midnight_research_publishes_models_ledgers_and_report(
             import_funding_history(
                 source,
                 symbol=symbol,
+                source_id="binance",
                 response_path=settlements,
                 http_status=200,
                 start_ms=start_ms,
@@ -870,11 +921,16 @@ def test_tardis_cross_midnight_research_publishes_models_ledgers_and_report(
     result = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id=HFT_RESEARCH_DATASET_ID,
-        start_date=plan["folds"][0]["development_test"]["start"],
-        end_date=plan["folds"][-1]["development_test"]["end"],
         raw_root=raw,
-        research_plan=plan,
+        research_plan=research_configuration(
+            "crypto",
+            "baseline",
+            development=(
+                plan["folds"][0]["development_test"]["start"],
+                plan["folds"][-1]["development_test"]["end"],
+            ),
+            plan=plan,
+        ),
     )
     targets = {target["target_id"]: target for target in result["target_results"]}
     if gap_kind is None:

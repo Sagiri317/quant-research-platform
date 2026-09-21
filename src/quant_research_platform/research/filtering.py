@@ -13,6 +13,10 @@ from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
+from quant_research_platform.contracts.validation import (
+    strict_bool_series,
+    strict_finite_numeric_series,
+)
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
@@ -143,3 +147,79 @@ def _filter_working_set_bound(frame: pd.DataFrame, *, mode: str) -> int:
         2 * mask_bytes if filter_count > 1 else mask_bytes,
         pandas_frame_payload_bytes(frame) + mask_bytes + output_index_expansion,
     )
+
+
+A_SHARE_ELIGIBILITY_FACTS = (
+    "is_a_share_scope",
+    "is_trading",
+    "is_st",
+    "is_pt",
+    "listing_age_trading_days",
+    "close",
+    "adj_close",
+    "volume",
+    "amount",
+    "turnover",
+)
+_A_SHARE_FUSION_ELIGIBILITY_FACTS = (
+    "is_nonfinancial_industry",
+    "has_legal_fundamental_pit",
+)
+
+
+def a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
+    bool_facts = {
+        column: strict_bool_series(
+            frame[column],
+            error=f"invalid_a_share_eligibility_fact: {column}",
+            allow_null=True,
+        )
+        for column in ("is_a_share_scope", "is_trading", "is_st", "is_pt")
+    }
+    numeric_facts = {
+        column: strict_finite_numeric_series(
+            frame[column],
+            error=f"invalid_a_share_eligibility_fact: {column}",
+            allow_null=True,
+        )
+        for column in (
+            "listing_age_trading_days",
+            "close",
+            "adj_close",
+            "volume",
+            "amount",
+            "turnover",
+        )
+    }
+    eligible = (
+        bool_facts["is_a_share_scope"]
+        & bool_facts["is_trading"]
+        & ~bool_facts["is_st"]
+        & ~bool_facts["is_pt"]
+        & numeric_facts["listing_age_trading_days"].ge(252)
+        & numeric_facts["close"].gt(0.0)
+        & numeric_facts["adj_close"].gt(0.0)
+        & numeric_facts["volume"].gt(0.0)
+        & numeric_facts["amount"].gt(0.0)
+        & numeric_facts["turnover"].gt(0.0)
+    ).fillna(False)
+    if dataset_id in {"fusion_nf_core", "fusion_nf_expectations"}:
+        for column in _A_SHARE_FUSION_ELIGIBILITY_FACTS:
+            if column not in frame:
+                raise ValueError(f"a_share_eligibility_facts_missing: {column}")
+            bool_facts[column] = strict_bool_series(
+                frame[column],
+                error=f"invalid_a_share_eligibility_fact: {column}",
+                allow_null=True,
+            ).fillna(False)
+            eligible &= bool_facts[column]
+        for column in (
+            "industry_standard_id",
+            "industry_level1_code",
+            "industry_level1_name",
+        ):
+            if column not in frame:
+                raise ValueError(f"a_share_eligibility_facts_missing: {column}")
+            values = frame[column].astype("string").str.strip()
+            eligible &= values.notna() & values.ne("")
+    return eligible.astype(bool)

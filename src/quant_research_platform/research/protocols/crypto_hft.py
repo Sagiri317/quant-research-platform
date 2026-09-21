@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass, replace
-from datetime import timedelta
+from dataclasses import asdict, dataclass
 
 import pandas as pd
 
@@ -21,7 +20,6 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import (
     bounded_qrp_json_object_snapshot,
 )
-from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioTargetBlocked,
@@ -35,7 +33,6 @@ from quant_research_platform.contracts.time import (
     time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import strict_finite_float
-from quant_research_platform.research.randomness import ROOT_SEED
 
 MARKET_ID = MarketId("crypto")
 PROTOCOL_ID = "crypto_hft"
@@ -53,8 +50,127 @@ HFT_FACTOR_COLUMNS = (
     "taker_buy_volume_100ms",
     "taker_sell_volume_100ms",
     "return_100ms",
+    "return_500ms",
     "realized_volatility_1s",
     "top10_depth_per_spread",
+    "trade_flow_imbalance_100ms",
+    "trade_flow_imbalance_500ms",
+    "trade_flow_imbalance_1s",
+    "trade_flow_imbalance_5s",
+    "ofi_500ms",
+    "ofi_1s",
+    "ofi_5s",
+    "depth_normalized_ofi_500ms",
+    "depth_normalized_ofi_1s",
+    "depth_normalized_ofi_5s",
+    "imbalance_1_minus_10",
+    "imbalance_5_minus_10",
+    "near_depth_share_1_10",
+    "taker_sell_pressure_500ms",
+    "taker_buy_pressure_500ms",
+)
+HFT_DERIVATIVE_FACTOR_COLUMNS = (
+    "mark_mid_basis",
+    "mark_index_basis",
+    "perp_index_basis",
+    "funding_rate",
+    "time_to_next_funding",
+    "log_open_interest",
+    "open_interest_change_30s",
+    "open_interest_change_1m",
+    "open_interest_change_5m",
+    "observed_force_order_imbalance_5s",
+    "observed_force_order_imbalance_30s",
+    "time_since_observed_force_order",
+    "top_position_long_short_ratio",
+    "top_account_long_short_ratio",
+    "global_account_long_short_ratio",
+    "taker_long_short_ratio",
+)
+HFT_DERIVATIVE_CHANNELS = (
+    "premiumIndex",
+    "openInterest",
+    "forceOrder",
+    "topLongShortPositionRatio",
+    "topLongShortAccountRatio",
+    "globalLongShortAccountRatio",
+    "takerlongshortRatio",
+)
+HFT_DERIVATIVE_CONTEXT_COLUMNS = tuple(
+    f"{channel}_{field}"
+    for channel in HFT_DERIVATIVE_CHANNELS
+    for field in ("age_ms", "observed_at", "event_at")
+)
+HFT_DERIVATIVE_DATA_ID = "binance_futures_derivative_factors_100ms"
+HFT_SPOT_PANEL_DATA_ID = "binance_spot_l2_panel_100ms"
+HFT_SPOT_CONTEXT_DATA_ID = "binance_spot_perp_context_100ms"
+HFT_SPOT_FACTOR_COLUMNS = (
+    "spot_perp_basis",
+    "spot_return_100ms",
+    "spot_return_500ms",
+    "spot_ofi_500ms",
+    "spot_tfi_500ms",
+    "spot_perp_return_divergence_100ms",
+    "spot_perp_return_divergence_500ms",
+    "spot_perp_normalized_ofi_divergence_500ms",
+    "spot_perp_tfi_divergence_500ms",
+    "lagged_spot_return_100ms",
+    "lagged_spot_ofi_500ms",
+    "lagged_spot_tfi_500ms",
+)
+HFT_SPOT_CONTEXT_COLUMNS = (
+    "spot_grid_age_ms",
+    "spot_book_age_ms",
+    "spot_grid_at",
+    "spot_book_observed_at",
+)
+HFT_SOL_PANEL_DATA_ID = "binance_sol_futures_l2_panel_100ms"
+HFT_INFORMATION_PANEL_DATA_ID = "binance_perpetual_information_panel_100ms"
+HFT_INFORMATION_STATE_DATA_ID = "binance_perpetual_information_state_100ms"
+HFT_CROSS_ASSET_DATA_ID = "binance_cross_asset_context_100ms"
+HFT_INFORMATION_COLUMNS = (
+    "return_100ms",
+    "return_500ms",
+    "depth_normalized_ofi_500ms",
+    "trade_flow_imbalance_500ms",
+)
+HFT_CROSS_ASSET_FACTOR_COLUMNS = tuple(
+    f"{asset}_{field}"
+    for asset in ("btc", "eth", "sol")
+    for field in (
+        "return_100ms",
+        "return_500ms",
+        "normalized_ofi_500ms",
+        "tfi_500ms",
+        "lagged_return_100ms",
+        "lagged_tfi_500ms",
+    )
+)
+HFT_CROSS_ASSET_CONTEXT_COLUMNS = tuple(
+    f"{asset}_{field}"
+    for asset in ("btc", "eth", "sol")
+    for field in ("grid_age_ms", "grid_at")
+)
+
+HFT_EXTERNAL_DATA_IDS = {
+    "bybit": "bybit_perpetual_context_100ms",
+    "okx": "okx_perpetual_context_100ms",
+}
+HFT_EXTERNAL_FIELDS = (
+    "mid_usdt",
+    "spread_usdt",
+    "return_100ms",
+    "return_500ms",
+    "observed_signed_base_flow_500ms",
+    "observed_signed_notional_flow_500ms",
+    "observed_tfi_500ms",
+    "price_difference",
+    "relative_mid_dispersion",
+)
+HFT_EXTERNAL_CLOCK_FIELDS = tuple(
+    f"{source}_{field}"
+    for source in ("quote", "trade", "ticker")
+    for field in ("age_ms", "observed_at", "event_at")
 )
 HFT_LABEL_HORIZONS_MS = (100, 500, 1_000, 5_000)
 HFT_PRICE_LABEL_COLUMNS = tuple(
@@ -74,44 +190,21 @@ HFT_LABEL_AVAILABILITY_COLUMNS = tuple(
 )
 HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS = 500
 HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN = "maker_bid_sell_pressure_proxy_500ms"
-HFT_MODEL_HORIZON_MS = 500
-HFT_MODEL_LABEL_COLUMN = f"future_mid_return_{HFT_MODEL_HORIZON_MS}ms"
-HFT_MODEL_ALGORITHMS = (
-    "lightgbm_regressor",
-    "linear_regression",
-    "xgboost_regressor",
-    "gradient_boosting_regressor",
-    "ridge_regression",
-)
-HFT_PRICE_MODEL_ALGORITHMS = HFT_MODEL_ALGORITHMS[:3]
-HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID = "crypto_hft_maker_bid_sell_pressure_proxy"
-HFT_RIDGE_FACTOR_COLUMNS = (
-    "relative_spread",
-    "imbalance_1",
-    "imbalance_5",
-    "imbalance_10",
-    "return_100ms",
-    "realized_volatility_1s",
-)
-HFT_MULTI_ASSET_SCOPES = {
-    "btc_independent": (("btc_usdt",), ("btc_usdt",)),
-    "eth_independent": (("eth_usdt",), ("eth_usdt",)),
-    "pooled": (("btc_usdt", "eth_usdt"), ("btc_usdt", "eth_usdt")),
-    "leave_btc_out": (("eth_usdt",), ("btc_usdt",)),
-    "leave_eth_out": (("btc_usdt",), ("eth_usdt",)),
-}
-HFT_EVALUATION_ID = "crypto_hft_microstructure_evaluation"
-HFT_LATENCY_SCENARIOS_MS = (0, 100, 200)
-HFT_TAKER_BASE_MODEL_ID = "crypto_hft_linear_regression"
-HFT_MAKER_CALIBRATION_MODEL_IDS = (
-    HFT_TAKER_BASE_MODEL_ID,
-    HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
-)
+HFT_MAKER_QUOTE_HORIZON_MS = 500
+HFT_EXECUTION_ASSET_IDS = ("btc_usdt", "eth_usdt")
+
 HFT_EXECUTION_CONTEXT_COLUMNS = (
     "book_segment_id",
     "trade_observation_id",
     "segment_id",
 )
+
+
+def label_horizon_ms(label_column):
+    """Return the duration encoded by an existing executable Crypto label."""
+    if label_column not in HFT_LABEL_COLUMNS:
+        raise ValueError("crypto_label_unknown")
+    return int(label_column.rsplit("_", 1)[1].removesuffix("ms"))
 
 
 @dataclass(frozen=True)
@@ -161,7 +254,9 @@ class CryptoExecutionPlan:
             or self.markout_horizon_ms <= 0
             or type(self.latency_scenarios_ms) is not tuple
             or any(type(value) is not int for value in self.latency_scenarios_ms)
-            or self.latency_scenarios_ms != HFT_LATENCY_SCENARIOS_MS
+            or not self.latency_scenarios_ms
+            or any(value < 0 for value in self.latency_scenarios_ms)
+            or len(set(self.latency_scenarios_ms)) != len(self.latency_scenarios_ms)
         ):
             raise ValueError("crypto_execution_parameters_invalid")
         for values in (self.fee_scenarios_bps, self.additional_spread_scenarios_bps):
@@ -197,48 +292,74 @@ class CryptoTakerCandidate:
 class CryptoMakerCandidate:
     candidate_id: str
     asset_id: str
-    calibrated: bool
+    price_model_id: str | None
+    proxy_model_id: str | None
+
+    @property
+    def calibrated(self):
+        return self.price_model_id is not None
+
+    @property
+    def model_ids(self):
+        return (self.price_model_id, self.proxy_model_id) if self.calibrated else ()
 
     @property
     def target_id(self):
         return f"{self.candidate_id}_ledger"
 
-
-def maker_candidates():
-    return (
-        CryptoMakerCandidate("crypto_hft_maker_baseline", "btc_usdt", False),
-        CryptoMakerCandidate("crypto_hft_maker", "btc_usdt", True),
-    )
+    @property
+    def calibration_target_id(self):
+        return f"{self.candidate_id}_calibration"
 
 
-def portfolio_candidates():
-    return (*taker_candidates(), *maker_candidates())
+def portfolio_candidates(selection):
+    """Decode explicit execution candidates without a named strategy roster."""
+    if type(selection) is not list:
+        raise ValueError("research_portfolio_configuration_invalid")
+    result = []
+    for item in selection:
+        if type(item) is not dict:
+            raise ValueError("research_portfolio_configuration_invalid")
+        if set(item) == {"candidate_id", "asset_id", "model_id", "latency_ms"}:
+            if type(item["model_id"]) is not str or not item["model_id"]:
+                raise ValueError("research_portfolio_model_invalid")
+            if item["latency_ms"] is not None and (
+                type(item["latency_ms"]) is not int or item["latency_ms"] < 0
+            ):
+                raise ValueError("crypto_execution_parameters_invalid")
+            candidate = CryptoTakerCandidate(**item)
+        elif set(item) == {
+            "candidate_id",
+            "asset_id",
+            "price_model_id",
+            "proxy_model_id",
+        }:
+            roles = (item["price_model_id"], item["proxy_model_id"])
+            if roles != (None, None) and any(
+                type(value) is not str or not value for value in roles
+            ):
+                raise ValueError("research_portfolio_model_invalid")
+            candidate = CryptoMakerCandidate(**item)
+        else:
+            raise ValueError("research_portfolio_configuration_invalid")
+        if (
+            type(candidate.candidate_id) is not str
+            or not candidate.candidate_id
+            or type(candidate.asset_id) is not str
+            or candidate.asset_id not in HFT_EXECUTION_ASSET_IDS
+        ):
+            raise ValueError("research_portfolio_configuration_invalid")
+        result.append(candidate)
+    return tuple(result)
 
 
-def taker_candidates():
-    return (
-        *(
-            CryptoTakerCandidate(
-                f"crypto_hft_{algorithm}", "btc_usdt", f"crypto_hft_{algorithm}"
-            )
-            for algorithm in HFT_PRICE_MODEL_ALGORITHMS
-        ),
-        *(
-            CryptoTakerCandidate(
-                f"crypto_hft_{mode}_{asset}", asset, f"crypto_hft_{mode}"
-            )
-            for mode, (_, assets) in HFT_MULTI_ASSET_SCOPES.items()
-            for asset in assets
-        ),
-        *(
-            CryptoTakerCandidate(
-                f"crypto_hft_latency_{latency}",
-                "btc_usdt",
-                HFT_TAKER_BASE_MODEL_ID,
-                latency,
-            )
-            for latency in HFT_LATENCY_SCENARIOS_MS
-        ),
+def maker_model_ids(selection):
+    """Derive validation persistence roles from actual maker consumers."""
+    return frozenset(
+        model_id
+        for candidate in portfolio_candidates(selection)
+        if isinstance(candidate, CryptoMakerCandidate)
+        for model_id in candidate.model_ids
     )
 
 
@@ -322,11 +443,6 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
             validation=window(item["validation"]),
             development_test=window(item["development_test"]),
         )
-        if any(
-            part.end - part.start < timedelta(milliseconds=HFT_MODEL_HORIZON_MS)
-            for part in (fold.train, fold.validation)
-        ):
-            raise ValueError("crypto_research_plan_label_window_too_short")
         if folds and folds[-1].development_test.end >= fold.development_test.start:
             raise ValueError("crypto_research_plan_oos_windows_overlap")
         folds.append(fold)
@@ -344,9 +460,7 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
     if capital.valuation_currency != "USDT":
         raise ValueError("crypto_research_plan_currency_invalid")
     raw_limits = snapshot["exposure_limits"]
-    if type(raw_limits) is not dict or set(raw_limits) != set(
-        HFT_MULTI_ASSET_SCOPES["pooled"][0]
-    ):
+    if type(raw_limits) is not dict or set(raw_limits) != set(HFT_EXECUTION_ASSET_IDS):
         raise ValueError("crypto_research_plan_exposure_limits_required")
     limits = []
     for asset, item in sorted(raw_limits.items()):
@@ -428,6 +542,7 @@ class CryptoProtocol:
     scenario_id: str = HFT_RESEARCH_DATASET_ID
     access_window: str = "development"
     research_plan: _CryptoResearchPlan | None = None
+    configuration_json: str | None = None
 
     def __post_init__(self) -> None:
         if self.scenario_id != HFT_RESEARCH_DATASET_ID:
@@ -439,18 +554,32 @@ class CryptoProtocol:
         if self.access_window not in {"development", "holdout"}:
             raise ValueError("unknown_crypto_access_window")
 
+    def configuration(self):
+        import json
+
+        return (
+            None
+            if self.configuration_json is None
+            else json.loads(self.configuration_json)
+        )
+
     @property
     def protocol_id(self) -> str:
         return PROTOCOL_ID
 
     def manifest(self) -> dict[str, object]:
         result = {
+            **(
+                {"research_configuration": self.configuration()}
+                if self.configuration_json is not None
+                else {}
+            ),
             "protocol_id": self.protocol_id,
             "scenario_id": self.scenario_id,
             "access_window": self.access_window,
             "required_terminals": list(self.terminal_targets("research run")),
             "portfolio_candidates": [
-                asdict(candidate) for candidate in portfolio_candidates()
+                asdict(candidate) for candidate in self.portfolio_candidates()
             ],
             "portfolio_statistics": {
                 "return_period": "complete_utc_day_within_one_oos_window",
@@ -462,12 +591,18 @@ class CryptoProtocol:
                 "cost_sensitivity": "constant_actual_turnover_additive_sensitivity",
             },
             "model_scopes": {
-                spec.model_id: {
-                    "training_asset_ids": list(_hft_asset_scope(spec.model_id, 0)),
-                    "validation_asset_ids": list(_hft_asset_scope(spec.model_id, 0)),
-                    "evaluation_asset_ids": list(_hft_asset_scope(spec.model_id, 1)),
+                item["model_id"]: {
+                    "training_asset_ids": item["training_asset_ids"],
+                    "validation_asset_ids": item["training_asset_ids"],
+                    "evaluation_asset_ids": item["evaluation_asset_ids"],
+                    "label_column": item["label_column"],
+                    "label_horizon_ms": label_horizon_ms(item["label_column"]),
                 }
-                for spec in build_hft_model_catalog(training_row_bound=None).list()
+                for item in (
+                    self.configuration()["models"]
+                    if self.configuration_json is not None
+                    else ()
+                )
             },
         }
 
@@ -480,7 +615,7 @@ class CryptoProtocol:
                     "end": payload["folds"][-1]["development_test"]["end"],
                 },
                 holdout_window=payload["final_holdout"],
-                label_horizon_ms=HFT_MODEL_HORIZON_MS,
+                maker_quote_horizon_ms=HFT_MAKER_QUOTE_HORIZON_MS,
                 label_availability_rule="decision_time_plus_horizon_lte_role_end",
                 holdout_status="HOLDOUT_LOCKED",
             )
@@ -489,23 +624,36 @@ class CryptoProtocol:
     def model_ids_for_target(self, target_id):
         if target_id != f"{self.scenario_id}_models":
             raise ValueError("crypto_model_target_invalid")
+        if self.configuration_json is not None:
+            return tuple(model["model_id"] for model in self.configuration()["models"])
         return tuple(
             spec.model_id
-            for spec in build_hft_model_catalog(training_row_bound=None).list()
+            for spec in build_hft_model_catalog(
+                configuration=self.configuration()
+            ).list()
         )
 
     def portfolio_candidate_for_target(self, target_id):
         return next(
             candidate
-            for candidate in portfolio_candidates()
+            for candidate in self.portfolio_candidates()
             if candidate.target_id == target_id
         )
 
     def portfolio_candidates(self):
-        return portfolio_candidates()
+        return portfolio_candidates(
+            self.configuration()["portfolios"]
+            if self.configuration_json is not None
+            else []
+        )
 
     def statistics_table_group(self, target_id):
-        if target_id == f"{self.scenario_id}_maker_calibration":
+        if any(
+            isinstance(candidate, CryptoMakerCandidate)
+            and candidate.calibrated
+            and target_id == candidate.calibration_target_id
+            for candidate in self.portfolio_candidates()
+        ):
             if (
                 self.research_plan is None
                 or self.research_plan.execution is None
@@ -536,7 +684,7 @@ class CryptoProtocol:
             "gap_policy": "continuous_capital_no_signals_cancel_pending_mark_and_fund",
             **(
                 {
-                    "quote_horizon_ms": HFT_MODEL_HORIZON_MS,
+                    "quote_horizon_ms": HFT_MAKER_QUOTE_HORIZON_MS,
                     "quote_policy": (
                         "maximize_absolute_expected_gain_of_active_and_pending_schedule"
                         "_keep_or_delayed_queue_reset_replace_or_zero_quantity_cancel"
@@ -561,50 +709,63 @@ class CryptoProtocol:
         models = f"{dataset}_models"
         predictions = f"{dataset}_predictions"
         statistics = f"{dataset}_portfolio_statistics"
-        calibration = f"{dataset}_maker_calibration"
         panel = build_hft_research_dataset_catalog().get(dataset).base_input_data_id
         return (
             *(
                 TargetSpec(
                     evaluation.evaluation_id,
-                    dependencies=(dataset, predictions)
+                    dependencies=(
+                        dataset,
+                        predictions,
+                        *(
+                            tuple(
+                                signal.signal_id + "_oos_evaluation"
+                                for signal in evaluation.signals
+                            )
+                            if len(evaluation.signals) > 1
+                            else ()
+                        ),
+                    )
                     if evaluation.signals[0].source_kind == "prediction"
                     else (dataset,),
                     producer_id=evaluation.evaluation_id,
                 )
-                for evaluation in build_crypto_evaluation_catalog().list()
+                for evaluation in build_crypto_evaluation_catalog(
+                    configuration=self.configuration()
+                ).list()
             ),
             TargetSpec(models, dependencies=(dataset,), producer_id=models),
             TargetSpec(
                 predictions, dependencies=(models, dataset), producer_id=predictions
             ),
-            TargetSpec(
-                calibration,
-                dependencies=(models, dataset, panel),
-                producer_id=calibration,
+            *(
+                TargetSpec(
+                    candidate.calibration_target_id,
+                    dependencies=(models, dataset, panel),
+                    producer_id=candidate.calibration_target_id,
+                )
+                for candidate in self.portfolio_candidates()
+                if isinstance(candidate, CryptoMakerCandidate) and candidate.calibrated
             ),
             *(
                 TargetSpec(
                     candidate.target_id,
-                    dependencies=(predictions, dataset, panel),
+                    dependencies=(
+                        (candidate.calibration_target_id, predictions, dataset, panel)
+                        if isinstance(candidate, CryptoMakerCandidate)
+                        and candidate.calibrated
+                        else (dataset, panel)
+                        if isinstance(candidate, CryptoMakerCandidate)
+                        else (predictions, dataset, panel)
+                    ),
                     producer_id=candidate.target_id,
                 )
-                for candidate in taker_candidates()
-            ),
-            TargetSpec(
-                maker_candidates()[0].target_id,
-                dependencies=(dataset, panel),
-                producer_id=maker_candidates()[0].target_id,
-            ),
-            TargetSpec(
-                maker_candidates()[1].target_id,
-                dependencies=(calibration, predictions, dataset, panel),
-                producer_id=maker_candidates()[1].target_id,
+                for candidate in self.portfolio_candidates()
             ),
             TargetSpec(
                 statistics,
                 dependencies=tuple(
-                    candidate.target_id for candidate in portfolio_candidates()
+                    candidate.target_id for candidate in self.portfolio_candidates()
                 ),
                 producer_id=statistics,
             ),
@@ -614,12 +775,42 @@ class CryptoProtocol:
         if action == "dataset build":
             return (self.scenario_id,)
         if action == "research run":
+            if (
+                self.configuration_json is not None
+                and self.configuration()["stage"] == "evaluation"
+            ):
+                return (f"{self.scenario_id}_evaluation",)
+            if self.configuration_json is not None:
+                selected = self.configuration()
+                return (
+                    f"{self.scenario_id}_evaluation",
+                    *(
+                        model["model_id"] + "_oos_evaluation"
+                        for model in selected["models"]
+                    ),
+                    *(
+                        spec.evaluation_id
+                        for spec in build_crypto_evaluation_catalog(
+                            configuration=selected
+                        ).list()
+                        if len(spec.signals) > 1
+                        and spec.signals[0].source_kind == "prediction"
+                    ),
+                    *(candidate.target_id for candidate in self.portfolio_candidates()),
+                    *(
+                        (f"{self.scenario_id}_portfolio_statistics",)
+                        if selected["portfolios"]
+                        else ()
+                    ),
+                )
             return (
                 *(
                     spec.evaluation_id
-                    for spec in build_crypto_evaluation_catalog().list()
+                    for spec in build_crypto_evaluation_catalog(
+                        configuration=self.configuration()
+                    ).list()
                 ),
-                *(candidate.target_id for candidate in portfolio_candidates()),
+                *(candidate.target_id for candidate in self.portfolio_candidates()),
                 f"{self.scenario_id}_portfolio_statistics",
             )
         if action == "data materialize":
@@ -680,108 +871,84 @@ def build_signal_specs(*, columns: tuple[str, ...]) -> tuple[SignalSpec, ...]:
     )
 
 
-def build_hft_model_catalog(*, training_row_bound: int | None) -> ModelCatalog:
-    if training_row_bound is not None and (
-        type(training_row_bound) is not int or training_row_bound <= 0
-    ):
-        raise ValueError("hft_training_row_bound_invalid")
-    price_models = tuple(
-        ModelSpec(
-            model_id=f"crypto_hft_{algorithm}",
-            model_algorithm=algorithm,
-            input_factor_columns=("ofi_100ms",)
-            if algorithm == "linear_regression"
-            else HFT_FACTOR_COLUMNS,
-            label_column=HFT_MODEL_LABEL_COLUMN,
-            random_seed=ROOT_SEED,
-            max_train_rows=training_row_bound,
-            hyperparameters={"n_jobs": -1}
-            if algorithm in {"xgboost_regressor", "lightgbm_regressor"}
-            else {},
-        )
-        for algorithm in HFT_MODEL_ALGORITHMS[:3]
-    )
-    return ModelCatalog(
-        (
-            *price_models,
-            ModelSpec(
-                model_id="crypto_hft_maker_bid_sell_pressure_proxy",
-                model_algorithm="gradient_boosting_regressor",
-                input_factor_columns=HFT_FACTOR_COLUMNS,
-                label_column="maker_bid_sell_pressure_proxy_500ms",
-                random_seed=ROOT_SEED,
-                max_train_rows=training_row_bound,
-            ),
-            *(
-                ModelSpec(
-                    model_id=f"crypto_hft_{mode}",
-                    model_algorithm="ridge_regression",
-                    input_factor_columns=HFT_RIDGE_FACTOR_COLUMNS,
-                    label_column=HFT_MODEL_LABEL_COLUMN,
-                    random_seed=ROOT_SEED,
-                    max_train_rows=training_row_bound,
-                    hyperparameters={"alpha": 1.0},
-                )
-                for mode in HFT_MULTI_ASSET_SCOPES
-            ),
-        )
+def build_hft_model_catalog(*, configuration=None) -> ModelCatalog:
+    return ModelCatalog.from_configuration(
+        [] if configuration is None else configuration["models"]
     )
 
 
 def build_hft_prediction_catalog(
-    *, train_end: str, test_start: str, test_end: str
+    *, configuration, train_end: str, test_start: str, test_end: str
 ) -> PredictionCatalog:
-    model_ids = (
-        *(f"crypto_hft_{algorithm}" for algorithm in HFT_PRICE_MODEL_ALGORITHMS),
-        HFT_MAKER_SELL_PRESSURE_PROXY_MODEL_ID,
-        *(f"crypto_hft_{mode}" for mode in HFT_MULTI_ASSET_SCOPES),
-    )
     return PredictionCatalog(
-        tuple(
-            PredictionSpec(
-                prediction_id=f"{model_id}_prediction",
-                model_id=model_id,
-                research_dataset_id=HFT_RESEARCH_DATASET_ID,
-                train_end=train_end,
-                test_start=test_start,
-                test_end=test_end,
-                training_asset_ids=_hft_asset_scope(model_id, 0),
-                evaluation_asset_ids=_hft_asset_scope(model_id, 1),
-            )
-            for model_id in model_ids
+        PredictionSpec(
+            prediction_id=f"{item['model_id']}_prediction",
+            model_id=item["model_id"],
+            research_dataset_id=HFT_RESEARCH_DATASET_ID,
+            train_end=train_end,
+            test_start=test_start,
+            test_end=test_end,
+            training_asset_ids=tuple(item["training_asset_ids"]),
+            evaluation_asset_ids=tuple(item["evaluation_asset_ids"]),
         )
+        for item in configuration["models"]
     )
 
 
-def _hft_asset_scope(model_id: str, position: int) -> tuple[str, ...]:
-    mode = model_id.removeprefix("crypto_hft_")
-    return (
-        HFT_MULTI_ASSET_SCOPES[mode][position] if mode in HFT_MULTI_ASSET_SCOPES else ()
-    )
-
-
-def build_hft_evaluation_catalog() -> EvaluationCatalog:
-    return EvaluationCatalog(
-        (
-            EvaluationSpec(
-                evaluation_id=HFT_EVALUATION_ID,
-                market_id=MARKET_ID,
-                research_dataset_id=HFT_RESEARCH_DATASET_ID,
-                signals=build_signal_specs(columns=HFT_FACTOR_COLUMNS),
-                label_columns=HFT_LABEL_COLUMNS,
-            ),
-        )
-    )
-
-
-def build_crypto_evaluation_catalog() -> EvaluationCatalog:
-    factor = replace(
-        build_hft_evaluation_catalog().get(HFT_EVALUATION_ID),
+def build_crypto_evaluation_catalog(*, configuration=None) -> EvaluationCatalog:
+    factor = EvaluationSpec(
         evaluation_id=f"{HFT_RESEARCH_DATASET_ID}_evaluation",
+        market_id=MARKET_ID,
+        research_dataset_id=HFT_RESEARCH_DATASET_ID,
+        signals=build_signal_specs(columns=HFT_FACTOR_COLUMNS),
+        label_columns=HFT_LABEL_COLUMNS,
         label_availability_columns={
             label: f"{label}_available_at" for label in HFT_LABEL_COLUMNS
         },
     )
+    models = build_hft_model_catalog(configuration=configuration).list()
+    comparisons = []
+    if configuration is not None and configuration["stage"] == "research":
+        reference = next(
+            model
+            for model in models
+            if model.model_id == configuration["comparison_model_id"]
+        )
+        scopes = {
+            item["model_id"]: set(item["evaluation_asset_ids"])
+            for item in configuration["models"]
+        }
+        for model in models:
+            if (
+                model.model_id == reference.model_id
+                or model.label_column != reference.label_column
+            ):
+                continue
+            assets = scopes[model.model_id] & scopes[reference.model_id]
+            comparisons.append(
+                EvaluationSpec(
+                    evaluation_id=f"{model.model_id}_vs_{reference.model_id}_common_oos",
+                    market_id=MARKET_ID,
+                    research_dataset_id=HFT_RESEARCH_DATASET_ID,
+                    signals=tuple(
+                        SignalSpec(
+                            signal_id=item.model_id,
+                            source_kind="prediction",
+                            source_column="prediction__" + item.model_id,
+                        )
+                        for item in (reference, model)
+                    ),
+                    label_columns=(model.label_column,),
+                    label_availability_columns={
+                        model.label_column: model.label_column + "_available_at",
+                    },
+                    evaluation_axis=(
+                        "single_asset_time_series"
+                        if len(assets) <= 1
+                        else "cross_sectional"
+                    ),
+                )
+            )
     return EvaluationCatalog(
         (
             factor,
@@ -802,11 +969,19 @@ def build_crypto_evaluation_catalog() -> EvaluationCatalog:
                         model.label_column: f"{model.label_column}_available_at"
                     },
                     evaluation_axis="single_asset_time_series"
-                    if len(_hft_asset_scope(model.model_id, 1)) == 1
+                    if len(
+                        next(
+                            item["evaluation_asset_ids"]
+                            for item in configuration["models"]
+                            if item["model_id"] == model.model_id
+                        )
+                    )
+                    == 1
                     else "cross_sectional",
                 )
-                for model in build_hft_model_catalog(training_row_bound=None).list()
+                for model in models
             ),
+            *comparisons,
         )
     )
 
@@ -901,3 +1076,94 @@ def _roles(
         else ColumnRole.CONTEXT
         for column in columns
     }
+
+
+def factor_catalog():
+    from quant_research_platform.catalog.factors import FactorCatalog
+    from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+
+    definitions = [
+        FactorDefinition(
+            factor_id=column,
+            market_id=MARKET_ID,
+            factor_set=FactorSet.STANDARD,
+            input_columns=(
+                "mid",
+                "book_spread",
+                "bid_depth_1",
+                "ask_depth_1",
+                "bid_depth_5",
+                "ask_depth_5",
+                "bid_depth_10",
+                "ask_depth_10",
+                "book_ofi_100ms",
+                "observed_signed_trade_volume_100ms",
+                "observed_taker_buy_volume_100ms",
+                "observed_taker_sell_volume_100ms",
+            ),
+            output_column=column,
+            family="microstructure",
+            required_input_data_id="binance_futures_microstructure_factors_100ms",
+            timing_semantics="observed_by_decision_on_contiguous_100ms_segment",
+            null_policy="full_window_positive_denominator",
+        )
+        for column in HFT_FACTOR_COLUMNS
+    ]
+    definitions.extend(
+        FactorDefinition(
+            factor_id=column,
+            market_id=MARKET_ID,
+            factor_set=FactorSet.STANDARD,
+            input_columns=("mid",),
+            output_column=column,
+            family="derivatives_state",
+            required_input_data_id=HFT_DERIVATIVE_DATA_ID,
+            timing_semantics="native_observed_at_lte_decision_with_explicit_age_limit",
+            null_policy="missing_stale_or_incomplete_window_is_null",
+        )
+        for column in HFT_DERIVATIVE_FACTOR_COLUMNS
+    )
+    definitions.extend(
+        FactorDefinition(
+            factor_id=column,
+            market_id=MARKET_ID,
+            factor_set=FactorSet.STANDARD,
+            input_columns=("mid",),
+            output_column=column,
+            family="spot_perp",
+            required_input_data_id=HFT_SPOT_CONTEXT_DATA_ID,
+            timing_semantics="spot_grid_available_by_perpetual_decision_with_explicit_age_limit",
+            null_policy="missing_stale_or_incomplete_window_is_null",
+        )
+        for column in HFT_SPOT_FACTOR_COLUMNS
+    )
+    definitions.extend(
+        FactorDefinition(
+            factor_id=column,
+            market_id=MARKET_ID,
+            factor_set=FactorSet.STANDARD,
+            input_columns=HFT_INFORMATION_COLUMNS,
+            output_column=column,
+            family="cross_asset",
+            required_input_data_id=HFT_CROSS_ASSET_DATA_ID,
+            timing_semantics="mature_information_grid_lte_decision_with_explicit_age_limit",
+            null_policy="missing_stale_or_incomplete_window_is_null",
+        )
+        for column in HFT_CROSS_ASSET_FACTOR_COLUMNS
+    )
+    definitions.extend(
+        FactorDefinition(
+            factor_id=f"{venue}_{column}",
+            market_id=MARKET_ID,
+            factor_set=FactorSet.STANDARD,
+            input_columns=("mid",),
+            output_column=f"{venue}_{column}",
+            family="external_price_discovery",
+            required_input_data_id=data_id,
+            timing_semantics="normalized_local_timestamp_lte_binance_decision",
+            null_policy="missing_stale_incomplete_or_unrepresentable_is_null",
+        )
+        for venue, data_id in HFT_EXTERNAL_DATA_IDS.items()
+        for column in HFT_EXTERNAL_FIELDS
+    )
+    return FactorCatalog(definitions)

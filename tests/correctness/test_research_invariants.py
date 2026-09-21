@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.contracts.experiments import legal_training_rows
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.markets.implementations.a_share.execution import (
@@ -14,10 +15,6 @@ from quant_research_platform.research.factors.fundamental.calculations import (
 )
 from quant_research_platform.research.factors.price_volume.calculations import (
     calculate_price_volume_factors,
-)
-from quant_research_platform.research.factors.price_volume.definitions import (
-    FORMAL_CORE_PRICE_VOLUME_FACTORS,
-    FORMAL_PRICE_VOLUME_FACTORS,
 )
 from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
@@ -42,7 +39,6 @@ from quant_research_platform.research.portfolios.optimizer import (
 )
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskState,
-    MarketModelRiskState,
 )
 from quant_research_platform.research.protocols.a_share import (
     PROTOCOL_ID,
@@ -54,13 +50,19 @@ from quant_research_platform.sources.csmar.interim import interim_catalog
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
+from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_research_protocol_identity_and_surfaces_are_explicit() -> None:
-    assert len(FORMAL_PRICE_VOLUME_FACTORS) == 25
-    assert len(FORMAL_CORE_PRICE_VOLUME_FACTORS) == 6
-    assert SCENARIO_IDS == ("pv_all", "fusion_nf_core", "fusion_nf_expectations")
+    assert len(PV25_FACTORS) == 25
+    assert len(CORE6_FACTORS) == 6
+    assert SCENARIO_IDS == (
+        "pv_all",
+        "pv_expanded",
+        "fusion_nf_core",
+        "fusion_nf_expectations",
+    )
     research_protocol = protocol("pv_all")
     assert research_protocol.protocol_id == PROTOCOL_ID == "a_share_low_frequency"
     assert research_protocol.manifest()["protocol_id"] == PROTOCOL_ID
@@ -324,6 +326,7 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
             "amount": 1_000.0,
             "volume": 100.0,
             "float_market_cap": 100_000.0,
+            "total_market_cap": 150_000.0,
         }
     )
     changed = base.copy()

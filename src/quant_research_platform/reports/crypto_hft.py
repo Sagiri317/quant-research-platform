@@ -10,6 +10,7 @@ REQUIRED_REPORT_SECTIONS = (
     "factor diagnostics",
     "models and validation",
     "OOS prediction",
+    "model comparison",
     "maker calibration",
     "portfolio",
     "execution",
@@ -24,6 +25,7 @@ REQUIRED_REPORT_SECTIONS = (
 
 def build_crypto_research_report(*, record, evidence):
     run_payload = record.payload()
+    configuration = run_payload["protocol"]["research_configuration"]
     statistics = evidence["statistics"]
 
     def statistical_rows(table, predicate=None):
@@ -48,7 +50,19 @@ def build_crypto_research_report(*, record, evidence):
         },
         "models and validation": evidence["models"],
         "OOS prediction": evidence["predictions"],
-        "maker calibration": evidence["calibration"],
+        "model comparison": {
+            "status": diagnostic_status(evidence["model_comparisons"])
+            if evidence["model_comparisons"]
+            else "UNDEFINED",
+            "reason": "" if evidence["model_comparisons"] else "no_comparable_models",
+            "sample_policy": "pairwise_exact_keys_finite_predictions_mature_same_label",
+            "reference_model_id": run_payload["protocol"]["research_configuration"][
+                "comparison_model_id"
+            ],
+            "evaluations": evidence["model_comparisons"],
+            "portfolio_policy": "full_individual_ledgers_unchanged",
+        },
+        "maker calibration": evidence["calibrations"],
         "portfolio": {
             "status": diagnostic_status(evidence["portfolios"]),
             "candidates": evidence["portfolios"],
@@ -94,6 +108,23 @@ def build_crypto_research_report(*, record, evidence):
             "issues": evidence["issues"],
         },
     }
+    if configuration["stage"] == "evaluation":
+        for name in ("models and validation", "OOS prediction", "model comparison"):
+            sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
+    if not evidence["calibrations"]:
+        sections["maker calibration"] = {
+            "status": "UNDEFINED",
+            "reason": "not_requested",
+        }
+    if not configuration["portfolios"]:
+        for name in (
+            "portfolio",
+            "execution",
+            "cost sensitivity",
+            "inventory",
+            "daily statistics",
+        ):
+            sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
     return {
         "schema_id": REPORT_SCHEMA_ID,
         "run_id": record.run_id,

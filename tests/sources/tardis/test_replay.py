@@ -646,3 +646,86 @@ def test_midnight_preserves_native_book_factor_and_label_continuity(
                 == midnight + pd.Timedelta(milliseconds=400)
             )
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("exchange", ["binance", "binance-futures"])
+@pytest.mark.parametrize("resend", ["duplicate", "conflict", "unseen"])
+def test_trade_resends_preserve_raw_bytes_and_count_each_identity_once(
+    tmp_path, exchange, resend
+):
+    from quant_research_platform.sources.binance.ids import SPOT_MARKET_TYPE
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+
+    def trade(second, identifier, quantity, *, transaction_second=None):
+        return _line(
+            second,
+            "aggTrade",
+            {
+                "e": "aggTrade",
+                "E": 1788220800000 + second * 1000,
+                "T": 1788220800000
+                + (second if transaction_second is None else transaction_second) * 1000,
+                "s": "BTCUSDT",
+                "st": 1,
+                "a": identifier,
+                "p": "100",
+                "q": quantity,
+                "nq": quantity,
+                "f": identifier,
+                "l": identifier,
+                "m": True,
+            },
+        )
+
+    native = (
+        _line(
+            0,
+            "depthSnapshot",
+            {"lastUpdateId": 100, "bids": [["100", "2"]], "asks": [["101", "2"]]},
+        )
+        + trade(1, 10, "2")
+        + trade(2, 11, "3")
+        + trade(
+            3,
+            9 if resend == "unseen" else 10,
+            "9" if resend == "conflict" else "2",
+            transaction_second=1,
+        )
+        + trade(4, 12, "4")
+    )
+    slices = _slices(tmp_path / "native", native, count=1)
+    published = tmp_path / "published"
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2)
+    ) as policy:
+        kwargs = dict(
+            date="2026-09-01",
+            slices=slices,
+            byte_budget=1024**2,
+            resource_policy=policy,
+            exchange=exchange,
+            symbols=("btcusdt",),
+            channels=("depth", "depthSnapshot", "aggTrade"),
+        )
+        if resend != "duplicate":
+            with pytest.raises(ValueError, match="sequence_non_monotonic"):
+                import_slices(published, **kwargs)
+            assert not published.exists()
+            assert policy.used_memory_bytes == 0
+            return
+        manifest = import_slices(published, **kwargs)
+        assert (published / manifest["files"][0]["path"]).read_bytes() == slices[
+            0
+        ].read_bytes()
+        assert manifest["gaps"]["record_count"] == 0
+        market = SPOT_MARKET_TYPE if exchange == "binance" else FUTURES_MARKET_TYPE
+        with open_market_source(published, resource_policy=policy) as source:
+            trades = list(iter_agg_trades(source, market, symbol="BTCUSDT"))
+            assert [item.source_sequence for item in trades] == [2, 3, 5]
+            assert sum(item.quantity for item in trades) == 9
+            assert [item.event_time_ms for item in trades] == [
+                1788220801000,
+                1788220802000,
+                1788220804000,
+            ]
+        assert policy.used_memory_bytes == 0

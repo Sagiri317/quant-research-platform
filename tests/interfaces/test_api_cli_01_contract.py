@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -267,6 +268,10 @@ def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> Non
         "inspect",
     }
     runner = CliRunner()
+    from tests.helpers.research_configuration import research_configuration
+
+    configuration_path = tmp_path / "research.json"
+    configuration_path.write_text(json.dumps(research_configuration()))
     for args in (
         ("catalog", "factors"),
         ("catalog", "labels"),
@@ -285,10 +290,8 @@ def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> Non
         (
             "research",
             "run",
-            "--start-date",
-            "2019-01-01",
-            "--end-date",
-            "2019-12-31",
+            "--research-plan",
+            str(configuration_path),
             "--plan",
         ),
         ("report", "build", "--help"),
@@ -321,7 +324,12 @@ def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> Non
     ):
         result = runner.invoke(app, [*args, "--help"])
         assert result.exit_code == 0, result.output
-        assert "--profile" in result.output
+        if args == ["research", "run"]:
+            assert "--research-plan" in result.output
+            assert "--profile" not in result.output
+            assert "--start-date" not in result.output
+        else:
+            assert "--profile" in result.output
 
     holdout = runner.invoke(
         app,
@@ -329,10 +337,8 @@ def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> Non
             "research",
             "run",
             "--holdout",
-            "--start-date",
-            "2019-01-01",
-            "--end-date",
-            "2019-12-31",
+            "--research-plan",
+            str(configuration_path),
         ],
     )
     assert holdout.exit_code != 0
@@ -552,3 +558,49 @@ def test_cli_materialize_leaves_raw_root_resolution_to_project_layout(
     assert result.exit_code == 0, result.output
     assert captured["raw_root"] is None
     assert captured["layout"].project_root == tmp_path
+
+
+def test_research_cli_uses_only_the_configuration_for_scientific_selection(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.workflows import research
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    config["windows"]["development"] = {"start": "2022-01-01", "end": "2022-12-31"}
+    path = tmp_path / "research.json"
+    path.write_text(json.dumps(config))
+    calls = []
+    monkeypatch.setattr(
+        research,
+        "research_run",
+        lambda **kwargs: calls.append(kwargs) or {"status": "COMPLETE"},
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "research",
+            "run",
+            "--research-plan",
+            str(path),
+            "--project-root",
+            str(tmp_path),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert len(calls) == 1
+    assert calls[0]["research_plan"] == config
+    assert not {"scenario_id", "start_date", "end_date"}.intersection(calls[0])
+    assert calls[0]["profile"].profile_id == config["profile_id"]
+
+
+@pytest.mark.parametrize("profile_id", [None, "unknown"])
+def test_research_cli_rejects_invalid_configuration_profile_without_traceback(
+    tmp_path, profile_id
+):
+    path = tmp_path / "invalid.json"
+    path.write_text(json.dumps({"profile_id": profile_id}))
+    result = CliRunner().invoke(app, ["research", "run", "--research-plan", str(path)])
+    assert result.exit_code == 2
+    assert "research_configuration_profile_invalid" in result.output
+    assert "Traceback" not in result.output

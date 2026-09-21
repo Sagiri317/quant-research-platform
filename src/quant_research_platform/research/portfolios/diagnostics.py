@@ -8,6 +8,7 @@ from itertools import zip_longest
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
 from quant_research_platform.contracts.validation import (
     clear_exception_frames,
@@ -21,7 +22,6 @@ from quant_research_platform.research.portfolios.accounting import (
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskState,
     HoldingFactorInputs,
-    MarketModelRiskState,
     holding_attribution,
 )
 from quant_research_platform.research.portfolios.schedules import holding_intervals
@@ -236,7 +236,7 @@ def build_crypto_portfolio_statistics_tables(
         portfolio_candidates,
     )
 
-    candidates = portfolio_candidates()
+    candidates = portfolio_candidates(protocol_manifest["portfolio_candidates"])
     plan = protocol_manifest["research_plan"]
     statistics_policy = protocol_manifest["portfolio_statistics"]
     windows = execution_windows(plan, time_window)
@@ -494,6 +494,7 @@ def iter_holding_factor_inputs(
     unified_trading_sessions,
     style_columns,
     risk_context_target_ids,
+    benchmark_required,
 ):
     """Stream aligned inputs, retaining only decision/entry/end prices."""
     from quant_research_platform.contracts.time import TimeWindow
@@ -559,10 +560,14 @@ def iter_holding_factor_inputs(
                 context_frames = {
                     root: next(source, None) for root, source in contexts.items()
                 }
-                benchmarks = stream(
-                    layout.target_root("benchmark_weights", None),
-                    ("benchmark_id", "asset_id", "timestamp", "weight"),
-                    time_window,
+                benchmarks = (
+                    stream(
+                        layout.target_root("benchmark_weights", None),
+                        ("benchmark_id", "asset_id", "timestamp", "weight"),
+                        time_window,
+                    )
+                    if benchmark_required
+                    else iter(())
                 )
                 panel, data, benchmark = (
                     next(panels, None),
@@ -776,19 +781,22 @@ def build_portfolio_statistics_tables(
                 resource_policy=resource_policy,
             )
             codes = protocol_manifest["benchmark_total_return_indices"]
-            with closing_iterator(
-                read_dataset(
-                    layout.target_root("index_market", None),
-                    columns=("source_asset_id", "timestamp", "open"),
-                    time_window=time_window,
-                    mode=DatasetReadMode.CHUNKED,
-                    resource_policy=resource_policy,
-                )
-            ) as chunks:
-                for frame in chunks:
-                    piece = frame.loc[frame.source_asset_id.isin(codes.values())].copy()
-                    if not piece.empty:
-                        pieces.append(piece)
+            if codes:
+                with closing_iterator(
+                    read_dataset(
+                        layout.target_root("index_market", None),
+                        columns=("source_asset_id", "timestamp", "open"),
+                        time_window=time_window,
+                        mode=DatasetReadMode.CHUNKED,
+                        resource_policy=resource_policy,
+                    )
+                ) as chunks:
+                    for frame in chunks:
+                        piece = frame.loc[
+                            frame.source_asset_id.isin(codes.values())
+                        ].copy()
+                        if not piece.empty:
+                            pieces.append(piece)
             benchmark = (
                 pd.concat(pieces, ignore_index=True)
                 if pieces
@@ -805,7 +813,12 @@ def build_portfolio_statistics_tables(
                 resource_policy=resource_policy,
                 unified_trading_sessions=unified_trading_sessions,
                 style_columns=tuple(protocol_manifest["risk_styles"]),
-                risk_context_target_ids=tuple(
+                benchmark_required=bool(codes),
+                risk_context_target_ids=("price_volume_facts",)
+                if not any(
+                    candidate.risk_context_target_ids for candidate in candidates
+                )
+                else tuple(
                     dict.fromkeys(
                         target_id
                         for candidate in candidates
@@ -844,9 +857,11 @@ def _portfolio_statistics_tables(
     unified_trading_sessions,
     holding_inputs,
 ):
-    """Project the fixed five actual ledgers into interval-aligned diagnostics."""
+    """Project the protocol-selected ledgers into interval-aligned diagnostics."""
     ids = tuple(candidate.candidate_id for candidate in candidates)
-    if len(ids) != 5 or set(ledgers) != set(ids):
+    if tuple(protocol_manifest["portfolio_candidates"]) != ids or set(ledgers) != set(
+        ids
+    ):
         raise ValueError("portfolio_statistics_candidate_set_invalid")
     expected_intervals = holding_intervals(
         pd.DatetimeIndex(unified_trading_sessions(calendar)), time_window

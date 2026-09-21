@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import (
     PLATFORM_ENTITY_TIME_KEY,
@@ -14,9 +16,26 @@ from quant_research_platform.contracts.data import (
     ProcessedDataSpec,
 )
 from quant_research_platform.research.protocols.crypto_hft import (
+    HFT_CROSS_ASSET_CONTEXT_COLUMNS,
+    HFT_CROSS_ASSET_DATA_ID,
+    HFT_CROSS_ASSET_FACTOR_COLUMNS,
+    HFT_DERIVATIVE_CONTEXT_COLUMNS,
+    HFT_DERIVATIVE_DATA_ID,
+    HFT_DERIVATIVE_FACTOR_COLUMNS,
+    HFT_EXTERNAL_CLOCK_FIELDS,
+    HFT_EXTERNAL_DATA_IDS,
+    HFT_EXTERNAL_FIELDS,
     HFT_FACTOR_COLUMNS,
+    HFT_INFORMATION_COLUMNS,
+    HFT_INFORMATION_PANEL_DATA_ID,
+    HFT_INFORMATION_STATE_DATA_ID,
     HFT_LABEL_AVAILABILITY_COLUMNS,
     HFT_LABEL_COLUMNS,
+    HFT_SOL_PANEL_DATA_ID,
+    HFT_SPOT_CONTEXT_COLUMNS,
+    HFT_SPOT_CONTEXT_DATA_ID,
+    HFT_SPOT_FACTOR_COLUMNS,
+    HFT_SPOT_PANEL_DATA_ID,
 )
 
 HFT_PANEL_CONTEXT_COLUMNS = (
@@ -69,6 +88,82 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 (*PLATFORM_ENTITY_TIME_KEY, *HFT_FACTOR_COLUMNS),
                 processed_input_data_ids=("binance_futures_l2_panel_100ms",),
                 semantic_role=ColumnRole.FACTOR,
+                parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
+            ),
+            _spec(HFT_SOL_PANEL_DATA_ID, ProcessedDataKind.PANEL, HFT_PANEL_COLUMNS),
+            _spec(
+                HFT_INFORMATION_PANEL_DATA_ID,
+                ProcessedDataKind.PANEL,
+                HFT_PANEL_COLUMNS,
+                processed_input_data_ids=(
+                    "binance_futures_l2_panel_100ms",
+                    HFT_SOL_PANEL_DATA_ID,
+                ),
+            ),
+            _spec(
+                HFT_INFORMATION_STATE_DATA_ID,
+                ProcessedDataKind.PANEL,
+                (*PLATFORM_ENTITY_TIME_KEY, *HFT_INFORMATION_COLUMNS),
+                processed_input_data_ids=("binance_futures_l2_panel_100ms",),
+                parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
+            ),
+            _spec(
+                HFT_CROSS_ASSET_DATA_ID,
+                ProcessedDataKind.FACTOR,
+                (
+                    *PLATFORM_ENTITY_TIME_KEY,
+                    *HFT_CROSS_ASSET_FACTOR_COLUMNS,
+                    *HFT_CROSS_ASSET_CONTEXT_COLUMNS,
+                ),
+                processed_input_data_ids=(
+                    "binance_futures_l2_panel_100ms",
+                    HFT_INFORMATION_STATE_DATA_ID,
+                ),
+                semantic_role=ColumnRole.FACTOR,
+            ),
+            _spec(
+                HFT_SPOT_PANEL_DATA_ID,
+                ProcessedDataKind.PANEL,
+                HFT_PANEL_COLUMNS,
+            ),
+            _spec(
+                HFT_SPOT_CONTEXT_DATA_ID,
+                ProcessedDataKind.FACTOR,
+                (
+                    *PLATFORM_ENTITY_TIME_KEY,
+                    *HFT_SPOT_FACTOR_COLUMNS,
+                    *HFT_SPOT_CONTEXT_COLUMNS,
+                ),
+                processed_input_data_ids=(
+                    "binance_futures_l2_panel_100ms",
+                    HFT_SPOT_PANEL_DATA_ID,
+                ),
+                semantic_role=ColumnRole.FACTOR,
+            ),
+            _spec(
+                HFT_DERIVATIVE_DATA_ID,
+                ProcessedDataKind.FACTOR,
+                (
+                    *PLATFORM_ENTITY_TIME_KEY,
+                    *HFT_DERIVATIVE_FACTOR_COLUMNS,
+                    *HFT_DERIVATIVE_CONTEXT_COLUMNS,
+                ),
+                processed_input_data_ids=("binance_futures_l2_panel_100ms",),
+                semantic_role=ColumnRole.FACTOR,
+            ),
+            *(
+                _spec(
+                    data_id,
+                    ProcessedDataKind.FACTOR,
+                    (
+                        *PLATFORM_ENTITY_TIME_KEY,
+                        *(venue + "_" + field for field in HFT_EXTERNAL_FIELDS),
+                        *(venue + "_" + field for field in HFT_EXTERNAL_CLOCK_FIELDS),
+                    ),
+                    processed_input_data_ids=("binance_futures_l2_panel_100ms",),
+                    semantic_role=ColumnRole.FACTOR,
+                )
+                for venue, data_id in HFT_EXTERNAL_DATA_IDS.items()
             ),
             _spec(
                 "binance_futures_mid_labels_100ms",
@@ -80,6 +175,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 ),
                 processed_input_data_ids=("binance_futures_l2_panel_100ms",),
                 semantic_role=ColumnRole.LABEL,
+                parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
             ),
         )
     )
@@ -93,6 +189,7 @@ def _spec(
     source_input_data_ids: tuple[str, ...] = (),
     processed_input_data_ids: tuple[str, ...] = (),
     semantic_role: ColumnRole | None = None,
+    parameters=None,
 ) -> ProcessedDataSpec:
     roles = {
         column: (
@@ -103,7 +200,18 @@ def _spec(
             else ColumnRole.UNIVERSE
             if column == "eligible"
             else ColumnRole.CONTEXT
-            if column in HFT_LABEL_AVAILABILITY_COLUMNS
+            if column
+            in (
+                *HFT_LABEL_AVAILABILITY_COLUMNS,
+                *HFT_DERIVATIVE_CONTEXT_COLUMNS,
+                *HFT_SPOT_CONTEXT_COLUMNS,
+                *HFT_CROSS_ASSET_CONTEXT_COLUMNS,
+                *(
+                    venue + "_" + field
+                    for venue in HFT_EXTERNAL_DATA_IDS
+                    for field in HFT_EXTERNAL_CLOCK_FIELDS
+                ),
+            )
             else semantic_role
             if semantic_role is not None
             else ColumnRole.CONTEXT
@@ -116,6 +224,7 @@ def _spec(
         kind=kind,
         source_input_data_ids=source_input_data_ids,
         processed_input_data_ids=processed_input_data_ids,
+        parameters_json=json.dumps({} if parameters is None else parameters),
         frequency=DataFrequency.TICK,
         grain=DataGrain.RESEARCH_ROW,
         column_roles=roles,

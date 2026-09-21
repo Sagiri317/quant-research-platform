@@ -332,7 +332,7 @@ def _plan_targets(
                     isinstance(data_spec, InterimDataSpec)
                     or binding.source_identity is not None
                 ):
-                    interim_raw_root = (
+                    interim_raw_root = binding.raw_root or (
                         _interim_raw_root(source_root, data_spec)
                         if isinstance(data_spec, InterimDataSpec)
                         else source_root
@@ -560,28 +560,21 @@ def research_run(
     *,
     profile: ResearchProfile,
     layout: StorageLayout,
-    scenario_id: str,
-    start_date: str,
-    end_date: str,
-    research_plan: Mapping[str, object] | None = None,
+    research_plan: Mapping[str, object],
     raw_root: Path | None = None,
     holdout: bool = False,
     development_run_id: str | None = None,
     plan: bool = False,
     rebuild: bool = False,
 ) -> dict[str, object]:
-    if str(profile.market_id) == "crypto":
-        if research_plan is None:
-            raise ValueError("crypto_research_plan_required")
-        bound = profile.protocol(scenario_id=scenario_id, research_plan=research_plan)
-        profile = replace(
-            profile,
-            protocol=lambda scenario_id, access_window="development": replace(
-                bound, scenario_id=scenario_id, access_window=access_window
-            ),
-        )
-    elif research_plan is not None:
-        raise ValueError("research_plan_not_supported")
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    profile = bind_research_configuration(
+        profile, research_plan, tardis_root=layout.raw_source_root("tardis")
+    )
+    scenario_id = research_plan["scenario_id"]
+    selected_window = research_plan["windows"]["holdout" if holdout else "development"]
+    start_date, end_date = selected_window["start"], selected_window["end"]
     protocol = profile.protocol(scenario_id=scenario_id, access_window="development")
     if not plan:
         model_ids = tuple(
@@ -1364,7 +1357,7 @@ def _build_target(
     producer = binding.producer
     raw_identity: str | None = None
     if isinstance(data_spec, InterimDataSpec) or binding.source_identity is not None:
-        interim_raw_root = (
+        interim_raw_root = binding.raw_root or (
             _interim_raw_root(raw_root, data_spec)
             if isinstance(data_spec, InterimDataSpec)
             else raw_root
@@ -1471,7 +1464,10 @@ def _build_target(
             source_catalog=profile.interim,
             resource_policy=policy,
             **(
-                {"raw_root": raw_root, "expected_source_identity": raw_identity}
+                {
+                    "raw_root": binding.raw_root or raw_root,
+                    "expected_source_identity": raw_identity,
+                }
                 if binding.source_identity is not None
                 else {}
             ),
@@ -1563,7 +1559,7 @@ def _build_semantic_target(
             reason="research_window_required",
         )
     raw_identity = (
-        binding.source_identity(raw_root, spec.target_id)
+        binding.source_identity(binding.raw_root or raw_root, spec.target_id)
         if binding.source_identity is not None
         else None
     )
@@ -2195,6 +2191,13 @@ def _build_report_from_run(
     plan: bool,
     report_lease,
 ) -> dict[str, object]:
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    profile = bind_research_configuration(
+        profile,
+        record.payload()["protocol"]["research_configuration"],
+        tardis_root=layout.raw_source_root("tardis"),
+    )
     report_target = f"{record.scenario_id}_report_artifact"
     binding = profile.producer_bindings.get(report_target)
     if binding is None or binding.kind is not ProducerKind.REPORT:
@@ -2355,7 +2358,9 @@ def _reuse_target(
                 root, expected_identity=requested_identity
             )
             try:
-                raw_identity = binding.source_identity(raw_root, spec.target_id)
+                raw_identity = binding.source_identity(
+                    binding.raw_root or raw_root, spec.target_id
+                )
                 if (
                     raw_identity
                     != envelope["semantic_metadata"]["raw_content_identity"]
@@ -2385,9 +2390,19 @@ def _reuse_target(
             instance_identity=requested_identity,
         )
     envelope = _validate_published_target(root, requested_identity)
-    if isinstance(data_spec, InterimDataSpec):
-        interim_raw_root = _interim_raw_root(raw_root, data_spec)
-        binding = profile.producer_bindings.get(spec.producer_id or "")
+    binding = profile.producer_bindings.get(spec.producer_id or "")
+    if isinstance(data_spec, InterimDataSpec) or (
+        binding is not None and binding.source_identity is not None
+    ):
+        interim_raw_root = (
+            binding.raw_root
+            if binding is not None and binding.raw_root is not None
+            else (
+                _interim_raw_root(raw_root, data_spec)
+                if isinstance(data_spec, InterimDataSpec)
+                else raw_root
+            )
+        )
         if binding is None or binding.source_identity is None:
             return TargetResult(
                 target_id=spec.target_id,

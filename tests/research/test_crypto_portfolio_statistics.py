@@ -1,4 +1,5 @@
-from dataclasses import asdict
+import json
+from dataclasses import asdict, replace
 
 import numpy as np
 import pandas as pd
@@ -30,7 +31,6 @@ from quant_research_platform.profiles.research import (
 from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_RESEARCH_DATASET_ID,
-    portfolio_candidates,
     protocol,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
@@ -39,6 +39,7 @@ from quant_research_platform.storage.software_identity import (
     production_software_identity,
 )
 from quant_research_platform.workflows.research import _target_envelope_for_spec
+from tests.helpers.research_configuration import research_configuration
 
 
 @pytest.mark.parametrize("quantity_scale", (1.0, 2.0**-50))
@@ -99,7 +100,12 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             },
         },
     }
-    bound = protocol(research_plan=plan)
+    configuration = research_configuration("crypto", "baseline")
+    configuration["research_plan"] = plan
+    bound = replace(
+        protocol(research_plan=plan),
+        configuration_json=json.dumps(configuration),
+    )
     profile = research_profile(CRYPTO_PROFILE_ID)
     layout = StorageLayout(tmp_path)
     start = pd.Timestamp("2024-01-01T00:00:00").value
@@ -112,7 +118,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
     }
     roots, identities = {}, {}
     with runtime_resource_policy_scope() as policy:
-        for candidate in portfolio_candidates():
+        for candidate in bound.portfolio_candidates():
             capital = PortfolioCapital(
                 candidate.candidate_id, 1000.0, "USDT", "linear_perpetual"
             )
@@ -235,7 +241,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             artifact.table("crypto_portfolio_daily.parquet") as daily,
             artifact.table("crypto_portfolio_intervals.parquet") as intervals,
         ):
-            for candidate in portfolio_candidates():
+            for candidate in bound.portfolio_candidates():
                 metrics = statistics.loc[
                     statistics.candidate_id.eq(candidate.candidate_id)
                 ].set_index("metric_id")

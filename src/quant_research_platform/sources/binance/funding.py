@@ -50,6 +50,18 @@ class FundingObservations:
     forecasts: Iterator[FundingForecast]
 
 
+def settlement_endpoint(source_id, symbol):
+    """Bind supported settlement provenance to its actual supplier endpoint."""
+    if symbol not in RESEARCH_SYMBOLS:
+        raise ValueError("binance_funding_settlement_source_invalid")
+    if source_id == "binance":
+        return "https://fapi.binance.com/fapi/v1/fundingRate"
+    if source_id == "xoomar":
+        asset = symbol.removesuffix("USDT").lower()
+        return f"https://xoomar.com/api/markets/funding-rates/{asset}?history=1y"
+    raise ValueError("binance_funding_settlement_source_invalid")
+
+
 def _manifest(root, symbol):
     if not all(
         (root / name).is_file() for name in ("response.csv", "response.metadata.json")
@@ -110,8 +122,7 @@ def _manifest(root, symbol):
                 "sha256",
                 "byte_count",
             }
-            or native["source_id"] != "binance"
-            or native["endpoint"] != "https://fapi.binance.com/fapi/v1/fundingRate"
+            or native["endpoint"] != settlement_endpoint(native["source_id"], symbol)
             or native["symbol"] != symbol
             or type(native["start_ms"]) is not int
             or type(native["end_ms"]) is not int

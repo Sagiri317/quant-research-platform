@@ -28,7 +28,7 @@
 research 可以依赖 contracts、storage、runtime，但不依赖 sources 或 markets/implementations。
 research/protocols 持有市场研究协议，profiles 只绑定实现。
 允许 artifacts→reports，禁止 reports→artifacts。
-可移植模型算法 ID、默认/冒烟参数、依赖、输入种类及并行类别由 contracts 定义；
+可移植模型算法 ID、依赖、输入种类及并行类别由 contracts 定义；研究选择与参数由显式配置提供；
 拟合、预测、缩放、排名、重要性和验证由 research 持有。字段名使用 model_algorithm，
 算法集合使用 model_algorithm_ids。当前合同取代旧入口后直接删除旧入口，不保留兼容支路。
 
@@ -37,10 +37,30 @@ signal 是评估/组合使用的排序、权重或交易意图，evaluation 是�
 多资产同一时点采用 cross_sectional；单资产 HFT 跨时间采用 single_asset_time_series。
 后者以有界在线矩计算 Pearson；尚未有精确有界实现的 RankIC/分组价差明确不适用。
 
+## 研究配置
+
+可编辑 JSON 位于 `configs/research/a_share/` 与 `configs/research/crypto/`。
+因子库、评估选择和模型特征是三个不同集合；配置分别声明评估因子、标签与主统计标签、
+每个模型的输入、算法和参数、使用的组合参数，以及 windows.development/windows.holdout。
+research run 不再接受独立的 profile/scenario/start-date/end-date 覆盖参数，避免双重选择来源。
+配置窗口必须位于原有访问边界内；选择窗口不会授予留出访问权。CORE6、PV25、Crypto baseline 是普通示例配置，
+运行入口不隐式选择它们，不动态展开“全部因子”。仅评估和完整研究复用同一 DAG。
+profiles 把确定的配置绑定到现有 catalog/protocol/producer，解析后的配置进入 protocol 与 run 身份。
+
+Crypto 的训练、评估资产由每个模型的显式范围决定，不由模型名称推断。
+执行仍限定 Binance BTC/ETH USDT perpetual。模型各自保留完整预测和有效样本数；
+直接比较在同一时点、同一资产主键的共同有效 OOS 样本上重算，不能只对齐日期。
+经济账本不因模型样本交集而裁剪。只选择一个模型时，比较表为空，联合检验明确为 UNDEFINED。
+
+配置文件不存运行产物。研究数据、模型和报告沿用既有 data 分层与 instances 身份目录；
+研究运行记录仍为 `data/runs/research/<run_id>.json`，trial 沿用 `data/runs/trials/<run_id>/`。
+
 ## 计划、身份与持久化
 
 所有来源、数据集、评估、模型、预测、组合、统计和报告由同一目标 DAG 展开依赖。
 业务目录、规格与生产器绑定分别有唯一来源，不能另存并行规划器或手工注册副本。
+辅助源路径由已有 producer binding 绑定，规划、生产与复用验证读取同一来源根；
+数据计算参数仍属于 processed 规格，路径不进入共享证据，原始内容身份进入谱系。
 数据问题只阻塞依赖子图；已发布的其他组合和产物保持可见。
 运行尝试与目标真实状态来自持久化记录，不能将部分输出概括成完整成功。
 模型拟合前先在现有 trial ledger 发布 attempted 事件，结束后追加同 attempt 的不可变终态事件；
@@ -50,7 +70,8 @@ signal 是评估/组合使用的排序、权重或交易意图，evaluation 是�
 数据集身份包含 schema、dtype、PK、逻辑窗口、来源谱系和精确内容。
 指纹仅快速拒绝；只有精确比较才能给出 MATCH。
 软件、协议、种子、后端、上游以及 trial/fold/asset/refit/季度谱系按现有合同绑定；
-持久化模型读取不重新发现主机参数。数据集身份不受下游模型或组合调参污染。
+持久化模型读取不重新发现主机参数。数据集身份不受下游模型或组合调参污染。影响数据计算的参数属于 ProcessedDataSpec，
+以严格 JSON 冻结并进入持久化规格及身份，例如辅助状态的 max_age_ms；改变 age 上限不能复用旧结果。
 默认/正式/定制选择若消费相同语义定义，复用同一身份。
 
 研究 run_id 是不可变尝试标识。查询、报告与 Notebook 只消费指定运行的确切产物引用，
@@ -111,3 +132,19 @@ environment.yml 提供对应 Conda 环境；不复制包版本表。
 当前命令、提交、测试数量和豁免仅记 .run/，不在长期合同中追加验收流水账。
 
 IC聚合的真实零方差与不可表示尺度分开：非零标准差若舍入为零，标准差及ICIR保留未定义，原因使用既有nonfinite_result，不标记zero_variance。
+
+
+研究配置的 `stage=evaluation` 通过同一 DAG 只生成已选因子评估。
+报告重建从指定 run 记录中的冻结 JSON 重新绑定完整目录，不沿用调用者上一次裁剪的选择。
+配置绑定由既有市场 protocol/catalog owner 完成；artifact reader 只消费绑定后的选择与持久化证据。
+模型、预测、组合和稳健性分析未被请求时，
+相应部分记为 `UNDEFINED / not_requested`，不制造缺产物 blocker。
+A股与 Crypto 的评估报告均从同一个有资源边界的 artifact reader 读取真实评估汇总；
+A股因子评估报告不依赖模型统计产物。
+
+
+配置字段必须有真实消费者。A股沿用季度选择 owner，允许按顺序列出
+`parameter_candidates`；Crypto 沿用每个显式模型一组 `hyperparameters` 的 trial，
+不同参数实验写成不同模型/研究配置，不接受会被忽略的 `parameter_candidates`。
+Crypto 必须声明 episode 的 `research_plan`；A股不接受该字段，时间访问范围来自
+`windows`，季度选择规则仍由既有 A股 protocol 管理。

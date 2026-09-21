@@ -562,6 +562,7 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     window = TimeWindow(dates[-4], dates[-1])
     with runtime_resource_policy_scope() as policy:
         source = iter_holding_factor_inputs(
+            benchmark_required=True,
             layout=layout,
             dataset_spec=spec,
             calendar=calendar,
@@ -616,6 +617,7 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     )
     with runtime_resource_policy_scope() as policy:
         source = iter_holding_factor_inputs(
+            benchmark_required=True,
             layout=missing_layout,
             dataset_spec=spec,
             calendar=calendar,

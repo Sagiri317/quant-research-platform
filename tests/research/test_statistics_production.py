@@ -50,6 +50,12 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
+from tests.helpers.research_configuration import (
+    A_SHARE_MODEL_ALGORITHMS,
+    CORE6_FACTORS,
+    PV25_FACTORS,
+    research_configuration,
+)
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.workflow_test_support import _selection_metadata, _trial_reference
@@ -64,10 +70,23 @@ def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
             input_factor_columns=(factor,),
             label_column=a_share.PRIMARY_LABEL_COLUMN,
         )
-        for algorithm in a_share.MODEL_FAMILY_ORDER
+        for algorithm in A_SHARE_MODEL_ALGORITHMS
     )
     preflight_model_specs(models)
     families = tuple(f"{spec.data_id}_{model.model_algorithm}" for model in models)
+    protocol["research_configuration"] = {
+        **research_configuration(),
+        "evaluation": {
+            "factors": list(spec.factor_columns),
+            "labels": [a_share.PRIMARY_LABEL_COLUMN],
+            "primary_label": a_share.PRIMARY_LABEL_COLUMN,
+        },
+        "comparison_model_id": families[0],
+        "models": [
+            {"model_id": family, "hyperparameters": dict(model.hyperparameters)}
+            for family, model in zip(families, models, strict=True)
+        ],
+    }
     year = pd.Timestamp(window.start).year
     training_calendar = pd.bdate_range(f"{year - 1}-01-02", periods=53)
     rng = np.random.default_rng(101)
@@ -140,11 +159,11 @@ def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
                 result, lease = _fit_selected_model_result(
                     dataset_spec=spec,
                     selected_spec=model,
+                    candidate_parameters=dict(model.hyperparameters),
                     chunks=chunks,
                     fitting_cutoff=f"{year - 1}-12-31",
                     quarter_id=str(period),
                     root_seed=42,
-                    config_index=0,
                 )
                 owned = OwnedValue(
                     QuarterlyModelResult(
@@ -212,7 +231,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     protocol = deepcopy(a_share.protocol("pv_all").manifest())
     protocol["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
     protocol["statistics"]["fama_macbeth_core_factors"] = ["x"]
-    families = tuple(f"pv_all_{algorithm}" for algorithm in a_share.MODEL_FAMILY_ORDER)
+    families = tuple(f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS)
     dates = pd.bdate_range("2019-01-01", periods=64)
     label_calendar = pd.bdate_range(dates[0], periods=len(dates) + 21)
     cutoff = label_calendar[-1]
@@ -563,9 +582,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                         "market_id": "a_share",
                         "asset_id": f"asset_{asset_index}",
                         "timestamp": timestamp,
-                        **{factor: np.nan for factor in a_share.PV_FULL},
-                        a_share.PV_CORE[0]: x,
-                        a_share.PV_CORE[1]: x * x,
+                        **{factor: np.nan for factor in PV25_FACTORS},
+                        CORE6_FACTORS[0]: x,
+                        CORE6_FACTORS[1]: x * x,
                         a_share.PRIMARY_LABEL_COLUMN: label,
                         "forward_return_20d_available_at": label_calendar[
                             date_index + 21
@@ -575,7 +594,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                 )
         spec = make_demo_research_dataset_spec(
             data_id="stats_demo",
-            factor_columns=a_share.PV_FULL,
+            factor_columns=PV25_FACTORS,
             label_columns=(
                 a_share.PRIMARY_LABEL_COLUMN,
                 "forward_return_20d_available_at",
@@ -601,9 +620,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                         research_dataset_id=spec.data_id,
                         signals=(
                             SignalSpec(
-                                signal_id=a_share.PV_CORE[0],
+                                signal_id=CORE6_FACTORS[0],
                                 source_kind="factor",
-                                source_column=a_share.PV_CORE[0],
+                                source_column=CORE6_FACTORS[0],
                             ),
                         ),
                         label_columns=(a_share.PRIMARY_LABEL_COLUMN,),
@@ -626,6 +645,10 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         finally:
             evaluation.close()
         protocol = deepcopy(a_share.protocol("pv_all").manifest())
+        protocol["statistics"]["factor_fdr_families"] = {
+            "price_volume": list(PV25_FACTORS)
+        }
+        protocol["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
         model = _statistics_models(
             layout, spec, protocol, TimeWindow(dates[0], cutoff), config_suffix="_0"
         )
@@ -662,9 +685,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     factors = outputs[0]["factor_diagnostics"]
     assert set(factors["family_id"]) == {"price_volume"}
     assert set(factors["fdr_method"]) == {"BH", "BY"}
-    assert set(factors["planned_hypothesis_count"]) == {len(a_share.PV_FULL)}
+    assert set(factors["planned_hypothesis_count"]) == {len(PV25_FACTORS)}
     assert set(factors["defined_hypothesis_count"]) == {2}
-    assert set(factors["missing_hypothesis_count"]) == {len(a_share.PV_FULL) - 2}
+    assert set(factors["missing_hypothesis_count"]) == {len(PV25_FACTORS) - 2}
     prediction = outputs[0]["prediction_diagnostics"].iloc[0]
     assert prediction["observation_count"] == 20
     assert prediction["status"] == "DEFINED"
@@ -673,7 +696,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         42, "a_share_statistics_bootstrap", "pv_all", "prediction"
     )
     fmb = outputs[0]["fama_macbeth"]
-    assert {"single:" + a_share.PV_CORE[0], "core_multifactor"}.issubset(
+    assert {"single:" + CORE6_FACTORS[0], "core_multifactor"}.issubset(
         set(fmb["regression_id"])
     )
     assert "intercept" in set(fmb["coefficient_id"])
@@ -743,7 +766,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     with zero_artifact.table("fama_macbeth_periods.parquet") as table:
         periods = table.copy()
     single_factor = periods.loc[
-        periods["regression_id"].eq("single:" + a_share.PV_CORE[0])
+        periods["regression_id"].eq("single:" + CORE6_FACTORS[0])
     ]
     assert single_factor["status"].eq("DEFINED").all()
     assert single_factor["value"].eq(0.0).all()
@@ -752,7 +775,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     with zero_artifact.table("fama_macbeth.parquet") as table:
         zero_summary = table.copy()
     single_summary = zero_summary.loc[
-        zero_summary["regression_id"].eq("single:" + a_share.PV_CORE[0])
+        zero_summary["regression_id"].eq("single:" + CORE6_FACTORS[0])
     ]
     assert single_summary["white_defined_period_count"].eq(0).all()
     assert single_summary["white_undefined_period_count"].eq(20).all()

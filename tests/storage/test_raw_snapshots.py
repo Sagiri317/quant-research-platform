@@ -50,3 +50,31 @@ def test_csv_consumed_digest_is_verified_on_every_exit(tmp_path, changed, termin
     else:
         rows.close()
     assert read_manifest(root / "response.metadata.json") == manifest
+
+
+def test_raw_cell_codec_preserves_types_canonical_bytes_and_bounds():
+    from quant_research_platform.storage.raw_snapshots import (
+        decode_raw_cell,
+        encode_raw_cell,
+    )
+
+    pairs = [
+        (None, "null"),
+        (True, "true"),
+        (1234, "1234"),
+        (-0.0, "-0.0"),
+        (1.2345, "1.2345"),
+        ("中文", '"中文"'),
+        ([2020, 1, None], "[2020,1,null]"),
+        (b"abc", '{"bytes_hex":"616263"}'),
+    ]
+    for value, encoded in pairs:
+        assert encode_raw_cell(value) == encoded
+        decoded = decode_raw_cell(encoded)
+        assert type(decoded) is type(value)
+        assert decoded == value
+    for invalid in (" 1", "1 ", "1e0", '"\\u4e2d"', '{"other":1}'):
+        with pytest.raises(ValueError):
+            decode_raw_cell(invalid)
+    with pytest.raises(ValueError, match="raw_csv_cell_bound_exceeded"):
+        decode_raw_cell('"' + "x" * (64 * 1024 + 1) + '"')

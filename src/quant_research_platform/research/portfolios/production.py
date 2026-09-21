@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.contracts.portfolios import (
     CONTINUOUS_EXECUTION_COLUMNS,
     PORTFOLIO_CASH_ASSET_ID,
@@ -50,7 +51,6 @@ from quant_research_platform.research.portfolios.optimizer import (
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskEstimate,
     FactorRiskState,
-    MarketModelRiskState,
     preprocess_risk_styles,
 )
 from quant_research_platform.research.portfolios.schedules import (

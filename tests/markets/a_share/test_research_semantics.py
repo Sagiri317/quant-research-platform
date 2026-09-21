@@ -21,6 +21,7 @@ from quant_research_platform.research.features.transforms import (
 )
 from quant_research_platform.research.protocols.a_share import (
     LABEL_HORIZONS,
+    research_dataset_catalog,
     research_dataset_specs,
 )
 from quant_research_platform.storage.datasets import write_dataset
@@ -29,7 +30,7 @@ from quant_research_platform.storage.layout import StorageLayout
 
 @pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
 def test_a_share_assembler_owns_eligibility_and_population_model_target(scale) -> None:
-    spec = research_dataset_specs()[0]
+    spec = research_dataset_catalog().get("pv_all")
     assert (
         "model_target"
         not in processed_catalog().get("forward_returns").required_columns
@@ -75,15 +76,18 @@ def test_a_share_assembler_owns_eligibility_and_population_model_target(scale) -
         is_nonfinancial_industry=True,
         has_legal_fundamental_pit=[False, True, True],
     )
-    fusion_result = _add_a_share_semantic_columns(fusion, research_dataset_specs()[1])
+    fusion_result = _add_a_share_semantic_columns(
+        fusion, research_dataset_catalog().get("fusion_nf_core")
+    )
     assert fusion_result["eligible"].tolist() == [False, True, False]
     assert not _add_a_share_semantic_columns(
-        fusion.assign(is_nonfinancial_industry=False), research_dataset_specs()[1]
+        fusion.assign(is_nonfinancial_industry=False),
+        research_dataset_catalog().get("fusion_nf_core"),
     )["eligible"].any()
 
 
 def test_a_share_model_target_zero_variance_does_not_invalidate_other_date() -> None:
-    spec = research_dataset_specs()[0]
+    spec = research_dataset_catalog().get("pv_all")
     frame = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
@@ -159,7 +163,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed = processed_catalog()
-    dataset_spec = research_dataset_specs()[0]
+    dataset_spec = research_dataset_catalog().get("pv_all")
     # Synthetic sessions: next-open entry, exit after the registered horizon.
     sessions = pd.bdate_range("2023-01-03", periods=max(LABEL_HORIZONS) + 2)
     timestamps = pd.DatetimeIndex([sessions[0]] * 3)
@@ -220,18 +224,19 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         spec=panel_spec,
     )
 
-    factor_spec = processed.get("price_volume_facts")
-    factors = keys.copy()
-    for column in factor_spec.required_columns:
-        if column not in factors:
-            factors[column] = [1.0, 2.0, 3.0]
-    write_dataset(
-        layout.processed_data_root(
-            factor_spec.market_id, factor_spec.kind, factor_spec.data_id
-        ),
-        factors.loc[:, list(factor_spec.required_columns)],
-        spec=factor_spec,
-    )
+    for factor_id in ("price_volume_facts", "market_model_factors"):
+        factor_spec = processed.get(factor_id)
+        factors = keys.copy()
+        for column in factor_spec.required_columns:
+            if column not in factors:
+                factors[column] = [1.0, 2.0, 3.0]
+        write_dataset(
+            layout.processed_data_root(
+                factor_spec.market_id, factor_spec.kind, factor_spec.data_id
+            ),
+            factors.loc[:, list(factor_spec.required_columns)],
+            spec=factor_spec,
+        )
 
     label_spec = processed.get("forward_returns")
     labels = keys.copy()

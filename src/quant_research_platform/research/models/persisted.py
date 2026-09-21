@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import pickle
 import re
@@ -9,7 +10,7 @@ import stat
 import sys
 from collections.abc import Callable, Iterable
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -560,12 +561,22 @@ def _validate_trial_references(
                 "input_feature_columns": tuple(parameters["input_feature_columns"]),
             }
         )
+        configuration = next(
+            item
+            for item in contract["protocol"]["research_configuration"]["models"]
+            if item["model_id"] == plan.candidate_family_id
+        )
+        candidates = configuration.get(
+            "parameter_candidates", [configuration["hyperparameters"]]
+        )
+        if len(candidates) != len(plan.candidate_ids):
+            raise ValueError("model_trial_parameters_misaligned")
         refit = _refit_model_spec(
             selected_spec,
+            candidate_parameters=candidates[plan.candidate_ids.index(selected)],
             n_train=metadata["rows_after_input_label_dropna"],
             quarter_id=entry["quarter_id"],
             root_seed=plan.random_seed,
-            config_index=plan.candidate_ids.index(selected),
         )
         if (
             metadata["random_seed"] != refit.random_seed
@@ -856,10 +867,12 @@ class PersistedCryptoModelArtifact:
 
 def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_layout):
     from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_MAKER_CALIBRATION_MODEL_IDS,
+        maker_model_ids,
     )
 
     _protocol, folds, model_ids = _crypto_model_scope(envelope.payload())
+    calibration_models = maker_model_ids(_protocol.configuration()["portfolios"])
+
     operational = {"model_trial_ledgers": []}
 
     def write(staging):
@@ -937,7 +950,7 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
                         ],
                         "validation_prediction_path": (
                             f"models/{fold.fold_id}/validation/{member.spec.model_id}.parquet"
-                            if member.spec.model_id in HFT_MAKER_CALIBRATION_MODEL_IDS
+                            if member.spec.model_id in calibration_models
                             else None
                         ),
                     }
@@ -1010,6 +1023,10 @@ def _crypto_model_scope(envelope):
         contract["protocol"]["scenario_id"],
         research_plan=contract["protocol"]["research_plan"],
     )
+    protocol = replace(
+        protocol,
+        configuration_json=json.dumps(contract["protocol"]["research_configuration"]),
+    )
     window = TimeWindow(
         envelope["research_window"]["start"], envelope["research_window"]["end"]
     )
@@ -1025,12 +1042,15 @@ def _crypto_model_scope(envelope):
 
 def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
     from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_MAKER_CALIBRATION_MODEL_IDS,
         build_hft_prediction_catalog,
+        label_horizon_ms,
+        maker_model_ids,
     )
 
     contract = envelope["semantic_metadata"]["target_contract"]
     protocol, folds, model_ids = _crypto_model_scope(envelope)
+    calibration_models = maker_model_ids(protocol.configuration()["portfolios"])
+
     payload = read_manifest(root / "model.json")
     if payload != {
         "schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
@@ -1053,6 +1073,7 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
         ):
             raise ValueError("crypto_model_members_invalid")
         scopes = build_hft_prediction_catalog(
+            configuration=contract["protocol"]["research_configuration"],
             train_end=fold.train.end.isoformat(),
             test_start=fold.development_test.start.isoformat(),
             test_end=fold.development_test.end.isoformat(),
@@ -1127,7 +1148,7 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
                 or not declared(first)
                 or not declared(last)
                 or last
-                + pd.Timedelta(milliseconds=contract["protocol"]["label_horizon_ms"])
+                + pd.Timedelta(milliseconds=label_horizon_ms(metadata["label_column"]))
                 > pd.Timestamp(fold.validation.end)
             ):
                 raise ValueError("crypto_model_refit_window_invalid")
@@ -1135,7 +1156,7 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
             path = entry["validation_prediction_path"]
             expected_path = (
                 f"models/{fold.fold_id}/validation/{entry['model_id']}.parquet"
-                if entry["model_id"] in HFT_MAKER_CALIBRATION_MODEL_IDS
+                if entry["model_id"] in calibration_models
                 else None
             )
             if path != expected_path or (
@@ -1163,12 +1184,11 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
 
 def _crypto_validation_chunks(root, members, entry):
     from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_MODEL_HORIZON_MS,
-        HFT_MULTI_ASSET_SCOPES,
+        label_horizon_ms,
     )
 
     previous = {}
-    assets = entry["validation_asset_ids"] or HFT_MULTI_ASSET_SCOPES["pooled"][0]
+    assets = entry["validation_asset_ids"]
     start, end = (
         pd.Timestamp(entry["validation_window"][key]) for key in ("start", "end")
     )
@@ -1217,7 +1237,12 @@ def _crypto_validation_chunks(root, members, entry):
                 and (frame.label_available_at <= end).all()
                 and (
                     frame.label_available_at
-                    >= frame.timestamp + pd.Timedelta(milliseconds=HFT_MODEL_HORIZON_MS)
+                    >= frame.timestamp
+                    + pd.Timedelta(
+                        milliseconds=label_horizon_ms(
+                            entry["model_metadata"]["label_column"]
+                        )
+                    )
                 ).all()
                 and frame.asset_id.isin(assets).all()
             ):

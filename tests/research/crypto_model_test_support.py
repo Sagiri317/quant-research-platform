@@ -326,21 +326,17 @@ def check_crypto_model_staging(*, layout, profile, saved):
     with runtime_resource_policy_scope() as policy:
         from quant_research_platform.research.protocols.crypto_hft import (
             HFT_FACTOR_COLUMNS,
-            HFT_RIDGE_FACTOR_COLUMNS,
         )
 
         for entry in saved.models:
             spec = profile.models.get(entry["model_id"])
             if spec.model_algorithm != "ridge_regression":
                 continue
-            assert (
-                tuple(entry["model_metadata"]["input_columns"])
-                == HFT_RIDGE_FACTOR_COLUMNS
-            )
+            assert tuple(entry["model_metadata"]["input_columns"]) == spec.input_columns
             with persisted.read_crypto_model_member(
                 saved, entry, resource_policy=policy
             ) as model:
-                assert model.scaler.columns == HFT_RIDGE_FACTOR_COLUMNS
+                assert model.scaler.columns == spec.input_columns
                 probe = pd.DataFrame(
                     {
                         column: np.arange(3, dtype=float) + 1
@@ -349,7 +345,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 )
                 predict = fitting.prediction_callable(spec.input_columns, model)
                 before = predict(probe)
-                for column in set(HFT_FACTOR_COLUMNS) - set(HFT_RIDGE_FACTOR_COLUMNS):
+                for column in set(HFT_FACTOR_COLUMNS) - set(spec.input_columns):
                     probe[column] *= 1000
                 np.testing.assert_array_equal(before, predict(probe))
         assert policy.used_memory_bytes == 0
@@ -718,10 +714,8 @@ def check_crypto_wide_fold_artifact(
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
     )
+    from quant_research_platform.profiles.research import bind_research_configuration
     from quant_research_platform.research.models import persisted
-    from quant_research_platform.research.protocols.crypto_hft import (
-        protocol as crypto_protocol,
-    )
 
     original = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
     plan = deepcopy(original["research_plan"])
@@ -743,7 +737,17 @@ def check_crypto_wide_fold_artifact(
         "start": (last + pd.Timedelta(seconds=10)).isoformat(),
         "end": (last + pd.Timedelta(seconds=11)).isoformat(),
     }
-    protocol = crypto_protocol(original["scenario_id"], research_plan=plan).manifest()
+    configuration = deepcopy(original["research_configuration"])
+    configuration["research_plan"] = plan
+    configuration["windows"] = {
+        "development": {
+            "start": plan["folds"][0]["development_test"]["start"],
+            "end": plan["folds"][-1]["development_test"]["end"],
+        },
+        "holdout": dict(plan["final_holdout"]),
+    }
+    profile = bind_research_configuration(profile, configuration)
+    protocol = profile.protocol(original["scenario_id"]).manifest()
     fields = {
         key: saved.envelope[key]
         for key in (

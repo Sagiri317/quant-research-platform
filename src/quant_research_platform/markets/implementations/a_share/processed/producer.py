@@ -319,8 +319,12 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
         )
         events = _financial_pit_events(source)
         event_lease.shrink_to(pandas_frame_payload_bytes(events))
-    # PV25 retains 25 Python numeric columns plus its result and join workspaces.
-    per_row = 14 * 1024 if events is not None else (2048 if definitions else 4096)
+    # Factor values, rolling workspaces and joins scale with the selected library.
+    per_row = (
+        14 * 1024
+        if events is not None
+        else (max(2048, len(definitions) * 128) if definitions else 4096)
+    )
     asset_count = max(1, len(asset_types))
     block_sessions = max(
         1,

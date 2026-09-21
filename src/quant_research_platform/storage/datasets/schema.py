@@ -70,6 +70,7 @@ _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
         "kind",
         "source_input_data_ids",
         "processed_input_data_ids",
+        "parameters",
         "input_data_ids",
         "base_input_data_id",
         "factor_columns",
@@ -124,6 +125,7 @@ _DATASET_SPEC_PROCESSED_KEYS = _DATASET_SPEC_COMMON_KEYS | {
     "kind",
     "source_input_data_ids",
     "processed_input_data_ids",
+    "parameters",
 }
 _DATASET_SPEC_RESEARCH_KEYS = _DATASET_SPEC_COMMON_KEYS | {
     "market_id",
@@ -1162,6 +1164,9 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
                 "kind": spec.kind.value,
                 "source_input_data_ids": list(spec.source_input_data_ids),
                 "processed_input_data_ids": list(spec.processed_input_data_ids),
+                "parameters": parse_qrp_json_object(
+                    spec.parameters_json.encode("utf-8")
+                ),
             }
         )
     if isinstance(spec, ResearchDatasetSpec):
@@ -1300,6 +1305,7 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
                 kind=ProcessedDataKind(kind),
                 source_input_data_ids=tuple(source_input_data_ids),
                 processed_input_data_ids=tuple(processed_input_data_ids),
+                parameters_json=render_qrp_json_object(spec["parameters"]),
             )
         )
         return

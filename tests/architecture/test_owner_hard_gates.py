@@ -151,18 +151,18 @@ def test_workflow_production_statuses_have_no_readiness_aliases() -> None:
     assert {"READY", "STALE"}.isdisjoint(literals)
 
 
-def test_model_algorithm_surface_matches_a_share_and_crypto_protocols() -> None:
-    from quant_research_platform.contracts.models import _MODEL_ALGORITHM_FACTS
-    from quant_research_platform.research.protocols.a_share import MODEL_FAMILY_ORDER
-    from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_MODEL_ALGORITHMS,
-    )
+def test_configured_model_algorithms_use_the_single_capability_owner() -> None:
+    import json
 
-    expected = {
-        *MODEL_FAMILY_ORDER,
-        *HFT_MODEL_ALGORITHMS,
+    from quant_research_platform.contracts.models import _MODEL_ALGORITHM_FACTS
+
+    root = Path(__file__).resolve().parents[2] / "configs" / "research"
+    configured = {
+        model["model_algorithm"]
+        for path in root.rglob("*.json")
+        for model in json.loads(path.read_text())["models"]
     }
-    assert set(_MODEL_ALGORITHM_FACTS) == expected
+    assert configured == set(_MODEL_ALGORITHM_FACTS)
 
 
 def test_source_surfaces_have_no_retired_naming() -> None:

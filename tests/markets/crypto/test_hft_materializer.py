@@ -160,6 +160,7 @@ def test_panel_transform_waits_for_reservation_and_closes_source(
                 transform=transform,
                 columns=tuple(frame.columns),
                 resource_policy=policy,
+                asset_ids=("btc_usdt", "eth_usdt"),
             )
             try:
                 bound = next(output)
@@ -379,33 +380,31 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
     from copy import deepcopy
 
     from quant_research_platform.artifacts.research import read_research_run_record
+    from tests.helpers.research_configuration import research_configuration
     from tests.workflows.test_research_dag import _crypto_plan_payload
 
-    plan = _crypto_plan_payload()
-    request = dict(
-        profile=profile,
-        layout=layout,
-        scenario_id=HFT_RESEARCH_DATASET_ID,
-        raw_root=raw_root,
-        start_date="1970-01-01T00:00:04",
-        end_date="1970-01-01T00:00:06",
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        development=("1970-01-01T00:00:04", "1970-01-01T00:00:06"),
+        plan=_crypto_plan_payload(),
     )
-    first = research.research_run(
-        **{
-            **request,
-            "start_date": "1970-01-01T08:00:04+08:00",
-            "end_date": "1970-01-01T08:00:06+08:00",
-        },
-        research_plan=plan,
-    )
+    request = dict(profile=profile, layout=layout, raw_root=raw_root)
+    offset_configuration = deepcopy(configuration)
+    offset_configuration["windows"]["development"] = {
+        "start": "1970-01-01T08:00:04+08:00",
+        "end": "1970-01-01T08:00:06+08:00",
+    }
+    first = research.research_run(**request, research_plan=offset_configuration)
     assert first["status"] == "BLOCKED"
     first_record = read_research_run_record(layout.research_run_path(first["run_id"]))
-    changed = deepcopy(plan)
-    changed["initial_capital"] = 2000.0
-    changed["final_holdout"] = {
+    changed = deepcopy(configuration)
+    changed["research_plan"]["initial_capital"] = 2000.0
+    changed["research_plan"]["final_holdout"] = {
         "start": "1970-01-01T00:00:08",
         "end": "1970-01-01T00:00:09",
     }
+    changed["windows"]["holdout"] = changed["research_plan"]["final_holdout"].copy()
     second = research.research_run(**request, research_plan=changed)
     second_record = read_research_run_record(layout.research_run_path(second["run_id"]))
     assert first_record.protocol_identity != second_record.protocol_identity

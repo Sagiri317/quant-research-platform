@@ -22,18 +22,16 @@
 |---|---|---|
 | 录制 | futures-hft 期货100ms深度与聚合成交；spot-l2 独立现货深度录制 | 公开端点、无认证下单；未录制的完整L2历史不能事后补造 |
 | 回放 | 运行清单、成员身份、快照与增量、序号、连接/分段和多时钟验证 | 现货/期货独立回放，缺口不静默连续 |
-| 研究数据 | 持久化100ms PANEL，14个微观结构特征，价格与执行质量标签 | 旧分钟线、旧独立封装及旧通用agg/depth适配已删除 |
-| 模型 | LR/LightGBM/XGBoost价格模型；GBR执行质量proxy；五个Ridge跨资产范围配置 | proxy不是成交概率；模型不因未观测队列变成真实执行模型 |
-| 执行 | 12个taker与2个maker候选，预期净收益定量、显式成本/延迟及连续资金账本 | 队列和流动性为公开L2近似，资金费覆盖不足则阻塞净结果 |
+| 研究数据 | 持久化100ms PANEL，L0–L5 因子库，按配置选择评估与模型输入 | 旧分钟线、旧独立封装及旧通用agg/depth适配已删除 |
+| 模型 | 配置选择已有模型算法、参数、标签及训练/OOS资产范围，包含 LightGBM/XGBoost | proxy不是成交概率；模型不因未观测队列变成真实执行模型 |
+| 执行 | 配置选择 Binance BTC/ETH perpetual 的 taker/maker 候选，显式成本/延迟及连续资金账本 | 队列和流动性为公开L2近似，资金费覆盖不足则阻塞净结果 |
 | 展示 | 唯一目标DAG、统计、指定run报告、CLI/API、只读Notebook | 合成与读取验证不证明真实OOS获利或充分日频覆盖 |
 
-正式模型目录为9个配置：3个价格模型、1个proxy模型，以及 btc_independent、
-eth_independent、pooled、leave_btc_out、leave_eth_out 五种Ridge范围。
-五种 Ridge 范围统一使用既有无量纲输入 relative_spread、imbalance_1/5/10、
-return_100ms、realized_volatility_1s，保证单资产与跨资产比较使用同一配方。
-绝对 microprice/spread 及按币种数量计的流量/深度不直接进入这组比较；
-14 个 FACTOR 原定义、其他价格模型与 proxy 均保留。仍只在训练期拟合 scaler，
-收益标签、费用、候选范围和持仓规则不变；配方变化登记新的模型/试验身份，旧失败结果不覆盖。
+baseline.json 保存原有九个模型选择作为可编辑示例；运行不强制保留这九项或原 14 项输入。
+评估因子、各模型输入、训练和评估资产分别显式选择。multiscale.json 展开 L0 增量，
+derivatives_state.json 展开 L1 增量；不做块或参数的笛卡尔搜索。
+示例中的费用、延迟和资金为研究假设，不能当成已验证的历史账户费率。
+scaler 仍只在训练期拟合；配方变化登记新的模型/试验身份，旧失败结果不覆盖。
 真实研究须有合格的事件来源与资金费归档；已完成的代码或合成验收不能替代真实覆盖。
 
 ## 3. 短期建议
@@ -51,21 +49,64 @@ return_100ms、realized_volatility_1s，保证单资产与跨资产比较使用�
 
 ## 4. 高级扩展候选
 
-完成单场所核心后，再分别评估：现货/永续基差和跨资产领先滞后；
-Bybit/OKX跨场所价格发现；Survival/Hawkes/DeepLOB及有增量证据的注意力模型；
-Deribit期权与波动率微观结构。多场所、期权、更多资产和清算研究均为候选，不是已实现功能。
+现货/永续基差、跨资产领先滞后和 Bybit/OKX 跨场所价格发现使用下文明确的研究配置。
+Survival/Hawkes/DeepLOB 及注意力模型仍为高级候选，不是已实现功能。
 需要对应真实数据和相对简单基线的增量OOS经济证据，仍复用现有DAG、试验、账本和报告，
 不预留第二套平台，也不从价格变化虚构精确清算量或L3事实。
 
 ## 5. 特征、标签与研究计划
 
-14个当前特征来自同一持久化PANEL：
+原 14 项微观结构因子来自同一持久化 PANEL：
 spread、relative_spread、imbalance_1/5/10、microprice、microprice_deviation、
 ofi_100ms、signed_trade_flow_100ms、taker_buy_volume_100ms、taker_sell_volume_100ms、
 return_100ms、realized_volatility_1s、top10_depth_per_spread。
+L0 另提供多尺度 TFI、OFI、深度归一 OFI、深度压力与不平衡差值，另有共享的 return_500ms，库共 30 项。
+连续完整窗口在相同资产、segment 内计算，frame 边界保留滚动状态，缺口清空状态。
+
+L1 由独立 derivatives-state producer 消费 native state 与 Binance 100ms PANEL，
+在 producer 内按 observed_at <= decision_time 对齐，再交给原有精确主键 assembler。
+状态分别保留 event_at、observed_at、age_ms；age 上限显式写在配置并进入 processed 规格身份。
+OI 使用 base 数量，变化为当前 OI/窗口起点 OI-1，整个窗口须有效；
+funding 为原始小数费率，time_to_next_funding 和 time_since_observed_force_order 为秒，
+basis 为无量纲比值减一。频道名 premiumIndex 不代表供应商存在同名经济字段。
+
+forceOrder 仅代表供应商观测到的 proxy。每条发布快照以 z（累计已成交 base 数量）加权，
+BUY 为正、SELL 为负；不以订单数量 q 代替成交数量，不声称完整或去重后的全市场清算量。
+无观测或分母为零保持 NULL；断连 generation、grid gap 和 episode 边界重置窗口。
+缺 state 归档只阻塞依赖它的分支，L0 不引入该依赖。
+
+L3 Spot panel 复用同一个 native 回放与 panel producer，逐资产保留真实观测覆盖；
+Spot/Perp context producer 在执行 panel 的原有主键上输出，assembler 仍只做精确键连接。
+现货和永续共用 L0 数学核。Spot basis 为 spot_mid/perp_mid-1，收益为已成熟的
+100/500ms 简单收益；OFI 以相同币种的 base 数量计，跨市场 OFI divergence 使用深度归一值。
+TFI 为有符号成交量/买卖成交量之和。lagged 字段取上一格连续 Spot 100ms 信息，
+不能跨 Spot segment/gap；上下游 frame 切分不改变结果。
+
+配置 spot.max_age_ms 同时限制 Spot grid age 与实际 book observation age，
+两种 age 及对应时间均保留。源不存在则依赖分支 BLOCKED；
+源存在但局部缺口、过期或窗口不完整则在相同执行主键上保留 NULL，不无限前填、不补零。
+L3 不改变 Binance BTC/ETH perpetual 的执行范围，也不把供应商观察顺序解释为共址交易延迟。
+
+L4 的读取行范围、模型训练/评估资产、信息资产与执行资产分别绑定。
+cross_btc_eth.json 不依赖 SOL；cross_asset.json 显式加入 SOL native 归档及
+SOL→BTC、BTC/ETH→SOL 的迁移选择。只有训练或评估需要 SOL 行时，研究基表才读取三资产信息 panel；
+仅把 SOL 用作辅助信息时，研究基表仍为 BTC/ETH。任何配置均不能把 SOL 加入执行组合。
+
+三资产共用 native panel、微观结构因子、完整窗口标签和模型生产器。
+跨资产 context 只读取持久化的成熟 100/500ms 收益、深度归一 OFI 和 TFI；
+来源资产的数值及上一格连续 100ms 的滞后值先在 producer 内按观测 grid 对齐，
+记录各来源 grid 时间与 age。缺口、过期或不完整窗口保持 NULL。
+同一个数学核负责 500ms 收益，不在 Spot、SOL 或跨资产层复制公式。
+只依赖 BTC/ETH 的配置不引入 SOL 数据节点；选择 SOL 后缺归档的依赖分支保留 BLOCKED。
+
 当前价格标签是100/500/1000/5000ms的future_mid_return和future_mid_direction；
-模型主目标为500ms收益，另有 maker_bid_sell_pressure_proxy_500ms。
+各模型显式选择标签；baseline.json 的价格模型选择500ms收益，另有 maker_bid_sell_pressure_proxy_500ms。
 每个标签有独立 available_at，短期限必须由实际事件分辨率和观测覆盖支持。
+
+07/01、08/01、09/01 为独立 UTC 日 episode；每个配置中的训练、验证、OOS 和留出窗口
+必须落在同一天，分别进入既有 run/trial/model/prediction/ledger/report。
+滚动状态、订单簿、仓位、现金、NAV、资金费状态与标签不能跨 episode 延续。
+多日结论只能引用各日精确 run 证据，不能把稀疏月初日期拼成连续年化业绩；不新增调度框架。
 
 研究计划必须显式给定滚动训练、验证、开发OOS、锁定留出窗口，初始资金、估值币种和暴露上限；
 不为适应短录制而缩窗，不随机打乱事件行，不用排序掩盖同时间戳顺序歧义。
@@ -178,11 +219,11 @@ reader 在收到真实快照并完成初始化后才报告就绪；实时连接�
 -> 标准评估 / 评估产物
 -> 按时间划分训练/测试的 ModelSpec 拟合与持久化预测
 -> 每个模型的样本外预测/目标评估
--> 12 个 taker 与 2 个 maker 的独立连续资金账本
--> 14 候选统计产物与指定 run_id 报告
+-> 配置所选 taker/maker 的独立连续资金账本
+-> 所选候选统计产物与指定 run_id 报告
 ```
 
-价格分支在同一个 500 ms 收益目标上比较线性回归、LightGBM 和 XGBoost。
+baseline.json 的价格分支在同一个 500 ms 收益目标上比较线性回归、LightGBM 和 XGBoost。
 执行质量分支预测明确命名的 `maker_bid_sell_pressure_proxy_500ms`：
 未来全部已观测卖出主动成交量除以当前展示的最优买档数量，并裁剪到 `[0, 1]`。
 分子包含未来每个价格上观测到的卖出主动成交量；PANEL 不提供按价格分布的成交量，
@@ -245,6 +286,9 @@ Tardis 接收 UTC 是供应商的观测时钟，不是本机接收时钟；缺�
 规范事件使用 `source_sequence`、`observation_id` 与原始接收 UTC。
 官方相同 UTC 的事件仍按真实 `receive_monotonic_ns`、再按原生序号排序；
 Tardis 相同 UTC 按切片及原生行序排序，`receive_monotonic_ns` 保持缺失。
+原生成交按 symbol 与聚合成交 ID 核对重发：仅事件时间 E 改变而其余字段相同的消息保留原字节，
+研究回放只采用首次观察，不重复计量成交，也不回退连续性高水位。未见过的倒序 ID 或成交字段冲突明确失败；
+身份摘要在现有 runtime 预算内保留，结束或提前关闭时释放。
 观察段标识只表示来源可证明的区间，不冒充物理连接。
 PANEL 的 `observed_utc`、`book_source_sequence`、`book_observation_id` 及
 成交行序范围保存该身份；缺失的单调时钟以 nullable Int64 持久化。
@@ -256,9 +300,12 @@ PANEL 的 `observed_utc`、`book_source_sequence`、`book_observation_id` 及
 ### 6.2 资金费、执行与账本
 
 Tardis 市场事件只消费该日自身的深度与成交，不以官方事件补洞。
-同一 Binance venue 的官方 `fundingRate` 原件作为独立结算附属输入，绑定
-symbol、完整 UTC 查询窗、HTTP 状态、原始字节数与哈希；每次资金费读取核验
-资金费 symbol 原子目录中的 `settlements.json`；其 `observations/` 子目录
+同一 Binance venue 的结算数据作为独立附属输入，明确区分官方 `fundingRate` 原件与
+[XOOMAR 历史结算记录](https://xoomar.com/markets/api/funding-rates)。第三方抽取只保留批准日期/资产的原记录，记录完整响应 SHA-256，
+不冒充官方直取；`source_id`、实际供应商 endpoint 和抽取文件哈希进入持久化身份。绑定
+symbol、官方 UTC 查询窗或第三方抽取窗、HTTP 状态、所存字节数与哈希；每次资金费读取核验
+资金费 symbol 原子目录中的 `settlements.json`；第三方抽取文件中的上游响应哈希是采集证据，不能替代所存文件的逐字节核验。
+其 `observations/` 子目录
 仍只含严格 CSV 与元数据两个成员。规范元数据的 `settlement_source` 显式说明原件身份，
 既有显式规范归档没有此原生附属成员时为 `null`，不从缺字段静默推断。
 历史 `markPrice` 的 `r`/`p`/`T` 仅产生当时供应商接收 UTC 可见的预测，
@@ -339,3 +386,60 @@ FACTOR 直接消费该价差；relative_spread 和 top10_depth_per_spread 共用
 盘口中间价在 PANEL 和执行路径都按整数价格坐标之和乘原生 price_unit 后除二，
 仅在最终结果转换为 float64。交叉盘口按整数坐标判断，不把浮点舍入相等的
 两个不同合法价位判为交叉，也不先把两倍中间价转换为浮点。
+
+
+### L5 外部价格发现上下文
+
+`configs/research/crypto/external_context.json` 显式选择 Bybit 与 OKX 信息因子。
+两个 venue 分别拥有 processed target；未配置或缺失其中一个来源只阻塞依赖它的分支。
+来源使用已有 Tardis normalized owner 的 quotes、trades、derivative_ticker，
+由 producer 按 `local_timestamp <= decision_time` 对齐到 Binance BTC/ETH 100ms 主键，
+随后使用现有 exact-key assembler。SOL 研究行对这些 BTC/ETH 专属信息保持 NULL。
+
+成交 amount 的原生单位不得混用。Bybit linear 为 base 数量；OKX BTC-USDT-SWAP
+每张为 0.01 BTC，ETH-USDT-SWAP 每张为 0.1 ETH。换算系数由市场 owner 定义，
+冻结进入 processed 参数身份。来源说明：
+[Tardis CSV 字段](https://docs.tardis.dev/downloadable-csv-files/data-types)、
+[OKX 合约面值公告](https://www.okx.com/zh-hans/help/adjustment-of-face-value-for-usdt-margined-perpetual-swap-futures-trading)。
+
+每个 venue 输出 mid/spread（USDT）、100/500ms 简单收益、500ms observed signed
+base/USDT 流量与 TFI、相对 Binance mid 的差值、两市场 mid 的相对标准差
+`abs(external_mid-binance_mid)/(external_mid+binance_mid)`。
+quote 的 observed/event 时间和 age，以及 trade/ticker 的对应时钟均保留为 context。
+收益需要连续且未过期的完整窗口；流量需要完整 500ms 决策窗口，没有观察到成交时为 NULL。
+这些是供应商观察样本，不声称完整交易流或共址延迟；ticker 不参与执行账本或费用。
+执行仍仅 Binance BTC/ETH perpetual。
+
+
+组合配置不再按 candidate 名称匹配内置模板。taker 显式给出
+`candidate_id/asset_id/model_id/latency_ms`，maker 给出
+`candidate_id/asset_id/price_model_id/proxy_model_id`；执行资产仍限定 BTC/ETH。
+DAG、producer binding、组合统计均由同一份解析后的选择派生。
+校准 maker 的 target 随 candidate 身份生成，采样、预测与重放使用该 candidate 的资产；
+报告逐组合列出校准证据，不能拿 BTC 的校准产物用于 ETH。
+
+
+maker 的价格与压力模型角色由配置中的模型 ID 指定，不按算法名称或固定 ID 识别。
+两个角色均为空表示未校准 maker；否则必须同时指定已选模型，并分别使用
+500ms mid return 与 500ms observed sell-pressure proxy 标签。
+该资产必须同时在模型的训练/验证与 OOS 预测范围内。
+验证预测的保存与读取校验只针对实际被 maker 引用的模型，模型改名不改变角色。
+
+
+模型直接比较复用 evaluation catalog 与既有 prediction lookup。
+每个与 `comparison_model_id` 使用同一标签的模型产生一个成对共同 OOS 评估，
+DAG 先要求双方各自 OOS 评估通过完整预测覆盖校验，再按精确主键取有限预测交集，
+并使用同一 fold 的标签成熟截止时间。资产或有效时间范围没有交集时，
+发布零行比较产物，时间覆盖边界为 NULL，报告记为 UNDEFINED；不制造样本或零相关系数，
+也不把没有共同样本误判为整个研究运行失败。
+报告分别展示各模型完整评估与共同样本评估；不裁剪预测文件或交易账本，
+不同标签/预测单位的模型不直接比较。该过程不是因子笛卡尔搜索，也不新增回测引擎。
+
+
+模型预测期限由所选 executable label 决定，并写入每个 model scope。
+taker 只接受 future-mid-return 模型，其持有/预测期限读取该模型 scope；
+direction 或压力 proxy 不得被当作收益率使用。
+模型 refit 与验证产物的成熟时间校验也读取各自标签期限。
+maker 保留原有独立的 500ms 报价/校准期限，不把这个期限强加给其他模型。
+报价期限从决策时刻计时，延迟生效不会顺延截止时间，保留原挂单也不会续期；
+OOS 窗口结束可以提前截断报价。该期限不是库存强制平仓时间，markout 期限独立配置。

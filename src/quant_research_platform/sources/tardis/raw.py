@@ -28,9 +28,15 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+from quant_research_platform.sources.binance.ids import (
+    FUTURES_MARKET_TYPE,
+    SPOT_MARKET_TYPE,
+)
 from quant_research_platform.sources.binance.validation import (
     strict_iso_timestamp,
+    strict_non_negative_float,
+    strict_non_negative_integer,
+    strict_positive_float,
     validate_market_payload,
 )
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
@@ -49,9 +55,97 @@ from quant_research_platform.storage.raw_snapshots import MAX_RECORD_BYTES
 SCHEMA_ID = "qrp-tardis-native-archive"
 EXCHANGE = "binance-futures"
 CHANNELS = ("depth", "depthSnapshot", "aggTrade", "markPrice")
+STATE_CHANNELS = (
+    "openInterest",
+    "forceOrder",
+    "premiumIndex",
+    "topLongShortPositionRatio",
+    "topLongShortAccountRatio",
+    "globalLongShortAccountRatio",
+    "takerlongshortRatio",
+)
 SYMBOLS = ("btcusdt", "ethusdt")
 SLICE_MINUTES = 10
 _COPY_BYTES = 64 * 1024
+
+
+def _request_scope(exchange, symbols, channels):
+    allowed_symbols = (
+        {"btcusdt", "ethusdt", "solusdt"}
+        if exchange == EXCHANGE
+        else {"btcusdt", "ethusdt"}
+    )
+    allowed_channels = (
+        {*CHANNELS, *STATE_CHANNELS}
+        if exchange == EXCHANGE
+        else {"depth", "depthSnapshot", "aggTrade"}
+    )
+    if (
+        type(exchange) is not str
+        or exchange not in {EXCHANGE, "binance"}
+        or type(symbols) is not tuple
+        or not symbols
+        or any(type(item) is not str for item in symbols)
+        or len(set(symbols)) != len(symbols)
+        or not set(symbols) <= allowed_symbols
+        or type(channels) is not tuple
+        or not channels
+        or any(type(item) is not str for item in channels)
+        or len(set(channels)) != len(channels)
+        or not set(channels) <= allowed_channels
+    ):
+        raise ValueError("tardis_request_scope_invalid")
+
+
+def _stream_suffix(channel, exchange):
+    if channel == "depth":
+        return "depth@0ms" if exchange == EXCHANGE else "depth@100ms"
+    return "markPrice@1s" if channel == "markPrice" else channel
+
+
+def _validate_state(channel, symbol, native):
+    if channel == "forceOrder":
+        if native.get("e") != "forceOrder" or type(native.get("o")) is not dict:
+            raise ValueError("tardis_force_order_invalid")
+        order = native["o"]
+        if order.get("s") != symbol or order.get("S") not in {"BUY", "SELL"}:
+            raise ValueError("tardis_force_order_invalid")
+        strict_non_negative_integer(native.get("E"), error="tardis_state_time_invalid")
+        strict_non_negative_integer(order.get("T"), error="tardis_state_time_invalid")
+        for field in ("q", "l", "z"):
+            strict_non_negative_float(
+                order.get(field), error="tardis_force_order_quantity_invalid"
+            )
+        return
+    if channel != "takerlongshortRatio" and native.get("symbol") != symbol:
+        raise ValueError("tardis_state_symbol_invalid")
+    clock = "time" if channel in {"openInterest", "premiumIndex"} else "timestamp"
+    strict_non_negative_integer(native.get(clock), error="tardis_state_time_invalid")
+    fields = (
+        ("openInterest",)
+        if channel == "openInterest"
+        else ("markPrice", "indexPrice")
+        if channel == "premiumIndex"
+        else ("buySellRatio", "buyVol", "sellVol")
+        if channel == "takerlongshortRatio"
+        else ("longShortRatio", "longAccount", "shortAccount")
+    )
+    for field in fields:
+        strict_non_negative_float(native.get(field), error="tardis_state_value_invalid")
+    if channel == "premiumIndex":
+        strict_positive_float(
+            native.get("markPrice"), error="tardis_mark_price_invalid"
+        )
+        strict_positive_float(
+            native.get("indexPrice"), error="tardis_index_price_invalid"
+        )
+        strict_non_negative_integer(
+            native.get("nextFundingTime"), error="tardis_state_time_invalid"
+        )
+        from quant_research_platform.contracts.validation import strict_finite_float
+
+        for field in ("lastFundingRate", "interestRate"):
+            strict_finite_float(native.get(field), error="tardis_state_value_invalid")
 
 
 def _date(value: str) -> dt.date:
@@ -66,12 +160,15 @@ def _date(value: str) -> dt.date:
     return result
 
 
-def _request_url(date: str, offset: int) -> str:
+def _request_url(
+    date: str, offset: int, *, exchange=EXCHANGE, symbols=SYMBOLS, channels=CHANNELS
+) -> str:
+    _request_scope(exchange, symbols, channels)
     date = (_date(date) + dt.timedelta(days=offset // 1440)).isoformat()
     offset %= 1440
     return (
         "https://api.tardis.dev/v1/data-feeds/"
-        + EXCHANGE
+        + exchange
         + "?"
         + urllib.parse.urlencode(
             {
@@ -79,7 +176,7 @@ def _request_url(date: str, offset: int) -> str:
                 "offset": offset,
                 "sliceSize": SLICE_MINUTES,
                 "filters": json.dumps(
-                    [{"channel": item, "symbols": list(SYMBOLS)} for item in CHANNELS],
+                    [{"channel": item, "symbols": list(symbols)} for item in channels],
                     separators=(",", ":"),
                 ),
             }
@@ -87,11 +184,11 @@ def _request_url(date: str, offset: int) -> str:
     )
 
 
-def _filename(date: str, offset: int) -> str:
+def _filename(date: str, offset: int, *, exchange=EXCHANGE) -> str:
     date = (_date(date) + dt.timedelta(days=offset // 1440)).isoformat()
     offset %= 1440
     return (
-        f"tardis__{EXCHANGE}__{date}__minutes-"
+        f"tardis__{exchange}__{date}__minutes-"
         f"{offset:04d}-{offset + SLICE_MINUTES:04d}.txt.gz"
     )
 
@@ -131,9 +228,18 @@ def _verified_file(path: Path, *, expected_sha256=None):
 
 
 def iter_native_slice(
-    path: Path, *, date: str, offset_minutes: int, resource_policy, expected_sha256=None
+    path: Path,
+    *,
+    date: str,
+    offset_minutes: int,
+    resource_policy,
+    expected_sha256=None,
+    exchange=EXCHANGE,
+    symbols=SYMBOLS,
+    channels=CHANNELS,
 ):
     """Yield borrowed native rows, including disconnect markers, in file order."""
+    _request_scope(exchange, symbols, channels)
     day = _date(date)
     start = int(dt.datetime.combine(day, dt.time(), dt.UTC).timestamp()) * 10**9
     lower = start + offset_minutes * 60 * 10**9
@@ -185,17 +291,12 @@ def iter_native_slice(
                     parts = value["stream"].split("@")
                     if (
                         len(parts) < 2
-                        or parts[0] not in SYMBOLS
-                        or parts[1] not in CHANNELS
+                        or parts[0] not in symbols
+                        or parts[1] not in channels
                     ):
                         raise ValueError("tardis_native_channel_invalid")
                     channel = parts[1]
-                    suffix = {
-                        "depth": "depth@0ms",
-                        "depthSnapshot": "depthSnapshot",
-                        "aggTrade": "aggTrade",
-                        "markPrice": "markPrice@1s",
-                    }[channel]
+                    suffix = _stream_suffix(channel, exchange)
                     if value["stream"] != parts[0] + "@" + suffix:
                         raise ValueError("tardis_native_frequency_unsupported")
                     native = value["data"]
@@ -203,7 +304,9 @@ def iter_native_slice(
                         raise ValueError("tardis_generated_flag_invalid")
                     if channel in ("depth", "aggTrade"):
                         validate_market_payload(
-                            FUTURES_MARKET_TYPE,
+                            FUTURES_MARKET_TYPE
+                            if exchange == EXCHANGE
+                            else SPOT_MARKET_TYPE,
                             "depth" if channel == "depth" else "agg_trades",
                             parts[0].upper(),
                             native,
@@ -218,6 +321,8 @@ def iter_native_slice(
                             or type(native.get("asks")) is not list
                         ):
                             raise ValueError("tardis_snapshot_invalid")
+                    elif channel in STATE_CHANNELS:
+                        _validate_state(channel, parts[0].upper(), native)
                     elif (
                         native.get("s") != parts[0].upper()
                         or native.get("e") != "markPriceUpdate"
@@ -235,7 +340,10 @@ def iter_native_slice(
 class _ObservedStreams:
     """One authority for native continuity and vendor observation identities."""
 
-    def __init__(self):
+    def __init__(self, exchange=EXCHANGE, *, trade_lease):
+        self.exchange = exchange
+        self.trade_lease = trade_lease
+        self.trade_fingerprints = set()
         self.active = {}
         self.previous = {}
         self.epoch = 0
@@ -248,7 +356,7 @@ class _ObservedStreams:
             self.epoch += 1
             return None, closed, {"reason": "vendor_disconnect"}
         symbol, channel, *_ = value["stream"].split("@")
-        if channel == "markPrice":
+        if channel not in {"depth", "depthSnapshot", "aggTrade"}:
             return None, closed, None
         kind = "agg_trades" if channel == "aggTrade" else "depth"
         key = (symbol, kind)
@@ -257,12 +365,39 @@ class _ObservedStreams:
         if channel != "depthSnapshot":
             current = native["a" if channel == "aggTrade" else "u"]
             previous = self.previous.get(key)
+            if channel == "aggTrade":
+                # A resend can change E while all trade facts retain their identity.
+                fingerprint = hashlib.sha256(
+                    json.dumps(
+                        {
+                            field: value
+                            for field, value in native.items()
+                            if field != "E"
+                        },
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode()
+                ).digest()
             if previous is not None:
                 identifier, epoch = previous
-                if current <= identifier:
-                    raise ValueError("tardis_native_sequence_non_monotonic")
-                if (kind == "depth" and native["pu"] != identifier) or (
-                    kind == "agg_trades" and current != identifier + 1
+                if current <= identifier and kind == "agg_trades":
+                    if (symbol, fingerprint) in self.trade_fingerprints:
+                        return None, closed, None
+                    error = ValueError("tardis_native_sequence_non_monotonic")
+                    error.add_note(
+                        f"stream={value['stream']};offset={offset};line={number};"
+                        f"previous_id={identifier};current_id={current};"
+                        f"after_disconnect={epoch != self.epoch}"
+                    )
+                    raise error
+                if current > identifier and (
+                    kind == "depth"
+                    and (
+                        native["pu"] != identifier
+                        if self.exchange == EXCHANGE
+                        else not native["U"] <= identifier + 1 <= current
+                    )
+                    or (kind == "agg_trades" and current != identifier + 1)
                 ):
                     gap = {
                         "reason": "native_sequence_gap",
@@ -273,7 +408,14 @@ class _ObservedStreams:
                     }
                     if key in self.active:
                         closed.append(self.active.pop(key))
-            self.previous[key] = current, self.epoch
+            if channel == "aggTrade":
+                # Budget the symbol, digest, tuple, and set growth before insertion.
+                self.trade_lease.grow(512)
+                self.trade_fingerprints.add((symbol, fingerprint))
+            # The shared book engine discards stale depth updates. Retain raw
+            # observations without moving the continuity high-water mark backwards.
+            if previous is None or current > previous[0]:
+                self.previous[key] = current, self.epoch
         observed = strict_iso_timestamp(
             timestamp, error="tardis_observed_time_invalid"
         ).value
@@ -307,7 +449,11 @@ def _publish_slices(
     slice_count,
     byte_budget,
     resource_policy,
+    exchange,
+    symbols,
+    channels,
 ):
+    _request_scope(exchange, symbols, channels)
     _date(date)
     if (
         type(offset_minutes) is not int
@@ -324,7 +470,6 @@ def _publish_slices(
         require_free_disk_headroom(root, reserve_bytes=byte_budget)
         members = []
         remaining = byte_budget
-        tracker = _ObservedStreams()
         decimal_places = {}
         snapshot_limits = {}
         gap_count = interval_count = 0
@@ -338,8 +483,11 @@ def _publish_slices(
         with (
             runtime_resource_policy_scope(resource_policy) as policy,
             policy.lease("tardis.archive_metadata", 0) as metadata_lease,
+            policy.lease("tardis.trade_identities", 0) as trade_lease,
             ExitStack() as streams,
         ):
+            tracker = _ObservedStreams(exchange, trade_lease=trade_lease)
+            streams.callback(tracker.trade_fingerprints.clear)
             gaps = streams.enter_context(
                 handle_preserving_primary(gzip.open(gap_path, "wt", encoding="utf-8"))
             )
@@ -353,7 +501,7 @@ def _publish_slices(
                 offset_minutes + slice_count * SLICE_MINUTES,
                 SLICE_MINUTES,
             ):
-                target = root / _filename(date, offset)
+                target = root / _filename(date, offset, exchange=exchange)
                 digest = hashlib.sha256()
                 size = 0
                 with policy.lease("tardis.raw_copy", 2 * _COPY_BYTES):
@@ -373,7 +521,13 @@ def _publish_slices(
                 disconnects = rows = 0
                 first = last = None
                 records = iter_native_slice(
-                    target, date=date, offset_minutes=offset, resource_policy=policy
+                    target,
+                    date=date,
+                    offset_minutes=offset,
+                    resource_policy=policy,
+                    exchange=exchange,
+                    symbols=symbols,
+                    channels=channels,
                 )
                 try:
                     for number, timestamp, value in records:
@@ -447,7 +601,13 @@ def _publish_slices(
                     "disconnect_markers": disconnects,
                     "first_observed_utc": first,
                     "last_observed_utc": last,
-                    "request_url": _request_url(date, offset),
+                    "request_url": _request_url(
+                        date,
+                        offset,
+                        exchange=exchange,
+                        symbols=symbols,
+                        channels=channels,
+                    ),
                 }
                 metadata_lease.grow(
                     json_record_working_set_bytes(len(json.dumps(member).encode()))
@@ -477,10 +637,10 @@ def _publish_slices(
                 "schema_id": SCHEMA_ID,
                 "source_id": "tardis",
                 "venue": "binance",
-                "exchange": EXCHANGE,
+                "exchange": exchange,
                 "date": date,
-                "symbols": list(SYMBOLS),
-                "requested_channels": list(CHANNELS),
+                "symbols": list(symbols),
+                "requested_channels": list(channels),
                 "observation_clock": "vendor_utc",
                 "ordering": "slice_offset_then_native_line",
                 "files": members,
@@ -506,6 +666,9 @@ def import_slices(
     offset_minutes: int = 0,
     byte_budget: int,
     resource_policy=None,
+    exchange=EXCHANGE,
+    symbols=SYMBOLS,
+    channels=CHANNELS,
 ):
     """Publish consecutive native slices of any duration without rewriting bytes."""
 
@@ -520,6 +683,9 @@ def import_slices(
         slice_count=len(slices),
         byte_budget=byte_budget,
         resource_policy=resource_policy,
+        exchange=exchange,
+        symbols=symbols,
+        channels=channels,
     )
 
 
@@ -532,6 +698,9 @@ def download_slices(
     byte_budget: int,
     api_key: str | None = None,
     resource_policy=None,
+    exchange=EXCHANGE,
+    symbols=SYMBOLS,
+    channels=CHANNELS,
 ):
     """Download an entitled slice range without a calendar-day duration limit."""
     _date(date)
@@ -548,7 +717,12 @@ def download_slices(
         headers = {"Accept-Encoding": "gzip"}
         if api_key is not None:
             headers["Authorization"] = "Bearer " + api_key
-        request = urllib.request.Request(_request_url(date, offset), headers=headers)
+        request = urllib.request.Request(
+            _request_url(
+                date, offset, exchange=exchange, symbols=symbols, channels=channels
+            ),
+            headers=headers,
+        )
         try:
             response = urllib.request.urlopen(request, timeout=60)
         except urllib.error.HTTPError as error:
@@ -571,4 +745,7 @@ def download_slices(
         slice_count=slice_count,
         byte_budget=byte_budget,
         resource_policy=resource_policy,
+        exchange=exchange,
+        symbols=symbols,
+        channels=channels,
     )

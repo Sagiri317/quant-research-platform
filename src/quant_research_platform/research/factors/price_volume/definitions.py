@@ -10,43 +10,6 @@ from quant_research_platform.contracts.ids import MarketId
 
 PRICE_VOLUME_FACTOR_FAMILY = "price_volume"
 
-FORMAL_PRICE_VOLUME_FACTORS: tuple[str, ...] = (
-    "reversal_1d",
-    "reversal_5d",
-    "reversal_20d",
-    "momentum_60_20",
-    "momentum_120_20",
-    "momentum_252_20",
-    "volatility_20d",
-    "volatility_60d",
-    "downside_volatility_20d",
-    "downside_volatility_60d",
-    "max_return_20d",
-    "skewness_60d",
-    "drawdown_60d",
-    "amplitude_20d",
-    "log_avg_amount_20d",
-    "turnover_20d",
-    "turnover_60d",
-    "turnover_volatility_20d",
-    "amihud_20d",
-    "amihud_60d",
-    "amount_shock_20d",
-    "return_amount_corr_20d",
-    "trend_efficiency_60d",
-    "signed_amount_flow_20d",
-    "log_float_market_cap",
-)
-FORMAL_CORE_PRICE_VOLUME_FACTORS: tuple[str, ...] = (
-    "momentum_252_20",
-    "reversal_5d",
-    "volatility_20d",
-    "amihud_20d",
-    "turnover_20d",
-    "log_float_market_cap",
-)
-
-
 # Each entry owns the base inputs and the required session windows.
 _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] = {
     "reversal_1d": (("adj_close",), (1,)),
@@ -93,25 +56,32 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
     "return_amount_imbalance_20d": (("period_return", "amount"), (20,)),
     "zero_amount_ratio_20d": (("amount",), (20,)),
     "log_total_market_cap": (("total_market_cap",), ()),
+    "share_price": (("close",), ()),
+    "avg_amount_126d": (("amount",), (126,)),
+    "amount_cv_126d": (("amount",), (126,)),
+    "turnover_cv_126d": (("volume", "float_market_cap", "close"), (126,)),
+    "amihud_126d": (("period_return", "amount"), (126,)),
+    "skewness_20d": (("period_return",), (20,)),
+    "top5_return_mean_20d": (("period_return",), (20,)),
+    "turnover_250d": (("volume", "float_market_cap", "close"), (250,)),
+    "abnormal_turnover_20_250": (("volume", "float_market_cap", "close"), (250, 20)),
 }
+
+PRICE_VOLUME_LIBRARY = tuple(_PRICE_VOLUME_INPUT_WINDOWS)
 
 
 def price_volume_factor_definitions(
     *,
     market_id: MarketId,
     required_input_data_id: str,
-    preset: str = "standard",
     factor_columns: Iterable[str] | None = None,
 ) -> tuple[FactorDefinition, ...]:
     """Bind canonical definitions without changing their identity across selections."""
-    if preset in {"standard", "formal"}:
-        selected = FORMAL_PRICE_VOLUME_FACTORS
-    elif preset == "core":
-        selected = FORMAL_CORE_PRICE_VOLUME_FACTORS
-    else:
-        raise ValueError("invalid_price_volume_preset")
-    if factor_columns is not None:
-        selected = tuple(dict.fromkeys(factor_columns))
+    selected = (
+        PRICE_VOLUME_LIBRARY
+        if factor_columns is None
+        else tuple(dict.fromkeys(factor_columns))
+    )
     definitions = []
     for column in selected:
         try:
@@ -123,9 +93,7 @@ def price_volume_factor_definitions(
             FactorDefinition(
                 factor_id=f"price_volume_{column}",
                 market_id=market_id,
-                factor_set=FactorSet.CORE
-                if column in FORMAL_CORE_PRICE_VOLUME_FACTORS
-                else FactorSet.STANDARD,
+                factor_set=FactorSet.STANDARD,
                 input_columns=inputs,
                 base_input_columns=inputs,
                 derived_input_columns=(),

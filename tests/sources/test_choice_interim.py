@@ -25,6 +25,7 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 from tests.helpers.choice_raw import SDK, response, write_css
+from tests.helpers.research_configuration import research_configuration
 
 FIELDS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)
 DATE_FIELDS = ("STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE")
@@ -440,9 +441,7 @@ def test_known_missing_coordinates_are_blocked_in_the_real_run_and_report(
     result = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2019-03-04",
-        end_date="2019-03-15",
+        research_plan=research_configuration(development=("2019-03-04", "2019-03-15")),
     )
     record = read_research_run_record(layout.research_run_path(result["run_id"]))
     targets = {row.target_id: row for row in record.target_results}
@@ -910,9 +909,7 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
     result = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2019-03-04",
-        end_date="2019-03-15",
+        research_plan=research_configuration(development=("2019-03-04", "2019-03-15")),
     )
     record = read_research_run_record(layout.research_run_path(result["run_id"]))
     targets = {row.target_id: row for row in record.target_results}

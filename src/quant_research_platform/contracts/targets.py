@@ -199,6 +199,7 @@ class ProducerBinding:
     kind: ProducerKind
     producer: Callable[..., object]
     source_identity: Callable[[Path, str], str | None] | None = None
+    raw_root: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "kind", ProducerKind(self.kind))
@@ -206,6 +207,10 @@ class ProducerBinding:
             raise ValueError("producer_callable_required")
         if self.source_identity is not None and not callable(self.source_identity):
             raise ValueError("source_identity_callable_required")
+        if self.raw_root is not None and (
+            not isinstance(self.raw_root, Path) or self.source_identity is None
+        ):
+            raise ValueError("producer_source_root_invalid")
 
 
 @dataclass(frozen=True, slots=True)

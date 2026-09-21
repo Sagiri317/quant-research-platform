@@ -112,3 +112,28 @@ def test_pearson_moments_preserve_materially_invalid_result() -> None:
         right_m2=1.0,
         covariance=invalid,
     ) == (invalid, None)
+
+
+def test_correlation_moments_preserve_exact_values_when_binary_scale_changes():
+    from fractions import Fraction
+
+    from quant_research_platform.compute.dataframe.cross_section import (
+        _CorrelationMoments,
+    )
+
+    pairs = [(1.0, 2.0), (0.125, -0.25), (1e200, 1e-200), (5e-324, -5e-324)]
+    for ordered in (pairs, pairs[::-1]):
+        moments = _CorrelationMoments()
+        observed = []
+        for left, right in ordered:
+            moments.update(left, right)
+            observed.append((Fraction(left), Fraction(right)))
+            count = len(observed)
+            expected = (
+                sum(x for x, _ in observed) / count,
+                sum(y for _, y in observed) / count,
+                sum(x * x for x, _ in observed) / count,
+                sum(y * y for _, y in observed) / count,
+                sum(x * y for x, y in observed) / count,
+            )
+            assert moments.averages() == expected

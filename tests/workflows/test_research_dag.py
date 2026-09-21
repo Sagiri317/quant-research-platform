@@ -47,6 +47,10 @@ from quant_research_platform.storage.manifests import (
     read_manifest,
 )
 from quant_research_platform.workflows import research
+from tests.helpers.research_configuration import (
+    A_SHARE_MODEL_ALGORITHMS,
+    research_configuration,
+)
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 
 
@@ -113,7 +117,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
                 label_column="label",
                 random_seed=42,
             )
-            for algorithm in a_share.MODEL_FAMILY_ORDER
+            for algorithm in A_SHARE_MODEL_ALGORITHMS
         )
     )
     sessions = pd.date_range("2014-01-01", "2019-06-30", freq="B")
@@ -230,9 +234,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     result = research.research_run(
         profile=profile,
         layout=StorageLayout(project_root=tmp_path),
-        scenario_id="pv_all",
-        start_date="2019-01-01",
-        end_date="2019-06-30",
+        research_plan=research_configuration(development=("2019-01-01", "2019-06-30")),
     )
     targets = {item["target_id"]: item for item in result["target_results"]}
     assert result["status"] == "FAILED"
@@ -270,7 +272,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     assert len(artifact.quarterly_models) == 16
     assert set(item["family_id"] for item in artifact.quarterly_models) == set(
         protocol_family_ids := tuple(
-            f"pv_all_{algorithm}" for algorithm in a_share.MODEL_FAMILY_ORDER
+            f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
         )
     )
     for item in artifact.quarterly_models:
@@ -368,9 +370,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     reused = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2019-01-01",
-        end_date="2019-06-30",
+        research_plan=research_configuration(development=("2019-01-01", "2019-06-30")),
     )
     reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
     assert not reused_record.trial_ledgers
@@ -385,10 +385,8 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     rebuilt = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2019-01-01",
-        end_date="2019-06-30",
         rebuild=True,
+        research_plan=research_configuration(development=("2019-01-01", "2019-06-30")),
     )
     rebuild_record = read_research_run_record(
         layout.research_run_path(rebuilt["run_id"])
@@ -601,19 +599,25 @@ def test_crypto_dataset_plan_reports_missing_raw_after_data_producers_are_bound(
 
 
 def test_protocol_owns_formal_research_and_report_graphs() -> None:
-    a_share = research_profile().protocol("pv_all")
+    from quant_research_platform.profiles.research import bind_research_configuration
+    from tests.helpers.research_configuration import research_configuration
+
+    a_profile = bind_research_configuration(
+        research_profile(), research_configuration(name="core6")
+    )
+    a_share = a_profile.protocol("pv_all")
     a_share_specs = {
         spec.target_id: spec for spec in a_share.target_specs("research run")
     }
     assert a_share.terminal_targets("research run") == (
         "pv_all_evaluation",
         "pv_all_statistics",
-        "pv_all_portfolio_statistics",
         "pv_all_ew_rank_top20_equal_weight_ledger",
         "pv_all_champion_top20_equal_weight_ledger",
         "pv_all_champion_top20_float_cap_ledger",
         "pv_all_champion_csi500_enhanced_ledger",
         "pv_all_champion_csi1000_enhanced_ledger",
+        "pv_all_portfolio_statistics",
     )
     assert a_share_specs["pv_all_evaluation"].dependencies == ("pv_all",)
     assert a_share_specs["pv_all_evaluation"].producer_id == "pv_all_evaluation"
@@ -706,7 +710,10 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
         "pv_all_champion_csi1000_enhanced_ledger",
     ]
 
-    crypto_profile = research_profile(CRYPTO_PROFILE_ID)
+    crypto_profile = bind_research_configuration(
+        research_profile(CRYPTO_PROFILE_ID),
+        research_configuration("crypto", "baseline"),
+    )
     crypto = crypto_profile.protocol(crypto_profile.research_datasets.list()[0].data_id)
     crypto_specs = {
         spec.target_id: spec for spec in crypto.target_specs("research run")
@@ -969,16 +976,17 @@ def test_data_target_identity_ignores_unrelated_protocol_factor_scope(
         source_identity=source_identity,
     )
     base = research_profile()
+    from quant_research_platform.profiles.research import bind_research_configuration
+    from tests.helpers.research_configuration import research_configuration
+
     full_profile = replace(
-        base,
-        protocol=lambda *, scenario_id, access_window: a_share.protocol(
-            scenario_id,
-            access_window,
-            factor_scope="full",
-        ),
+        bind_research_configuration(base, research_configuration(name="pv25")),
         producer_bindings={data_id: binding},
     )
-    core_profile = replace(base, producer_bindings={data_id: binding})
+    core_profile = replace(
+        bind_research_configuration(base, research_configuration(name="core6")),
+        producer_bindings={data_id: binding},
+    )
 
     core_plan = research.plan_targets(
         profile=core_profile,
@@ -1910,10 +1918,8 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     research_plan = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2019-01-01",
-        end_date="2019-12-31",
         plan=True,
+        research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
     )
     assert research_plan["status"] == "BLOCKED"
     assert not (tmp_path / "data" / "runs").exists()
@@ -1922,9 +1928,7 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     research_result = research.research_run(
         profile=profile,
         layout=layout,
-        scenario_id="pv_all",
-        start_date="2019-01-01",
-        end_date="2019-12-31",
+        research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
     )
     run_id = research_result["run_id"]
     report_plan = research.report_build(
@@ -1996,9 +2000,9 @@ def test_research_run_records_unexpected_failure_without_masking_primary(
         research.research_run(
             profile=profile,
             layout=layout,
-            scenario_id="pv_all",
-            start_date="2019-01-01",
-            end_date="2019-12-31",
+            research_plan=research_configuration(
+                development=("2019-01-01", "2019-12-31")
+            ),
         )
     assert raised.value is primary
     records = tuple((tmp_path / "data/runs/research").glob("*.json"))
@@ -2020,9 +2024,9 @@ def test_research_run_records_unexpected_failure_without_masking_primary(
         research.research_run(
             profile=profile,
             layout=StorageLayout(project_root=tmp_path / "secondary"),
-            scenario_id="pv_all",
-            start_date="2019-01-01",
-            end_date="2019-12-31",
+            research_plan=research_configuration(
+                development=("2019-01-01", "2019-12-31")
+            ),
         )
     assert secondary_raised.value is primary
 
@@ -2081,29 +2085,28 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     from quant_research_platform.interfaces.cli.commands import app
     from quant_research_platform.profiles.research import (
         CRYPTO_PROFILE_ID,
+        bind_research_configuration,
         research_profile,
-    )
-    from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_RESEARCH_DATASET_ID,
     )
 
     profile = research_profile(CRYPTO_PROFILE_ID)
-    request = dict(
-        profile=profile,
-        layout=StorageLayout(tmp_path),
-        scenario_id=HFT_RESEARCH_DATASET_ID,
-        start_date="1970-01-01T00:00:04",
-        end_date="1970-01-01T00:00:06",
-        plan=True,
-    )
-    with pytest.raises(ValueError, match="crypto_research_plan_required"):
+    request = dict(profile=profile, layout=StorageLayout(tmp_path), plan=True)
+    with pytest.raises(TypeError, match="research_plan"):
         research.research_run(**request)
-    payload = _crypto_plan_payload()
-    bound = profile.protocol(research_plan=payload)
-    frozen = bound.manifest()
-    payload["initial_capital"] = 9999.0
-    payload["exposure_limits"]["btc_usdt"]["max_position_quantity"] = 999.0
-    assert bound.manifest() == frozen
+
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        development=("1970-01-01T00:00:04", "1970-01-01T00:00:06"),
+        plan=_crypto_plan_payload(),
+    )
+    bound = bind_research_configuration(profile, configuration)
+    frozen = bound.protocol(configuration["scenario_id"]).manifest()
+    configuration["research_plan"]["initial_capital"] = 9999.0
+    configuration["research_plan"]["exposure_limits"]["btc_usdt"][
+        "max_position_quantity"
+    ] = 999.0
+    assert bound.protocol(configuration["scenario_id"]).manifest() == frozen
     assert frozen["holdout_status"] == "HOLDOUT_LOCKED"
     for field in (
         "folds",
@@ -2114,20 +2117,22 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     ):
         bad = _crypto_plan_payload()
         del bad[field]
+        configuration["research_plan"] = bad
         with pytest.raises(ValueError, match="crypto_research_plan_fields_invalid"):
-            research.research_run(**request, research_plan=bad)
+            research.research_run(**request, research_plan=configuration)
     bad = _crypto_plan_payload()
     bad["raw_root"] = "private/provider"
+    configuration["research_plan"] = bad
     with pytest.raises(ValueError, match="crypto_research_plan_fields_invalid"):
-        research.research_run(**request, research_plan=bad)
+        research.research_run(**request, research_plan=configuration)
     bad = _crypto_plan_payload()
     bad["folds"][0]["validation"]["end"] = "1970-01-01T00:00:01.200000"
+    configuration["research_plan"] = bad
     with pytest.raises(ValueError, match="crypto_research_plan_label_window_too_short"):
-        research.research_run(**request, research_plan=bad)
+        research.research_run(**request, research_plan=configuration)
+    configuration["research_plan"] = _crypto_plan_payload()
     with pytest.raises(PermissionError, match="holdout_frozen"):
-        research.research_run(
-            **request, research_plan=_crypto_plan_payload(), holdout=True
-        )
+        research.research_run(**request, research_plan=configuration, holdout=True)
     valid = _crypto_plan_payload()
     for fold in valid["folds"]:
         for role in ("train", "validation", "development_test"):
@@ -2135,23 +2140,12 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     valid["final_holdout"] = {
         key: value + "Z" for key, value in valid["final_holdout"].items()
     }
+    configuration["research_plan"] = valid
     plan_file = tmp_path / "plan.json"
-    plan_file.write_text(json.dumps(valid), encoding="utf-8")
-    args = [
-        "research",
-        "run",
-        "--profile",
-        CRYPTO_PROFILE_ID,
-        "--start-date",
-        request["start_date"] + "Z",
-        "--end-date",
-        request["end_date"] + "Z",
-        "--project-root",
-        str(tmp_path),
-        "--plan",
-    ]
+    plan_file.write_text(json.dumps(configuration), encoding="utf-8")
+    args = ["research", "run", "--project-root", str(tmp_path), "--plan"]
     missing = CliRunner().invoke(app, args)
-    assert missing.exit_code == 2 and "crypto_research_plan_required" in missing.output
+    assert missing.exit_code == 2 and "research-plan" in missing.output
     result = CliRunner().invoke(app, [*args, "--research-plan", str(plan_file)])
     assert result.exit_code == 0, result.output
     published = json.loads(result.output)
@@ -2352,6 +2346,13 @@ def test_source_hash_failure_keeps_run_failure_semantics(
     marker.parent.mkdir(parents=True)
     marker.write_bytes(b"synthetic")
     profile, _, _ = _calendar_rebuild_profile("value", marker=marker)
+    profile = replace(
+        profile,
+        producer_bindings={
+            **research_profile().producer_bindings,
+            **profile.producer_bindings,
+        },
+    )
     primary = {
         "missing": FileNotFoundError(errno.ENOENT, "missing"),
         "memory": MemoryError("primary"),
@@ -2373,9 +2374,7 @@ def test_source_hash_failure_keeps_run_failure_semantics(
         profile=profile,
         layout=StorageLayout(tmp_path),
         raw_root=raw,
-        scenario_id="pv_all",
-        start_date="2019-01-01",
-        end_date="2019-12-31",
+        research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
     )
     if failure == "missing":
         result = research.research_run(**kwargs)

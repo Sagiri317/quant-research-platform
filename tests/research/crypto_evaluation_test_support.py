@@ -18,6 +18,7 @@ from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact_record,
 )
 from quant_research_platform.workflows import research
+from tests.helpers.research_configuration import research_configuration
 
 
 def check_crypto_evaluation_readback(
@@ -51,24 +52,33 @@ def check_crypto_evaluation_readback(
         work = frame.copy()
         assets = ()
         if spec.signals[0].source_kind == "prediction":
-            model_id = spec.signals[0].signal_id
-            predictions = read_parquet(
-                prediction_root
-                / "outputs"
-                / f"{model_id}_prediction"
-                / "prediction.parquet"
-            )
-            work = work.merge(
-                predictions,
-                on=["timestamp", "asset_id"],
-                how="left",
-                validate="one_to_one",
-            )
-            scopes = profile.protocol(research_plan=plan).manifest()["model_scopes"]
-            assets = tuple(scopes[model_id]["evaluation_asset_ids"])
+            scopes = profile.protocol(
+                profile.research_datasets.list()[0].data_id
+            ).manifest()["model_scopes"]
+            asset_sets = []
+            for signal in spec.signals:
+                model_id = signal.signal_id
+                predictions = read_parquet(
+                    prediction_root
+                    / "outputs"
+                    / f"{model_id}_prediction"
+                    / "prediction.parquet"
+                )
+                work = work.merge(
+                    predictions[["timestamp", "asset_id", "prediction_score"]].rename(
+                        columns={"prediction_score": signal.source_column}
+                    ),
+                    on=["timestamp", "asset_id"],
+                    how="left",
+                    validate="one_to_one",
+                )
+                asset_sets.append(set(scopes[model_id]["evaluation_asset_ids"]))
+            assets = tuple(set.intersection(*asset_sets))
         scope = oos & work.eligible
-        if assets:
+        if spec.signals[0].source_kind == "prediction":
             scope &= work.asset_id.isin(assets)
+            for signal in spec.signals:
+                scope &= np.isfinite(work[signal.source_column])
         for signal in spec.signals:
             for label, availability in spec.label_availability_columns.items():
                 mask = (
@@ -96,10 +106,14 @@ def check_crypto_evaluation_readback(
                             float(np.corrcoef(values.T)[0, 1]), abs=1e-10
                         )
         diagnostics = manifest["metadata"]["evaluation_diagnostics"]
-        assert (
-            diagnostics["min_timestamp"]
-            >= plan["folds"][0]["development_test"]["start"]
-        )
+        if diagnostics["timestamp_count"]:
+            assert (
+                diagnostics["min_timestamp"]
+                >= plan["folds"][0]["development_test"]["start"]
+            )
+        else:
+            assert diagnostics["min_timestamp"] is None
+            assert diagnostics["max_timestamp"] is None
 
 
 def check_crypto_evaluation_old_good(*, layout, profile, targets, raw, plan):
@@ -143,12 +157,17 @@ def check_crypto_evaluation_old_good(*, layout, profile, targets, raw, plan):
         research.research_run(
             profile=altered,
             layout=layout,
-            scenario_id=profile.research_datasets.list()[0].data_id,
-            start_date=plan["folds"][0]["development_test"]["start"],
-            end_date=plan["folds"][-1]["development_test"]["end"],
-            research_plan=plan,
             raw_root=raw,
             rebuild=True,
+            research_plan=research_configuration(
+                "crypto",
+                "baseline",
+                development=(
+                    plan["folds"][0]["development_test"]["start"],
+                    plan["folds"][-1]["development_test"]["end"],
+                ),
+                plan=plan,
+            ),
         )
     assert caught.value is primary
     assert any("RuntimeError" in note for note in primary.__notes__)
@@ -163,7 +182,7 @@ def check_crypto_evaluation_input_boundaries(
     target_layout = layout.with_target_roots(
         {dataset_id: dataset_root, f"{dataset_id}_predictions": prediction_root}
     )
-    protocol = profile.protocol(research_plan=plan).manifest()
+    protocol = profile.protocol(profile.research_datasets.list()[0].data_id).manifest()
     window = TimeWindow(
         plan["folds"][0]["development_test"]["start"],
         plan["folds"][-1]["development_test"]["end"],

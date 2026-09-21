@@ -22,10 +22,10 @@ CSMAR 市场/指数/行业/分析师事实及 Choice 财务事件版本 → 因�
 | 能力 | 当前实现 | 尚不能据此宣称 |
 |---|---|---|
 | 数据与 PIT | CSMAR 市场事实、Choice 原生请求归档及事件版本适配、合法可用时点与修订传播 | 全 A 股全部原始/修订历史已经齐备 |
-| 场景与因子 | pv_all、fusion_nf_core、fusion_nf_expectations；正式 PV25、Fundamental19、预期4；CORE/FULL及同一价量库的16个可选项 | 可选项已纳入正式实验或已发现有效 alpha |
+| 场景与因子 | 配置选择 pv_all、pv_expanded、fusion_nf_core、fusion_nf_expectations；保留正式 PV25/CORE，价量库共50项，另有共享 beta/残差波动率、Fundamental19、预期4 | 库中因子均有完整真实数据、已经通过正式实验或已发现有效 alpha |
 | 特征与标签 | 横截面资格、MAD/中性化/zscore、缺失指示、成熟标签、20日模型目标与辅助期限 | 缺数据的真实样本可以直接使用 |
-| 模型与预测 | 两种排名集成及 OLS/Huber/Ridge/Lasso/RF/XGB，季度家族内选择、重拟合与持久化 OOS 预测 | 真实留出已经解锁或验证 |
-| 组合与推断 | 三个 Top20% 简单候选、CSI500/CSI1000 增强，统一自融资账本、成本/风险/容量/归因及预注册统计 | 所有市场环境均可成交或优化可行 |
+| 模型与预测 | 配置选择两种排名集成及 OLS/Huber/Ridge/Lasso/RF/XGB/LightGBM，季度家族内选择、重拟合与持久化 OOS 预测 | 真实留出已经解锁或验证 |
+| 组合与推断 | 配置选择简单组合或 CSI500/CSI1000 增强，统一自融资账本、成本/风险/容量/归因及预注册统计 | 所有市场环境均可成交或优化可行 |
 | 报告与展示 | 唯一目标 DAG、按 run_id 的报告、CLI/API 和只读 Notebook | 合成运行等于真实经济有效性 |
 
 当前真实财务验收按用户安排延期，HOLDOUT_LOCKED 保持。
@@ -595,7 +595,7 @@ momentum_252_20 = P_{t-20} / P_{t-252} - 1
 
 ##### 可选价量因子
 
-正式默认仍为上述 PV25，CORE 仍为上述六项，scenario/模型选择不扩张。
+PV25 与六项 CORE 由普通研究配置保存，不是代码中的隐式默认选择。
 库通过同一 `price_volume_factor_definitions(..., factor_columns=...)` 选择以下独有16项；
 没有新增实验输出组，也没有周期笛卡尔展开：
 
@@ -622,6 +622,20 @@ CSMAR摄取现有finite数值校验未建立amount非负invariant，因此非正
 价量定义由同一份 definitions 及数学核提供，默认/正式/定制选择的同一项使用相同身份。
 reversal_5d 预热为 5，momentum_252_20 预热为 252；只计算请求因子与核心输出窗口。
 旧同名异义引擎和别名已删除，不保留另一套数学定义。
+
+##### 扩展价量选择
+
+同一个价量 owner 还提供 share_price、avg_amount_126d、amount_cv_126d、
+turnover_cv_126d、amihud_126d、skewness_20d、top5_return_mean_20d、
+turnover_250d、abnormal_turnover_20_250，共 50 项价量因子。
+CV 使用完整窗口样本标准差除以正均值；top5 为完整 20 日中最高五个收益的均值；
+异常换手为 20 日均值除以 250 日均值。缺失窗口或非法分母保持 NULL。
+
+beta_252d 与 residual_volatility_60d 复用 compute/market_model 的唯一风险数学核，
+不复制风险引擎。pv_expanded 示例选择 50 项价量与这两项暴露；
+使用既有 evaluation、季度模型/OOS、三个简单组合和统计/报告链。
+该选择不要求 Choice 财务或增强组合。缺 PIT、分钟或 quote 事实的其他候选保留 BLOCKED，
+不会以代理字段冒充已具备数据。
 
 #### 5.9.2 基本面 19 因子
 
@@ -1004,7 +1018,8 @@ can_enter / can_exit 未来执行列
 
 ### 5.14 正式模型层级与预处理
 
-正式 A 股模型层级：
+原正式配置保留以下模型层级；扩展配置也可选择 LightGBM。运行中的模型集合、
+输入与参数来自研究 JSON，不由下列清单隐式补齐：
 
 ```text
 单因子诊断
@@ -1144,7 +1159,7 @@ device = cpu
 两级选择：
 
 1. 家族内按过去 12 个月每日验证 RankIC 的均值选择配置。
-2. 在以下家族优胜配置中选择季度优胜模型：
+2. 在本次研究 JSON 选定的家族优胜配置中选择季度优胜模型；原正式配置为：
 
 ```text
 Equal-rank
@@ -1157,9 +1172,9 @@ RF
 XGB
 ```
 
-精确并列时，按上述从简顺序选择。
+精确并列时，按研究 JSON 中模型的声明顺序选择；原正式配置保留上述从简顺序。
 
-家族内并列时采用保守配置：
+家族内并列时按显式 parameter_candidates 顺序选择；原正式配置按以下保守顺序声明：
 
 ```text
 Ridge / Huber -> 较大的 lambda
@@ -1300,7 +1315,7 @@ Fama-MacBeth 用于经济解释/稳健性，不是第二选择引擎。
 
 #### 5.17.5 组合过拟合诊断
 
-正式组合候选范围固定为下方定义的五个候选。
+组合过拟合诊断使用本次配置所选的完整候选集合；原正式配置为下方五个候选。
 
 CSCV-PBO：
 
@@ -1317,7 +1332,7 @@ PSR / DSR / CSCV-PBO 只使用开发区间，作为诊断，不作为选择门�
 
 ### 5.18 正式组合候选
 
-主方案恰为五个周频候选：
+原正式配置保存五个周频候选；pv_expanded 选择其中三个简单组合，运行不强制补齐五项：
 
 ```text
 1. 等权排名 -> Top20% 等权
@@ -1327,7 +1342,7 @@ PSR / DSR / CSCV-PBO 只使用开发区间，作为诊断，不作为选择门�
 5. 优胜模型 -> CSI1000 增强
 ```
 
-日/月频日程、成本敏感性和稳健性变体不扩展这一试验范围。
+每次运行的日程与候选范围由配置冻结；成本敏感性和稳健性变体不自动扩展该试验范围。
 
 Top20 表示横截面最高 20% 分位，而不是前 20 只股票。
 
@@ -1868,3 +1883,12 @@ HAC 要求至少两个有限观测且 0 <= lag < N。常量或振幅不超过
 相同观测允许有限的点区间；非有限或反序区间不得发布。
 秩亏回归不发布伪系数，SPA/StepM/MCS 的常量差分、零方差与非法后端 p 值
 保持 UNDEFINED。报告和 Notebook 只消费已发布统计，不补算第二真相。
+
+
+组合选择由研究 JSON 的 `portfolios` 显式声明，包括 `candidate_id`、
+`construction`、`prediction_selector`、`top_quantile`、
+`rebalance_schedule` 和 `benchmark_id`。组合名称不决定算法；
+现有 `top20_equal_weight` / `top20_float_cap` 构建标识仍使用配置的分位数，
+名称中的 top20 不覆盖 `top_quantile`。benchmark-enhanced 的风险与数据依赖
+由既有组合合同派生。原五组合仅是普通配置中的五条记录；
+未绑定研究配置的 profile 不隐式创建组合或账本目标。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import codecs
+import csv
 import io
 import os
 import re
@@ -464,7 +465,7 @@ class _BoundedCsvRecords:
         )
 
     def _try_fast_fields(self) -> tuple[list[str], int, int] | None:
-        """Parse common unquoted legal-width rows without per-byte dispatch."""
+        """Parse common single-line records without per-byte dispatch."""
 
         if (
             self._pushback
@@ -484,7 +485,30 @@ class _BoundedCsvRecords:
         if source_bytes > self._limit_bytes:
             raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
         comma_count = line.count(b",")
-        if b'"' in line or comma_count + 1 > _MAX_PROVIDER_HEADER_FIELDS:
+        if b'"' in line:
+            # A whole-line native decode owns UTF-8/Unicode copies, field strings,
+            # list slots and the C CSV parser's growing UCS4 field buffer.
+            # Larger and multiline records retain the bounded streaming grammar.
+            if source_bytes > csv.field_size_limit():
+                self._handle.seek(self._handle.tell() - source_bytes)
+                return None
+            self._admit_record_bytes(32768 + 32 * source_bytes + 96 * (comma_count + 1))
+            text = line.decode("utf-8-sig" if self._first_record else "utf-8")
+            try:
+                fields = next(csv.reader((text,), strict=True))
+            except csv.Error:
+                self._handle.seek(self._handle.tell() - source_bytes)
+                return None
+            if len(fields) > _MAX_PROVIDER_HEADER_FIELDS:
+                self._handle.seek(self._handle.tell() - source_bytes)
+                return None
+            self._first_record = False
+            return (
+                fields,
+                source_bytes,
+                sum(len(field.encode("utf-8")) for field in fields),
+            )
+        if comma_count + 1 > _MAX_PROVIDER_HEADER_FIELDS:
             self._handle.seek(self._handle.tell() - source_bytes)
             return None
         content_end = source_bytes

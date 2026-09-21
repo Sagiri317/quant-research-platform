@@ -18,6 +18,7 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _stable_zscore,
     compute_ic_and_grouped_label_values,
 )
+from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.compute.panels import ComputePanelSpec
 from quant_research_platform.contracts.evaluations import (
     EvaluationSpec,
@@ -41,7 +42,6 @@ from quant_research_platform.research.evaluations.engine import (
 from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
-from quant_research_platform.research.portfolios.risk import MarketModelRiskState
 from quant_research_platform.research.statistics import cross_sectional_rank_ic
 from quant_research_platform.runtime.dataframes import iter_complete_time_sized_frames
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope

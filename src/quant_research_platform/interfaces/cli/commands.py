@@ -122,12 +122,8 @@ def dataset_build(
 
 @research_app.command("run")
 def research_run(
-    scenario_id: str | None = typer.Option(None, "--scenario-id"),  # noqa: B008
-    profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
-    start_date: str = typer.Option(..., "--start-date"),  # noqa: B008
-    end_date: str = typer.Option(..., "--end-date"),  # noqa: B008
     project_root: Path = typer.Option(Path("."), "--project-root"),  # noqa: B008
-    research_plan: Path | None = typer.Option(None, "--research-plan"),  # noqa: B008
+    research_plan: Path = typer.Option(..., "--research-plan"),  # noqa: B008
     raw_root: Path | None = typer.Option(None, "--raw-root"),  # noqa: B008
     holdout: bool = typer.Option(False, "--holdout"),  # noqa: B008
     development_run_id: str | None = typer.Option(None, "--development-run-id"),  # noqa: B008
@@ -135,24 +131,19 @@ def research_run(
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
     try:
-        selected_profile = research_profile(profile)
+        configuration = read_bounded_qrp_json(research_plan)[1]
+        profile_id = configuration.get("profile_id")
+        if type(profile_id) is not str:
+            raise ValueError("research_configuration_profile_invalid")
+        try:
+            selected_profile = research_profile(profile_id)
+        except KeyError:
+            raise ValueError("research_configuration_profile_invalid") from None
         result = research.research_run(
             profile=selected_profile,
-            research_plan=None
-            if research_plan is None
-            else read_bounded_qrp_json(research_plan)[1],
+            research_plan=configuration,
             raw_root=raw_root,
             layout=StorageLayout(project_root=project_root),
-            scenario_id=(
-                scenario_id
-                or (
-                    "pv_all"
-                    if selected_profile.profile_id == A_SHARE_PROFILE_ID
-                    else selected_profile.research_datasets.list()[0].data_id
-                )
-            ),
-            start_date=start_date,
-            end_date=end_date,
             holdout=holdout,
             development_run_id=development_run_id,
             plan=plan,

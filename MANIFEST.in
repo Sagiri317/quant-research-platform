@@ -1,1 +1,2 @@
 include notebooks/research-interview-demo.ipynb
+recursive-include configs/research *.json

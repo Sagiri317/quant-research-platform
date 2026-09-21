@@ -22,6 +22,7 @@ from quant_research_platform.research.evaluations.engine import (
     build_evaluation_result_from_frames,
 )
 from quant_research_platform.research.predictions.alignment import (
+    _iter_common_prediction_chunks,
     _iter_prediction_joined_chunks,
 )
 from quant_research_platform.runtime.resources import (
@@ -69,7 +70,24 @@ def build_crypto_evaluation_result(
         prediction = spec.signals[0].source_kind == "prediction"
         input_columns = tuple(signal.source_column for signal in spec.signals)
         assets = ()
-        if prediction:
+        common = prediction and len(spec.signals) > 1
+        lookups = {}
+        if common:
+            input_columns = ()
+            prediction_target = f"{dataset.data_id}_predictions"
+            root = layout.target_root(prediction_target, Path("__missing_prediction__"))
+            for signal in spec.signals:
+                output_id = signal.signal_id + "_prediction"
+                _manifest, lookup = operation.enter_context(
+                    read_prediction_bundle(
+                        root / "outputs" / output_id,
+                        expected_output_id=output_id,
+                        expected_run_id=f"run_{output_id}",
+                        time_window=time_window,
+                    )
+                )
+                lookups[signal.source_column] = lookup
+        elif prediction:
             model_id = spec.signals[0].signal_id
             prediction_target = f"{dataset.data_id}_predictions"
             root = layout.target_root(prediction_target, Path("__missing_prediction__"))
@@ -120,7 +138,9 @@ def build_crypto_evaluation_result(
                             yield chunk
 
         chunks = source()
-        if prediction:
+        if common:
+            chunks = _iter_common_prediction_chunks(chunks, prediction_lookups=lookups)
+        elif prediction:
             chunks = _iter_prediction_joined_chunks(
                 chunks,
                 prediction_lookup=lookup,
@@ -173,7 +193,9 @@ def build_crypto_evaluation_result(
             source_columns_by_kind={
                 "factor": tuple(dataset.factor_columns),
                 "feature": tuple(dataset.feature_columns),
-                "prediction": ("prediction_score",) if prediction else (),
+                "prediction": tuple(signal.source_column for signal in spec.signals)
+                if prediction
+                else (),
             },
             resource_policy=policy,
         )

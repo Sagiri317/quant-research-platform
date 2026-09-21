@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from contextlib import ExitStack
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
@@ -114,3 +115,28 @@ def _iter_prediction_joined_chunks(
         raise ValueError("missing_required_prediction_keys")
     if unexpected:
         raise ValueError("misaligned_persisted_prediction_keys")
+
+
+def _iter_common_prediction_chunks(chunks, *, prediction_lookups):
+    """Select exact-key finite intersections without altering persisted outputs."""
+    with closing_iterator(iter(chunks)) as source:
+        for chunk in source:
+            policy = current_runtime_resource_policy()
+            with ExitStack() as state:
+                if policy is not None:
+                    state.enter_context(
+                        policy.lease(
+                            "research.prediction.common_sample",
+                            3 * pandas_frame_payload_bytes(chunk)
+                            + len(chunk) * (16 * len(prediction_lookups) + 32),
+                        )
+                    )
+                common = np.ones(len(chunk), dtype=bool)
+                output = chunk.copy()
+                for column, lookup in prediction_lookups.items():
+                    values, found = state.enter_context(
+                        lookup.values_for_frame(chunk, mark_matched=False)
+                    )
+                    common &= np.asarray(found, dtype=bool) & np.isfinite(values)
+                    output[column] = values
+                yield output.loc[common]

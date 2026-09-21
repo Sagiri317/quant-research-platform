@@ -18,6 +18,42 @@ class ModelCatalog(ImmutableCatalog[ModelSpec]):
             seen.add(spec.model_id)
         super().__init__(sorted(values, key=lambda spec: spec.model_id))
 
+    @classmethod
+    def from_configuration(cls, items) -> ModelCatalog:
+        if type(items) is not list:
+            raise ValueError("research_model_selection_invalid")
+        models = []
+        for item in items:
+            if type(item) is not dict:
+                raise ValueError("research_model_configuration_invalid")
+            fields = {
+                key: value
+                for key, value in item.items()
+                if key
+                not in {
+                    "parameter_candidates",
+                    "training_asset_ids",
+                    "evaluation_asset_ids",
+                }
+            }
+            for key in ("input_factor_columns", "input_feature_columns"):
+                if type(fields.get(key)) is not list:
+                    raise ValueError("research_model_input_selection_invalid")
+                fields[key] = tuple(fields[key])
+            try:
+                models.append(ModelSpec(**fields))
+            except TypeError:
+                raise ValueError("research_model_configuration_invalid") from None
+            if "parameter_candidates" in item and (
+                type(item["parameter_candidates"]) is not list
+                or not item["parameter_candidates"]
+                or any(
+                    type(value) is not dict for value in item["parameter_candidates"]
+                )
+            ):
+                raise ValueError("research_parameter_candidates_invalid")
+        return cls(models)
+
     def get(self, model_id: str) -> ModelSpec:
         try:
             return next(spec for spec in self._items if spec.model_id == model_id)

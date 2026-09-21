@@ -18,10 +18,10 @@ from quant_research_platform.research.models.supervised import (
     preflight_model_specs,
 )
 from quant_research_platform.research.predictions.outputs import prediction_callable
-from quant_research_platform.research.protocols.a_share import model_specs
 from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
+from tests.helpers.research_configuration import configured_models
 from tests.research.prediction_output_helpers import (
     write_prediction_output_and_read,
 )
@@ -96,7 +96,7 @@ def test_a_share_prediction_requires_persisted_quarter_lineage() -> None:
 
 
 def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> None:
-    specs = model_specs("pv_all")
+    specs = configured_models("pv_all")
     dates = pd.date_range("2020-01-01", periods=12, freq="D")
     frame = pd.DataFrame(
         {

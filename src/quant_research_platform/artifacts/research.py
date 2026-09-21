@@ -11,6 +11,8 @@ from html import escape
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
+import pandas as pd
+
 from quant_research_platform.artifacts.evidence import (
     read_json_evidence,
     write_json_evidence,
@@ -39,9 +41,13 @@ from quant_research_platform.contracts.targets import (
     TargetStatus,
     research_run_record_from_payload,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.reports import a_share, crypto_hft, diagnostic_status
 from quant_research_platform.reports.a_share import build_a_share_report
 from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
+from quant_research_platform.storage.datasets.reading import (
+    iter_declared_parquet_member_batches,
+)
 from quant_research_platform.storage.datasets.schema import (
     COMMON_MANIFEST_METADATA_KEY,
 )
@@ -117,6 +123,66 @@ def read_research_run_record(
         return record
 
 
+def _report_rows(frame, report_lease):
+    reserve_report_frames(report_lease, (frame,))
+    return [
+        {
+            key: value.isoformat() if isinstance(value, pd.Timestamp) else value
+            for key, value in row.items()
+            if not pd.isna(value)
+        }
+        for row in frame.to_dict("records")
+    ]
+
+
+def read_evaluation_report_evidence(
+    root,
+    *,
+    evaluation_id,
+    instance_identity,
+    report_lease,
+):
+    """Read validated aggregate evaluation evidence for both market reports."""
+    tables = {}
+
+    def observe(_manifest, members):
+        for path, identity in members:
+            if path.name not in {"ic_summary.parquet", "group_spread_summary.parquet"}:
+                continue
+            rows = []
+            with closing_iterator(
+                iter_declared_parquet_member_batches(
+                    path,
+                    expected_identity=identity,
+                    target_chunk_bytes=256 * 1024,
+                )
+            ) as chunks:
+                for frame in chunks:
+                    rows.extend(_report_rows(frame, report_lease))
+            tables[path.stem] = rows
+
+    manifest, _members = validate_output_bundle(
+        root / "outputs" / evaluation_id,
+        expected_output_id=evaluation_id,
+        expected_run_id=f"run_{evaluation_id}",
+        observer=observe,
+    )
+    undefined = not any(tables.values()) or any(
+        value
+        for rows in tables.values()
+        for row in rows
+        for key, value in row.items()
+        if key.endswith("_reason")
+    )
+    return {
+        "evaluation_id": evaluation_id,
+        "identity": instance_identity,
+        "status": "UNDEFINED" if undefined else "DEFINED",
+        "tables": tables,
+        "metadata": manifest["metadata"],
+    }
+
+
 def load_a_share_run_evidence(
     *,
     layout: StorageLayout,
@@ -150,11 +216,16 @@ def load_a_share_run_evidence(
         return result
 
     scenario = record.scenario_id
+    configuration = record.payload()["protocol"]["research_configuration"]
+    full_research = configuration["stage"] == "research"
     for target_id in (
         scenario,
         f"{scenario}_evaluation",
-        f"{scenario}_model_selection_refit",
-        f"{scenario}_persisted_predictions",
+        *(
+            (f"{scenario}_model_selection_refit", f"{scenario}_persisted_predictions")
+            if full_research
+            else ()
+        ),
     ):
         load(target_id)
 
@@ -224,13 +295,15 @@ def load_a_share_run_evidence(
         "targets": pit_targets,
     }
     evaluation_ref = loaded.get(f"{scenario}_evaluation")
+    factor_evaluation = _unavailable(issues, f"{scenario}_evaluation")
     if evaluation_ref is not None:
-        output, _members = validate_output_bundle(
-            _instance_root(layout, evaluation_ref)
-            / "outputs"
-            / evaluation_ref.target_id
+        factor_evaluation = read_evaluation_report_evidence(
+            _instance_root(layout, evaluation_ref),
+            evaluation_id=evaluation_ref.target_id,
+            instance_identity=evaluation_ref.instance_identity,
+            report_lease=report_lease,
         )
-        coverage["evaluation"] = output["metadata"]["evaluation_diagnostics"]
+        coverage["evaluation"] = factor_evaluation["metadata"]["evaluation_diagnostics"]
     for target in record.target_results:
         if target.producer_kind is not ProducerKind.MODEL:
             continue
@@ -255,10 +328,14 @@ def load_a_share_run_evidence(
             )
 
     statistics_target = f"{scenario}_statistics"
-    statistics_ref = load(statistics_target)
+    statistics_ref = load(statistics_target) if full_research else None
     statistics: dict[str, object]
     if statistics_ref is None:
-        statistics = _unavailable(issues, statistics_target)
+        statistics = (
+            _unavailable(issues, statistics_target)
+            if full_research
+            else {"status": "UNDEFINED", "reason": "not_requested"}
+        )
     else:
         try:
             artifact = read_statistics_artifact(
@@ -336,9 +413,15 @@ def load_a_share_run_evidence(
         raise ValueError("research_run_protocol_portfolios_invalid")
     portfolios: list[dict[str, object]] = []
     portfolio_target = f"{scenario}_portfolio_statistics"
-    portfolio_ref = load(portfolio_target)
+    portfolio_ref = load(portfolio_target) if candidates else None
     portfolio_statistics = (
-        _unavailable(issues, portfolio_target) if portfolio_ref is None else None
+        (
+            _unavailable(issues, portfolio_target)
+            if candidates
+            else {"status": "UNDEFINED", "reason": "not_requested"}
+        )
+        if portfolio_ref is None
+        else None
     )
     if portfolio_ref is not None:
         try:
@@ -484,6 +567,7 @@ def load_a_share_run_evidence(
             target_id: result.instance_identity for target_id, result in loaded.items()
         },
         "coverage": coverage,
+        "factor_evaluation": factor_evaluation,
         "quarterly_selections": quarterly_selections,
         "statistics": statistics,
         "portfolio_statistics": portfolio_statistics,

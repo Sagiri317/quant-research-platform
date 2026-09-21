@@ -1,4 +1,4 @@
-"""Project native vendor forecasts and official settlements into one funding owner."""
+"""Project native forecasts and sourced settlements through one funding owner."""
 
 import hashlib
 from pathlib import Path
@@ -20,6 +20,7 @@ from quant_research_platform.sources.binance.funding import (
     FUNDING_SCHEMA_ID,
     _manifest,
     _records,
+    settlement_endpoint,
 )
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
@@ -40,10 +41,22 @@ from quant_research_platform.storage.raw_snapshots import write_csv_snapshot
 
 
 def import_funding_history(
-    archive, *, symbol, response_path, http_status, start_ms, end_ms, byte_budget
+    archive,
+    *,
+    symbol,
+    source_id,
+    response_path,
+    http_status,
+    start_ms,
+    end_ms,
+    byte_budget,
 ):
-    """Preserve the official bytes and publish forecasts with vendor availability."""
-    if symbol not in RESEARCH_SYMBOLS:
+    """Preserve source bytes and publish forecasts with vendor availability."""
+    endpoint = settlement_endpoint(source_id, symbol)
+    if (
+        symbol not in RESEARCH_SYMBOLS
+        or archive.manifest["exchange"] != "binance-futures"
+    ):
         raise ValueError("binance_funding_symbol_invalid")
     midnight = strict_iso_timestamp(
         archive.manifest["date"] + "T00:00:00Z", error="tardis_funding_date_invalid"
@@ -80,18 +93,51 @@ def import_funding_history(
                 raise ValueError("tardis_funding_source_changed")
             if byte_budget <= len(raw):
                 raise ValueError("tardis_funding_budget_exceeded")
-            payload = parse_qrp_json_object(b'{"records":' + raw + b"}")["records"]
+            if source_id == "binance":
+                payload = parse_qrp_json_object(b'{"records":' + raw + b"}")["records"]
+            else:
+                payload = parse_qrp_json_object(raw)
+                if (
+                    set(payload) != {"schema_id", "upstream_response_sha256", "records"}
+                    or payload["schema_id"] != "qrp-xoomar-settlement-extract"
+                    or type(payload["upstream_response_sha256"]) is not str
+                    or len(payload["upstream_response_sha256"]) != 64
+                    or any(
+                        c not in "0123456789abcdef"
+                        for c in payload["upstream_response_sha256"]
+                    )
+                ):
+                    raise ValueError("tardis_funding_extract_invalid")
+                payload = payload["records"]
             if type(payload) is not list or len(payload) >= 1000:
                 raise ValueError("tardis_funding_response_incomplete")
             events = []
             previous = -1
             for row in payload:
-                if type(row) is not dict or row.get("symbol") != symbol:
+                if type(row) is not dict:
                     raise ValueError("tardis_funding_settlement_identity_invalid")
-                timestamp = strict_non_negative_integer(
-                    row.get("fundingTime"),
-                    error="tardis_funding_settlement_time_invalid",
-                )
+                if source_id == "binance":
+                    if row.get("symbol") != symbol:
+                        raise ValueError("tardis_funding_settlement_identity_invalid")
+                    timestamp = strict_non_negative_integer(
+                        row.get("fundingTime"),
+                        error="tardis_funding_settlement_time_invalid",
+                    )
+                else:
+                    asset = symbol.removesuffix("USDT")
+                    if (
+                        row.get("exchange") != "binance"
+                        or row.get("baseAsset") != asset
+                        or row.get("slug") != asset.lower()
+                    ):
+                        raise ValueError("tardis_funding_settlement_identity_invalid")
+                    observed = strict_iso_timestamp(
+                        row.get("fundingTime"),
+                        error="tardis_funding_settlement_time_invalid",
+                    ).value
+                    if observed % 1_000_000:
+                        raise ValueError("tardis_funding_settlement_time_invalid")
+                    timestamp = observed // 1_000_000
                 if not start_ms <= timestamp <= end_ms or timestamp <= previous:
                     raise ValueError("tardis_funding_settlement_order_invalid")
                 previous = timestamp
@@ -108,8 +154,8 @@ def import_funding_history(
                 events.append(event)
             payload = row = event = None
             native = {
-                "source_id": "binance",
-                "endpoint": "https://fapi.binance.com/fapi/v1/fundingRate",
+                "source_id": source_id,
+                "endpoint": endpoint,
                 "symbol": symbol,
                 "start_ms": start_ms,
                 "end_ms": end_ms,
@@ -150,6 +196,9 @@ def import_funding_history(
                         offset_minutes=member["offset_minutes"],
                         expected_sha256=member["sha256"],
                         resource_policy=policy,
+                        exchange=archive.manifest["exchange"],
+                        symbols=tuple(archive.manifest["symbols"]),
+                        channels=tuple(archive.manifest["requested_channels"]),
                     )
                     with closing_iterator(records):
                         value = mark = forecast = None

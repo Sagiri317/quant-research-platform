@@ -12,7 +12,14 @@ from quant_research_platform.contracts.business_manifest import (
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.semantic_artifacts import write_semantic_artifact
+from tests.helpers.research_configuration import research_configuration
 from tests.helpers.runtime_resources import capture_test_policy
+
+MAKER_MODEL_IDS = next(
+    (item["price_model_id"], item["proxy_model_id"])
+    for item in research_configuration("crypto", "baseline")["portfolios"]
+    if item.get("price_model_id") is not None
+)
 
 
 @pytest.fixture
@@ -60,6 +67,7 @@ def tables():
         white_defined_period_count=32,
         white_undefined_period_count=0,
         common_date=1,
+        common_observation_count=32,
         block_size=20,
         repetitions=10000,
         alpha=0.05,
@@ -778,9 +786,6 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
 
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.crypto import portfolio
-    from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_MAKER_CALIBRATION_MODEL_IDS,
-    )
     from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
@@ -818,9 +823,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                 "book_segment_id": ["s1"] * 2,
                 "trade_observation_id": ["trade-connection-1"] * 2,
                 "segment_id": ["segment"] * 2,
-                "prediction_score": [
-                    0.0 if model_id == HFT_MAKER_CALIBRATION_MODEL_IDS[0] else 1.0
-                ]
+                "prediction_score": [0.0 if model_id == MAKER_MODEL_IDS[0] else 1.0]
                 * 2,
                 "label": [0.0] * 2,
             }
@@ -834,6 +837,8 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
 
             def produce(on_table):
                 portfolio.produce_maker_calibration(
+                    asset_id="btc_usdt",
+                    model_ids=MAKER_MODEL_IDS,
                     on_table=on_table,
                     layout=StorageLayout(tmp_path),
                     protocol_manifest=manifest,
@@ -951,7 +956,6 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.crypto import portfolio
     from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_MAKER_CALIBRATION_MODEL_IDS,
         HFT_RESEARCH_DATASET_ID,
         protocol,
     )
@@ -1018,9 +1022,7 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
                     "book_segment_id": ["s1"] * len(stamps),
                     "trade_observation_id": ["trade-connection-1"] * len(stamps),
                     "segment_id": ["segment"] * len(stamps),
-                    "prediction_score": [
-                        0.0 if model_id == HFT_MAKER_CALIBRATION_MODEL_IDS[0] else 1.0
-                    ]
+                    "prediction_score": [0.0 if model_id == MAKER_MODEL_IDS[0] else 1.0]
                     * len(stamps),
                     "label": [0.0] * len(stamps),
                 }
@@ -1053,6 +1055,8 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
                 on_table(name, frame)
 
             portfolio.produce_maker_calibration(
+                asset_id="btc_usdt",
+                model_ids=MAKER_MODEL_IDS,
                 on_table=append,
                 layout=StorageLayout(tmp_path),
                 protocol_manifest=manifest,

@@ -101,7 +101,9 @@ def build_a_share_statistics_tables(
         _fdr_method(statistics.get("fdr_primary"), expected="BH"),
         _fdr_method(statistics.get("fdr_robustness"), expected="BY"),
     )
-    factors = tuple(dataset_spec.factor_columns)
+    factors = tuple(
+        protocol_manifest["research_configuration"]["evaluation"]["factors"]
+    )
     families = _factor_families(family_specs, factors)
     core = tuple(core_factors)
     if any(factor not in factors for factor in core):
@@ -118,7 +120,7 @@ def build_a_share_statistics_tables(
             next(iter(persisted_model.quarterly_selections))
         ]["tie_break_order"]
     )
-    benchmark_id = f"{dataset_id}_equal_weight_rank_ensemble"
+    benchmark_id = protocol_manifest["research_configuration"]["comparison_model_id"]
     if benchmark_id not in family_ids:
         raise ValueError("statistics_model_benchmark_missing")
     read_columns = tuple(
@@ -147,6 +149,7 @@ def build_a_share_statistics_tables(
         * 1024,
     )
     rank_records: list[dict[str, object]] = []
+    comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
     fmb_period_records: list[dict[str, object]] = []
     with ExitStack() as ownership:
@@ -245,9 +248,15 @@ def build_a_share_statistics_tables(
                             )
                             rank_records.extend(rank.to_dict("records"))
                             daily = rank.iloc[0]
+                            paired_rank, paired_count = _common_model_rank_ic(
+                                mature,
+                                family_ids=family_ids,
+                                label_column=primary_label,
+                            )
+                            comparison_records.extend(paired_rank.to_dict("records"))
                             common = bool(
                                 np.isfinite(
-                                    daily.loc[list(family_ids)].to_numpy(
+                                    paired_rank.loc[:, list(family_ids)].to_numpy(
                                         dtype="float64"
                                     )
                                 ).all()
@@ -277,6 +286,7 @@ def build_a_share_statistics_tables(
                                         if defined
                                         else "cross_sectional_rankic_undefined",
                                         "common_date": int(common),
+                                        "common_observation_count": paired_count,
                                     }
                                 )
                         else:
@@ -342,10 +352,14 @@ def build_a_share_statistics_tables(
                 "status",
                 "reason",
                 "common_date",
+                "common_observation_count",
             ),
         )
+        comparison_by_date = pd.DataFrame.from_records(
+            comparison_records, columns=["timestamp", *family_ids]
+        )
         common_count = int(
-            rank_by_date.loc[:, list(family_ids)].notna().all(axis=1).sum()
+            comparison_by_date.loc[:, list(family_ids)].notna().all(axis=1).sum()
         )
         bootstrap_workspace = (
             64 * repetitions * len(family_ids) ** 2
@@ -357,7 +371,7 @@ def build_a_share_statistics_tables(
             "research.statistics.bootstrap_workspace", bootstrap_workspace
         ):
             comparison, tests, robustness = _model_comparison(
-                rank_by_date,
+                comparison_by_date,
                 family_ids=family_ids,
                 benchmark_id=benchmark_id,
                 access_window=protocol_manifest["access_window"],
@@ -370,7 +384,7 @@ def build_a_share_statistics_tables(
         fmb_periods = pd.DataFrame.from_records(
             fmb_period_records, columns=_FAMA_MACBETH_PERIOD_COLUMNS
         )
-        del rank_records, fmb_period_records, loss_records
+        del rank_records, comparison_records, fmb_period_records, loss_records
         fmb_summary = _fama_macbeth_summary(
             fmb_periods,
             factors=factors,
@@ -591,6 +605,25 @@ def _model_trials(persisted_model: object, layout: StorageLayout) -> pd.DataFram
     return pd.DataFrame(rows)
 
 
+def _common_model_rank_ic(frame, *, family_ids, label_column):
+    """Compare predictions only on the exact intersection of valid OOS rows."""
+    columns = [*family_ids, label_column]
+    valid = np.isfinite(frame.loc[:, columns].to_numpy(dtype="float64")).all(axis=1)
+    shared = frame.loc[valid]
+    if shared.empty:
+        return pd.DataFrame(
+            [
+                {
+                    "timestamp": frame["timestamp"].iloc[0],
+                    **dict.fromkeys(family_ids, np.nan),
+                }
+            ]
+        ), 0
+    return cross_sectional_rank_ic(
+        shared, value_columns=family_ids, label_column=label_column
+    ), len(shared)
+
+
 def _model_comparison(
     rank_by_date,
     *,
@@ -633,7 +666,7 @@ def _model_comparison(
             root_seed, "a_share_model_reality_check", dataset_id, access_window, test_id
         )
         result = None
-        if len(common) > block_size:
+        if challengers and len(common) > block_size:
             options = dict(block_size=block_size, repetitions=repetitions, seed=seed)
             if test_id == "spa_reality_check":
                 result = spa_reality_check(
@@ -652,6 +685,8 @@ def _model_comparison(
         reason = (
             result.reason
             if result is not None
+            else "no_comparison_models"
+            if not challengers
             else "bootstrap_block_exceeds_common_observations"
         )
         robustness_rows.append(
@@ -715,8 +750,21 @@ def _model_comparison(
             )
             for family, name, value in values
         )
+    if comparisons:
+        comparison_table = pd.concat(comparisons, ignore_index=True)
+    else:
+        comparison_table = _prediction_summary(
+            pd.DataFrame(),
+            prediction_id=benchmark_id,
+            max_lags=max_lags,
+            block_size=block_size,
+            repetitions=repetitions,
+            seed=root_seed,
+        ).iloc[:0]
+        comparison_table.insert(0, "access_window", pd.Series(dtype="str"))
+        comparison_table.insert(1, "benchmark_id", pd.Series(dtype="str"))
     return (
-        pd.concat(comparisons, ignore_index=True),
+        comparison_table,
         pd.DataFrame(test_rows),
         pd.DataFrame(robustness_rows),
     )

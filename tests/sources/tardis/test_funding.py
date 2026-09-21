@@ -15,9 +15,10 @@ from tests.sources.tardis.test_raw import _slices
 from tests.sources.tardis.test_replay import _line
 
 
+@pytest.mark.parametrize("source_id", ["binance", "xoomar"])
 @pytest.mark.parametrize("slice_count", [1, 144, 289])
 def test_forecast_does_not_use_future_settlement_and_original_is_verified(
-    tmp_path, slice_count
+    tmp_path, slice_count, source_id
 ):
     start_ms = pd.Timestamp("2026-09-01T00:00:00Z").value // 1_000_000
     native = _line(
@@ -44,6 +45,23 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
             }
         ]
     ).encode()
+    if source_id == "xoomar":
+        original = json.dumps(
+            {
+                "schema_id": "qrp-xoomar-settlement-extract",
+                "upstream_response_sha256": "a" * 64,
+                "records": [
+                    {
+                        "exchange": "binance",
+                        "baseAsset": "BTC",
+                        "slug": "btc",
+                        "fundingTime": "2026-09-01T00:00:10.000Z",
+                        "fundingRate": "0.1",
+                        "markPrice": "200",
+                    }
+                ],
+            }
+        ).encode()
     response.write_bytes(original)
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
@@ -59,6 +77,7 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
             import_funding_history(
                 day,
                 symbol="BTCUSDT",
+                source_id=source_id,
                 response_path=response,
                 http_status=200,
                 start_ms=start_ms,
@@ -76,6 +95,11 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
                 assert forecasts[0].cashflows == (
                     ((start_ms + 10000) * 1_000_000, -5.0),
                 )
+            metadata = json.loads(
+                (day.funding_root("BTCUSDT") / "response.metadata.json").read_text()
+            )["metadata"]["settlement_source"]
+            assert metadata["source_id"] == source_id
+            assert ("xoomar.com" in metadata["endpoint"]) == (source_id == "xoomar")
             preserved = day.funding_root("BTCUSDT").parent / "settlements.json"
             assert preserved.read_bytes() == original == response.read_bytes()
             preserved.write_bytes(original.replace(b"200", b"201"))

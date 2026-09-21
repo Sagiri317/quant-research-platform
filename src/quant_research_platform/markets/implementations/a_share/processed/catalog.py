@@ -29,13 +29,16 @@ from quant_research_platform.research.factors.fundamental.definitions import (
     FUNDAMENTAL_FACTORS,
 )
 from quant_research_platform.research.factors.price_volume.definitions import (
-    FORMAL_PRICE_VOLUME_FACTORS,
+    PRICE_VOLUME_LIBRARY,
 )
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_available_at_column,
     forward_return_label_column,
 )
-from quant_research_platform.research.protocols.a_share import LABEL_HORIZONS
+from quant_research_platform.research.protocols.a_share import (
+    LABEL_HORIZONS,
+    MARKET_MODEL_FACTORS,
+)
 
 PANEL_COLUMNS = (
     *PLATFORM_ENTITY_TIME_KEY,
@@ -117,7 +120,7 @@ LABEL_COLUMNS = tuple(
         forward_return_available_at_column(horizon),
     )
 )
-FACTOR_COLUMNS = tuple(FORMAL_PRICE_VOLUME_FACTORS)
+FACTOR_COLUMNS = tuple(PRICE_VOLUME_LIBRARY)
 BENCHMARK_WEIGHTS_ID = "benchmark_weights"
 BENCHMARK_WEIGHTS_COLUMNS = (
     "market_id",
@@ -172,6 +175,13 @@ def processed_catalog() -> ProcessedDataCatalog:
                 (*PLATFORM_ENTITY_TIME_KEY, *FACTOR_COLUMNS),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
                 factor_columns=FACTOR_COLUMNS,
+            ),
+            _spec(
+                "market_model_factors",
+                ProcessedDataKind.FACTOR,
+                (*PLATFORM_ENTITY_TIME_KEY, *MARKET_MODEL_FACTORS),
+                processed_input_data_ids=(MARKET_PANEL_ID,),
+                factor_columns=MARKET_MODEL_FACTORS,
             ),
             _spec(
                 FUNDAMENTAL_DATA_ID,

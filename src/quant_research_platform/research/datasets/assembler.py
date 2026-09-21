@@ -30,6 +30,11 @@ from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
     canonical_feature_pipeline,
 )
+from quant_research_platform.research.filtering import (
+    A_SHARE_ELIGIBILITY_FACTS,
+    a_share_eligibility,
+)
+from quant_research_platform.research.protocols.a_share import SCENARIO_IDS
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     OwnedValue,
@@ -54,26 +59,6 @@ from quant_research_platform.storage.datasets.writing import (
 )
 from quant_research_platform.storage.identity import require_artifact_root
 from quant_research_platform.storage.layout import StorageLayout
-
-_A_SHARE_SCENARIO_IDS = frozenset(
-    {"pv_all", "fusion_nf_core", "fusion_nf_expectations"}
-)
-_A_SHARE_ELIGIBILITY_FACTS = (
-    "is_a_share_scope",
-    "is_trading",
-    "is_st",
-    "is_pt",
-    "listing_age_trading_days",
-    "close",
-    "adj_close",
-    "volume",
-    "amount",
-    "turnover",
-)
-_A_SHARE_FUSION_ELIGIBILITY_FACTS = (
-    "is_nonfinancial_industry",
-    "has_legal_fundamental_pit",
-)
 
 
 def assemble_research_dataset(
@@ -802,7 +787,7 @@ def _generated_feature_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, 
 def _generated_semantic_columns(
     dataset_spec: ResearchDatasetSpec,
 ) -> tuple[str, ...]:
-    if dataset_spec.data_id not in _A_SHARE_SCENARIO_IDS:
+    if dataset_spec.data_id not in SCENARIO_IDS:
         return ()
     return tuple(
         column
@@ -815,76 +800,18 @@ def _add_a_share_semantic_columns(
     frame: pd.DataFrame,
     dataset_spec: ResearchDatasetSpec,
 ) -> pd.DataFrame:
-    if dataset_spec.data_id not in _A_SHARE_SCENARIO_IDS:
+    if dataset_spec.data_id not in SCENARIO_IDS:
         return frame
-    missing = sorted(set(_A_SHARE_ELIGIBILITY_FACTS).difference(frame.columns))
+    missing = sorted(set(A_SHARE_ELIGIBILITY_FACTS).difference(frame.columns))
     if missing:
         raise ValueError("a_share_eligibility_facts_missing: " + ", ".join(missing))
     result = frame.copy()
-    result["eligible"] = _a_share_eligibility(result, dataset_spec.data_id)
+    result["eligible"] = a_share_eligibility(result, dataset_spec.data_id)
     if "model_target" in dataset_spec.label_columns:
         if "forward_return_20d" not in result.columns:
             raise ValueError("a_share_model_target_label_missing")
         result["model_target"] = _a_share_model_target(result)
     return result
-
-
-def _a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
-    bool_facts = {
-        column: strict_bool_series(
-            frame[column],
-            error=f"invalid_a_share_eligibility_fact: {column}",
-            allow_null=True,
-        )
-        for column in ("is_a_share_scope", "is_trading", "is_st", "is_pt")
-    }
-    numeric_facts = {
-        column: strict_finite_numeric_series(
-            frame[column],
-            error=f"invalid_a_share_eligibility_fact: {column}",
-            allow_null=True,
-        )
-        for column in (
-            "listing_age_trading_days",
-            "close",
-            "adj_close",
-            "volume",
-            "amount",
-            "turnover",
-        )
-    }
-    eligible = (
-        bool_facts["is_a_share_scope"]
-        & bool_facts["is_trading"]
-        & ~bool_facts["is_st"]
-        & ~bool_facts["is_pt"]
-        & numeric_facts["listing_age_trading_days"].ge(252)
-        & numeric_facts["close"].gt(0.0)
-        & numeric_facts["adj_close"].gt(0.0)
-        & numeric_facts["volume"].gt(0.0)
-        & numeric_facts["amount"].gt(0.0)
-        & numeric_facts["turnover"].gt(0.0)
-    ).fillna(False)
-    if dataset_id in {"fusion_nf_core", "fusion_nf_expectations"}:
-        for column in _A_SHARE_FUSION_ELIGIBILITY_FACTS:
-            if column not in frame:
-                raise ValueError(f"a_share_eligibility_facts_missing: {column}")
-            bool_facts[column] = strict_bool_series(
-                frame[column],
-                error=f"invalid_a_share_eligibility_fact: {column}",
-                allow_null=True,
-            ).fillna(False)
-            eligible &= bool_facts[column]
-        for column in (
-            "industry_standard_id",
-            "industry_level1_code",
-            "industry_level1_name",
-        ):
-            if column not in frame:
-                raise ValueError(f"a_share_eligibility_facts_missing: {column}")
-            values = frame[column].astype("string").str.strip()
-            eligible &= values.notna() & values.ne("")
-    return eligible.astype(bool)
 
 
 def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
@@ -917,7 +844,7 @@ def _apply_feature_transforms(
 ) -> pd.DataFrame:
     if not dataset_spec.feature_transforms:
         return frame
-    if dataset_spec.data_id in _A_SHARE_SCENARIO_IDS:
+    if dataset_spec.data_id in SCENARIO_IDS:
         return canonical_feature_pipeline(
             frame,
             factor_columns=dataset_spec.factor_columns,

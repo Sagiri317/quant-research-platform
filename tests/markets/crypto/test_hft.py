@@ -786,3 +786,77 @@ def test_panel_and_execution_midpoint_round_only_final_exact_price(
     )
     write_dataset(root, panel, spec=spec)
     assert read_dataset(root).mid.tolist() == [expected]
+
+
+def test_l0_full_windows_chunk_segments_assets_causality_and_persistence(tmp_path):
+    import numpy as np
+
+    size = 110
+    panel = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp_ms": np.arange(size) * 100,
+            "segment_id": ["a"] * 55 + ["b"] * 55,
+            "mid": 100.0,
+            "book_spread": 2.0,
+            "bid_depth_1": 3.0,
+            "ask_depth_1": 1.0,
+            "bid_depth_5": 8.0,
+            "ask_depth_5": 2.0,
+            "bid_depth_10": 12.0,
+            "ask_depth_10": 8.0,
+            "book_ofi_100ms": 2.0,
+            "observed_signed_trade_volume_100ms": 2.0,
+            "observed_taker_buy_volume_100ms": 3.0,
+            "observed_taker_sell_volume_100ms": 1.0,
+        }
+    )
+    full = pd.concat(iter_factor_frames([panel]), ignore_index=True)
+    chunked = pd.concat(
+        iter_factor_frames([panel.iloc[i : i + 7] for i in range(0, size, 7)]),
+        ignore_index=True,
+    )
+    pd.testing.assert_frame_equal(full, chunked, check_exact=True)
+    oracle = {
+        "trade_flow_imbalance_100ms": 0.5,
+        "trade_flow_imbalance_500ms": 0.5,
+        "trade_flow_imbalance_1s": 0.5,
+        "trade_flow_imbalance_5s": 0.5,
+        "ofi_500ms": 10.0,
+        "ofi_1s": 20.0,
+        "ofi_5s": 100.0,
+        "depth_normalized_ofi_500ms": 2.5,
+        "depth_normalized_ofi_1s": 5.0,
+        "depth_normalized_ofi_5s": 25.0,
+        "imbalance_1_minus_10": 0.3,
+        "imbalance_5_minus_10": 0.4,
+        "near_depth_share_1_10": 0.2,
+        "taker_sell_pressure_500ms": 5 / 3,
+        "taker_buy_pressure_500ms": 15.0,
+    }
+    assert len(oracle) == 15
+    assert set(oracle) <= set(full.columns)
+    for name, value in oracle.items():
+        assert full.loc[54, name] == pytest.approx(value), name
+        assert full.loc[109, name] == pytest.approx(value), name
+    assert full.ofi_5s.iloc[:49].isna().all()
+    assert full.ofi_5s.iloc[55:104].isna().all()
+    changed = panel.copy()
+    changed.loc[54:, "observed_signed_trade_volume_100ms"] = 0
+    future = pd.concat(iter_factor_frames([changed]), ignore_index=True)
+    pd.testing.assert_frame_equal(future.iloc[:54], full.iloc[:54], check_exact=True)
+    zero = panel.assign(
+        observed_taker_buy_volume_100ms=0.0,
+        observed_taker_sell_volume_100ms=0.0,
+        observed_signed_trade_volume_100ms=0.0,
+    )
+    zeros = pd.concat(iter_factor_frames([zero]), ignore_index=True)
+    assert zeros.trade_flow_imbalance_5s.isna().all()
+    assert zeros.taker_sell_pressure_500ms.iloc[54] == 0
+    other = panel.iloc[:10].assign(asset_id="eth_usdt")
+    separate = list(iter_factor_frames([panel.iloc[:55], other]))[-1]
+    assert separate.ofi_1s.iloc[:9].isna().all()
+    path = tmp_path / "l0.parquet"
+    full.to_parquet(path, index=False)
+    pd.testing.assert_frame_equal(pd.read_parquet(path), full, check_exact=True)

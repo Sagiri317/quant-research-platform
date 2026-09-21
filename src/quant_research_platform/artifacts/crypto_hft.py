@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pandas as pd
-
 from quant_research_platform.artifacts.outputs import validate_output_bundle
 from quant_research_platform.artifacts.portfolio_ledger import (
     PortfolioLedgerArtifact,
@@ -13,10 +11,11 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 from quant_research_platform.artifacts.research import (
     _instance_root,
     _issue,
+    _report_rows,
     _unavailable,
     _validate_reference,
+    read_evaluation_report_evidence,
     report_payload_working_set,
-    reserve_report_frames,
 )
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.contracts.json_codec import (
@@ -29,24 +28,9 @@ from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.reports import diagnostic_status
 from quant_research_platform.reports.crypto_hft import build_crypto_research_report
-from quant_research_platform.storage.datasets.reading import (
-    iter_declared_parquet_member_batches,
-)
 from quant_research_platform.storage.manifests import (
     read_dataset_manifest_evidence,
 )
-
-
-def _report_rows(frame, report_lease):
-    reserve_report_frames(report_lease, (frame,))
-    return [
-        {
-            key: value.isoformat() if isinstance(value, pd.Timestamp) else value
-            for key, value in row.items()
-            if not pd.isna(value)
-        }
-        for row in frame.to_dict("records")
-    ]
 
 
 def produce_crypto_report(
@@ -59,6 +43,8 @@ def produce_crypto_report(
     expected_symbols,
     read_reconstruction,
     validate_maker_calibration,
+    calibration_candidates,
+    comparison_ids,
 ):
     protocol = record.payload()["protocol"]
     issues, references = [], {}
@@ -245,48 +231,13 @@ def produce_crypto_report(
             )
             continue
         try:
-            tables = {}
-
-            def observe(_manifest, members, tables=tables):
-                for path, identity in members:
-                    if path.name not in {
-                        "ic_summary.parquet",
-                        "group_spread_summary.parquet",
-                    }:
-                        continue
-                    rows = []
-                    with closing_iterator(
-                        iter_declared_parquet_member_batches(
-                            path,
-                            expected_identity=identity,
-                            target_chunk_bytes=256 * 1024,
-                        )
-                    ) as chunks:
-                        for frame in chunks:
-                            rows.extend(_report_rows(frame, report_lease))
-                    tables[path.stem] = rows
-
-            manifest, _members = validate_output_bundle(
-                _instance_root(layout, result) / "outputs" / result.target_id,
-                expected_output_id=result.target_id,
-                expected_run_id=f"run_{result.target_id}",
-                observer=observe,
-            )
-            undefined = any(
-                value
-                for rows in tables.values()
-                for row in rows
-                for key, value in row.items()
-                if key.endswith("_reason")
-            )
             evaluations.append(
-                {
-                    "evaluation_id": result.target_id,
-                    "identity": result.instance_identity,
-                    "status": "UNDEFINED" if undefined else "DEFINED",
-                    "tables": tables,
-                    "metadata": manifest["metadata"],
-                }
+                read_evaluation_report_evidence(
+                    _instance_root(layout, result),
+                    evaluation_id=result.target_id,
+                    instance_identity=result.instance_identity,
+                    report_lease=report_lease,
+                )
             )
         except (OSError, KeyError, TypeError, ValueError):
             issues.append(
@@ -299,40 +250,51 @@ def produce_crypto_report(
                 }
             )
 
-    calibration_target = f"{record.scenario_id}_maker_calibration"
-    calibration = _unavailable(issues, calibration_target)
-    if calibration_target in references:
-        reference = references[calibration_target]
-        try:
-            artifact = read_statistics_artifact(
-                _instance_root(layout, reference),
-                expected_identity=reference.instance_identity,
-                validate_tables=validate_maker_calibration,
-            )
-            with artifact.table("crypto_maker_calibration.parquet") as frame:
-                calibration = {
-                    "status": "DEFINED"
-                    if frame.status.eq("DEFINED").all()
-                    else "UNDEFINED",
-                    "identity": reference.instance_identity,
-                    "summary": _report_rows(frame, report_lease),
-                    "method": (
-                        "paired_validation_event_paths_and_forecast_error_by_side"
-                    ),
-                    "quote_order_type": "post_only_limit",
-                    "outcome_clock": "original_decision_plus_500ms",
-                    "sample_tables": [
-                        "crypto_maker_samples.parquet",
-                        "crypto_maker_events.parquet",
-                    ],
-                }
-        except (OSError, KeyError, TypeError, ValueError):
-            issues.append(
-                _issue(
-                    calibration_target, "FAILED", "maker_calibration_artifact_invalid"
+    calibrations = []
+    for item in calibration_candidates:
+        calibration_target = item.calibration_target_id
+        calibration = _unavailable(issues, calibration_target)
+        if calibration_target in references:
+            reference = references[calibration_target]
+            try:
+                artifact = read_statistics_artifact(
+                    _instance_root(layout, reference),
+                    expected_identity=reference.instance_identity,
+                    validate_tables=validate_maker_calibration,
                 )
-            )
-            calibration = _unavailable(issues, calibration_target)
+                with artifact.table("crypto_maker_calibration.parquet") as frame:
+                    calibration = {
+                        "status": "DEFINED"
+                        if frame.status.eq("DEFINED").all()
+                        else "UNDEFINED",
+                        "identity": reference.instance_identity,
+                        "summary": _report_rows(frame, report_lease),
+                        "method": (
+                            "paired_validation_event_paths_and_forecast_error_by_side"
+                        ),
+                        "quote_order_type": "post_only_limit",
+                        "outcome_clock": "original_decision_plus_500ms",
+                        "sample_tables": [
+                            "crypto_maker_samples.parquet",
+                            "crypto_maker_events.parquet",
+                        ],
+                    }
+            except (OSError, KeyError, TypeError, ValueError):
+                issues.append(
+                    _issue(
+                        calibration_target,
+                        "FAILED",
+                        "maker_calibration_artifact_invalid",
+                    )
+                )
+                calibration = _unavailable(issues, calibration_target)
+        calibrations.append(
+            {
+                "candidate_id": item.candidate_id,
+                "asset_id": item.asset_id,
+                **calibration,
+            }
+        )
 
     portfolios = []
     for candidate in protocol["portfolio_candidates"]:
@@ -411,8 +373,15 @@ def produce_crypto_report(
             "data": data,
             "models": models,
             "predictions": predictions,
-            "evaluations": evaluations,
-            "calibration": calibration,
+            "evaluations": [
+                item
+                for item in evaluations
+                if item["evaluation_id"] not in comparison_ids
+            ],
+            "model_comparisons": [
+                item for item in evaluations if item["evaluation_id"] in comparison_ids
+            ],
+            "calibrations": calibrations,
             "portfolios": portfolios,
             "statistics": statistics,
             "issues": issues,

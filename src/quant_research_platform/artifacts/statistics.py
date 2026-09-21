@@ -195,6 +195,7 @@ _TABLE_COLUMNS.update(
             "status",
             "reason",
             "common_date",
+            "common_observation_count",
         ),
         "model_comparison.parquet": (
             "access_window",
@@ -244,7 +245,11 @@ _STRING_COLUMNS.update(
 )
 _COUNT_COLUMNS.update(
     {
-        "model_losses.parquet": ("observation_count", "common_date"),
+        "model_losses.parquet": (
+            "observation_count",
+            "common_date",
+            "common_observation_count",
+        ),
         "model_comparison.parquet": _COUNT_COLUMNS["prediction_diagnostics.parquet"],
         "model_reality_checks.parquet": (
             "observation_count",
@@ -587,6 +592,7 @@ _TIMESTAMP_COLUMNS.update(
 _EMPTY_TABLE_MEMBERS = frozenset(
     {
         "model_losses.parquet",
+        "model_comparison.parquet",
         "fama_macbeth_periods.parquet",
         "portfolio_capacity.parquet",
         "portfolio_exposures.parquet",
@@ -1014,6 +1020,11 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         if (
             not result["loss"].dropna().between(-1, 1).all()
             or not result["common_date"].isin((0, 1)).all()
+            or (result["common_observation_count"] > result["observation_count"]).any()
+            or result.groupby("timestamp")["common_observation_count"]
+            .nunique()
+            .gt(1)
+            .any()
         ):
             raise ValueError("statistics_model_loss_invalid")
     if member in {

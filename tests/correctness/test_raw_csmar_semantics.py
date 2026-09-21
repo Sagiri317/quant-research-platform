@@ -1175,7 +1175,7 @@ def test_read_export_header_preserves_keyboard_interrupt_over_close_failure(
     primary = KeyboardInterrupt("header_interrupted")
     close_calls = 0
     path = tmp_path / "export.csv"
-    path.write_text('"quoted",header\n', encoding="utf-8")
+    path.write_text('"quoted\nvalue",header\n', encoding="utf-8")
     original_close = raw_schemas._BoundedCsvRecords.close
 
     def interrupted(_self):
@@ -1279,20 +1279,25 @@ def test_index_market_preserves_nullable_official_open_without_close_substitutio
     assert "open" in interim.INDEX_RETURN_INTERIM_COLUMNS
 
 
+@pytest.mark.parametrize("quoted", [False, True])
 @pytest.mark.parametrize("width", (32, 154, 160))
-def test_legal_provider_width_uses_bounded_unquoted_fast_path(
-    tmp_path, monkeypatch, width
+def test_legal_provider_width_uses_bounded_fast_path(
+    tmp_path, monkeypatch, width, quoted
 ):
     from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     path = tmp_path / "legal.csv"
     fields = [f"field_{position}" for position in range(width)]
-    path.write_text(
-        ",".join(fields) + "\n" + ",".join(["1"] * width) + "\n", encoding="utf-8"
-    )
+    if quoted:
+        fields[0] = '字段,"示例"'
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.writer(
+            handle, quoting=csv.QUOTE_ALL if quoted else csv.QUOTE_MINIMAL
+        )
+        writer.writerows((fields, ["1"] * width))
 
     def forbidden(_self):
-        raise AssertionError("legal_unquoted_row_entered_byte_parser")
+        raise AssertionError("legal_csv_row_entered_byte_parser")
 
     monkeypatch.setattr(raw_schemas._BoundedCsvRecords, "_parse_record", forbidden)
     with runtime_resource_policy_scope() as policy:
