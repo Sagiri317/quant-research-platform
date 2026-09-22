@@ -24,7 +24,7 @@ from quant_research_platform.contracts.predictions import (
     prediction_output_columns,
 )
 from quant_research_platform.contracts.time import (
-    is_intraday_time_value,
+    is_datetime_value,
     time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
@@ -235,7 +235,7 @@ class _PredictionBuildState:
         )
         current_end = time_value_isoformat(
             pd.Timestamp(timestamps.max()),
-            date_only=not is_intraday_time_value(spec.test_start),
+            date_only=not is_datetime_value(spec.test_start),
         )
         if self.effective_test_end is None or pd.Timestamp(current_end) > pd.Timestamp(
             self.effective_test_end

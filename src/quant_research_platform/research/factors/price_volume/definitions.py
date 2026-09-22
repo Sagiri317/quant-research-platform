@@ -93,7 +93,17 @@ def price_volume_factor_definitions(
             FactorDefinition(
                 factor_id=f"price_volume_{column}",
                 market_id=market_id,
-                factor_set=FactorSet.STANDARD,
+                factor_set=FactorSet.CORE
+                if column
+                in {
+                    "momentum_252_20",
+                    "reversal_5d",
+                    "volatility_20d",
+                    "amihud_20d",
+                    "turnover_20d",
+                    "log_float_market_cap",
+                }
+                else FactorSet.STANDARD,
                 input_columns=inputs,
                 base_input_columns=inputs,
                 derived_input_columns=(),

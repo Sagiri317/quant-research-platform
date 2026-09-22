@@ -1,5 +1,24 @@
 # Crypto 高频研究
 
+研究窗口以连续UTC timestamp定义；午夜不是episode或账本状态边界。book、features、labels、
+position、cash、NAV和funding跨午夜延续，仅真实gap、sequence或disconnect断状态。
+
+开发到留出复用共享frozen target/reference。development_run_id必须指向已完成且参数完全一致的
+development运行；冻结最后开发fold已存在的train+validation refit模型和maker calibration，
+不消费development_test重新拟合。final_holdout只构建新的prediction/evaluation/ledger/statistics/report，
+并保存holdout_evidence；禁止训练、选模型、调参或重新校准。
+
+Crypto label由统一LabelDefinition/LabelCatalog拥有，horizon单位为milliseconds，
+available_at、模型期限、评估binding与processed label合同由它派生。
+maker报价期限由CryptoMakerPlan拥有；它与模型预测期限和markout时钟不同。
+
+Crypto不使用A股横截面canonical transform；当前仅使用training-only ModelMatrixScaler。
+未来robust/log/winsor预处理仍属roadmap，必须train-fit并随model冻结后才可进入active protocol。
+
+固定收益/成本算法由实现和本合同定义：完整UTC日收益、365日年化、ddof=1、零收益cash基准、
+真实gap的独立经济贡献、固定实际turnover的附加费用敏感性，不作为并行active manifest旋钮。
+
+
 本文件定义 Binance BTC/ETH 主线的终局方向、当前能力、短期工作和研究合同。
 协议为 crypto_hft，profile 为 crypto_binance_hft，正式数据集为 binance_futures_hft_research_100ms。
 这是历史研究和执行近似，不是实盘交易、交易账户或投资建议。

@@ -86,7 +86,7 @@ def _metadata(
             "package": "internal",
             "version": "test",
         },
-        "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
+        "training_weighting": {"method": "equal_timestamp", "half_life": None},
         "scaler": None,
         "feature_importance": {column: 1.0 for column in columns},
         "fit_cutoff": "2018-12-31",

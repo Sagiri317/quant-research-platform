@@ -201,7 +201,7 @@ def test_native_consumed_digest_is_verified_on_every_exit(
 def test_archive_duration_and_source_identity_are_not_limited_to_one_day(
     tmp_path, count
 ):
-    from quant_research_platform.sources.binance.replay import open_market_source
+    from quant_research_platform.sources import open_market_source
 
     slices = _slices(tmp_path / "native", count=count)
     with runtime_resource_policy_scope() as policy:

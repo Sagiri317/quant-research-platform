@@ -24,13 +24,15 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.execution import (
     _record_execution_result,
 )
+from quant_research_platform.markets.implementations.crypto.ids import (
+    HFT_RESEARCH_DATASET_ID,
+)
 from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
     research_profile,
 )
 from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.research.protocols.crypto_hft import (
-    HFT_RESEARCH_DATASET_ID,
     protocol,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope

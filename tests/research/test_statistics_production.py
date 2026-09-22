@@ -157,6 +157,7 @@ def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
                 families, models, references, strict=True
             ):
                 result, lease = _fit_selected_model_result(
+                    training_counts={},
                     dataset_spec=spec,
                     selected_spec=model,
                     candidate_parameters=dict(model.hyperparameters),

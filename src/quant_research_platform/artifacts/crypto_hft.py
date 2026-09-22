@@ -13,8 +13,8 @@ from quant_research_platform.artifacts.research import (
     _issue,
     _report_rows,
     _unavailable,
-    _validate_reference,
     read_evaluation_report_evidence,
+    read_validated_reference,
     report_payload_working_set,
 )
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
@@ -53,7 +53,7 @@ def produce_crypto_report(
             issues.append(_issue(result.target_id, result.status.value, result.reason))
             continue
         try:
-            _validate_reference(layout, result)
+            read_validated_reference(layout, result)
         except (OSError, ValueError):
             issues.append(
                 _issue(result.target_id, "FAILED", "target_reference_invalid")

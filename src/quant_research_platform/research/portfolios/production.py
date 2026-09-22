@@ -7,7 +7,6 @@ from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
-from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -26,7 +25,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCandidateSpec,
     PortfolioLedgerBatch,
     PortfolioTargetBlocked,
-    TradeCostComponents,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import clear_exception_frames
@@ -49,6 +47,7 @@ from quant_research_platform.research.portfolios.optimizer import (
     optimize_portfolio,
 )
 from quant_research_platform.research.portfolios.risk import (
+    FactorRiskConfig,
     FactorRiskEstimate,
     FactorRiskState,
     preprocess_risk_styles,
@@ -67,8 +66,6 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets.reading import (
-    DatasetSession,
-    materialize_dataset_session,
     open_dataset_session,
     read_dataset,
 )
@@ -121,11 +118,11 @@ _ALPHA_DIAGNOSTICS = {
 
 
 def frozen_alpha_calibration(
-    artifact, *, cutoff: pd.Timestamp
+    batches, *, cutoff: pd.Timestamp
 ) -> tuple[AlphaCalibration, str]:
     """Read the last published, sufficiently observed development calibration."""
     latest = None
-    with closing_iterator(artifact.iter_chunks()) as batches:
+    with closing_iterator(batches):
         for batch in batches:
             observed_at = pd.Timestamp(
                 min(row.timestamp_ns for row in batch.valuations)
@@ -206,13 +203,15 @@ def build_portfolio_ledger(
     input_window: TimeWindow,
     formal_dataset_window: TimeWindow,
     prediction_window: TimeWindow | None = None,
+    risk_config: FactorRiskConfig | None = None,
+    optimizer_config: OptimizerConfig | None = None,
     frozen_calibration: AlphaCalibration | None = None,
     prediction_lookup: object,
     assumptions: ExecutionAssumptions,
     resource_policy: RuntimeResourcePolicy | None,
     fee_schedule_from_frame: Callable[..., object],
     require_fee_coverage: Callable[..., None],
-    trade_cost: Callable[..., TradeCostComponents],
+    prepare_trade_cost: Callable[..., object],
     market_name_for_type: Callable[[object], str],
     unified_trading_sessions: Callable[[pd.DataFrame], pd.DatetimeIndex],
 ) -> Iterator[PortfolioLedgerBatch]:
@@ -351,7 +350,9 @@ def build_portfolio_ledger(
     risk_assets: set[str] = set()
     market_model = MarketModelRiskState() if enhanced else None
     factor_risk = (
-        FactorRiskState(style_columns=risk_style_columns) if enhanced else None
+        FactorRiskState(style_columns=risk_style_columns, config=risk_config)
+        if enhanced
+        else None
     )
     previous_risk_cross: pd.DataFrame | None = None
     calibration_rows: list[dict[str, object]] = []
@@ -421,29 +422,36 @@ def build_portfolio_ledger(
                 )
                 for root, columns in risk_inputs.items()
             }
-            panel_session = input_channels.enter_context(
-                open_dataset_session(
-                    panel_root,
-                    columns=panel_columns,
-                    time_window=history,
-                    resource_policy=resource_policy,
+            next_panel_frames = input_channels.enter_context(
+                closing_iterator(
+                    _iter_input_sessions(
+                        panel_root, panel_columns, history, resource_policy
+                    )
                 )
             )
-            execution_session = input_channels.enter_context(
-                open_dataset_session(
-                    execution_root,
-                    columns=_EXECUTION_COLUMNS,
-                    time_window=history,
-                    resource_policy=resource_policy,
+            endpoint_panel_frames = input_channels.enter_context(
+                closing_iterator(
+                    _iter_input_sessions(
+                        panel_root, panel_columns, history, resource_policy
+                    )
                 )
             )
-            benchmark_session = (
+            execution_frames = input_channels.enter_context(
+                closing_iterator(
+                    _iter_input_sessions(
+                        execution_root, _EXECUTION_COLUMNS, history, resource_policy
+                    )
+                )
+            )
+            benchmark_frames = (
                 input_channels.enter_context(
-                    open_dataset_session(
-                        benchmark_root,
-                        columns=_BENCHMARK_COLUMNS,
-                        time_window=history,
-                        resource_policy=resource_policy,
+                    closing_iterator(
+                        _iter_benchmark_weights(
+                            benchmark_root,
+                            candidate.benchmark_id,
+                            sessions,
+                            resource_policy,
+                        )
                     )
                 )
                 if enhanced
@@ -607,13 +615,8 @@ def build_portfolio_ledger(
                                 )
                                 resize_state()
 
-                        assert benchmark_session is not None
-                        benchmark_weights = _benchmark_weights(
-                            benchmark_session,
-                            candidate.benchmark_id or "",
-                            decision_timestamp,
-                            resource_policy,
-                        )
+                        assert benchmark_frames is not None
+                        benchmark_weights = next(benchmark_frames)
 
                     if decision_timestamp < output_start:
                         continue
@@ -629,18 +632,11 @@ def build_portfolio_ledger(
                                 "portfolio_research_dataset_session_missing"
                             )
                     assert dataset is not None
-                    execution = _read_session(
-                        execution_session,
+                    execution = _read_next_session(
+                        execution_frames,
                         _EXECUTION_COLUMNS,
                         decision_timestamp,
-                        resource_policy,
-                    )
-                    retained.enter_context(
-                        _retain_frame(
-                            execution,
-                            resource_policy,
-                            "research.portfolio.execution",
-                        )
+                        retained,
                     )
                     if execution.empty:
                         raise PortfolioTargetBlocked("portfolio_execution_mask_missing")
@@ -665,35 +661,21 @@ def build_portfolio_ledger(
                         endpoint_timestamp = output_intervals.loc[
                             decision_timestamp, "end_at"
                         ]
-                        next_panel = _read_session(
-                            panel_session,
+                        next_panel = _read_next_session(
+                            next_panel_frames,
                             panel_columns,
                             next_timestamp,
-                            resource_policy,
-                        )
-                        retained.enter_context(
-                            _retain_frame(
-                                next_panel,
-                                resource_policy,
-                                "research.portfolio.next_panel",
-                            )
+                            retained,
                         )
                         if next_panel.empty:
                             raise PortfolioTargetBlocked(
                                 "portfolio_market_session_missing"
                             )
-                        endpoint_panel = _read_session(
-                            panel_session,
+                        endpoint_panel = _read_next_session(
+                            endpoint_panel_frames,
                             panel_columns,
                             endpoint_timestamp,
-                            resource_policy,
-                        )
-                        retained.enter_context(
-                            _retain_frame(
-                                endpoint_panel,
-                                resource_policy,
-                                "research.portfolio.endpoint_panel",
-                            )
+                            retained,
                         )
                         if endpoint_panel.empty:
                             raise PortfolioTargetBlocked(
@@ -788,10 +770,11 @@ def build_portfolio_ledger(
                                 enhanced_decision=enhanced_decision,
                                 target_override=target_override,
                                 decision_reason=decision_reason,
+                                optimizer_config=optimizer_config,
                                 assumptions=assumptions,
                                 fee_schedule=fee_schedule,
                                 fee_identity=fee_identity,
-                                trade_cost=trade_cost,
+                                prepare_trade_cost=prepare_trade_cost,
                                 market_name_for_type=market_name_for_type,
                             )
                         )
@@ -924,25 +907,6 @@ def _read_next_session(
     return pd.DataFrame(columns=columns)
 
 
-def _read_session(
-    session: DatasetSession,
-    columns: tuple[str, ...],
-    timestamp: pd.Timestamp,
-    resource_policy: RuntimeResourcePolicy | None,
-) -> pd.DataFrame:
-    with session.filtered_view(TimeWindow(timestamp, timestamp)) as view:
-        frame = materialize_dataset_session(
-            view,
-            target_chunk_bytes=resource_policy.operation_headroom_bytes,
-        )
-    if "timestamp" not in frame.columns:
-        raise ValueError("portfolio_input_schema_invalid")
-    normalized = _session_frame(frame, columns)
-    if not bool(normalized["timestamp"].eq(timestamp).all()):
-        raise ValueError("portfolio_input_session_window_invalid")
-    return normalized
-
-
 @contextmanager
 def _retain_frame(
     frame: pd.DataFrame,
@@ -1007,18 +971,17 @@ def _risk_context_input_columns(
     available: set[str] = set()
     inputs = {}
     for root in roots:
-        probe = _read_materialized(
+        with open_dataset_session(
             root,
-            None,
+            columns=None,
             time_window=TimeWindow(timestamp, timestamp),
             resource_policy=resource_policy,
-        )
-        columns = tuple(
-            column
-            for column in style_columns
-            if column in probe.columns and column not in market_styles
-        )
-        del probe
+        ) as session:
+            columns = tuple(
+                column
+                for column in style_columns
+                if column in session.arrow_schema.names and column not in market_styles
+            )
         if available.intersection(columns):
             raise ValueError("portfolio_risk_context_owner_duplicate")
         available.update(columns)
@@ -1114,17 +1077,35 @@ def _completed_calibration_rows(
     ]
 
 
+def _iter_benchmark_weights(root, benchmark_id, sessions, resource_policy):
+    """Align sparse snapshots without consuming a future session prematurely."""
+    with closing_iterator(
+        _iter_input_sessions(
+            root,
+            _BENCHMARK_COLUMNS,
+            TimeWindow(sessions[0], sessions[-1]),
+            resource_policy,
+        )
+    ) as frames:
+        pending = next(frames, None)
+        try:
+            for timestamp in sessions:
+                while pending is not None and pending["timestamp"].iloc[0] < timestamp:
+                    pending = next(frames, None)
+                if pending is None or pending["timestamp"].iloc[0] > timestamp:
+                    yield pd.Series(dtype="float64")
+                else:
+                    with _retain_session_workspace(len(pending), 0, resource_policy):
+                        yield _benchmark_weights(pending, benchmark_id, timestamp)
+        finally:
+            pending = None
+
+
 def _benchmark_weights(
-    session: DatasetSession,
+    frame: pd.DataFrame,
     benchmark_id: str,
     timestamp: pd.Timestamp,
-    resource_policy: RuntimeResourcePolicy | None,
 ) -> pd.Series:
-    with session.filtered_view(TimeWindow(timestamp, timestamp)) as view:
-        frame = materialize_dataset_session(
-            view,
-            target_chunk_bytes=resource_policy.operation_headroom_bytes,
-        )
     if type(frame) is not pd.DataFrame:
         raise ValueError("portfolio_input_reader_not_materialized")
     if not set(_BENCHMARK_COLUMNS).issubset(frame.columns):
@@ -1298,10 +1279,11 @@ def _build_session(
     enhanced_decision: _EnhancedDecision | None,
     target_override: pd.Series | None,
     decision_reason: str,
+    optimizer_config: OptimizerConfig | None = None,
     assumptions: ExecutionAssumptions,
     fee_schedule: object,
     fee_identity: str,
-    trade_cost: Callable[..., TradeCostComponents],
+    prepare_trade_cost: Callable[..., object],
     market_name_for_type: Callable[[object], str],
 ) -> tuple[
     ExecutionAccounting, pd.Series, pd.Series, OptimizationResult | None, pd.Series
@@ -1381,23 +1363,18 @@ def _build_session(
     )
     masks = _mask_values(execution, assets)
 
-    def cost_for_trade(
-        execution_date: date,
-        asset: str,
-        side: str,
-        notional: float,
-        adv20: float,
-        called_assumptions: ExecutionAssumptions,
-    ) -> TradeCostComponents:
-        return trade_cost(
-            execution_date,
-            market_by_asset[asset],
-            side,
-            notional,
-            adv20,
-            fee_schedule,
-            called_assumptions,
+    prepared = {
+        (market, side): prepare_trade_cost(
+            next_timestamp.date(), market, side, fee_schedule, assumptions
         )
+        for market in set(market_by_asset.values())
+        for side in ("buy", "sell")
+    }
+
+    def cost_for_trade(
+        execution_date, asset, side, notional, adv20, called_assumptions
+    ):
+        return prepared[market_by_asset[asset], side].trade(notional, adv20)
 
     if (
         target_override is None
@@ -1418,31 +1395,26 @@ def _build_session(
             eligible=eligible,
             panel=panel,
         )
-        adv_by_asset = assets_frame.set_index("asset_id")["adv"]
+        current_values = assets_frame["current_weight"].to_numpy(dtype="float64")
+        adv_values = assets_frame["adv"].to_numpy(dtype="float64")
+        market_masks = {
+            market: assets_frame["asset_id"].map(market_by_asset).eq(market).to_numpy()
+            for market in set(market_by_asset.values())
+        }
 
         def expected_cost(weights: np.ndarray) -> float:
-            current_values = assets_frame["current_weight"].to_numpy(dtype="float64")
-            total = 0.0
-            for asset, weight, current_weight in zip(
-                assets_frame["asset_id"].astype(str),
-                weights,
-                current_values,
-                strict=True,
-            ):
-                notional = abs(float(weight - current_weight)) * nav
-                if notional == 0.0:
-                    continue
-                if asset == PORTFOLIO_CASH_ASSET_ID:
-                    continue
-                total += cost_for_trade(
-                    next_timestamp.date(),
-                    asset,
-                    "buy" if weight > current_weight else "sell",
-                    notional,
-                    float(adv_by_asset.loc[asset]),
-                    assumptions,
-                ).total_cost
-            return float(total)
+            delta = weights - current_values
+            notionals = np.abs(delta) * nav
+            totals = np.zeros(len(delta), dtype="float64")
+            for (market, side), evaluator in prepared.items():
+                active = market_masks[market] & (
+                    delta > 0 if side == "buy" else delta < 0
+                )
+                if active.any():
+                    totals[active] = evaluator.totals(
+                        notionals[active], adv_values[active]
+                    )
+            return sum(map(float, totals), 0.0)
 
         optimization = optimize_portfolio(
             assets_frame,
@@ -1454,7 +1426,9 @@ def _build_session(
             ),
             style_columns=candidate.risk_style_columns,
             expected_transaction_cost=expected_cost,
-            config=OptimizerConfig(initial_nav=float(nav)),
+            config=optimizer_config,
+            nav=float(nav),
+            assumptions=assumptions,
             eligibility_column="eligible",
             financial_column="is_financial",
             cash_column="is_cash",

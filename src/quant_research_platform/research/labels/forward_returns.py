@@ -47,56 +47,54 @@ def add_forward_return_labels(
         error="invalid_forward_return_price",
         allow_null=True,
     ).astype("float64")
-    row_lookup = {
-        (asset, _timestamp): position
-        for position, (asset, _timestamp) in enumerate(
-            zip(result[asset_column], result[date_column], strict=True)
-        )
-    }
-    position_by_session = {timestamp: index for index, timestamp in enumerate(axis)}
-    positions = result[date_column].map(position_by_session).to_numpy()
+    keys = pd.MultiIndex.from_arrays([result[asset_column], result[date_column]])
+    positions = axis.get_indexer(result[date_column])
     prices = price.to_numpy(dtype="float64", copy=False)
-    can_enter = strict_bool_series(
-        result[can_enter_column],
-        error="invalid_forward_return_can_enter",
-        allow_null=True,
-    ).to_numpy(copy=False)
+    can_enter = (
+        strict_bool_series(
+            result[can_enter_column],
+            error="invalid_forward_return_can_enter",
+            allow_null=True,
+        )
+        .fillna(False)
+        .to_numpy(dtype=bool)
+    )
+    assets = result[asset_column].to_numpy(copy=False)
     for horizon in horizons:
         labels = np.full(len(result), np.nan, dtype="float64")
         available = np.full(len(result), np.datetime64("NaT"), dtype="datetime64[ns]")
-        for position, (asset, _timestamp) in enumerate(
-            zip(result[asset_column], result[date_column], strict=True)
-        ):
-            session_position = positions[position]
-            if pd.isna(session_position):
-                continue
-            entry_position = int(session_position) + 1
-            exit_position = entry_position + horizon
-            if exit_position >= len(axis):
-                continue
-            entry_date = axis[entry_position]
-            exit_date = axis[exit_position]
-            entry_row = row_lookup.get((asset, entry_date))
-            exit_row = row_lookup.get((asset, exit_date))
-            if entry_row is None or exit_row is None:
-                continue
-            if pd.isna(can_enter[position]) or not bool(can_enter[position]):
-                continue
-            entry_price = prices[entry_row]
-            exit_price = prices[exit_row]
-            if (
-                not np.isfinite(entry_price)
-                or entry_price <= 0.0
-                or not np.isfinite(exit_price)
-                or exit_price <= 0.0
-            ):
-                continue
-            with np.errstate(over="ignore"):
-                value = exit_price / entry_price - 1.0
-            if not np.isfinite(value):
-                continue
-            labels[position] = value
-            available[position] = exit_date.to_datetime64()
+        valid_positions = np.flatnonzero(
+            (positions >= 0) & (positions + 1 + horizon < len(axis)) & can_enter
+        )
+        entry_dates = axis.take(positions[valid_positions] + 1)
+        exit_dates = axis.take(positions[valid_positions] + 1 + horizon)
+        entry_rows = keys.get_indexer(
+            pd.MultiIndex.from_arrays([assets[valid_positions], entry_dates])
+        )
+        exit_rows = keys.get_indexer(
+            pd.MultiIndex.from_arrays([assets[valid_positions], exit_dates])
+        )
+        present = (entry_rows >= 0) & (exit_rows >= 0)
+        valid_positions = valid_positions[present]
+        exit_dates = exit_dates[present]
+        entry_prices, exit_prices = (
+            prices[entry_rows[present]],
+            prices[exit_rows[present]],
+        )
+        positive = (
+            np.isfinite(entry_prices)
+            & (entry_prices > 0)
+            & np.isfinite(exit_prices)
+            & (exit_prices > 0)
+        )
+        valid_positions, exit_dates = valid_positions[positive], exit_dates[positive]
+        with np.errstate(over="ignore"):
+            values = exit_prices[positive] / entry_prices[positive] - 1.0
+        finite = np.isfinite(values)
+        labels[valid_positions[finite]] = values[finite]
+        available[valid_positions[finite]] = exit_dates[finite].to_numpy(
+            dtype="datetime64[ns]"
+        )
         label_column = forward_return_label_column(horizon, frequency)
         result[label_column] = labels
         result[f"{label_column}_available_at"] = available

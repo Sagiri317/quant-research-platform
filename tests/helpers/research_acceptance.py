@@ -17,6 +17,9 @@ from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_DECISION_REASON_ENHANCED,
 )
 from quant_research_platform.contracts.targets import ProducerKind
+from quant_research_platform.markets.implementations.crypto.ids import (
+    HFT_RESEARCH_DATASET_ID,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
@@ -28,7 +31,6 @@ from quant_research_platform.research.models.persisted import (
     read_quarterly_model_artifact,
 )
 from quant_research_platform.research.protocols.crypto_hft import (
-    HFT_RESEARCH_DATASET_ID,
     CryptoMakerCandidate,
     CryptoTakerCandidate,
 )

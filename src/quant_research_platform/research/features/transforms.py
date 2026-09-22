@@ -26,6 +26,10 @@ def apply_feature_transforms(
     timestamp_column: str = "timestamp",
     resource_lease: MemoryLease | None = None,
 ) -> pd.DataFrame:
+    canonical = tuple(t for t in transforms if t.transform == "a_share_canonical")
+    if canonical:
+        if len(transforms) != 1:
+            raise ValueError("canonical_feature_pipeline_must_be_exclusive")
     working_bytes = _feature_transform_working_bytes(frame, transforms)
     policy = current_runtime_resource_policy()
     reservation = (
@@ -34,13 +38,16 @@ def apply_feature_transforms(
         else nullcontext()
     )
     with reservation:
-        result = frame.copy()
-        for transform in transforms:
-            _apply_feature_transform_to_owned_frame(
-                result,
-                transform,
-                timestamp_column=timestamp_column,
+        if canonical:
+            result = canonical_feature_pipeline(
+                frame, factor_columns=canonical[0].source_columns
             )
+        else:
+            result = frame.copy()
+            for transform in transforms:
+                _apply_feature_transform_to_owned_frame(
+                    result, transform, timestamp_column=timestamp_column
+                )
         if pandas_frame_payload_bytes(result) > _feature_transform_output_bytes(
             frame,
             transforms,
@@ -89,7 +96,9 @@ def _feature_transform_workspace_bytes(
     group_codes = vector_bytes
     numeric_values = vector_bytes
     assignment_values = row_count * 8
-    if transform.transform == "cross_sectional_zscore":
+    if transform.transform == "a_share_canonical":
+        transform_state = vector_bytes * (8 * len(transform.source_columns) + 32)
+    elif transform.transform == "cross_sectional_zscore":
         transform_state = sum(
             (
                 vector_bytes,  # group means
@@ -273,13 +282,21 @@ def _industry_size_residuals(target, industries, sizes):
         else nullcontext()
     )
     with reservation:
-        sums = {
-            group: [Fraction(), Fraction(), Fraction(), Fraction()]
-            for group in counts.index
-        }
+        y_scale = max(float(value).as_integer_ratio()[1] for value in target)
+        x_scale = (
+            1
+            if sizes is None
+            else max(float(value).as_integer_ratio()[1] for value in sizes)
+        )
+
+        def integer(value, scale):
+            numerator, denominator = float(value).as_integer_ratio()
+            return numerator * (scale // denominator)
+
+        sums = {group: [0, 0, 0, 0] for group in counts.index}
         for index, (group, value) in enumerate(zip(industries, target, strict=True)):
-            y = Fraction(float(value))
-            x = Fraction() if sizes is None else Fraction(float(sizes[index]))
+            y = integer(value, y_scale)
+            x = 0 if sizes is None else integer(sizes[index], x_scale)
             totals = sums[group]
             totals[0] += y
             totals[1] += x
@@ -289,32 +306,31 @@ def _industry_size_residuals(target, industries, sizes):
         if sizes is not None:
             xx = sum(
                 (
-                    values[2] - values[1] ** 2 / int(counts[group])
-                    for group, values in sums.items()
+                    Fraction(int(counts[group]) * v[2] - v[1] ** 2, int(counts[group]))
+                    for group, v in sums.items()
                 ),
                 Fraction(),
             )
             xy = sum(
                 (
-                    values[3] - values[0] * values[1] / int(counts[group])
-                    for group, values in sums.items()
+                    Fraction(
+                        int(counts[group]) * v[3] - v[0] * v[1], int(counts[group])
+                    )
+                    for group, v in sums.items()
                 ),
                 Fraction(),
             )
             slope = xy / xx
-        for group, values in sums.items():
-            count = int(counts[group])
-            values[0] /= count
-            values[1] /= count
         residuals = np.empty(len(target), dtype="float64")
         for index, (group, value) in enumerate(zip(industries, target, strict=True)):
-            y = Fraction(float(value)) - sums[group][0]
+            count = int(counts[group])
+            y = integer(value, y_scale) * count - sums[group][0]
             x = (
-                Fraction()
+                0
                 if sizes is None
-                else Fraction(float(sizes[index])) - sums[group][1]
+                else integer(sizes[index], x_scale) * count - sums[group][1]
             )
-            residuals[index] = float(y - slope * x)
+            residuals[index] = float((y - slope * x) / (count * y_scale))
         return residuals
 
 
@@ -461,20 +477,16 @@ def _apply_fillna(
 
 
 def canonical_feature_transforms(factor_columns):
-    """Declare the same canonical feature pipeline used by dataset production."""
-    from quant_research_platform.contracts.features import FeatureTransformSpec
-
-    return tuple(
+    """Persist the executable eligible/MAD/neutralize/zscore/encoding pipeline."""
+    return (
         FeatureTransformSpec(
-            transform_id=prefix + column,
-            source_columns=(column,),
-            output_columns=(prefix + column,),
-            transform=transform,
-        )
-        for column in factor_columns
-        for prefix, transform in (
-            ("feature_", "mad_winsorized_zscore"),
-            ("feature_missing_", "missing_indicator"),
-            ("feature_observed_", "observed_indicator"),
-        )
+            transform_id="a_share_canonical",
+            source_columns=tuple(factor_columns),
+            output_columns=tuple(
+                prefix + column
+                for column in factor_columns
+                for prefix in ("feature_", "feature_missing_", "feature_observed_")
+            ),
+            transform="a_share_canonical",
+        ),
     )

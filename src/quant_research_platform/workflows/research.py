@@ -32,9 +32,9 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 )
 from quant_research_platform.artifacts.research import (
     _instance_root,
-    _validate_reference,
     read_research_report_artifact,
     read_research_run_record,
+    read_validated_reference,
     report_payload_working_set,
     write_research_report_artifact,
     write_research_run_record,
@@ -90,7 +90,7 @@ from quant_research_platform.contracts.targets import (
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
-    is_intraday_time_window,
+    is_datetime_window,
     time_value_isoformat,
 )
 from quant_research_platform.markets.implementations.crypto.portfolio import (
@@ -106,10 +106,6 @@ from quant_research_platform.research.models.persisted import (
     write_quarterly_model_artifact,
 )
 from quant_research_platform.research.models.supervised import preflight_model_specs
-from quant_research_platform.research.portfolios.production import (
-    frozen_alpha_calibration,
-)
-from quant_research_platform.research.protocols.a_share import analysis_windows
 from quant_research_platform.runtime.execution_metrics import record_run_observations
 from quant_research_platform.runtime.resources import (
     current_runtime_resource_policy,
@@ -252,8 +248,9 @@ def _plan_targets(
     by_id: dict[str, TargetPlan] = {}
     for spec in ordered:
         frozen = protocol.manifest().get("frozen_development")
-        if frozen is not None and spec.target_id == protocol.model_selection_target_id:
-            reference = frozen["model"]
+        if frozen is not None and spec.target_id in frozen["targets"]:
+            target = frozen["targets"][spec.target_id]
+            reference = target["reference"]
             plan = TargetPlan(
                 target_id=spec.target_id,
                 upstream_target_ids=(),
@@ -261,9 +258,9 @@ def _plan_targets(
                 decision=PlanDecision.REUSE,
                 requested_identity=reference["instance_identity"],
                 matching_instance_identity=reference["instance_identity"],
-                upstream_identities=frozen["model_upstream_identities"],
+                upstream_identities=target["upstream_identities"],
                 rebuild=False,
-                producer_kind=ProducerKind.MODEL,
+                producer_kind=profile.producer_bindings[spec.producer_id].kind,
                 schema_identity=reference["schema_identity"],
                 artifact_root=reference["path"],
             )
@@ -592,8 +589,6 @@ def research_run(
     with runtime_resource_policy_scope(None):
         preflight_blocker = None
         if holdout:
-            if protocol.protocol_id != "a_share_low_frequency":
-                raise PermissionError("holdout_frozen_development_identity_unavailable")
             protocol, preflight_blocker = _frozen_holdout_protocol(
                 profile, layout, protocol, development_run_id, start_date, end_date
             )
@@ -761,76 +756,47 @@ def _frozen_holdout_protocol(
         ):
             raise ValueError("holdout_development_run_invalid")
         references = {item.target_id: item for item in record.target_results}
-        for target_id in (*record.terminal_targets, protocol.model_selection_target_id):
+        artifacts = {}
+        validated = {}
+        for target_id in dict.fromkeys(
+            (*record.terminal_targets, *protocol.frozen_target_ids())
+        ):
             reference = references.get(target_id)
             if reference is None:
                 raise ValueError("holdout_development_reference_missing")
-            _validate_reference(layout, reference)
-        reference = references[protocol.model_selection_target_id]
-        root = _target_instance_root(
-            profile, layout, reference.target_id, reference.instance_identity
-        )
-        _validate_semantic_target_root(
-            profile,
-            protocol,
-            next(
-                item
-                for item in protocol.target_specs("research run")
-                if item.target_id == reference.target_id
-            ),
-            root,
-            reference.instance_identity,
-            trial_layout=layout,
-        )
-        persisted = read_quarterly_model_artifact(
-            root, expected_identity=reference.instance_identity, trial_layout=layout
-        )
-        if max(persisted.quarterly_selections) != str(
-            pd.Period(protocol.manifest()["development_window"]["end"], freq="Q")
-        ):
-            raise ValueError("holdout_development_model_quarter_invalid")
+            root, envelope = read_validated_reference(layout, reference)
+            validated[target_id] = root, envelope
+            if reference.producer_kind is ProducerKind.PORTFOLIO:
+                artifacts[target_id] = partial(
+                    read_portfolio_ledger_artifact,
+                    root,
+                    expected_identity=reference.instance_identity,
+                )
         frozen = {
             "run_id": record.run_id,
             "run_identity": canonical_json_hash(record.payload()),
-            "model": reference.payload(),
-            "model_upstream_identities": persisted.envelope["upstream_identities"],
+            "targets": {},
         }
-        calibration = None
-        calibration_date = None
-        blocker = None
-        sources = []
-        for candidate in protocol.portfolio_candidates():
-            if candidate.construction != "benchmark_enhanced":
-                continue
-            target_id = f"{protocol.scenario_id}_{candidate.candidate_id}_ledger"
-            source = references[target_id]
-            artifact = read_portfolio_ledger_artifact(
-                _target_instance_root(
-                    profile, layout, target_id, source.instance_identity
+        for target_id in protocol.frozen_target_ids():
+            reference = references[target_id]
+            root, envelope = validated[target_id]
+            artifacts[target_id] = _validate_semantic_target_root(
+                profile,
+                protocol,
+                next(
+                    item
+                    for item in protocol.target_specs("research run")
+                    if item.target_id == target_id
                 ),
-                expected_identity=source.instance_identity,
+                root,
+                reference.instance_identity,
+                trial_layout=layout,
             )
-            try:
-                current, observed_at = frozen_alpha_calibration(
-                    artifact, cutoff=pd.Timestamp(record.research_window["end"])
-                )
-            except PortfolioTargetBlocked as exc:
-                blocker = str(exc)
-                break
-            if calibration is not None and (
-                current != calibration or observed_at != calibration_date
-            ):
-                raise ValueError("holdout_alpha_sources_disagree")
-            calibration = current
-            calibration_date = observed_at
-            sources.append({"reference": source.payload(), "observed_at": observed_at})
-        frozen["alpha_sources"] = sources
-    return replace(
-        protocol,
-        access_window="holdout",
-        frozen_development=frozen,
-        frozen_alpha=calibration,
-    ), blocker
+            frozen["targets"][target_id] = {
+                "reference": reference.payload(),
+                "upstream_identities": envelope["upstream_identities"],
+            }
+        return protocol.freeze_development(record, references, frozen, artifacts)
 
 
 def _require_development_window(protocol: Any, start_date: str, end_date: str) -> None:
@@ -1014,7 +980,7 @@ def _inspect_run_target(*, profile, layout, target_id, run_id):
     if result is None:
         raise KeyError(target_id)
     if result.status in {TargetStatus.BUILT, TargetStatus.REUSED}:
-        _validate_reference(layout, result)
+        read_validated_reference(layout, result)
     return {"profile_id": profile.profile_id, "run_id": run_id, **result.payload()}
 
 
@@ -1621,6 +1587,7 @@ def _build_semantic_target(
                     persisted_model=persisted,
                     time_window=time_window,
                     resource_policy=policy,
+                    access_window=protocol.access_window,
                 )
                 with closing_iterator(iter(results)) as active:
                     for result in active:
@@ -1951,10 +1918,8 @@ def _build_semantic_target(
             raise ValueError("prediction_target_root_missing")
         prediction_window = time_window
         if candidate.construction == "benchmark_enhanced":
-            prediction_window = _a_share_target_window(
-                protocol,
-                candidate.prediction_target_id,
-                time_window,
+            prediction_window = protocol.target_window(
+                "research run", None, time_window, candidate.prediction_target_id
             )
         with read_prediction_output_bundle(
             prediction_root / "outputs" / prediction_target,
@@ -1974,6 +1939,8 @@ def _build_semantic_target(
                 frozen_calibration=protocol.frozen_alpha,
                 prediction_lookup=prediction_lookup,
                 assumptions=protocol.execution_assumptions,
+                risk_config=protocol.risk_config,
+                optimizer_config=protocol.optimizer_config,
                 resource_policy=policy,
             )
 
@@ -2103,10 +2070,7 @@ def _holdout_evidence(
     software_identity: str,
     target_results: tuple[ResearchRunTargetResult, ...],
 ) -> dict[str, object]:
-    if (
-        protocol.protocol_id != "a_share_low_frequency"
-        or protocol.access_window != "holdout"
-    ):
+    if protocol.access_window != "holdout":
         return {}
     prior = []
     same_evidence = False
@@ -2118,14 +2082,12 @@ def _holdout_evidence(
     }
     current = {key: item.instance_identity for key, item in produced.items()}
 
-    def alpha_sources(frozen):
-        return tuple(
-            (
-                item["reference"]["target_id"],
-                item["reference"]["instance_identity"],
-                item["observed_at"],
-            )
-            for item in frozen["alpha_sources"]
+    def frozen_inputs(frozen):
+        return canonical_json_hash(
+            {
+                "targets": frozen["targets"],
+                "alpha_sources": frozen.get("alpha_sources", []),
+            }
         )
 
     evidence_targets = tuple(
@@ -2159,13 +2121,13 @@ def _holdout_evidence(
         if (
             record.status is RunStatus.COMPLETE
             and protocol.scenario_id in current
-            and protocol.model_selection_target_id in current
+            and all(key in current for key in protocol.frozen_target_ids())
             and record.software_identity == software_identity
             and all(old.get(key) == current[key] for key in evidence_targets)
         ):
-            if alpha_sources(record.protocol["frozen_development"]) == alpha_sources(
-                protocol.frozen_development
-            ):
+            if frozen_inputs(
+                record.payload()["protocol"]["frozen_development"]
+            ) == frozen_inputs(protocol.frozen_development):
                 same_inputs = True
                 same_evidence |= (
                     dict(record.research_window) == dict(research_window)
@@ -2212,7 +2174,7 @@ def _build_report_from_run(
             }:
                 continue
             try:
-                _validate_reference(layout, result)
+                read_validated_reference(layout, result)
             except (FileNotFoundError, OSError, ValueError):
                 continue
             persisted = read_quarterly_model_artifact(
@@ -2514,7 +2476,7 @@ def _validate_semantic_target_root(
         ProducerKind.PREDICTION,
     }:
         if binding.kind is ProducerKind.MODEL:
-            read_crypto_model_artifact(
+            return read_crypto_model_artifact(
                 root, expected_identity=expected_identity, trial_layout=trial_layout
             )
         else:
@@ -2539,7 +2501,14 @@ def _validate_semantic_target_root(
                 ) as (manifest, _lookup):
                     if manifest["metadata"][
                         "model_metadata"
-                    ] != persisted.prediction_lineage(model_id):
+                    ] != persisted.prediction_lineage(
+                        model_id,
+                        TimeWindow(
+                            envelope["research_window"]["start"],
+                            envelope["research_window"]["end"],
+                        ),
+                        access_window=protocol.access_window,
+                    ):
                         raise ValueError("crypto_prediction_model_lineage_invalid")
         return
     if binding.kind is ProducerKind.MODEL:
@@ -2558,16 +2527,15 @@ def _validate_semantic_target_root(
                 raise ValueError("model_selection_protocol_mismatch")
             if tuple(selection["tie_break_order"]) != expected_model_ids:
                 raise ValueError("model_selection_protocol_mismatch")
-            selected_algorithm = metadata["model_algorithm"]
-            expected_spec_id = f"{protocol.scenario_id}_{selected_algorithm}"
+            expected_spec_id = quarter["family_id"]
             if expected_spec_id not in expected_model_ids:
-                raise ValueError("model_selection_algorithm_mismatch")
-            if quarter["family_id"] != expected_spec_id:
                 raise ValueError("model_selection_family_mismatch")
             expected_spec = profile.models.get(expected_spec_id)
+            if expected_spec.model_algorithm != metadata["model_algorithm"]:
+                raise ValueError("model_selection_algorithm_mismatch")
             if list(expected_spec.input_columns) != metadata["input_columns"]:
                 raise ValueError("model_selection_input_columns_mismatch")
-        return
+        return persisted
     if binding.kind is ProducerKind.EVALUATION:
         try:
             manifest, _members = validate_output_bundle(
@@ -2981,33 +2949,14 @@ def _target_time_window(
     if (
         data_spec is not None
         and data_spec.frequency is DataFrequency.TICK
-        and not is_intraday_time_window(requested_window)
+        and not is_datetime_window(requested_window)
         and (
             action in {"data materialize", "dataset build"}
             or requested["access"] != "not_applicable"
         )
     ):
         raise ValueError("tick_data_requires_intraday_window")
-    if (
-        action == "research run"
-        and data_spec is not None
-        and protocol.protocol_id == "a_share_low_frequency"
-    ):
-        if isinstance(data_spec, (InterimDataSpec, ProcessedDataSpec)):
-            return protocol.data_window
-        if isinstance(data_spec, ResearchDatasetSpec):
-            return protocol.formal_dataset_window
-    if (
-        action == "research run"
-        and data_spec is not None
-        and protocol.protocol_id == "crypto_hft"
-        and protocol.research_plan is not None
-    ):
-        return TimeWindow(
-            min(fold.train.start for fold in protocol.research_plan.folds),
-            requested_window.end,
-        )
-    return requested_window
+    return protocol.target_window(action, data_spec, requested_window)
 
 
 def _window_payload(window: TimeWindow, *, access: str) -> dict[str, object]:
@@ -3030,44 +2979,7 @@ def _semantic_target_time_window(
     window = _target_time_window(action, protocol, data_spec, requested)
     if action != "research run" or data_spec is not None:
         return window
-    return _a_share_target_window(protocol, target_spec.target_id, window)
-
-
-def _a_share_target_window(
-    protocol: Any,
-    target_id: str,
-    time_window: TimeWindow,
-) -> TimeWindow:
-    if getattr(protocol, "protocol_id", None) != "a_share_low_frequency":
-        return time_window
-    if protocol.access_window == "holdout":
-        return time_window
-    if target_id in {
-        f"{protocol.scenario_id}_evaluation",
-        f"{protocol.scenario_id}_statistics",
-    }:
-        return analysis_windows(protocol.manifest(), time_window)[0]
-    champion_target_ids = {
-        protocol.model_selection_target_id,
-        protocol.persisted_prediction_target_id,
-    }
-    if target_id not in champion_target_ids:
-        return time_window
-    manifest = protocol.manifest()
-    development_window = manifest.get("development_window")
-    if type(development_window) is not dict:
-        raise ValueError("research_window_invalid")
-    development_start = development_window.get("start")
-    if type(development_start) is not str or not development_start:
-        raise ValueError("research_window_invalid")
-    start = max(
-        pd.Timestamp(development_start),
-        pd.Timestamp(time_window.start) - pd.DateOffset(months=12),
-    )
-    return TimeWindow(
-        start.date(),
-        pd.Timestamp(time_window.end).date(),
-    )
+    return protocol.target_window(action, None, window, target_spec.target_id)
 
 
 def _matching_instance(

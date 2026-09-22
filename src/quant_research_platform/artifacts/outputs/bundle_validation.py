@@ -26,7 +26,7 @@ from quant_research_platform.contracts.predictions import (
     prediction_output_columns,
 )
 from quant_research_platform.contracts.time import (
-    is_intraday_time_value,
+    is_datetime_value,
     time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import clear_exception_frames
@@ -460,7 +460,7 @@ def read_prediction_output_bundle(
                 if (
                     time_value_isoformat(
                         effective_test_end,
-                        date_only=not is_intraday_time_value(test_start),
+                        date_only=not is_datetime_value(test_start),
                     )
                     != metadata["prediction_metadata"]["effective_test_end"]
                 ):

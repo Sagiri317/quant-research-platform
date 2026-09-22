@@ -9,6 +9,17 @@ HFT_PANEL_DATA_ID = "binance_futures_l2_panel_100ms"
 HFT_FACTOR_DATA_ID = "binance_futures_microstructure_factors_100ms"
 HFT_LABEL_DATA_ID = "binance_futures_mid_labels_100ms"
 HFT_RESEARCH_DATASET_ID = "binance_futures_hft_research_100ms"
+HFT_DERIVATIVE_DATA_ID = "binance_futures_derivative_factors_100ms"
+HFT_SPOT_PANEL_DATA_ID = "binance_spot_l2_panel_100ms"
+HFT_SPOT_CONTEXT_DATA_ID = "binance_spot_perp_context_100ms"
+HFT_SOL_PANEL_DATA_ID = "binance_sol_futures_l2_panel_100ms"
+HFT_INFORMATION_PANEL_DATA_ID = "binance_perpetual_information_panel_100ms"
+HFT_INFORMATION_STATE_DATA_ID = "binance_perpetual_information_state_100ms"
+HFT_CROSS_ASSET_DATA_ID = "binance_cross_asset_context_100ms"
+HFT_EXTERNAL_DATA_IDS = {
+    "bybit": "bybit_perpetual_context_100ms",
+    "okx": "okx_perpetual_context_100ms",
+}
 _SUPPORTED_QUOTE_ASSETS = ("USDT", "USDC", "FDUSD", "BTC", "ETH")
 
 

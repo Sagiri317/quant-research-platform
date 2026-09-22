@@ -551,6 +551,7 @@ def _validate_trial_references(
             "label_column",
             "sample_filter_mode",
             "max_train_rows",
+            "training_weighting",
         ):
             if metadata[key] != parameters[key]:
                 raise ValueError("model_trial_parameters_misaligned")
@@ -838,8 +839,32 @@ class PersistedCryptoModelArtifact:
         )
         return _crypto_validation_chunks(self.instance_root, self.member_records, entry)
 
-    def prediction_lineage(self, model_id):
-        entries = [entry for entry in self.models if entry["model_id"] == model_id]
+    def prediction_models(self, window, *, access_window="development"):
+        if access_window == "development":
+            return tuple(
+                entry
+                for entry in self.models
+                if pd.Timestamp(entry["prediction_window"]["start"])
+                <= pd.Timestamp(window.end)
+                and pd.Timestamp(entry["prediction_window"]["end"])
+                >= pd.Timestamp(window.start)
+            )
+        plan = self.envelope["semantic_metadata"]["target_contract"]["protocol"][
+            "research_plan"
+        ]
+        source_fold = plan["folds"][-1]["fold_id"]
+        return tuple(
+            {**entry, "prediction_window": _intraday_window(window)}
+            for entry in self.models
+            if entry["fold_id"] == source_fold
+        )
+
+    def prediction_lineage(self, model_id, window, *, access_window="development"):
+        entries = [
+            entry
+            for entry in self.prediction_models(window, access_window=access_window)
+            if entry["model_id"] == model_id
+        ]
         return {
             "model_artifact_id": self.envelope["logical_artifact_id"],
             "model_artifact_identity": self.envelope["instance_identity"],
@@ -1125,6 +1150,7 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
                 "sample_filter_mode",
                 "hyperparameters",
                 "max_train_rows",
+                "training_weighting",
             ):
                 if metadata[key] != parameters[key]:
                     raise ValueError("crypto_model_parameters_misaligned")

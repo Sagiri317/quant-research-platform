@@ -7,6 +7,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_RESEARCH_DATASET_ID,
 )
@@ -231,15 +232,15 @@ def test_crypto_valid_selected_windows_reach_training(tmp_path, selected_folds):
 def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     tmp_path, monkeypatch
 ):
+    from quant_research_platform.markets.implementations.crypto.ids import (
+        HFT_RESEARCH_DATASET_ID,
+    )
     from quant_research_platform.profiles.research import (
         CRYPTO_PROFILE_ID,
         research_profile,
     )
     from quant_research_platform.research.models.persisted import (
         read_crypto_model_artifact,
-    )
-    from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_RESEARCH_DATASET_ID,
     )
     from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.workflows import research
@@ -428,7 +429,10 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             ) as (manifest, lookup):
                 assert manifest["metadata"][
                     "model_metadata"
-                ] == saved.prediction_lineage(spec.model_id)
+                ] == saved.prediction_lineage(
+                    spec.model_id,
+                    TimeWindow("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+                )
                 assert lookup.row_count == len(expected)
                 with lookup.values_for_frame(expected, mark_matched=True) as (
                     values,
@@ -812,8 +816,8 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tm
 
 
 @pytest.mark.parametrize("gap_kind", [None, "depth", "agg_trades"])
-def test_tardis_cross_midnight_archive_keeps_research_within_one_episode(
-    tmp_path, gap_kind
+def test_tardis_cross_midnight_development_and_frozen_holdout(
+    tmp_path, gap_kind, monkeypatch
 ):
     import gzip
 
@@ -821,13 +825,13 @@ def test_tardis_cross_midnight_archive_keeps_research_within_one_episode(
         CRYPTO_PROFILE_ID,
         research_profile,
     )
-    from quant_research_platform.sources.binance.replay import open_market_source
+    from quant_research_platform.sources import open_market_source
     from quant_research_platform.sources.tardis.funding import import_funding_history
     from quant_research_platform.sources.tardis.raw import import_slices
     from quant_research_platform.workflows import research
     from tests.helpers.binance_hft import write_binance_hft_run
 
-    origin = pd.Timestamp("2026-09-01T23:59:49.500000Z")
+    origin = pd.Timestamp("2026-09-01T23:59:55.500000Z")
     origin_ms = origin.value // 1_000_000
     recorder = tmp_path / "fixture"
     manifest = write_binance_hft_run(recorder, count=120, maker_liquidity=True)
@@ -961,6 +965,45 @@ def test_tardis_cross_midnight_archive_keeps_research_within_one_episode(
         profile=profile, layout=layout, run_id=result["run_id"]
     )
     assert report["target_result"]["status"] == "BUILT"
+    if gap_kind is None:
+        from quant_research_platform.artifacts.research import read_research_run_record
+        from quant_research_platform.markets.implementations.crypto import portfolio
+        from quant_research_platform.research.models import fitting
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("holdout must not fit, select, or calibrate")
+
+        monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", forbidden)
+        monkeypatch.setattr(portfolio, "produce_maker_calibration", forbidden)
+        development = read_research_run_record(
+            layout.research_run_path(result["run_id"])
+        )
+        held = research.research_run(
+            profile=profile,
+            layout=layout,
+            raw_root=raw,
+            research_plan=development.payload()["protocol"]["research_configuration"],
+            holdout=True,
+            development_run_id=result["run_id"],
+        )
+        assert held["status"] == "COMPLETE", held
+        held_targets = {item["target_id"]: item for item in held["target_results"]}
+        for key, item in held_targets.items():
+            if key.endswith("_models") or key.endswith("_calibration"):
+                assert item["status"] == "REUSED"
+                assert item["instance_identity"] == targets[key]["instance_identity"]
+        holdout_record = read_research_run_record(
+            layout.research_run_path(held["run_id"])
+        )
+        assert (
+            holdout_record.holdout_evidence["qualification"] == "HOLDOUT_FIRST_EVIDENCE"
+        )
+        assert (
+            research.report_build(
+                profile=profile, layout=layout, run_id=held["run_id"]
+            )["status"]
+            == "COMPLETE"
+        )
 
 
 def test_crypto_plan_preserves_multi_day_windows_without_calendar_alignment():

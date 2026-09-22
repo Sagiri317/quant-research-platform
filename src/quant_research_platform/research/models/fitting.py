@@ -43,7 +43,7 @@ from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
     ModelMatrixScaler,
     ScaledPredictor,
-    equal_date_sample_weights,
+    equal_timestamp_sample_weights,
 )
 from quant_research_platform.runtime.dataframes import (
     _concat_frame_payload_bytes,
@@ -101,6 +101,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         hyperparameters=metadata["hyperparameters"],
         random_seed=metadata["random_seed"],
         max_train_rows=metadata["max_train_rows"],
+        training_weighting=metadata["training_weighting"],
     )
     if spec.model_algorithm == "linear_regression":
         if type(predictor) is not LinearScaledPredictor:
@@ -272,7 +273,9 @@ def _fit_linear_model_result_with_lease(
                 error="model_training_working_set_exceeds_task_memory_budget",
             )
             model_lease.grow(fit_work_bytes)
-        weights = equal_date_sample_weights(training["timestamp"])
+        weights = equal_timestamp_sample_weights(
+            training["timestamp"], spec.training_weighting
+        )
         matrix = training.loc[:, spec.input_columns]
         scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
         transformed = scaler.transform(matrix).to_numpy(dtype="float64")
@@ -365,7 +368,7 @@ def model_metadata(
         "dependency_status": dependencies.require_model_dependency(
             spec.model_algorithm,
         ),
-        "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
+        "training_weighting": spec.training_weighting.payload(),
         "scaler": None if scaler is None else scaler.to_payload(),
     }
     if feature_importance is not None:
@@ -922,7 +925,13 @@ def _fit_predictor(
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",
     }:
-        return estimator.fit(training, y)
+        return estimator.fit(
+            training,
+            y,
+            sample_weight=equal_timestamp_sample_weights(
+                training["timestamp"], spec.training_weighting
+            ),
+        )
     from sklearn.exceptions import ConvergenceWarning
 
     if spec.model_algorithm in supervised._PARALLEL_MODEL_ALGORITHMS:  # noqa: SLF001
@@ -936,7 +945,9 @@ def _fit_predictor(
         else 1
     )
     matrix = training.loc[:, spec.input_columns]
-    weights = equal_date_sample_weights(training["timestamp"])
+    weights = equal_timestamp_sample_weights(
+        training["timestamp"], spec.training_weighting
+    )
     scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
     scaled_matrix = scaler.transform(matrix)
     try:
@@ -1020,7 +1031,7 @@ def _estimator_fit_working_set_bytes(
     coefficient_workspace = (inputs + 1) ** 2 * np.dtype(np.float64).itemsize
     if spec.model_algorithm == "linear_regression":
         # Cover scaling temporaries, intercept design, weighted LAPACK inputs/copies,
-        # equal-date grouping, and the dense least-squares workspace together.
+        # equal-timestamp grouping, and the dense least-squares workspace together.
         return (
             feature_frame
             + 8 * dense_features

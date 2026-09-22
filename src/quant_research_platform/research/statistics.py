@@ -456,7 +456,7 @@ def probabilistic_and_deflated_sharpe(
 ) -> SharpeInference:
     data = _finite_vector(returns, minimum=4)
     trials = np.asarray(trial_sharpes, dtype="float64")
-    if trials.ndim != 1 or len(trials) < 2:
+    if trials.ndim != 1 or len(trials) < 1:
         raise ValueError("finite_vector_required")
     if type(benchmark_sharpe) is not float or not np.isfinite(benchmark_sharpe):
         raise ValueError("sharpe_benchmark_invalid")
@@ -477,6 +477,17 @@ def probabilistic_and_deflated_sharpe(
     if not np.isfinite(variance) or variance <= 0.0:
         raise ValueError("sharpe_variance_invalid")
     scale = variance**0.5
+    if len(trials) == 1:
+        return SharpeInference(
+            observed_sharpe=observed,
+            benchmark_sharpe=float(benchmark_sharpe),
+            psr=float(norm.cdf((observed - benchmark_sharpe) / scale)),
+            deflated_reference_sharpe=None,
+            dsr=None,
+            observation_count=len(data),
+            trial_count=1,
+            dsr_reason="insufficient_candidate_count",
+        )
     trial_scale = (
         float(return_standard_deviation(trials))
         if np.isfinite(trials).all()
@@ -528,7 +539,11 @@ def cscv_pbo(
     combination_count = comb(slice_count, slice_count // 2)
     if type(max_combinations) is not int or combination_count > max_combinations:
         raise ValueError("cscv_combination_budget_exceeded")
-    matrix = _finite_matrix(returns, minimum_rows=4, minimum_columns=2)
+    matrix = _finite_matrix(returns, minimum_rows=4, minimum_columns=1)
+    if matrix.shape[1] == 1:
+        return _undefined_pbo(
+            matrix, slice_count, combination_count, "insufficient_candidate_count"
+        )
     roundoff = _return_roundoff(matrix, return_roundoff)
     if any(
         np.array_equal(matrix[:, left], matrix[:, right])

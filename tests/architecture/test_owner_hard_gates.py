@@ -35,12 +35,19 @@ def test_public_workflow_actions_have_one_owner_and_direct_callers() -> None:
     assert _direct_workflow_calls(cli_path) == set(WORKFLOW_ACTIONS)
 
 
-def test_research_and_profile_owners_have_no_provider_traversal() -> None:
+def test_research_and_profile_owners_have_no_provider_traversal(import_edges) -> None:
     research_sources = "\n".join(
         path.read_text(encoding="utf-8")
         for path in (SOURCE_ROOT / "research").rglob("*.py")
     )
-    assert "markets.implementations" not in research_sources
+    from tests.helpers.import_graph import import_edges_under
+
+    for edge in import_edges_under(import_edges, SOURCE_ROOT / "research"):
+        if edge.module.startswith("quant_research_platform.markets.implementations"):
+            assert edge.module in {
+                "quant_research_platform.markets.implementations.a_share.ids",
+                "quant_research_platform.markets.implementations.crypto.ids",
+            }
     assert "quant_research_platform.sources" not in research_sources
 
     profile = (SOURCE_ROOT / "profiles" / "research.py").read_text(encoding="utf-8")

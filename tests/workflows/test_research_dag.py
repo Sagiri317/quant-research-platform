@@ -237,8 +237,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
 
     configuration = research_configuration(development=("2019-01-01", "2019-06-30"))
     configuration["portfolios"] = []
-    configuration["evaluation"]["labels"] = ["label"]
-    configuration["evaluation"]["primary_label"] = "label"
+    # Keep registered statistics labels; the synthetic dataset deliberately lacks them.
     for model in configuration["models"]:
         spec = model_catalog.get(model["model_id"])
         model.update(
@@ -675,6 +674,7 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
         "trading_calendar",
         "a_share_fee_schedule",
         "market_panel_1d",
+        *a_share.portfolio_candidates()[0].risk_context_target_ids,
     )
     assert (
         "benchmark_weights"
@@ -2139,7 +2139,7 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
         "max_position_quantity"
     ] = 999.0
     assert bound.protocol(configuration["scenario_id"]).manifest() == frozen
-    assert frozen["holdout_status"] == "HOLDOUT_LOCKED"
+    assert "holdout_status" not in frozen
     for field in (
         "folds",
         "final_holdout",
@@ -2182,7 +2182,7 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     assert result.exit_code == 0, result.output
     published = json.loads(result.output)
     assert published["protocol"]["research_plan"] == _crypto_plan_payload()
-    assert published["protocol"]["holdout_status"] == "HOLDOUT_LOCKED"
+    assert "holdout_status" not in published["protocol"]
     assert published["status"] == "BLOCKED"
     assert "research_plan" not in profile.protocol().manifest()
 

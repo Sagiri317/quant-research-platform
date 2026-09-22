@@ -4,7 +4,7 @@ from collections.abc import Mapping
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.contracts.columns import (
-    PLATFORM_ENTITY_TIME_KEY,
+    PLATFORM_ASSET_TIME_KEY,
     ColumnRole,
 )
 from quant_research_platform.contracts.data import DataFrequency, DataGrain
@@ -34,7 +34,7 @@ def make_demo_research_dataset_spec(
     filter_column_roles: Mapping[str, ColumnRole] | None = None,
     frequency: DataFrequency = DataFrequency.DAILY,
     grain: DataGrain = DataGrain.RESEARCH_ROW,
-    primary_key: tuple[str, ...] = PLATFORM_ENTITY_TIME_KEY,
+    primary_key: tuple[str, ...] = PLATFORM_ASSET_TIME_KEY,
     partition_columns: tuple[str, ...] = ("year",),
 ) -> ResearchDatasetSpec:
     defaults = _demo_research_dataset_defaults()
@@ -83,7 +83,7 @@ def _research_dataset_spec_from_defaults(
     filter_column_roles: Mapping[str, ColumnRole] | None = None,
     frequency: DataFrequency = DataFrequency.DAILY,
     grain: DataGrain = DataGrain.RESEARCH_ROW,
-    primary_key: tuple[str, ...] = PLATFORM_ENTITY_TIME_KEY,
+    primary_key: tuple[str, ...] = PLATFORM_ASSET_TIME_KEY,
     partition_columns: tuple[str, ...] = ("year",),
 ) -> ResearchDatasetSpec:
     if data_id == "demo" and defaults["data_id"] != "demo":

@@ -20,6 +20,7 @@ class LabelDefinition:
     lookahead: int
     entry_rule: str
     exit_rule: str
+    horizon_unit: str = "market_sessions"
     definition_version: str = "0.1"
 
     def __post_init__(self) -> None:
@@ -40,6 +41,8 @@ class LabelDefinition:
             raise ValueError("label_timing_required")
         if not isinstance(self.horizon, int) or isinstance(self.horizon, bool):
             raise ValueError("label_horizon_must_be_positive")
+        if self.horizon_unit not in {"market_sessions", "milliseconds"}:
+            raise ValueError("label_horizon_unit_invalid")
         if self.horizon <= 0:
             raise ValueError("label_horizon_must_be_positive")
         if not isinstance(self.lookahead, int) or isinstance(self.lookahead, bool):
@@ -66,6 +69,7 @@ class LabelDefinition:
             "available_at_column": f"{self.output_column}_available_at",
             "label_timing": self.label_timing,
             "horizon": self.horizon,
+            "horizon_unit": self.horizon_unit,
             "lookahead": self.lookahead,
             "entry_rule": self.entry_rule,
             "exit_rule": self.exit_rule,

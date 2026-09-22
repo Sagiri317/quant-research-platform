@@ -35,6 +35,7 @@ from quant_research_platform.research.predictions.alignment import (
 )
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_EXECUTION_CONTEXT_COLUMNS,
+    CryptoMakerPlan,
     execution_windows,
 )
 from quant_research_platform.runtime.resources import (
@@ -237,7 +238,9 @@ def produce_taker_ledger(
         taker_fee_bps=execution["taker_fee_bps"],
         markout_horizon_ms=execution["markout_horizon_ms"],
     )
-    windows = execution_windows(plan, output_window)
+    windows = execution_windows(
+        plan, output_window, access_window=protocol_manifest["access_window"]
+    )
     bounds = _window_bounds(windows)
     dataset = dataset_catalog.get(protocol_manifest["scenario_id"])
     panel = _panel(layout, upstream_identities)
@@ -396,7 +399,12 @@ def produce_maker_calibration(
         expected_identity=upstream_identities[model_target],
         trial_layout=layout,
     )
-    selected_folds = {fold for fold, _window in execution_windows(plan, time_window)}
+    selected_folds = {
+        fold
+        for fold, _window in execution_windows(
+            plan, time_window, access_window=protocol_manifest["access_window"]
+        )
+    }
     sample_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
     event_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_events.parquet"]
     integers = {
@@ -668,7 +676,9 @@ def produce_maker_ledger(
     read_statistics_artifact,
 ):
     plan = protocol_manifest["research_plan"]
-    windows = execution_windows(plan, output_window)
+    windows = execution_windows(
+        plan, output_window, access_window=protocol_manifest["access_window"]
+    )
     bounds = _window_bounds(windows)
     config = _maker_config(plan, candidate.asset_id)
     panel = _panel(layout, upstream_identities)
@@ -1113,8 +1123,7 @@ def validate_maker_calibration(artifact, envelope):
                 expiry = buy.prediction_end.value
                 if not (
                     beginning <= decision <= cutoff
-                    and expiry
-                    == decision + protocol["maker_quote_horizon_ms"] * 1000000
+                    and expiry == decision + CryptoMakerPlan.quote_horizon_ms * 1000000
                     and expiry <= buy.label_available_at.value <= cutoff
                 ):
                     raise ValueError("crypto_calibration_outcome_not_mature")
@@ -1195,7 +1204,7 @@ def validate_maker_calibration(artifact, envelope):
                                     new_order=order,
                                     active_order=None,
                                     commands=(),
-                                    lifetime_ns=protocol["maker_quote_horizon_ms"]
+                                    lifetime_ns=CryptoMakerPlan.quote_horizon_ms
                                     * 1000000,
                                     replace_quantity=row.quote_quantity,
                                 )

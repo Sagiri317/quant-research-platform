@@ -20,7 +20,6 @@ def record():
         },
         "portfolio_statistics": {},
         "portfolio_candidates": (),
-        "holdout_status": "HOLDOUT_LOCKED",
         "holdout_window": {},
     }
     payload = {"protocol": protocol, "operation_evidence": {}, "holdout_evidence": {}}
@@ -109,7 +108,7 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
     checked = []
     monkeypatch.setattr(
         research,
-        "_validate_reference",
+        "read_validated_reference",
         lambda layout, result: checked.append(result.target_id),
     )
     manifest = {

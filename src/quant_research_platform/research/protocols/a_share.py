@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date
 
 import pandas as pd
@@ -17,7 +17,6 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
-from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
@@ -26,6 +25,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import TargetSpec
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.markets.implementations.a_share import ids as market_ids
 from quant_research_platform.research.factors.expectations.definitions import (
     EXPECTATIONS_FACTORS,
     expectations_factor_definitions,
@@ -47,12 +47,11 @@ from quant_research_platform.research.labels.forward_returns import (
     forward_return_label_column,
 )
 from quant_research_platform.research.portfolios.accounting import AlphaCalibration
+from quant_research_platform.research.portfolios.optimizer import OptimizerConfig
+from quant_research_platform.research.portfolios.risk import FactorRiskConfig
 from quant_research_platform.research.randomness import ROOT_SEED
 
-MARKET_ID = MarketId("a_share")
 PROTOCOL_ID = "a_share_low_frequency"
-MARKET_PANEL_ID = "market_panel_1d"
-PRICE_VOLUME_DATA_ID = "price_volume_facts"
 MARKET_MODEL_FACTORS = ("beta_252d", "residual_volatility_60d")
 RESEARCH_DATASET_IDS = {
     "pv_all": "pv_all",
@@ -86,24 +85,16 @@ def quarter_id_for_fold(fold: ExperimentFold) -> str:
     return f"{year}Q{quarter}"
 
 
-INITIAL_NAV = 1_000_000_000.0
-PRIMARY_PARTICIPATION = 0.05
-PARTICIPATION_SENSITIVITIES = (0.01, 0.02, 0.05, 0.10)
-FIXED_SLIPPAGE_BPS = 5.0
-IMPACT_BPS = 25.0
-COMMISSION_BPS = 3.0
 EXECUTION_ASSUMPTIONS = ExecutionAssumptions(
-    initial_nav=INITIAL_NAV,
-    slippage_bps=FIXED_SLIPPAGE_BPS,
-    impact_bps=IMPACT_BPS,
-    adv_participation=PRIMARY_PARTICIPATION,
-    adv_sensitivities=PARTICIPATION_SENSITIVITIES,
+    initial_nav=1_000_000_000.0,
+    slippage_bps=5.0,
+    impact_bps=25.0,
+    adv_participation=0.05,
+    adv_sensitivities=(0.01, 0.02, 0.05, 0.10),
 )
-ANNUALIZATION = 252
 STATISTICS_BLOCK = 20
 STATISTICS_REPETITIONS = 10_000
 HAC_LAG = 19
-ROBUSTNESS_TIME_DECAY_HALF_LIFE = 756
 RISK_STYLE_COLUMNS = (
     "log_float_market_cap",
     "beta_252d",
@@ -111,13 +102,6 @@ RISK_STYLE_COLUMNS = (
     "residual_volatility_60d",
     "amihud_60d",
     "earnings_yield",
-)
-PORTFOLIO_CANDIDATES = (
-    "ew_rank_top20_equal_weight",
-    "champion_top20_equal_weight",
-    "champion_top20_float_cap",
-    "champion_csi500_enhanced",
-    "champion_csi1000_enhanced",
 )
 
 
@@ -129,6 +113,8 @@ class AShareProtocol:
     frozen_development: dict[str, object] | None = None
     frozen_alpha: AlphaCalibration | None = None
     configuration_json: str | None = None
+    risk_config: FactorRiskConfig = FactorRiskConfig()
+    optimizer_config: OptimizerConfig = OptimizerConfig()
 
     def __post_init__(self) -> None:
         if self.scenario_id not in SCENARIO_IDS:
@@ -217,54 +203,10 @@ class AShareProtocol:
                 "end": HOLDOUT_END.isoformat(),
             },
             "model_chronology": {"validation_months": 12},
-            "factor_columns": list(self.factor_columns),
-            "label_horizons": list(LABEL_HORIZONS),
-            "primary_label": self.configuration()["evaluation"]["primary_label"]
-            if self.configuration_json is not None
-            else PRIMARY_LABEL_COLUMN,
-            "primary_label_available_at": (
-                self.configuration()["evaluation"]["primary_label"] + "_available_at"
-                if self.configuration_json is not None
-                else forward_return_available_at_column(20)
-            ),
-            "model_target": MODEL_TARGET_COLUMN,
-            "model_ladder": [
-                "single_factor_diagnostic",
-                *(model["model_algorithm"] for model in self.configuration()["models"]),
-            ]
-            if self.configuration_json is not None
-            else [],
-            "selection_tie_break": [
-                model["model_algorithm"] for model in self.configuration()["models"]
-            ]
-            if self.configuration_json is not None
-            else [],
-            "sample_weight": "equal_date_total_equal_sum_n_train",
-            "primary_time_decay": None,
-            "robustness_time_decay_half_life": ROBUSTNESS_TIME_DECAY_HALF_LIFE,
-            "transform_order": [
-                "eligible",
-                "mad_winsor",
-                "neutralize",
-                "zscore",
-            ],
             "root_seed": self.root_seed,
             "benchmark_total_return_indices": {}
             if self.scenario_id == "pv_expanded"
             else {"csi500": "H00905", "csi1000": "H00852"},
-            "holding_attribution": {
-                "exposures_at": "decision_close_t",
-                "returns": "execution_open_s_to_endpoint_open_e",
-                "contribution_weights": "post_trade_notional_over_before_nav",
-                "display_exposures": "post_trade_notional_over_post_nav",
-                "reference_basket": (
-                    "decision_known_benchmark_weights_drifted_to_entry_open"
-                ),
-                "factor_fit_statistical_weights": "sqrt_prior_float_market_cap",
-                "residual_unexplained": (
-                    "stock_residual_difference_plus_reference_minus_official_return"
-                ),
-            },
             "execution_assumptions": {
                 "initial_nav": EXECUTION_ASSUMPTIONS.initial_nav,
                 "valuation_currency": "CNY",
@@ -273,20 +215,8 @@ class AShareProtocol:
                 "adv_participation": EXECUTION_ASSUMPTIONS.adv_participation,
                 "adv_sensitivities": list(EXECUTION_ASSUMPTIONS.adv_sensitivities),
             },
-            "risk": {
-                "annualization": ANNUALIZATION,
-                "factor_window": 504,
-                "factor_half_life": 126,
-                "specific_window": 252,
-                "specific_half_life": 63,
-                "hard_constraints": {
-                    "active_name": 0.005,
-                    "tracking_error": 0.05,
-                    "target_turnover": 0.20,
-                    "industry_active": 0.02,
-                    "style_active": 0.20,
-                },
-            },
+            "risk": asdict(self.risk_config),
+            "optimizer": asdict(self.optimizer_config),
             "statistics": {
                 "hac_lag": HAC_LAG,
                 "bootstrap_block": STATISTICS_BLOCK,
@@ -294,22 +224,99 @@ class AShareProtocol:
                 "fdr_primary": "BH_5pct",
                 "fdr_robustness": "BY_5pct",
                 "cscv_blocks": 10,
-                "cscv_combinations": 252,
                 "factor_fdr_families": self.factor_fdr_families,
-                "fama_macbeth_core_factors": list(self.factor_columns),
+                "fama_macbeth_core_factors": [
+                    item.output_column
+                    for item in factor_catalog().list()
+                    if item.factor_set is FactorSet.CORE
+                    and item.output_column in self.factor_columns
+                ],
             },
             "portfolio_candidates": [
                 candidate.candidate_id for candidate in self.portfolio_candidates()
             ],
-            "risk_styles": list(
-                RISK_STYLE_COLUMNS[:-1]
-                if not any(
-                    candidate.benchmark_id for candidate in self.portfolio_candidates()
-                )
-                else RISK_STYLE_COLUMNS
-            ),
-            "required_terminals": list(self.terminal_targets("research run")),
         }
+
+    def target_window(self, action, data_spec, window, target_id=None):
+        from quant_research_platform.contracts.data import (
+            InterimDataSpec,
+            ProcessedDataSpec,
+        )
+
+        if action != "research run":
+            return window
+        if isinstance(data_spec, (InterimDataSpec, ProcessedDataSpec)):
+            return self.data_window
+        if isinstance(data_spec, ResearchDatasetSpec):
+            return self.formal_dataset_window
+        if self.access_window == "holdout":
+            return window
+        if target_id in {
+            f"{self.scenario_id}_evaluation",
+            f"{self.scenario_id}_statistics",
+        }:
+            return analysis_windows(self.manifest(), window)[0]
+        if target_id in {
+            self.model_selection_target_id,
+            self.persisted_prediction_target_id,
+        }:
+            return TimeWindow(
+                max(
+                    pd.Timestamp(self.manifest()["development_window"]["start"]),
+                    pd.Timestamp(window.start) - pd.DateOffset(months=12),
+                ).date(),
+                pd.Timestamp(window.end).date(),
+            )
+        return window
+
+    def frozen_target_ids(self):
+        return (self.model_selection_target_id,)
+
+    def freeze_development(self, record, references, frozen, artifacts):
+        from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+        from quant_research_platform.research.portfolios.production import (
+            frozen_alpha_calibration,
+        )
+
+        persisted = artifacts[self.model_selection_target_id]
+        if max(persisted.quarterly_selections) != str(
+            pd.Period(self.manifest()["development_window"]["end"], freq="Q")
+        ):
+            raise ValueError("holdout_development_model_quarter_invalid")
+        calibration = calibration_date = blocker = None
+        sources = []
+        for candidate in self.portfolio_candidates():
+            if candidate.construction != "benchmark_enhanced":
+                continue
+            source = references[f"{self.scenario_id}_{candidate.candidate_id}_ledger"]
+            calibration_result = []
+
+            def consume(batches, *, calibration_result=calibration_result):
+                calibration_result.append(
+                    frozen_alpha_calibration(
+                        batches, cutoff=pd.Timestamp(record.research_window["end"])
+                    )
+                )
+
+            try:
+                artifacts[source.target_id](consume_batches=consume)
+                ((current, observed_at),) = calibration_result
+            except PortfolioTargetBlocked as exc:
+                blocker = str(exc)
+                break
+            if calibration is not None and (
+                current != calibration or observed_at != calibration_date
+            ):
+                raise ValueError("holdout_alpha_sources_disagree")
+            calibration, calibration_date = current, observed_at
+            sources.append({"reference": source.payload(), "observed_at": observed_at})
+        frozen["alpha_sources"] = sources
+        return replace(
+            self,
+            access_window="holdout",
+            frozen_development=frozen,
+            frozen_alpha=calibration,
+        ), blocker
 
     def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
         if action != "research run":
@@ -365,23 +372,28 @@ class AShareProtocol:
             *portfolios,
             TargetSpec(
                 f"{dataset}_portfolio_statistics",
-                dependencies=(
-                    *(item.target_id for item in portfolios),
-                    dataset,
-                    "market_panel_1d",
-                    "trading_calendar",
-                    *(
-                        (PRICE_VOLUME_DATA_ID,)
-                        if not any(
-                            candidate.benchmark_id for candidate in portfolio_candidates
+                dependencies=tuple(
+                    dict.fromkeys(
+                        (
+                            *(item.target_id for item in portfolios),
+                            dataset,
+                            "market_panel_1d",
+                            "trading_calendar",
+                            *(
+                                (market_ids.PRICE_VOLUME_DATA_ID,)
+                                if not any(
+                                    candidate.benchmark_id
+                                    for candidate in portfolio_candidates
+                                )
+                                else ("benchmark_weights", "index_market")
+                            ),
+                            *(
+                                target_id
+                                for candidate in portfolio_candidates
+                                for target_id in candidate.risk_context_target_ids
+                            ),
                         )
-                        else ("benchmark_weights", "index_market")
-                    ),
-                    *dict.fromkeys(
-                        target_id
-                        for candidate in portfolio_candidates
-                        for target_id in candidate.risk_context_target_ids
-                    ),
+                    )
                 ),
                 producer_id=f"{dataset}_portfolio_statistics",
             ),
@@ -432,15 +444,17 @@ class AShareProtocol:
                     benchmark_weights_target_id="benchmark_weights"
                     if enhanced
                     else None,
-                    risk_style_columns=RISK_STYLE_COLUMNS if enhanced else (),
+                    risk_style_columns=RISK_STYLE_COLUMNS
+                    if enhanced
+                    else RISK_STYLE_COLUMNS[:-1],
                     risk_context_target_ids=(
-                        PRICE_VOLUME_DATA_ID,
+                        market_ids.PRICE_VOLUME_DATA_ID,
                         "fundamental_factors",
                     )
                     if enhanced
-                    else (),
+                    else (market_ids.PRICE_VOLUME_DATA_ID,),
                     research_dataset_id=self.scenario_id,
-                    market_panel_target_id=MARKET_PANEL_ID,
+                    market_panel_target_id=market_ids.MARKET_PANEL_ID,
                     execution_mask_target_id="execution_mask",
                     trading_calendar_target_id="trading_calendar",
                     fee_schedule_target_id="a_share_fee_schedule",
@@ -566,14 +580,14 @@ def factor_catalog() -> FactorCatalog:
     return FactorCatalog(
         (
             *price_volume_factor_definitions(
-                market_id=MARKET_ID,
-                required_input_data_id=PRICE_VOLUME_DATA_ID,
+                market_id=market_ids.MARKET_ID,
+                required_input_data_id=market_ids.PRICE_VOLUME_DATA_ID,
                 factor_columns=PRICE_VOLUME_LIBRARY,
             ),
             *(
                 FactorDefinition(
                     factor_id=column,
-                    market_id=MARKET_ID,
+                    market_id=market_ids.MARKET_ID,
                     factor_set=FactorSet.STANDARD,
                     input_columns=tuple(
                         dict.fromkeys(
@@ -601,11 +615,11 @@ def factor_catalog() -> FactorCatalog:
                 for column in MARKET_MODEL_FACTORS
             ),
             *fundamental_factor_definitions(
-                market_id=MARKET_ID,
+                market_id=market_ids.MARKET_ID,
                 required_input_data_id="fundamental_pit",
             ),
             *expectations_factor_definitions(
-                market_id=MARKET_ID,
+                market_id=market_ids.MARKET_ID,
                 required_input_data_id="analyst_forecast",
             ),
         )
@@ -616,7 +630,7 @@ def label_definitions() -> tuple[LabelDefinition, ...]:
     return tuple(
         LabelDefinition(
             label_id=f"forward_return_{horizon}d",
-            market_id=MARKET_ID,
+            market_id=market_ids.MARKET_ID,
             family="forward_return",
             input_columns=("adj_open", "can_enter"),
             output_column=forward_return_label_column(horizon),
@@ -638,7 +652,7 @@ def evaluation_catalog() -> EvaluationCatalog:
     return EvaluationCatalog(
         EvaluationSpec(
             evaluation_id=f"{selected}_evaluation",
-            market_id=MARKET_ID,
+            market_id=market_ids.MARKET_ID,
             research_dataset_id=RESEARCH_DATASET_IDS[selected],
             signals=tuple(
                 SignalSpec(
@@ -716,7 +730,11 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
             for column in all_columns
         }
         transforms = canonical_feature_transforms(factor_columns)
-        input_data_ids = [MARKET_PANEL_ID, PRICE_VOLUME_DATA_ID, "forward_returns"]
+        input_data_ids = [
+            market_ids.MARKET_PANEL_ID,
+            market_ids.PRICE_VOLUME_DATA_ID,
+            "forward_returns",
+        ]
         if set(factor_columns).intersection(MARKET_MODEL_FACTORS):
             input_data_ids.append("market_model_factors")
         if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
@@ -726,9 +744,9 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
         specs.append(
             ResearchDatasetSpec(
                 data_id=RESEARCH_DATASET_IDS[scenario_id],
-                market_id=MARKET_ID,
+                market_id=market_ids.MARKET_ID,
                 input_data_ids=tuple(input_data_ids),
-                base_input_data_id=MARKET_PANEL_ID,
+                base_input_data_id=market_ids.MARKET_PANEL_ID,
                 factor_columns=factor_columns,
                 feature_columns=feature_columns,
                 feature_transforms=transforms,

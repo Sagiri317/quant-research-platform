@@ -26,6 +26,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
     PortfolioValuation,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.helpers.binance_hft import KNOWN_NO_FUNDING
 from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
@@ -517,6 +518,7 @@ def _session(
 def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
     tmp_path: Path,
     long_path: bool,
+    monkeypatch,
 ) -> None:
     if long_path:
         tmp_path = tmp_path / ("long" * 25) / ("path" * 25)
@@ -550,10 +552,40 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
             tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(first, second)
         )
 
-    artifact = read_portfolio_ledger_artifact(
-        root,
-        expected_identity=root.name,
-    )
+    inspected = []
+    original_batches = ledger_artifact._iter_batches
+
+    def counted_batches(*args):
+        for batch in original_batches(*args):
+            inspected.append(batch.sequence)
+            yield batch
+
+    def consume_first(batches):
+        assert next(batches).sequence == 0
+        batches.close()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_artifact, "_iter_batches", counted_batches)
+        artifact = read_portfolio_ledger_artifact(
+            root,
+            expected_identity=root.name,
+            consume_batches=consume_first,
+        )
+    assert inspected == [0, 1]
+
+    def invalid_tail(*args):
+        with closing_iterator(original_batches(*args)) as batches:
+            yield next(batches)
+            raise ValueError("synthetic_tail_invalid")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ledger_artifact, "_iter_batches", invalid_tail)
+        with pytest.raises(ValueError, match="synthetic_tail_invalid"):
+            read_portfolio_ledger_artifact(
+                root,
+                expected_identity=root.name,
+                consume_batches=consume_first,
+            )
     if long_path:
         assert len(str(root / "trades.parquet")) > 260
     chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
@@ -1171,7 +1203,7 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
                     ValueError, match="holdout_alpha_source_after_cutoff"
                 ) as caught:
                     frozen_alpha_calibration(
-                        artifact, cutoff=pd.Timestamp("2018-12-31")
+                        artifact.iter_chunks(), cutoff=pd.Timestamp("2018-12-31")
                     )
             else:
                 chunks = artifact.iter_chunks()
@@ -1265,7 +1297,9 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
     with pytest.raises(
         PortfolioTargetBlocked, match="holdout_alpha_calibration_undefined"
     ):
-        frozen_alpha_calibration(artifact, cutoff=pd.Timestamp("2023-12-31"))
+        frozen_alpha_calibration(
+            artifact.iter_chunks(), cutoff=pd.Timestamp("2023-12-31")
+        )
 
 
 @pytest.mark.parametrize("alpha_exponent", (0, 600, -600))
@@ -1329,7 +1363,9 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
     )
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    frozen, _ = frozen_alpha_calibration(artifact, cutoff=pd.Timestamp("2019-12-31"))
+    frozen, _ = frozen_alpha_calibration(
+        artifact.iter_chunks(), cutoff=pd.Timestamp("2019-12-31")
+    )
     assert frozen == calibration
     summary = ledger_artifact.summarize_portfolio_ledger(artifact)
     assert summary["alpha_calibration"]["inference_status"] == "UNDEFINED"

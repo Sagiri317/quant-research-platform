@@ -101,6 +101,11 @@ def test_owner_layer_import_boundaries_are_enforced(
     violations: list[str] = []
     for root, forbidden_prefixes in LAYER_BOUNDARIES.items():
         for edge in import_edges_under(import_edges, SOURCE_ROOT / root):
+            if root == "research" and edge.module in {
+                "quant_research_platform.markets.implementations.a_share.ids",
+                "quant_research_platform.markets.implementations.crypto.ids",
+            }:
+                continue
             if any(edge.module.startswith(prefix) for prefix in forbidden_prefixes):
                 violations.append(f"{edge.path.as_posix()}:{edge.lineno}:{edge.module}")
 

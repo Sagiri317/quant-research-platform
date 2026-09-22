@@ -633,7 +633,7 @@ def calibrate_expected_alpha(
     minimum_coverage: float = 0.8,
     minimum_valid_dates: int = 6,
 ) -> AlphaCalibration:
-    """Calibrate expected alpha with equal-date weighted pooled OLS."""
+    """Calibrate expected alpha with equal-timestamp weighted pooled OLS."""
 
     required = {"timestamp", alpha_column, return_column}
     if not isinstance(frame, pd.DataFrame) or not required.issubset(frame.columns):

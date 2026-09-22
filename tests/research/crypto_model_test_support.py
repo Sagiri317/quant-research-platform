@@ -268,7 +268,9 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
                     ),
                     layout=StorageLayout(staging),
                     output_chunks=(frame,),
-                    model_metadata=saved.prediction_lineage(entry["model_id"]),
+                    model_metadata=saved.prediction_lineage(
+                        entry["model_id"], TimeWindow(spec.test_start, spec.test_end)
+                    ),
                     prediction_metadata_factory=lambda: pytest.fail(
                         "invalid row must reject before metadata publication"
                     ),

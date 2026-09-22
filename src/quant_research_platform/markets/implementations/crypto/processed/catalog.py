@@ -6,7 +6,7 @@ import json
 
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import (
-    PLATFORM_ENTITY_TIME_KEY,
+    PLATFORM_ASSET_TIME_KEY,
     ColumnRole,
 )
 from quant_research_platform.contracts.data import (
@@ -15,27 +15,28 @@ from quant_research_platform.contracts.data import (
     ProcessedDataKind,
     ProcessedDataSpec,
 )
+from quant_research_platform.markets.implementations.crypto.ids import (
+    HFT_CROSS_ASSET_DATA_ID,
+    HFT_DERIVATIVE_DATA_ID,
+    HFT_EXTERNAL_DATA_IDS,
+    HFT_INFORMATION_PANEL_DATA_ID,
+    HFT_INFORMATION_STATE_DATA_ID,
+    HFT_SOL_PANEL_DATA_ID,
+    HFT_SPOT_CONTEXT_DATA_ID,
+    HFT_SPOT_PANEL_DATA_ID,
+)
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_CROSS_ASSET_CONTEXT_COLUMNS,
-    HFT_CROSS_ASSET_DATA_ID,
     HFT_CROSS_ASSET_FACTOR_COLUMNS,
     HFT_DERIVATIVE_CONTEXT_COLUMNS,
-    HFT_DERIVATIVE_DATA_ID,
     HFT_DERIVATIVE_FACTOR_COLUMNS,
     HFT_EXTERNAL_CLOCK_FIELDS,
-    HFT_EXTERNAL_DATA_IDS,
     HFT_EXTERNAL_FIELDS,
     HFT_FACTOR_COLUMNS,
     HFT_INFORMATION_COLUMNS,
-    HFT_INFORMATION_PANEL_DATA_ID,
-    HFT_INFORMATION_STATE_DATA_ID,
-    HFT_LABEL_AVAILABILITY_COLUMNS,
-    HFT_LABEL_COLUMNS,
-    HFT_SOL_PANEL_DATA_ID,
     HFT_SPOT_CONTEXT_COLUMNS,
-    HFT_SPOT_CONTEXT_DATA_ID,
     HFT_SPOT_FACTOR_COLUMNS,
-    HFT_SPOT_PANEL_DATA_ID,
+    label_catalog,
 )
 
 HFT_PANEL_CONTEXT_COLUMNS = (
@@ -71,7 +72,7 @@ HFT_PANEL_CONTEXT_COLUMNS = (
     "observed_taker_buy_volume_100ms",
     "observed_taker_sell_volume_100ms",
 )
-HFT_PANEL_COLUMNS = (*PLATFORM_ENTITY_TIME_KEY, *HFT_PANEL_CONTEXT_COLUMNS, "eligible")
+HFT_PANEL_COLUMNS = (*PLATFORM_ASSET_TIME_KEY, *HFT_PANEL_CONTEXT_COLUMNS, "eligible")
 
 
 def hft_processed_catalog() -> ProcessedDataCatalog:
@@ -85,7 +86,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 "binance_futures_microstructure_factors_100ms",
                 ProcessedDataKind.FACTOR,
-                (*PLATFORM_ENTITY_TIME_KEY, *HFT_FACTOR_COLUMNS),
+                (*PLATFORM_ASSET_TIME_KEY, *HFT_FACTOR_COLUMNS),
                 processed_input_data_ids=("binance_futures_l2_panel_100ms",),
                 semantic_role=ColumnRole.FACTOR,
                 parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
@@ -103,7 +104,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 HFT_INFORMATION_STATE_DATA_ID,
                 ProcessedDataKind.PANEL,
-                (*PLATFORM_ENTITY_TIME_KEY, *HFT_INFORMATION_COLUMNS),
+                (*PLATFORM_ASSET_TIME_KEY, *HFT_INFORMATION_COLUMNS),
                 processed_input_data_ids=("binance_futures_l2_panel_100ms",),
                 parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
             ),
@@ -111,7 +112,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 HFT_CROSS_ASSET_DATA_ID,
                 ProcessedDataKind.FACTOR,
                 (
-                    *PLATFORM_ENTITY_TIME_KEY,
+                    *PLATFORM_ASSET_TIME_KEY,
                     *HFT_CROSS_ASSET_FACTOR_COLUMNS,
                     *HFT_CROSS_ASSET_CONTEXT_COLUMNS,
                 ),
@@ -130,7 +131,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 HFT_SPOT_CONTEXT_DATA_ID,
                 ProcessedDataKind.FACTOR,
                 (
-                    *PLATFORM_ENTITY_TIME_KEY,
+                    *PLATFORM_ASSET_TIME_KEY,
                     *HFT_SPOT_FACTOR_COLUMNS,
                     *HFT_SPOT_CONTEXT_COLUMNS,
                 ),
@@ -144,7 +145,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 HFT_DERIVATIVE_DATA_ID,
                 ProcessedDataKind.FACTOR,
                 (
-                    *PLATFORM_ENTITY_TIME_KEY,
+                    *PLATFORM_ASSET_TIME_KEY,
                     *HFT_DERIVATIVE_FACTOR_COLUMNS,
                     *HFT_DERIVATIVE_CONTEXT_COLUMNS,
                 ),
@@ -156,7 +157,7 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                     data_id,
                     ProcessedDataKind.FACTOR,
                     (
-                        *PLATFORM_ENTITY_TIME_KEY,
+                        *PLATFORM_ASSET_TIME_KEY,
                         *(venue + "_" + field for field in HFT_EXTERNAL_FIELDS),
                         *(venue + "_" + field for field in HFT_EXTERNAL_CLOCK_FIELDS),
                     ),
@@ -169,13 +170,16 @@ def hft_processed_catalog() -> ProcessedDataCatalog:
                 "binance_futures_mid_labels_100ms",
                 ProcessedDataKind.LABEL,
                 (
-                    *PLATFORM_ENTITY_TIME_KEY,
-                    *HFT_LABEL_COLUMNS,
-                    *HFT_LABEL_AVAILABILITY_COLUMNS,
+                    *PLATFORM_ASSET_TIME_KEY,
+                    *(item.output_column for item in label_catalog().list()),
+                    *(item.available_at_column for item in label_catalog().list()),
                 ),
                 processed_input_data_ids=("binance_futures_l2_panel_100ms",),
                 semantic_role=ColumnRole.LABEL,
-                parameters={"asset_ids": ["btc_usdt", "eth_usdt"]},
+                parameters={
+                    "asset_ids": ["btc_usdt", "eth_usdt"],
+                    "labels": [item.to_manifest() for item in label_catalog().list()],
+                },
             ),
         )
     )
@@ -196,13 +200,13 @@ def _spec(
             ColumnRole.TIMESTAMP
             if column == "timestamp"
             else ColumnRole.KEY
-            if column in PLATFORM_ENTITY_TIME_KEY
+            if column in PLATFORM_ASSET_TIME_KEY
             else ColumnRole.UNIVERSE
             if column == "eligible"
             else ColumnRole.CONTEXT
             if column
             in (
-                *HFT_LABEL_AVAILABILITY_COLUMNS,
+                *(item.available_at_column for item in label_catalog().list()),
                 *HFT_DERIVATIVE_CONTEXT_COLUMNS,
                 *HFT_SPOT_CONTEXT_COLUMNS,
                 *HFT_CROSS_ASSET_CONTEXT_COLUMNS,
@@ -228,6 +232,6 @@ def _spec(
         frequency=DataFrequency.TICK,
         grain=DataGrain.RESEARCH_ROW,
         column_roles=roles,
-        primary_key=PLATFORM_ENTITY_TIME_KEY,
+        primary_key=PLATFORM_ASSET_TIME_KEY,
         partition_columns=("year",),
     )

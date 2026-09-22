@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from itertools import zip_longest
+from math import comb
 
 import numpy as np
 import pandas as pd
@@ -20,6 +21,7 @@ from quant_research_platform.research.portfolios.accounting import (
     portfolio_interval_economics,
 )
 from quant_research_platform.research.portfolios.risk import (
+    FactorRiskConfig,
     FactorRiskState,
     HoldingFactorInputs,
     holding_attribution,
@@ -239,7 +241,9 @@ def build_crypto_portfolio_statistics_tables(
     candidates = portfolio_candidates(protocol_manifest["portfolio_candidates"])
     plan = protocol_manifest["research_plan"]
     statistics_policy = protocol_manifest["portfolio_statistics"]
-    windows = execution_windows(plan, time_window)
+    windows = execution_windows(
+        plan, time_window, access_window=protocol_manifest["access_window"]
+    )
     bounds = tuple(
         (pd.Timestamp(window.start).value, pd.Timestamp(window.end).value)
         for _fold, window in windows
@@ -495,6 +499,7 @@ def iter_holding_factor_inputs(
     style_columns,
     risk_context_target_ids,
     benchmark_required,
+    risk_config: FactorRiskConfig | None = None,
 ):
     """Stream aligned inputs, retaining only decision/entry/end prices."""
     from quant_research_platform.contracts.time import TimeWindow
@@ -522,7 +527,7 @@ def iter_holding_factor_inputs(
         resource_policy=resource_policy,
     )
     market = MarketModelRiskState()
-    risk = FactorRiskState(style_columns=style_columns)
+    risk = FactorRiskState(style_columns=style_columns, config=risk_config)
     seen = set()
     panel_window = {}
     context_frames = {}
@@ -812,7 +817,14 @@ def build_portfolio_statistics_tables(
                 time_window=time_window,
                 resource_policy=resource_policy,
                 unified_trading_sessions=unified_trading_sessions,
-                style_columns=tuple(protocol_manifest["risk_styles"]),
+                style_columns=tuple(
+                    dict.fromkeys(
+                        column
+                        for candidate in candidates
+                        for column in candidate.risk_style_columns
+                    )
+                ),
+                risk_config=FactorRiskConfig(**protocol_manifest["risk"]),
                 benchmark_required=bool(codes),
                 risk_context_target_ids=("price_volume_facts",)
                 if not any(
@@ -1365,15 +1377,16 @@ def _portfolio_statistics_tables(
                             status="UNDEFINED" if value is None else "DEFINED",
                             reason=reason,
                             observation_count=len(matrix),
-                            candidate_count=5,
+                            candidate_count=len(ids),
                             access_window=access,
                         )
                     )
-            if len(matrix) >= 10:
+            blocks = protocol_manifest["statistics"]["cscv_blocks"]
+            if len(matrix) >= blocks:
                 result = cscv_pbo(
                     matrix,
-                    slice_count=10,
-                    max_combinations=252,
+                    slice_count=blocks,
+                    max_combinations=comb(blocks, blocks // 2),
                     return_roundoff=roundoff,
                 )
                 value, status, reason = result.pbo, result.status, result.reason or ""
@@ -1387,7 +1400,7 @@ def _portfolio_statistics_tables(
                     status=status,
                     reason=reason,
                     observation_count=len(matrix),
-                    candidate_count=5,
+                    candidate_count=len(ids),
                     access_window=access,
                 )
             )
@@ -1400,7 +1413,7 @@ def _portfolio_statistics_tables(
                     status="UNDEFINED",
                     reason="holdout_excluded",
                     observation_count=0,
-                    candidate_count=5,
+                    candidate_count=len(ids),
                     access_window=access,
                 )
             )

@@ -206,6 +206,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     def fitted():
         for spec, reference in zip(specs, references, strict=True):
             result, lease = _fit_selected_model_result(
+                training_counts={},
                 dataset_spec=dataset,
                 selected_spec=spec,
                 candidate_parameters=dict(spec.hyperparameters),
@@ -1385,6 +1386,7 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
 
     monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", fit_owned)
     _fit_selected_model_result(
+        training_counts={},
         dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
         selected_spec=base,
         candidate_parameters=dict(base.hyperparameters),
@@ -1606,6 +1608,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
     )
     with runtime_resource_policy_scope() as policy:
         winners, metadata, refs, indices = _select_model_family_winners(
+            training_counts={},
             selection_spec=prediction,
             dataset_spec=dataset,
             model_catalog=ModelCatalog((base,)),
@@ -1628,6 +1631,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             index == 0 and selected.hyperparameters["alpha"] == trial_alpha
         )  # Retained training rows times the selected lambda 10.
         result, lease = _fit_selected_model_result(
+            training_counts={},
             dataset_spec=dataset,
             selected_spec=selected,
             candidate_parameters=configuration["models"][0]["parameter_candidates"][
@@ -1834,6 +1838,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         frame.loc[frame.timestamp.ge("2019-01-01"), ["x", "label"]] *= 1000000.0
         later_winners, later_selection, later_refs, later_indices = (
             _select_model_family_winners(
+                training_counts={},
                 selection_spec=prediction,
                 dataset_spec=dataset,
                 model_catalog=ModelCatalog((base,)),
@@ -1856,6 +1861,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         assert later_selection == metadata
         assert later_refs != refs
         later, later_lease = _fit_selected_model_result(
+            training_counts={},
             dataset_spec=dataset,
             selected_spec=later_winners["ridge"],
             candidate_parameters=configuration["models"][0]["parameter_candidates"][
@@ -1988,7 +1994,7 @@ def test_linear_workspace_cap_rejects_before_weights_and_solver(
         raise AssertionError("linear_allocation_before_admission")
 
     monkeypatch.setattr(fitting, "_collect_training_frame_owned", collect)
-    monkeypatch.setattr(fitting, "equal_date_sample_weights", forbidden)
+    monkeypatch.setattr(fitting, "equal_timestamp_sample_weights", forbidden)
     monkeypatch.setattr(fitting.np.linalg, "lstsq", forbidden)
     with runtime_resource_policy_scope(policy):
         try:

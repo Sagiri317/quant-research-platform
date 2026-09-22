@@ -982,7 +982,7 @@ def _typed_category_value_payload(value: object) -> dict[str, Any]:
         if value.is_zero():
             value = Decimal(0)
         # A category cannot exceed the control manifest that must contain it.
-        from quant_research_platform.storage.manifests import _MAX_QRP_JSON_BYTES
+        from quant_research_platform.contracts.json_codec import MAX_QRP_JSON_BYTES
 
         sign, digits, exponent = value.as_tuple()
         size = sign + (
@@ -990,7 +990,7 @@ def _typed_category_value_payload(value: object) -> dict[str, Any]:
             if exponent >= 0
             else max(len(digits), 1 - exponent) + 1
         )
-        if size > _MAX_QRP_JSON_BYTES:
+        if size > MAX_QRP_JSON_BYTES:
             raise ValueError("dataset_logical_dtype_metadata_exceeds_payload_target")
         return {"type": "decimal", "value": format(value, "f")}
     if type(value) is date and type(value) is not datetime:

@@ -47,22 +47,15 @@ def build_crypto_evaluation_result(
     """Evaluate frozen development folds against labels mature within each fold."""
     spec = evaluation_catalog.get(evaluation_id)
     dataset = dataset_catalog.get(spec.research_dataset_id)
+    from quant_research_platform.research.protocols.crypto_hft import execution_windows
+
     windows = tuple(
-        TimeWindow(
-            max(
-                pd.Timestamp(fold["development_test"]["start"]),
-                pd.Timestamp(time_window.start),
-            ),
-            min(
-                pd.Timestamp(fold["development_test"]["end"]),
-                pd.Timestamp(time_window.end),
-            ),
+        window
+        for _fold, window in execution_windows(
+            protocol_manifest["research_plan"],
+            time_window,
+            access_window=protocol_manifest["access_window"],
         )
-        for fold in protocol_manifest["research_plan"]["folds"]
-        if pd.Timestamp(fold["development_test"]["end"])
-        >= pd.Timestamp(time_window.start)
-        and pd.Timestamp(fold["development_test"]["start"])
-        <= pd.Timestamp(time_window.end)
     )
     operation = ExitStack()
     policy = operation.enter_context(runtime_resource_policy_scope(resource_policy))

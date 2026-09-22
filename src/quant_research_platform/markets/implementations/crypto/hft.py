@@ -35,9 +35,9 @@ from quant_research_platform.research.protocols.crypto_hft import (
     HFT_EXTERNAL_FIELDS,
     HFT_FACTOR_COLUMNS,
     HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN,
-    HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS,
     HFT_SPOT_CONTEXT_COLUMNS,
     HFT_SPOT_FACTOR_COLUMNS,
+    label_catalog,
 )
 from quant_research_platform.runtime.resources import OwnedValue
 
@@ -1209,7 +1209,8 @@ def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFr
         )
         for kind in ("return", "direction"):
             output[f"future_mid_{kind}_{horizon}ms_available_at"] = available
-    if HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS in horizons:
+    proxy = label_catalog().get(HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN)
+    if proxy.horizon in horizons:
         best_bid_quantity = pd.Series(
             _finite_column(
                 frame,
@@ -1231,7 +1232,7 @@ def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFr
         if bool(taker_sell_volume.lt(0).any()):
             raise ValueError("hft_label_taker_sell_volume_invalid")
         grouped_sell = taker_sell_volume.groupby(segment_groups, sort=False)
-        steps = HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS // HFT_GRID_MS
+        steps = proxy.horizon // HFT_GRID_MS
         future_sell_volume = pd.concat(
             tuple(grouped_sell.shift(-step) for step in range(1, steps + 1)),
             axis=1,

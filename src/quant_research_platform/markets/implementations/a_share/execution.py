@@ -221,6 +221,108 @@ def require_fee_coverage(
         current += timedelta(days=1)
 
 
+@dataclass(frozen=True)
+class PreparedTradeCost:
+    """Effective fees shared by scalar execution and batched optimization."""
+
+    rates: tuple[float, float, float]
+    face_value: tuple[bool, bool, bool]
+    slippage: tuple[float, int]
+    impact: tuple[float, int]
+    source_identity: str
+
+    def components(self, notional, adv20, *, face_value_notional=None):
+        if (
+            np.asarray(notional).dtype.kind == "b"
+            or np.asarray(adv20).dtype.kind == "b"
+        ):
+            raise ValueError("a_share_trade_cost_inputs_invalid")
+        try:
+            amount_values = np.asarray(notional, dtype="float64")
+            adv_values = np.asarray(adv20, dtype="float64")
+        except (TypeError, ValueError) as exc:
+            raise ValueError("a_share_trade_cost_inputs_invalid") from exc
+        if (
+            amount_values.shape != adv_values.shape
+            or not np.isfinite(amount_values).all()
+            or not np.isfinite(adv_values).all()
+            or (amount_values < 0).any()
+            or (adv_values <= 0).any()
+        ):
+            raise ValueError("a_share_trade_cost_inputs_invalid")
+        if face_value_notional is not None:
+            face = np.asarray(face_value_notional, dtype="float64")
+            if (
+                np.asarray(face_value_notional).dtype.kind == "b"
+                or face.shape != amount_values.shape
+                or not np.isfinite(face).all()
+                or (face <= 0).any()
+            ):
+                raise ValueError("a_share_face_value_notional_invalid")
+        elif any(self.face_value):
+            raise ValueError("a_share_face_value_notional_required")
+        else:
+            face = None
+        fees = tuple(
+            (face if basis else amount_values) * rate
+            for basis, rate in zip(self.face_value, self.rates, strict=True)
+        )
+        amount, amount_exponent = np.frexp(amount_values)
+        adv_amount, adv_exponent = np.frexp(adv_values)
+        slippage_rate, slippage_exponent = self.slippage
+        impact_rate, impact_exponent = self.impact
+        root_exponent, odd_exponent = np.divmod(amount_exponent - adv_exponent, 2)
+        participation_root = np.sqrt(np.ldexp(amount / adv_amount, odd_exponent))
+        slippage = np.ldexp(
+            amount * slippage_rate / 10_000.0, amount_exponent + slippage_exponent
+        )
+        impact = np.ldexp(
+            amount * impact_rate / 10_000.0 * participation_root,
+            amount_exponent + impact_exponent + root_exponent,
+        )
+        result = (*fees, slippage, impact)
+        if any(not np.isfinite(value).all() or (value < 0).any() for value in result):
+            raise ValueError("trade_cost_components_invalid")
+        return result
+
+    def totals(self, notional, adv20):
+        commission, stamp, transfer, slippage, impact = self.components(notional, adv20)
+        return commission + stamp + transfer + slippage + impact
+
+    def trade(self, notional, adv20, *, face_value_notional=None):
+        values = self.components(
+            notional, adv20, face_value_notional=face_value_notional
+        )
+        return TradeCostComponents(
+            float(notional), *(float(value) for value in values), self.source_identity
+        )
+
+
+def prepare_trade_cost(execution_date, market, side, schedule, assumptions):
+    if not isinstance(schedule, FeeSchedule) or not isinstance(
+        assumptions, ExecutionAssumptions
+    ):
+        raise ValueError("a_share_trade_cost_inputs_invalid")
+    rules = {
+        rule.fee_code: rule
+        for rule in schedule.rules_for(execution_date, market=market, side=side)
+    }
+    codes = ("BROKER_COMMISSION", "STAMP_DUTY", "TRANSFER_FEE")
+    required = set(codes) - ({"STAMP_DUTY"} if side == "buy" else set())
+    if not required.issubset(rules):
+        raise ValueError("a_share_fee_schedule_missing")
+    return PreparedTradeCost(
+        tuple(rules[code].rate if code in required else 0.0 for code in codes),
+        tuple(
+            rules[code].basis == "face_value" if code in required else False
+            for code in codes
+        ),
+        np.frexp(assumptions.slippage_bps),
+        np.frexp(assumptions.impact_bps),
+        schedule.content_identity,
+    )
+
+
 def trade_cost(
     execution_date: date,
     market: str,
@@ -232,81 +334,10 @@ def trade_cost(
     *,
     face_value_notional: float | None = None,
 ) -> TradeCostComponents:
-    """Calculate statutory and modeled costs for one executed trade."""
-
-    if not isinstance(schedule, FeeSchedule) or not isinstance(
-        assumptions, ExecutionAssumptions
-    ):
-        raise ValueError("a_share_trade_cost_inputs_invalid")
-    try:
-        notional_value = float(notional)
-        adv_value = float(adv20)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("a_share_trade_cost_inputs_invalid") from exc
-    if (
-        isinstance(notional, bool)
-        or isinstance(adv20, bool)
-        or not np.isfinite(notional_value)
-        or not np.isfinite(adv_value)
-        or notional_value < 0.0
-        or adv_value <= 0.0
-    ):
-        raise ValueError("a_share_trade_cost_inputs_invalid")
-    if face_value_notional is not None:
-        try:
-            face_value = float(face_value_notional)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("a_share_face_value_notional_invalid") from exc
-        if (
-            isinstance(face_value_notional, bool)
-            or not np.isfinite(face_value)
-            or face_value <= 0.0
-        ):
-            raise ValueError("a_share_face_value_notional_invalid")
-    else:
-        face_value = None
-    rules = schedule.rules_for(execution_date, market=market, side=side)
-    required_codes = {"BROKER_COMMISSION", "TRANSFER_FEE"}
-    if side == "sell":
-        required_codes.add("STAMP_DUTY")
-    by_code: dict[str, FeeRule] = {rule.fee_code: rule for rule in rules}
-    if not required_codes.issubset(by_code):
-        raise ValueError("a_share_fee_schedule_missing")
-    fee_values: dict[str, float] = {}
-    for code in required_codes:
-        rule = by_code[code]
-        if rule.basis == "face_value":
-            if face_value is None:
-                raise ValueError("a_share_face_value_notional_required")
-            base = face_value
-        else:
-            base = notional_value
-        fee_values[code] = base * rule.rate
-    amount, amount_exponent = np.frexp(notional_value)
-    adv_amount, adv_exponent = np.frexp(adv_value)
-    slippage_rate, slippage_exponent = np.frexp(assumptions.slippage_bps)
-    impact_rate, impact_exponent = np.frexp(assumptions.impact_bps)
-    root_exponent, odd_exponent = divmod(amount_exponent - adv_exponent, 2)
-    participation_root = np.sqrt(np.ldexp(amount / adv_amount, odd_exponent))
-    slippage = np.ldexp(
-        amount * slippage_rate / 10_000.0, amount_exponent + slippage_exponent
-    )
-    impact = np.ldexp(
-        amount * impact_rate / 10_000.0 * participation_root,
-        amount_exponent + impact_exponent + root_exponent,
-    )
-    commission = fee_values["BROKER_COMMISSION"]
-    stamp_duty = fee_values.get("STAMP_DUTY", 0.0)
-    transfer_fee = fee_values["TRANSFER_FEE"]
-    return TradeCostComponents(
-        notional=notional_value,
-        commission_cost=float(commission),
-        stamp_duty_cost=float(stamp_duty),
-        transfer_fee_cost=float(transfer_fee),
-        slippage_cost=float(slippage),
-        impact_cost=float(impact),
-        source_identity=schedule.content_identity,
-    )
+    """Calculate statutory and modeled costs using the prepared cost owner."""
+    return prepare_trade_cost(
+        execution_date, market, side, schedule, assumptions
+    ).trade(notional, adv20, face_value_notional=face_value_notional)
 
 
 def _validate_fee_intervals(rules: tuple[FeeRule, ...]) -> None:

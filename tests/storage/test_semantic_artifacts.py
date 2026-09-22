@@ -373,7 +373,7 @@ def test_inventory_limit_failure_preserves_published_artifact_and_parent(
     del candidate_fields["instance_identity"], candidate_fields["status"]
     candidate_fields["semantic_metadata"] = {"candidate": True}
     candidate = build_business_manifest_envelope(**candidate_fields)
-    monkeypatch.setattr(storage, "_MAX_QRP_JSON_BYTES", 2048)
+    monkeypatch.setattr(storage, "MAX_QRP_JSON_BYTES", 2048)
 
     def writer(staging):
         for index in range(257):

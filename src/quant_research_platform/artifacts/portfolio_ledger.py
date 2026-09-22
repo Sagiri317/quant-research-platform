@@ -237,7 +237,9 @@ def read_portfolio_ledger_artifact(
     instance_root: Path,
     *,
     expected_identity: str,
+    consume_batches: Callable[[Iterator[PortfolioLedgerBatch]], object] | None = None,
 ) -> PortfolioLedgerArtifact:
+    """Validate once, optionally consuming batches during that same full pass."""
     envelope, members = read_semantic_artifact_record(
         instance_root, expected_identity=expected_identity
     )
@@ -248,7 +250,11 @@ def read_portfolio_ledger_artifact(
     artifact = PortfolioLedgerArtifact(
         Path(instance_root), expected_identity, _capital(envelope)
     )
-    with closing_iterator(artifact.iter_chunks()) as batches:
+    with closing_iterator(
+        _iter_batches(artifact.root, artifact.capital, envelope["research_window"])
+    ) as batches:
+        if consume_batches is not None:
+            consume_batches(batch for batch in batches)
         for _batch in batches:
             pass
     return artifact

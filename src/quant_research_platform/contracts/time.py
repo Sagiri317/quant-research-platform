@@ -26,7 +26,7 @@ class TimeWindow:
         object.__setattr__(self, "end", end)
 
 
-def is_intraday_time_window(time_window: TimeWindow) -> bool:
+def is_datetime_window(time_window: TimeWindow) -> bool:
     return isinstance(time_window.start, datetime)
 
 
@@ -80,7 +80,7 @@ def time_value_isoformat(
     raise ValueError("invalid_time_value")
 
 
-def is_intraday_time_value(value: date | datetime | str) -> bool:
+def is_datetime_value(value: date | datetime | str) -> bool:
     return isinstance(_coerce_bound(value), datetime)
 
 

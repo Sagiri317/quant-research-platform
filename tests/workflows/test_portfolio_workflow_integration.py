@@ -558,7 +558,6 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
             )
         ),
         producer_bindings=bindings,
-        schema_inventory_important_columns=(),
     )
 
 
@@ -664,6 +663,7 @@ def _prepare_model_artifacts(
     def fitted_families():
         for model_id, reference in zip(model_ids, references, strict=True):
             fitted, lease = _fit_selected_model_result(
+                training_counts={},
                 dataset_spec=profile.research_datasets.get("pv_all"),
                 selected_spec=profile.models.get(model_id),
                 candidate_parameters=dict(profile.models.get(model_id).hyperparameters),
@@ -722,7 +722,7 @@ def test_factor_and_model_windows_keep_separate_formal_boundaries(
     assert model_window == requested
     for target in ("pv_all_evaluation", "pv_all_statistics"):
         assert (
-            research._a_share_target_window(protocol, target, requested)
+            protocol.target_window("research run", None, requested, target)
             == factor_window
         )
 
@@ -742,6 +742,7 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_
         access_window="holdout",
         frozen_development={
             "run_id": "run_development",
+            "targets": {},
             "alpha_sources": [
                 {
                     "reference": {
@@ -1079,6 +1080,16 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", forbidden)
     monkeypatch.setattr(production, "_select_model_family_winners", forbidden)
     monkeypatch.setattr(portfolios, "calibrate_expected_alpha", forbidden)
+    from quant_research_platform.research.predictions import runner as predictions
+
+    loaded_sources = []
+    original_predictor_reader = predictions.read_quarterly_predictor
+
+    def counted_predictor(artifact, source_quarter, family, **kwargs):
+        loaded_sources.append((source_quarter, family))
+        return original_predictor_reader(artifact, source_quarter, family, **kwargs)
+
+    monkeypatch.setattr(predictions, "read_quarterly_predictor", counted_predictor)
     request = dict(
         profile=profile,
         layout=layout,
@@ -1144,7 +1155,9 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         raise PortfolioTargetBlocked("alpha_calibration_insufficient_observations")
 
     with monkeypatch.context() as preflight:
-        preflight.setattr(research, "frozen_alpha_calibration", unavailable_alpha)
+        from quant_research_platform.research.portfolios import production
+
+        preflight.setattr(production, "frozen_alpha_calibration", unavailable_alpha)
         preflight.setattr(research, "_execute_action", forbidden)
         planned_block = research.research_run(**request, plan=True)
         assert planned_block["status"] == "BLOCKED" and "run_id" not in planned_block
@@ -1172,6 +1185,8 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     previous = len(captured)
     holdout = research.research_run(**request)
     assert holdout["status"] == "COMPLETE", holdout
+    assert len(loaded_sources) == len(A_SHARE_MODEL_ALGORITHMS)
+    assert len(set(loaded_sources)) == len(loaded_sources)
     assert_one_capture(previous)
     record = read_research_run_record(layout.research_run_path(holdout["run_id"]))
     assert record.trial_ledgers == ()
@@ -1290,7 +1305,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 expected_identity=source.instance_identity,
             )
             calibration, _ = portfolios.frozen_alpha_calibration(
-                original, cutoff=pd.Timestamp("2023-12-31")
+                original.iter_chunks(), cutoff=pd.Timestamp("2023-12-31")
             )
             assert (
                 calibration.valid_rebalance_dates >= 6 and calibration.coverage >= 0.8

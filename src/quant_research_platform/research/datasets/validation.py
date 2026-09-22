@@ -7,7 +7,7 @@ from contextlib import nullcontext
 
 import pandas as pd
 
-from quant_research_platform.contracts.columns import PLATFORM_ENTITY_TIME_KEY
+from quant_research_platform.contracts.columns import PLATFORM_ASSET_TIME_KEY
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -20,7 +20,7 @@ def validate_research_dataset(
     *,
     require_all_columns: bool = True,
 ) -> None:
-    if spec.primary_key != PLATFORM_ENTITY_TIME_KEY:
+    if spec.primary_key != PLATFORM_ASSET_TIME_KEY:
         raise ValueError("invalid_research_dataset_primary_key")
     duplicate_columns = tuple(
         dict.fromkeys(

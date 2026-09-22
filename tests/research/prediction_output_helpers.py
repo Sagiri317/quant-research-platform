@@ -167,7 +167,7 @@ def synthetic_prediction_model_metadata(
         "resolved_hyperparameters": {},
         "random_seed": None,
         "max_train_rows": 1,
-        "sample_weight_protocol": "equal_date_total_equal_sum_n_train",
+        "training_weighting": {"method": "equal_timestamp", "half_life": None},
         "scaler": None,
         "dependency_status": {
             "status": "available",

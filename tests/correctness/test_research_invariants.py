@@ -24,7 +24,7 @@ from quant_research_platform.research.models.fitting import (
 )
 from quant_research_platform.research.models.scaler import (
     ModelMatrixScaler,
-    equal_date_sample_weights,
+    equal_timestamp_sample_weights,
 )
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
@@ -38,9 +38,11 @@ from quant_research_platform.research.portfolios.optimizer import (
     optimize_portfolio,
 )
 from quant_research_platform.research.portfolios.risk import (
+    FactorRiskConfig,
     FactorRiskState,
 )
 from quant_research_platform.research.protocols.a_share import (
+    EXECUTION_ASSUMPTIONS,
     PROTOCOL_ID,
     SCENARIO_IDS,
     protocol,
@@ -119,14 +121,14 @@ def test_session_label_uses_next_open_and_persists_availability() -> None:
     assert result.loc[1, "forward_return_1d_available_at"] == sessions[3]
 
 
-def test_model_scaler_uses_equal_date_weights_and_zero_variance_zero() -> None:
+def test_model_scaler_uses_equal_timestamp_weights_and_zero_variance_zero() -> None:
     frame = pd.DataFrame(
         {
             "x": [1.0, 3.0, 5.0],
             "constant": [2.0, 2.0, 2.0],
         }
     )
-    weights = equal_date_sample_weights(
+    weights = equal_timestamp_sample_weights(
         pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02"])
     )
     assert weights.sum() == pytest.approx(3.0)
@@ -721,7 +723,9 @@ def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
     market_model = MarketModelRiskState()
     factor_risk = FactorRiskState(
         style_columns=style_columns,
-        minimum_cross_section=2,
+        config=FactorRiskConfig(
+            minimum_cross_section=2,
+        ),
     )
     for position, timestamp in enumerate(dates):
         returns = pd.Series(
@@ -780,9 +784,11 @@ def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
 def test_factor_risk_projects_history_to_current_industry_domain() -> None:
     state = FactorRiskState(
         style_columns=("style",),
-        minimum_cross_section=10,
-        minimum_factor_dates=3,
-        minimum_specific_dates=3,
+        config=FactorRiskConfig(
+            minimum_cross_section=10,
+            minimum_factor_dates=3,
+            minimum_specific_dates=3,
+        ),
     )
     x = np.arange(20, dtype="float64")
     cross = pd.DataFrame(
@@ -846,15 +852,19 @@ def test_factor_risk_windows_and_decay_follow_observed_sessions() -> None:
     dates = pd.bdate_range("2020-01-01", periods=509)
     specific_state = FactorRiskState(
         style_columns=("style",),
-        minimum_cross_section=10,
-        minimum_factor_dates=3,
-        minimum_specific_dates=3,
+        config=FactorRiskConfig(
+            minimum_cross_section=10,
+            minimum_factor_dates=3,
+            minimum_specific_dates=3,
+        ),
     )
     factor_state = FactorRiskState(
         style_columns=("style",),
-        minimum_cross_section=10,
-        minimum_factor_dates=3,
-        minimum_specific_dates=3,
+        config=FactorRiskConfig(
+            minimum_cross_section=10,
+            minimum_factor_dates=3,
+            minimum_specific_dates=3,
+        ),
     )
     x = np.arange(12, dtype="float64")
 
@@ -981,13 +991,11 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         columns=exposure_columns,
     )
     config = OptimizerConfig(
-        initial_nav=1_000_000_000.0,
         active_name_limit=0.005,
         tracking_error_limit=0.05,
         target_turnover_limit=0.20,
         industry_active_limit=0.02,
         style_active_limit=0.20,
-        adv_participation_limit=0.05,
         solver_ftol=1e-12,
         solver_maxiter=1000,
     )
@@ -997,6 +1005,8 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         industry_columns=("industry_a",),
         style_columns=exposure_columns[1:],
         expected_transaction_cost=lambda _weights: 0.0,
+        nav=1_000_000_000.0,
+        assumptions=EXECUTION_ASSUMPTIONS,
         config=config,
     )
     assert result.weights.sum() == pytest.approx(1.0)
@@ -1031,6 +1041,8 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
         industry_columns=("industry_a",),
         style_columns=exposure_columns[1:],
         expected_transaction_cost=lambda _weights: 0.0,
+        nav=1_000_000_000.0,
+        assumptions=EXECUTION_ASSUMPTIONS,
         cash_column="is_cash",
         config=config,
     )
@@ -1073,6 +1085,8 @@ def test_optimizer_fixed_missing_exposure_retains_real_trade_capacity(
             industry_columns=("industry",),
             style_columns=("style",),
             expected_transaction_cost=lambda _weights: 0.0,
+            nav=1_000_000_000.0,
+            assumptions=EXECUTION_ASSUMPTIONS,
         )
 
     if error is not None:

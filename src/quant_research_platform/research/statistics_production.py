@@ -14,7 +14,10 @@ from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
-from quant_research_platform.research.protocols.a_share import analysis_windows
+from quant_research_platform.research.protocols.a_share import (
+    analysis_windows,
+    label_catalog,
+)
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics import (
     cross_sectional_rank_ic,
@@ -69,8 +72,10 @@ def build_a_share_statistics_tables(
     resource_policy: RuntimeResourcePolicy,
 ) -> OwnedValue[dict[str, pd.DataFrame]]:
     dataset_spec = dataset_catalog.get(dataset_id)
-    primary_label = protocol_manifest.get("primary_label")
-    availability = protocol_manifest.get("primary_label_available_at")
+    primary_label = protocol_manifest["research_configuration"]["evaluation"][
+        "primary_label"
+    ]
+    availability = label_catalog().get(primary_label).available_at_column
     statistics = protocol_manifest.get("statistics")
     root_seed = protocol_manifest.get("root_seed")
     if (
@@ -322,7 +327,9 @@ def build_a_share_statistics_tables(
             rank_by_date,
             factors=factors,
             families=families,
-            methods=fdr_methods,
+            methods=fdr_methods
+            if protocol_manifest["access_window"] == "development"
+            else (None,),
             max_lags=max_lags,
         )
         prediction_summary = _prediction_summary(
@@ -443,7 +450,7 @@ def _factor_summary(
     *,
     factors: tuple[str, ...],
     families: Mapping[str, tuple[str, ...]],
-    methods: tuple[str, str],
+    methods: tuple[str | None, ...],
     max_lags: int,
 ) -> pd.DataFrame:
     parts: list[pd.DataFrame] = []
@@ -461,6 +468,8 @@ def _factor_summary(
                 fdr_alpha=0.05,
                 fdr_family_size=len(planned_factors),
             ).rename(columns={"timestamp": "factor_id"})
+            if method is None:
+                part["fdr_method"] = "NOT_APPLICABLE"
             part.insert(0, "family_id", family_id)
             defined_count = int(part["status"].eq("DEFINED").sum())
             part["planned_hypothesis_count"] = len(planned_factors)
@@ -666,7 +675,7 @@ def _model_comparison(
             root_seed, "a_share_model_reality_check", dataset_id, access_window, test_id
         )
         result = None
-        if challengers and len(common) > block_size:
+        if access_window == "development" and challengers and len(common) > block_size:
             options = dict(block_size=block_size, repetitions=repetitions, seed=seed)
             if test_id == "spa_reality_check":
                 result = spa_reality_check(
@@ -685,6 +694,8 @@ def _model_comparison(
         reason = (
             result.reason
             if result is not None
+            else "holdout_excluded"
+            if access_window != "development"
             else "no_comparison_models"
             if not challengers
             else "bootstrap_block_exceeds_common_observations"

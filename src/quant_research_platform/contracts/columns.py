@@ -19,4 +19,4 @@ class ColumnRole(StrEnum):
     PORTFOLIO = "portfolio"
 
 
-PLATFORM_ENTITY_TIME_KEY = ("market_id", "asset_id", "timestamp")
+PLATFORM_ASSET_TIME_KEY = ("market_id", "asset_id", "timestamp")

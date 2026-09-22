@@ -16,6 +16,50 @@ from quant_research_platform.research.models.scaler import ModelMatrixScaler
 
 
 @dataclass(frozen=True)
+class FactorRiskConfig:
+    factor_window: int = 504
+    specific_window: int = 252
+    factor_half_life: float = 126.0
+    specific_half_life: float = 63.0
+    minimum_factor_dates: int = 252
+    minimum_specific_dates: int = 126
+    minimum_cross_section: int = 100
+    diagonal_shrinkage: float = 0.20
+    annualization: float = 252.0
+    weight_column: str = "float_market_cap"
+    weighting: str = "sqrt_cap"
+
+    def __post_init__(self):
+        for name in (
+            "factor_window",
+            "specific_window",
+            "minimum_factor_dates",
+            "minimum_specific_dates",
+            "minimum_cross_section",
+        ):
+            if type(getattr(self, name)) is not int or getattr(self, name) <= 0:
+                raise ValueError("factor_risk_config_invalid")
+        if (
+            self.minimum_factor_dates > self.factor_window
+            or self.minimum_specific_dates > self.specific_window
+            or type(self.diagonal_shrinkage) not in {int, float}
+            or not np.isfinite(self.diagonal_shrinkage)
+            or not 0 <= self.diagonal_shrinkage <= 1
+            or self.weighting != "sqrt_cap"
+            or type(self.weight_column) is not str
+            or not self.weight_column
+        ):
+            raise ValueError("factor_risk_config_invalid")
+        for value in (
+            self.factor_half_life,
+            self.specific_half_life,
+            self.annualization,
+        ):
+            if type(value) not in {float, int} or not np.isfinite(value) or value <= 0:
+                raise ValueError("factor_risk_config_invalid")
+
+
+@dataclass(frozen=True)
 class FactorRiskEstimate:
     factor_returns: pd.DataFrame
     factor_covariance: pd.DataFrame
@@ -222,16 +266,10 @@ class FactorRiskState:
         self,
         *,
         style_columns: tuple[str, ...],
-        weight_column: str = "float_market_cap",
-        minimum_cross_section: int = 100,
-        minimum_factor_dates: int = 252,
-        minimum_specific_dates: int = 126,
+        config: FactorRiskConfig | None = None,
     ):
         self.style_columns = style_columns
-        self.weight_column = weight_column
-        self.minimum_cross_section = minimum_cross_section
-        self.minimum_factor_dates = minimum_factor_dates
-        self.minimum_specific_dates = minimum_specific_dates
+        self.config = FactorRiskConfig() if config is None else config
         self._industry_codes: set[str] = set()
         self._factor_rows: list[dict[str, object]] = []
         self._residuals: dict[str, array] = {}
@@ -243,7 +281,7 @@ class FactorRiskState:
             "timestamp",
             "asset_id",
             "industry_level1_code",
-            self.weight_column,
+            self.config.weight_column,
             *self.style_columns,
         }
         if not isinstance(cross, pd.DataFrame) or not required.issubset(cross.columns):
@@ -262,7 +300,7 @@ class FactorRiskState:
                 raise ValueError("factor_risk_eligibility_invalid")
             frame = frame.loc[frame.eligible].copy()
         frame["asset_id"] = frame.asset_id.astype("string")
-        for column in (self.weight_column, *self.style_columns):
+        for column in (self.config.weight_column, *self.style_columns):
             frame[column] = strict_real_numeric_series(
                 frame[column], error="factor_risk_numeric_invalid"
             )
@@ -270,7 +308,7 @@ class FactorRiskState:
             frame.dropna(subset=list(required))
             .loc[
                 lambda item: (
-                    item[self.weight_column].gt(0)
+                    item[self.config.weight_column].gt(0)
                     & item.industry_level1_code.astype(str).ne("")
                 )
             ]
@@ -294,7 +332,7 @@ class FactorRiskState:
             return None
         if frame.asset_id.duplicated().any() or frame.timestamp.nunique() != 1:
             raise ValueError("factor_return_cross_section_keys_invalid")
-        frame = frame.dropna().loc[lambda item: item[self.weight_column].gt(0.0)]
+        frame = frame.dropna().loc[lambda item: item[self.config.weight_column].gt(0.0)]
         if frame.empty:
             return
         frame = preprocess_risk_styles(frame, style_columns=self.style_columns)
@@ -316,11 +354,11 @@ class FactorRiskState:
         if design.shape[1] != len(exposure_columns):
             raise ValueError("factor_risk_exposure_columns_invalid")
         p = design.shape[1]
-        if len(frame) < max(self.minimum_cross_section, 5 * p):
+        if len(frame) < max(self.config.minimum_cross_section, 5 * p):
             return
         if np.linalg.matrix_rank(design) != p:
             return
-        weights = np.sqrt(frame[self.weight_column].to_numpy(dtype="float64"))
+        weights = np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64"))
         root_weights = np.sqrt(weights)
         returns = frame["asset_return"].to_numpy(dtype="float64")
         coefficients = np.linalg.lstsq(
@@ -342,13 +380,17 @@ class FactorRiskState:
         self._session_count += 1
         while (
             self._factor_rows
-            and self._factor_rows[0]["session"] <= self._session_count - 504
+            and self._factor_rows[0]["session"]
+            <= self._session_count - self.config.factor_window
         ):
             self._factor_rows.pop(0)
         for asset in tuple(self._residuals):
             sessions = self._residual_sessions[asset]
             values = self._residuals[asset]
-            while sessions and sessions[0] <= self._session_count - 252:
+            while (
+                sessions
+                and sessions[0] <= self._session_count - self.config.specific_window
+            ):
                 sessions.pop(0)
                 values.pop(0)
             if not sessions:
@@ -409,7 +451,7 @@ class FactorRiskState:
         return result
 
     def estimate(self) -> FactorRiskEstimate:
-        if len(self._factor_rows) < self.minimum_factor_dates:
+        if len(self._factor_rows) < self.config.minimum_factor_dates:
             raise ValueError("factor_risk_factor_history_insufficient")
         industry_columns = tuple(
             f"industry_{code}" for code in sorted(self._industry_codes)
@@ -420,23 +462,25 @@ class FactorRiskState:
             .reindex(columns=["session", "timestamp", *columns])
             .dropna()
         )
-        if len(factor_returns) < self.minimum_factor_dates:
+        if len(factor_returns) < self.config.minimum_factor_dates:
             raise ValueError("factor_risk_factor_history_insufficient")
         factor_ages = self._session_count - factor_returns.pop("session").to_numpy()
         covariance = _ewma_covariance(
             factor_returns.loc[:, list(columns)].to_numpy(dtype="float64"),
             ages=factor_ages,
-            half_life=126.0,
-            diagonal_shrinkage=0.20,
-            annualization_factor=252.0,
+            half_life=self.config.factor_half_life,
+            diagonal_shrinkage=self.config.diagonal_shrinkage,
+            annualization_factor=self.config.annualization,
             columns=columns,
         )
         specific: dict[str, float] = {}
         for asset, values in self._residuals.items():
-            if len(values) >= self.minimum_specific_dates:
+            if len(values) >= self.config.minimum_specific_dates:
                 ages = self._session_count - np.asarray(self._residual_sessions[asset])
-                weights = _ewma_weights(ages, 63.0)
-                specific[asset] = float(np.dot(weights, values) * 252.0)
+                weights = _ewma_weights(ages, self.config.specific_half_life)
+                specific[asset] = float(
+                    np.dot(weights, values) * self.config.annualization
+                )
         return FactorRiskEstimate(
             factor_returns=factor_returns.reset_index(drop=True),
             factor_covariance=covariance,
@@ -445,10 +489,10 @@ class FactorRiskState:
                 dtype="float64",
                 name="specific_variance",
             ),
-            factor_half_life=126.0,
-            specific_half_life=63.0,
-            diagonal_shrinkage=0.20,
-            annualization_factor=252.0,
+            factor_half_life=self.config.factor_half_life,
+            specific_half_life=self.config.specific_half_life,
+            diagonal_shrinkage=self.config.diagonal_shrinkage,
+            annualization_factor=self.config.annualization,
         )
 
 

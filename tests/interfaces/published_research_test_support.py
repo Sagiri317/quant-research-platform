@@ -251,18 +251,17 @@ def check_published_evidence_views(
                 finally:
                     (root / "report.json").write_bytes(saved)
                 saved_markdown = (root / "report.md").read_bytes()
-                actual_read_report = report_artifact.read_research_report_artifact
+                actual_read_markdown = report_artifact._read_utf8
 
                 def changed_after_validation(*args, **kwargs):
-                    result = actual_read_report(*args, **kwargs)
                     (root / "report.md").write_bytes(b"x" * len(saved_markdown))
-                    return result
+                    return actual_read_markdown(*args, **kwargs)
 
                 try:
                     with monkeypatch.context() as race:
                         race.setattr(
                             report_artifact,
-                            "read_research_report_artifact",
+                            "_read_utf8",
                             changed_after_validation,
                         )
                         failed = await client.get(

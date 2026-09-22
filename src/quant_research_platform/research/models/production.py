@@ -218,6 +218,7 @@ def _build_a_share_quarterly_models(
         QuarterlyModelResult | OwnedValue[QuarterlyModelResult]
     ]:
         model_lease: MemoryLease | None = None
+        training_counts = {}
         try:
             for quarter in selected_quarters:
                 selection_spec = PredictionSpec(
@@ -244,6 +245,7 @@ def _build_a_share_quarterly_models(
                 winner_specs, selection_metadata, trial_ledgers, config_indices = (
                     _select_model_family_winners(
                         selection_spec=selection_spec,
+                        training_counts=training_counts,
                         dataset_spec=dataset_spec,
                         model_catalog=model_catalog,
                         chunks=chunks,
@@ -271,6 +273,7 @@ def _build_a_share_quarterly_models(
                     model_result, model_lease = _fit_selected_model_result(
                         dataset_spec=dataset_spec,
                         selected_spec=selected_spec,
+                        training_counts=training_counts,
                         chunks=chunks,
                         fitting_cutoff=time_value_isoformat(
                             quarter.validation.end, date_only=True
@@ -351,13 +354,18 @@ def _fit_selected_model_result(
     dataset_spec,
     selected_spec,
     chunks,
+    training_counts,
     fitting_cutoff: str,
     quarter_id: str,
     root_seed: int,
     candidate_parameters,
 ) -> tuple[fitting.ModelFitResult, MemoryLease | None]:
     n_refit = _count_training_rows(
-        dataset_spec, selected_spec, chunks=chunks, train_end=fitting_cutoff
+        dataset_spec,
+        selected_spec,
+        chunks=chunks,
+        train_end=fitting_cutoff,
+        cache=training_counts,
     )
     refit_spec = _refit_model_spec(
         selected_spec,
@@ -430,6 +438,7 @@ def _refit_model_spec(
 def _select_model_family_winners(
     *,
     selection_spec: PredictionSpec,
+    training_counts,
     dataset_spec,
     model_catalog: ModelCatalog,
     chunks,
@@ -451,17 +460,6 @@ def _select_model_family_winners(
     winner_specs: dict[str, object] = {}
     config_indices: dict[str, int] = {}
     winner_metrics: list[dict[str, object]] = []
-    family_validation_inputs = tuple(
-        dict.fromkeys(
-            column
-            for family_id in model_ids
-            for column in model_catalog.get(family_id).input_columns
-            if _model_algorithm_facts(
-                model_catalog.get(family_id).model_algorithm
-            ).input_kind
-            != "rank_ensemble_inputs"
-        )
-    )
     for family_id in model_ids:
         base_spec = model_catalog.get(family_id)
         n_train = _count_training_rows(
@@ -469,6 +467,7 @@ def _select_model_family_winners(
             base_spec,
             chunks=chunks,
             train_end=selection_spec.train_end,
+            cache=training_counts,
         )
         selected = next(
             item
@@ -550,7 +549,11 @@ def _select_model_family_winners(
             dataset_spec=dataset_spec,
             model_catalog=trial_catalog,
             chunks=chunks,
-            validation_input_columns=family_validation_inputs,
+            validation_input_columns=tuple(
+                dict.fromkeys(
+                    column for spec in trial_specs for column in spec.input_columns
+                )
+            ),
             trial_recorder=recorder,
         )
         reference = recorder.reference()
@@ -615,7 +618,18 @@ def _count_training_rows(
     *,
     chunks,
     train_end: str,
+    cache,
 ) -> int:
+    scope = (
+        frozenset(model_spec.input_columns),
+        model_spec.label_column,
+        model_spec.sample_filter_mode,
+        model_spec.max_train_rows,
+        train_end,
+        _model_algorithm_facts(model_spec.model_algorithm).input_kind,
+    )
+    if scope in cache:
+        return cache[scope]
     read_columns = model_training_read_columns(
         dataset_spec.primary_key,
         model_spec.input_columns,
@@ -643,11 +657,12 @@ def _count_training_rows(
         count += len(frame)
     if count <= 0:
         raise ValueError("model_training_sample_empty")
-    return (
+    cache[scope] = (
         min(count, model_spec.max_train_rows)
         if model_spec.max_train_rows is not None
         else count
     )
+    return cache[scope]
 
 
 @dataclass(frozen=True)

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from quant_research_platform.contracts.validation import _validate_column_tuple
 
 FEATURE_TRANSFORMS = {
+    "a_share_canonical",
     "cross_sectional_zscore",
     "cross_sectional_rank",
     "winsorize",
@@ -40,7 +41,15 @@ class FeatureTransformSpec:
             raise ValueError("feature_transform_id_required")
         _validate_column_tuple(self.source_columns, "source_columns")
         _validate_column_tuple(self.output_columns, "output_columns")
-        if len(self.source_columns) != len(self.output_columns):
+        if self.transform == "a_share_canonical":
+            expected = tuple(
+                prefix + column
+                for column in self.source_columns
+                for prefix in ("feature_", "feature_missing_", "feature_observed_")
+            )
+            if self.output_columns != expected or self.fillna_policy != "none":
+                raise ValueError("canonical_feature_pipeline_contract_invalid")
+        elif len(self.source_columns) != len(self.output_columns):
             raise ValueError("feature_transform_source_output_count_mismatch")
         if type(self.transform) is not str or self.transform not in FEATURE_TRANSFORMS:
             raise ValueError("unsupported_feature_transform")

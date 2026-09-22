@@ -49,10 +49,10 @@ def catalog_factors(
 def catalog_labels(
     profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
 ) -> None:
-    typer.echo("label_id,market_id,horizon,definition_version")
+    typer.echo("label_id,market_id,horizon,horizon_unit,definition_version")
     for item in queries.list_labels(research_profile(profile)).items:
         typer.echo(
-            f"{item.label_id},{item.market_id},{item.horizon},{item.definition_version}"
+            f"{item.label_id},{item.market_id},{item.horizon},{item.horizon_unit},{item.definition_version}"
         )
 
 

@@ -208,7 +208,7 @@ def load_a_share_run_evidence(
         if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}:
             return None
         try:
-            _validate_reference(layout, result)
+            read_validated_reference(layout, result)
         except (FileNotFoundError, OSError, ValueError):
             issues.append(_issue(target_id, "FAILED", "target_reference_invalid"))
             return None
@@ -600,7 +600,7 @@ def produce_a_share_report(
     )
 
 
-def _validate_reference(layout: StorageLayout, result: ResearchRunTargetResult) -> None:
+def read_validated_reference(layout: StorageLayout, result: ResearchRunTargetResult):
     if result.instance_identity is None or result.schema_identity is None:
         raise ValueError("research_run_target_reference_invalid")
     root = _instance_root(layout, result)
@@ -622,6 +622,7 @@ def _validate_reference(layout: StorageLayout, result: ResearchRunTargetResult) 
         or envelope["schema_identity"] != result.schema_identity
     ):
         raise ValueError("research_run_target_reference_invalid")
+    return root, envelope
 
 
 def _instance_root(layout: StorageLayout, result: ResearchRunTargetResult) -> Path:
@@ -670,6 +671,7 @@ def read_research_report_artifact(
     expected_identity: str,
     source_run: ResearchRunRecord | None = None,
     report_lease=None,
+    include_markdown: bool = False,
 ) -> dict[str, object]:
     envelope, members = read_semantic_artifact_record(
         Path(instance_root),
@@ -710,6 +712,12 @@ def read_research_report_artifact(
             "_report_artifact"
         ):
             raise ValueError("research_report_payload_invalid")
+        if include_markdown:
+            report_lease.grow(8 * by_path["report.md"]["size"])
+            markdown = _read_utf8(
+                Path(instance_root) / "report.md", expected_member=by_path["report.md"]
+            )
+            return {"report": payload, "markdown": markdown}
         return payload
 
 

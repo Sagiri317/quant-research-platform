@@ -169,6 +169,27 @@ def _resolved_model_thread_count(
     return resolved
 
 
+@dataclass(frozen=True)
+class TrainingWeighting:
+    """Equal timestamp mass, optionally decayed in observed training periods."""
+
+    method: str = "equal_timestamp"
+    half_life: float | None = None
+
+    def __post_init__(self):
+        if self.method != "equal_timestamp":
+            raise ValueError("training_weighting_method_invalid")
+        if self.half_life is not None and (
+            type(self.half_life) not in {int, float}
+            or not isfinite(self.half_life)
+            or self.half_life <= 0
+        ):
+            raise ValueError("training_weighting_half_life_invalid")
+
+    def payload(self):
+        return {"method": self.method, "half_life": self.half_life}
+
+
 @dataclass(frozen=True, kw_only=True)
 class ModelSpec:
     """A model request with no hidden research defaults."""
@@ -182,10 +203,17 @@ class ModelSpec:
     hyperparameters: Mapping[str, object] = field(default_factory=dict)
     random_seed: int | None = None
     max_train_rows: int | None = None
+    training_weighting: TrainingWeighting = field(default_factory=TrainingWeighting)
     contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
         hyperparameters = _freeze_model_hyperparameters(self.hyperparameters)
+        weighting = self.training_weighting
+        if isinstance(weighting, Mapping):
+            weighting = TrainingWeighting(**weighting)
+        if type(weighting) is not TrainingWeighting:
+            raise ValueError("training_weighting_invalid")
+        object.__setattr__(self, "training_weighting", weighting)
         if type(self.contract_version) is not str or self.contract_version != "0.1":
             raise ValueError("unsupported_model_contract_version")
         _validate_non_empty_string(self.model_id, "model_id_required")
@@ -271,7 +299,7 @@ def validate_model_metadata_core(
         "train_end",
         "filter_columns_used",
         "filter_definition",
-        "sample_weight_protocol",
+        "training_weighting",
         "scaler",
     }
     if not required.issubset(metadata):
@@ -291,8 +319,9 @@ def validate_model_metadata_core(
         type(metadata.get("random_seed")) is not int or metadata["random_seed"] < 0
     ):
         raise ValueError("invalid_model_metadata")
-    if metadata["sample_weight_protocol"] != "equal_date_total_equal_sum_n_train":
+    if type(metadata["training_weighting"]) is not dict:
         raise ValueError("invalid_model_metadata")
+    TrainingWeighting(**metadata["training_weighting"])
     for key in (
         "rows_input",
         "rows_after_filter_mode",
@@ -375,6 +404,7 @@ def validate_model_metadata_core(
             hyperparameters=metadata["hyperparameters"],
             random_seed=metadata["random_seed"],
             max_train_rows=metadata["max_train_rows"],
+            training_weighting=metadata["training_weighting"],
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("invalid_model_metadata") from exc
@@ -773,6 +803,7 @@ def model_spec_payload(spec: object) -> dict[str, object]:
         "hyperparameters": _thaw_model_hyperparameters(spec.hyperparameters),
         "random_seed": spec.random_seed,
         "max_train_rows": spec.max_train_rows,
+        "training_weighting": spec.training_weighting.payload(),
     }
 
 

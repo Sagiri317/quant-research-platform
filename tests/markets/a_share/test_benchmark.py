@@ -218,10 +218,9 @@ def test_benchmark_normalization_rejects_fact_mutations(
 @pytest.mark.parametrize("raw_weight", (0.3333333, 0.3333334))
 def test_rounded_benchmark_weights_publish_as_unit_portfolio(tmp_path, raw_weight):
     from quant_research_platform.research.portfolios.production import (
-        _benchmark_weights,
+        _iter_benchmark_weights,
     )
     from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-    from quant_research_platform.storage.datasets.reading import open_dataset_session
     from quant_research_platform.storage.datasets.writing import write_dataset
 
     info, _ = _benchmark_facts()
@@ -250,18 +249,17 @@ def test_rounded_benchmark_weights_publish_as_unit_portfolio(tmp_path, raw_weigh
         write_dataset(
             root, normalized, spec=spec, resource_policy=policy, borrowed_input=True
         )
-        with open_dataset_session(
-            root, columns=None, time_window=None, resource_policy=policy
-        ) as session:
-            for benchmark in ("csi500", "csi1000"):
-                weights = _benchmark_weights(session, benchmark, timestamp, policy)
-                # Three equal published weights imply one third, independently of units.
-                np.testing.assert_array_max_ulp(
-                    weights.to_numpy(), np.full(3, 1.0 / 3.0), maxulp=1
-                )
-                np.testing.assert_array_max_ulp(
-                    np.array([(weights * 100.0).sum()]), np.array([100.0]), maxulp=2
-                )
+        for benchmark in ("csi500", "csi1000"):
+            (weights,) = _iter_benchmark_weights(
+                root, benchmark, pd.DatetimeIndex([timestamp]), policy
+            )
+            # Three equal published weights imply one third, independently of units.
+            np.testing.assert_array_max_ulp(
+                weights.to_numpy(), np.full(3, 1.0 / 3.0), maxulp=1
+            )
+            np.testing.assert_array_max_ulp(
+                np.array([(weights * 100.0).sum()]), np.array([100.0]), maxulp=2
+            )
         assert policy.used_memory_bytes == 0
     pd.testing.assert_frame_equal(raw, original, check_exact=True)
 

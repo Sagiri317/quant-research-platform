@@ -80,10 +80,17 @@ def test_expanded_pv_uses_existing_owners_and_keeps_formal_selections():
     )
     expanded = expanded_profile.protocol("pv_expanded")
     assert len(expanded.portfolio_candidates()) == 3
-    assert all(
-        not candidate.risk_context_target_ids
-        for candidate in expanded.portfolio_candidates()
-    )
+    targets = {
+        target.target_id: target for target in expanded.target_specs("research run")
+    }
+    for candidate in expanded.portfolio_candidates():
+        assert candidate.risk_style_columns
+        assert candidate.risk_context_target_ids == ("price_volume_facts",)
+        ledger = targets[f"pv_expanded_{candidate.candidate_id}_ledger"]
+        assert set(candidate.risk_context_target_ids) <= set(ledger.dependencies)
+        assert set(candidate.risk_context_target_ids) <= set(
+            targets["pv_expanded_portfolio_statistics"].dependencies
+        )
     assert expanded.manifest()["portfolio_candidates"] == [
         candidate.candidate_id for candidate in expanded.portfolio_candidates()
     ]

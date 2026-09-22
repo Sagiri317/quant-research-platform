@@ -12,7 +12,7 @@ import quant_research_platform.research.datasets.assembler as assembler_module
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import (
-    PLATFORM_ENTITY_TIME_KEY,
+    PLATFORM_ASSET_TIME_KEY,
     ColumnRole,
 )
 from quant_research_platform.contracts.data import (
@@ -543,7 +543,7 @@ def test_research_join_clears_transient_chunk_before_next_bound(
 
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    primary_key = PLATFORM_ENTITY_TIME_KEY
+    primary_key = PLATFORM_ASSET_TIME_KEY
     factor_spec = ProcessedDataSpec(
         data_id="minute_factors",
         market_id=MarketId("crypto"),
@@ -682,7 +682,7 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
                     "can_exit": ColumnRole.MASK,
                     "market_type": ColumnRole.CONTEXT,
                 },
-                primary_key=PLATFORM_ENTITY_TIME_KEY,
+                primary_key=PLATFORM_ASSET_TIME_KEY,
                 partition_columns=("year",),
             ),
         )
@@ -746,7 +746,7 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
         frequency=DataFrequency.TICK,
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles=roles,
-        primary_key=PLATFORM_ENTITY_TIME_KEY,
+        primary_key=PLATFORM_ASSET_TIME_KEY,
         partition_columns=("year",),
     )
     dataset = make_research_dataset_catalog(
@@ -818,7 +818,7 @@ def test_custom_feature_spec_survives_context_and_persisted_assembly(
         frequency=DataFrequency.DAILY,
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles=roles,
-        primary_key=PLATFORM_ENTITY_TIME_KEY,
+        primary_key=PLATFORM_ASSET_TIME_KEY,
         partition_columns=("year",),
     )
     datasets = make_research_dataset_catalog(
@@ -1357,7 +1357,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
                     "market_type": ColumnRole.FACTOR,
                     "forward_return_20d": ColumnRole.LABEL,
                 },
-                primary_key=PLATFORM_ENTITY_TIME_KEY,
+                primary_key=PLATFORM_ASSET_TIME_KEY,
                 partition_columns=("year",),
             ),
         )
@@ -1416,7 +1416,7 @@ def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context
                         "can_exit": ColumnRole.MASK,
                         "market_type": ColumnRole.CONTEXT,
                     },
-                    primary_key=PLATFORM_ENTITY_TIME_KEY,
+                    primary_key=PLATFORM_ASSET_TIME_KEY,
                     partition_columns=("year",),
                 ),
             )

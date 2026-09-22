@@ -112,11 +112,13 @@ def maker_calibration_tables():
     from quant_research_platform.markets.implementations.crypto.execution import (
         replay_maker_calibration,
     )
+    from quant_research_platform.markets.implementations.crypto.ids import (
+        HFT_RESEARCH_DATASET_ID,
+    )
     from quant_research_platform.markets.implementations.crypto.portfolio import (
         _maker_config,
     )
     from quant_research_platform.research.protocols.crypto_hft import (
-        HFT_RESEARCH_DATASET_ID,
         protocol,
     )
     from tests.helpers.binance_hft import _quote, hft_research_plan
@@ -955,8 +957,10 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
 
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.crypto import portfolio
-    from quant_research_platform.research.protocols.crypto_hft import (
+    from quant_research_platform.markets.implementations.crypto.ids import (
         HFT_RESEARCH_DATASET_ID,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
         protocol,
     )
     from quant_research_platform.runtime.resources import pandas_frame_payload_bytes

@@ -73,32 +73,22 @@ def read_report(
             report_identity,
         )
         root = Path(native_filesystem_path(root))
-        _envelope, members = report_artifact.read_semantic_artifact_record(
-            root, expected_identity=report_identity
-        )
-        by_path = report_artifact._require_members(
-            members, ("report.json", "report.md")
-        )
         with policy.lease(
             "queries.report",
-            report_artifact.report_payload_working_set(record.payload())
-            + 8 * by_path["report.md"]["size"],
+            report_artifact.report_payload_working_set(record.payload()),
         ) as lease:
-            payload = report_artifact.read_research_report_artifact(
+            document = report_artifact.read_research_report_artifact(
                 root,
                 expected_identity=report_identity,
                 source_run=record,
                 report_lease=lease,
-            )
-            markdown = report_artifact._read_utf8(
-                root / "report.md", expected_member=by_path["report.md"]
+                include_markdown=True,
             )
             return {
                 "profile_id": profile.profile_id,
                 "run_id": run_id,
                 "report_identity": report_identity,
-                "report": payload,
-                "markdown": markdown,
+                **document,
             }
 
 
@@ -138,9 +128,9 @@ def portfolio_curve(
             initial_bytes, error="portfolio_curve_exceeds_task_memory_budget"
         )
         with policy.lease("queries.portfolio_curve", initial_bytes) as retained:
-            report_artifact._validate_reference(layout, result)
+            root, _envelope = report_artifact.read_validated_reference(layout, result)
             artifact = read_portfolio_ledger_artifact(
-                report_artifact._instance_root(layout, result),
+                root,
                 expected_identity=result.instance_identity,
             )
             points, boundaries = [], []

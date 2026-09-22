@@ -97,7 +97,8 @@ def build_crypto_research_report(*, record, evidence):
         "development vs holdout": {
             "status": "DEFINED",
             "access_window": record.research_window["access"],
-            "holdout_status": record.protocol["holdout_status"],
+            "frozen_development": run_payload["protocol"].get("frozen_development"),
+            "evidence": run_payload["holdout_evidence"],
             "holdout_window": run_payload["protocol"]["holdout_window"],
         },
         "readiness/blockers": {

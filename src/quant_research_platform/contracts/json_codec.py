@@ -17,6 +17,8 @@ from typing import Any, NoReturn
 
 import pandas as pd
 
+MAX_QRP_JSON_BYTES = 1024 * 1024
+
 _LENGTH_BYTES = 8
 _MAX_INTEGER_DECIMAL_DIGITS = 4_096
 _MAX_INTEGER_BITS = 13_607

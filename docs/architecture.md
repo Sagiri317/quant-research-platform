@@ -25,8 +25,11 @@
 | workflows/ | 唯一目标 DAG 编排、发布和部分真实状态 |
 | interfaces/ | 已批准的 CLI/API 路由与适配 |
 
-research 可以依赖 contracts、storage、runtime，但不依赖 sources 或 markets/implementations。
-research/protocols 持有市场研究协议，profiles 只绑定实现。
+research 可以依赖 contracts、storage、runtime；市场/data ID仅从各市场的轻量 `ids.py` owner导入，
+不得依赖 sources 或 markets/implementations 的执行、来源、生产器实现。
+research/protocols 持有配置选择校验、窗口、冻结及统计研究语义，profiles 只组合目录与来源/生产器绑定。
+开发到留出统一复用冻结 target/reference：市场 protocol 指定冻结模型/校准及资格，workflow 负责 DAG 和引用发布。
+留出创建新的预测、评估、账本、统计、报告与 holdout_evidence，不重新训练或校准。
 允许 artifacts→reports，禁止 reports→artifacts。
 可移植模型算法 ID、依赖、输入种类及并行类别由 contracts 定义；研究选择与参数由显式配置提供；
 拟合、预测、缩放、排名、重要性和验证由 research 持有。字段名使用 model_algorithm，
@@ -91,6 +94,15 @@ bytes 租约只使保守粗估可相加；在读取、解码、分配前选择�
 仅在保守估算无法维持相对安全或显式限制不允许时稳定失败。
 聚合持久化输出可以大于内存规划目标而精确完成。
 
+操作内 SQLite 索引与 dataset inventory 使用标准 `tempfile.gettempdir()`，由启动环境的
+`TMPDIR`／`TEMP`／`TMP` 选择临时文件系统；不增加 QRP 专属 scratch 配置，也不硬编码挂载点。
+运行和验收入口在启动新 Python 进程前，显式核对任务临时目录的真实挂载、非别名路径、
+可写性及可用容量，并确认 Python 实际选中的临时目录等于指定目录；失败即停止，不依赖
+标准库的候选目录回退。共享文件系统上的小文件与 SQLite journal 延迟须单独测量，不能由
+目录名推断本地磁盘性能。两个索引 owner 保留创建及增长前的容量准入和结束清理。
+持久化 artifact 的事务暂存仍在目标同父目录，不能为了临时存储提速迁走原子发布边界。
+若选用内存文件系统，还须将预计 scratch 占用与进程工作集一起核对可用内存；它不是无限溢写空间。
+
 嵌套 owner 继承同一根，拒绝冲突策略或并行资源根。
 输入已有 DataFrame/ndarray 为借用基线；新载荷、原生工作区和输出各有一个逻辑归属，
 在生产/消费边界转移，不重复计费。阶段顺序执行，释放后复用预算，责任上下文负责关闭。
@@ -117,6 +129,11 @@ Windows 保留宿主资源与原生文件锁。仓库外 RSS/CPU/IO 是校准证
 检查量化因果、批准能力、单一 owner、数据精确性、故障生命周期、资源、
 身份复现、私有边界、CLI/API/Notebook 和包。关注实际影响，不另造验证框架。
 定向检查优先；默认全量命令是 python -m pytest -q。测试夹具错误与生产错误区分记录。
+验收使用独立的、已验证容量与挂载类型的任务临时目录，并在新进程导入数值库前固定原生线程环境。
+性能对照使用相同测试、相同线程设置和独立进程，记录 call 时间及真实产物身份；
+改变 `TMPDIR` 也可能改变 pytest fixture 产物位置，不能把总差异直接归因某个 SQLite 调用。
+内存文件系统仅在任务规模和内存余量允许时使用；隔离安装与可执行入口验收另须确认挂载允许执行，
+不能把 `noexec` 临时目录当作包环境安装位置。
 
 正式包验收依次为：
 1. 从仓库外干净 Git 导出构建全新 sdist。

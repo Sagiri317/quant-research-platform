@@ -460,11 +460,11 @@ def test_manifest_writers_share_exact_pretty_render_boundary(
     accepted = tmp_path / "accepted" / f"{writer_name}.json"
     rejected = tmp_path / "rejected" / f"{writer_name}.json"
 
-    monkeypatch.setattr(manifests, "_MAX_QRP_JSON_BYTES", len(rendered.encode()) + 1)
+    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", len(rendered.encode()) + 1)
     writer(accepted, payload)
     assert accepted.read_text(encoding="utf-8") == rendered + "\n"
 
-    monkeypatch.setattr(manifests, "_MAX_QRP_JSON_BYTES", len(rendered.encode()))
+    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", len(rendered.encode()))
     with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes"):
         writer(rejected, payload)
     assert not rejected.exists()

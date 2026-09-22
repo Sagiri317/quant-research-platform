@@ -32,14 +32,15 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 )
 from quant_research_platform.markets.implementations.a_share.execution import (
     fee_schedule_from_frame,
+    prepare_trade_cost,
     require_fee_coverage,
-    trade_cost,
 )
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.accounting import (
     execute_continuous_target,
 )
 from quant_research_platform.research.portfolios.risk import (
+    FactorRiskConfig,
     FactorRiskEstimate,
     FactorRiskState,
 )
@@ -53,9 +54,11 @@ from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
 def test_enhanced_decision_requires_history_for_current_industry_domain() -> None:
     state = FactorRiskState(
         style_columns=("style",),
-        minimum_cross_section=10,
-        minimum_factor_dates=3,
-        minimum_specific_dates=3,
+        config=FactorRiskConfig(
+            minimum_cross_section=10,
+            minimum_factor_dates=3,
+            minimum_specific_dates=3,
+        ),
     )
     x = np.arange(20, dtype="float64")
     cross = pd.DataFrame(
@@ -382,31 +385,18 @@ def _build_producer(
 
     expected_policy = resource_policy
 
-    class Session:
-        def __init__(self, root, columns):
-            self.root, self.columns = root, columns
-            self.window = None
-
-        @contextmanager
-        def filtered_view(self, window):
-            self.window = window
-            yield self
-
     @contextmanager
-    def open_session(root, *, columns, time_window, resource_policy):
-        assert resource_policy is expected_policy
-        yield Session(root, columns)
+    def schema_session(root, *, columns, time_window, resource_policy):
+        from types import SimpleNamespace
 
-    def materialize_session(session, *, target_chunk_bytes):
-        return fake_read_dataset(
-            session.root,
-            columns=session.columns,
-            time_window=session.window,
-            resource_policy=expected_policy,
+        target = next(key for key, value in roots.items() if value == root)
+        assert columns is None
+        assert resource_policy is expected_policy
+        yield SimpleNamespace(
+            arrow_schema=SimpleNamespace(names=tuple(frames[target].columns))
         )
 
-    monkeypatch.setattr(production, "open_dataset_session", open_session)
-    monkeypatch.setattr(production, "materialize_dataset_session", materialize_session)
+    monkeypatch.setattr(production, "open_dataset_session", schema_session)
     monkeypatch.setattr(production, "read_dataset", fake_read_dataset)
     assumptions = ExecutionAssumptions(
         initial_nav=100.0,
@@ -434,7 +424,7 @@ def _build_producer(
                 resource_policy=bound_policy,
                 fee_schedule_from_frame=fee_schedule_from_frame,
                 require_fee_coverage=require_fee_coverage,
-                trade_cost=trade_cost,
+                prepare_trade_cost=prepare_trade_cost,
                 market_name_for_type=lambda _value: "shanghai",
                 unified_trading_sessions=unified_trading_sessions,
             )
@@ -503,6 +493,62 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
     assert np.isclose(frames_out[0]["post_trade_notional"].sum(), 100.0 - 0.04)
 
 
+def test_portfolio_stream_count_does_not_scale_with_decision_dates(
+    tmp_path, monkeypatch
+):
+    from collections import Counter
+
+    frames, fee_frame, output_window = _inputs()
+    chunks, calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+    )
+    assert list(chunks)
+    streams = Counter(
+        target for target, mode, _window in calls if mode is DatasetReadMode.CHUNKED
+    )
+    assert streams == {"panel": 3, "dataset": 1, "execution": 1}
+    assert all(
+        target in {"fee", "calendar"}
+        for target, mode, _window in calls
+        if mode is DatasetReadMode.MATERIALIZED
+    )
+
+
+def test_benchmark_stream_keeps_future_snapshot_across_missing_sessions(monkeypatch):
+    sessions = pd.date_range("2020-01-01", periods=5)
+    observed = []
+
+    def snapshots(*args):
+        observed.append("open")
+        try:
+            for timestamp in sessions[[1, 3]]:
+                yield pd.DataFrame(
+                    {
+                        "benchmark_id": ["csi500", "csi500"],
+                        "asset_id": ["a", "b"],
+                        "timestamp": timestamp,
+                        "weight": [0.25, 0.75],
+                    }
+                )
+        finally:
+            observed.append("closed")
+
+    monkeypatch.setattr(production, "_iter_input_sessions", snapshots)
+    with runtime_resource_policy_scope() as policy:
+        weights = list(
+            production._iter_benchmark_weights(None, "csi500", sessions, policy)
+        )
+        assert [item.empty for item in weights] == [True, False, True, False, True]
+        for item in (weights[1], weights[3]):
+            np.testing.assert_array_equal(item.to_numpy(), [0.25, 0.75])
+        assert policy.used_memory_bytes == 0
+    assert observed == ["open", "closed"]
+
+
 def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
     assets = pd.Index([f"asset_{index:02}" for index in range(20)])
     caps = pd.Series(np.random.default_rng(4).uniform(1, 100, 20), index=assets)
@@ -525,9 +571,9 @@ def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
         can_exit=permitted,
         execution_date=execution_date.date(),
         cost_for_trade=lambda timestamp, _asset, side, amount, volume, settings: (
-            trade_cost(
-                timestamp, "shanghai", side, amount, volume, fee_schedule, settings
-            )
+            prepare_trade_cost(
+                timestamp, "shanghai", side, fee_schedule, settings
+            ).trade(amount, volume)
         ),
         assumptions=assumptions,
         cost_source_identity="f" * 64,
@@ -1191,7 +1237,9 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
             ),
             style_columns=RISK_STYLE_COLUMNS,
             expected_transaction_cost=lambda _weights: 0.0,
-            config=production.OptimizerConfig(initial_nav=100.0),
+            config=production.OptimizerConfig(),
+            nav=100.0,
+            assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 0.05, (0.05,)),
             eligibility_column="eligible",
             financial_column="is_financial",
             cash_column="is_cash",
@@ -1285,7 +1333,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
             assumptions=assumptions,
             fee_schedule=fee_schedule_from_frame(fee_frame, content_identity="f" * 64),
             fee_identity="f" * 64,
-            trade_cost=trade_cost,
+            prepare_trade_cost=prepare_trade_cost,
             market_name_for_type=lambda _market: "shanghai",
         )
         assert optimized is not None and "__cash__" in optimized.weights
@@ -1699,8 +1747,10 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
     )
     state = FactorRiskState(
         style_columns=RISK_STYLE_COLUMNS,
-        minimum_factor_dates=3,
-        minimum_specific_dates=3,
+        config=FactorRiskConfig(
+            minimum_factor_dates=3,
+            minimum_specific_dates=3,
+        ),
     )
     for day in pd.bdate_range("2020-01-02", periods=3):
         state.observe_return_session(cross.assign(timestamp=day))

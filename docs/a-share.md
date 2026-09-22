@@ -455,6 +455,11 @@ fusion_nf_expectations
 
 不跨场景选择优胜模型；三个场景分别形成独立评估、模型和组合结论。
 
+`fusion_nf_core` 的历史研究选择是 PV25 + Fundamental19，共44个因子；名字不表示只选 `FactorSet.CORE`。
+配置中这44个因子继续分别做单因子FMB、RankIC/HAC/FDR及模型OOS研究。
+多因子 `core_multifactor` 只用预先选中因子与 `FactorDefinition.factor_set=CORE` 的交集：
+CORE6/PV25/PV-expanded各6，fusion_nf_core为12，fusion_nf_expectations为16。
+
 研究数据集对外只有一个样本过滤真值：
 
 `eligible`
@@ -1050,9 +1055,9 @@ fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
 
 排名集成和单因子不使用该缩放器。
 
-#### 5.14.1 等日期样本权重
+#### 5.14.1 等时点样本权重
 
-每个信号日期贡献相同总权重；最终权重归一化为：
+`equal_timestamp` 按完整timestamp分组，每个训练时点贡献相同总权重；最终权重归一化为：
 
 `sum(sample_weight) = N_train`
 
@@ -1060,9 +1065,20 @@ fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
 
 主方案不使用时间衰减。
 
-预注册稳健性可以使用半衰期 756 个交易日；先乘等日期权重再重新归一化，不参与优胜模型选择。
+预注册稳健性通过 ModelSpec/config 的 `training_weighting={"method":"equal_timestamp","half_life":756}` 执行；
+按有序训练时点的年龄乘 `0.5 ** (age / half_life)` 后重新归一化为 `sum=N_train`。
+该合同进入模型与trial身份、metadata及冻结复用，supervised缩放/拟合与rank ensemble方向/IC权重共用。
+主方案的half_life为null；756-period稳健性作为预注册配置，不用留出结果选择模型或参数。
 
 缩放器的加权均值/标准差使用精确的最终训练样本权重。
+
+ResearchDataset只有一个可执行feature-pipeline真值：持久化的 `a_share_canonical` transform。
+它执行 `eligible → MAD winsor → industry+size neutralize → population zscore → missing/observed encoding`；
+assembler不根据scenario绕过此合同。Crypto不接入该横截面流程。
+
+FactorRiskConfig唯一拥有风险窗口、半衰期、最小观测、diagonal shrinkage、annualization与weighting；
+OptimizerConfig唯一拥有active-name/TE/turnover/industry/style/SLSQP容差和迭代上限。
+protocol序列化同一配置，运行消费同一实例；ADV participation由ExecutionAssumptions唯一拥有。
 
 #### 5.14.2 Ridge
 
@@ -1268,6 +1284,10 @@ Fundamental19 一个家族
 
 `Benjamini-Yekutieli q=5%`
 
+FDR家族按研究JSON预先选择的因子及FactorDefinition.family冻结，不按结果删减成员。
+BH/BY发现性FDR仅development；holdout只保留raw OOS/HAC，FDR记NOT_APPLICABLE。
+SPA/StepM/MCS也仅development，holdout记UNDEFINED/holdout_excluded。
+单候选PSR仍可定义，DSR/PBO统一为UNDEFINED/insufficient_candidate_count；候选数取真实ID数量。
 FDR 永不动态改变 CORE/FULL 因子成员。
 
 #### 5.17.2 挑战模型比较

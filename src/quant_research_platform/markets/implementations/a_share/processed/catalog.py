@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.columns import (
-    PLATFORM_ENTITY_TIME_KEY,
+    PLATFORM_ASSET_TIME_KEY,
     ColumnRole,
 )
 from quant_research_platform.contracts.data import (
@@ -41,7 +41,7 @@ from quant_research_platform.research.protocols.a_share import (
 )
 
 PANEL_COLUMNS = (
-    *PLATFORM_ENTITY_TIME_KEY,
+    *PLATFORM_ASSET_TIME_KEY,
     "session_date",
     "available_at",
     "stock_name",
@@ -79,9 +79,9 @@ PANEL_COLUMNS = (
     "total_market_cap",
     "float_market_cap",
 )
-EXECUTION_COLUMNS = (*PLATFORM_ENTITY_TIME_KEY, "can_enter", "can_exit")
+EXECUTION_COLUMNS = (*PLATFORM_ASSET_TIME_KEY, "can_enter", "can_exit")
 FINANCIAL_PIT_COLUMNS = (
-    *PLATFORM_ENTITY_TIME_KEY,
+    *PLATFORM_ASSET_TIME_KEY,
     "total_assets",
     "total_liabilities",
     "parent_equity",
@@ -172,14 +172,14 @@ def processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 PRICE_VOLUME_DATA_ID,
                 ProcessedDataKind.FACTOR,
-                (*PLATFORM_ENTITY_TIME_KEY, *FACTOR_COLUMNS),
+                (*PLATFORM_ASSET_TIME_KEY, *FACTOR_COLUMNS),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
                 factor_columns=FACTOR_COLUMNS,
             ),
             _spec(
                 "market_model_factors",
                 ProcessedDataKind.FACTOR,
-                (*PLATFORM_ENTITY_TIME_KEY, *MARKET_MODEL_FACTORS),
+                (*PLATFORM_ASSET_TIME_KEY, *MARKET_MODEL_FACTORS),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
                 factor_columns=MARKET_MODEL_FACTORS,
             ),
@@ -187,7 +187,7 @@ def processed_catalog() -> ProcessedDataCatalog:
                 FUNDAMENTAL_DATA_ID,
                 ProcessedDataKind.FACTOR,
                 (
-                    *PLATFORM_ENTITY_TIME_KEY,
+                    *PLATFORM_ASSET_TIME_KEY,
                     *FUNDAMENTAL_FACTORS,
                     "has_legal_fundamental_pit",
                 ),
@@ -197,7 +197,7 @@ def processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 "expectations_factors",
                 ProcessedDataKind.FACTOR,
-                (*PLATFORM_ENTITY_TIME_KEY, *EXPECTATIONS_FACTORS),
+                (*PLATFORM_ASSET_TIME_KEY, *EXPECTATIONS_FACTORS),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
                 source_input_data_ids=("analyst_forecast",),
                 factor_columns=EXPECTATIONS_FACTORS,
@@ -205,7 +205,7 @@ def processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 FORWARD_RETURNS_DATA_ID,
                 ProcessedDataKind.LABEL,
-                (*PLATFORM_ENTITY_TIME_KEY, *LABEL_COLUMNS),
+                (*PLATFORM_ASSET_TIME_KEY, *LABEL_COLUMNS),
                 processed_input_data_ids=(MARKET_PANEL_ID, EXECUTION_MASK_ID),
                 label_columns=LABEL_COLUMNS,
             ),
@@ -237,7 +237,7 @@ def _spec(
     primary_key: tuple[str, ...] | None = None,
 ) -> ProcessedDataSpec:
     roles = {column: _role(column, factor_columns, label_columns) for column in columns}
-    selected_primary_key = primary_key or PLATFORM_ENTITY_TIME_KEY
+    selected_primary_key = primary_key or PLATFORM_ASSET_TIME_KEY
     for column in selected_primary_key:
         if column != "timestamp":
             roles[column] = ColumnRole.KEY
@@ -266,7 +266,7 @@ def _role(
         return ColumnRole.LABEL
     if column == "timestamp":
         return ColumnRole.TIMESTAMP
-    if column in PLATFORM_ENTITY_TIME_KEY:
+    if column in PLATFORM_ASSET_TIME_KEY:
         return ColumnRole.KEY
     if column in {
         "can_enter",

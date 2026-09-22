@@ -41,6 +41,7 @@ class LabelCatalogItem(_PublicModel):
     available_at_column: str
     label_timing: str
     horizon: int
+    horizon_unit: str
     lookahead: int
     entry_rule: str
     exit_rule: str

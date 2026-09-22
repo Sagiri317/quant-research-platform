@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import replace
+from itertools import groupby
 
 import pandas as pd
 
@@ -102,118 +103,126 @@ def build_prediction_result_from_persisted_model(
                 root, columns=None, time_window=window, resource_policy=policy
             ) as dataset_session,
         ):
-            for item in selected:
-                metadata = dict(item["model_metadata"])
-                q_start_value = max(
-                    pd.Timestamp(item["prediction_window"]["start"]),
-                    requested_start,
-                )
-                q_end_value = min(
-                    pd.Timestamp(item["prediction_window"]["end"]),
-                    requested_end,
-                )
-                if q_start_value > q_end_value:
-                    continue
-                q_start = q_start_value.date().isoformat()
-                q_end = q_end_value.date().isoformat()
-                q_model_id = item["model_id"]
-                q_input_columns = tuple(metadata["input_columns"])
-                if not q_input_columns:
-                    raise ValueError("persisted_model_input_columns_missing")
-                read_columns = tuple(
-                    dict.fromkeys(
-                        (
-                            *dataset_spec.primary_key,
-                            *q_input_columns,
-                            *required_filter_columns(
-                                prediction_spec.sample_filter_mode
-                            ),
-                        )
-                    )
-                )
 
-                def chunks(
-                    *,
-                    _q_start=q_start,
-                    _q_end=q_end,
-                    _read_columns=read_columns,
-                    _q_input_columns=q_input_columns,
-                    _family=item["family_id"],
-                    _quarter=item["quarter_id"],
-                ) -> Iterable[pd.DataFrame]:
-                    if {"family_id", "quarter_id"}.intersection(_read_columns):
-                        raise ValueError("prediction_input_coordinate_collision")
-                    columns = resolve_columns_from_schema(
-                        tuple(dataset_session.arrow_schema.names),
-                        spec=dataset_session.spec,
-                        columns=_read_columns,
-                    )
-                    projection = replace(
-                        dataset_session,
-                        logical_columns=columns,
-                        physical_columns=columns,
-                        owns_inventory=False,
-                        owns_lease=False,
-                    )
-                    with projection.filtered_view(TimeWindow(_q_start, _q_end)) as view:
-                        with closing_iterator(
-                            iter_validated_research_input_chunks(
-                                iter_dataset_chunks(
-                                    view,
-                                    target_chunk_bytes=max(
-                                        1, policy.operation_headroom_bytes
-                                    ),
-                                ),
-                                dataset_spec=dataset_spec,
-                                input_columns=_q_input_columns,
-                            )
-                        ) as source:
-                            for frame in source:
-                                with policy.lease(
-                                    "research.prediction.family_coordinates",
-                                    max(1, len(frame) * 512 + 65536),
-                                ):
-                                    frame["family_id"] = _family
-                                    frame["quarter_id"] = _quarter
-                                    try:
-                                        yield frame
-                                    finally:
-                                        del frame["family_id"]
-                                        del frame["quarter_id"]
+            def source_key(item):
+                return item["source_quarter"], item["family_id"]
 
-                q_spec = replace(
-                    prediction_spec,
-                    prediction_id=f"{prediction_spec.prediction_id}_{item['quarter_id'].lower()}",
-                    model_id=q_model_id,
-                    train_end=None,
-                    test_start=q_start,
-                    test_end=q_end,
-                    candidate_model_ids=(),
-                    model_selection_validation_start=None,
-                    model_selection_validation_end=None,
-                )
-                q_metadata = dict(metadata)
-                q_metadata.pop("fit_cutoff", None)
-                q_metadata.pop("rank_parameters", None)
+            for (source_quarter, family), entries in groupby(
+                sorted(selected, key=source_key), key=source_key
+            ):
                 with read_quarterly_predictor(
-                    persisted_model,
-                    item["source_quarter"],
-                    item["family_id"],
-                    resource_policy=policy,
+                    persisted_model, source_quarter, family, resource_policy=policy
                 ) as predictor:
-                    q_result = build_prediction_result_from_frames(
-                        chunks(),
-                        q_spec,
-                        q_input_columns,
-                        prediction_model=predictor,
-                        model_metadata=q_metadata,
-                        resource_policy=policy,
-                    )
-                    try:
-                        yield from q_result.output_chunks
-                        state.add(q_result.prediction_metadata_factory())
-                    finally:
-                        q_result.close()
+                    for item in entries:
+                        metadata = dict(item["model_metadata"])
+                        q_start_value = max(
+                            pd.Timestamp(item["prediction_window"]["start"]),
+                            requested_start,
+                        )
+                        q_end_value = min(
+                            pd.Timestamp(item["prediction_window"]["end"]),
+                            requested_end,
+                        )
+                        if q_start_value > q_end_value:
+                            continue
+                        q_start = q_start_value.date().isoformat()
+                        q_end = q_end_value.date().isoformat()
+                        q_model_id = item["model_id"]
+                        q_input_columns = tuple(metadata["input_columns"])
+                        if not q_input_columns:
+                            raise ValueError("persisted_model_input_columns_missing")
+                        read_columns = tuple(
+                            dict.fromkeys(
+                                (
+                                    *dataset_spec.primary_key,
+                                    *q_input_columns,
+                                    *required_filter_columns(
+                                        prediction_spec.sample_filter_mode
+                                    ),
+                                )
+                            )
+                        )
+
+                        def chunks(
+                            *,
+                            _q_start=q_start,
+                            _q_end=q_end,
+                            _read_columns=read_columns,
+                            _q_input_columns=q_input_columns,
+                            _family=item["family_id"],
+                            _quarter=item["quarter_id"],
+                        ) -> Iterable[pd.DataFrame]:
+                            if {"family_id", "quarter_id"}.intersection(_read_columns):
+                                raise ValueError(
+                                    "prediction_input_coordinate_collision"
+                                )
+                            columns = resolve_columns_from_schema(
+                                tuple(dataset_session.arrow_schema.names),
+                                spec=dataset_session.spec,
+                                columns=_read_columns,
+                            )
+                            projection = replace(
+                                dataset_session,
+                                logical_columns=columns,
+                                physical_columns=columns,
+                                owns_inventory=False,
+                                owns_lease=False,
+                            )
+                            with projection.filtered_view(
+                                TimeWindow(_q_start, _q_end)
+                            ) as view:
+                                with closing_iterator(
+                                    iter_validated_research_input_chunks(
+                                        iter_dataset_chunks(
+                                            view,
+                                            target_chunk_bytes=max(
+                                                1, policy.operation_headroom_bytes
+                                            ),
+                                        ),
+                                        dataset_spec=dataset_spec,
+                                        input_columns=_q_input_columns,
+                                    )
+                                ) as source:
+                                    for frame in source:
+                                        with policy.lease(
+                                            "research.prediction.family_coordinates",
+                                            max(1, len(frame) * 512 + 65536),
+                                        ):
+                                            frame["family_id"] = _family
+                                            frame["quarter_id"] = _quarter
+                                            try:
+                                                yield frame
+                                            finally:
+                                                del frame["family_id"]
+                                                del frame["quarter_id"]
+
+                        q_spec = replace(
+                            prediction_spec,
+                            prediction_id=f"{prediction_spec.prediction_id}_{item['quarter_id'].lower()}",
+                            model_id=q_model_id,
+                            train_end=None,
+                            test_start=q_start,
+                            test_end=q_end,
+                            candidate_model_ids=(),
+                            model_selection_validation_start=None,
+                            model_selection_validation_end=None,
+                        )
+                        q_metadata = dict(metadata)
+                        q_metadata.pop("fit_cutoff", None)
+                        q_metadata.pop("rank_parameters", None)
+                        q_result = build_prediction_result_from_frames(
+                            chunks(),
+                            q_spec,
+                            q_input_columns,
+                            prediction_model=predictor,
+                            model_metadata=q_metadata,
+                            resource_policy=policy,
+                        )
+                        try:
+                            yield from q_result.output_chunks
+                            state.add(q_result.prediction_metadata_factory())
+                        finally:
+                            q_result.close()
 
     source = output_chunks()
     return PredictionResult(
@@ -275,7 +284,13 @@ class _PredictionMetadataState:
 
 
 def build_crypto_predictions(
-    *, layout, dataset_catalog, persisted_model, time_window, resource_policy
+    *,
+    layout,
+    dataset_catalog,
+    persisted_model,
+    time_window,
+    resource_policy,
+    access_window="development",
 ):
     from quant_research_platform.contracts.predictions import PredictionSpec
     from quant_research_platform.research.models.persisted import (
@@ -291,7 +306,11 @@ def build_crypto_predictions(
     )
     for model_id in model_ids:
         entries = tuple(
-            entry for entry in persisted_model.models if entry["model_id"] == model_id
+            entry
+            for entry in persisted_model.prediction_models(
+                time_window, access_window=access_window
+            )
+            if entry["model_id"] == model_id
         )
         inputs = tuple(entries[0]["model_metadata"]["input_columns"])
         spec = PredictionSpec(
@@ -371,7 +390,9 @@ def build_crypto_predictions(
         yield PredictionResult(
             spec,
             source,
-            persisted_model.prediction_lineage(model_id),
+            persisted_model.prediction_lineage(
+                model_id, time_window, access_window=access_window
+            ),
             lambda state=state, spec=spec: state.metadata(spec),
             source.close,
         )

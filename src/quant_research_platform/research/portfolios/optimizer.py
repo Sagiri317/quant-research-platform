@@ -9,6 +9,7 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import minimize
 
+from quant_research_platform.contracts.portfolios import ExecutionAssumptions
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
@@ -17,13 +18,11 @@ from quant_research_platform.contracts.validation import (
 
 @dataclass(frozen=True)
 class OptimizerConfig:
-    initial_nav: float = 1_000_000_000.0
     active_name_limit: float = 0.005
     tracking_error_limit: float = 0.05
     target_turnover_limit: float = 0.20
     industry_active_limit: float = 0.02
     style_active_limit: float = 0.20
-    adv_participation_limit: float = 0.05
     solver_ftol: float = 1e-12
     solver_maxiter: int = 1000
 
@@ -49,6 +48,8 @@ def optimize_portfolio(
     industry_columns: tuple[str, ...] = (),
     style_columns: tuple[str, ...] = (),
     expected_transaction_cost: Callable[[np.ndarray], float],
+    nav: float,
+    assumptions: ExecutionAssumptions,
     financial_column: str | None = None,
     cash_column: str | None = None,
     config: OptimizerConfig | None = None,
@@ -73,6 +74,10 @@ def optimize_portfolio(
     if not callable(expected_transaction_cost):
         raise ValueError("optimizer_cost_provider_invalid")
     config = OptimizerConfig() if config is None else config
+    if not isinstance(assumptions, ExecutionAssumptions):
+        raise ValueError("optimizer_execution_assumptions_invalid")
+    if type(nav) is not float or not np.isfinite(nav) or nav <= 0:
+        raise ValueError("optimizer_nav_invalid")
     if eligibility_column is not None and eligibility_column not in assets:
         raise ValueError("optimizer_eligibility_column_missing")
     if financial_column is not None and financial_column not in assets:
@@ -189,15 +194,14 @@ def optimize_portfolio(
         {
             "type": "ineq",
             "fun": lambda weights: (
-                config.adv_participation_limit
-                - np.abs(weights - current) * config.initial_nav / adv
+                assumptions.adv_participation - np.abs(weights - current) * nav / adv
             ),
         },
     ]
     result = minimize(
         lambda weights: float(
             -(expected_alpha @ (weights - benchmark))
-            + float(expected_transaction_cost(weights)) / config.initial_nav
+            + float(expected_transaction_cost(weights)) / nav
         ),
         current.copy(),
         method="SLSQP",
@@ -219,11 +223,13 @@ def optimize_portfolio(
         adv=adv,
         config=config,
         industry_count=len(industry_columns),
+        nav=nav,
+        assumptions=assumptions,
     )
     active = weights - benchmark
     factor_variance = float(active @ exposure @ covariance @ exposure.T @ active)
     specific_variance = float(np.sum(specific * active**2))
-    participation = np.abs(weights - current) * config.initial_nav / adv
+    participation = np.abs(weights - current) * nav / adv
     return OptimizationResult(
         weights=pd.Series(weights, index=data["asset_id"], name="weight"),
         predicted_tracking_error=float(np.sqrt(factor_variance + specific_variance)),
@@ -280,6 +286,8 @@ def _verify_solution(
     adv: np.ndarray,
     config: OptimizerConfig,
     industry_count: int,
+    nav: float,
+    assumptions: ExecutionAssumptions,
 ) -> None:
     tolerance = 1e-8
     active = weights - benchmark
@@ -311,21 +319,19 @@ def _verify_solution(
     ):
         raise ValueError("optimizer_solution_invalid")
     if np.any(
-        np.abs(weights - current) * config.initial_nav / adv
-        > config.adv_participation_limit + tolerance
+        np.abs(weights - current) * nav / adv
+        > assumptions.adv_participation + tolerance
     ):
         raise ValueError("optimizer_solution_invalid")
 
 
 def _validate_config(config: OptimizerConfig) -> None:
     values = (
-        config.initial_nav,
         config.active_name_limit,
         config.tracking_error_limit,
         config.target_turnover_limit,
         config.industry_active_limit,
         config.style_active_limit,
-        config.adv_participation_limit,
         config.solver_ftol,
     )
     if any(
@@ -334,11 +340,9 @@ def _validate_config(config: OptimizerConfig) -> None:
     ):
         raise ValueError("optimizer_config_invalid")
     if (
-        config.initial_nav <= 0.0
-        or config.active_name_limit <= 0.0
+        config.active_name_limit <= 0.0
         or config.tracking_error_limit <= 0.0
         or config.target_turnover_limit <= 0.0
-        or config.adv_participation_limit <= 0.0
     ):
         raise ValueError("optimizer_config_invalid")
     if type(config.solver_maxiter) is not int or config.solver_maxiter <= 0:

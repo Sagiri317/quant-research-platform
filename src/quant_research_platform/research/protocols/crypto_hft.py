@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from typing import ClassVar
 
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
+from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.catalog.predictions import PredictionCatalog
 from quant_research_platform.contracts.columns import ColumnRole
@@ -16,10 +18,10 @@ from quant_research_platform.contracts.data import DataFrequency, DataGrain
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import ExperimentFold
-from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import (
     bounded_qrp_json_object_snapshot,
 )
+from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioTargetBlocked,
@@ -29,14 +31,13 @@ from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import TargetSpec
 from quant_research_platform.contracts.time import (
     TimeWindow,
-    is_intraday_time_window,
+    is_datetime_window,
     time_value_isoformat,
 )
 from quant_research_platform.contracts.validation import strict_finite_float
+from quant_research_platform.markets.implementations.crypto import ids as market_ids
 
-MARKET_ID = MarketId("crypto")
 PROTOCOL_ID = "crypto_hft"
-HFT_RESEARCH_DATASET_ID = "binance_futures_hft_research_100ms"
 HFT_FACTOR_COLUMNS = (
     "spread",
     "relative_spread",
@@ -101,9 +102,6 @@ HFT_DERIVATIVE_CONTEXT_COLUMNS = tuple(
     for channel in HFT_DERIVATIVE_CHANNELS
     for field in ("age_ms", "observed_at", "event_at")
 )
-HFT_DERIVATIVE_DATA_ID = "binance_futures_derivative_factors_100ms"
-HFT_SPOT_PANEL_DATA_ID = "binance_spot_l2_panel_100ms"
-HFT_SPOT_CONTEXT_DATA_ID = "binance_spot_perp_context_100ms"
 HFT_SPOT_FACTOR_COLUMNS = (
     "spot_perp_basis",
     "spot_return_100ms",
@@ -124,10 +122,6 @@ HFT_SPOT_CONTEXT_COLUMNS = (
     "spot_grid_at",
     "spot_book_observed_at",
 )
-HFT_SOL_PANEL_DATA_ID = "binance_sol_futures_l2_panel_100ms"
-HFT_INFORMATION_PANEL_DATA_ID = "binance_perpetual_information_panel_100ms"
-HFT_INFORMATION_STATE_DATA_ID = "binance_perpetual_information_state_100ms"
-HFT_CROSS_ASSET_DATA_ID = "binance_cross_asset_context_100ms"
 HFT_INFORMATION_COLUMNS = (
     "return_100ms",
     "return_500ms",
@@ -152,10 +146,6 @@ HFT_CROSS_ASSET_CONTEXT_COLUMNS = tuple(
     for field in ("grid_age_ms", "grid_at")
 )
 
-HFT_EXTERNAL_DATA_IDS = {
-    "bybit": "bybit_perpetual_context_100ms",
-    "okx": "okx_perpetual_context_100ms",
-}
 HFT_EXTERNAL_FIELDS = (
     "mid_usdt",
     "spread_usdt",
@@ -172,25 +162,53 @@ HFT_EXTERNAL_CLOCK_FIELDS = tuple(
     for source in ("quote", "trade", "ticker")
     for field in ("age_ms", "observed_at", "event_at")
 )
-HFT_LABEL_HORIZONS_MS = (100, 500, 1_000, 5_000)
-HFT_PRICE_LABEL_COLUMNS = tuple(
-    column
-    for horizon in HFT_LABEL_HORIZONS_MS
-    for column in (
-        f"future_mid_return_{horizon}ms",
-        f"future_mid_direction_{horizon}ms",
+
+
+def label_catalog():
+    """Executable continuous-segment labels, including their maturity clock."""
+    definitions = []
+    for horizon in (100, 500, 1_000, 5_000):
+        for kind in ("return", "direction"):
+            column = f"future_mid_{kind}_{horizon}ms"
+            definitions.append(
+                LabelDefinition(
+                    label_id=column,
+                    market_id=market_ids.MARKET_ID,
+                    family=f"future_mid_{kind}",
+                    input_columns=("mid", "segment_id", "timestamp_ms"),
+                    output_column=column,
+                    label_timing="decision_time_plus_horizon_lte_role_end",
+                    horizon=horizon,
+                    horizon_unit="milliseconds",
+                    lookahead=horizon,
+                    entry_rule="decision_mid",
+                    exit_rule="same_continuous_segment_fixed_horizon_mid",
+                )
+            )
+    definitions.append(
+        LabelDefinition(
+            label_id="maker_bid_sell_pressure_proxy_500ms",
+            market_id=market_ids.MARKET_ID,
+            family="maker_sell_pressure_proxy",
+            input_columns=(
+                "best_bid_qty",
+                "observed_taker_sell_volume_100ms",
+                "segment_id",
+                "timestamp_ms",
+            ),
+            output_column="maker_bid_sell_pressure_proxy_500ms",
+            label_timing="decision_time_plus_horizon_lte_role_end",
+            horizon=500,
+            horizon_unit="milliseconds",
+            lookahead=500,
+            entry_rule="decision_best_bid_quantity",
+            exit_rule="same_continuous_segment_future_observed_sell_volume",
+        )
     )
-)
-HFT_LABEL_COLUMNS = (
-    *HFT_PRICE_LABEL_COLUMNS,
-    "maker_bid_sell_pressure_proxy_500ms",
-)
-HFT_LABEL_AVAILABILITY_COLUMNS = tuple(
-    f"{column}_available_at" for column in HFT_LABEL_COLUMNS
-)
-HFT_MAKER_SELL_PRESSURE_PROXY_HORIZON_MS = 500
+    return LabelCatalog(definitions)
+
+
 HFT_MAKER_BID_SELL_PRESSURE_PROXY_COLUMN = "maker_bid_sell_pressure_proxy_500ms"
-HFT_MAKER_QUOTE_HORIZON_MS = 500
 HFT_EXECUTION_ASSET_IDS = ("btc_usdt", "eth_usdt")
 
 HFT_EXECUTION_CONTEXT_COLUMNS = (
@@ -201,14 +219,13 @@ HFT_EXECUTION_CONTEXT_COLUMNS = (
 
 
 def label_horizon_ms(label_column):
-    """Return the duration encoded by an existing executable Crypto label."""
-    if label_column not in HFT_LABEL_COLUMNS:
-        raise ValueError("crypto_label_unknown")
-    return int(label_column.rsplit("_", 1)[1].removesuffix("ms"))
+    """Read the horizon from the executable label definition."""
+    return label_catalog().get(label_column).horizon
 
 
 @dataclass(frozen=True)
 class CryptoMakerPlan:
+    quote_horizon_ms: ClassVar[int] = 500
     maker_fee_bps: float
     latency_ms: int
     min_calibration_samples: int
@@ -421,7 +438,7 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
         if type(value) is not dict or set(value) != {"start", "end"}:
             raise ValueError("crypto_research_plan_window_invalid")
         result = TimeWindow(value["start"], value["end"])
-        if not is_intraday_time_window(result):
+        if not is_datetime_window(result):
             raise ValueError("crypto_research_plan_requires_intraday_window")
         return result
 
@@ -539,13 +556,14 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
 
 @dataclass(frozen=True)
 class CryptoProtocol:
-    scenario_id: str = HFT_RESEARCH_DATASET_ID
+    scenario_id: str = market_ids.HFT_RESEARCH_DATASET_ID
     access_window: str = "development"
     research_plan: _CryptoResearchPlan | None = None
     configuration_json: str | None = None
+    frozen_development: dict[str, object] | None = None
 
     def __post_init__(self) -> None:
-        if self.scenario_id != HFT_RESEARCH_DATASET_ID:
+        if self.scenario_id != market_ids.HFT_RESEARCH_DATASET_ID:
             raise ValueError("unknown_crypto_scenario")
         if self.research_plan is not None and not isinstance(
             self.research_plan, _CryptoResearchPlan
@@ -574,21 +592,20 @@ class CryptoProtocol:
                 if self.configuration_json is not None
                 else {}
             ),
+            **(
+                {"frozen_development": self.frozen_development}
+                if self.frozen_development is not None
+                else {}
+            ),
             "protocol_id": self.protocol_id,
             "scenario_id": self.scenario_id,
             "access_window": self.access_window,
-            "required_terminals": list(self.terminal_targets("research run")),
             "portfolio_candidates": [
                 asdict(candidate) for candidate in self.portfolio_candidates()
             ],
             "portfolio_statistics": {
-                "return_period": "complete_utc_day_within_one_oos_window",
                 "annualization_periods": 365,
                 "annualization_minimum_observations": 2,
-                "standard_deviation_ddof": 1,
-                "benchmark": "zero_return_cash",
-                "gap_policy": "separate_economic_contribution",
-                "cost_sensitivity": "constant_actual_turnover_additive_sensitivity",
             },
             "model_scopes": {
                 item["model_id"]: {
@@ -615,9 +632,6 @@ class CryptoProtocol:
                     "end": payload["folds"][-1]["development_test"]["end"],
                 },
                 holdout_window=payload["final_holdout"],
-                maker_quote_horizon_ms=HFT_MAKER_QUOTE_HORIZON_MS,
-                label_availability_rule="decision_time_plus_horizon_lte_role_end",
-                holdout_status="HOLDOUT_LOCKED",
             )
         return result
 
@@ -677,30 +691,41 @@ class CryptoProtocol:
         return {
             "candidate": asdict(candidate),
             "execution": self.research_plan.payload()["execution"],
-            "funding_forecast_units": "USDT_cashflow_per_long_asset_unit",
-            "window_boundary_order": (
-                "events_funding_effective_orders_then_cancel_pending"
-            ),
-            "gap_policy": "continuous_capital_no_signals_cancel_pending_mark_and_fund",
-            **(
-                {
-                    "quote_horizon_ms": HFT_MAKER_QUOTE_HORIZON_MS,
-                    "quote_policy": (
-                        "maximize_absolute_expected_gain_of_active_and_pending_schedule"
-                        "_keep_or_delayed_queue_reset_replace_or_zero_quantity_cancel"
-                        if candidate.calibrated
-                        else "keep_same_price_and_remaining_quantity_without_renewal"
-                        "_else_delayed_cancel_replace"
-                    ),
-                    "calibration": (
-                        "side_only_paired_validation_event_paths_and_forecast_error"
-                    ),
-                    "order_type": "post_only_limit",
-                }
-                if isinstance(candidate, CryptoMakerCandidate)
-                else {}
-            ),
         }
+
+    def target_window(self, action, data_spec, window, target_id=None):
+        if (
+            action == "research run"
+            and data_spec is not None
+            and self.research_plan is not None
+        ):
+            return TimeWindow(
+                min(fold.train.start for fold in self.research_plan.folds), window.end
+            )
+        return window
+
+    def frozen_target_ids(self):
+        return (
+            f"{self.scenario_id}_models",
+            *(
+                candidate.calibration_target_id
+                for candidate in self.portfolio_candidates()
+                if isinstance(candidate, CryptoMakerCandidate) and candidate.calibrated
+            ),
+        )
+
+    def freeze_development(self, record, references, frozen, artifacts):
+        reference = references[f"{self.scenario_id}_models"]
+        persisted = artifacts[reference.target_id]
+        final_fold = self.research_plan.folds[-1]
+        entries = [
+            item for item in persisted.models if item["fold_id"] == final_fold.fold_id
+        ]
+        if {item["model_id"] for item in entries} != set(
+            self.model_ids_for_target(reference.target_id)
+        ):
+            raise ValueError("holdout_development_model_fold_invalid")
+        return replace(self, access_window="holdout", frozen_development=frozen), None
 
     def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
         if action != "research run":
@@ -822,7 +847,21 @@ class CryptoProtocol:
         raise ValueError("unknown_crypto_action")
 
 
-def execution_windows(plan, output_window):
+def execution_windows(plan, output_window, *, access_window="development"):
+    if access_window == "holdout":
+        boundary = plan["final_holdout"]
+        return (
+            (
+                plan["folds"][-1]["fold_id"],
+                TimeWindow(
+                    max(
+                        pd.Timestamp(boundary["start"]),
+                        pd.Timestamp(output_window.start),
+                    ),
+                    min(pd.Timestamp(boundary["end"]), pd.Timestamp(output_window.end)),
+                ),
+            ),
+        )
     return tuple(
         (
             fold["fold_id"],
@@ -846,7 +885,7 @@ def execution_windows(plan, output_window):
 
 
 def protocol(
-    scenario_id: str = HFT_RESEARCH_DATASET_ID,
+    scenario_id: str = market_ids.HFT_RESEARCH_DATASET_ID,
     access_window: str = "development",
     research_plan: Mapping[str, object] | None = None,
 ) -> CryptoProtocol:
@@ -884,7 +923,7 @@ def build_hft_prediction_catalog(
         PredictionSpec(
             prediction_id=f"{item['model_id']}_prediction",
             model_id=item["model_id"],
-            research_dataset_id=HFT_RESEARCH_DATASET_ID,
+            research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
             train_end=train_end,
             test_start=test_start,
             test_end=test_end,
@@ -897,13 +936,14 @@ def build_hft_prediction_catalog(
 
 def build_crypto_evaluation_catalog(*, configuration=None) -> EvaluationCatalog:
     factor = EvaluationSpec(
-        evaluation_id=f"{HFT_RESEARCH_DATASET_ID}_evaluation",
-        market_id=MARKET_ID,
-        research_dataset_id=HFT_RESEARCH_DATASET_ID,
+        evaluation_id=f"{market_ids.HFT_RESEARCH_DATASET_ID}_evaluation",
+        market_id=market_ids.MARKET_ID,
+        research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
         signals=build_signal_specs(columns=HFT_FACTOR_COLUMNS),
-        label_columns=HFT_LABEL_COLUMNS,
+        label_columns=tuple(item.output_column for item in label_catalog().list()),
         label_availability_columns={
-            label: f"{label}_available_at" for label in HFT_LABEL_COLUMNS
+            label: f"{label}_available_at"
+            for label in tuple(item.output_column for item in label_catalog().list())
         },
     )
     models = build_hft_model_catalog(configuration=configuration).list()
@@ -928,8 +968,8 @@ def build_crypto_evaluation_catalog(*, configuration=None) -> EvaluationCatalog:
             comparisons.append(
                 EvaluationSpec(
                     evaluation_id=f"{model.model_id}_vs_{reference.model_id}_common_oos",
-                    market_id=MARKET_ID,
-                    research_dataset_id=HFT_RESEARCH_DATASET_ID,
+                    market_id=market_ids.MARKET_ID,
+                    research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
                     signals=tuple(
                         SignalSpec(
                             signal_id=item.model_id,
@@ -955,8 +995,8 @@ def build_crypto_evaluation_catalog(*, configuration=None) -> EvaluationCatalog:
             *(
                 EvaluationSpec(
                     evaluation_id=f"{model.model_id}_oos_evaluation",
-                    market_id=MARKET_ID,
-                    research_dataset_id=HFT_RESEARCH_DATASET_ID,
+                    market_id=market_ids.MARKET_ID,
+                    research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
                     signals=(
                         SignalSpec(
                             signal_id=model.model_id,
@@ -988,7 +1028,7 @@ def build_crypto_evaluation_catalog(*, configuration=None) -> EvaluationCatalog:
 
 def build_hft_research_dataset_catalog() -> ResearchDatasetCatalog:
     context = (
-        *HFT_LABEL_AVAILABILITY_COLUMNS,
+        *tuple(item.available_at_column for item in label_catalog().list()),
         "segment_id",
         "book_segment_id",
         "book_observation_id",
@@ -1025,15 +1065,15 @@ def build_hft_research_dataset_catalog() -> ResearchDatasetCatalog:
         "asset_id",
         "timestamp",
         *HFT_FACTOR_COLUMNS,
-        *HFT_LABEL_COLUMNS,
+        *tuple(item.output_column for item in label_catalog().list()),
         "eligible",
         *context,
     )
     return ResearchDatasetCatalog(
         (
             ResearchDatasetSpec(
-                data_id=HFT_RESEARCH_DATASET_ID,
-                market_id=MARKET_ID,
+                data_id=market_ids.HFT_RESEARCH_DATASET_ID,
+                market_id=market_ids.MARKET_ID,
                 input_data_ids=(
                     "binance_futures_l2_panel_100ms",
                     "binance_futures_microstructure_factors_100ms",
@@ -1041,13 +1081,18 @@ def build_hft_research_dataset_catalog() -> ResearchDatasetCatalog:
                 ),
                 base_input_data_id="binance_futures_l2_panel_100ms",
                 factor_columns=HFT_FACTOR_COLUMNS,
-                label_columns=HFT_LABEL_COLUMNS,
+                label_columns=tuple(
+                    item.output_column for item in label_catalog().list()
+                ),
                 filter_columns=("eligible",),
                 context_columns=context,
                 frequency=DataFrequency.TICK,
                 grain=DataGrain.RESEARCH_ROW,
                 column_roles=_roles(
-                    columns, HFT_FACTOR_COLUMNS, HFT_LABEL_COLUMNS, ("eligible",)
+                    columns,
+                    HFT_FACTOR_COLUMNS,
+                    tuple(item.output_column for item in label_catalog().list()),
+                    ("eligible",),
                 ),
                 primary_key=("market_id", "asset_id", "timestamp"),
                 partition_columns=("year",),
@@ -1085,7 +1130,7 @@ def factor_catalog():
     definitions = [
         FactorDefinition(
             factor_id=column,
-            market_id=MARKET_ID,
+            market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
             input_columns=(
                 "mid",
@@ -1112,12 +1157,12 @@ def factor_catalog():
     definitions.extend(
         FactorDefinition(
             factor_id=column,
-            market_id=MARKET_ID,
+            market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
             input_columns=("mid",),
             output_column=column,
             family="derivatives_state",
-            required_input_data_id=HFT_DERIVATIVE_DATA_ID,
+            required_input_data_id=market_ids.HFT_DERIVATIVE_DATA_ID,
             timing_semantics="native_observed_at_lte_decision_with_explicit_age_limit",
             null_policy="missing_stale_or_incomplete_window_is_null",
         )
@@ -1126,12 +1171,12 @@ def factor_catalog():
     definitions.extend(
         FactorDefinition(
             factor_id=column,
-            market_id=MARKET_ID,
+            market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
             input_columns=("mid",),
             output_column=column,
             family="spot_perp",
-            required_input_data_id=HFT_SPOT_CONTEXT_DATA_ID,
+            required_input_data_id=market_ids.HFT_SPOT_CONTEXT_DATA_ID,
             timing_semantics="spot_grid_available_by_perpetual_decision_with_explicit_age_limit",
             null_policy="missing_stale_or_incomplete_window_is_null",
         )
@@ -1140,12 +1185,12 @@ def factor_catalog():
     definitions.extend(
         FactorDefinition(
             factor_id=column,
-            market_id=MARKET_ID,
+            market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
             input_columns=HFT_INFORMATION_COLUMNS,
             output_column=column,
             family="cross_asset",
-            required_input_data_id=HFT_CROSS_ASSET_DATA_ID,
+            required_input_data_id=market_ids.HFT_CROSS_ASSET_DATA_ID,
             timing_semantics="mature_information_grid_lte_decision_with_explicit_age_limit",
             null_policy="missing_stale_or_incomplete_window_is_null",
         )
@@ -1154,7 +1199,7 @@ def factor_catalog():
     definitions.extend(
         FactorDefinition(
             factor_id=f"{venue}_{column}",
-            market_id=MARKET_ID,
+            market_id=market_ids.MARKET_ID,
             factor_set=FactorSet.STANDARD,
             input_columns=("mid",),
             output_column=f"{venue}_{column}",
@@ -1163,7 +1208,7 @@ def factor_catalog():
             timing_semantics="normalized_local_timestamp_lte_binance_decision",
             null_policy="missing_stale_incomplete_or_unrepresentable_is_null",
         )
-        for venue, data_id in HFT_EXTERNAL_DATA_IDS.items()
+        for venue, data_id in market_ids.HFT_EXTERNAL_DATA_IDS.items()
         for column in HFT_EXTERNAL_FIELDS
     )
     return FactorCatalog(definitions)

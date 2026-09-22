@@ -5,6 +5,7 @@ import copy
 import pytest
 
 from quant_research_platform.contracts.models import model_spec_payload
+from quant_research_platform.markets.implementations.crypto import ids as crypto_ids
 from quant_research_platform.profiles.research import (
     bind_research_configuration,
     research_profile,
@@ -99,13 +100,13 @@ def test_model_input_and_evaluation_selection_are_independent():
 
 def test_crypto_selection_keeps_execution_assets_and_can_evaluate_only():
     profile = research_profile("crypto_binance_hft")
-    config = configuration(profile.profile_id, crypto_hft.HFT_RESEARCH_DATASET_ID)
+    config = configuration(profile.profile_id, crypto_ids.HFT_RESEARCH_DATASET_ID)
     config["research_plan"] = hft_research_plan()
     selected = bind_research_configuration(profile, config)
     assert selected.research_datasets.list()[0].factor_columns == ("ofi_500ms",)
-    protocol = selected.protocol(crypto_hft.HFT_RESEARCH_DATASET_ID)
+    protocol = selected.protocol(crypto_ids.HFT_RESEARCH_DATASET_ID)
     assert protocol.terminal_targets("research run") == (
-        crypto_hft.HFT_RESEARCH_DATASET_ID + "_evaluation",
+        crypto_ids.HFT_RESEARCH_DATASET_ID + "_evaluation",
     )
     assert selected.models.list() == ()
     assert set(protocol.manifest()["research_plan"]["exposure_limits"]) == {
@@ -190,14 +191,21 @@ def test_portfolio_parameters_flow_through_existing_candidate_contracts():
     candidate = bound.protocol("pv_expanded").portfolio_candidates()[0]
     assert candidate.top_quantile == 0.1
     assert candidate.prediction_selector == "champion"
-    assert candidate.risk_context_target_ids == ()
+    assert candidate.risk_context_target_ids == ("price_volume_facts",)
+    assert candidate.risk_style_columns
+    ledger = next(
+        target
+        for target in bound.protocol("pv_expanded").target_specs("research run")
+        if target.target_id == "pv_expanded_champion_top20_equal_weight_ledger"
+    )
+    assert set(candidate.risk_context_target_ids) <= set(ledger.dependencies)
     config["portfolios"][0]["top_quantile"] = 0
     with pytest.raises(ValueError, match="quantile_invalid"):
         bind_research_configuration(research_profile(), config)
 
 
 def test_auxiliary_source_dependency_and_age_context_are_selected_locally(tmp_path):
-    from quant_research_platform.research.protocols.crypto_hft import (
+    from quant_research_platform.markets.implementations.crypto.ids import (
         HFT_DERIVATIVE_DATA_ID,
     )
     from tests.helpers.research_configuration import research_configuration
@@ -242,8 +250,14 @@ def test_primary_statistics_label_is_explicit_and_cannot_select_availability_col
     config["evaluation"]["primary_label"] = "forward_return_5d"
     selected = bind_research_configuration(research_profile(), config)
     manifest = selected.protocol("pv_expanded").manifest()
-    assert manifest["primary_label"] == "forward_return_5d"
-    assert manifest["primary_label_available_at"] == "forward_return_5d_available_at"
+    assert (
+        manifest["research_configuration"]["evaluation"]["primary_label"]
+        == "forward_return_5d"
+    )
+    assert (
+        selected.labels.get("forward_return_5d").available_at_column
+        == "forward_return_5d_available_at"
+    )
     assert selected.evaluations.list()[0].label_columns == (
         "forward_return_5d",
         "forward_return_60d",
@@ -256,7 +270,7 @@ def test_primary_statistics_label_is_explicit_and_cannot_select_availability_col
 
 def test_auxiliary_age_changes_processed_identity_without_changing_schema(tmp_path):
     from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.research.protocols.crypto_hft import (
+    from quant_research_platform.markets.implementations.crypto.ids import (
         HFT_DERIVATIVE_DATA_ID,
     )
     from quant_research_platform.storage.datasets.schema import (
@@ -284,7 +298,7 @@ def test_auxiliary_age_changes_processed_identity_without_changing_schema(tmp_pa
     assert before["parameters"]["max_age_ms"]["openInterest"] == 15000
 
 
-def test_research_windows_and_independent_crypto_episodes_are_enforced():
+def test_research_windows_allow_continuous_crypto_across_midnight():
     from tests.helpers.research_configuration import research_configuration
 
     config = research_configuration()
@@ -294,17 +308,22 @@ def test_research_windows_and_independent_crypto_episodes_are_enforced():
     config = research_configuration("crypto", "baseline")
     config["research_plan"]["final_holdout"]["end"] = "2026-08-02T00:00:00"
     config["windows"]["holdout"]["end"] = "2026-08-02T00:00:00"
-    with pytest.raises(ValueError, match="independent_episode_required"):
-        bind_research_configuration(research_profile("crypto_binance_hft"), config)
+    bound = bind_research_configuration(research_profile("crypto_binance_hft"), config)
+    assert (
+        bound.protocol(
+            config["scenario_id"]
+        ).research_plan.final_holdout.end.isoformat()
+        == "2026-08-02T00:00:00"
+    )
 
 
 def test_spot_uses_shared_native_owner_and_only_selected_graph_dependencies(tmp_path):
-    from quant_research_platform.markets.implementations.crypto.processed import (
-        producer as crypto_producer,
-    )
-    from quant_research_platform.research.protocols.crypto_hft import (
+    from quant_research_platform.markets.implementations.crypto.ids import (
         HFT_SPOT_CONTEXT_DATA_ID,
         HFT_SPOT_PANEL_DATA_ID,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer as crypto_producer,
     )
     from quant_research_platform.workflows.research import (
         _target_specs,
@@ -373,13 +392,13 @@ def test_sol_read_and_training_scopes_do_not_expand_execution(tmp_path):
     for item in selected.processed.list():
         validate_dataset_spec_payload(data_spec_payload(item))
     dataset = selected.research_datasets.list()[0]
-    assert dataset.base_input_data_id == crypto_hft.HFT_INFORMATION_PANEL_DATA_ID
+    assert dataset.base_input_data_id == crypto_ids.HFT_INFORMATION_PANEL_DATA_ID
     assert "sol_grid_age_ms" in dataset.context_columns
     assert "sol_grid_at" in dataset.context_columns
     for key in (HFT_FACTOR_DATA_ID, HFT_LABEL_DATA_ID):
         spec = selected.processed.get(key)
         assert spec.processed_input_data_ids == (
-            crypto_hft.HFT_INFORMATION_PANEL_DATA_ID,
+            crypto_ids.HFT_INFORMATION_PANEL_DATA_ID,
         )
         assert json.loads(spec.parameters_json)["asset_ids"] == [
             "btc_usdt",
@@ -401,12 +420,12 @@ def test_sol_read_and_training_scopes_do_not_expand_execution(tmp_path):
         _target_specs(selected, action="research run", protocol=protocol),
         protocol.terminal_targets("research run"),
     )
-    assert crypto_hft.HFT_SOL_PANEL_DATA_ID in {target.target_id for target in graph}
+    assert crypto_ids.HFT_SOL_PANEL_DATA_ID in {target.target_id for target in graph}
     del config["auxiliary_sources"]["sol"]
     missing = bind_research_configuration(
         research_profile("crypto_binance_hft"), config, tardis_root=tmp_path
     )
-    assert crypto_hft.HFT_SOL_PANEL_DATA_ID not in missing.producer_bindings
+    assert crypto_ids.HFT_SOL_PANEL_DATA_ID not in missing.producer_bindings
     plain = research_configuration("crypto", "cross_btc_eth")
     independent = bind_research_configuration(
         research_profile("crypto_binance_hft"), plain
@@ -416,7 +435,7 @@ def test_sol_read_and_training_scopes_do_not_expand_execution(tmp_path):
         _target_specs(independent, action="research run", protocol=protocol),
         protocol.terminal_targets("research run"),
     )
-    assert crypto_hft.HFT_SOL_PANEL_DATA_ID not in {
+    assert crypto_ids.HFT_SOL_PANEL_DATA_ID not in {
         target.target_id for target in graph
     }
 
@@ -452,7 +471,7 @@ def test_external_sources_have_independent_owners_units_and_sol_nulls(tmp_path):
         tardis_root=tmp_path,
     )
     dataset = selected.research_datasets.list()[0]
-    for venue, data_id in crypto_hft.HFT_EXTERNAL_DATA_IDS.items():
+    for venue, data_id in crypto_ids.HFT_EXTERNAL_DATA_IDS.items():
         assert data_id in dataset.input_data_ids
         assert venue + "_quote_observed_at" in dataset.context_columns
         binding = selected.producer_bindings[data_id]
@@ -467,8 +486,8 @@ def test_external_sources_have_independent_owners_units_and_sol_nulls(tmp_path):
         config,
         tardis_root=tmp_path,
     )
-    assert crypto_hft.HFT_EXTERNAL_DATA_IDS["bybit"] in missing.producer_bindings
-    assert crypto_hft.HFT_EXTERNAL_DATA_IDS["okx"] not in missing.producer_bindings
+    assert crypto_ids.HFT_EXTERNAL_DATA_IDS["bybit"] in missing.producer_bindings
+    assert crypto_ids.HFT_EXTERNAL_DATA_IDS["okx"] not in missing.producer_bindings
     transfer = research_configuration("crypto", "cross_asset")
     transfer["evaluation"]["factors"].append("bybit_price_difference")
     transfer["auxiliary_sources"]["bybit"] = config["auxiliary_sources"]["bybit"]
@@ -479,7 +498,7 @@ def test_external_sources_have_independent_owners_units_and_sol_nulls(tmp_path):
     )
     assert (
         mixed.research_datasets.list()[0].key_coverage[
-            crypto_hft.HFT_EXTERNAL_DATA_IDS["bybit"]
+            crypto_ids.HFT_EXTERNAL_DATA_IDS["bybit"]
         ]
         == "sparse"
     )
@@ -736,7 +755,7 @@ def test_crypto_model_horizon_follows_selected_label_and_taker_requires_returns(
     )
     manifest = profile.protocol(config["scenario_id"]).manifest()
     assert manifest["model_scopes"]["short_return"]["label_horizon_ms"] == 100
-    assert manifest["maker_quote_horizon_ms"] == 500
+    assert crypto_hft.CryptoMakerPlan.quote_horizon_ms == 500
     model["label_column"] = "future_mid_direction_100ms"
     with pytest.raises(ValueError, match="taker_model_label_mismatch"):
         bind_research_configuration(research_profile("crypto_binance_hft"), config)

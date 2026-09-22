@@ -16,7 +16,7 @@ from quant_research_platform.compute.dataframe.cross_section import _stable_zsco
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.time import TimeWindow, is_intraday_time_window
+from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_finite_numeric_series,
@@ -28,7 +28,6 @@ from quant_research_platform.research.datasets.validation import (
 from quant_research_platform.research.features.transforms import (
     _feature_transform_working_bytes,
     apply_feature_transforms,
-    canonical_feature_pipeline,
 )
 from quant_research_platform.research.filtering import (
     A_SHARE_ELIGIBILITY_FACTS,
@@ -457,7 +456,7 @@ def _iter_research_chunk_windows_from_base_input(
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    intraday = is_intraday_time_window(time_window)
+    intraday = is_datetime_window(time_window)
     last_timestamp: pd.Timestamp | None = None
     pending: TimeWindow | None = None
     with base_session.filtered_view(time_window) as session:
@@ -844,11 +843,6 @@ def _apply_feature_transforms(
 ) -> pd.DataFrame:
     if not dataset_spec.feature_transforms:
         return frame
-    if dataset_spec.data_id in SCENARIO_IDS:
-        return canonical_feature_pipeline(
-            frame,
-            factor_columns=dataset_spec.factor_columns,
-        )
     return apply_feature_transforms(
         frame,
         dataset_spec.feature_transforms,

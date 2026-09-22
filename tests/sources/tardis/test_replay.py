@@ -10,11 +10,11 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.sources import open_market_source
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.binance.replay import (
     ReconstructionStats,
     iter_reconstructed_depth,
-    open_market_source,
 )
 from quant_research_platform.sources.tardis.raw import import_slices
 from tests.helpers.runtime_resources import capture_test_policy
@@ -448,7 +448,7 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
     import errno
     from pathlib import Path
 
-    from quant_research_platform.sources.binance.replay import market_source_identity
+    from quant_research_platform.sources import market_source_identity
     from tests.sources.tardis.test_raw import _snapshot
 
     root = tmp_path / "published"

@@ -8,6 +8,7 @@ from typing import Any
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts.json_codec import (
+    MAX_QRP_JSON_BYTES,
     bounded_qrp_json_object_snapshot,
     parse_qrp_json_object,
     render_qrp_json_object,
@@ -29,8 +30,6 @@ from quant_research_platform.storage.identity import (
     require_unaliased_path,
 )
 
-_MAX_QRP_JSON_BYTES = 1024 * 1024
-
 
 def _qrp_json_file_identity(path: Path) -> DatasetFileIdentity:
     try:
@@ -43,7 +42,7 @@ def read_bounded_qrp_json(
     path: Path,
     *,
     expected_identity: DatasetFileIdentity | None = None,
-    max_bytes: int = _MAX_QRP_JSON_BYTES,
+    max_bytes: int = MAX_QRP_JSON_BYTES,
 ) -> tuple[bytes, dict[str, Any]]:
     if type(max_bytes) is not int or max_bytes < 0:
         raise ValueError("dataset_metadata_size_limit_invalid")
@@ -196,5 +195,5 @@ def _require_schema_id(payload: object) -> None:
 def _bounded_qrp_json_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     return bounded_qrp_json_object_snapshot(
         payload,
-        max_bytes=_MAX_QRP_JSON_BYTES - 1,
+        max_bytes=MAX_QRP_JSON_BYTES - 1,
     )

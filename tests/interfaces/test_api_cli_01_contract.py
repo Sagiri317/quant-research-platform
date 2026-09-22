@@ -92,10 +92,9 @@ def test_curve_output_growth_is_admitted_before_retention(
         lambda *args, **kwargs: record,
     )
     monkeypatch.setattr(
-        queries.report_artifact, "_validate_reference", lambda *args: None
-    )
-    monkeypatch.setattr(
-        queries.report_artifact, "_instance_root", lambda *args: tmp_path
+        queries.report_artifact,
+        "read_validated_reference",
+        lambda *args: (tmp_path, {}),
     )
     monkeypatch.setattr(
         queries, "read_portfolio_ledger_artifact", lambda *args, **kwargs: artifact

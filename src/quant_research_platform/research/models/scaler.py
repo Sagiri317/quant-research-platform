@@ -1,4 +1,4 @@
-"""Training-only model matrix scaling and equal-date weighting."""
+"""Training-only model matrix scaling and equal-timestamp weighting."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.models import TrainingWeighting
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 
 
@@ -111,15 +112,24 @@ class LinearScaledPredictor:
         return np.asarray(self.coefficients[1:], dtype="float64")
 
 
-def equal_date_sample_weights(timestamps: object) -> np.ndarray:
-    """Return weights whose date totals are equal and whose sum is row count."""
+def equal_timestamp_sample_weights(
+    timestamps: object, weighting: TrainingWeighting | None = None
+) -> np.ndarray:
+    """Assign equal timestamp mass, then decay and normalize to training rows."""
 
+    weighting = TrainingWeighting() if weighting is None else weighting
     values = pd.Series(pd.to_datetime(timestamps, errors="raise"))
     if values.empty or values.isna().any():
         raise ValueError("sample_weight_timestamps_invalid")
     counts = values.groupby(values, sort=False).transform("size").to_numpy()
-    date_count = int(values.nunique())
-    return len(values) / (date_count * counts.astype("float64"))
+    timestamp_count = int(values.nunique())
+    weights = len(values) / (timestamp_count * counts.astype("float64"))
+    if weighting.half_life is not None:
+        periods = pd.Index(values.unique()).sort_values()
+        age = len(periods) - 1 - periods.get_indexer(values)
+        weights *= np.exp2(-age / weighting.half_life)
+        weights *= len(values) / weights.sum()
+    return weights
 
 
 def _finite_matrix(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:

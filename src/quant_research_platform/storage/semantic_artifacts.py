@@ -20,6 +20,7 @@ from quant_research_platform.contracts.experiments import (
     validate_trial_ledger_reference,
 )
 from quant_research_platform.contracts.json_codec import (
+    MAX_QRP_JSON_BYTES,
     bounded_qrp_json_object_snapshot,
     render_qrp_json_object,
 )
@@ -46,7 +47,6 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
-    _MAX_QRP_JSON_BYTES,
     read_manifest,
     write_manifest,
 )
@@ -381,7 +381,7 @@ def read_semantic_artifact_operational_metadata(
 
 
 def _operational_metadata(value: object) -> dict[str, object]:
-    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=_MAX_QRP_JSON_BYTES)
+    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=MAX_QRP_JSON_BYTES)
     if set(snapshot) - {"model_trial_ledgers"}:
         raise ValueError("semantic_artifact_operational_metadata_invalid")
     if "model_trial_ledgers" in snapshot:
@@ -469,7 +469,7 @@ def _member_inventory(
         identities[relative] = _member_identity(child)
         member = _member_record(relative, child)
         encoded_bytes += len(render_qrp_json_object(member).encode("utf-8"))
-        if encoded_bytes > _MAX_QRP_JSON_BYTES:
+        if encoded_bytes > MAX_QRP_JSON_BYTES:
             raise ValueError("semantic_artifact_member_limit_exceeded")
         members.append(member)
 
@@ -519,7 +519,7 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
                     continue
                 relative = f"{prefix}/{entry.name}" if prefix else entry.name
                 path_bytes += len(relative.encode("utf-8")) + 2
-                if path_bytes > _MAX_QRP_JSON_BYTES:
+                if path_bytes > MAX_QRP_JSON_BYTES:
                     raise ValueError("semantic_artifact_member_limit_exceeded")
                 if entry.is_symlink():
                     raise ValueError("semantic_artifact_member_invalid")

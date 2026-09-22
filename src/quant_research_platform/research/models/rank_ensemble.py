@@ -37,11 +37,14 @@ class EqualWeightRankEnsembleFactory:
     columns: tuple[str, ...]
     label_column: str
 
-    def fit(self, frame: pd.DataFrame, _target: np.ndarray) -> RankEnsemblePredictor:
+    def fit(
+        self, frame: pd.DataFrame, _target: np.ndarray, *, sample_weight=None
+    ) -> RankEnsemblePredictor:
         directions = _rank_directions(
             frame,
             input_columns=self.columns,
             label_column=self.label_column,
+            sample_weight=sample_weight,
         )
         return RankEnsemblePredictor(
             columns=self.columns,
@@ -54,11 +57,14 @@ class ICWeightedRankEnsembleFactory:
     columns: tuple[str, ...]
     label_column: str
 
-    def fit(self, frame: pd.DataFrame, _target: np.ndarray) -> ICWeightedRankEnsemble:
+    def fit(
+        self, frame: pd.DataFrame, _target: np.ndarray, *, sample_weight=None
+    ) -> ICWeightedRankEnsemble:
         return ICWeightedRankEnsemble.fit(
             frame,
             input_columns=self.columns,
             label_column=self.label_column,
+            sample_weight=sample_weight,
         )
 
 
@@ -74,33 +80,16 @@ class ICWeightedRankEnsemble:
         *,
         input_columns: tuple[str, ...],
         label_column: str,
+        sample_weight=None,
     ) -> ICWeightedRankEnsemble:
         weights = []
         defined_columns: list[str] = []
-        for column in input_columns:
-            timestamp_correlations: list[float] = []
-            for timestamp_frame in _cross_section_groups(frame):
-                input_values = timestamp_frame[column].to_numpy(
-                    dtype="float64",
-                    copy=False,
-                )
-                label_values = timestamp_frame[label_column].to_numpy(
-                    dtype="float64",
-                    copy=False,
-                )
-                valid = np.isfinite(input_values) & np.isfinite(label_values)
-                if int(valid.sum()) < 2:
-                    continue
-                corr, _reason = _pearson_correlation_result(
-                    _average_ranks(input_values[valid]),
-                    _average_ranks(label_values[valid]),
-                )
-                if corr is not None:
-                    timestamp_correlations.append(corr)
-            if not timestamp_correlations:
-                continue
-            defined_columns.append(column)
-            weights.append(float(np.mean(timestamp_correlations)))
+        for column, correlation in _training_rank_correlations(
+            frame, input_columns, label_column, sample_weight
+        ):
+            if correlation is not None:
+                defined_columns.append(column)
+                weights.append(correlation)
         if not weights:
             raise ValueError("all_ensemble_correlations_undefined")
         values = np.asarray(weights, dtype="float64")
@@ -162,30 +151,55 @@ def _rank_directions(
     *,
     input_columns: tuple[str, ...],
     label_column: str,
+    sample_weight=None,
 ) -> tuple[float, ...]:
-    directions: list[float] = []
-    for column in input_columns:
-        correlations: list[float] = []
-        for timestamp_frame in _cross_section_groups(frame):
-            input_values = timestamp_frame[column].to_numpy(dtype="float64", copy=False)
-            label_values = timestamp_frame[label_column].to_numpy(
-                dtype="float64", copy=False
-            )
-            valid = np.isfinite(input_values) & np.isfinite(label_values)
-            if int(valid.sum()) < 2:
-                continue
-            correlation, _reason = _pearson_correlation_result(
-                _average_ranks(input_values[valid]),
-                _average_ranks(label_values[valid]),
-            )
-            if correlation is not None:
-                correlations.append(correlation)
-        if not correlations:
+    directions = []
+    for column, correlation in _training_rank_correlations(
+        frame, input_columns, label_column, sample_weight
+    ):
+        if correlation is None:
             raise ValueError(
                 f"ensemble_direction_undefined:{column}:no_valid_training_rankic"
             )
-        directions.append(1.0 if float(np.mean(correlations)) >= 0.0 else -1.0)
+        directions.append(1.0 if correlation >= 0.0 else -1.0)
     return tuple(directions)
+
+
+def _training_rank_correlations(frame, columns, label_column, sample_weight):
+    from quant_research_platform.research.models.scaler import _weights
+
+    weights = _weights(sample_weight, len(frame))
+    masses = (
+        pd.Series(weights).groupby(pd.to_datetime(frame["timestamp"]).to_numpy()).sum()
+        if "timestamp" in frame
+        else None
+    )
+    for column in columns:
+        correlations, period_weights = [], []
+        for group in _cross_section_groups(frame):
+            x = group[column].to_numpy(dtype="float64", copy=False)
+            y = group[label_column].to_numpy(dtype="float64", copy=False)
+            valid = np.isfinite(x) & np.isfinite(y)
+            if int(valid.sum()) < 2:
+                continue
+            corr, _reason = _pearson_correlation_result(
+                _average_ranks(x[valid]), _average_ranks(y[valid])
+            )
+            if corr is not None:
+                correlations.append(corr)
+                period_weights.append(
+                    1.0
+                    if sample_weight is None or masses is None
+                    else masses.loc[pd.Timestamp(group["timestamp"].iloc[0])]
+                )
+        yield (
+            column,
+            (
+                float(np.average(correlations, weights=period_weights))
+                if correlations
+                else None
+            ),
+        )
 
 
 def _cross_section_groups(frame: pd.DataFrame) -> Iterator[pd.DataFrame]:

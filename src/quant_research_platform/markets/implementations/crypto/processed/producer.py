@@ -12,7 +12,7 @@ from itertools import chain
 import pandas as pd
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.time import is_intraday_time_window
+from quant_research_platform.contracts.time import is_datetime_window
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
     iter_cross_asset_factor_frames,
@@ -25,17 +25,14 @@ from quant_research_platform.markets.implementations.crypto.hft import (
 )
 from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_FACTOR_DATA_ID,
+    HFT_INFORMATION_STATE_DATA_ID,
     HFT_LABEL_DATA_ID,
     HFT_PANEL_DATA_ID,
+    HFT_SPOT_PANEL_DATA_ID,
     MARKET_ID,
     canonical_crypto_asset_id,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.protocols.crypto_hft import (
-    HFT_INFORMATION_STATE_DATA_ID,
-    HFT_LABEL_HORIZONS_MS,
-    HFT_SPOT_PANEL_DATA_ID,
-)
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
@@ -88,7 +85,7 @@ def produce_hft_processed_data(
     panel_id=HFT_PANEL_DATA_ID,
 ):
     """Keep readers alive until the shared writer's prepublication validator."""
-    if not is_intraday_time_window(time_window):
+    if not is_datetime_window(time_window):
         raise ValueError("hft_materialization_requires_intraday_window")
     metadata = {}
     with ExitStack() as readers:
@@ -204,7 +201,15 @@ def produce_hft_processed_data(
                 iter_factor_frames
                 if spec.data_id != HFT_LABEL_DATA_ID
                 else lambda frames: iter_label_frames(
-                    frames, horizons_ms=HFT_LABEL_HORIZONS_MS
+                    frames,
+                    horizons_ms=tuple(
+                        sorted(
+                            {
+                                item["horizon"]
+                                for item in json.loads(spec.parameters_json)["labels"]
+                            }
+                        )
+                    ),
                 )
             )
             data = _panel_frame_producer(

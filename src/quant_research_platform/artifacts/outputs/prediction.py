@@ -38,7 +38,7 @@ from quant_research_platform.contracts.predictions import (
     PredictionSpec,
     prediction_output_columns,
 )
-from quant_research_platform.contracts.time import is_intraday_time_value
+from quant_research_platform.contracts.time import is_datetime_value
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.runtime.resources import (
@@ -100,7 +100,7 @@ def write_prediction_outputs(
                 required=required,
                 key_columns=tuple(spec.primary_key),
                 compression="zstd",
-                date_only=not is_intraday_time_value(spec.test_start),
+                date_only=not is_datetime_value(spec.test_start),
                 borrowed_input=spec.prediction_mode == "a_share_oos",
                 validate_frame=(
                     lambda frame: validate_crypto_prediction_frame(
@@ -159,9 +159,11 @@ def write_prediction_outputs(
 
 def _stage_family_predictions(frames, root, required, spec, metadata):
     paths = []
-    expected = [
-        (item["quarter_id"], item["family_id"]) for item in metadata["quarterly_models"]
-    ]
+    expected = {
+        (item["quarter_id"], item["family_id"]): index
+        for index, item in enumerate(metadata["quarterly_models"])
+    }
+    seen = set()
     policy = current_runtime_resource_policy()
 
     def group_key(item):
@@ -179,8 +181,9 @@ def _stage_family_predictions(frames, root, required, spec, metadata):
 
     with closing_iterator(iter(frames)) as source:
         for coordinate, group in groupby(source, key=group_key):
-            if len(paths) >= len(expected) or coordinate != expected[len(paths)]:
-                raise ValueError("prediction_family_stream_order_invalid")
+            if coordinate not in expected or coordinate in seen:
+                raise ValueError("prediction_family_stream_coordinate_invalid")
+            seen.add(coordinate)
             path = root / owned_scratch_name(".s-", uuid4().hex[:12])
             write_parquet_chunks(
                 group,
@@ -191,9 +194,9 @@ def _stage_family_predictions(frames, root, required, spec, metadata):
                 date_only=True,
             )
             paths.append((*coordinate, path))
-    if len(paths) != len(expected):
+    if seen != expected.keys():
         raise ValueError("prediction_family_stream_missing")
-    return paths
+    return sorted(paths, key=lambda item: expected[item[:2]])
 
 
 def _merge_family_predictions(paths, columns):
