@@ -240,6 +240,144 @@ def test_exact_key_tmpfs_row_stream_keeps_capacity_for_sibling_owner(
     assert not list(tmp_path.glob(".k-*"))
 
 
+def test_exact_key_tmpfs_low_disk_uses_row_credit_before_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import _scratch_ownership, exact_keys
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    if not _scratch_ownership._memory_filesystem(tmp_path):
+        pytest.skip("requires actual tmpfs")
+    monkeypatch.setattr(exact_keys, "gettempdir", lambda: str(tmp_path))
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=64 * 1024**2,
+    )
+    with runtime_resource_policy_scope(policy):
+        with policy.lease(
+            "storage.exact_keys", exact_keys.EXACT_KEY_SQLITE_CACHE_BYTES
+        ):
+            with exact_keys.ExactPrimaryKeyIndex(primary_key=("key",)) as index:
+                assert index.add_table(pa.table({"key": [1]})) == 0
+                connection = index._connection
+                assert connection is not None
+                scratch = index._scratch_reservation
+                assert scratch is not None
+                resident_bytes = (
+                    sum(
+                        int(
+                            connection.execute(
+                                f"PRAGMA {schema}.page_count"
+                            ).fetchone()[0]
+                        )
+                        for schema in ("main", "temp")
+                    )
+                    * exact_keys.EXACT_KEY_SQLITE_PAGE_BYTES
+                )
+                assert scratch.reserved_bytes == resident_bytes
+
+                class ProbeComplete(Exception):
+                    pass
+
+                batch_targets: list[int] = []
+                resize = scratch.resize
+
+                def capture_batch_target(total_bytes: int) -> None:
+                    batch_targets.append(total_bytes)
+                    raise ProbeComplete
+
+                monkeypatch.setattr(scratch, "resize", capture_batch_target)
+                with pytest.raises(ProbeComplete):
+                    index._admit_physical_write(
+                        1024**2,
+                        minimum_bytes=8 * exact_keys.EXACT_KEY_SQLITE_PAGE_BYTES,
+                    )
+                monkeypatch.setattr(scratch, "resize", resize)
+                assert len(batch_targets) == 1
+                batch_growth = batch_targets[0] - scratch.reserved_bytes
+                free_disk = batch_targets[0] - 2 * resident_bytes + resident_bytes // 2
+                assert 0 < free_disk < batch_growth
+
+                observed_growth: list[int] = []
+
+                def constrained_disk(_path: Path, *, reserve_bytes: int) -> int:
+                    observed_growth.append(reserve_bytes)
+                    if reserve_bytes > free_disk:
+                        raise RuntimeError("insufficient_free_disk")
+                    return free_disk
+
+                monkeypatch.setattr(
+                    exact_keys, "require_free_disk_headroom", constrained_disk
+                )
+                monkeypatch.setattr(
+                    _scratch_ownership, "require_free_disk_headroom", constrained_disk
+                )
+                assert index.add_table(pa.table({"key": [2]})) == 0
+                assert index.identity_payload_count(namespace="dataset") == 2
+                assert observed_growth and max(observed_growth) <= free_disk
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.glob(".k-*"))
+
+
+def test_comparison_tmpfs_reuses_bounded_row_payload_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.runtime.resources import (
+        MemoryLease,
+        runtime_resource_policy_scope,
+    )
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+    from quant_research_platform.storage.exact_keys import (
+        EXACT_KEY_SQLITE_CACHE_BYTES,
+        ExactPrimaryKeyIndex,
+    )
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    if not _memory_filesystem(tmp_path):
+        pytest.skip("requires actual tmpfs")
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
+    grow = MemoryLease.grow
+    payload_growths = 0
+
+    def observed_grow(lease: MemoryLease, additional_bytes: int) -> None:
+        nonlocal payload_growths
+        if lease.owner == "storage.dataset.comparison.payload":
+            payload_growths += 1
+        grow(lease, additional_bytes)
+
+    monkeypatch.setattr(MemoryLease, "grow", observed_grow)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=64 * 1024**2,
+    )
+    table = pa.table(
+        {"key": range(256), "score": [float(position) for position in range(256)]}
+    )
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("storage.exact_keys", EXACT_KEY_SQLITE_CACHE_BYTES):
+            with ExactPrimaryKeyIndex(primary_key=("key",)) as index:
+                assert (
+                    index.add_comparison_table(
+                        table,
+                        namespace="left",
+                        value_columns=("score",),
+                        payload_target_bytes=1024**2,
+                    )
+                    == 0
+                )
+                assert index.identity_payload_count(namespace="left") == 256
+                assert payload_growths < 64
+                with policy.lease("test.sibling", 64 * 1024):
+                    assert policy.used_memory_bytes <= policy.explicit_memory_cap_bytes
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.glob(".k-*"))
+
+
 def test_exact_key_tmpfs_large_btree_split_stays_within_admitted_pages(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -273,6 +411,22 @@ def test_exact_key_tmpfs_large_btree_split_stays_within_admitted_pages(
             with ExactPrimaryKeyIndex(
                 primary_key=("market_id", "asset_id", "timestamp")
             ) as index:
+                connection = index._connection
+                assert connection is not None
+                admit = index._admit_physical_write
+                admissions: list[tuple[int, int, int | None]] = []
+
+                def observed_admit(
+                    reserve_bytes: int, *, minimum_bytes: int | None = None
+                ) -> int:
+                    page_count = int(
+                        connection.execute("PRAGMA main.page_count").fetchone()[0]
+                    )
+                    credit = admit(reserve_bytes, minimum_bytes=minimum_bytes)
+                    admissions.append((page_count, credit, minimum_bytes))
+                    return credit
+
+                monkeypatch.setattr(index, "_admit_physical_write", observed_admit)
                 for start in range(0, 40_000, 4_096):
                     assert (
                         index.add_table(
@@ -281,6 +435,15 @@ def test_exact_key_tmpfs_large_btree_split_stays_within_admitted_pages(
                         == 0
                     )
                 assert index.identity_payload_count(namespace="dataset") == 40_000
+                assert len(admissions) < 10_000
+                assert any(
+                    before.bit_length() < after.bit_length()
+                    and minimum is not None
+                    and credit > minimum
+                    for (before, credit, minimum), (after, _, _) in zip(
+                        admissions, admissions[1:], strict=False
+                    )
+                )
                 samples = key_table(range(36_008, 36_011))
                 assert index.add_table(samples) == 3
                 connection = index._connection

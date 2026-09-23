@@ -461,8 +461,8 @@ def test_exact_key_classifier_renews_disk_gate_for_secondary_index_before_mutati
         initial_pages = connection.execute("PRAGMA main.page_count").fetchone()[0]
         staged_at_gate: list[int] = []
 
-        def gate(_path: Path, *, reserve_bytes: int) -> None:
-            assert reserve_bytes > 0
+        def gate(_path: Path, *, reserve_bytes: int) -> int:
+            assert reserve_bytes >= 0
             staged = connection.execute(
                 "SELECT COUNT(*) FROM comparison_rows"
             ).fetchone()[0]
@@ -476,6 +476,7 @@ def test_exact_key_classifier_renews_disk_gate_for_secondary_index_before_mutati
                     "SELECT COUNT(*) FROM exact_keys"
                 ).fetchone() == (0,)
                 raise OSError("disk_headroom_exhausted")
+            return 1024**3
 
         monkeypatch.setattr(key_tracking, "require_free_disk_headroom", gate)
         with pytest.raises(OSError, match="disk_headroom_exhausted"):
@@ -511,8 +512,8 @@ def test_exact_key_classifier_gates_exact_insert_physical_growth_before_mutation
         connection = index._connection
         staged_at_gate: list[int] = []
 
-        def gate(_path: Path, *, reserve_bytes: int) -> None:
-            assert reserve_bytes > 0
+        def gate(_path: Path, *, reserve_bytes: int) -> int:
+            assert reserve_bytes >= 0
             staged = connection.execute(
                 "SELECT COUNT(*) FROM comparison_rows"
             ).fetchone()[0]
@@ -523,6 +524,7 @@ def test_exact_key_classifier_gates_exact_insert_physical_growth_before_mutation
                     ("exact-overlap",),
                 ).fetchone() == (0,)
                 raise OSError("disk_headroom_exhausted")
+            return 1024**3
 
         monkeypatch.setattr(key_tracking, "require_free_disk_headroom", gate)
         with pytest.raises(OSError, match="disk_headroom_exhausted"):
@@ -2372,7 +2374,7 @@ def test_inventory_discovery_classifies_scan_error(
     native_scan = os.scandir
 
     def fail_scan(path):
-        if not isinstance(path, int) and Path(path) == data_root:
+        if path == inventory_owner.native_filesystem_path(data_root):
             raise primary
         return native_scan(path)
 

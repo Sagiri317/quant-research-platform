@@ -687,7 +687,8 @@ class ExactPrimaryKeyIndex:
                 namespace=namespace,
                 payload_target_bytes=payload_target_bytes,
                 payload_lease=payload_lease,
-            )
+            ),
+            payload_lease=payload_lease,
         )
 
     def _validate_comparison_table_grammar(
@@ -870,9 +871,8 @@ class ExactPrimaryKeyIndex:
         value_arrays = tuple(values.column(column) for column in values.column_names)
         for row_index in range(keys.num_rows):
             key_payload = value_payload = None
-            if payload_lease is not None:
-                payload_lease.shrink_to(0)
-            key_payload = _BoundedPayloadSink(payload_target_bytes, payload_lease)
+            lease_row = (payload_lease, [0]) if payload_lease is not None else None
+            key_payload = _BoundedPayloadSink(payload_target_bytes, lease_row)
             for column, field in zip(key_columns, key_fields, strict=True):
                 _append_arrow_scalar_payload(
                     key_payload,
@@ -883,9 +883,7 @@ class ExactPrimaryKeyIndex:
                         or pa.types.is_float64(field.type)
                     ),
                 )
-            value_payload = _BoundedPayloadSink(
-                key_payload.remaining_bytes, payload_lease
-            )
+            value_payload = _BoundedPayloadSink(key_payload.remaining_bytes, lease_row)
             for column, field in zip(value_arrays, value_fields, strict=True):
                 _append_arrow_scalar_payload(
                     value_payload,
@@ -899,6 +897,8 @@ class ExactPrimaryKeyIndex:
     def _gated_rows(
         self,
         rows: Iterable[tuple[str, bytes | bytearray, bytes | bytearray | None]],
+        *,
+        payload_lease: MemoryLease | None = None,
     ) -> Iterator[tuple[str, bytes | bytearray, bytes | bytearray | None]]:
         admitted_bytes = 0
         for namespace, payload, value in rows:
@@ -909,6 +909,10 @@ class ExactPrimaryKeyIndex:
                 logical_row_bytes + 27 + key_bytes + 4 * EXACT_KEY_SQLITE_PAGE_BYTES
             )
             if reserve_bytes > admitted_bytes:
+                if payload_lease is not None:
+                    payload_lease.shrink_to(
+                        2 * (len(payload) + (0 if value is None else len(value)))
+                    )
                 admitted_bytes = self._admit_physical_write(
                     max(_DISK_RESERVE_BATCH_BYTES, reserve_bytes),
                     minimum_bytes=reserve_bytes,
@@ -927,20 +931,73 @@ class ExactPrimaryKeyIndex:
             schema: int(connection.execute(f"PRAGMA {schema}.page_count").fetchone()[0])
             for schema in ("main", "temp")
         }
+        admitted_bytes = reserve_bytes
         row_admission = (
             self._scratch_reservation.memory_capacity_bytes is not None
             and minimum_bytes is not None
         )
         if row_admission:
-            # A row can split every level of the table and its secondary index.
-            # Page count bounds B-tree depth; reserve two pages per level per tree.
-            split_pages = max(4, 4 * max(pages.values()).bit_length())
-            reserve_bytes = (
-                minimum_bytes + 2 * (split_pages - 4) * EXACT_KEY_SQLITE_PAGE_BYTES
+            # Every streamed row spends at least eight pages of logical credit.
+            batch_rows = (reserve_bytes + 8 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
+                8 * EXACT_KEY_SQLITE_PAGE_BYTES
             )
-        require_free_disk_headroom(
-            self._scratch_parent, reserve_bytes=reserve_bytes * len(pages)
-        )
+
+            def with_split_slack(credit: int, row_count: int) -> int:
+                admitted = credit
+                while True:
+                    # Cover the deepest page reached anywhere in this admission.
+                    growth = (admitted + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
+                        2 * EXACT_KEY_SQLITE_PAGE_BYTES
+                    )
+                    depth = (max(pages.values()) + growth).bit_length()
+                    split_pages = max(4, 4 * depth)
+                    required = (
+                        credit
+                        + row_count
+                        * 2
+                        * (split_pages - 4)
+                        * EXACT_KEY_SQLITE_PAGE_BYTES
+                    )
+                    if required <= admitted:
+                        return admitted
+                    admitted = required
+
+            row_reserve = with_split_slack(minimum_bytes, 1)
+            batch_reserve = with_split_slack(reserve_bytes, batch_rows)
+            row_growth_pages = (row_reserve + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
+                2 * EXACT_KEY_SQLITE_PAGE_BYTES
+            )
+            batch_growth_pages = (
+                batch_reserve + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1
+            ) // (2 * EXACT_KEY_SQLITE_PAGE_BYTES)
+            resident_pages = sum(pages.values())
+            reserved_bytes = self._scratch_reservation.reserved_bytes
+            row_capacity = (
+                2
+                * (resident_pages + len(pages) * row_growth_pages)
+                * EXACT_KEY_SQLITE_PAGE_BYTES
+            )
+            batch_capacity = (
+                2
+                * (resident_pages + len(pages) * batch_growth_pages)
+                * EXACT_KEY_SQLITE_PAGE_BYTES
+            )
+            free_disk = require_free_disk_headroom(
+                self._scratch_parent,
+                reserve_bytes=max(0, row_capacity - reserved_bytes),
+            )
+            if (
+                batch_capacity <= self._scratch_reservation.memory_capacity_bytes
+                and free_disk >= max(0, batch_capacity - reserved_bytes)
+            ):
+                reserve_bytes = batch_reserve
+            else:
+                reserve_bytes = row_reserve
+                admitted_bytes = minimum_bytes
+        else:
+            require_free_disk_headroom(
+                self._scratch_parent, reserve_bytes=reserve_bytes * len(pages)
+            )
         # reserve_bytes already includes the rollback journal; page limits cover
         # only database growth, with old and journal pages charged separately.
         growth_pages = (reserve_bytes + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
@@ -955,26 +1012,34 @@ class ExactPrimaryKeyIndex:
         )
         for schema, limit in bounds.items():
             connection.execute(f"PRAGMA {schema}.max_page_count={limit}")
-        # The depth allowance covers this row only, not a credit for later rows.
-        return minimum_bytes if row_admission else reserve_bytes
+        return admitted_bytes
 
 
 class _BoundedPayloadSink:
-    __slots__ = ("buffer", "_auxiliary_bytes", "_limit", "_lease")
+    __slots__ = ("buffer", "_auxiliary_bytes", "_limit", "_lease_row")
 
-    def __init__(self, limit: int | None, lease: MemoryLease | None = None) -> None:
+    def __init__(
+        self,
+        limit: int | None,
+        lease_row: tuple[MemoryLease, list[int]] | None = None,
+    ) -> None:
         self.buffer = bytearray()
         self._auxiliary_bytes = 0
         self._limit = limit
-        self._lease = lease
+        self._lease_row = lease_row
 
     def _reserve(self, size: int) -> None:
-        if self._lease is not None:
-            policy = current_runtime_resource_policy()
-            policy.require_working_set(
-                2 * size, error="dataset_comparison_payload_exceeds_capacity"
-            )
-            self._lease.grow(2 * size)
+        if self._lease_row is not None:
+            lease, row_charge = self._lease_row
+            required = row_charge[0] + 2 * size
+            growth = max(0, required - lease.reserved_bytes)
+            if growth:
+                policy = current_runtime_resource_policy()
+                policy.require_working_set(
+                    growth, error="dataset_comparison_payload_exceeds_capacity"
+                )
+                lease.grow(growth)
+            row_charge[0] = required
 
     @property
     def remaining_bytes(self) -> int | None:
@@ -998,8 +1063,8 @@ class _BoundedPayloadSink:
 
     def release_auxiliary(self, size: int) -> None:
         self._auxiliary_bytes -= size
-        if self._lease is not None:
-            self._lease.shrink_to(self._lease.reserved_bytes - 2 * size)
+        if self._lease_row is not None:
+            self._lease_row[1][0] -= 2 * size
 
 
 def _append_arrow_scalar_payload(

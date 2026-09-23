@@ -836,3 +836,62 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
             spools = [pair[0] for pair in source._spools.values()]
         assert all(spool.closed for spool in spools)
     assert policy.used_memory_bytes == 0
+
+
+def test_tardis_spool_reservation_keeps_small_cap_usable(monkeypatch):
+    import quant_research_platform.sources.tardis.replay as replay
+    import quant_research_platform.storage._scratch_ownership as scratch
+
+    monkeypatch.setattr(scratch, "_memory_filesystem", lambda _path: True)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=2 * 1024**2,
+    )
+    with runtime_resource_policy_scope(policy):
+        with scratch.reserved_temporary_file(resource_policy=policy) as (
+            spool,
+            reservation,
+        ):
+            with policy.lease("test.occupied", policy.working_set_headroom_bytes - 128):
+                replay._reserve_spool_capacity(reservation, 128, 128)
+                spool.write(b"x" * 128)
+                assert reservation.reserved_bytes == 128
+                with pytest.raises(
+                    ValueError, match="storage_scratch_exceeds_memory_capacity"
+                ):
+                    replay._reserve_spool_capacity(reservation, 129, 1)
+    assert policy.used_memory_bytes == 0
+
+
+def test_tardis_spool_rechecks_disk_before_each_append(monkeypatch):
+    from types import SimpleNamespace
+
+    import quant_research_platform.sources.tardis.replay as replay
+    from quant_research_platform.storage._scratch_ownership import (
+        reserved_temporary_file,
+    )
+
+    def no_disk(_path, *, reserve_bytes):
+        assert reserve_bytes == 1
+        raise RuntimeError("insufficient_free_disk")
+
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with reserved_temporary_file(resource_policy=policy) as (spool, reservation):
+            replay._reserve_spool_capacity(reservation, 128, 128)
+            spool.write(b"x" * 128)
+            assert reservation.reserved_bytes >= 129
+            if hasattr(replay.os, "statvfs"):
+                monkeypatch.setattr(
+                    replay.os,
+                    "statvfs",
+                    lambda _path: SimpleNamespace(f_bavail=0, f_frsize=4096),
+                )
+            else:
+                monkeypatch.setattr(replay, "require_free_disk_headroom", no_disk)
+            with pytest.raises(RuntimeError, match="insufficient_free_disk"):
+                replay._reserve_spool_capacity(reservation, 129, 1)
+            assert spool.tell() == 128
+            spool.seek(0)
+            assert spool.read() == b"x" * 128
+    assert policy.used_memory_bytes == 0

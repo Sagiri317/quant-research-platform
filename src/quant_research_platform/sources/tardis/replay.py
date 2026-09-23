@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import struct
 import sys
 from contextlib import ExitStack, contextmanager
@@ -20,6 +21,7 @@ from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
+    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
@@ -70,6 +72,35 @@ _MANIFEST_KEYS = {
     "price_units",
     "snapshot_limits",
 }
+_SPOOL_RESERVATION_STEP_BYTES = 64 * 1024
+
+
+def _spool_disk_free(reservation, append_bytes):
+    if hasattr(os, "statvfs"):
+        state = os.statvfs(reservation.parent)
+        free = state.f_bavail * state.f_frsize
+        if free < append_bytes:
+            raise RuntimeError("insufficient_free_disk")
+        return free
+    return require_free_disk_headroom(reservation.parent, reserve_bytes=append_bytes)
+
+
+def _reserve_spool_capacity(reservation, required_bytes, append_bytes):
+    disk_free = _spool_disk_free(reservation, append_bytes)
+    if required_bytes <= reservation.reserved_bytes:
+        return
+    rounded = (
+        (required_bytes + _SPOOL_RESERVATION_STEP_BYTES - 1)
+        // _SPOOL_RESERVATION_STEP_BYTES
+        * _SPOOL_RESERVATION_STEP_BYTES
+    )
+    target = min(rounded, reservation.reserved_bytes + disk_free)
+    memory_capacity = reservation.memory_capacity_bytes
+    if memory_capacity is not None:
+        target = min(target, max(required_bytes, memory_capacity))
+    reservation.resize(target)
+
+
 _FILE_KEYS = {
     "path",
     "offset_minutes",
@@ -364,7 +395,8 @@ class TardisArchive:
                 self._spools[key] = pair
             target, reservation = pair
             end = target.seek(0, 2)
-            reservation.resize(end + len(encoded) + 8)
+            append_bytes = len(encoded) + 8
+            _reserve_spool_capacity(reservation, end + append_bytes, append_bytes)
             target.write(struct.pack(">Q", len(encoded)))
             target.write(encoded)
             item = record = encoded = None
@@ -489,7 +521,10 @@ class TardisArchive:
                     encoded = json.dumps(
                         record, separators=(",", ":"), allow_nan=False
                     ).encode()
-                    reservation.resize(spool.tell() + len(encoded) + 8)
+                    append_bytes = len(encoded) + 8
+                    _reserve_spool_capacity(
+                        reservation, spool.tell() + append_bytes, append_bytes
+                    )
                     spool.write(struct.pack(">Q", len(encoded)))
                     spool.write(encoded)
                     encoded = None
