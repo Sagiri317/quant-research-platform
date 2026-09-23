@@ -1397,8 +1397,10 @@ def test_insufficient_snapshot_waits_for_next_segment(tmp_path: Path) -> None:
         events[1].lease.close()
 
 
+@pytest.mark.parametrize("output_levels", [None, 1, 10])
 def test_advancing_replay_keeps_previous_book_state_lease_active(
     tmp_path: Path,
+    output_levels,
 ) -> None:
     root = tmp_path / "run"
     _futures_run(
@@ -1422,10 +1424,19 @@ def test_advancing_replay_keeps_previous_book_state_lease_active(
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         events = iter_reconstructed_depth(
-            run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+            run,
+            FUTURES_MARKET_TYPE,
+            symbol="BTCUSDT",
+            required_levels=1,
+            output_levels=output_levels,
         )
         first = next(events)
+        previous_bids = first.value.bids
         second = next(events)
+        assert first.value.bids == previous_bids
+        assert second.value.bids != previous_bids
+        if output_levels is not None:
+            assert len(first.value.bids) <= output_levels
         assert first.lease.active
         assert second.lease.active
         first.lease.close()
@@ -2411,3 +2422,31 @@ def test_raw_identity_rejects_disappearance_after_initial_stat(
     monkeypatch.setattr(replay, "dataset_file_identity", remove_before_capture)
     with pytest.raises(ValueError, match="^binance_raw_export_identity_changed$"):
         replay._capture_raw_file_identity(path)
+
+
+@pytest.mark.parametrize("resend", ["same", "event_clock", "conflict", "unseen"])
+def test_native_trade_identity_is_exact_across_official_resends(tmp_path, resend):
+    first, duplicate = _agg_trade(1), _agg_trade(2)
+    duplicate["payload"] = dict(first["payload"])
+    if resend == "event_clock":
+        duplicate["payload"]["E"] += 1
+    elif resend == "conflict":
+        duplicate["payload"]["q"] = "3"
+    elif resend == "unseen":
+        duplicate["payload"]["a"] -= 1
+    root = tmp_path / "run"
+    _write_run(
+        root,
+        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [first, duplicate])],
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
+        if resend in {"conflict", "unseen"}:
+            with pytest.raises(ValueError, match="sequence_non_monotonic"):
+                list(iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+        else:
+            result = list(iter_agg_trades(run, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
+            assert [(row.quantity, row.visible_quantity) for row in result] == [
+                (2.0, 1.0)
+            ]
+    assert policy.used_memory_bytes == 0

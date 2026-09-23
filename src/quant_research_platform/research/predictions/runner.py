@@ -19,6 +19,9 @@ from quant_research_platform.research.datasets.io import (
 from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
+from quant_research_platform.research.features.transforms import (
+    canonical_feature_validity_columns,
+)
 from quant_research_platform.research.models.persisted import (
     PersistedQuarterlyModelArtifact,
     read_quarterly_predictor,
@@ -136,6 +139,9 @@ def build_prediction_result_from_persisted_model(
                                 (
                                     *dataset_spec.primary_key,
                                     *q_input_columns,
+                                    *canonical_feature_validity_columns(
+                                        q_input_columns
+                                    ),
                                     *required_filter_columns(
                                         prediction_spec.sample_filter_mode
                                     ),
@@ -176,7 +182,7 @@ def build_prediction_result_from_persisted_model(
                                         iter_dataset_chunks(
                                             view,
                                             target_chunk_bytes=max(
-                                                1, policy.operation_headroom_bytes
+                                                1, policy.planning_headroom_bytes
                                             ),
                                         ),
                                         dataset_spec=dataset_spec,
@@ -208,7 +214,8 @@ def build_prediction_result_from_persisted_model(
                             model_selection_validation_end=None,
                         )
                         q_metadata = dict(metadata)
-                        q_metadata.pop("fit_cutoff", None)
+                        q_metadata.pop("fit_cutoff")
+                        q_metadata.pop("fit_coverage_id")
                         q_metadata.pop("rank_parameters", None)
                         q_result = build_prediction_result_from_frames(
                             chunks(),

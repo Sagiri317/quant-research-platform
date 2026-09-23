@@ -6,7 +6,6 @@ import os
 import stat
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from itertools import zip_longest
 from pathlib import Path
 
 import pyarrow as pa
@@ -47,7 +46,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
-    read_manifest,
+    read_bounded_qrp_json,
     write_manifest,
 )
 from quant_research_platform.storage.parquet import (
@@ -216,18 +215,22 @@ def _parquet_members_match(old_path, candidate_path, old_identity, candidate_ide
         if not schemas[0].equals(schemas[1], check_metadata=True):
             return False
         payload_target = max(1, policy.operation_headroom_bytes // 8)
+        batch_target = max(1, policy.planning_headroom_bytes // 8)
         codec = ExactPrimaryKeyIndex(
             primary_key=(),
         )
 
         def rows(path, identity):
-            with closing_iterator(
-                iter_dataset_part_batches(
-                    path,
-                    expected_identity=identity,
-                    target_chunk_bytes=payload_target,
-                )
-            ) as batches:
+            with (
+                policy.lease("storage.semantic.comparison.payload", 0) as payload_lease,
+                closing_iterator(
+                    iter_dataset_part_batches(
+                        path,
+                        expected_identity=identity,
+                        target_chunk_bytes=batch_target,
+                    )
+                ) as batches,
+            ):
                 for batch in batches:
                     table = pa.Table.from_batches([batch])
                     for _, _, payload in codec._comparison_payload_rows(
@@ -235,20 +238,25 @@ def _parquet_members_match(old_path, candidate_path, old_identity, candidate_ide
                         table,
                         namespace="comparison",
                         payload_target_bytes=payload_target,
+                        payload_lease=payload_lease,
                     ):
                         yield payload
+                        payload = None
                     del batch, table
 
         missing = object()
         with (
-            policy.lease("storage.semantic.comparison.payload", 2 * payload_target),
             closing_iterator(rows(old_path, old_identity)) as old,
             closing_iterator(rows(candidate_path, candidate_identity)) as candidate,
         ):
-            return all(
-                left == right
-                for left, right in zip_longest(old, candidate, fillvalue=missing)
-            )
+            while True:
+                left = next(old, missing)
+                right = next(candidate, missing)
+                if left is missing or right is missing:
+                    return left is right
+                if left != right:
+                    return False
+                del left, right
 
 
 def write_semantic_artifact(
@@ -299,7 +307,7 @@ def verify_semantic_artifact_member(
     *,
     relative_path: str,
     expected: dict[str, object],
-) -> None:
+) -> DatasetFileIdentity:
     """Verify one already-published member without rescanning its siblings."""
 
     root = require_unaliased_path(
@@ -319,14 +327,19 @@ def verify_semantic_artifact_member(
     member = require_unaliased_path(
         root / Path(*candidate.parts), error="semantic_artifact_member_invalid"
     )
-    if _member_record(relative_path, member) != expected:
+    identity = _member_identity(member)
+    if _member_record(relative_path, member, identity=identity) != expected:
         raise ValueError("semantic_artifact_member_integrity_invalid")
+    return identity
 
 
 def read_semantic_artifact_record(
     instance_root: Path,
     *,
     expected_identity: str | None = None,
+    member_identities: dict[str, DatasetFileIdentity] | None = None,
+    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
+    operational_metadata: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
     root = require_unaliased_path(
         Path(instance_root),
@@ -336,8 +349,14 @@ def read_semantic_artifact_record(
         _directory_identity(root)
     except ValueError as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
-    manifest_identity = _member_identity(root / "manifest.json")
-    payload = read_manifest(root / "manifest.json")
+    manifest_identity = (
+        _member_identity(root / "manifest.json")
+        if expected_member_identities is None
+        else expected_member_identities["manifest.json"]
+    )
+    payload = read_bounded_qrp_json(
+        root / "manifest.json", expected_identity=manifest_identity
+    )[1]
     if set(payload) != {
         "schema_id",
         "common_manifest",
@@ -347,7 +366,7 @@ def read_semantic_artifact_record(
         raise ValueError("semantic_artifact_manifest_invalid")
     if payload["schema_id"] != SEMANTIC_ARTIFACT_SCHEMA_ID:
         raise ValueError("semantic_artifact_manifest_invalid")
-    _operational_metadata(payload["operational_metadata"])
+    operational = _operational_metadata(payload["operational_metadata"])
     envelope = validate_business_manifest_envelope(payload["common_manifest"])
     if root.name != envelope["instance_identity"]:
         raise ValueError("semantic_artifact_identity_mismatch")
@@ -357,26 +376,32 @@ def read_semantic_artifact_record(
     ):
         raise ValueError("semantic_artifact_identity_mismatch")
     members = _validate_member_payload(payload["members"])
+    if expected_member_identities is not None and set(expected_member_identities) != {
+        "manifest.json",
+        *(str(member["path"]) for member in members),
+    }:
+        raise ValueError("semantic_artifact_member_set_changed")
     if members != _member_inventory(
-        root, expected_paths={str(member["path"]) for member in members}
+        root,
+        expected_paths={str(member["path"]) for member in members},
+        verified_identities=member_identities,
+        expected_identities=expected_member_identities,
     ):
         raise ValueError("semantic_artifact_member_integrity_invalid")
     if _member_identity(root / "manifest.json") != manifest_identity:
         raise ValueError("semantic_artifact_member_identity_changed")
+    if member_identities is not None:
+        member_identities["manifest.json"] = manifest_identity
+    if operational_metadata is not None:
+        operational_metadata.update(operational)
     return envelope, members
 
 
 def read_semantic_artifact_operational_metadata(
     instance_root: Path,
 ) -> dict[str, object]:
-    manifest_path = instance_root / "manifest.json"
-    identity = _member_identity(manifest_path)
-    read_semantic_artifact_record(instance_root)
-    metadata = _operational_metadata(
-        read_manifest(manifest_path)["operational_metadata"]
-    )
-    if _member_identity(manifest_path) != identity:
-        raise ValueError("semantic_artifact_member_identity_changed")
+    metadata: dict[str, object] = {}
+    read_semantic_artifact_record(instance_root, operational_metadata=metadata)
     return metadata
 
 
@@ -455,7 +480,11 @@ def _directory_identity(path: Path) -> tuple[int, int, int, int]:
 
 
 def _member_inventory(
-    root: Path, *, expected_paths: set[str] | None = None
+    root: Path,
+    *,
+    expected_paths: set[str] | None = None,
+    verified_identities: dict[str, DatasetFileIdentity] | None = None,
+    expected_identities: Mapping[str, DatasetFileIdentity] | None = None,
 ) -> tuple[dict[str, object], ...]:
     members: list[dict[str, object]] = []
     identities: dict[str, DatasetFileIdentity] = {}
@@ -466,8 +495,12 @@ def _member_inventory(
         nonlocal encoded_bytes
         if expected_paths is not None and relative not in expected_paths:
             raise ValueError("semantic_artifact_member_integrity_invalid")
-        identities[relative] = _member_identity(child)
-        member = _member_record(relative, child)
+        identities[relative] = (
+            _member_identity(child)
+            if expected_identities is None
+            else expected_identities[relative]
+        )
+        member = _member_record(relative, child, identity=identities[relative])
         encoded_bytes += len(render_qrp_json_object(member).encode("utf-8"))
         if encoded_bytes > MAX_QRP_JSON_BYTES:
             raise ValueError("semantic_artifact_member_limit_exceeded")
@@ -486,6 +519,8 @@ def _member_inventory(
     _visit_member_paths(root, verify)
     if remaining:
         raise ValueError("semantic_artifact_member_set_changed")
+    if verified_identities is not None:
+        verified_identities.update(identities)
     return tuple(sorted(members, key=lambda item: str(item["path"])))
 
 
@@ -557,8 +592,11 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
         raise ValueError("semantic_artifact_member_invalid") from exc
 
 
-def _member_record(relative: str, path: Path) -> dict[str, object]:
-    identity = _member_identity(path)
+def _member_record(
+    relative: str, path: Path, *, identity: DatasetFileIdentity | None = None
+) -> dict[str, object]:
+    if identity is None:
+        identity = _member_identity(path)
     try:
         with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
             with policy.lease(

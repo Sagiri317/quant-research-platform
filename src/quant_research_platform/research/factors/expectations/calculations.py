@@ -74,9 +74,19 @@ def build_expectations_features(
         lambda value: _next_session(sessions, value)
     )
     forecast = forecast.dropna(subset=["available_at"])
+    forecast = forecast.groupby(
+        [
+            "asset_id",
+            "forecast_end_date",
+            "institution_id",
+            "declare_date",
+            "available_at",
+        ],
+        as_index=False,
+        sort=False,
+    )["forecast_eps"].median()
     forecast = forecast.sort_values(
-        ["asset_id", "forecast_end_date", "institution_id", "declare_date"],
-        kind="mergesort",
+        ["asset_id", "available_at", "declare_date"], kind="mergesort"
     )
 
     output = observations.loc[:, ["asset_id", "timestamp", "close"]].copy()
@@ -95,15 +105,26 @@ def build_expectations_features(
     forecast_groups = forecast.groupby("asset_id", sort=False).indices
     for asset_id, positions in output.groupby("asset_id", sort=False).indices.items():
         asset_forecast = forecast.iloc[forecast_groups.get(asset_id, [])]
-        for position, observation in zip(
-            positions, output.iloc[positions].itertuples(index=False), strict=True
-        ):
+        events = iter(asset_forecast.itertuples(index=False))
+        event = next(events, None)
+        active = {}
+        for position in sorted(positions, key=lambda i: output.iloc[i].timestamp):
+            observation = output.iloc[position]
+            timestamp = observation.timestamp
+            while event is not None and event.available_at <= timestamp:
+                active[(event.forecast_end_date, event.institution_id)] = event
+                event = next(events, None)
+            oldest = timestamp - pd.Timedelta(days=freshness_days)
+            active = {
+                key: value
+                for key, value in active.items()
+                if value.declare_date >= oldest and value.forecast_end_date >= timestamp
+            }
             rows[position] = _features_for_observation(
                 observation.asset_id,
-                observation.timestamp,
+                timestamp,
                 observation.close,
-                asset_forecast,
-                freshness_days=freshness_days,
+                active.values(),
                 minimum_institutions=minimum_institutions,
             )
     return pd.DataFrame.from_records(
@@ -116,9 +137,8 @@ def _features_for_observation(
     asset_id: str,
     timestamp: pd.Timestamp,
     close: float,
-    forecast: pd.DataFrame,
+    forecast,
     *,
-    freshness_days: int,
     minimum_institutions: int,
 ) -> dict[str, object]:
     base: dict[str, object] = {
@@ -128,34 +148,16 @@ def _features_for_observation(
     }
     if not np.isfinite(close) or close <= 0.0:
         return base
-    candidates = forecast.loc[
-        forecast["forecast_end_date"].ge(timestamp)
-        & forecast["available_at"].le(timestamp)
-        & forecast["declare_date"].ge(timestamp - pd.Timedelta(days=freshness_days))
-    ]
-    if candidates.empty:
+    by_period = {}
+    for event in forecast:
+        by_period.setdefault(event.forecast_end_date, []).append(event.forecast_eps)
+    if not by_period:
         return base
-    end_dates = tuple(sorted(candidates["forecast_end_date"].unique()))
-    selected: list[pd.DataFrame] = []
-    for end_date in end_dates[:2]:
-        if pd.Timestamp(end_date).year > pd.Timestamp(end_dates[0]).year + 1:
-            break
-        current = candidates.loc[candidates["forecast_end_date"].eq(end_date)]
-        latest = current.groupby("institution_id", sort=False)["declare_date"].max()
-        current = current.merge(
-            latest.rename("latest_declare_date"),
-            left_on="institution_id",
-            right_index=True,
-            how="inner",
-        )
-        current = current.loc[
-            current["declare_date"].eq(current["latest_declare_date"])
-        ]
-        current = current.groupby("institution_id", as_index=False)[
-            "forecast_eps"
-        ].median()
-        selected.append(current)
-    eps_values = selected[0]["forecast_eps"].to_numpy(dtype="float64")
+    end_dates = sorted(by_period)
+    selected = [np.asarray(by_period[end_dates[0]], dtype="float64")]
+    if len(end_dates) > 1 and end_dates[1].year == end_dates[0].year + 1:
+        selected.append(np.asarray(by_period[end_dates[1]], dtype="float64"))
+    eps_values = selected[0]
     if len(eps_values) >= minimum_institutions:
         median_eps = float(np.median(eps_values))
         mad = float(np.median(np.abs(eps_values - median_eps)))
@@ -163,7 +165,7 @@ def _features_for_observation(
         base["forecast_dispersion_fy1"] = mad
         base["log_analyst_coverage"] = float(np.log(len(eps_values)))
     if len(selected) > 1:
-        fy2 = selected[1]["forecast_eps"].to_numpy(dtype="float64")
+        fy2 = selected[1]
         if len(fy2) >= minimum_institutions:
             base["forward_earnings_yield_fy2"] = float(np.median(fy2)) / close
     return base

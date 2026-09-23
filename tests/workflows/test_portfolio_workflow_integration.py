@@ -74,7 +74,13 @@ from tests.helpers.research_configuration import (
     PV25_FACTORS,
     research_configuration,
 )
-from tests.research.workflow_test_support import _quarterly_result, _trial_reference
+from tests.research.workflow_test_support import (
+    _quarterly_result,
+    _trial_reference,
+    fixture_quarterly_results,
+    fixture_refit_reference,
+    fixture_validation_coverage,
+)
 
 
 def _interim_specs() -> InterimDataCatalog:
@@ -143,6 +149,14 @@ def _processed_specs() -> ProcessedDataCatalog:
             "float_market_cap": ColumnRole.CONTEXT,
             "industry_level1_code": ColumnRole.KEY,
             "is_nonfinancial_industry": ColumnRole.CONTEXT,
+            "is_a_share_scope": ColumnRole.CONTEXT,
+            "is_trading": ColumnRole.CONTEXT,
+            "is_st": ColumnRole.CONTEXT,
+            "is_pt": ColumnRole.CONTEXT,
+            "listing_age_trading_days": ColumnRole.CONTEXT,
+            "close": ColumnRole.CONTEXT,
+            "volume": ColumnRole.CONTEXT,
+            "turnover": ColumnRole.CONTEXT,
         },
         primary_key=("market_id", "asset_id", "timestamp"),
         partition_columns=("year",),
@@ -199,6 +213,7 @@ def _processed_specs() -> ProcessedDataCatalog:
                 ("log_float_market_cap", "momentum_252_20", "amihud_60d"),
             ),
             ("fundamental_factors", ("earnings_yield",)),
+            ("market_model_factors", ("beta_252d", "residual_volatility_60d")),
         )
     )
     return ProcessedDataCatalog((panel, execution, benchmark, *risk_context))
@@ -301,6 +316,28 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     panel["float_market_cap"] = panel["asset_id"].map({"a": 1_000.0, "b": 2_000.0})
     panel["industry_level1_code"] = "A01"
     panel["is_nonfinancial_industry"] = True
+    panel = panel.assign(
+        is_a_share_scope=True,
+        is_trading=True,
+        is_st=False,
+        is_pt=False,
+        listing_age_trading_days=300,
+        close=panel.adj_close,
+        volume=1000.0,
+        turnover=0.01,
+    )
+    from quant_research_platform.research.factors.engine import (
+        calculate_factors_for_panel,
+    )
+
+    market_factors = calculate_factors_for_panel(
+        panel,
+        definitions=tuple(
+            definition
+            for definition in a_share.factor_catalog().list()
+            if definition.family == "market_model"
+        ),
+    )
     calendar = pd.DataFrame(
         {
             "timestamp": calendar_dates,
@@ -345,6 +382,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     fees["included_in"] = pd.Series([pd.NA] * len(fees), dtype="string")
     return {
         "market_panel_1d": panel,
+        "market_model_factors": market_factors,
         "price_volume_facts": dataset.loc[
             :,
             [
@@ -603,8 +641,8 @@ def _prepare_model_artifacts(
     quarterly = _quarterly_result(
         1,
         trial_layout=layout,
-        model_id=selected_model_id,
-        columns=("x",),
+        model_spec=profile.models.get(selected_model_id),
+        protocol=protocol.manifest(),
         predictor=RankEnsemblePredictor(columns=("x",), directions=(1.0,)),
     )
     selection = quarterly.selection_metadata
@@ -613,6 +651,12 @@ def _prepare_model_artifacts(
     selection["selected_family_id"] = selected_model_id
     selection["selected_model_id"] = selected_model_id
     selection["families"] = []
+    validation_specs = tuple(profile.models.get(model_id) for model_id in model_ids)
+    selection["common_validation_coverage"] = fixture_validation_coverage(
+        quarterly.quarter,
+        validation_specs,
+        plans[target_id]["upstream_identities"][protocol.scenario_id],
+    )
     references = []
     for model_id in model_ids:
         reference = _trial_reference(
@@ -623,10 +667,11 @@ def _prepare_model_artifacts(
             target_id=target_id,
             dataset_id=protocol.scenario_id,
             data_identity=plans[target_id]["upstream_identities"][protocol.scenario_id],
-            protocol=protocol.manifest(),
+            protocol=protocol.target_manifest(target_id, "MODEL"),
             rankic=0.3 if model_id == selected_model_id else 0.2,
             model_spec=profile.models.get(model_id),
             root_seed=42,
+            validation_specs=validation_specs,
         )
         references.append(reference)
         selection["families"].append(
@@ -678,7 +723,10 @@ def _prepare_model_artifacts(
                     model_id=model_id,
                     family_id=model_id,
                     model_result=fitted,
-                    trial_ledgers=(reference,),
+                    trial_ledgers=(
+                        reference,
+                        fixture_refit_reference(layout, reference, fitted.metadata),
+                    ),
                 ),
                 lease,
             )
@@ -697,7 +745,7 @@ def _prepare_model_artifacts(
             layout.semantic_artifact_root("a_share", target_id),
             model_id=target_id,
             envelope=envelope,
-            quarterly_results=fitted_families(),
+            quarterly_results=fixture_quarterly_results(fitted_families()),
             trial_layout=layout,
         )
 
@@ -878,6 +926,41 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_
             **{**arguments, "protocol": new_protocol, "software_identity": "2" * 64}
         )["qualification"]
         == "POST_HOLDOUT_CORRECTED"
+    )
+
+
+def test_portfolio_statistics_target_identity_tracks_its_consumed_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    configuration = research_configuration()
+    protocol = bind_research_configuration(research_profile(), configuration).protocol(
+        "pv_all"
+    )
+    target_id = "pv_all_portfolio_statistics"
+    original = protocol.target_manifest(target_id, "STATISTIC")
+    model = protocol.target_manifest("pv_all_model_selection_refit", "MODEL")
+    ledger = protocol.target_manifest(
+        "pv_all_ew_rank_top20_equal_weight_ledger", "PORTFOLIO"
+    )
+    assert original["portfolio_candidates"] == [
+        candidate.candidate_id for candidate in protocol.portfolio_candidates()
+    ]
+    assert original["statistics"] == protocol.manifest()["statistics"]
+
+    monkeypatch.setattr(
+        a_share, "STATISTICS_REPETITIONS", a_share.STATISTICS_REPETITIONS + 1
+    )
+    changed = protocol.target_manifest(target_id, "STATISTIC")
+    assert canonical_json_hash(changed) != canonical_json_hash(original)
+    assert protocol.target_manifest("pv_all_model_selection_refit", "MODEL") == model
+    assert (
+        protocol.target_manifest(
+            "pv_all_ew_rank_top20_equal_weight_ledger", "PORTFOLIO"
+        )
+        == ledger
     )
 
 

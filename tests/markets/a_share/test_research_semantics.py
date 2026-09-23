@@ -128,7 +128,7 @@ def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
 
     result = canonical_feature_pipeline(frame, factor_columns=("factor",))
 
-    assert result["feature_factor"].tolist() == [0.0, 0.0]
+    assert result["feature_factor"].isna().all()
     assert result["feature_missing_factor"].tolist() == [1, 1]
     assert result["feature_observed_factor"].tolist() == [0, 0]
 
@@ -397,3 +397,49 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
     )
     assert features["feature_observed_factor"].eq(1).all()
     assert features["feature_missing_factor"].eq(0).all()
+
+
+def test_auxiliary_size_winsorization_matches_full_configuration():
+    size = np.r_[np.linspace(1.0, 4.0, 119), 1e12]
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "eligible": True,
+            "industry_level1_code": "A",
+            "log_float_market_cap": size,
+            "factor": np.sin(np.arange(120)),
+        }
+    )
+    single = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    full = canonical_feature_pipeline(
+        frame, factor_columns=("factor", "log_float_market_cap")
+    )
+    pd.testing.assert_series_equal(
+        single.feature_factor, full.feature_factor, check_exact=True
+    )
+    assert "feature_log_float_market_cap" not in single
+    frame.loc[0, "factor"] = np.nan
+    frame.loc[1, "log_float_market_cap"] = np.nan
+    frame.loc[2, "industry_level1_code"] = None
+    result = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    assert result.feature_factor.iloc[0] == 0.0
+    assert result.feature_factor.iloc[1:3].isna().all()
+    assert result.feature_missing_factor.iloc[:3].eq(1).all()
+
+
+def test_exact_nonzero_size_variation_is_not_svd_rank_failure():
+    size = np.resize([1.0, np.nextafter(1.0, np.inf)], 120)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "industry_level1_code": "A",
+            "log_float_market_cap": size,
+            "factor": np.resize([1.0, 3.0], 120),
+        }
+    )
+    result = neutralize_cross_section(frame, factor_columns=("factor",))
+    assert result.factor.eq(0.0).all()
+    frame["log_float_market_cap"] = 1.0
+    assert (
+        neutralize_cross_section(frame, factor_columns=("factor",)).factor.isna().all()
+    )

@@ -1232,7 +1232,7 @@ def _iter_evaluation_compute_batches(
                 n_groups=n_groups,
             )
             candidate_bytes = planned_bytes + session_bytes
-            if candidate_bytes > resource_policy.operation_headroom_bytes:
+            if candidate_bytes > resource_policy.planning_headroom_bytes:
                 if stop == start:
                     resource_policy.require_working_set(
                         candidate_bytes,

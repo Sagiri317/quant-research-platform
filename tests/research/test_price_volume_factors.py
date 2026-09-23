@@ -64,6 +64,7 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
             "close": x,
             "amount": x * 10.0,
             "volume": x + 10.0,
+            "turnover": (x + 10.0) / 1000.0,
             "float_market_cap": x * 1_000.0,
             "total_market_cap": x * 2_000.0,
         }
@@ -109,6 +110,7 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
             "period_return": returns,
             "amount": x,
             "volume": 2.0 * x,
+            "turnover": 2.0 * x / 100.0,
             "float_market_cap": 1_000.0,
             "close": 10.0,
             "total_market_cap": 10_000.0,
@@ -188,7 +190,7 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
     )
     assert missing_result.loc[60, "momentum_20d"] == result.loc[60, "momentum_20d"]
     constant = panel.assign(
-        amount=0.0, volume=0.0, period_return=0.0, total_market_cap=0.0
+        amount=0.0, volume=0.0, turnover=0.0, period_return=0.0, total_market_cap=0.0
     )
     zero = calculate_price_volume_factors(constant, factor_columns=UNIQUE_FACTORS).iloc[
         -1
@@ -354,6 +356,7 @@ def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
             "period_return": x,
             "amount": y,
             "volume": y,
+            "turnover": y,
             "close": 1.0,
             "float_market_cap": 1.0,
         }
@@ -412,6 +415,7 @@ def test_volatility_representable_result_with_extreme_units(name, scale, tmp_pat
             "period_return": values,
             "amount": values + 2 * scale,
             "volume": values + 2 * scale,
+            "turnover": values + 2 * scale,
             "close": 1.0,
             "float_market_cap": 1.0,
         }
@@ -451,6 +455,7 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
             "close": 10.0,
             "amount": x,
             "volume": x,
+            "turnover": x / 100.0,
             "float_market_cap": 1000.0,
             "period_return": returns,
         }
@@ -490,11 +495,12 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
     # A suspended market session stays in the window; absent facts cannot compress it.
     missing = panel.copy()
-    missing.loc[240, ["amount", "volume", "period_return"]] = np.nan
+    missing.loc[240, ["amount", "volume", "turnover", "period_return"]] = np.nan
     observed = calculate_price_volume_factors(missing, factor_columns=names)
     assert observed.loc[249, list(names[1:])].isna().all()
     zero = calculate_price_volume_factors(
-        panel.assign(amount=0.0, volume=0.0, period_return=0.0), factor_columns=names
+        panel.assign(amount=0.0, volume=0.0, turnover=0.0, period_return=0.0),
+        factor_columns=names,
     )
     assert (
         zero.loc[
@@ -512,7 +518,7 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     )
     # Suffix changes cannot affect earlier outputs.
     future = panel.copy()
-    future.loc[249, ["amount", "volume", "period_return"]] *= 2
+    future.loc[249, ["amount", "volume", "turnover", "period_return"]] *= 2
     changed = calculate_price_volume_factors(future, factor_columns=names)
     pd.testing.assert_frame_equal(changed.iloc[:-1], result.iloc[:-1], check_exact=True)
 
@@ -631,6 +637,7 @@ def test_long_rolling_means_match_exact_scalar_windows():
             "timestamp": dates,
             "amount": values,
             "volume": values,
+            "turnover": values,
             "close": 1.0,
             "float_market_cap": 1.0,
         }
@@ -651,3 +658,51 @@ def test_long_rolling_means_match_exact_scalar_windows():
             output_window=TimeWindow(dates[300], dates[-1]),
         )
         np.testing.assert_array_equal(bounded[name], result[name].iloc[300:])
+
+
+def test_turnover_uses_canonical_suspension_zero_and_preserves_unknown(tmp_path):
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_processed_dataset_spec,
+    )
+
+    raw = pd.DataFrame(
+        {
+            "asset_id": "a",
+            "timestamp": pd.bdate_range("2024-01-01", periods=20).as_unit("ns"),
+            "market_id": "a_share",
+            "market_type": 1,
+            "filling_flag": [0] * 19 + [1],
+            "close": 10.0,
+            "open": 10.0,
+            "high": 10.0,
+            "low": 10.0,
+            "adj_close": 10.0,
+            "adj_open": 10.0,
+            "period_return": 0.0,
+            "volume": 1.0,
+            "amount": 10.0,
+            "float_market_cap": 1000.0,
+        }
+    )
+    raw.loc[19, "float_market_cap"] = np.nan
+    panel = panels._apply_suspension_semantics(raw)
+    root = make_dataset_artifact_root(tmp_path, "canonical_turnover")
+    selected = panel[["market_id", "asset_id", "timestamp", "turnover"]]
+    write_dataset(
+        root,
+        selected,
+        spec=make_processed_dataset_spec("canonical_turnover", value_column="turnover"),
+    )
+    persisted = read_dataset(root)
+    result = calculate_price_volume_factors(persisted, factor_columns=("turnover_20d",))
+    assert result.turnover_20d.iloc[-1] == pytest.approx(0.0095)
+    raw.loc[19, "filling_flag"] = 0
+    unknown = panels._apply_suspension_semantics(raw)
+    assert (
+        calculate_price_volume_factors(unknown, factor_columns=("turnover_20d",))
+        .turnover_20d.isna()
+        .all()
+    )

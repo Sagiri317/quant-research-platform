@@ -14,6 +14,7 @@ def bind_research_selection(profile, library, configuration):
         bounded_qrp_json_object_snapshot,
     )
     from quant_research_platform.research.features.transforms import (
+        canonical_feature_input_factors,
         canonical_feature_transforms,
     )
     from quant_research_platform.research.protocols import a_share, crypto_hft
@@ -130,12 +131,16 @@ def bind_research_selection(profile, library, configuration):
             item["model_id"]
         ).training_weighting.payload()
     model_configurations = {item["model_id"]: item for item in config["models"]}
+    canonical_factors = []
     for model in models:
         selected_factors.extend(model.input_factor_columns)
         for column in model.input_feature_columns:
             if column not in feature_sources:
                 raise ValueError("research_feature_not_available")
-            selected_factors.append(feature_sources[column])
+            canonical_factors.append(feature_sources[column])
+    canonical_factors = tuple(dict.fromkeys(canonical_factors))
+    if str(profile.market_id) == "a_share":
+        selected_factors.extend(canonical_feature_input_factors(canonical_factors))
     uses_sol_rows = str(profile.market_id) == "crypto" and any(
         "sol_usdt" in item[key]
         for item in config["models"]
@@ -167,11 +172,8 @@ def bind_research_selection(profile, library, configuration):
         raise ValueError("research_factor_not_available")
     if len(set(evaluation["factors"])) != len(evaluation["factors"]):
         raise ValueError("research_evaluation_factor_duplicate")
-    # Feature transformations retain their existing semantics for selected factors.
     transforms = (
-        canonical_feature_transforms(columns)
-        if str(profile.market_id) == "a_share"
-        else ()
+        canonical_feature_transforms(canonical_factors) if canonical_factors else ()
     )
     features = tuple(
         name for transform in transforms for name in transform.output_columns

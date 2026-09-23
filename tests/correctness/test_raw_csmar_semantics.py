@@ -2191,3 +2191,19 @@ def test_csmar_pending_copy_admits_payload_before_concurrent_allocation(
         assert not worker_errors
         assert policy.used_memory_bytes == 0
     assert not list(tmp_path.rglob("manifest.json"))
+
+
+def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_path):
+    payload = "Stkcd,Shrchgdt,Nshrttl,Nshra\n000001,2024-01-02,100,50\n"
+    outputs = []
+    for directory in ("stock_master", "market_cap"):
+        root = tmp_path / directory
+        root.mkdir()
+        path = root / "unknown.csv"
+        path.write_text(payload)
+        outputs.append(raw_schemas.inspect_raw_export_file(path).dataset)
+    assert outputs == ["market_cap", "market_cap"]
+    conflict = tmp_path / "TRDNEW_Co.csv"
+    conflict.write_text(payload)
+    with pytest.raises(ValueError, match="table_identity_conflict"):
+        raw_schemas.inspect_raw_export_file(conflict)

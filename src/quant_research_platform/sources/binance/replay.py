@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import hashlib
 import heapq
+import json
 import os
 import sqlite3
 import stat
@@ -13,6 +14,7 @@ import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +60,7 @@ from quant_research_platform.sources.binance.validation import (
     validate_market_payload,
 )
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     _DigestingReader,
@@ -523,6 +526,43 @@ class ObservationCoverage:
         # Two entries suffice to reject ambiguous coverage; no per-grid history scan.
         return tuple(item[1] for item in self.active[:2])
 
+    def intervals(self):
+        """Yield only unambiguous half-open coverage in chronological order."""
+        query = "WHERE market=? AND data_kind=? AND stream LIKE ?"
+        cursor = self.index._database.execute(
+            "SELECT opened_ns, observation_id, 1 FROM coverage "
+            + query
+            + " UNION ALL SELECT closed_ns, observation_id, -1 FROM coverage "
+            + query
+            + " ORDER BY 1, 3",
+            (*self.parameters, *self.parameters),
+        )
+        active = set()
+        previous = None
+        retained = 0
+        with handle_preserving_primary(cursor):
+            try:
+                for timestamp, events in groupby(cursor, key=lambda row: row[0]):
+                    if (
+                        previous is not None
+                        and previous < timestamp
+                        and len(active) == 1
+                    ):
+                        yield previous, timestamp
+                    for _stamp, identity, delta in events:
+                        size = 512 + 4 * len(identity)
+                        if delta > 0:
+                            self.lease.grow(size)
+                            retained += size
+                            active.add(identity)
+                        else:
+                            active.remove(identity)
+                            self.lease.shrink_to(self.lease.reserved_bytes - size)
+                            retained -= size
+                    previous = timestamp
+            finally:
+                self.lease.shrink_to(self.lease.reserved_bytes - retained)
+
     def close(self):
         try:
             if self.cursor is not None:
@@ -645,16 +685,30 @@ class RecorderRun:
 
     def iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
         """Decode recorder-specific identity into the shared venue event contract."""
-        with closing_iterator(
-            self.iter_records(
-                symbol=symbol,
-                market_type=market_type,
-                data_kinds=data_kinds,
+        with ExitStack() as resources:
+            records = resources.enter_context(
+                closing_iterator(
+                    self.iter_records(
+                        symbol=symbol, market_type=market_type, data_kinds=data_kinds
+                    )
+                )
             )
-        ) as records:
+            observe = (
+                resources.enter_context(native_trade_identities(self.resource_policy))
+                if "agg_trades" in data_kinds
+                else None
+            )
             for record in records:
-                if end_ns is None or record["observed_time_ns"] <= end_ns:
-                    yield normalize_recorder_record(record)
+                if end_ns is not None and record["observed_time_ns"] > end_ns:
+                    continue
+                normalized = normalize_recorder_record(record)
+                if normalized["data_kind"] == "agg_trades":
+                    accepted, _previous = observe(
+                        market_type, symbol, normalized["payload"]
+                    )
+                    if not accepted:
+                        continue
+                yield normalized
 
     def observation_coverage(
         self,
@@ -1544,6 +1598,7 @@ class DepthReconstructor:
         resource_policy: RuntimeResourcePolicy,
         stats: ReconstructionStats,
         coverage_lease: MemoryLease,
+        output_levels: int | None = None,
     ) -> None:
         if market_type not in {SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE}:
             raise ValueError("binance_replay_market_type_invalid")
@@ -1560,6 +1615,7 @@ class DepthReconstructor:
         self.market_type = market_type
         self.price_unit = validate_price_unit(price_unit)
         self.required_levels = required_levels
+        self.output_levels = output_levels
         self.max_book_levels = max_book_levels
         self.connection_close_ns = connection_close_ns
         self.policy = resource_policy
@@ -1743,7 +1799,13 @@ class DepthReconstructor:
         segment_id, observation_id = _record_identity(record)
         last = self._last_update_id
         assert last is not None
-        state_bound = 64 * 1024 + (len(self._bids) + len(self._asks)) * _LEVEL_BYTES
+        levels = (
+            len(self._bids) + len(self._asks)
+            if self.output_levels is None
+            else min(len(self._bids), self.output_levels)
+            + min(len(self._asks), self.output_levels)
+        )
+        state_bound = 64 * 1024 + levels * _LEVEL_BYTES
         state_lease = self.policy.lease("binance.replay.state", state_bound)
         transferred = False
         try:
@@ -1759,8 +1821,18 @@ class DepthReconstructor:
                 observation_id=observation_id,
                 market_type=self.market_type,
                 price_unit=self.price_unit,
-                bids=tuple(sorted(self._bids.items(), reverse=True)),
-                asks=tuple(sorted(self._asks.items())),
+                bids=tuple(sorted(self._bids.items(), reverse=True))
+                if self.output_levels is None
+                else tuple(
+                    (price, self._bids[price])
+                    for price in heapq.nlargest(self.output_levels, self._bids)
+                ),
+                asks=tuple(sorted(self._asks.items()))
+                if self.output_levels is None
+                else tuple(
+                    (price, self._asks[price])
+                    for price in heapq.nsmallest(self.output_levels, self._asks)
+                ),
             )
             if self.connection_close_ns is not None:
                 previous = self.stats.coverage_segments.get(segment_id)
@@ -1896,6 +1968,7 @@ def iter_reconstructed_depth(
     symbol: str,
     required_levels: int = RECONSTRUCTION_REQUIRED_LEVELS,
     max_book_levels: int = RECONSTRUCTION_MAX_BOOK_LEVELS,
+    output_levels: int | None = None,
     stats: ReconstructionStats | None = None,
     end_ns: int | None = None,
 ) -> Iterator[OwnedValue[BookState] | BookBoundary]:
@@ -1952,6 +2025,7 @@ def iter_reconstructed_depth(
                         snapshot_limit=metadata["snapshot_limit"],
                         required_levels=required_levels,
                         max_book_levels=max_book_levels,
+                        output_levels=output_levels,
                         connection_close_ns=bounds[1],
                         resource_policy=run.resource_policy,
                         stats=active_stats,
@@ -2067,6 +2141,41 @@ def iter_reconstructed_depth(
                         )
                     else:
                         raise
+
+
+@contextmanager
+def native_trade_identities(resource_policy):
+    """Own exact native trade identity across resends and historical conflicts."""
+    with (
+        ExactPrimaryKeyIndex(primary_key=("market", "symbol", "trade_id")) as index,
+        resource_policy.lease(
+            "binance.native_trade_identities", index.retained_memory_bytes + 64 * 1024
+        ),
+    ):
+        latest = {}
+
+        def observe(market_type, symbol, payload):
+            namespace = market_type + ":" + symbol
+            trade_id = payload["a"]
+            key = str(trade_id).encode("ascii")
+            previous = latest.get(namespace)
+            value = json.dumps(
+                {key: value for key, value in payload.items() if key != "E"},
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+            if previous is not None and trade_id <= previous:
+                if (
+                    index.identity_payload_value(namespace=namespace, payload=key)
+                    == value
+                ):
+                    return False, previous
+                raise ValueError("binance_native_sequence_non_monotonic")
+            index.add_identity_payload_rows(rows=((namespace, key, value),))
+            latest[namespace] = trade_id
+            return True, previous
+
+        yield observe
 
 
 def iter_agg_trades(

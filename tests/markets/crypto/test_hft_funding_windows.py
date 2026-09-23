@@ -188,3 +188,471 @@ def test_taker_missing_forecast_and_boundary_price_fail_without_future_fill():
                 **kwargs,
             )
         assert policy.used_memory_bytes == 0
+
+
+def test_independent_episode_collection_resets_capital_and_funding_boundaries(tmp_path):
+    from functools import partial
+    from types import SimpleNamespace
+
+    import pandas as pd
+
+    from quant_research_platform.artifacts.crypto_hft import (
+        read_crypto_episode_artifact,
+        write_crypto_episode_artifact,
+    )
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        summarize_portfolio_ledger,
+    )
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _execute_portfolio,
+    )
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.runtime.resources import OwnedValue
+    from tests.markets.crypto.test_hft import _boundary
+
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="fixture_episodes",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": pd.Timestamp(0).isoformat(),
+            "end": pd.Timestamp(70_000_000).isoformat(),
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+    coverage = {"s1": (0, 30_000_000), "s2": (40_000_000, 60_000_000)}
+    trade_coverage = SimpleNamespace(intervals=lambda: iter(coverage.values()))
+    decisions = [
+        {"timestamp_ms": time, "score": prediction}
+        for time, prediction in ((10, 0.02), (20, 0.02), (40, -0.02))
+    ]
+    events = tuple(
+        FundingEvent(stamp * 1_000_000, 0.01, 100.0) for stamp in (0, 20, 30, 40, 50)
+    )
+    book_rows = [
+        *(_state(stamp, bid_index=990, ask_index=1000) for stamp in (0, 10, 20)),
+        _state(29, bid_index=990, ask_index=1010),
+        _boundary(30),
+        _state(40, bid_index=1000, ask_index=1010, segment_id="s2"),
+        _state(59, bid_index=990, ask_index=1010, segment_id="s2"),
+    ]
+    read_count = 0
+    with runtime_resource_policy_scope() as policy:
+
+        def books():
+            nonlocal read_count
+            for value in book_rows:
+                read_count += 1
+                if hasattr(value, "bids"):
+                    yield OwnedValue(value, policy.lease("test.episode.book", 8192))
+                else:
+                    yield value
+
+        funding = SimpleNamespace(
+            identity="d" * 64,
+            coverage=(0, 70_000_000),
+            events=events,
+            forecasts=iter((FundingForecast(0, 1_000_000_000, ()),)),
+        )
+        execute = partial(
+            simulate_taker,
+            prediction_column="score",
+            prediction_horizon_ms=500,
+            config=replace(
+                _taker_config(latency_ms=0), taker_fee_bps=0.0, position_size=2.0
+            ),
+            observed_coverage=coverage,
+            resource_policy=policy,
+            capital=capital,
+            asset_id="btc_usdt",
+            decision_windows_ns=((0, 70_000_000),),
+        )
+        root = write_crypto_episode_artifact(
+            tmp_path / "result",
+            envelope=envelope,
+            produce=lambda emit: _execute_portfolio(
+                execution_mode="independent_segments",
+                execute=execute,
+                books=books(),
+                trades=None,
+                decisions=iter(decisions),
+                funding=funding,
+                expected_funding_identity=funding.identity,
+                coverage=coverage,
+                trade_coverage=trade_coverage,
+                bounds=((0, 70_000_000),),
+                on_ledger=None,
+                on_episode=emit,
+            ),
+        )
+        artifact = read_crypto_episode_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        summaries = []
+        with closing_iterator(artifact.iter_episodes()) as rows:
+            for index, ledger in rows:
+                summaries.append(summarize_portfolio_ledger(ledger))
+                assert ledger.capital == capital
+                assert index["termination"] == "TRUNCATED"
+                with closing_iterator(ledger.iter_chunks()) as batches:
+                    batches = list(batches)
+                assert batches[0].sequence == 0
+                assert all(
+                    index["start_ns"] <= row.timestamp_ns < index["stop_ns"]
+                    for batch in batches
+                    for row in batch.valuations
+                )
+                assert (
+                    sum(
+                        row.value
+                        for row in batches[0].valuations
+                        if row.phase == "before"
+                    )
+                    == 1000.0
+                )
+        assert [row["net_pnl"] for row in summaries] == pytest.approx([-1.0, 1.0])
+        assert [row["funding"] for row in summaries] == pytest.approx([-1.0, 1.0])
+        assert read_count == len(book_rows)
+        assert policy.used_memory_bytes == 0
+
+
+def test_episode_publication_cancel_preserves_old_and_parent_capture_rejects_child_swap(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    import os
+
+    import pandas as pd
+
+    import quant_research_platform.artifacts.crypto_hft as episodes
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.business_manifest import (
+        BusinessManifestEnvelope,
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.research.portfolios.accounting import (
+        PortfolioEconomics,
+    )
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact_record,
+    )
+
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+
+    def envelope(software):
+        return build_business_manifest_envelope(
+            logical_artifact_id="fixture_episodes",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity=software * 64,
+            research_window={
+                "start": pd.Timestamp(0).isoformat(),
+                "end": pd.Timestamp(30_000_000).isoformat(),
+                "access": "development",
+            },
+            upstream_identities={},
+            semantic_metadata={"portfolio_capital": asdict(capital)},
+        )
+
+    def economic_path(mark):
+        def produce(emit):
+            account = PortfolioEconomics(capital, "btc_usdt", emit)
+            account.mark(0, 100.0)
+            account.fill(
+                timestamp_ns=10_000_000,
+                order_id="one",
+                quantity=1.0,
+                price=100.0,
+                mark_price=100.0,
+                fee=0.0,
+            )
+            account.mark(20_000_000, mark)
+
+        return produce
+
+    def produce(emit):
+        emit(
+            start_ns=0,
+            stop_ns=30_000_001,
+            termination="PLANNED_END",
+            stop_reasons=("planned_oos_end",),
+            produce=economic_path(110.0),
+        )
+
+    with runtime_resource_policy_scope():
+        original = envelope("c")
+        old = episodes.write_crypto_episode_artifact(
+            tmp_path / "collection", envelope=original, produce=produce
+        )
+        before = {
+            path.relative_to(old): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in old.rglob("*")
+            if path.is_file()
+        }
+        other = envelope("d")
+
+        def cancel(emit):
+            produce(emit)
+            raise KeyboardInterrupt("cancel_after_complete_child")
+
+        with pytest.raises(KeyboardInterrupt, match="cancel_after_complete_child"):
+            episodes.write_crypto_episode_artifact(
+                tmp_path / "collection", envelope=other, produce=cancel
+            )
+        assert not (
+            tmp_path / "collection" / "instances" / other.instance_identity
+        ).exists()
+        assert before == {
+            path.relative_to(old): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in old.rglob("*")
+            if path.is_file()
+        }
+        make_child = episodes._episode_envelope
+        child_calls = 0
+
+        def wrong_parent_once(parent, start, stop):
+            nonlocal child_calls
+            child_calls += 1
+            child = make_child(parent, start, stop)
+            if child_calls != 1:
+                return child
+            payload = child.payload()
+            return build_business_manifest_envelope(
+                **{
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"instance_identity", "status", "upstream_identities"}
+                },
+                upstream_identities={"episode_parent": "e" * 64},
+            )
+
+        with monkeypatch.context() as patch:
+            patch.setattr(episodes, "_episode_envelope", wrong_parent_once)
+            with pytest.raises(
+                ValueError, match="crypto_episode_child_contract_invalid"
+            ):
+                episodes.write_crypto_episode_artifact(
+                    tmp_path / "collection", envelope=other, produce=produce
+                )
+        assert child_calls >= 2
+        assert not (
+            tmp_path / "collection" / "instances" / other.instance_identity
+        ).exists()
+        assert before == {
+            path.relative_to(old): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in old.rglob("*")
+            if path.is_file()
+        }
+        real = episodes.read_portfolio_ledger_artifact
+        replaced = False
+        consumed = 0
+
+        def swap(root, **kwargs):
+            nonlocal replaced
+            if not replaced:
+                child, _ = read_semantic_artifact_record(root)
+                alternative = write_portfolio_ledger_artifact(
+                    tmp_path / "replacement",
+                    envelope=BusinessManifestEnvelope(**child),
+                    produce=economic_path(120.0),
+                )
+                for source in alternative.iterdir():
+                    os.replace(source, root / source.name)
+                replaced = True
+            consume = kwargs.pop("consume_batches")
+
+            def counted(batches):
+                def rows():
+                    nonlocal consumed
+                    for batch in batches:
+                        consumed += 1
+                        yield batch
+
+                return consume(rows())
+
+            return real(root, consume_batches=counted, **kwargs)
+
+        monkeypatch.setattr(episodes, "read_portfolio_ledger_artifact", swap)
+        with pytest.raises(ValueError, match="identity|changed"):
+            episodes.read_crypto_episode_artifact(
+                old, expected_identity=original.instance_identity
+            )
+        assert replaced
+        assert consumed == 0
+
+
+def test_funding_cut_between_books_carries_only_information_not_account_or_lease():
+    from functools import partial
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _execute_portfolio,
+    )
+    from quant_research_platform.runtime.resources import OwnedValue
+
+    count = 0
+    observed = []
+    with runtime_resource_policy_scope() as policy:
+
+        def books():
+            nonlocal count
+            for stamp in (0, 60):
+                count += 1
+                yield OwnedValue(_state(stamp), policy.lease("test.episode.book", 8192))
+
+        def emit(**episode):
+            batches = []
+            result = episode.pop("produce")(batches.append)
+            observed.append((episode, result, batches))
+
+        coverage = {"s1": (0, 61_000_000)}
+        funding = SimpleNamespace(
+            identity="a" * 64,
+            coverage=(0, 70_000_000),
+            events=(
+                FundingEvent(30_000_000, None, None),
+                FundingEvent(40_000_000, 0.01, 100.0),
+                FundingEvent(50_000_000, 0.01, 100.0),
+            ),
+            forecasts=iter((FundingForecast(0, 1_000_000_000, ()),)),
+        )
+        execute = partial(
+            simulate_taker,
+            prediction_column="score",
+            prediction_horizon_ms=500,
+            config=replace(_taker_config(latency_ms=0), taker_fee_bps=0.0),
+            observed_coverage=coverage,
+            resource_policy=policy,
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            decision_windows_ns=((0, 60_000_000),),
+        )
+        _execute_portfolio(
+            execution_mode="independent_segments",
+            execute=execute,
+            books=books(),
+            trades=None,
+            decisions=iter(
+                (
+                    {"timestamp_ms": 10, "score": 0.02},
+                    {"timestamp_ms": 40, "score": -0.02},
+                )
+            ),
+            funding=funding,
+            expected_funding_identity=funding.identity,
+            coverage=coverage,
+            trade_coverage=SimpleNamespace(intervals=lambda: iter(coverage.values())),
+            bounds=((0, 60_000_000),),
+            on_ledger=None,
+            on_episode=emit,
+        )
+        assert policy.used_memory_bytes == 0
+    assert count == 2 and len(observed) == 2
+    assert observed[1][0]["start_ns"] == 30_000_001
+    assert [row[1]["funding"] for row in observed] == [0.0, 1.0]
+    assert [row[1]["initial_capital"] for row in observed] == [1000.0, 1000.0]
+    for episode, _result, batches in observed:
+        assert all(
+            episode["start_ns"] <= value.timestamp_ns < episode["stop_ns"]
+            for batch in batches
+            for value in batch.valuations
+        )
+        assert (
+            sum(
+                value.value
+                for value in batches[0].valuations
+                if value.phase == "before"
+            )
+            == 1000.0
+        )
+
+
+@pytest.mark.parametrize(
+    "start,stop", ((5_000_000, 9_000_000), (12_000_000, 18_000_000))
+)
+def test_observed_empty_episode_has_real_initial_value_and_no_trades(start, stop):
+    batches = []
+    with runtime_resource_policy_scope() as policy:
+        result = simulate_taker(
+            [_state(0), _state(20)],
+            [],
+            prediction_column="score",
+            prediction_horizon_ms=500,
+            config=_taker_config(latency_ms=0),
+            observed_coverage={"s1": (0, 31_000_000)},
+            decision_windows_ns=((0, 10_000_000), (20_000_000, 30_000_000)),
+            observation_window_ns=(start, stop),
+            funding_events=(),
+            funding_forecasts=(),
+            resource_policy=policy,
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            on_ledger=batches.append,
+        )
+        assert result["no_eligible_decisions"]
+        assert result["nav"] == 1000.0
+        assert not [value for batch in batches for value in batch.trades]
+        stamps = [value.timestamp_ns for batch in batches for value in batch.valuations]
+        assert stamps and min(stamps) == start and max(stamps) < stop
+        assert policy.used_memory_bytes == 0
+
+
+def test_episode_qualification_does_not_split_fold_or_day_and_empty_is_blocked():
+    from contextlib import ExitStack
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _execute_episodes,
+        _qualified_episodes,
+    )
+
+    day = 86_400_000_000_000
+    bounds = ((0, day // 2), (day, day * 2))
+    coverage = {"s1": (0, day * 2 + 1)}
+    trade = SimpleNamespace(intervals=lambda: iter(coverage.values()))
+    funding = SimpleNamespace(coverage=(0, day * 2), events=())
+    assert list(_qualified_episodes(coverage, trade, funding, bounds)) == [
+        (
+            0,
+            day * 2 + 1,
+            "PLANNED_END",
+            (
+                "book_coverage_end",
+                "funding_coverage_end",
+                "planned_oos_end",
+                "trade_coverage_end",
+            ),
+        )
+    ]
+    funding.coverage = (0, 2**63 - 1)
+    longer_calendar = list(_qualified_episodes(coverage, trade, funding, bounds))
+    assert longer_calendar[0][:3] == (0, day * 2 + 1, "PLANNED_END")
+    assert "funding_coverage_end" not in longer_calendar[0][3]
+    with pytest.raises(ValueError, match="window_overflow"):
+        list(_qualified_episodes(coverage, trade, funding, ((0, 2**63 - 1),)))
+    with ExitStack() as resources:
+        with pytest.raises(PortfolioTargetBlocked, match="qualified_episode_missing"):
+            _execute_episodes(
+                books=(),
+                trades=None,
+                decisions=(),
+                forecasts=(),
+                funding=funding,
+                coverage={},
+                trade_coverage=trade,
+                bounds=bounds,
+                resources=resources,
+                execute=lambda **_kwargs: pytest.fail("no qualified interval"),
+                on_episode=lambda **_kwargs: pytest.fail(
+                    "must not publish empty episode"
+                ),
+            )

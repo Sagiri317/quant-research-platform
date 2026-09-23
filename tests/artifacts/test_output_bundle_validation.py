@@ -170,6 +170,23 @@ def test_prediction_plain_dictionary_reader_bounds_native_expansion(
     table = pq.read_table(path)
     pq.write_table(table, path, use_dictionary=True, write_statistics=False)
     table = None
+    with runtime_resource_policy_scope() as policy:
+        with bundle_validation.read_prediction_output_bundle(
+            root, expected_output_id=spec.prediction_id
+        ) as (_manifest, lookup):
+            assert lookup.row_count == 256
+            with lookup.values_for_frame(frame.iloc[[0, 255]], mark_matched=False) as (
+                values,
+                found,
+            ):
+                assert list(found) == [1, 1]
+                assert list(values) == [0.0, 255.0]
+        assert policy.used_memory_bytes == 0
+    frame = None
+
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.storage.parquet import iter_dataset_part_batches
+
     native_batches = pq.ParquetFile.iter_batches
     pulled = []
 
@@ -181,16 +198,15 @@ def test_prediction_plain_dictionary_reader_bounds_native_expansion(
 
     monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed_batches)
     with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
-        with bundle_validation.read_prediction_output_bundle(
-            root, expected_output_id=spec.prediction_id
-        ) as (_manifest, lookup):
-            assert lookup.row_count == 256
-            with lookup.values_for_frame(frame.iloc[[0, 255]], mark_matched=False) as (
-                values,
-                found,
-            ):
-                assert list(found) == [1, 1]
-                assert list(values) == [0.0, 255.0]
+        with closing_iterator(
+            iter_dataset_part_batches(
+                path,
+                expected_identity=dataset_file_identity(path),
+                target_chunk_bytes=4 * 1024**2,
+                operation_headroom_bytes=policy.operation_headroom_bytes,
+            )
+        ) as batches:
+            assert sum(batch.num_rows for batch in batches) == 256
         assert policy.used_memory_bytes == 0
     assert pulled and len(pulled) > 1
 
@@ -783,3 +799,28 @@ def test_prediction_effective_end_matches_all_rows_before_filtering(
                         assert values[0] == 1.0
             assert policy.used_memory_bytes == 0
         assert len(scans) == 2
+
+
+@pytest.mark.parametrize("alias", (False, True))
+def test_output_destination_uses_layout_relationship_not_name(tmp_path, alias):
+    from quant_research_platform.artifacts.outputs.common_validation import (
+        derive_output_bundle_root,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root = tmp_path / "metadata" / "raw-notes"
+    root.mkdir(parents=True)
+    if alias:
+        data = root / "data" / "raw"
+        data.mkdir(parents=True)
+        (root / "outputs").symlink_to(data, target_is_directory=True)
+    kwargs = dict(
+        output_spec=make_prediction_report_spec(),
+        layout=StorageLayout(root),
+        expected_definition_id="prediction_outputs",
+    )
+    if alias:
+        with pytest.raises(ValueError, match="output_bundle_must_not_be_dataset_root"):
+            derive_output_bundle_root(**kwargs)
+    else:
+        assert derive_output_bundle_root(**kwargs) == root / "outputs" / "pred-run"

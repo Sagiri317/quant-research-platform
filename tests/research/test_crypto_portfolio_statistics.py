@@ -1,5 +1,4 @@
-import json
-from dataclasses import asdict, replace
+from dataclasses import asdict
 
 import numpy as np
 import pandas as pd
@@ -24,17 +23,12 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.execution import (
     _record_execution_result,
 )
-from quant_research_platform.markets.implementations.crypto.ids import (
-    HFT_RESEARCH_DATASET_ID,
-)
 from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
+    bind_research_configuration,
     research_profile,
 )
 from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
-from quant_research_platform.research.protocols.crypto_hft import (
-    protocol,
-)
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.software_identity import (
@@ -44,12 +38,8 @@ from quant_research_platform.workflows.research import _target_envelope_for_spec
 from tests.helpers.research_configuration import research_configuration
 
 
-@pytest.mark.parametrize("quantity_scale", (1.0, 2.0**-50))
-@pytest.mark.parametrize("missing_boundary", (False, True))
-def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
-    tmp_path, missing_boundary, quantity_scale
-):
-    plan = {
+def _statistics_plan(quantity_scale=1.0):
+    return {
         "folds": [
             {
                 "fold_id": "first",
@@ -87,6 +77,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             for asset in ("btc_usdt", "eth_usdt")
         },
         "execution": {
+            "backtest_modes": ["continuous"],
             "taker_fee_bps": 0.0,
             "latency_ms": 0,
             "markout_horizon_ms": 500,
@@ -102,13 +93,27 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             },
         },
     }
-    configuration = research_configuration("crypto", "baseline")
-    configuration["research_plan"] = plan
-    bound = replace(
-        protocol(research_plan=plan),
-        configuration_json=json.dumps(configuration),
+
+
+@pytest.mark.parametrize("quantity_scale", (1.0, 2.0**-50))
+@pytest.mark.parametrize("missing_boundary", (False, True))
+def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
+    tmp_path, missing_boundary, quantity_scale
+):
+    plan = _statistics_plan(quantity_scale)
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        development=(
+            plan["folds"][0]["development_test"]["start"],
+            plan["folds"][-1]["development_test"]["end"],
+        ),
+        plan=plan,
     )
-    profile = research_profile(CRYPTO_PROFILE_ID)
+    profile = bind_research_configuration(
+        research_profile(CRYPTO_PROFILE_ID), configuration
+    )
+    bound = profile.protocol(configuration["scenario_id"])
     layout = StorageLayout(tmp_path)
     start = pd.Timestamp("2024-01-01T00:00:00").value
     day = pd.Timedelta(days=1).value
@@ -120,12 +125,13 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
     }
     roots, identities = {}, {}
     with runtime_resource_policy_scope() as policy:
-        for candidate in bound.portfolio_candidates():
+        for descriptor in bound.execution_targets():
+            candidate = descriptor.candidate
             capital = PortfolioCapital(
                 candidate.candidate_id, 1000.0, "USDT", "linear_perpetual"
             )
             envelope = build_business_manifest_envelope(
-                logical_artifact_id=candidate.target_id,
+                logical_artifact_id=descriptor.target_id,
                 schema_identity="a" * 64,
                 protocol_or_spec_identity="b" * 64,
                 software_identity="c" * 64,
@@ -197,97 +203,108 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                     350.0 / quantity_scale,
                 )
 
-            roots[candidate.target_id] = write_portfolio_ledger_artifact(
-                layout.semantic_artifact_root("crypto", candidate.target_id),
+            roots[descriptor.target_id] = write_portfolio_ledger_artifact(
+                layout.semantic_artifact_root("crypto", descriptor.target_id),
                 envelope=envelope,
                 produce=produce,
             )
-            identities[candidate.target_id] = envelope.instance_identity
-        target = f"{HFT_RESEARCH_DATASET_ID}_portfolio_statistics"
-        spec = next(
-            spec
-            for spec in bound.target_specs("research run")
-            if spec.target_id == target
-        )
-        envelope = _target_envelope_for_spec(
-            profile=profile,
-            protocol=bound,
-            target_spec=spec,
-            data_spec=None,
-            research_window=research_window,
-            upstream_identities=identities,
-            software_identity=production_software_identity(),
-            raw_content_identity=None,
-        )
-        owned = profile.producer_bindings[target].producer(
-            layout=layout.with_target_roots(roots),
-            protocol_manifest=bound.manifest(),
-            time_window=window,
-            upstream_identities=identities,
-            resource_policy=policy,
-        )
-        try:
-            root = write_statistics_artifact(
-                layout.semantic_artifact_root("crypto", target),
-                envelope=envelope,
-                tables=owned.value,
-                table_group="crypto_portfolio",
+            identities[descriptor.target_id] = envelope.instance_identity
+        for descriptor in bound.execution_targets():
+            target = descriptor.statistics_target_id
+            selected_identities = {
+                descriptor.target_id: identities[descriptor.target_id]
+            }
+            spec = next(
+                spec
+                for spec in bound.target_specs("research run")
+                if spec.target_id == target
             )
-        finally:
-            owned.release(owner="research.statistics.output")
-        artifact = read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
-        )
-        with (
-            artifact.table("crypto_portfolio_statistics.parquet") as statistics,
-            artifact.table("crypto_portfolio_daily.parquet") as daily,
-            artifact.table("crypto_portfolio_intervals.parquet") as intervals,
-        ):
-            for candidate in bound.portfolio_candidates():
-                metrics = statistics.loc[
-                    statistics.candidate_id.eq(candidate.candidate_id)
-                ].set_index("metric_id")
-                assert metrics.loc["terminal_nav", "value"] == 1350.0
-                assert metrics.loc["continuous_max_drawdown", "value"] == pytest.approx(
-                    -0.1
+            envelope = _target_envelope_for_spec(
+                profile=profile,
+                protocol=bound,
+                target_spec=spec,
+                data_spec=None,
+                research_window=research_window,
+                upstream_identities=selected_identities,
+                software_identity=production_software_identity(),
+                raw_content_identity=None,
+            )
+            owned = profile.producer_bindings[target].producer(
+                layout=layout.with_target_roots(roots),
+                protocol_manifest=envelope.payload()["semantic_metadata"][
+                    "target_contract"
+                ]["protocol"],
+                time_window=window,
+                upstream_identities=selected_identities,
+                resource_policy=policy,
+            )
+            try:
+                root = write_statistics_artifact(
+                    layout.semantic_artifact_root("crypto", target),
+                    envelope=envelope,
+                    tables=owned.value,
+                    table_group="crypto_portfolio",
                 )
-                assert metrics.loc["gap_net_pnl", "value"] == 400.0
-                assert metrics.loc["oos_net_pnl", "value"] == -50.0
-                assert (
-                    metrics.loc["oos_inventory_max_abs", "value"]
-                    == 2.0 * quantity_scale
-                )
-                assert metrics.loc["oos_inventory_mean", "value"] == pytest.approx(
-                    quantity_scale, abs=0.0
-                )
-                assert (
-                    metrics.loc["oos_inventory_time_at_limit_fraction", "value"] == 0.0
-                )
-                rows = daily.loc[daily.candidate_id.eq(candidate.candidate_id)]
-                assert len(rows) == 4 and rows.benchmark_return.eq(0).all()
-                assert rows.iloc[-1].start_nav == 1500.0
-                assert rows.iloc[-1].net_return == -0.1
-                if missing_boundary:
-                    assert rows.status.eq("DEFINED").sum() == 2
-                    assert metrics.loc["sharpe", "status"] == "UNDEFINED"
-                    assert metrics.loc["annualized_volatility", "status"] == "UNDEFINED"
-                    assert (
-                        metrics.loc["sharpe", "reason"]
-                        == "planned_utc_day_valuation_undefined"
-                    )
-                else:
-                    assert rows.net_return.to_numpy() == pytest.approx(
-                        [0.1, 0.0, 0.0, -0.1]
-                    )
-                    assert metrics.loc["sharpe", "value"] == pytest.approx(0.0)
+            finally:
+                owned.release(owner="research.statistics.output")
+            artifact = read_statistics_artifact(
+                root, expected_identity=envelope.instance_identity
+            )
+            with (
+                artifact.table("crypto_portfolio_statistics.parquet") as statistics,
+                artifact.table("crypto_portfolio_daily.parquet") as daily,
+                artifact.table("crypto_portfolio_intervals.parquet") as intervals,
+            ):
+                for candidate in (descriptor.candidate,):
+                    metrics = statistics.loc[
+                        statistics.candidate_id.eq(candidate.candidate_id)
+                        & statistics.episode_id.eq("continuous")
+                    ].set_index("metric_id")
+                    assert metrics.loc["terminal_nav", "value"] == 1350.0
                     assert metrics.loc[
-                        "annualized_volatility", "value"
-                    ] == pytest.approx(np.sqrt(0.02 / 3 * 365))
-                gap = intervals.loc[
-                    intervals.candidate_id.eq(candidate.candidate_id)
-                    & intervals.kind.eq("gap")
-                ].iloc[0]
-                assert gap.funding == 100.0 and gap.net_pnl == 400.0
+                        "continuous_max_drawdown", "value"
+                    ] == pytest.approx(-0.1)
+                    assert metrics.loc["gap_net_pnl", "value"] == 400.0
+                    assert metrics.loc["oos_net_pnl", "value"] == -50.0
+                    assert (
+                        metrics.loc["oos_inventory_max_abs", "value"]
+                        == 2.0 * quantity_scale
+                    )
+                    assert metrics.loc["oos_inventory_mean", "value"] == pytest.approx(
+                        quantity_scale, abs=0.0
+                    )
+                    assert (
+                        metrics.loc["oos_inventory_time_at_limit_fraction", "value"]
+                        == 0.0
+                    )
+                    rows = daily.loc[daily.candidate_id.eq(candidate.candidate_id)]
+                    assert len(rows) == 4 and rows.benchmark_return.eq(0).all()
+                    assert rows.iloc[-1].start_nav == 1500.0
+                    assert rows.iloc[-1].net_return == -0.1
+                    if missing_boundary:
+                        assert rows.status.eq("DEFINED").sum() == 2
+                        assert metrics.loc["sharpe", "status"] == "UNDEFINED"
+                        assert (
+                            metrics.loc["annualized_volatility", "status"]
+                            == "UNDEFINED"
+                        )
+                        assert (
+                            metrics.loc["sharpe", "reason"]
+                            == "planned_utc_day_valuation_undefined"
+                        )
+                    else:
+                        assert rows.net_return.to_numpy() == pytest.approx(
+                            [0.1, 0.0, 0.0, -0.1]
+                        )
+                        assert metrics.loc["sharpe", "value"] == pytest.approx(0.0)
+                        assert metrics.loc[
+                            "annualized_volatility", "value"
+                        ] == pytest.approx(np.sqrt(0.02 / 3 * 365))
+                    gap = intervals.loc[
+                        intervals.candidate_id.eq(candidate.candidate_id)
+                        & intervals.kind.eq("gap")
+                    ].iloc[0]
+                    assert gap.funding == 100.0 and gap.net_pnl == 400.0
         assert policy.used_memory_bytes == 0
 
 
@@ -349,4 +366,396 @@ def test_inventory_limit_duration_has_exact_execution_boundary(
         assert inventory["oos"]["duration"] == duration
         assert inventory["oos"]["at_limit"] / duration == expected_fraction
         assert inventory["gap"]["duration"] == 0
+        assert policy.used_memory_bytes == 0
+
+
+def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.artifacts import statistics as statistics_module
+    from quant_research_platform.artifacts.crypto_hft import (
+        write_crypto_episode_artifact,
+    )
+    from quant_research_platform.artifacts.research import (
+        read_research_report_artifact,
+        write_research_run_record,
+    )
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.targets import (
+        ProducerKind,
+        ResearchRunRecord,
+        ResearchRunTargetResult,
+        RunStatus,
+        TargetStatus,
+        unmeasured_operation_evidence,
+    )
+    from quant_research_platform.interfaces.queries import portfolio_curve
+    from quant_research_platform.workflows.research import _build_report_from_run
+
+    plan = _statistics_plan()
+    plan["execution"]["backtest_modes"] = ["continuous", "independent_segments"]
+    plan["folds"][-1]["development_test"]["end"] = "2025-01-01T00:00:00"
+    plan["final_holdout"] = {
+        "start": "2025-01-02T00:00:00",
+        "end": "2025-01-03T00:00:00",
+    }
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        development=(
+            plan["folds"][0]["development_test"]["start"],
+            plan["folds"][-1]["development_test"]["end"],
+        ),
+        plan=plan,
+    )
+    configuration["portfolios"] = configuration["portfolios"][:1]
+    profile = bind_research_configuration(
+        research_profile(CRYPTO_PROFILE_ID), configuration
+    )
+    bound = profile.protocol(configuration["scenario_id"])
+    continuous, descriptor = bound.execution_targets()
+    candidate = descriptor.candidate
+    layout = StorageLayout(tmp_path)
+    window = TimeWindow(**configuration["windows"]["development"])
+    research_window = {
+        "start": window.start.isoformat(),
+        "end": window.end.isoformat(),
+        "access": "development",
+    }
+    specs = {spec.target_id: spec for spec in bound.target_specs("research run")}
+    execution_envelope = _target_envelope_for_spec(
+        profile=profile,
+        protocol=bound,
+        target_spec=specs[descriptor.target_id],
+        data_spec=None,
+        research_window=research_window,
+        upstream_identities={},
+        software_identity=production_software_identity(),
+        raw_content_identity=None,
+    )
+    capital = PortfolioCapital(
+        candidate.candidate_id, 1000.0, "USDT", "linear_perpetual"
+    )
+    first = pd.Timestamp(window.start).value
+    day, hour = pd.Timedelta(days=1).value, pd.Timedelta(hours=1).value
+
+    def produce(emit_episode, *, price_delta=0.0):
+        for offset, fee, price in ((0, 1.0, 200.0), (2 * day, 2.0, 150.0)):
+            price += price_delta
+            start = first + offset
+
+            def ledger(emit, start=start, fee=fee, price=price):
+                economics = PortfolioEconomics(capital, candidate.asset_id, emit)
+                economics.mark(start, 100.0)
+                economics.fill(
+                    timestamp_ns=start,
+                    order_id="entry",
+                    quantity=1.0,
+                    price=100.0,
+                    mark_price=100.0,
+                    fee=fee,
+                )
+                economics.mark(start + hour // 2, price)
+                _record_execution_result(
+                    economics,
+                    {
+                        "simulation": "independent_fixture",
+                        "net_pnl": price - 100.0 - fee,
+                        "created_orders": 1,
+                        "filled_orders": 1,
+                    },
+                    start + hour // 2,
+                    price,
+                )
+
+            emit_episode(
+                start_ns=start,
+                stop_ns=start + hour,
+                termination="TRUNCATED",
+                stop_reasons=["book_coverage_end"],
+                produce=ledger,
+            )
+
+    with runtime_resource_policy_scope() as policy:
+        root = write_crypto_episode_artifact(
+            layout.semantic_artifact_root("crypto", descriptor.target_id),
+            envelope=execution_envelope,
+            produce=produce,
+        )
+        execution_root = root
+        upstream = {descriptor.target_id: execution_envelope.instance_identity}
+        statistics_spec = specs[descriptor.statistics_target_id]
+        envelope = _target_envelope_for_spec(
+            profile=profile,
+            protocol=bound,
+            target_spec=statistics_spec,
+            data_spec=None,
+            research_window=research_window,
+            upstream_identities=upstream,
+            software_identity=production_software_identity(),
+            raw_content_identity=None,
+        )
+        statistics_reservations = []
+        grow = type(policy)._grow_lease
+
+        def track_statistics_reservation(root, lease, additional):
+            grow(root, lease, additional)
+            if lease.owner == "research.crypto.portfolio.statistics":
+                statistics_reservations.append(lease.reserved_bytes)
+
+        monkeypatch.setattr(type(policy), "_grow_lease", track_statistics_reservation)
+        owned = profile.producer_bindings[descriptor.statistics_target_id].producer(
+            layout=layout.with_target_roots({descriptor.target_id: root}),
+            protocol_manifest=envelope.payload()["semantic_metadata"][
+                "target_contract"
+            ]["protocol"],
+            time_window=window,
+            upstream_identities=upstream,
+            resource_policy=policy,
+        )
+        assert max(statistics_reservations) < 512 * 1024
+        try:
+            root = write_statistics_artifact(
+                layout.semantic_artifact_root(
+                    "crypto", descriptor.statistics_target_id
+                ),
+                envelope=envelope,
+                tables=owned.value,
+                table_group="crypto_portfolio",
+            )
+            invalid = owned.value["crypto_portfolio_statistics"].copy()
+            invalid.loc[
+                invalid.episode_id.eq("all") & invalid.metric_id.eq("fees"), "metric_id"
+            ] = "net_pnl"
+            with pytest.raises(ValueError, match="cross_episode_metric"):
+                statistics_module._validated_frame(
+                    invalid, member="crypto_portfolio_statistics.parquet"
+                )
+        finally:
+            owned.release(owner="research.statistics.output")
+        artifact = read_statistics_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        with artifact.table("crypto_portfolio_statistics.parquet") as frame:
+            episode_metrics = frame.loc[frame.episode_id.ne("all")]
+            assert sorted(
+                episode_metrics.loc[episode_metrics.metric_id.eq("net_pnl"), "value"]
+            ) == [48.0, 99.0]
+            assert episode_metrics.loc[
+                episode_metrics.metric_id.eq("initial_capital"), "value"
+            ].tolist() == [1000.0, 1000.0]
+            all_metrics = frame.loc[frame.episode_id.eq("all")].set_index("metric_id")
+            assert all_metrics.loc["fees", "value"] == 3.0
+            assert all_metrics.loc["covered_seconds", "value"] == 7200.0
+            assert all_metrics.loc["episode_count", "value"] == 2.0
+            assert all_metrics.loc["truncated_episode_count", "value"] == 2.0
+            assert not {
+                "net_pnl",
+                "capital_return",
+                "terminal_nav",
+                "sharpe",
+                "annualized_volatility",
+                "episode_max_drawdown",
+            }.intersection(all_metrics.index)
+        with artifact.table("crypto_portfolio_coverage.parquet") as frame:
+            assert frame.kind.tolist() == ["covered", "missing", "covered", "missing"]
+            assert (
+                frame.stop_at.iloc[:-1].to_numpy() == frame.start_at.iloc[1:].to_numpy()
+            ).all()
+            assert frame.start_at.iloc[0] == pd.Timestamp(window.start)
+            assert frame.stop_at.iloc[-1] == pd.Timestamp(window.end) + pd.Timedelta(
+                nanoseconds=1
+            )
+        with artifact.table("crypto_portfolio_daily.parquet") as frame:
+            assert frame.empty
+        assert policy.used_memory_bytes == 0
+        manifest = bound.manifest()
+        references = tuple(
+            ResearchRunTargetResult(
+                target_id=item.target_id,
+                producer_kind=kind,
+                status=TargetStatus.BUILT,
+                instance_identity=identity.instance_identity,
+                schema_identity=identity.schema_identity,
+                artifact_root=layout.semantic_artifact_root("crypto", item.target_id)
+                .relative_to(tmp_path)
+                .as_posix(),
+            )
+            for item, kind, identity in (
+                (
+                    specs[descriptor.target_id],
+                    ProducerKind.PORTFOLIO,
+                    execution_envelope,
+                ),
+                (statistics_spec, ProducerKind.STATISTIC, envelope),
+            )
+        ) + tuple(
+            ResearchRunTargetResult(
+                target_id=target,
+                producer_kind=kind,
+                status=TargetStatus.BLOCKED,
+                reason="book_coverage_missing",
+            )
+            for target, kind in (
+                (continuous.target_id, ProducerKind.PORTFOLIO),
+                (continuous.statistics_target_id, ProducerKind.STATISTIC),
+            )
+        )
+        run = ResearchRunRecord(
+            run_id="run_independent_statistics",
+            profile_id=profile.profile_id,
+            scenario_id=configuration["scenario_id"],
+            protocol=manifest,
+            protocol_identity=canonical_json_hash(manifest),
+            research_window=research_window,
+            software_identity=production_software_identity().identity_hash,
+            terminal_targets=(
+                continuous.statistics_target_id,
+                descriptor.statistics_target_id,
+            ),
+            target_results=references,
+            status=RunStatus.BLOCKED,
+            operation_evidence=unmeasured_operation_evidence("fixture_record"),
+        )
+        write_research_run_record(layout.research_run_path(run.run_id), run)
+        curve = portfolio_curve(
+            profile=profile,
+            layout=layout,
+            run_id=run.run_id,
+            target_id=descriptor.target_id,
+        )
+        assert curve["execution_mode"] == "independent_segments"
+        assert "points" not in curve
+        assert curve["episode_count"] == 2
+        assert curve["source_point_count"] == curve["displayed_point_count"]
+        assert [episode["points"][0]["nav"] for episode in curve["episodes"]] == [
+            1000.0,
+            1000.0,
+        ]
+        assert [episode["points"][-1]["nav"] for episode in curve["episodes"]] == [
+            1099.0,
+            1048.0,
+        ]
+
+        import json
+        from pathlib import Path
+
+        monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
+        import matplotlib
+
+        matplotlib.use("Agg")
+        from matplotlib import pyplot as plt
+        from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
+        from matplotlib.ticker import StrMethodFormatter
+
+        notebook = json.loads(
+            (
+                Path(__file__).resolve().parents[2]
+                / "notebooks"
+                / "research-interview-demo.ipynb"
+            ).read_text()
+        )
+        plot = next(
+            cell for cell in notebook["cells"] if cell["id"] == "research-cell-11"
+        )
+        namespace = {
+            "curves": [curve],
+            "pd": pd,
+            "plt": plt,
+            "is_crypto": True,
+            "display": lambda value: None,
+            "AutoDateLocator": AutoDateLocator,
+            "ConciseDateFormatter": ConciseDateFormatter,
+            "StrMethodFormatter": StrMethodFormatter,
+        }
+        exec(
+            compile("".join(plot["source"]), "research-interview-demo.ipynb", "exec"),
+            namespace,
+        )
+        figure = namespace["figure"]
+        figure.canvas.draw()
+        assert len(figure.axes) == 2
+        assert [axis.lines[0].get_ydata()[0] for axis in figure.axes] == [
+            1000.0,
+            1000.0,
+        ]
+        assert [axis.lines[0].get_ydata()[-1] for axis in figure.axes] == [
+            1099.0,
+            1048.0,
+        ]
+        figure = namespace = curve = None
+        with policy.lease("reports.fixture", 0) as report_lease:
+            report = _build_report_from_run(
+                profile=profile,
+                layout=layout,
+                record=run,
+                plan=False,
+                report_lease=report_lease,
+            )
+            result = report["target_result"]
+            saved = read_research_report_artifact(
+                layout.instance_root(
+                    layout.semantic_artifact_root("crypto", result["target_id"]),
+                    result["instance_identity"],
+                ),
+                expected_identity=result["instance_identity"],
+                source_run=run,
+                report_lease=report_lease,
+            )
+            assert saved == report["report"]
+            candidates = saved["sections"]["portfolio"]["candidates"]
+            assert candidates[0]["execution_mode"] == "continuous"
+            assert candidates[0]["status"] == "BLOCKED"
+            assert candidates[0]["reason"] == "book_coverage_missing"
+            assert candidates[1]["status"] == "DEFINED"
+            assert [
+                row["economics"]["net_pnl"] for row in candidates[1]["episodes"]
+            ] == [99.0, 48.0]
+            assert "economics" not in candidates[1]
+            assert all(
+                row["termination"] == "TRUNCATED" for row in candidates[1]["episodes"]
+            )
+            assert saved["sections"]["portfolio"]["intervals"]["results"]
+            assert saved["sections"]["Data/Coverage"]["execution_coverage"]["results"]
+            report = saved = candidates = None
+        assert policy.used_memory_bytes == 0
+        from quant_research_platform.interfaces import queries
+
+        replacement = write_crypto_episode_artifact(
+            tmp_path / "replacement",
+            envelope=execution_envelope,
+            produce=lambda emit: produce(emit, price_delta=10.0),
+        )
+        read_reference = queries.report_artifact.read_validated_reference
+        read_curve = queries._ledger_curve
+        consumed = 0
+        replaced = False
+
+        def swap_after_reference(*args, **kwargs):
+            nonlocal replaced
+            reference = read_reference(*args, **kwargs)
+            assert kwargs["member_identities"]
+            for source in replacement.rglob("*"):
+                if source.is_file():
+                    source.replace(execution_root / source.relative_to(replacement))
+            replaced = True
+            return reference
+
+        def observe_curve(*args, **kwargs):
+            nonlocal consumed
+            consumed += 1
+            return read_curve(*args, **kwargs)
+
+        monkeypatch.setattr(
+            queries.report_artifact, "read_validated_reference", swap_after_reference
+        )
+        monkeypatch.setattr(queries, "_ledger_curve", observe_curve)
+        with pytest.raises(ValueError, match="identity|changed"):
+            portfolio_curve(
+                profile=profile,
+                layout=layout,
+                run_id=run.run_id,
+                target_id=descriptor.target_id,
+            )
+        assert replaced and consumed == 0
         assert policy.used_memory_bytes == 0

@@ -54,6 +54,7 @@ def hft_research_plan():
             for asset in ("btc_usdt", "eth_usdt")
         },
         "execution": {
+            "backtest_modes": ["continuous"],
             "taker_fee_bps": 1.0,
             "latency_ms": 10,
             "markout_horizon_ms": 500,

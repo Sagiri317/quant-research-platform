@@ -12,7 +12,12 @@ import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.contracts.experiments import ExperimentFold, ExperimentPlan
+from quant_research_platform.contracts.experiments import (
+    ExperimentFold,
+    ExperimentPlan,
+    legal_training_rows,
+    training_availability_columns,
+)
 from quant_research_platform.contracts.models import (
     _model_algorithm_facts,
     model_spec_payload,
@@ -28,6 +33,9 @@ from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
 from quant_research_platform.research.experiments import TrialRecorder
+from quant_research_platform.research.features.transforms import (
+    canonical_feature_validity_columns,
+)
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.fitting import (
     iter_legal_training_chunks,
@@ -38,6 +46,10 @@ from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
 from quant_research_platform.research.models.trial_selection import (
+    ModelSampleCoverage,
+    crypto_validation_coverage_scope,
+    model_validation_coverage_scope,
+    model_validation_inputs,
     select_best_validation_trial,
     select_prediction_model_spec,
 )
@@ -50,11 +62,16 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     OwnedValue,
     RuntimeResourcePolicy,
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
 )
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_chunks,
     resolve_columns_from_schema,
+)
+from quant_research_platform.storage.experiments import (
+    read_model_trial_ledger_reference,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -85,6 +102,7 @@ def build_model_selection_result(
     model_target_id: str,
     backend_versions: Mapping[str, str],
     dataset_session: DatasetSession,
+    on_validation_coverage,
 ) -> Iterable[QuarterlyModelResult | OwnedValue[QuarterlyModelResult]]:
     if not model_ids or set(model_ids) != set(tie_break_order):
         raise ValueError("model_selection_model_ids_invalid")
@@ -123,7 +141,7 @@ def build_model_selection_result(
             with closing_iterator(
                 iter_dataset_chunks(
                     view,
-                    target_chunk_bytes=max(1, resource_policy.operation_headroom_bytes),
+                    target_chunk_bytes=max(1, resource_policy.planning_headroom_bytes),
                 )
             ) as source:
                 yield from source
@@ -172,6 +190,7 @@ def build_model_selection_result(
         backend_versions=backend_versions,
         holdout_window=protocol_manifest["holdout_window"],
         research_configuration=protocol_manifest["research_configuration"],
+        on_validation_coverage=on_validation_coverage,
     )
 
 
@@ -196,6 +215,7 @@ def _build_a_share_quarterly_models(
     backend_versions: Mapping[str, str],
     holdout_window: Mapping[str, object],
     research_configuration,
+    on_validation_coverage,
 ) -> Iterable[QuarterlyModelResult | OwnedValue[QuarterlyModelResult]]:
     quarters = model_folds(
         sessions,
@@ -242,10 +262,77 @@ def _build_a_share_quarterly_models(
                         quarter.validation.end, date_only=True
                     ),
                 )
+                family_specs = tuple(
+                    model_catalog.get(model_id) for model_id in model_ids
+                )
+                common_inputs = model_validation_inputs(family_specs)
+                label = family_specs[0].label_column
+                availability = training_availability_columns(label)[0]
+                dataset_identity = layout.target_root(
+                    dataset_spec.data_id,
+                    layout.research_dataset_root(
+                        dataset_spec.market_id, dataset_spec.data_id
+                    ),
+                ).name
+                coverage = ModelSampleCoverage(
+                    model_validation_coverage_scope(
+                        dataset_identity, quarter, family_specs
+                    )
+                )
+
+                def coverage_frames(
+                    common_inputs=common_inputs,
+                    label=label,
+                    availability=availability,
+                    quarter=quarter,
+                    coverage=coverage,
+                ):
+                    columns = tuple(
+                        dict.fromkeys(
+                            (
+                                *dataset_spec.primary_key,
+                                *common_inputs,
+                                label,
+                                availability,
+                                "eligible",
+                            )
+                        )
+                    )
+                    source = chunks(
+                        columns,
+                        input_columns=common_inputs,
+                        start=quarter.validation.start,
+                        end=quarter.validation.end,
+                    )
+                    with closing_iterator(source):
+                        for frame in source:
+                            with current_runtime_resource_policy().lease(
+                                "research.model.validation_coverage",
+                                max(1, 3 * pandas_frame_payload_bytes(frame)),
+                            ):
+                                legal = legal_training_rows(
+                                    frame,
+                                    fitting_cutoff=quarter.validation.end,
+                                    availability_column=availability,
+                                    feature_columns=common_inputs,
+                                    target_column=label,
+                                )
+                                if not legal.empty:
+                                    keys = legal.loc[:, ["timestamp", "asset_id"]]
+                                    coverage.add(keys)
+                                    yield keys
+                                    del keys
+                                del legal
+
+                coverage_path = on_validation_coverage(quarter, coverage_frames())
+                if not coverage.row_count:
+                    raise ValueError("empty_model_selection_validation_window")
                 winner_specs, selection_metadata, trial_ledgers, config_indices = (
                     _select_model_family_winners(
                         selection_spec=selection_spec,
                         training_counts=training_counts,
+                        validation_coverage=coverage,
+                        validation_input_columns=common_inputs,
                         dataset_spec=dataset_spec,
                         model_catalog=model_catalog,
                         chunks=chunks,
@@ -263,6 +350,11 @@ def _build_a_share_quarterly_models(
                         research_configuration=research_configuration,
                     )
                 )
+                selection_metadata["common_validation_coverage"] = {
+                    "path": coverage_path,
+                    "semantic_identity": coverage.semantic_identity,
+                    "row_count": coverage.row_count,
+                }
                 for family_id, reference in zip(model_ids, trial_ledgers, strict=True):
                     selected_spec = winner_specs[family_id]
                     selected_configuration = next(
@@ -270,28 +362,73 @@ def _build_a_share_quarterly_models(
                         for item in research_configuration["models"]
                         if item["model_id"] == family_id
                     )
-                    model_result, model_lease = _fit_selected_model_result(
-                        dataset_spec=dataset_spec,
-                        selected_spec=selected_spec,
-                        training_counts=training_counts,
-                        chunks=chunks,
-                        fitting_cutoff=time_value_isoformat(
-                            quarter.validation.end, date_only=True
-                        ),
-                        quarter_id=quarter_id_for_fold(quarter),
-                        root_seed=root_seed,
-                        candidate_parameters=selected_configuration.get(
-                            "parameter_candidates",
-                            [selected_configuration["hyperparameters"]],
-                        )[config_indices[family_id]],
+                    selection_plan, _selection_records = (
+                        read_model_trial_ledger_reference(layout, reference)
                     )
+                    refit_recorder = refit_attempt = fit_coverage = None
+
+                    def begin_refit(
+                        spec,
+                        training,
+                        *,
+                        selection_plan=selection_plan,
+                        quarter=quarter,
+                        reference=reference,
+                    ):
+                        nonlocal refit_recorder, refit_attempt, fit_coverage
+                        fit_coverage = _refit_sample_coverage(
+                            selection_plan,
+                            spec,
+                            training,
+                            fitting_cutoff=quarter.validation.end,
+                        )
+                        selection_recorder = TrialRecorder(
+                            layout, run_id, selection_plan
+                        )
+                        refit_recorder, refit_attempt = selection_recorder.begin_refit(
+                            spec, common_coverage_id=fit_coverage.semantic_identity
+                        )
+
+                    try:
+                        model_result, model_lease = _fit_selected_model_result(
+                            dataset_spec=dataset_spec,
+                            selected_spec=selected_spec,
+                            training_counts=training_counts,
+                            chunks=chunks,
+                            fitting_cutoff=time_value_isoformat(
+                                quarter.validation.end, date_only=True
+                            ),
+                            quarter_id=quarter_id_for_fold(quarter),
+                            root_seed=root_seed,
+                            candidate_parameters=selected_configuration.get(
+                                "parameter_candidates",
+                                [selected_configuration["hyperparameters"]],
+                            )[config_indices[family_id]],
+                            on_fit_start=begin_refit,
+                        )
+                        model_result.metadata["fit_coverage_id"] = (
+                            fit_coverage.semantic_identity
+                        )
+                        refit_recorder.finish(
+                            refit_attempt, model_metadata=model_result.metadata
+                        )
+                    except BaseException as primary:
+                        if refit_attempt is not None:
+                            try:
+                                refit_recorder.finish(refit_attempt, error=primary)
+                            except BaseException as record_error:
+                                primary.add_note(
+                                    "refit trial recording also failed: "
+                                    + type(record_error).__name__
+                                )
+                        raise
                     item = QuarterlyModelResult(
                         quarter=quarter,
                         model_id=selected_spec.model_id,
                         model_result=model_result,
                         family_id=family_id,
                         selection_metadata=selection_metadata,
-                        trial_ledgers=(reference,),
+                        trial_ledgers=(reference, refit_recorder.reference()),
                     )
                     owned_item = (
                         OwnedValue(item, model_lease)
@@ -349,6 +486,26 @@ def _dataset_sessions(chunks: Iterable[pd.DataFrame]) -> pd.DatetimeIndex:
     return pd.DatetimeIndex(sorted(values))
 
 
+def _refit_sample_coverage(plan, spec, training, *, fitting_cutoff, asset_ids=()):
+    coverage = ModelSampleCoverage(
+        {
+            "dataset_identity": plan.data_snapshot_id,
+            "fold_id": plan.folds[0].fold_id,
+            "stage": "refit",
+            "fit_cutoff": str(fitting_cutoff),
+            "label": spec.label_column,
+            "availability": training_availability_columns(spec.label_column)[0],
+            "inputs": list(spec.input_columns),
+            "input_kind": _model_algorithm_facts(spec.model_algorithm).input_kind,
+            "max_train_rows": spec.max_train_rows,
+            "asset_ids": list(asset_ids),
+            "eligible": True,
+        }
+    )
+    coverage.add(training)
+    return coverage
+
+
 def _fit_selected_model_result(
     *,
     dataset_spec,
@@ -359,6 +516,7 @@ def _fit_selected_model_result(
     quarter_id: str,
     root_seed: int,
     candidate_parameters,
+    on_fit_start=None,
 ) -> tuple[fitting.ModelFitResult, MemoryLease | None]:
     n_refit = _count_training_rows(
         dataset_spec,
@@ -392,6 +550,7 @@ def _fit_selected_model_result(
         refit_spec,
         estimator=build_estimator_from_model_spec(refit_spec),
         fitting_cutoff=fitting_cutoff,
+        on_fit_start=on_fit_start,
     )
     model_result = (
         owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
@@ -435,10 +594,37 @@ def _refit_model_spec(
     )
 
 
+def _selection_model_specs(base_spec, parameters, *, n_train, root_seed, quarter_id):
+    return tuple(
+        replace(
+            base_spec,
+            model_id=base_spec.model_id
+            if len(parameters) == 1
+            else f"{base_spec.model_id}__config_{index}",
+            hyperparameters=_resolve_candidate_parameters(
+                base_spec.model_algorithm, values, n_train
+            ),
+            random_seed=derive_seed(
+                root_seed,
+                "a_share_model_trial",
+                base_spec.model_algorithm,
+                base_spec.model_id
+                if len(parameters) == 1
+                else f"{base_spec.model_id}__config_{index}",
+                quarter_id,
+                index,
+            ),
+        )
+        for index, values in enumerate(parameters)
+    )
+
+
 def _select_model_family_winners(
     *,
     selection_spec: PredictionSpec,
     training_counts,
+    validation_coverage,
+    validation_input_columns,
     dataset_spec,
     model_catalog: ModelCatalog,
     chunks,
@@ -475,27 +661,12 @@ def _select_model_family_winners(
             if item["model_id"] == family_id
         )
         parameters = selected.get("parameter_candidates", [selected["hyperparameters"]])
-        trial_specs = tuple(
-            replace(
-                base_spec,
-                model_id=base_spec.model_id
-                if len(parameters) == 1
-                else f"{base_spec.model_id}__config_{index}",
-                hyperparameters=_resolve_candidate_parameters(
-                    base_spec.model_algorithm, values, n_train
-                ),
-                random_seed=derive_seed(
-                    root_seed,
-                    "a_share_model_trial",
-                    base_spec.model_algorithm,
-                    base_spec.model_id
-                    if len(parameters) == 1
-                    else f"{base_spec.model_id}__config_{index}",
-                    quarter_id,
-                    index,
-                ),
-            )
-            for index, values in enumerate(parameters)
+        trial_specs = _selection_model_specs(
+            base_spec,
+            parameters,
+            n_train=n_train,
+            root_seed=root_seed,
+            quarter_id=quarter_id,
         )
         trial_catalog = ModelCatalog(trial_specs)
         trial_ids = tuple(spec.model_id for spec in trial_specs)
@@ -512,6 +683,7 @@ def _select_model_family_winners(
             layout.research_dataset_root(dataset_spec.market_id, dataset_spec.data_id),
         ).name
         plan = ExperimentPlan(
+            stage="selection",
             experiment_id=f"experiment_{uuid4().hex}",
             market_id=dataset_spec.market_id,
             research_dataset_id=dataset_spec.data_id,
@@ -549,11 +721,8 @@ def _select_model_family_winners(
             dataset_spec=dataset_spec,
             model_catalog=trial_catalog,
             chunks=chunks,
-            validation_input_columns=tuple(
-                dict.fromkeys(
-                    column for spec in trial_specs for column in spec.input_columns
-                )
-            ),
+            validation_input_columns=validation_input_columns,
+            validation_coverage=validation_coverage,
             trial_recorder=recorder,
         )
         reference = recorder.reference()
@@ -638,7 +807,7 @@ def _count_training_rows(
     )
     count = 0
     required_input_columns = (
-        ()
+        canonical_feature_validity_columns(model_spec.input_columns)
         if _model_algorithm_facts(model_spec.model_algorithm).input_kind
         == "rank_ensemble_inputs"
         else model_spec.input_columns
@@ -672,7 +841,9 @@ class CryptoFoldModelResult:
     result: fitting.ModelFitResult
     training_assets: tuple[str, ...]
     evaluation_assets: tuple[str, ...]
-    trial_reference: dict[str, str]
+    selection_trial_reference: dict[str, str]
+    refit_trial_reference: dict[str, str]
+    fit_coverage_id: str
 
 
 def build_crypto_fold_models(
@@ -699,22 +870,16 @@ def build_crypto_fold_models(
     from quant_research_platform.research.protocols.crypto_hft import (
         HFT_EXECUTION_CONTEXT_COLUMNS,
         build_hft_prediction_catalog,
-        maker_model_ids,
-    )
-    from quant_research_platform.research.protocols.crypto_hft import (
-        protocol as crypto_protocol,
+        research_chronology,
     )
 
-    protocol = crypto_protocol(
-        dataset_id, research_plan=protocol_manifest["research_plan"]
-    )
-    calibration_models = maker_model_ids(protocol_manifest["portfolio_candidates"])
+    folds, holdout = research_chronology(protocol_manifest["research_plan"])
 
     dataset = dataset_catalog.get(dataset_id)
     identity = layout.target_root(
         dataset_id, layout.research_dataset_root(dataset.market_id, dataset_id)
     ).name
-    for fold in protocol.research_plan.folds:
+    for fold in folds:
         if pd.Timestamp(fold.development_test.end) < pd.Timestamp(
             time_window.start
         ) or pd.Timestamp(fold.development_test.start) > pd.Timestamp(time_window.end):
@@ -734,6 +899,7 @@ def build_crypto_fold_models(
             )
             prediction = prediction_catalog.get(f"{model_id}_prediction")
             plan = ExperimentPlan(
+                stage="selection",
                 experiment_id=f"experiment_{uuid4().hex}",
                 market_id=dataset.market_id,
                 research_dataset_id=dataset_id,
@@ -743,7 +909,7 @@ def build_crypto_fold_models(
                 input_lineage=(identity,),
                 research_protocol_identity=research_protocol_identity,
                 folds=(fold,),
-                final_holdout=protocol.research_plan.final_holdout,
+                final_holdout=holdout,
                 selection_metric="validation_mse",
                 selection_direction="minimize",
                 candidate_ids=(model_id,),
@@ -755,7 +921,6 @@ def build_crypto_fold_models(
                 candidate_parameters={model_id: model_spec_payload(spec)},
             )
             recorder = TrialRecorder(layout, run_id, plan)
-            attempt = recorder.begin(spec)
             train_owned = refit_owned = trained = result = None
             metrics = training_metadata = None
 
@@ -772,11 +937,7 @@ def build_crypto_fold_models(
                             label_column=spec.label_column,
                             sample_filter_mode=spec.sample_filter_mode,
                         ),
-                        *(
-                            HFT_EXECUTION_CONTEXT_COLUMNS
-                            if spec.model_id in calibration_models
-                            else ()
-                        ),
+                        *HFT_EXECUTION_CONTEXT_COLUMNS,
                     ),
                 )
                 yield from training_scope_chunks(
@@ -786,8 +947,56 @@ def build_crypto_fold_models(
                     asset_ids=prediction.training_asset_ids,
                 )
 
+            validation_coverage = ModelSampleCoverage(
+                crypto_validation_coverage_scope(
+                    plan, spec, prediction.training_asset_ids
+                )
+            )
+            with closing_iterator(chunks(fold.validation)) as validation_source:
+                for frame in validation_source:
+                    with resource_policy.lease(
+                        "research.model.validation_coverage",
+                        max(1, 2 * pandas_frame_payload_bytes(frame)),
+                    ):
+                        legal = legal_training_rows(
+                            frame,
+                            fitting_cutoff=fold.validation.end,
+                            availability_column=training_availability_columns(
+                                spec.label_column
+                            )[0],
+                            feature_columns=spec.input_columns,
+                            target_column=spec.label_column,
+                        )
+                        validation_coverage.add(legal)
+                        del legal
+            attempt = recorder.begin(
+                spec, common_coverage_id=validation_coverage.semantic_identity
+            )
             member = None
             finished = False
+            refit_recorder = refit_attempt = fit_coverage = None
+            refit_finished = False
+
+            def begin_crypto_refit(
+                actual_spec,
+                training,
+                *,
+                recorder=recorder,
+                fold=fold,
+                prediction=prediction,
+            ):
+                nonlocal refit_recorder, refit_attempt, fit_coverage
+                fit_coverage = _refit_sample_coverage(
+                    recorder.plan,
+                    actual_spec,
+                    training,
+                    fitting_cutoff=fold.validation.end,
+                    asset_ids=prediction.training_asset_ids,
+                )
+                refit_recorder, refit_attempt = recorder.begin_refit(
+                    actual_spec, common_coverage_id=fit_coverage.semantic_identity
+                )
+
             try:
                 train_owned = fitting._fit_model_result_owned_from_frames(
                     chunks(fold.train),
@@ -810,10 +1019,8 @@ def build_crypto_fold_models(
                     model_result=trained,
                     validation_start=pd.Timestamp(fold.validation.start),
                     validation_end=pd.Timestamp(fold.validation.end),
-                    include_availability=model_id in calibration_models,
-                    extra_output_columns=HFT_EXECUTION_CONTEXT_COLUMNS
-                    if model_id in calibration_models
-                    else (),
+                    include_availability=True,
+                    extra_output_columns=HFT_EXECUTION_CONTEXT_COLUMNS,
                 )
 
                 def observed_validation(
@@ -821,10 +1028,7 @@ def build_crypto_fold_models(
                 ):
                     with closing_iterator(iter(validation)) as validation_source:
                         for item in validation_source:
-                            if (
-                                on_validation is not None
-                                and model_id in calibration_models
-                            ):
+                            if on_validation is not None:
                                 on_validation(
                                     fold,
                                     spec,
@@ -839,6 +1043,7 @@ def build_crypto_fold_models(
                     model_id=model_id,
                     label_column=spec.label_column,
                     prediction_column=prediction.prediction_column,
+                    expected_coverage=validation_coverage,
                 )
                 if metrics["validation_rows"] <= 0 or not pd.notna(
                     metrics["validation_mse"]
@@ -849,6 +1054,11 @@ def build_crypto_fold_models(
                     train_owned.release(owner="research.model.crypto.validation")
                 train_owned = None
 
+                recorder.finish(
+                    attempt, metrics=metrics, model_metadata=training_metadata
+                )
+                finished = True
+
                 def refit_chunks(fold=fold):
                     yield from chunks(fold.train)
                     yield from chunks(fold.validation)
@@ -858,16 +1068,15 @@ def build_crypto_fold_models(
                     spec,
                     estimator=build_estimator_from_model_spec(spec),
                     fitting_cutoff=fold.validation.end,
+                    on_fit_start=begin_crypto_refit,
                 )
                 result = (
                     refit_owned.value
                     if isinstance(refit_owned, OwnedValue)
                     else refit_owned
                 )
-                recorder.finish(
-                    attempt, metrics=metrics, model_metadata=training_metadata
-                )
-                finished = True
+                refit_recorder.finish(refit_attempt, model_metadata=result.metadata)
+                refit_finished = True
                 member = CryptoFoldModelResult(
                     fold,
                     spec,
@@ -875,6 +1084,8 @@ def build_crypto_fold_models(
                     prediction.training_asset_ids,
                     prediction.evaluation_asset_ids,
                     recorder.reference(),
+                    refit_recorder.reference(),
+                    fit_coverage.semantic_identity,
                 )
                 yield (
                     OwnedValue(member, refit_owned.lease)
@@ -882,6 +1093,14 @@ def build_crypto_fold_models(
                     else member
                 )
             except BaseException as error:
+                if refit_attempt is not None and not refit_finished:
+                    try:
+                        refit_recorder.finish(refit_attempt, error=error)
+                    except BaseException as secondary:
+                        error.add_note(
+                            "refit failure record also failed: "
+                            + type(secondary).__name__
+                        )
                 if not finished:
                     try:
                         recorder.finish(

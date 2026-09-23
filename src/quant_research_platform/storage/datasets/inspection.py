@@ -91,7 +91,7 @@ def _inspect_dataset_session_owned(
     try:
         runtime = _inspection_runtime_metadata(
             context,
-            target_chunk_bytes=resource_policy.operation_headroom_bytes,
+            target_chunk_bytes=max(1, resource_policy.planning_headroom_bytes),
         )
         columns = physical_schema_columns(context.schema)
     except BaseException:
@@ -293,7 +293,8 @@ def _inspection_runtime_metadata(
             "partitions": list(partitions),
             **observer.summary_payload(),
         }
+        manifest = context.manifest
         for key, value in persisted_summary.items():
-            if context.manifest.get(key) != value:
+            if manifest.get(key) != value:
                 raise ValueError("dataset_manifest_summary_mismatch")
     return runtime_summary

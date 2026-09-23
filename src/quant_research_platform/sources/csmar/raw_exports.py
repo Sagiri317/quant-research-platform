@@ -35,7 +35,7 @@ from quant_research_platform.storage.identity import (
     require_unaliased_path,
 )
 
-from .field_mappings import RAW_TABLE_CONTRACTS
+from .field_mappings import RAW_TABLE_CONTRACTS, missing_raw_column_names
 from .raw_schemas import (
     _CSV_RECORD_LEASE_BOUND_BYTES,
     LOGICAL_RECORD_LIMIT_ERROR,
@@ -774,6 +774,7 @@ def iter_private_export_chunks_with_policy(
         raise ValueError("unknown_csmar_dataset")
     export_path = Path(path)
     producer_bound = max(1, resource_policy.operation_headroom_bytes // 2)
+    batch_target = max(1, resource_policy.planning_headroom_bytes // 2)
     payload_lease_ref: list[MemoryLease | None] = [None]
 
     if dataset == "index_info":
@@ -812,7 +813,7 @@ def iter_private_export_chunks_with_policy(
                         + _raw_frame_owner_known_bytes(pending, header)
                         + _CSV_RECORD_LEASE_BOUND_BYTES
                         + 64 * 1024
-                        > producer_bound
+                        > batch_target
                     ):
                         break
                     try:
@@ -1157,11 +1158,15 @@ def _raw_dataset_candidate(
             resource_policy=resource_policy,
             expected_identity=expected_identity,
         )
-        return _infer_dataset_from_header(columns)
     except ValueError as exc:
         if str(exc) == "csmar_raw_export_identity_changed":
             raise
         return None
+    if all(
+        missing_raw_column_names(columns, dataset) for dataset in RAW_TABLE_CONTRACTS
+    ):
+        return None
+    return _infer_dataset_from_header(columns)
 
 
 def _verify_csmar_member_set(

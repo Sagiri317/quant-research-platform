@@ -21,6 +21,7 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.models import (
     A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
     ModelSpec,
+    model_spec_payload,
     validate_model_selection_metadata,
 )
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -76,6 +77,9 @@ from tests.research.workflow_test_support import (
     _quarterly_result,
     _selection_metadata,
     _trial_reference,
+    fixture_quarterly_results,
+    fixture_refit_reference,
+    fixture_validation_coverage,
 )
 
 
@@ -163,6 +167,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
             protocol=protocol_payload,
             model_spec=spec,
             root_seed=42,
+            validation_specs=specs,
         )
         for spec in specs
     )
@@ -172,6 +177,9 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     selection["candidate_family_ids"] = selection["tie_break_order"] = [
         spec.model_id for spec in specs
     ]
+    selection["common_validation_coverage"] = fixture_validation_coverage(
+        _fold(1), specs
+    )
     selection["families"] = [
         {
             "family_id": spec.model_id,
@@ -195,7 +203,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
         semantic_metadata={
             "target_contract": {
                 "protocol": protocol_payload,
-                "model_specs": [{"model_id": spec.model_id} for spec in specs],
+                "model_specs": [model_spec_payload(spec) for spec in specs],
             }
         },
     )
@@ -216,7 +224,15 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
                 root_seed=42,
             )
             item = QuarterlyModelResult(
-                _fold(1), spec.model_id, result, spec.model_id, selection, (reference,)
+                _fold(1),
+                spec.model_id,
+                result,
+                spec.model_id,
+                selection,
+                (
+                    reference,
+                    fixture_refit_reference(layout, reference, result.metadata),
+                ),
             )
             owned = OwnedValue(item, lease)
             item = result = None
@@ -233,7 +249,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
             tmp_path / "full_models",
             model_id="model-artifact",
             envelope=envelope,
-            quarterly_results=fitted(),
+            quarterly_results=fixture_quarterly_results(fitted()),
             trial_layout=layout,
         )
         artifact = read_quarterly_model_artifact(root, trial_layout=layout)
@@ -300,10 +316,40 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
         pd.period_range(a_share.DEVELOPMENT_START, a_share.HOLDOUT_END, freq="Q")
     )
     assert (development, total) == (20, 28)
-    assert (1 + development * 9, 1 + total * 9) == (181, 253)
+    per_quarter_members = len(specs) + 2
+    assert (1 + development * per_quarter_members, 1 + total * per_quarter_members) == (
+        201,
+        281,
+    )
 
 
-def _envelope(*, software_identity="c" * 64) -> object:
+def _fixture_protocol(specs):
+    return {
+        "fixture": True,
+        "research_configuration": {
+            "models": [
+                {
+                    "model_id": spec.model_id,
+                    "hyperparameters": dict(spec.hyperparameters),
+                }
+                for spec in specs
+            ]
+        },
+    }
+
+
+def _envelope(*, software_identity="c" * 64, specs=None) -> object:
+    if specs is None:
+        specs = tuple(
+            ModelSpec(
+                model_id=item["model_id"],
+                model_algorithm=item["model_id"],
+                input_factor_columns=("x",),
+                label_column="label",
+            )
+            for item in QUARTERLY_FIXTURE_PROTOCOL["research_configuration"]["models"]
+        )
+    protocol = _fixture_protocol(specs)
     return build_business_manifest_envelope(
         logical_artifact_id="model-artifact",
         schema_identity="a" * 64,
@@ -317,13 +363,8 @@ def _envelope(*, software_identity="c" * 64) -> object:
         upstream_identities={"fixture": "d" * 64},
         semantic_metadata={
             "target_contract": {
-                "protocol": QUARTERLY_FIXTURE_PROTOCOL,
-                "model_specs": [
-                    {"model_id": item["model_id"]}
-                    for item in QUARTERLY_FIXTURE_PROTOCOL["research_configuration"][
-                        "models"
-                    ]
-                ],
+                "protocol": protocol,
+                "model_specs": [model_spec_payload(spec) for spec in specs],
             }
         },
     )
@@ -345,59 +386,73 @@ def test_persisted_quarter_consumption_uses_active_columns_and_actual_model_ids(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    specs = tuple(
+        ModelSpec(
+            model_id="linear_" + column,
+            model_algorithm="linear_regression",
+            input_factor_columns=(column,),
+            label_column="label",
+        )
+        for column in ("x", "y")
+    )
+    protocol = _fixture_protocol(specs)
+
+    def results():
+        for quarter in (1, 2):
+            members = [
+                _quarterly_result(
+                    quarter,
+                    trial_layout=StorageLayout(tmp_path),
+                    model_spec=spec,
+                    protocol=protocol,
+                    validation_specs=specs,
+                    validation_rankic=0.3 if index == quarter - 1 else 0.1,
+                    predictor=_column_predictor(spec.input_columns[0], float(quarter)),
+                )
+                for index, spec in enumerate(specs)
+            ]
+            selection = members[quarter - 1].selection_metadata
+            selection.update(
+                candidate_family_ids=[spec.model_id for spec in specs],
+                tie_break_order=[spec.model_id for spec in specs],
+                families=[
+                    member.selection_metadata["families"][0] for member in members
+                ],
+            )
+            for member in members:
+                yield OwnedValue(
+                    replace(member, selection_metadata=selection),
+                    policy.lease(
+                        "test.model",
+                        fitting._linear_model_state_upper_bound_bytes(specs[0]),
+                    ),
+                )
+
     with runtime_resource_policy_scope() as policy:
         root = write_quarterly_model_artifact(
             tmp_path / "model",
             model_id="model-artifact",
             trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(),
-            quarterly_results=(
-                OwnedValue(
-                    item,
-                    policy.lease(
-                        "test.model",
-                        fitting._linear_model_state_upper_bound_bytes(
-                            ModelSpec(
-                                model_id=item.model_id,
-                                model_algorithm=item.model_result.metadata[
-                                    "model_algorithm"
-                                ],
-                                input_factor_columns=tuple(
-                                    item.model_result.metadata["input_columns"]
-                                ),
-                                label_column="label",
-                            )
-                        ),
-                    ),
-                )
-                for item in (
-                    _quarterly_result(
-                        1,
-                        trial_layout=StorageLayout(tmp_path),
-                        model_id="champion_q1",
-                        columns=("x",),
-                        predictor=_column_predictor("x", 1.0),
-                    ),
-                    _quarterly_result(
-                        2,
-                        trial_layout=StorageLayout(tmp_path),
-                        model_id="champion_q2",
-                        columns=("y",),
-                        predictor=_column_predictor("y", 2.0),
-                    ),
-                )
-            ),
+            envelope=_envelope(specs=specs),
+            quarterly_results=fixture_quarterly_results(results()),
         )
     artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
+    from quant_research_platform.research.statistics_production import _model_trials
+
+    trials = _model_trials(artifact, StorageLayout(tmp_path))
+    assert len(artifact.trial_ledgers) == 8
+    assert len(trials) == 4
+    assert set(trials.config_id) == {"linear_x", "linear_y"}
+    assert trials.observation_count.tolist() == [2, 2, 2, 2]
     spec = _dataset_spec()
     frame = pd.DataFrame(
         {
-            "market_id": ["a_share", "a_share"],
-            "asset_id": ["a", "a"],
-            "timestamp": pd.to_datetime(["2019-02-01", "2019-05-01"]),
-            "x": [3.0, np.nan],
-            "y": [np.nan, 4.0],
-            "eligible": [True, True],
+            "market_id": ["a_share"] * 4,
+            "asset_id": ["a", "b", "a", "b"],
+            "timestamp": pd.to_datetime(["2019-02-01"] * 2 + ["2019-05-01"] * 2),
+            "x": [3.0, 5.0, np.nan, 7.0],
+            "y": [np.nan, 6.0, 4.0, 8.0],
+            "eligible": [True] * 4,
         }
     )
     _mock_prediction_dataset(monkeypatch, frame)
@@ -425,10 +480,26 @@ def test_persisted_quarter_consumption_uses_active_columns_and_actual_model_ids(
         output = pd.concat(frames, ignore_index=True)
     finally:
         result.close()
-    assert len(output) == 2
-    assert output["model_id"].tolist() == ["champion_q1", "champion_q2"]
-    assert output["raw_prediction"].tolist() == pytest.approx([4.0, 6.0])
-    assert output["alpha_score"].tolist() == pytest.approx([0.0, 0.0])
+    assert len(output) == 6
+    assert output["model_id"].tolist() == [
+        "linear_x",
+        "linear_x",
+        "linear_y",
+        "linear_x",
+        "linear_y",
+        "linear_y",
+    ]
+    assert output["raw_prediction"].tolist() == pytest.approx(
+        [4.0, 6.0, 7.0, 9.0, 6.0, 10.0]
+    )
+    assert output.iloc[[2, 3]]["alpha_score"].tolist() == pytest.approx([0.0, 0.0])
+    active_only = output.loc[output.asset_id.eq("a")]
+    assert active_only.model_id.tolist() == ["linear_x", "linear_y"]
+    assert active_only.raw_prediction.tolist() == [4.0, 6.0]
+    assert [
+        selection["selected_family_id"]
+        for selection in artifact.quarterly_selections.values()
+    ] == ["linear_x", "linear_y"]
     assert policy.used_memory_bytes == 0
 
 
@@ -442,7 +513,7 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
             model_id="model-artifact",
             trial_layout=StorageLayout(tmp_path),
             envelope=_envelope(),
-            quarterly_results=(
+            quarterly_results=fixture_quarterly_results(
                 OwnedValue(
                     item,
                     policy.lease(
@@ -465,8 +536,12 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
                     _quarterly_result(
                         1,
                         trial_layout=StorageLayout(tmp_path),
-                        model_id="champion",
-                        columns=("x",),
+                        model_spec=ModelSpec(
+                            model_id="linear_regression",
+                            model_algorithm="linear_regression",
+                            input_factor_columns=("x",),
+                            label_column="label",
+                        ),
                     ),
                 )
             ),
@@ -531,6 +606,7 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
                     (selected.iloc[:1], selected.iloc[1:]),
                     prediction_lookup=lookup,
                     input_columns=("x",),
+                    model_algorithm="linear_regression",
                     sample_filter_mode=prediction_spec.sample_filter_mode,
                     test_start=prediction_spec.test_start,
                     test_end=prediction_spec.test_end,
@@ -585,7 +661,7 @@ def test_persisted_quarter_request_is_clipped_to_requested_window(
             model_id="model-artifact",
             trial_layout=StorageLayout(tmp_path),
             envelope=_envelope(),
-            quarterly_results=(
+            quarterly_results=fixture_quarterly_results(
                 OwnedValue(
                     item,
                     policy.lease(
@@ -608,8 +684,12 @@ def test_persisted_quarter_request_is_clipped_to_requested_window(
                     _quarterly_result(
                         1,
                         trial_layout=StorageLayout(tmp_path),
-                        model_id="champion",
-                        columns=("x",),
+                        model_spec=ModelSpec(
+                            model_id="linear_regression",
+                            model_algorithm="linear_regression",
+                            input_factor_columns=("x",),
+                            label_column="label",
+                        ),
                     ),
                 )
             ),
@@ -666,7 +746,7 @@ def test_persisted_quarter_route_rejects_uncovered_first_quarter(
             model_id="model-artifact",
             trial_layout=StorageLayout(tmp_path),
             envelope=_envelope(),
-            quarterly_results=(
+            quarterly_results=fixture_quarterly_results(
                 OwnedValue(
                     item,
                     policy.lease(
@@ -689,8 +769,12 @@ def test_persisted_quarter_route_rejects_uncovered_first_quarter(
                     _quarterly_result(
                         2,
                         trial_layout=StorageLayout(tmp_path),
-                        model_id="champion",
-                        columns=("x",),
+                        model_spec=ModelSpec(
+                            model_id="linear_regression",
+                            model_algorithm="linear_regression",
+                            input_factor_columns=("x",),
+                            label_column="label",
+                        ),
                     ),
                 )
             ),
@@ -756,7 +840,7 @@ def test_same_champion_and_ic_columns_are_canonicalized(tmp_path: Path) -> None:
             model_id="model-artifact",
             trial_layout=StorageLayout(tmp_path),
             envelope=_envelope(),
-            quarterly_results=(
+            quarterly_results=fixture_quarterly_results(
                 OwnedValue(
                     item,
                     policy.lease(
@@ -779,29 +863,44 @@ def test_same_champion_and_ic_columns_are_canonicalized(tmp_path: Path) -> None:
                     _quarterly_result(
                         1,
                         trial_layout=StorageLayout(tmp_path),
-                        model_id="same_champion",
-                        columns=("x",),
+                        model_spec=ModelSpec(
+                            model_id="linear_regression",
+                            model_algorithm="linear_regression",
+                            input_factor_columns=("x",),
+                            label_column="label",
+                        ),
                     ),
                     _quarterly_result(
                         2,
                         trial_layout=StorageLayout(tmp_path),
-                        model_id="same_champion",
-                        columns=("x",),
+                        model_spec=ModelSpec(
+                            model_id="linear_regression",
+                            model_algorithm="linear_regression",
+                            input_factor_columns=("x",),
+                            label_column="label",
+                        ),
                     ),
                 )
             ),
         )
     artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
     assert [item["model_id"] for item in artifact.quarterly_models] == [
-        "same_champion",
-        "same_champion",
+        "linear_regression",
+        "linear_regression",
     ]
 
+    ic_spec = ModelSpec(
+        model_id="ic_weighted_rank_ensemble",
+        model_algorithm="ic_weighted_rank_ensemble",
+        input_factor_columns=("x", "y"),
+        label_column="label",
+    )
+    ic_protocol = _fixture_protocol((ic_spec,))
     ic_result = _quarterly_result(
         1,
         trial_layout=StorageLayout(tmp_path),
-        model_id="ic_champion",
-        columns=("x", "y"),
+        model_spec=ic_spec,
+        protocol=ic_protocol,
         predictor=ICWeightedRankEnsemble(
             columns=("x",),
             weights=(1.0,),
@@ -812,8 +911,8 @@ def test_same_champion_and_ic_columns_are_canonicalized(tmp_path: Path) -> None:
             tmp_path / "ic-model",
             model_id="model-artifact",
             trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(),
-            quarterly_results=(
+            envelope=_envelope(specs=(ic_spec,)),
+            quarterly_results=fixture_quarterly_results(
                 OwnedValue(
                     item,
                     policy.lease(
@@ -847,46 +946,28 @@ def test_same_champion_and_ic_columns_are_canonicalized(tmp_path: Path) -> None:
 
 def test_model_member_mutation_is_rejected_before_loading_predictor(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    with runtime_resource_policy_scope() as policy:
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(),
-            quarterly_results=(
-                OwnedValue(
-                    item,
-                    policy.lease(
-                        "test.model",
-                        fitting._linear_model_state_upper_bound_bytes(
-                            ModelSpec(
-                                model_id=item.model_id,
-                                model_algorithm=item.model_result.metadata[
-                                    "model_algorithm"
-                                ],
-                                input_factor_columns=tuple(
-                                    item.model_result.metadata["input_columns"]
-                                ),
-                                label_column="label",
-                            )
-                        ),
-                    ),
-                )
-                for item in (
-                    _quarterly_result(
-                        1,
-                        trial_layout=StorageLayout(tmp_path),
-                        model_id="champion",
-                        columns=("x",),
-                    ),
-                )
-            ),
+    artifact, layout = _small_common_coverage_case(tmp_path)
+    from quant_research_platform.research.models import persisted
+
+    root = artifact.instance_root
+    path = root / "models" / "2019Q1" / "linear_x.pkl"
+    replacement = path.with_suffix(".replacement")
+    replacement.write_bytes(path.read_bytes())
+    replacement.replace(path)
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            persisted.pickle,
+            "load",
+            lambda *_args: pytest.fail("replaced physical member reached decoder"),
         )
-    (root / "models" / "2019Q1" / "linear_regression.pkl").write_bytes(b"mutated")
+        with pytest.raises(ValueError, match="model_artifact_model_invalid"):
+            with persisted.read_quarterly_predictor(artifact, "2019Q1", "linear_x"):
+                pytest.fail("replaced physical member reached consumer")
+    path.write_bytes(b"mutated")
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
-    assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize(
@@ -1161,8 +1242,8 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
 
     monkeypatch.setattr(
         research_workflow,
-        "read_semantic_artifact",
-        lambda *_args, **_kwargs: envelope,
+        "read_semantic_artifact_record",
+        lambda *_args, **_kwargs: (envelope, {}),
     )
     monkeypatch.setattr(
         research_workflow,
@@ -1225,8 +1306,8 @@ def test_model_selection_rejects_protocol_family_mismatch(
     )
     monkeypatch.setattr(
         research_workflow,
-        "read_semantic_artifact",
-        lambda *_args, **_kwargs: {"logical_artifact_id": model_target},
+        "read_semantic_artifact_record",
+        lambda *_args, **_kwargs: ({"logical_artifact_id": model_target}, {}),
     )
     monkeypatch.setattr(
         research_workflow,
@@ -1254,14 +1335,18 @@ def test_quarterly_writer_releases_owned_member_on_primary_failure(
 
     monkeypatch.setattr(persisted.pickle, "dump", fail_dump)
     policy = capture_test_policy(
-        available_memory_bytes=8 * 1024 * 1024,
-        explicit_cap_bytes=2 * 1024 * 1024,
+        available_memory_bytes=256 * 1024 * 1024,
+        explicit_cap_bytes=64 * 1024 * 1024,
     )
     quarter = _quarterly_result(
         1,
         trial_layout=StorageLayout(tmp_path),
-        model_id="champion",
-        columns=("x",),
+        model_spec=ModelSpec(
+            model_id="linear_regression",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        ),
     )
 
     def yielded() -> object:
@@ -1290,7 +1375,7 @@ def test_quarterly_writer_releases_owned_member_on_primary_failure(
                 model_id="model-artifact",
                 trial_layout=StorageLayout(tmp_path),
                 envelope=_envelope(),
-                quarterly_results=yielded(),
+                quarterly_results=fixture_quarterly_results(yielded()),
             )
     assert policy.used_memory_bytes == 0
 
@@ -1471,6 +1556,11 @@ def test_two_level_selection_mutations_are_rejected() -> None:
         "selected_family_id": "ridge",
         "selected_model_id": "ridge_config_0",
         "families": [family],
+        "common_validation_coverage": {
+            "path": "models/2019Q1/validation-coverage.parquet",
+            "semantic_identity": "b" * 64,
+            "row_count": 2,
+        },
     }
     validate_model_selection_metadata(payload)
     for mutation in (
@@ -1520,6 +1610,10 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         _select_model_family_winners,
     )
     from quant_research_platform.research.models.supervised import preflight_model_specs
+    from quant_research_platform.research.models.trial_selection import (
+        ModelSampleCoverage,
+        model_validation_coverage_scope,
+    )
     from quant_research_platform.storage.experiments import read_trial_ledger_reference
     from quant_research_platform.storage.semantic_artifacts import (
         write_semantic_artifact,
@@ -1585,6 +1679,14 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         ]
     }
     protocol = {"fixture": True, "research_configuration": configuration}
+    validation_coverage = ModelSampleCoverage(
+        model_validation_coverage_scope("d" * 64, _fold(1), (base,))
+    )
+    validation_keys = frame.loc[
+        frame["timestamp"].eq(pd.Timestamp("2018-12-28")),
+        ["timestamp", "asset_id"],
+    ]
+    validation_coverage.add(validation_keys)
     envelope = build_business_manifest_envelope(
         logical_artifact_id="model-artifact",
         schema_identity=canonical_json_hash(
@@ -1602,13 +1704,15 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             "target_contract": {
                 "protocol": protocol,
                 "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-                "model_specs": [{"model_id": "ridge"}],
+                "model_specs": [model_spec_payload(base)],
             }
         },
     )
     with runtime_resource_policy_scope() as policy:
         winners, metadata, refs, indices = _select_model_family_winners(
             training_counts={},
+            validation_coverage=validation_coverage,
+            validation_input_columns=("x",),
             selection_spec=prediction,
             dataset_spec=dataset,
             model_catalog=ModelCatalog((base,)),
@@ -1626,6 +1730,11 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             backend_versions={"sklearn": "test"},
             research_configuration=configuration,
         )
+        metadata["common_validation_coverage"] = {
+            "path": "models/2019Q1/validation-coverage.parquet",
+            "semantic_identity": validation_coverage.semantic_identity,
+            "row_count": validation_coverage.row_count,
+        }
         selected, index = winners["ridge"], indices["ridge"]
         assert (
             index == 0 and selected.hyperparameters["alpha"] == trial_alpha
@@ -1642,17 +1751,45 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             quarter_id="2019Q1",
             root_seed=42,
         )
-        assert result.prediction_model.estimator.alpha == refit_alpha
-        quarterly = QuarterlyModelResult(
-            _fold(1), selected.model_id, result, "ridge", metadata, refs
-        )
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            envelope=envelope,
-            quarterly_results=(OwnedValue(quarterly, lease),),
-            trial_layout=layout,
-        )
+        try:
+            assert result.prediction_model.estimator.alpha == refit_alpha
+            fit_keys = frame.loc[
+                frame["timestamp"].le(pd.Timestamp("2018-12-31")),
+                ["timestamp", "asset_id"],
+            ]
+            if max_train_rows is not None:
+                fit_keys = fit_keys.tail(max_train_rows)
+            assert len(fit_keys) == refit_rows
+            refit_reference = fixture_refit_reference(
+                layout,
+                refs[0],
+                result.metadata,
+                candidate_parameters=configuration["models"][0]["parameter_candidates"][
+                    index
+                ],
+                fit_keys=fit_keys,
+            )
+            quarterly = QuarterlyModelResult(
+                _fold(1),
+                selected.model_id,
+                result,
+                "ridge",
+                metadata,
+                (*refs, refit_reference),
+            )
+            root = write_quarterly_model_artifact(
+                tmp_path / "model",
+                model_id="model-artifact",
+                envelope=envelope,
+                quarterly_results=fixture_quarterly_results(
+                    (OwnedValue(quarterly, lease),),
+                    validation_keys=validation_keys,
+                ),
+                trial_layout=layout,
+            )
+        finally:
+            if lease is not None and lease.active:
+                lease.close()
         artifact = read_quarterly_model_artifact(root, trial_layout=layout)
         saved = artifact.quarterly_models[0]["model_metadata"]
         assert pd.Timestamp(saved["train_start"]) > pd.Timestamp(
@@ -1668,9 +1805,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             ).normalized_parameters["hyperparameters"]["alpha"]
             == trial_alpha
         )
-        assert all(
-            record.validation_metrics["n_train"] == train_rows for record in trials
-        )
+        assert all(record.metrics["n_train"] == train_rows for record in trials)
         with read_quarterly_predictor(
             artifact, "2019Q1", "ridge", resource_policy=policy
         ) as predictor:
@@ -1822,7 +1957,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                 ),
                 "ridge",
                 metadata,
-                refs,
+                quarterly.trial_ledgers,
             )
             owned.value = altered
             altered = None
@@ -1831,7 +1966,9 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                     tmp_path / "writer_reject",
                     model_id="model-artifact",
                     envelope=envelope,
-                    quarterly_results=(owned,),
+                    quarterly_results=fixture_quarterly_results(
+                        (owned,), validation_keys=validation_keys
+                    ),
                     trial_layout=layout,
                 )
         assert policy.used_memory_bytes == 0
@@ -1839,6 +1976,8 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         later_winners, later_selection, later_refs, later_indices = (
             _select_model_family_winners(
                 training_counts={},
+                validation_coverage=validation_coverage,
+                validation_input_columns=("x",),
                 selection_spec=prediction,
                 dataset_spec=dataset,
                 model_catalog=ModelCatalog((base,)),
@@ -1858,7 +1997,11 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             )
         )
         assert later_indices == indices
-        assert later_selection == metadata
+        assert later_selection == {
+            key: value
+            for key, value in metadata.items()
+            if key != "common_validation_coverage"
+        }
         assert later_refs != refs
         later, later_lease = _fit_selected_model_result(
             training_counts={},
@@ -1890,22 +2033,40 @@ def test_model_publication_rejects_self_consistent_wrong_trial_provenance(
     from tests.research.workflow_test_support import _fold, _trial_reference
 
     layout = StorageLayout(tmp_path)
-    original = _quarterly_result(
-        1, trial_layout=layout, model_id="champion", columns=("x",)
+    model_spec = ModelSpec(
+        model_id="linear_regression",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        label_column="label",
     )
-    for index, (fold, arguments) in enumerate(
+    original = _quarterly_result(1, trial_layout=layout, model_spec=model_spec)
+    for index, (fold, arguments, expected_error) in enumerate(
         (
-            (_fold(1), {"dataset_id": "other", "data_identity": "e" * 64}),
-            (_fold(1), {"target_id": "other_model"}),
-            (_fold(1), {"protocol": {"different_protocol": True}}),
-            (_fold(2), {}),
-            (_fold(1), {"family_id": "other_family"}),
+            (
+                _fold(1),
+                {"dataset_id": "other", "data_identity": "e" * 64},
+                "model_validation_coverage_mismatch",
+            ),
+            (
+                _fold(1),
+                {"target_id": "other_model"},
+                "model_trial_artifact_binding_invalid",
+            ),
+            (
+                _fold(1),
+                {"protocol": {"different_protocol": True}},
+                "model_trial_artifact_binding_invalid",
+            ),
+            (_fold(2), {}, "model_trial_references_missing"),
+            (_fold(1), {"family_id": "other_family"}, "model_trial_references_missing"),
         )
     ):
         reference = _trial_reference(
             layout,
             fold,
-            model_id="champion",
+            model_id=original.model_id,
+            model_spec=model_spec,
+            validation_specs=(model_spec,),
             **({"family_id": "linear_regression"} | arguments),
         )
         metadata = deepcopy(original.selection_metadata)
@@ -1915,16 +2076,16 @@ def test_model_publication_rejects_self_consistent_wrong_trial_provenance(
         wrong = replace(
             original,
             selection_metadata=metadata,
-            trial_ledgers=(reference,),
+            trial_ledgers=(reference, original.trial_ledgers[1]),
         )
         logical_root = tmp_path / f"wrong_{index}"
-        with pytest.raises(ValueError, match="model_trial_"):
+        with pytest.raises(ValueError, match=expected_error):
             with runtime_resource_policy_scope() as policy:
                 write_quarterly_model_artifact(
                     logical_root,
                     model_id="model-artifact",
                     envelope=_envelope(),
-                    quarterly_results=(
+                    quarterly_results=fixture_quarterly_results(
                         OwnedValue(
                             item,
                             policy.lease(
@@ -2129,10 +2290,17 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
 
     layout = StorageLayout(tmp_path)
     template = _quarterly_result(
-        1, trial_layout=layout, model_id="champion", columns=("x",)
+        1,
+        trial_layout=layout,
+        model_spec=ModelSpec(
+            model_id="linear_regression",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        ),
     )
     spec = ModelSpec(
-        model_id="champion",
+        model_id="linear_regression",
         model_algorithm="linear_regression",
         input_factor_columns=("x",),
         label_column="label",
@@ -2143,8 +2311,9 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
         layout,
         _fold(1),
         family_id="linear_regression",
-        model_id="champion",
+        model_id="linear_regression",
         model_spec=spec,
+        protocol=_fixture_protocol((spec,)),
     )
     selection = {
         **template.selection_metadata,
@@ -2160,7 +2329,8 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
     )
     frame = pd.DataFrame(
         {
-            "timestamp": pd.to_datetime(["2017-01-02"] * 400 + ["2017-01-03"] * 400),
+            "timestamp": pd.to_datetime(["2017-01-02"] * 400 + ["2017-01-03"] * 400)
+            + pd.to_timedelta(list(range(400)) * 2, unit="ns"),
             "label_available_at": pd.to_datetime(
                 ["2017-01-02"] * 400 + ["2017-01-03"] * 400
             ),
@@ -2196,17 +2366,23 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
             owned = fitting._fit_linear_model_result_owned_from_frames(
                 (frame,), spec, fitting_cutoff="2018-12-31"
             )
-            assert (
-                owned.lease.reserved_bytes
-                == fitting._linear_model_state_upper_bound_bytes(spec)
-            )
-            result = replace(
-                template,
-                model_result=owned.value,
-            )
-            owned.value = result
-            result = None
             try:
+                assert (
+                    owned.lease.reserved_bytes
+                    == fitting._linear_model_state_upper_bound_bytes(spec)
+                )
+                result = replace(
+                    template,
+                    model_result=owned.value,
+                    trial_ledgers=(
+                        reference,
+                        fixture_refit_reference(
+                            layout, reference, owned.value.metadata
+                        ),
+                    ),
+                )
+                owned.value = result
+                result = None
                 yield owned
             finally:
                 if owned.lease.active:
@@ -2215,8 +2391,8 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
         root = write_quarterly_model_artifact(
             logical,
             model_id="model-artifact",
-            envelope=_envelope(),
-            quarterly_results=members(),
+            envelope=_envelope(specs=(spec,)),
+            quarterly_results=fixture_quarterly_results(members()),
             trial_layout=layout,
         )
         assert solver_calls == [800 if max_train_rows is None else max_train_rows]
@@ -2252,8 +2428,8 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
             write_quarterly_model_artifact(
                 logical,
                 model_id="model-artifact",
-                envelope=_envelope(software_identity="e" * 64),
-                quarterly_results=members(),
+                envelope=_envelope(software_identity="e" * 64, specs=(spec,)),
+                quarterly_results=fixture_quarterly_results(members()),
                 trial_layout=layout,
             )
         assert calls == []
@@ -2290,7 +2466,9 @@ def test_training_retention_preserves_trailing_rows_and_same_day_order(cap, chun
         }
     )
     frame.loc[frame.index % 7 == 0, "label_available_at"] = pd.Timestamp("2018-01-01")
-    expected = frame.loc[frame.index % 7 != 0, ["timestamp", "x", "label"]].copy()
+    expected = frame.loc[
+        frame.index % 7 != 0, ["timestamp", "asset_id", "x", "label"]
+    ].copy()
     expected["timestamp"] = expected["timestamp"].dt.as_unit("ns")
     if cap is not None:
         expected = expected.tail(cap)
@@ -2387,7 +2565,14 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                 observed.append(True)
                 if mutation == "staged":
                     item = _quarterly_result(
-                        1, trial_layout=layout, model_id="champion", columns=("x",)
+                        1,
+                        trial_layout=layout,
+                        model_spec=ModelSpec(
+                            model_id="linear_regression",
+                            model_algorithm="linear_regression",
+                            input_factor_columns=("x",),
+                            label_column="label",
+                        ),
                     )
                     state_bytes = fitting._linear_model_state_upper_bound_bytes(
                         ModelSpec(
@@ -2416,7 +2601,7 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                         logical,
                         model_id="model-artifact",
                         envelope=_envelope(),
-                        quarterly_results=members(False),
+                        quarterly_results=fixture_quarterly_results(members(False)),
                         trial_layout=layout,
                         verify_source=session.verify,
                     )
@@ -2433,7 +2618,7 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                             logical,
                             model_id="model-artifact",
                             envelope=_envelope(software_identity="e" * 64),
-                            quarterly_results=members(True),
+                            quarterly_results=fixture_quarterly_results(members(True)),
                             trial_layout=layout,
                             verify_source=session.verify,
                         )
@@ -2492,6 +2677,9 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                     model_target_id="snapshot_model",
                     backend_versions={},
                     dataset_session=session,
+                    on_validation_coverage=lambda *_args: pytest.fail(
+                        "coverage must not run before snapshot validation"
+                    ),
                 )
 
             if mutation in {"cancel", "staged"}:
@@ -2654,14 +2842,23 @@ def test_model_member_io_preserves_failure_class(
     )
     with runtime_resource_policy_scope() as policy:
         item = _quarterly_result(
-            1, trial_layout=layout, model_id="linear", columns=("x",)
+            1,
+            trial_layout=layout,
+            model_spec=ModelSpec(
+                model_id="linear_regression",
+                model_algorithm="linear_regression",
+                input_factor_columns=("x",),
+                label_column="label",
+            ),
         )
         root = write_quarterly_model_artifact(
             tmp_path / "model",
             model_id="model-artifact",
             trial_layout=layout,
             envelope=_envelope(),
-            quarterly_results=(OwnedValue(item, policy.lease("test.model", bound)),),
+            quarterly_results=fixture_quarterly_results(
+                (OwnedValue(item, policy.lease("test.model", bound)),)
+            ),
         )
         item = None
         artifact = read_quarterly_model_artifact(root, trial_layout=layout)
@@ -2681,15 +2878,27 @@ def test_model_member_io_preserves_failure_class(
             crypto_root = write_semantic_artifact(
                 tmp_path / "crypto", _envelope(), write_crypto_member
             )
-            _, members = read_semantic_artifact_record(crypto_root)
+            identities = {}
+            _, members = read_semantic_artifact_record(
+                crypto_root, member_identities=identities
+            )
             crypto_artifact = SimpleNamespace(
-                instance_root=crypto_root, member_records=members
+                instance_root=crypto_root,
+                member_records=members,
+                member_identities=identities,
             )
             entry = dict(fold_id="fold_1", model_id="linear", model_metadata=metadata)
         staged_layout = StorageLayout(tmp_path / "staged-trials")
         staged_item = (
             _quarterly_result(
-                1, trial_layout=staged_layout, model_id="linear", columns=("x",)
+                1,
+                trial_layout=staged_layout,
+                model_spec=ModelSpec(
+                    model_id="linear_regression",
+                    model_algorithm="linear_regression",
+                    input_factor_columns=("x",),
+                    label_column="label",
+                ),
             )
             if consumer == "staged"
             else None
@@ -2747,8 +2956,8 @@ def test_model_member_io_preserves_failure_class(
                     model_id="model-artifact",
                     trial_layout=staged_layout,
                     envelope=_envelope(),
-                    quarterly_results=(
-                        OwnedValue(staged_item, policy.lease("test.model", bound)),
+                    quarterly_results=fixture_quarterly_results(
+                        (OwnedValue(staged_item, policy.lease("test.model", bound)),)
                     ),
                 )
             else:
@@ -2794,7 +3003,14 @@ def test_quarterly_model_final_stat_preserves_system_error(
     layout = StorageLayout(tmp_path)
     with runtime_resource_policy_scope() as policy:
         item = _quarterly_result(
-            1, trial_layout=layout, model_id="linear", columns=("x",)
+            1,
+            trial_layout=layout,
+            model_spec=ModelSpec(
+                model_id="linear_regression",
+                model_algorithm="linear_regression",
+                input_factor_columns=("x",),
+                label_column="label",
+            ),
         )
         bound = fitting._linear_model_state_upper_bound_bytes(
             ModelSpec(
@@ -2809,7 +3025,9 @@ def test_quarterly_model_final_stat_preserves_system_error(
             model_id="model-artifact",
             trial_layout=layout,
             envelope=_envelope(),
-            quarterly_results=(OwnedValue(item, policy.lease("test.model", bound)),),
+            quarterly_results=fixture_quarterly_results(
+                (OwnedValue(item, policy.lease("test.model", bound)),)
+            ),
         )
         item = None
         primary = failure_type("model_stat_failure")
@@ -2873,3 +3091,397 @@ def test_equal_rank_single_undefined_direction_names_required_input():
     fitted = estimator.fit(frame, frame.label.to_numpy())
     assert fitted.columns == ("valid", "constant")
     assert fitted.directions == (1.0, -1.0)
+
+
+def _small_common_coverage_case(tmp_path, *, fail_refit_scaler=False, monkeypatch=None):
+    from functools import partial
+
+    from quant_research_platform.catalog.models import ModelCatalog
+    from quant_research_platform.contracts.features import FeatureTransformSpec
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.experiments import TrialRecorder
+    from quant_research_platform.research.models.production import (
+        _build_a_share_quarterly_models,
+    )
+    from quant_research_platform.storage.experiments import (
+        read_model_trial_ledger_reference,
+    )
+
+    dates = pd.to_datetime(
+        [
+            "2014-01-02",
+            "2016-01-04",
+            "2017-12-29",
+            "2018-01-02",
+            "2018-06-01",
+            "2018-12-31",
+            "2019-01-02",
+        ]
+    )
+    frame = pd.DataFrame(
+        [
+            {
+                "timestamp": date,
+                "market_id": "a_share",
+                "asset_id": f"asset_{asset}",
+                "eligible": True,
+                "x": np.nan if asset == 0 else float(asset),
+                "y": np.nan if asset == 1 else float(asset * 2),
+                "raw": np.nan if asset == 7 else float(asset),
+                "feature_f": np.nan
+                if asset == 6
+                else 0.0
+                if asset == 7
+                else float(asset),
+                "feature_missing_f": 1 if asset >= 6 else 0,
+                "feature_observed_f": 0 if asset >= 6 else 1,
+                "f": float(asset),
+                "label": asset * 0.03 + index * 0.01,
+                "label_available_at": date,
+            }
+            for index, date in enumerate(dates)
+            for asset in range(8)
+        ]
+    )
+    specs = (
+        ModelSpec(
+            model_id="linear_x",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+            max_train_rows=12,
+        ),
+        ModelSpec(
+            model_id="linear_y",
+            model_algorithm="linear_regression",
+            input_factor_columns=("y",),
+            label_column="label",
+            max_train_rows=12,
+        ),
+        ModelSpec(
+            model_id="rank_raw",
+            model_algorithm="equal_weight_rank_ensemble",
+            input_factor_columns=("raw",),
+            label_column="label",
+            max_train_rows=12,
+        ),
+    )
+    specs = (
+        *specs,
+        ModelSpec(
+            model_id="rank_flag",
+            model_algorithm="equal_weight_rank_ensemble",
+            input_feature_columns=("feature_missing_f",),
+            label_column="label",
+            max_train_rows=12,
+        ),
+    )
+    dataset = make_demo_research_dataset_spec(
+        data_id="fixture",
+        input_data_ids=("processed_demo",),
+        base_input_data_id="processed_demo",
+        factor_columns=("x", "y", "raw", "f"),
+        feature_columns=("feature_f", "feature_missing_f", "feature_observed_f"),
+        feature_transforms=(
+            FeatureTransformSpec(
+                transform_id="canonical",
+                source_columns=("f",),
+                transform="a_share_canonical",
+                output_columns=("feature_f", "feature_missing_f", "feature_observed_f"),
+            ),
+        ),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        context_columns=(),
+    )
+    configuration = {
+        "models": [{"model_id": spec.model_id, "hyperparameters": {}} for spec in specs]
+    }
+    protocol = {"research_configuration": configuration}
+    layout = StorageLayout(tmp_path).with_target_roots(
+        {"fixture": tmp_path / ("d" * 64)}
+    )
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="model-artifact",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity=canonical_json_hash(protocol),
+        software_identity="c" * 64,
+        research_window={
+            "start": "2019-01-02",
+            "end": "2019-01-02",
+            "access": "development",
+        },
+        upstream_identities={"fixture": "d" * 64},
+        semantic_metadata={
+            "target_contract": {
+                "protocol": protocol,
+                "model_specs": [model_spec_payload(spec) for spec in specs],
+            }
+        },
+    )
+
+    def chunks(columns, *, input_columns, start, end):
+        selected = frame.loc[frame.timestamp.le(pd.Timestamp(end))]
+        if start is not None:
+            selected = selected.loc[selected.timestamp.ge(pd.Timestamp(start))]
+        for start_index in range(0, len(selected), 5):
+            yield selected.iloc[start_index : start_index + 5].loc[:, list(columns)]
+
+    attempts = []
+    if fail_refit_scaler:
+        original_begin = TrialRecorder.begin
+        original_fit = fitting.ModelMatrixScaler.fit
+
+        def begin(recorder, *args, **kwargs):
+            record = original_begin(recorder, *args, **kwargs)
+            attempts.append((recorder, record))
+            return record
+
+        def fit(matrix, *args, **kwargs):
+            if attempts and attempts[-1][0].plan.stage == "refit":
+                raise (
+                    KeyboardInterrupt if fail_refit_scaler == "cancel" else RuntimeError
+                )("refit_scaler_oracle")
+            return original_fit(matrix, *args, **kwargs)
+
+        monkeypatch.setattr(TrialRecorder, "begin", begin)
+        monkeypatch.setattr(fitting.ModelMatrixScaler, "fit", fit)
+    results = partial(
+        _build_a_share_quarterly_models,
+        layout=layout,
+        dataset_spec=dataset,
+        model_catalog=ModelCatalog(specs),
+        dataset_id="fixture",
+        model_ids=tuple(spec.model_id for spec in specs),
+        tie_break_order=tuple(spec.model_id for spec in specs),
+        time_window=TimeWindow("2019-01-02", "2019-01-02"),
+        chunks=chunks,
+        sessions=pd.DatetimeIndex(dates),
+        chronology={"validation_months": 12},
+        formal_dataset_window={"start": "2014-01-01", "end": "2019-01-02"},
+        development_window={"start": "2019-01-01", "end": "2019-01-02"},
+        root_seed=42,
+        run_id="run_small",
+        research_protocol_identity=canonical_json_hash(protocol),
+        model_target_id="model-artifact",
+        backend_versions={"internal": "test"},
+        holdout_window={"start": "2020-01-01", "end": "2020-12-31"},
+        research_configuration=configuration,
+    )
+    with runtime_resource_policy_scope() as policy:
+        if fail_refit_scaler:
+            with pytest.raises(
+                KeyboardInterrupt if fail_refit_scaler == "cancel" else RuntimeError,
+                match="refit_scaler_oracle",
+            ):
+                write_quarterly_model_artifact(
+                    tmp_path / "models",
+                    model_id="model-artifact",
+                    envelope=envelope,
+                    quarterly_results=results,
+                    trial_layout=layout,
+                )
+            recorder, record = attempts[-1]
+            assert recorder.plan.stage == "refit"
+            from quant_research_platform.storage.experiments import read_trial_ledger
+
+            events = read_trial_ledger(recorder.root, recorder.plan)
+            assert events[-1].status == (
+                "abandoned" if fail_refit_scaler == "cancel" else "failed"
+            )
+            assert events[-1].metrics == {}
+            assert events[-1].undefined_reasons == {
+                "failure": "KeyboardInterrupt"
+                if fail_refit_scaler == "cancel"
+                else "RuntimeError"
+            }
+            assert not tuple((tmp_path / "models").glob(".*staging*"))
+            assert policy.used_memory_bytes == 0
+            return
+        root = write_quarterly_model_artifact(
+            tmp_path / "models",
+            model_id="model-artifact",
+            envelope=envelope,
+            quarterly_results=results,
+            trial_layout=layout,
+        )
+        saved = read_quarterly_model_artifact(
+            root, expected_identity=envelope.instance_identity, trial_layout=layout
+        )
+        coverage = saved.quarterly_selections["2019Q1"]["common_validation_coverage"]
+        keys = pd.read_parquet(root / coverage["path"])
+        assert coverage["row_count"] == 15
+        assert set(keys.asset_id) == {f"asset_{i}" for i in (2, 3, 4, 5, 7)}
+        assert len(saved.trial_ledgers) == 8
+        for reference in saved.trial_ledgers:
+            plan, records = read_model_trial_ledger_reference(layout, reference)
+            if plan.stage == "selection":
+                assert records[0].common_coverage_id == coverage["semantic_identity"]
+                assert records[0].metrics["validation_rows"] == 15
+            else:
+                assert dict(records[0].metrics) == {"n_train": 12}
+                assert plan.selection_metric is None
+                assert records[0].common_coverage_id != coverage["semantic_identity"]
+        assert policy.used_memory_bytes == 0
+        return saved, layout
+
+
+def test_common_pk_and_refit_use_real_small_model_write_read_chain(tmp_path):
+    _small_common_coverage_case(tmp_path)
+
+
+def test_refit_scaler_failure_is_recorded_before_any_learning(tmp_path, monkeypatch):
+    _small_common_coverage_case(
+        tmp_path, fail_refit_scaler=True, monkeypatch=monkeypatch
+    )
+
+
+def test_common_pk_identity_distinguishes_equal_count_and_ignores_chunking():
+    from quant_research_platform.research.models.trial_selection import (
+        ModelSampleCoverage,
+    )
+
+    asset_major = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2019-01-01", "2019-01-02"] * 2),
+            "asset_id": ["a", "a", "b", "b"],
+        }
+    )
+    time_major = asset_major.iloc[[0, 2, 1, 3]]
+    whole, pieces, changed, duplicate, invalid = (
+        ModelSampleCoverage({"scope": "oracle"}) for _ in range(5)
+    )
+    whole.add(asset_major)
+    pieces.add(time_major.iloc[:2])
+    pieces.add(time_major.iloc[2:])
+    changed.add(asset_major.assign(asset_id=["a", "a", "c", "c"]))
+    assert whole.row_count == pieces.row_count == changed.row_count == 4
+    assert whole.semantic_identity == pieces.semantic_identity
+    assert whole.semantic_identity != changed.semantic_identity
+    duplicate.add(asset_major)
+    with pytest.raises(ValueError, match="model_coverage_key_order_invalid"):
+        duplicate.add(asset_major.iloc[-1:])
+    with pytest.raises(ValueError, match="model_coverage_key_invalid"):
+        invalid.add(asset_major.assign(asset_id=["a", "a", None, "b"]))
+
+
+def test_validation_coverage_readback_ignores_physical_key_interleaving(tmp_path):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.research.models.persisted import (
+        _validate_validation_coverage,
+    )
+    from quant_research_platform.research.models.trial_selection import (
+        ModelSampleCoverage,
+    )
+
+    scope = {
+        "validation_start": "2019-01-01",
+        "validation_end": "2019-01-02",
+    }
+    asset_major = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2019-01-01", "2019-01-02"] * 2),
+            "asset_id": ["a", "a", "b", "b"],
+        }
+    )
+    time_major = asset_major.iloc[[0, 2, 1, 3]]
+    coverage = ModelSampleCoverage(scope)
+    coverage.add(asset_major)
+    metadata = {
+        "path": "models/2019Q1/validation-coverage.parquet",
+        "row_count": coverage.row_count,
+        "semantic_identity": coverage.semantic_identity,
+    }
+    for name, physical_rows in (
+        ("asset_major", asset_major),
+        ("time_major", time_major),
+    ):
+        root = tmp_path / name
+        path = root / metadata["path"]
+        path.parent.mkdir(parents=True)
+        pq.write_table(pa.Table.from_pandas(physical_rows, preserve_index=False), path)
+        _validate_validation_coverage(
+            root, "2019Q1", metadata, scope, member_identities=None
+        )
+
+
+def test_refit_scaler_cancellation_is_recorded_before_any_learning(
+    tmp_path, monkeypatch
+):
+    _small_common_coverage_case(
+        tmp_path, fail_refit_scaler="cancel", monkeypatch=monkeypatch
+    )
+
+
+def test_reader_binds_formal_model_basis_and_actual_coverage_count(
+    tmp_path, monkeypatch
+):
+    from copy import deepcopy
+
+    from quant_research_platform.research.models import persisted
+
+    saved, layout = _small_common_coverage_case(tmp_path)
+    envelope = deepcopy(saved.envelope)
+    # The common domain stays unchanged: the next family already requires y.
+    # All published model metadata and trial parameters still agree on x alone.
+    envelope["semantic_metadata"]["target_contract"]["model_specs"][0][
+        "input_factor_columns"
+    ] = ["x", "y"]
+    with pytest.raises(ValueError, match="model_trial_parameters_misaligned"):
+        persisted._validate_trial_references(
+            saved.quarterly_models,
+            saved.quarterly_selections,
+            saved.trial_ledgers,
+            layout,
+            envelope,
+            root=saved.instance_root,
+            member_identities=saved.member_identities,
+        )
+    reduced = deepcopy(saved.quarterly_selections)
+    for selection in reduced.values():
+        selection["candidate_family_ids"].remove("rank_flag")
+        selection["tie_break_order"].remove("rank_flag")
+        selection["families"] = [
+            item for item in selection["families"] if item["family_id"] != "rank_flag"
+        ]
+        selection["selected_family_id"] = "linear_x"
+        selection["selected_model_id"] = "linear_x"
+    references = tuple(
+        ref
+        for ref in saved.trial_ledgers
+        if persisted.read_model_trial_ledger_reference(layout, ref)[
+            0
+        ].candidate_family_id
+        != "rank_flag"
+    )
+    with pytest.raises(ValueError, match="model_trial_family_coverage_mismatch"):
+        persisted._validate_trial_references(
+            tuple(
+                entry
+                for entry in saved.quarterly_models
+                if entry["family_id"] != "rank_flag"
+            ),
+            reduced,
+            references,
+            layout,
+            saved.envelope,
+            root=saved.instance_root,
+            member_identities=saved.member_identities,
+        )
+    read = persisted.read_model_trial_ledger_reference
+
+    def altered(layout, reference):
+        plan, records = read(layout, reference)
+        if plan.stage == "selection":
+            records = tuple(
+                replace(record, metrics={**record.metrics, "validation_rows": 16})
+                for record in records
+            )
+        return plan, records
+
+    monkeypatch.setattr(persisted, "read_model_trial_ledger_reference", altered)
+    with pytest.raises(ValueError, match="model_trial_common_coverage_mismatch"):
+        read_quarterly_model_artifact(saved.instance_root, trial_layout=layout)

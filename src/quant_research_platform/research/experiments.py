@@ -27,11 +27,12 @@ class TrialRecorder:
         self, layout: StorageLayout, run_id: str, plan: ExperimentPlan
     ) -> None:
         self.plan = plan
+        self.layout = layout
         self.run_id = run_id
         self.root = layout.trial_ledger_root(run_id, plan.experiment_id)
         self.index = 0
 
-    def begin(self, spec: ModelSpec) -> TrialRecord:
+    def begin(self, spec: ModelSpec, *, common_coverage_id: str) -> TrialRecord:
         self.index += 1
         record = TrialRecord(
             run_id=self.run_id,
@@ -47,7 +48,7 @@ class TrialRecorder:
             research_dataset_id=self.plan.research_dataset_id,
             target_id=self.plan.target_id,
             horizon_id=spec.label_column,
-            common_coverage_id=self.plan.data_snapshot_id,
+            common_coverage_id=common_coverage_id,
             factor_definition_ids=spec.input_factor_columns,
             model_definition_id=spec.model_id,
             normalized_parameters=model_spec_payload(spec),
@@ -62,6 +63,24 @@ class TrialRecorder:
         )
         append_trial_record(self.root, self.plan, record)
         return record
+
+    def begin_refit(self, spec: ModelSpec, *, common_coverage_id: str):
+        """Bind a real prepared fit domain to its completed selection ledger."""
+        plan = replace(
+            self.plan,
+            stage="refit",
+            experiment_id=f"experiment_{uuid4().hex}",
+            selection_metric=None,
+            selection_direction=None,
+            tie_break_order=(),
+            candidate_ids=(spec.model_id,),
+            trial_budget=1,
+            random_seed=spec.random_seed,
+            candidate_parameters={spec.model_id: model_spec_payload(spec)},
+            selection_ledger_semantic_identity=self.reference()["semantic_identity"],
+        )
+        recorder = TrialRecorder(self.layout, self.run_id, plan)
+        return recorder, recorder.begin(spec, common_coverage_id=common_coverage_id)
 
     def finish(
         self,
@@ -105,7 +124,7 @@ class TrialRecorder:
             event_id=f"event_{uuid4().hex}",
             attempt_index=self.index,
             status=status,
-            validation_metrics=values,
+            metrics=values,
             thread_settings=threads,
             undefined_reasons={}
             if error is None

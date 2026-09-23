@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+from dataclasses import replace
+
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -119,6 +122,7 @@ def maker_calibration_tables():
         _maker_config,
     )
     from quant_research_platform.research.protocols.crypto_hft import (
+        CryptoMakerCandidate,
         protocol,
     )
     from tests.helpers.binance_hft import _quote, hft_research_plan
@@ -225,9 +229,24 @@ def maker_calibration_tables():
     assert frames["crypto_maker_samples"].loc[
         lambda frame: frame.side.eq("buy"), "filled_quantity"
     ].tolist() == [1.0, 1.0]
-    manifest = protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan).manifest()
+    research_protocol = replace(
+        protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan),
+        configuration_json=json.dumps(
+            research_configuration("crypto", "baseline", plan=plan)
+        ),
+    )
+    candidate = next(
+        candidate
+        for candidate in research_protocol.portfolio_candidates()
+        if isinstance(candidate, CryptoMakerCandidate)
+        and candidate.asset_id == "btc_usdt"
+        and candidate.model_ids == MAKER_MODEL_IDS
+    )
+    manifest = research_protocol.target_manifest(
+        candidate.calibration_target_id, "STATISTIC"
+    )
     envelope = build_business_manifest_envelope(
-        logical_artifact_id=f"{HFT_RESEARCH_DATASET_ID}_maker_calibration",
+        logical_artifact_id=candidate.calibration_target_id,
         schema_identity="a" * 64,
         protocol_or_spec_identity="b" * 64,
         software_identity="c" * 64,
@@ -673,11 +692,14 @@ def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatc
 def crypto_tables():
     row = dict(
         candidate_id="candidate",
+        execution_mode="continuous",
+        episode_id="continuous",
         kind="oos",
         fold_id="fold_1",
         metric_id="net_pnl",
         start_at=pd.Timestamp("2023-01-02"),
         end_at=pd.Timestamp("2023-01-03"),
+        stop_at=pd.Timestamp("2023-01-03"),
         start_nav=100.0,
         end_nav=110.0,
         gross_pnl=10.0,
@@ -709,6 +731,7 @@ def crypto_tables():
         )
         for member in statistics.STATISTICS_TABLE_GROUPS["crypto_portfolio"]
     }
+    result["crypto_portfolio_coverage"].loc[0, "kind"] = "covered"
     result["crypto_execution_diagnostics"].loc[0, ["value", "text"]] = [
         float("nan"),
         "estimated_queue_ahead",
@@ -961,6 +984,7 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
         HFT_RESEARCH_DATASET_ID,
     )
     from quant_research_platform.research.protocols.crypto_hft import (
+        CryptoMakerCandidate,
         protocol,
     )
     from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
@@ -981,10 +1005,25 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
     fold["development_test"] = {"start": iso(last + 1000), "end": iso(last + 2000)}
     plan["folds"] = [fold]
     plan["final_holdout"] = {"start": iso(last + 2100), "end": iso(last + 3000)}
-    manifest = protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan).manifest()
+    research_protocol = replace(
+        protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan),
+        configuration_json=json.dumps(
+            research_configuration("crypto", "baseline", plan=plan)
+        ),
+    )
+    candidate = next(
+        candidate
+        for candidate in research_protocol.portfolio_candidates()
+        if isinstance(candidate, CryptoMakerCandidate)
+        and candidate.asset_id == "btc_usdt"
+        and candidate.model_ids == MAKER_MODEL_IDS
+    )
+    manifest = research_protocol.target_manifest(
+        candidate.calibration_target_id, "STATISTIC"
+    )
     window = fold["development_test"]
     envelope = build_business_manifest_envelope(
-        logical_artifact_id=f"{HFT_RESEARCH_DATASET_ID}_maker_calibration",
+        logical_artifact_id=candidate.calibration_target_id,
         schema_identity="a" * 64,
         protocol_or_spec_identity="b" * 64,
         software_identity="c" * 64,
@@ -1160,3 +1199,48 @@ def test_streamed_calibration_rechecks_member_bytes_after_consumption(
                 validate_tables=portfolio.validate_maker_calibration,
             )
         assert changed and policy.used_memory_bytes == 0
+
+
+def test_maker_calibration_uses_declared_asset_without_btc_limits(
+    tmp_path, maker_calibration_tables
+):
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        validate_maker_calibration,
+    )
+
+    tables, original = maker_calibration_tables
+    payload = original.payload()
+    metadata = payload["semantic_metadata"]
+    contract = metadata["target_contract"]["protocol"]
+    candidate = contract["portfolio_candidates"][0]
+    candidate["asset_id"] = "eth_usdt"
+    candidate["candidate_id"] = "eth_fixture_maker"
+    limits = contract["research_plan"]["exposure_limits"]
+    limits["eth_usdt"] = limits.pop("btc_usdt")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="eth_fixture_maker_calibration",
+        schema_identity=payload["schema_identity"],
+        protocol_or_spec_identity=payload["protocol_or_spec_identity"],
+        software_identity=payload["software_identity"],
+        research_window=payload["research_window"],
+        upstream_identities=payload["upstream_identities"],
+        semantic_metadata=metadata,
+    )
+
+    def produce(on_table):
+        for name, frame in tables.items():
+            on_table(name, frame)
+
+    with runtime_resource_policy_scope():
+        root = statistics.write_statistics_artifact(
+            tmp_path / "eth",
+            envelope=envelope,
+            tables=produce,
+            table_group="crypto_maker_calibration",
+            validate_tables=validate_maker_calibration,
+        )
+        statistics.read_statistics_artifact(
+            root,
+            expected_identity=envelope.instance_identity,
+            validate_tables=validate_maker_calibration,
+        )

@@ -327,7 +327,7 @@ def test_many_known_funding_offsets_complete_under_one_small_query_budget():
 
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=EXACT_KEY_SQLITE_CACHE_BYTES + 64 * 1024,
+        explicit_cap_bytes=2 * EXACT_KEY_SQLITE_CACHE_BYTES + 64 * 1024,
     )
     state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
     paths = [
@@ -340,6 +340,7 @@ def test_many_known_funding_offsets_complete_under_one_small_query_budget():
             0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
         )
         try:
+            retained_before_queries = policy.used_memory_bytes
             for index in range(2048):
                 elapsed = (5000000, 15000000, 25000000)[index % 3] + index
                 keep, quantity, gain = model.select(
@@ -355,6 +356,7 @@ def test_many_known_funding_offsets_complete_under_one_small_query_budget():
                 )
                 assert not keep and quantity == 0.5
                 assert gain == pytest.approx((0.020025, 0.025025, 0.030025)[index % 3])
+                assert policy.used_memory_bytes == retained_before_queries
         finally:
             model.close()
         assert policy.used_memory_bytes == 0
@@ -617,7 +619,7 @@ def test_decisions_reuse_captured_sample_origins_without_initial_book_reads():
         finally:
             model.close()
         assert policy.used_memory_bytes == 0
-    assert len(reads) == 12
+    assert len(reads) == 6
 
 
 def test_unknown_historical_visible_quantity_blocks_maker_without_faking_fill():

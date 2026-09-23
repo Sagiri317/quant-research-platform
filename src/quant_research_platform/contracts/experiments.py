@@ -95,6 +95,7 @@ class ExperimentFold:
 
 @dataclass(frozen=True, kw_only=True)
 class ExperimentPlan:
+    stage: Literal["selection", "refit"]
     experiment_id: str
     market_id: MarketId
     research_dataset_id: str
@@ -104,8 +105,8 @@ class ExperimentPlan:
     input_lineage: tuple[str, ...]
     folds: tuple[ExperimentFold, ...]
     final_holdout: TimeWindow
-    selection_metric: str
-    selection_direction: SelectionDirection
+    selection_metric: str | None
+    selection_direction: SelectionDirection | None
     candidate_ids: tuple[str, ...]
     trial_budget: int
     random_seed: int
@@ -115,6 +116,7 @@ class ExperimentPlan:
     cost_assumptions: Mapping[str, object] = field(default_factory=dict)
     risk_assumptions: Mapping[str, object] = field(default_factory=dict)
     candidate_parameters: Mapping[str, object] = field(default_factory=dict)
+    selection_ledger_semantic_identity: str | None = None
     research_protocol_identity: str = ""
     holdout_status: Literal["LOCKED"] = "LOCKED"
 
@@ -126,7 +128,6 @@ class ExperimentPlan:
             (self.target_id, "experiment_target_id_required"),
             (self.candidate_family_id, "experiment_candidate_family_id_required"),
             (self.data_snapshot_id, "experiment_data_snapshot_id_required"),
-            (self.selection_metric, "experiment_selection_metric_required"),
         ):
             _validate_non_empty_string(value, error)
         _validate_string_tuple(self.input_lineage, "experiment_input_lineage")
@@ -158,8 +159,31 @@ class ExperimentPlan:
                 window_bounds.extend((window.start, window.end))
         if len({isinstance(bound, datetime) for bound in window_bounds}) != 1:
             raise ValueError("experiment_time_kind_mismatch")
-        if self.selection_direction not in {"maximize", "minimize"}:
-            raise ValueError("experiment_selection_direction_invalid")
+        if self.stage == "selection":
+            _validate_non_empty_string(
+                self.selection_metric, "experiment_selection_metric_required"
+            )
+            if self.selection_direction not in {"maximize", "minimize"}:
+                raise ValueError("experiment_selection_direction_invalid")
+            if self.selection_ledger_semantic_identity is not None:
+                raise ValueError("experiment_selection_parent_invalid")
+        elif self.stage == "refit":
+            if (
+                self.selection_metric is not None
+                or self.selection_direction is not None
+                or self.tie_break_order
+                or len(self.folds) != 1
+                or len(self.candidate_ids) != 1
+                or self.trial_budget != 1
+                or type(self.selection_ledger_semantic_identity) is not str
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", self.selection_ledger_semantic_identity
+                )
+                is None
+            ):
+                raise ValueError("experiment_refit_plan_invalid")
+        else:
+            raise ValueError("experiment_stage_invalid")
         if type(self.trial_budget) is not int or self.trial_budget <= 0:
             raise ValueError("experiment_trial_budget_invalid")
         if self.trial_budget < len(self.candidate_ids) * len(self.folds):
@@ -178,6 +202,12 @@ class ExperimentPlan:
         )
         if parameters and set(parameters) != set(self.candidate_ids):
             raise ValueError("experiment_candidate_parameters_mismatch")
+        if self.stage == "refit" and (
+            not parameters
+            or type(parameters[self.candidate_ids[0]]) is not dict
+            or parameters[self.candidate_ids[0]].get("random_seed") != self.random_seed
+        ):
+            raise ValueError("experiment_refit_plan_invalid")
         object.__setattr__(self, "candidate_parameters", _freeze_json(parameters))
         object.__setattr__(
             self, "backend_versions", _freeze_string_mapping(self.backend_versions)
@@ -199,6 +229,10 @@ class ExperimentPlan:
     def protocol_payload(self) -> dict[str, object]:
         return {
             "experiment_id": self.experiment_id,
+            "stage": self.stage,
+            "selection_ledger_semantic_identity": (
+                self.selection_ledger_semantic_identity
+            ),
             "market_id": str(self.market_id),
             "research_dataset_id": self.research_dataset_id,
             "target_id": self.target_id,
@@ -274,17 +308,15 @@ class ExperimentPlan:
         return tuple(getattr(fold, role) for fold in self.folds)
 
 
-def legal_training_rows(
+def label_maturity_mask(
     frame: pd.DataFrame,
     *,
     fitting_cutoff: object,
     availability_column: str | None = "label_available_at",
-    feature_columns: tuple[str, ...] = (),
     target_column: str | None = None,
-) -> pd.DataFrame:
-    """Select eligible finite rows whose labels were available by the cutoff."""
-
-    required = {"eligible", "timestamp", *feature_columns}
+) -> pd.Series:
+    """Select finite labels observable by the cutoff, independently of eligibility."""
+    required = {"timestamp"}
     if availability_column is not None:
         required.add(availability_column)
     if target_column is not None:
@@ -298,10 +330,7 @@ def legal_training_rows(
     timestamps = strict_timestamp_series(
         frame["timestamp"], error="invalid_training_timestamp"
     )
-    eligible = frame["eligible"]
-    if not pd.api.types.is_bool_dtype(eligible) or bool(eligible.isna().any()):
-        raise ValueError("invalid_training_eligibility")
-    keep = eligible & timestamps.le(cutoff)
+    keep = timestamps.le(cutoff)
     if availability_column is not None:
         available = strict_timestamp_series(
             frame[availability_column],
@@ -309,12 +338,41 @@ def legal_training_rows(
             allow_null=True,
         )
         keep &= available.notna() & available.le(cutoff)
-    value_columns = (
-        (*feature_columns, target_column)
-        if target_column is not None
-        else feature_columns
+    if target_column is not None:
+        values = strict_finite_numeric_series(
+            frame[target_column],
+            error=f"invalid_training_value: {target_column}",
+            allow_null=True,
+        )
+        keep &= values.notna()
+    return keep
+
+
+def legal_training_rows(
+    frame: pd.DataFrame,
+    *,
+    fitting_cutoff: object,
+    availability_column: str | None = "label_available_at",
+    feature_columns: tuple[str, ...] = (),
+    target_column: str | None = None,
+) -> pd.DataFrame:
+    """Select eligible finite inputs with mature labels."""
+    missing = sorted({"eligible", *feature_columns}.difference(frame.columns))
+    if missing:
+        raise ValueError("legal_training_columns_missing: " + ", ".join(missing))
+    eligible = frame["eligible"]
+    if not pd.api.types.is_bool_dtype(eligible) or bool(eligible.isna().any()):
+        raise ValueError("invalid_training_eligibility")
+    keep = (
+        label_maturity_mask(
+            frame,
+            fitting_cutoff=fitting_cutoff,
+            availability_column=availability_column,
+            target_column=target_column,
+        )
+        & eligible
     )
-    for column in value_columns:
+    for column in feature_columns:
         values = strict_finite_numeric_series(
             frame[column], error=f"invalid_training_value: {column}", allow_null=True
         )
@@ -456,7 +514,7 @@ class TrialRecord:
     backend_versions: Mapping[str, str] = field(default_factory=dict)
     thread_settings: Mapping[str, int] = field(default_factory=dict)
     status: TrialStatus
-    validation_metrics: Mapping[str, object] = field(default_factory=dict)
+    metrics: Mapping[str, object] = field(default_factory=dict)
     development_test_metrics: Mapping[str, object] = field(default_factory=dict)
     development_test_contaminated: bool = False
     undefined_reasons: Mapping[str, object] = field(default_factory=dict)
@@ -465,7 +523,7 @@ class TrialRecord:
     rebalance_assumption: str = "not_applicable"
     artifact_lineage: tuple[str, ...] = ()
     holdout_accessed: bool = False
-    contract_version: str = "1.0"
+    contract_version: str = "2.0"
 
     def __post_init__(self) -> None:
         for value in (
@@ -524,13 +582,13 @@ class TrialRecord:
             raise ValueError("trial_holdout_access_forbidden")
         if type(self.development_test_contaminated) is not bool:
             raise ValueError("trial_development_test_contamination_invalid")
-        if self.contract_version != "1.0":
+        if self.contract_version != "2.0":
             raise ValueError("trial_contract_version_invalid")
         for field_name in (
             "normalized_parameters",
             "backend_versions",
             "thread_settings",
-            "validation_metrics",
+            "metrics",
             "development_test_metrics",
             "undefined_reasons",
             "cost_assumptions",
@@ -571,7 +629,7 @@ class TrialRecord:
             "backend_versions": _thaw_json(self.backend_versions),
             "thread_settings": _thaw_json(self.thread_settings),
             "status": self.status,
-            "validation_metrics": _thaw_json(self.validation_metrics),
+            "metrics": _thaw_json(self.metrics),
             "development_test_metrics": _thaw_json(self.development_test_metrics),
             "development_test_contaminated": self.development_test_contaminated,
             "undefined_reasons": _thaw_json(self.undefined_reasons),
@@ -596,7 +654,7 @@ class TrialRecord:
                     "normalized_parameters",
                     "backend_versions",
                     "thread_settings",
-                    "validation_metrics",
+                    "metrics",
                     "development_test_metrics",
                     "undefined_reasons",
                     "cost_assumptions",
@@ -629,6 +687,8 @@ def validate_trial_record_against_plan(
         raise ValueError("trial_plan_mismatch")
     if record.candidate_id not in plan.candidate_ids:
         raise ValueError("trial_candidate_not_registered")
+    if plan.stage == "refit" and record.random_seed != plan.random_seed:
+        raise ValueError("trial_refit_seed_mismatch")
     if (
         plan.candidate_parameters
         and record.normalized_parameters

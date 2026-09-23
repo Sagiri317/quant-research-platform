@@ -853,6 +853,10 @@ neutralization n >= max(100, 5p)  # 中性化样本门槛
 中间累积及投影保留精确有理数，残差最后一次转换为浮点数，避免大基线相减的舍入
 误差被后续 zscore 放大。精确位于设计空间内的输入残差为零；真实可分辨的微小差异
 仍按同一投影保留，不以 epsilon 或额外舍入判为零。
+设有效行业数为K：Size自身的p=K；非Size的p=K+1，满秩等价于精确组内Size平方和大于0。
+复用同一精确组内统计判定，不另建one-hot矩阵或浮点SVD门槛。必要Size即使不输出自身feature，
+也按同一eligible截面执行MAD缩尾再作为协变量；单因子与完整配置的同一因子输出必须一致。
+辅助Size维持FACTOR角色，仅补数据依赖，不自动加入评价信号或生成无消费者feature。
 
 #### 5.10.3 Z-score 标准化
 
@@ -888,7 +892,12 @@ feature_missing = 0
 observed = 1
 ```
 
-结构/上下文前提失败时，该特征/行必须明确失败；中性化失败不得通过 `.fillna(0)` 变成已观测有效特征。
+结构/上下文前提失败时，该特征/行必须明确不可用；中性化失败不得通过 `.fillna(0)` 进入模型。
+现有三列 (feature, feature_missing, feature_observed) 的唯一编码：eligible且结构无效为
+(NULL,1,0)，设计有效但普通raw缺失为(0,1,0)，已观察有效为(z,0,1)，ineligible为(NULL,0,0)。
+训练、验证与OOS按该模型实际依赖的来源feature是否结构有效筛选；即使只选missing/observed
+标记，也必须检查来源feature，不能因为标记为有限数而绕过。raw排名模型不消费的canonical
+结构状态不改变其既有缺失中性规则。不新增行级原因表，原始输入和转换规格保留可复核原因。
 
 单因子统计始终使用原始已观测经济值，绝不使用模型填充零。
 
@@ -1199,6 +1208,13 @@ RF / XGB -> 更浅 / 更保守的配置
 ```
 
 必需试验失败意味着正式季度选择失败；不得静默删除候选。
+同一季度所有参加比较的家族/配置在唯一共同有效(timestamp,asset_id)域上重算验证成绩。
+先在各自完整合法截面预测，再投影共同域评分，不能先裁剪而改变rank；排名缺失中性规则不变。
+只有raw因子的rank缺失保持中性；rank模型若消费canonical值或缺失/合法性标志，仍须满足来源特征的结构有效性。
+模型target每季度只持一份validation-coverage.parquet精确键成员，selection元数据记录
+common_validation_coverage的path、semantic_identity和row_count，所有selection trial绑定同一域。
+生产评分逐日期精确核对PK；读回核对成员、逻辑域身份及trial/冠军引用，行数相同不代表覆盖相同。
+共同域只约束比较，不裁剪完整预测或经济账本；无法解释的预测漏行不得用于缩小比较域。
 
 RankIC 为负的优胜模型仍是有效协议结果；不得因结果差而重新调参。
 

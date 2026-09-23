@@ -32,6 +32,9 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.features.transforms import (
+    canonical_feature_validity_columns,
+)
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
 )
@@ -196,16 +199,18 @@ def _fit_model_result_owned_from_frames(
     *,
     estimator: object,
     fitting_cutoff: object,
+    on_fit_start=None,
 ) -> ModelFitResult | _OwnedModelFitResult:
     if spec.model_algorithm == "linear_regression":
         return _fit_linear_model_result_owned_from_frames(
-            frames, spec, fitting_cutoff=fitting_cutoff
+            frames, spec, fitting_cutoff=fitting_cutoff, on_fit_start=on_fit_start
         )
     return _fit_estimator_model_result_owned_from_frames(
         frames,
         spec,
         estimator=estimator,
         fitting_cutoff=fitting_cutoff,
+        on_fit_start=on_fit_start,
     )
 
 
@@ -214,6 +219,7 @@ def _fit_linear_model_result_owned_from_frames(
     spec: ModelSpec,
     *,
     fitting_cutoff: object,
+    on_fit_start=None,
 ) -> ModelFitResult | _OwnedModelFitResult:
     policy = current_runtime_resource_policy()
     model_lease = (
@@ -230,6 +236,7 @@ def _fit_linear_model_result_owned_from_frames(
             spec,
             model_lease=model_lease,
             fitting_cutoff=fitting_cutoff,
+            on_fit_start=on_fit_start,
         )
     except BaseException as primary:
         if model_lease is not None:
@@ -248,6 +255,7 @@ def _fit_linear_model_result_with_lease(
     *,
     model_lease: MemoryLease | None,
     fitting_cutoff: object,
+    on_fit_start=None,
 ) -> ModelFitResult | _OwnedModelFitResult:
     owned_training = _collect_training_frame_owned(
         frames, spec, fitting_cutoff=fitting_cutoff
@@ -273,6 +281,8 @@ def _fit_linear_model_result_with_lease(
                 error="model_training_working_set_exceeds_task_memory_budget",
             )
             model_lease.grow(fit_work_bytes)
+        if on_fit_start is not None:
+            on_fit_start(spec, training)
         weights = equal_timestamp_sample_weights(
             training["timestamp"], spec.training_weighting
         )
@@ -386,6 +396,7 @@ def _fit_estimator_model_result_owned_from_frames(
     *,
     estimator: object,
     fitting_cutoff: object,
+    on_fit_start=None,
 ) -> ModelFitResult | _OwnedModelFitResult:
     owned_training = _collect_training_frame_owned(
         frames, spec, fitting_cutoff=fitting_cutoff
@@ -463,6 +474,8 @@ def _fit_estimator_model_result_owned_from_frames(
                 )
         raise
     try:
+        if on_fit_start is not None:
+            on_fit_start(spec, training)
         y = training.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
         predictor = _fit_predictor(
             spec,
@@ -544,7 +557,8 @@ def _collect_training_frame_owned(
     tuple[pd.DataFrame, dict[str, object], dict[str, object]]
     | OwnedValue[tuple[pd.DataFrame, dict[str, object], dict[str, object]]]
 ):
-    required = set(spec.input_columns)
+    validity_columns = canonical_feature_validity_columns(spec.input_columns)
+    required = set((*spec.input_columns, *validity_columns))
     required.add(spec.label_column)
     required.add("timestamp")
     required.add("eligible")
@@ -555,6 +569,7 @@ def _collect_training_frame_owned(
                 "timestamp",
                 "asset_id",
                 *spec.input_columns,
+                *validity_columns,
                 spec.label_column,
                 "eligible",
                 *availability_columns,
@@ -640,10 +655,12 @@ def _collect_training_frame_owned(
                     fitting_cutoff=fitting_cutoff,
                     availability_column=availability_column,
                     feature_columns=(
-                        ()
+                        validity_columns
                         if _model_algorithm_facts(spec.model_algorithm).input_kind
                         == "rank_ensemble_inputs"
-                        else spec.input_columns
+                        else tuple(
+                            dict.fromkeys((*spec.input_columns, *validity_columns))
+                        )
                     ),
                     target_column=spec.label_column,
                 ).loc[:, selected_columns]
@@ -807,83 +824,35 @@ def _collect_training_frame_owned(
         raise
     resource_policy = current_runtime_resource_policy()
     result_lease = None
-    previous_training_lease = None
     timestamps = None
-    previous_training = None
     try:
-        training_bytes = pandas_frame_payload_bytes(training)
-        output_bound = (
-            _selected_frame_payload_bytes(
-                training,
-                [column for column in training.columns if column != "asset_id"],
-            )
-            if "asset_id" in training.columns
-            else training_bytes
-        )
-        has_identity = "asset_id" in training.columns
-        result_bound = (output_bound if has_identity else 0) + len(training) * 16
         if resource_policy is not None:
             result_lease = resource_policy.lease(
-                "research.model.training_result",
-                result_bound,
+                "research.model.training_result", len(training) * 16
             )
-        if has_identity:
-            previous_training = training
-            training = previous_training.drop(columns="asset_id")
-            previous_training = None
         train_start = None
         train_end = None
         if not training.empty:
             timestamps = strict_timestamp_series(
-                training["timestamp"],
-                error="invalid_model_training_timestamp",
+                training["timestamp"], error="invalid_model_training_timestamp"
             )
             train_start = time_value_isoformat(pd.Timestamp(timestamps.min()))
             train_end = time_value_isoformat(pd.Timestamp(timestamps.max()))
         timestamps = None
-        if result_lease is not None and has_identity:
-            result_lease.shrink_to(pandas_frame_payload_bytes(training))
-            result_lease.transfer("research.model.training")
-            previous_training_lease = training_lease
-            training_lease = result_lease
-            result_lease = None
-            if previous_training_lease is not None:
-                previous_training_lease.close()
-                previous_training_lease = None
-        elif result_lease is not None:
+        if result_lease is not None:
             result_lease.close()
             result_lease = None
     except BaseException as primary:
-        previous_training = None
-        timestamps = None
-        training = None
-        if result_lease is not None:
-            try:
-                result_lease.close()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "training result lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-        if (
-            previous_training_lease is not None
-            and previous_training_lease is not training_lease
-        ):
-            try:
-                previous_training_lease.close()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "previous training lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-        if training_lease is not None:
-            try:
-                training_lease.close()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "training lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
+        timestamps = training = None
+        for lease in (result_lease, training_lease):
+            if lease is not None:
+                try:
+                    lease.close()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "training result lease release also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
         raise
     row_counts = {
         "rows_input": rows_input,
@@ -1199,6 +1168,7 @@ def model_training_read_columns(
             (
                 *primary_key,
                 *input_columns,
+                *canonical_feature_validity_columns(input_columns),
                 label_column,
                 "eligible",
                 *training_availability_columns(label_column),
@@ -1246,7 +1216,14 @@ def iter_legal_training_chunks(
                 chunk,
                 fitting_cutoff=train_end,
                 availability_column=availability_column,
-                feature_columns=input_columns,
+                feature_columns=tuple(
+                    dict.fromkeys(
+                        (
+                            *input_columns,
+                            *canonical_feature_validity_columns(input_columns),
+                        )
+                    )
+                ),
                 target_column=label_column,
             )
             if train.empty:

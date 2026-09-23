@@ -273,8 +273,10 @@ def _dense_lifecycle_panel(
         ]
     assets = tuple(sorted(asset_market_types.index))
     rows: list[pd.DataFrame] = []
+    stock_groups = stocks.groupby("asset_id", sort=False).indices
+    bar_groups = bars.groupby("asset_id", sort=False).indices
     for asset_id in assets:
-        stock = stocks.loc[stocks["asset_id"].eq(asset_id)]
+        stock = stocks.iloc[stock_groups.get(asset_id, [])]
         if stock.empty:
             continue
         listing = stock["listing_date"].min()
@@ -290,7 +292,7 @@ def _dense_lifecycle_panel(
         if dates.empty:
             continue
         base = pd.DataFrame({"asset_id": asset_id, "timestamp": dates})
-        raw = bars.loc[bars["asset_id"].eq(asset_id)]
+        raw = bars.iloc[bar_groups.get(asset_id, [])]
         base["market_type"] = asset_market_types.loc[asset_id]
         base = base.merge(
             raw.drop(
@@ -325,8 +327,9 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
         "delisting_date",
         "company_status",
     )
+    stock_groups = stocks.groupby("asset_id", sort=False).indices
     for asset_id, group in panel.groupby("asset_id", sort=False):
-        right = stocks.loc[stocks["asset_id"].eq(asset_id)]
+        right = stocks.iloc[stock_groups.get(asset_id, [])]
         if right.empty:
             current = group.copy()
             for column in columns:
@@ -395,8 +398,9 @@ def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
         caps["asset_id"], error="invalid_market_cap_asset_id"
     )
     outputs: list[pd.DataFrame] = []
+    cap_groups = caps.groupby("asset_id", sort=False).indices
     for asset_id, group in panel.groupby("asset_id", sort=False):
-        right = caps.loc[caps["asset_id"].eq(asset_id)]
+        right = caps.iloc[cap_groups.get(asset_id, [])]
         if right.empty:
             current = group.copy()
             current["share_change_date"] = pd.NaT
@@ -491,10 +495,11 @@ def _asof_industry(
     if right.duplicated(["asset_id", "timestamp"], keep=False).any():
         raise ValueError("industry_history_key_duplicate")
     output: list[pd.DataFrame] = []
+    history_groups = right.groupby("asset_id", sort=False).indices
     for asset_id, group in panel.groupby("asset_id", sort=False):
         current = pd.merge_asof(
             group.sort_values("timestamp"),
-            right.loc[right["asset_id"].eq(asset_id)].sort_values("timestamp"),
+            right.iloc[history_groups.get(asset_id, [])],
             on="timestamp",
             by="asset_id",
             direction="backward",

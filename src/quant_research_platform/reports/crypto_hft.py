@@ -29,21 +29,67 @@ def build_crypto_research_report(*, record, evidence):
     statistics = evidence["statistics"]
 
     def statistical_rows(table, predicate=None):
-        if statistics["status"] in {"BLOCKED", "FAILED"}:
-            return dict(statistics)
-        rows = statistics["tables"][table]
-        selected = [row for row in rows if predicate is None or predicate(row)]
+        selected, states, artifacts = [], [], []
+        for item in statistics:
+            artifacts.append(
+                {key: value for key, value in item.items() if key != "tables"}
+            )
+            states.append({"status": item["status"]})
+            if item["status"] in {"BLOCKED", "FAILED"}:
+                continue
+            rows = item["tables"][table]
+            selected.extend(row for row in rows if predicate is None or predicate(row))
+        states.extend({"status": row["status"]} for row in selected if "status" in row)
         return {
-            "status": diagnostic_status(selected)
-            if selected and "status" in selected[0]
-            else "DEFINED",
-            "statistics_identity": statistics["identity"],
+            "status": diagnostic_status(states),
+            "statistics_artifacts": artifacts,
             "results": selected,
         }
 
+    assets = {
+        item["candidate_id"]: item["asset_id"] for item in configuration["portfolios"]
+    }
+    coverage_groups = {}
+    for item in statistics:
+        if item["status"] != "DEFINED":
+            continue
+        bounds = tuple(
+            (row["start_at"], row["stop_at"])
+            for row in item["tables"]["crypto_portfolio_coverage"]
+            if row["kind"] == "covered"
+        )
+        groups = coverage_groups.setdefault(assets[item["candidate_id"]], {})
+        groups.setdefault(bounds, []).append(
+            {
+                "candidate_id": item["candidate_id"],
+                "execution_mode": item["execution_mode"],
+            }
+        )
+    coverage_comparison = [
+        {
+            "asset_id": asset,
+            "status": "DEFINED" if len(groups) == 1 else "UNDEFINED",
+            "reason": "" if len(groups) == 1 else "different_coverage_not_comparable",
+            "scope": "exact_coverage_and_episode_boundaries_only",
+            "groups": [
+                {
+                    "intervals": [
+                        {"start_at": start, "stop_at": stop} for start, stop in bounds
+                    ],
+                    "candidates": candidates,
+                }
+                for bounds, candidates in groups.items()
+            ],
+        }
+        for asset, groups in coverage_groups.items()
+    ]
+
     evaluations = evidence["evaluations"]
     sections = {
-        "Data/Coverage": evidence["data"],
+        "Data/Coverage": {
+            **evidence["data"],
+            "execution_coverage": statistical_rows("crypto_portfolio_coverage"),
+        },
         "factor diagnostics": {
             "status": diagnostic_status(evaluations),
             "evaluations": evaluations,
@@ -67,9 +113,20 @@ def build_crypto_research_report(*, record, evidence):
             "status": diagnostic_status(evidence["portfolios"]),
             "candidates": evidence["portfolios"],
             "intervals": statistical_rows("crypto_portfolio_intervals"),
+            "coverage_comparison": coverage_comparison,
         },
         "execution": statistical_rows("crypto_execution_diagnostics"),
-        "cost sensitivity": statistical_rows("crypto_cost_sensitivity"),
+        "cost sensitivity": {
+            **statistical_rows("crypto_cost_sensitivity"),
+            "observed_cost_summary": statistical_rows(
+                "crypto_portfolio_statistics",
+                lambda row: (
+                    row["episode_id"] == "all"
+                    and row["metric_id"]
+                    in {"fees", "funding", "turnover", "fill_events", "fill_quantity"}
+                ),
+            ),
+        },
         "inventory": statistical_rows(
             "crypto_portfolio_statistics", lambda row: "inventory_" in row["metric_id"]
         ),
@@ -85,6 +142,7 @@ def build_crypto_research_report(*, record, evidence):
                         "planned_complete_utc_days",
                         "defined_complete_utc_days",
                         "continuous_max_drawdown",
+                        "episode_max_drawdown",
                     }
                 ),
             ),

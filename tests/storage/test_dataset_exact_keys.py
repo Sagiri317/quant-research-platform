@@ -204,6 +204,159 @@ def test_exact_key_index_spills_sqlite_temp_state_to_disk(
         ) == (1, 1)
 
 
+def test_exact_key_tmpfs_row_stream_keeps_capacity_for_sibling_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+    from quant_research_platform.storage.exact_keys import (
+        EXACT_KEY_SQLITE_CACHE_BYTES,
+        ExactPrimaryKeyIndex,
+    )
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    if not _memory_filesystem(tmp_path):
+        pytest.skip("requires actual tmpfs")
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=EXACT_KEY_SQLITE_CACHE_BYTES + 512 * 1024,
+    )
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("storage.exact_keys", EXACT_KEY_SQLITE_CACHE_BYTES):
+            with ExactPrimaryKeyIndex(primary_key=()) as index:
+                rows = (
+                    ("stream", position.to_bytes(4, "big"), b"value")
+                    for position in range(32)
+                )
+                assert index.add_identity_payload_rows(rows=rows) == 32
+                assert index.identity_payload_count(namespace="stream") == 32
+                with policy.lease("test.sibling", 64 * 1024):
+                    assert policy.used_memory_bytes <= policy.explicit_memory_cap_bytes
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.glob(".k-*"))
+
+
+def test_exact_key_tmpfs_large_btree_split_stays_within_admitted_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+    from quant_research_platform.storage.exact_keys import (
+        EXACT_KEY_SQLITE_CACHE_BYTES,
+        ExactPrimaryKeyIndex,
+    )
+
+    if not _memory_filesystem(tmp_path):
+        pytest.skip("requires actual tmpfs")
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
+
+    def key_table(positions: range) -> pa.Table:
+        frame = pd.DataFrame(
+            {
+                "market_id": ["a_share"] * len(positions),
+                "asset_id": [f"a{position % 256:03d}" for position in positions],
+                "timestamp": pd.Timestamp("2020-01-01")
+                + pd.to_timedelta(list(positions), unit="s"),
+            }
+        )
+        return pa.Table.from_pandas(frame, preserve_index=False)
+
+    with runtime_resource_policy_scope(explicit_cap_bytes=2 * 1024**3) as policy:
+        with policy.lease("storage.exact_keys", EXACT_KEY_SQLITE_CACHE_BYTES):
+            with ExactPrimaryKeyIndex(
+                primary_key=("market_id", "asset_id", "timestamp")
+            ) as index:
+                for start in range(0, 40_000, 4_096):
+                    assert (
+                        index.add_table(
+                            key_table(range(start, min(start + 4_096, 40_000)))
+                        )
+                        == 0
+                    )
+                assert index.identity_payload_count(namespace="dataset") == 40_000
+                samples = key_table(range(36_008, 36_011))
+                assert index.add_table(samples) == 3
+                connection = index._connection
+                assert connection is not None
+                for namespace, payload, _ in index._payload_rows(
+                    samples, namespace="dataset"
+                ):
+                    assert connection.execute(
+                        "SELECT payload, value FROM exact_keys "
+                        "WHERE namespace = ? AND payload = ?",
+                        (namespace, bytes(payload)),
+                    ).fetchone() == (bytes(payload), None)
+                assert policy.used_memory_bytes <= policy.explicit_memory_cap_bytes
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.glob(".k-*"))
+
+
+def test_exact_key_tmpfs_lookup_admits_matched_namespace_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+    from quant_research_platform.storage.exact_keys import (
+        EXACT_KEY_SQLITE_CACHE_BYTES,
+        ExactPrimaryKeyIndex,
+    )
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    if not _memory_filesystem(tmp_path):
+        pytest.skip("requires actual tmpfs")
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=EXACT_KEY_SQLITE_CACHE_BYTES + 2 * 1024**2,
+    )
+    table = pa.table(
+        {
+            "key": range(256),
+            "score": [float(position) for position in range(256)],
+        }
+    )
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("artifacts.prediction.lookup", EXACT_KEY_SQLITE_CACHE_BYTES):
+            with ExactPrimaryKeyIndex(primary_key=("key",)) as index:
+                assert (
+                    index.add_float_value_table(
+                        table,
+                        namespace="prediction",
+                        value_column="score",
+                        payload_target_bytes=1024**2,
+                    )
+                    == 0
+                )
+                for _ in range(2):
+                    values, found = index.lookup_float_values(
+                        table.select(("key",)),
+                        source_namespace="prediction",
+                        matched_namespace="prediction-matched",
+                        payload_target_bytes=1024**2,
+                    )
+                    assert list(found) == [1] * 256
+                    assert list(values) == [float(position) for position in range(256)]
+                assert (
+                    index.identity_payload_count(namespace="prediction-matched") == 256
+                )
+                assert index.difference_counts(
+                    expected_namespace="prediction",
+                    actual_namespace="prediction-matched",
+                ) == (0, 0)
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.glob(".k-*"))
+
+
 def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     tmp_path: Path,
 ) -> None:

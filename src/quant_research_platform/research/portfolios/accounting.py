@@ -795,6 +795,9 @@ def execute_continuous_target(
         [date, str, str, float, float, ExecutionAssumptions],
         TradeCostComponents,
     ],
+    cost_totals_for_buys: Callable[
+        [tuple[str, ...], np.ndarray, np.ndarray], np.ndarray
+    ],
     assumptions: ExecutionAssumptions,
     cost_source_identity: str,
 ) -> ExecutionAccounting:
@@ -891,6 +894,21 @@ def execute_continuous_target(
             continue
         buy_candidates[str(asset)] = min(desired_delta, float(capacity[asset]))
 
+    buy_assets = tuple(buy_candidates)
+    buy_amounts = np.asarray(tuple(buy_candidates.values()), dtype="float64")
+    buy_adv = adv.reindex(buy_assets).to_numpy(dtype="float64")
+
+    def buy_spend_total(scale: float) -> float:
+        amounts = buy_amounts * scale
+        costs = np.asarray(cost_totals_for_buys(buy_assets, amounts, buy_adv))
+        if (
+            costs.shape != amounts.shape
+            or not np.isfinite(costs).all()
+            or (costs < 0).any()
+        ):
+            raise ValueError("execution_cost_provider_invalid")
+        return sum(map(float, amounts), 0.0) + sum(map(float, costs), 0.0)
+
     def buy_spend(
         scale: float,
     ) -> tuple[float, float, dict[str, TradeCostComponents]]:
@@ -916,8 +934,7 @@ def execute_continuous_target(
 
     scale = 0.0
     if buy_candidates and cash_after_sells > 0.0:
-        full_notional, full_cost, _ = buy_spend(1.0)
-        if full_notional + full_cost <= cash_after_sells + tolerance:
+        if buy_spend_total(1.0) <= cash_after_sells + tolerance:
             scale = 1.0
         else:
             low, high = 0.0, 1.0
@@ -925,8 +942,7 @@ def execute_continuous_target(
                 middle = (low + high) / 2.0
                 if middle == low or middle == high:
                     break
-                middle_notional, middle_cost, _ = buy_spend(middle)
-                if middle_notional + middle_cost <= cash_after_sells:
+                if buy_spend_total(middle) <= cash_after_sells:
                     low = middle
                 else:
                     high = middle

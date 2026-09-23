@@ -50,7 +50,10 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     require_free_disk_headroom,
 )
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.storage._scratch_ownership import (
+    handle_preserving_primary,
+    reserved_temporary_file,
+)
 from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
@@ -389,9 +392,11 @@ class _PendingMarkouts:
                 del fill
                 self._pop()
 
-    def expire_all(self) -> None:
+    def expire_all(self, *, reason=None) -> None:
         while (fill := self._peek()) is not None:
             try:
+                if reason is not None:
+                    fill["markout_reason"] = reason
                 self._finalize(fill, future_mid=None)
             finally:
                 del fill
@@ -673,12 +678,25 @@ def simulate_taker(
     funding_events: Iterable[FundingEvent],
     funding_forecasts: Iterable[FundingForecast],
     decision_windows_ns: tuple[tuple[int, int], ...] | None = None,
+    observation_window_ns: tuple[int, int] | None = None,
+    on_terminal_book=None,
     on_ledger: Callable[[PortfolioLedgerBatch], None] | None = None,
     on_fill: Callable[[Mapping[str, Any]], None] | None = None,
     on_equity: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Freeze the net-gain maximizing order at decision time, then execute later."""
 
+    observation_start = (
+        None if observation_window_ns is None else observation_window_ns[0]
+    )
+    observation_stop = (
+        None if observation_window_ns is None else observation_window_ns[1]
+    )
+    truncated = observation_stop is not None and (
+        decision_windows_ns is None or observation_stop <= decision_windows_ns[-1][1]
+    )
+    censored_count = censored_pending = censored_zero_fill = 0
+    censored_quantity = 0.0
     _positive_integer(prediction_horizon_ms, "hft_prediction_horizon_invalid")
     if decision_windows_ns is not None:
         previous_end = -1
@@ -727,12 +745,21 @@ def simulate_taker(
     last_net: float | None = None
     market_event_count = 0
     window_index = 0
+    if observation_start is not None and decision_windows_ns is not None:
+        while (
+            window_index < len(decision_windows_ns)
+            and decision_windows_ns[window_index][1] < observation_start
+        ):
+            window_index += 1
     window_open = False
     cancelled_orders = 0
     next_day = (
         None
         if decision_windows_ns is None
-        else ((decision_windows_ns[0][0] + _UTC_DAY_NS - 1) // _UTC_DAY_NS)
+        else (
+            (max(decision_windows_ns[0][0], observation_start or 0) + _UTC_DAY_NS - 1)
+            // _UTC_DAY_NS
+        )
         * _UTC_DAY_NS
     )
 
@@ -790,7 +817,7 @@ def simulate_taker(
                         previous_owned.release(owner="crypto.execution.book")
                 if (
                     decision_windows_ns is not None
-                    and decision_windows_ns[0][0]
+                    and max(decision_windows_ns[0][0], observation_start or 0)
                     <= state.observed_time_ns
                     <= decision_windows_ns[-1][1]
                     and _covered(
@@ -801,7 +828,14 @@ def simulate_taker(
 
             def consume_until(target: int) -> None:
                 nonlocal market_event_count, next_event
-                while next_event is not None and _book_key(next_event)[0] <= target:
+                while (
+                    next_event is not None
+                    and _book_key(next_event)[0] <= target
+                    and (
+                        observation_stop is None
+                        or _book_key(next_event)[0] < observation_stop
+                    )
+                ):
                     event = next_event
                     market_event_count += 1
                     consume_event(event)
@@ -950,6 +984,10 @@ def simulate_taker(
                     )
                     else None
                 )
+                if mark is None and observation_window_ns is not None and not closing:
+                    raise PortfolioTargetBlocked(
+                        "portfolio_episode_initial_valuation_missing"
+                    )
                 if mark is None and economics.quantity != 0.0:
                     raise PortfolioTargetBlocked(
                         "portfolio_window_boundary_valuation_missing"
@@ -988,9 +1026,25 @@ def simulate_taker(
                     ),
                 )
 
+            if observation_start is not None and (
+                decision_windows_ns is None
+                or observation_start < decision_windows_ns[window_index][0]
+            ):
+                advance(observation_start)
+                if latest_state is None or not _covered(
+                    observed_coverage, latest_state.segment_id, observation_start
+                ):
+                    raise PortfolioTargetBlocked(
+                        "portfolio_episode_initial_valuation_missing"
+                    )
+                economics.mark(observation_start, _mid(latest_state))
             for row in active_decisions:
                 decision_time = row["timestamp_ms"]
                 decision_ns = decision_time * _NANOSECONDS_PER_MILLISECOND
+                if observation_start is not None and decision_ns < observation_start:
+                    continue
+                if observation_stop is not None and decision_ns >= observation_stop:
+                    break
                 if decision_windows_ns is not None:
                     while (
                         window_index < len(decision_windows_ns)
@@ -998,7 +1052,11 @@ def simulate_taker(
                     ):
                         if not window_open:
                             boundary(
-                                decision_windows_ns[window_index][0], closing=False
+                                max(
+                                    decision_windows_ns[window_index][0],
+                                    observation_start or 0,
+                                ),
+                                closing=False,
                             )
                         boundary(decision_windows_ns[window_index][1], closing=True)
                         window_index += 1
@@ -1009,7 +1067,13 @@ def simulate_taker(
                     ):
                         raise ValueError("hft_decision_outside_oos_window")
                     if not window_open:
-                        boundary(decision_windows_ns[window_index][0], closing=False)
+                        boundary(
+                            max(
+                                decision_windows_ns[window_index][0],
+                                observation_start or 0,
+                            ),
+                            closing=False,
+                        )
                         window_open = True
                 prediction = strict_finite_float(
                     row.get(prediction_column), error="hft_prediction_invalid"
@@ -1169,20 +1233,34 @@ def simulate_taker(
                     advance(decision_ns)
             if decision_windows_ns is not None:
                 while window_index < len(decision_windows_ns):
+                    begin, end = decision_windows_ns[window_index]
+                    if observation_stop is not None and begin >= observation_stop:
+                        break
                     if not window_open:
-                        boundary(decision_windows_ns[window_index][0], closing=False)
-                    boundary(decision_windows_ns[window_index][1], closing=True)
+                        boundary(max(begin, observation_start or 0), closing=False)
+                    if observation_stop is not None and end >= observation_stop:
+                        break
+                    boundary(end, closing=True)
                     window_index += 1
                     window_open = False
-            else:
+            if truncated:
+                advance(observation_stop - 1)
+                censored_count = censored_pending = censored_zero_fill = len(orders)
+                censored_quantity = sum(abs(order[4]) for order in orders)
+                end_timestamp = max(terminal_timestamp, economics.last_timestamp)
+            elif decision_windows_ns is None:
                 while orders:
                     advance(orders[0][2] * _NANOSECONDS_PER_MILLISECOND)
                 while next_event is not None:
                     consume_until(_book_key(next_event)[0])
-            end_timestamp = max(
-                action_timestamp, terminal_timestamp, economics.last_timestamp
-            )
-            pending.expire_all()
+                end_timestamp = max(
+                    action_timestamp, terminal_timestamp, economics.last_timestamp
+                )
+            else:
+                end_timestamp = max(
+                    action_timestamp, terminal_timestamp, economics.last_timestamp
+                )
+            pending.expire_all(reason="observation_truncated" if truncated else None)
             terminal_mid = (
                 _mid(latest_state)
                 if latest_state is not None
@@ -1198,6 +1276,11 @@ def simulate_taker(
                     terminal_mid,
                 )
                 last_gross, last_net = marked["gross_pnl"], marked["net_pnl"]
+            if on_terminal_book is not None and latest_state is not None:
+                on_terminal_book(
+                    latest_owned if latest_owned is not None else latest_state
+                )
+                latest_owned = None
         except BaseException as error:
             clear_exception_frames(error)
             raise
@@ -1213,9 +1296,14 @@ def simulate_taker(
         "created_orders": created_orders,
         "filled_orders": filled_orders,
         "cancelled_orders": cancelled_orders,
-        "zero_fill_orders": created_orders - filled_orders,
+        "zero_fill_orders": created_orders - filled_orders - censored_zero_fill,
+        "censored_active_order_count": censored_count,
+        "censored_pending_command_count": censored_pending,
+        "censored_order_quantity": censored_quantity,
+        "observation_termination": "TRUNCATED" if truncated else "PLANNED_END",
         "unfilled_quantity": unfilled_quantity,
         "equity_rows": equity_rows,
+        "no_eligible_decisions": equity_rows == 0,
         "gross_pnl": last_gross,
         "net_pnl": last_net,
         "max_abs_position": max_abs_position,
@@ -1372,6 +1460,78 @@ def _maker_new_order(order_id, side, quantity, state, row, config):
     )
 
 
+@contextmanager
+def _calibration_event_replays(source, policy):
+    """Decode a sample's native path once; replay bounded economic hypotheses."""
+    with reserved_temporary_file(resource_policy=policy) as (spool, reservation):
+        maximum = 0
+        with closing_iterator(source):
+            for event in source:
+                bound = (
+                    4096
+                    + 128
+                    * (
+                        len(getattr(event, "bids", ()))
+                        + len(getattr(event, "asks", ()))
+                    )
+                    + 8
+                    * sum(
+                        len(value)
+                        for value in vars(event).values()
+                        if isinstance(value, str)
+                    )
+                )
+                with policy.lease("crypto.calibration.event_encode", bound):
+                    payload = (
+                        json.dumps(
+                            vars(event), separators=(",", ":"), allow_nan=False
+                        ).encode()
+                        + b"\n"
+                    )
+                    reservation.resize(spool.tell() + len(payload))
+                    spool.write(payload)
+                    maximum = max(maximum, len(payload))
+                    payload = None
+            event = None
+
+        def replay():
+            spool.seek(0)
+            active = None
+            try:
+                while True:
+                    lease = policy.lease(
+                        "crypto.calibration.event_decode",
+                        json_record_working_set_bytes(maximum),
+                    )
+                    try:
+                        payload = spool.readline(maximum + 1)
+                        if not payload:
+                            return
+                        lease.shrink_to(json_record_working_set_bytes(len(payload)))
+                        event = SimpleNamespace(**parse_qrp_json_object(payload))
+                        payload = None
+                        if event.kind == "book":
+                            previous = active
+                            active = OwnedValue(event, lease)
+                            lease = None
+                            try:
+                                yield event
+                            finally:
+                                if previous is not None:
+                                    previous.release(owner="crypto.calibration.event")
+                        else:
+                            yield event
+                        event = None
+                    finally:
+                        if lease is not None:
+                            lease.close()
+            finally:
+                if active is not None:
+                    active.release(owner="crypto.calibration.event")
+
+        yield replay
+
+
 class MakerCalibration:
     """Stream shared validation samples and replay only their event windows."""
 
@@ -1399,6 +1559,7 @@ class MakerCalibration:
         commands,
         lifetime_ns,
         replace_quantity,
+        events,
     ):
         side = new_order.side
         start = int(sample["decision_at"])
@@ -1459,9 +1620,7 @@ class MakerCalibration:
                 for tick, quantity in state.asks
             ),
         )
-        with closing_iterator(
-            self.events(int(sample["event_start"]), int(sample["event_end"]))
-        ) as events:
+        with closing_iterator(events) as events:
             try:
                 event = next(events, None)
                 while event is not None or pending:
@@ -1578,56 +1737,65 @@ class MakerCalibration:
                         sample_count += 1
                         error = sample["forecast_error"]
                         funded = [0.0] * len(funding)
-                        for replacement in (None, limit):
-                            cumulative = 0.0
-                            with closing_iterator(
-                                self._response(
-                                    sample,
-                                    state=state,
-                                    decision_ns=decision_ns,
-                                    new_order=new_order,
-                                    active_order=active_order,
-                                    commands=commands,
-                                    lifetime_ns=lifetime_ns,
-                                    replace_quantity=replacement,
-                                )
-                            ) as response:
-                                for elapsed, quantity, price, is_new in response:
-                                    if is_new:
-                                        cumulative += quantity
-                                        if 0.0 <= cumulative <= limit:
-                                            payload = struct.pack(">d", cumulative)
-                                            yield "choices", payload, payload
-                                        for index, (stamp, _cash) in enumerate(funding):
-                                            if elapsed < stamp:
-                                                funded[index] = max(
-                                                    funded[index], cumulative
-                                                )
-                                    else:
-                                        gain = quantity * (
-                                            sign * (forecast - price)
-                                            - price * fee_bps / 10000.0
-                                            + sign * mid * error
-                                        )
-                                        gain += (
-                                            quantity
-                                            * sign
-                                            * sum(
-                                                cash
-                                                for stamp, cash in funding
-                                                if elapsed < stamp
-                                            )
-                                        )
-                                        if replacement is None:
-                                            keep_gain += gain
+                        with _calibration_event_replays(
+                            self.events(
+                                int(sample["event_start"]), int(sample["event_end"])
+                            ),
+                            self.policy,
+                        ) as replay_events:
+                            for replacement in (None, limit):
+                                cumulative = 0.0
+                                with closing_iterator(
+                                    self._response(
+                                        sample,
+                                        state=state,
+                                        decision_ns=decision_ns,
+                                        new_order=new_order,
+                                        active_order=active_order,
+                                        commands=commands,
+                                        lifetime_ns=lifetime_ns,
+                                        replace_quantity=replacement,
+                                        events=replay_events(),
+                                    )
+                                ) as response:
+                                    for elapsed, quantity, price, is_new in response:
+                                        if is_new:
+                                            cumulative += quantity
+                                            if 0.0 <= cumulative <= limit:
+                                                payload = struct.pack(">d", cumulative)
+                                                yield "choices", payload, payload
+                                            for index, (stamp, _cash) in enumerate(
+                                                funding
+                                            ):
+                                                if elapsed < stamp:
+                                                    funded[index] = max(
+                                                        funded[index], cumulative
+                                                    )
                                         else:
-                                            cancel_gain += gain
-                            if replacement is not None:
-                                yield (
-                                    "response",
-                                    struct.pack(">dQ", cumulative, sample_id),
-                                    struct.pack(">dd", cumulative, error),
-                                )
+                                            gain = quantity * (
+                                                sign * (forecast - price)
+                                                - price * fee_bps / 10000.0
+                                                + sign * mid * error
+                                            )
+                                            gain += (
+                                                quantity
+                                                * sign
+                                                * sum(
+                                                    cash
+                                                    for stamp, cash in funding
+                                                    if elapsed < stamp
+                                                )
+                                            )
+                                            if replacement is None:
+                                                keep_gain += gain
+                                            else:
+                                                cancel_gain += gain
+                                if replacement is not None:
+                                    yield (
+                                        "response",
+                                        struct.pack(">dQ", cumulative, sample_id),
+                                        struct.pack(">dd", cumulative, error),
+                                    )
                         for index, quantity in enumerate(funded):
                             yield (
                                 f"funding_{index}",
@@ -2029,11 +2197,24 @@ def simulate_maker(
     funding_forecasts=(),
     calibrations=None,
     decision_windows_ns=None,
+    observation_window_ns=None,
+    on_terminal_book=None,
     on_ledger=None,
     on_fill=None,
     on_equity=None,
 ):
     """Freeze passive quotes at decisions; replay delayed replacements and expiry."""
+    observation_start = (
+        None if observation_window_ns is None else observation_window_ns[0]
+    )
+    observation_stop = (
+        None if observation_window_ns is None else observation_window_ns[1]
+    )
+    truncated = observation_stop is not None and (
+        decision_windows_ns is None or observation_stop <= decision_windows_ns[-1][1]
+    )
+    censored_count = censored_pending = censored_zero_fill = 0
+    censored_quantity = 0.0
     events = iter(_market_events(book_events, trades))
     decisions = iter(_checked_quote_schedule(quote_schedule))
     forecasts = iter(funding_forecasts)
@@ -2054,11 +2235,20 @@ def simulate_maker(
     filled_lifetime_count = filled_lifetime_sum_ns = 0
     decision_time_ns = last_event_time_ns = 0
     window_index = 0
+    if observation_start is not None and decision_windows_ns is not None:
+        while (
+            window_index < len(decision_windows_ns)
+            and decision_windows_ns[window_index][1] < observation_start
+        ):
+            window_index += 1
     window_open = False
     next_day = (
         None
         if decision_windows_ns is None
-        else ((decision_windows_ns[0][0] + _UTC_DAY_NS - 1) // _UTC_DAY_NS)
+        else (
+            (max(decision_windows_ns[0][0], observation_start or 0) + _UTC_DAY_NS - 1)
+            // _UTC_DAY_NS
+        )
         * _UTC_DAY_NS
     )
 
@@ -2182,7 +2372,7 @@ def simulate_maker(
                     previous_owned.release(owner="crypto.execution.book")
             if (
                 decision_windows_ns is None
-                or decision_windows_ns[0][0]
+                or max(decision_windows_ns[0][0], observation_start or 0)
                 <= state.observed_time_ns
                 <= decision_windows_ns[-1][1]
             ) and _covered(observed_coverage, state.segment_id, state.observed_time_ns):
@@ -2344,6 +2534,10 @@ def simulate_maker(
             if closing:
                 cancel_all(timestamp)
             mark = observed_mark(timestamp)
+            if mark is None and observation_window_ns is not None and not closing:
+                raise PortfolioTargetBlocked(
+                    "portfolio_episode_initial_valuation_missing"
+                )
             if mark is None and economics.quantity != 0:
                 raise PortfolioTargetBlocked(
                     "portfolio_window_boundary_valuation_missing"
@@ -2381,8 +2575,29 @@ def simulate_maker(
             )
 
         try:
+            if observation_start is not None and (
+                decision_windows_ns is None
+                or observation_start < decision_windows_ns[window_index][0]
+            ):
+                process_until(observation_start)
+                mark = observed_mark(observation_start)
+                if mark is None:
+                    raise PortfolioTargetBlocked(
+                        "portfolio_episode_initial_valuation_missing"
+                    )
+                economics.mark(observation_start, mark)
             for row in decisions:
                 decision_time_ns = row["timestamp_ms"] * _NANOSECONDS_PER_MILLISECOND
+                if (
+                    observation_start is not None
+                    and decision_time_ns < observation_start
+                ):
+                    continue
+                if (
+                    observation_stop is not None
+                    and decision_time_ns >= observation_stop
+                ):
+                    break
                 if decision_windows_ns is not None:
                     while (
                         window_index < len(decision_windows_ns)
@@ -2390,7 +2605,11 @@ def simulate_maker(
                     ):
                         if not window_open:
                             boundary(
-                                decision_windows_ns[window_index][0], closing=False
+                                max(
+                                    decision_windows_ns[window_index][0],
+                                    observation_start or 0,
+                                ),
+                                closing=False,
                             )
                         boundary(decision_windows_ns[window_index][1], closing=True)
                         window_index += 1
@@ -2401,7 +2620,13 @@ def simulate_maker(
                     ):
                         raise ValueError("hft_decision_outside_oos_window")
                     if not window_open:
-                        boundary(decision_windows_ns[window_index][0], closing=False)
+                        boundary(
+                            max(
+                                decision_windows_ns[window_index][0],
+                                observation_start or 0,
+                            ),
+                            closing=False,
+                        )
                         window_open = True
                 process_until(decision_time_ns)
                 while next_forecast is not None:
@@ -2638,11 +2863,34 @@ def simulate_maker(
                 equity_rows += 1
             if decision_windows_ns is not None:
                 while window_index < len(decision_windows_ns):
+                    begin, end = decision_windows_ns[window_index]
+                    if observation_stop is not None and begin >= observation_stop:
+                        break
                     if not window_open:
-                        boundary(decision_windows_ns[window_index][0], closing=False)
-                    boundary(decision_windows_ns[window_index][1], closing=True)
+                        boundary(max(begin, observation_start or 0), closing=False)
+                    if observation_stop is not None and end >= observation_stop:
+                        break
+                    boundary(end, closing=True)
                     window_index += 1
                     window_open = False
+            if truncated:
+                process_until(observation_stop - 1)
+                censored_orders = (
+                    *active.values(),
+                    *(order for _time, _side, order in commands if order is not None),
+                )
+                censored_count = len(censored_orders)
+                censored_pending = sum(
+                    order is not None for _time, _side, order in commands
+                )
+                censored_zero_fill = sum(
+                    not order.had_fill for order in censored_orders
+                )
+                censored_quantity = sum(order.remaining for order in censored_orders)
+                end_timestamp = max(
+                    economics.last_timestamp, last_event_time_ns, observation_start or 0
+                )
+            elif decision_windows_ns is not None:
                 end_timestamp = decision_windows_ns[-1][1]
             else:
                 while next_event is not None or commands:
@@ -2656,7 +2904,7 @@ def simulate_maker(
                 for order in active.values():
                     finish_order(order, order.valid_until_ns, cancelled=True)
                 active.clear()
-            pending.expire_all()
+            pending.expire_all(reason="observation_truncated" if truncated else None)
             terminal_mid = observed_mark(end_timestamp)
             marked = (
                 None
@@ -2665,6 +2913,11 @@ def simulate_maker(
             )
             last_gross = None if marked is None else marked["gross_pnl"]
             last_net = None if marked is None else marked["net_pnl"]
+            if on_terminal_book is not None and latest_state is not None:
+                on_terminal_book(
+                    latest_owned if latest_owned is not None else latest_state
+                )
+                latest_owned = None
         except BaseException as error:
             clear_exception_frames(error)
             raise
@@ -2676,11 +2929,16 @@ def simulate_maker(
         "created_orders": created_orders,
         "filled_orders": filled_orders,
         "cancelled_orders": cancelled_orders,
-        "zero_fill_orders": created_orders - filled_orders,
+        "zero_fill_orders": created_orders - filled_orders - censored_zero_fill,
+        "censored_active_order_count": censored_count,
+        "censored_pending_command_count": censored_pending,
+        "censored_order_quantity": censored_quantity,
+        "observation_termination": "TRUNCATED" if truncated else "PLANNED_END",
         "partial_fill_events": partial_fill_events,
         "trade_through_fill_events": trade_through_fill_events,
         "post_only_rejections": post_only_rejections,
         "equity_rows": equity_rows,
+        "no_eligible_decisions": equity_rows == 0,
         "gross_pnl": last_gross,
         "net_pnl": last_net,
         "max_abs_position": max_abs_position,

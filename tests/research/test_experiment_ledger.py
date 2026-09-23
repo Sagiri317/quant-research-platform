@@ -21,6 +21,7 @@ from quant_research_platform.storage.experiments import (
 
 def _plan() -> ExperimentPlan:
     return ExperimentPlan(
+        stage="selection",
         experiment_id="unified-smoke-1",
         market_id=MarketId("a_share"),
         research_dataset_id="a-share-smoke",
@@ -78,7 +79,7 @@ def _record(
         backend_versions={"statsmodels": "0.15.0"},
         thread_settings={"native_threads": 1},
         status=status,
-        validation_metrics={"rankic": None},
+        metrics={"rankic": None},
         development_test_metrics={},
         undefined_reasons={"rankic": "insufficient_observations"},
         cost_assumptions={"commission_bps": 2.0},
@@ -200,6 +201,10 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
     from quant_research_platform.research.experiments import TrialRecorder
     from quant_research_platform.research.models import trial_selection
     from quant_research_platform.research.models.supervised import preflight_model_specs
+    from quant_research_platform.research.models.trial_selection import (
+        ModelSampleCoverage,
+        model_validation_coverage_scope,
+    )
     from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.research_specs import make_demo_research_dataset_spec
@@ -260,6 +265,10 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
         model_selection_validation_end="2020-01-02",
     )
     layout = StorageLayout(tmp_path)
+    coverage = ModelSampleCoverage(
+        model_validation_coverage_scope(plan.data_snapshot_id, plan.folds[0], specs)
+    )
+    coverage.add(frame.loc[frame.timestamp == "2020-01-02", ["timestamp", "asset_id"]])
 
     def select(run_id: str):
         recorder = TrialRecorder(layout, run_id, plan)
@@ -271,6 +280,7 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
                     model_catalog=ModelCatalog(specs),
                     chunks=lambda columns, **_kwargs: (frame.loc[:, list(columns)],),
                     trial_recorder=recorder,
+                    validation_coverage=coverage,
                 )
             finally:
                 assert policy.used_memory_bytes == 0
@@ -279,8 +289,8 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
     (_, _metadata), first = select("run_first")
     records = read_trial_ledger(first.root)
     assert [record.status for record in records] == ["completed", "completed"]
-    assert all(record.validation_metrics["validation_rows"] == 3 for record in records)
-    assert all(record.validation_metrics["n_train"] == 3 for record in records)
+    assert all(record.metrics["validation_rows"] == 3 for record in records)
+    assert all(record.metrics["n_train"] == 3 for record in records)
     assert all(
         record.normalized_parameters == plan.candidate_parameters[record.candidate_id]
         for record in records
@@ -383,7 +393,7 @@ def test_model_trial_read_validates_metrics_without_restricting_generic_experime
             _record(
                 plan, event_id=f"event_{index}", attempt_index=1, status="completed"
             ),
-            validation_metrics=bad,
+            metrics=bad,
         )
         root = layout.trial_ledger_root(record.run_id, plan.experiment_id)
         append_trial_record(root, plan, record)
@@ -416,24 +426,50 @@ def test_started_trial_survives_without_finish_and_terminal_is_identity_bound(tm
         append_trial_record(root, plan, terminal)
 
 
-def test_production_begin_survives_hard_exit(tmp_path):
+@pytest.mark.parametrize("stage", ("selection", "refit"))
+def test_production_begin_survives_hard_exit(tmp_path, stage):
+    import json
     import os
     import subprocess
     import sys
+    from dataclasses import replace
 
+    from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
     from quant_research_platform.storage.layout import StorageLayout
 
-    code = """import os, sys
+    spec = ModelSpec(
+        model_id="ridge",
+        model_algorithm="ridge_regression",
+        input_feature_columns=("feature",),
+        label_column="label",
+        random_seed=7,
+        hyperparameters={"alpha": 1.0},
+    )
+    plan = replace(_plan(), candidate_parameters={"ridge": model_spec_payload(spec)})
+    if stage == "refit":
+        plan = replace(
+            plan,
+            stage="refit",
+            selection_metric=None,
+            selection_direction=None,
+            tie_break_order=(),
+            trial_budget=1,
+            folds=plan.folds[:1],
+            candidate_ids=("ridge",),
+            selection_ledger_semantic_identity="b" * 64,
+        )
+    code = """import os, sys, json
 from pathlib import Path
-from tests.research.test_experiment_ledger import _plan
+from quant_research_platform.contracts.experiments import ExperimentPlan
 from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.storage.layout import StorageLayout
-recorder = TrialRecorder(StorageLayout(Path(sys.argv[1])), 'run_test', _plan())
+plan = ExperimentPlan.from_payload(json.loads(sys.argv[2]))
+recorder = TrialRecorder(StorageLayout(Path(sys.argv[1])), 'run_test', plan)
 recorder.begin(ModelSpec(
     model_id='ridge', model_algorithm='ridge_regression',
     input_feature_columns=('feature',), label_column='label', random_seed=7,
-    hyperparameters={'alpha': 1.0}))
+    hyperparameters={'alpha': 1.0}), common_coverage_id='a' * 64)
 os._exit(17)
 """
     environment = os.environ.copy()
@@ -442,15 +478,21 @@ os._exit(17)
         (str(repository), str(repository / "src"))
     )
     child = subprocess.run(
-        [sys.executable, "-c", code, str(tmp_path)],
+        [
+            sys.executable,
+            "-c",
+            code,
+            str(tmp_path),
+            json.dumps(plan.protocol_payload()),
+        ],
         env=environment,
         capture_output=True,
         timeout=30,
     )
     assert child.returncode == 17
     records = read_trial_ledger(
-        StorageLayout(tmp_path).trial_ledger_root("run_test", _plan().experiment_id),
-        _plan(),
+        StorageLayout(tmp_path).trial_ledger_root("run_test", plan.experiment_id),
+        plan,
     )
     assert len(records) == 1 and records[0].status == "attempted"
 
@@ -495,7 +537,7 @@ def test_run_ledger_references_have_no_arbitrary_member_limit(tmp_path):
         "normalized_parameters",
         "backend_versions",
         "thread_settings",
-        "validation_metrics",
+        "metrics",
         "development_test_metrics",
         "undefined_reasons",
         "cost_assumptions",

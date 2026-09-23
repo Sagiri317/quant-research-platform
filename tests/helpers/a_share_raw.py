@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 
 import numpy as np
@@ -13,7 +14,6 @@ import pandas as pd
 from quant_research_platform.markets.implementations.a_share.benchmark import (
     FORMAL_BENCHMARKS,
 )
-from quant_research_platform.research.protocols.a_share import protocol
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
@@ -36,14 +36,16 @@ def _write_csmar(root, data_id, rows, *, extra_columns=()):
         writer.writerows(rows)
 
 
-def write_a_share_raw_fixture(layout: StorageLayout) -> None:
+def write_a_share_raw_fixture(
+    layout: StorageLayout, *, benchmark_total_return_indices: Mapping[str, str]
+) -> None:
     """Keep real source, processed, dataset, model, and portfolio bindings intact."""
     with runtime_resource_policy_scope() as policy:
         with policy.lease("tests.a_share.raw_fixture", 64 * 1024**2):
-            _write_raw(layout, policy)
+            _write_raw(layout, policy, benchmark_total_return_indices)
 
 
-def _write_raw(layout, policy):
+def _write_raw(layout, policy, benchmark_total_return_indices):
     raw_root = layout.raw_source_root("csmar").parent
     root = Path(raw_root) / "csmar"
     root.mkdir(parents=True)
@@ -195,13 +197,13 @@ def _write_raw(layout, policy):
             for code, stamp in (("AB", "2011-01-04"), ("BA", "2011-01-06"))
         ),
     )
-    total_return_codes = protocol("pv_all").manifest()["benchmark_total_return_indices"]
+    total_return_codes = benchmark_total_return_indices
     info = []
     for code, (benchmark, name) in FORMAL_BENCHMARKS.items():
-        for source_code, label in (
-            (code, name),
-            (total_return_codes[benchmark], f"{name}全收益"),
-        ):
+        sources = [(code, name)]
+        if benchmark in total_return_codes:
+            sources.append((total_return_codes[benchmark], f"{name}全收益"))
+        for source_code, label in sources:
             info.append(
                 {
                     "Indexcd": source_code,

@@ -357,15 +357,16 @@ def test_native_scope_rejects_unapproved_requests(
 
 
 def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
+    from quant_research_platform.sources.binance.replay import native_trade_identities
     from quant_research_platform.sources.tardis.raw import _ObservedStreams
 
     with (
         runtime_resource_policy_scope(
             capture_test_policy(available_memory_bytes=64 * 1024**2)
         ) as policy,
-        policy.lease("test.trade_identities", 0) as trade_lease,
+        native_trade_identities(policy) as observe_trade,
     ):
-        tracker = _ObservedStreams(exchange="binance", trade_lease=trade_lease)
+        tracker = _ObservedStreams(exchange="binance", observe_trade=observe_trade)
 
         def depth(last, first=None):
             return {
@@ -397,5 +398,4 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
         with pytest.raises(ValueError, match="sequence_non_monotonic"):
             tracker.observe(0, 9, "2026-07-01T00:00:09Z", trade)
 
-        tracker.trade_fingerprints.clear()
     assert policy.used_memory_bytes == 0

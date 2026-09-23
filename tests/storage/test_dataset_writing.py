@@ -306,7 +306,7 @@ def test_writer_reserves_complete_fixed_owner_before_sqlite_or_input(
 
     monkeypatch.setattr(dataset_inventory.sqlite3, "connect", reject_connect)
     policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
+        available_memory_bytes=4 * 1024**2,
         explicit_cap_bytes=(
             dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
             + dataset_inventory._DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
@@ -328,7 +328,7 @@ def test_private_writer_admits_producer_bound_before_data_pull(
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
+        explicit_cap_bytes=2 * 1024 * 1024,
     )
     pulls = 0
 

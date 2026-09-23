@@ -408,9 +408,73 @@ def _timestamp(value: int) -> dt.datetime:
     return dt.datetime(1970, 1, 1) + dt.timedelta(milliseconds=value)
 
 
-def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]:
+def iter_factor_frames(
+    frames: Iterable[pd.DataFrame], *, columns: Iterable[str] | None = None
+) -> Iterator[pd.DataFrame]:
     """Derive HFT factors from bounded persisted PANEL frames."""
 
+    selected = set(HFT_FACTOR_COLUMNS if columns is None else columns)
+    if not selected <= set(HFT_FACTOR_COLUMNS):
+        raise ValueError("hft_factor_columns_invalid")
+    needed = set(selected)
+    dependencies = {
+        "microprice": {"microprice_deviation"},
+        "microprice_deviation": {"imbalance_1"},
+        "imbalance_1_minus_10": {"imbalance_1", "imbalance_10"},
+        "imbalance_5_minus_10": {"imbalance_5", "imbalance_10"},
+    }
+    for name in (
+        "microprice",
+        "microprice_deviation",
+        "imbalance_1_minus_10",
+        "imbalance_5_minus_10",
+    ):
+        if name in needed:
+            needed.update(dependencies[name])
+    flow_columns = {
+        name
+        for name in needed
+        if name.startswith(("trade_flow_imbalance_", "depth_normalized_ofi_"))
+        or name
+        in {
+            "ofi_500ms",
+            "ofi_1s",
+            "ofi_5s",
+            "taker_sell_pressure_500ms",
+            "taker_buy_pressure_500ms",
+        }
+    }
+    if flow_columns:
+        needed.update(
+            {
+                "ofi_100ms",
+                "signed_trade_flow_100ms",
+                "taker_buy_volume_100ms",
+                "taker_sell_volume_100ms",
+            }
+        )
+    flow_windows = tuple(
+        (count, suffix)
+        for count, suffix in ((1, "100ms"), (5, "500ms"), (10, "1s"), (50, "5s"))
+        if flow_columns
+        & (
+            {
+                f"trade_flow_imbalance_{suffix}",
+                f"ofi_{suffix}",
+                f"depth_normalized_ofi_{suffix}",
+            }
+            | (
+                {"taker_sell_pressure_500ms", "taker_buy_pressure_500ms"}
+                if count == 5
+                else set()
+            )
+        )
+    )
+    depth_levels = {level for level in (1, 5, 10) if f"imbalance_{level}" in needed}
+    if flow_columns or "near_depth_share_1_10" in needed:
+        depth_levels.add(1)
+    if needed & {"near_depth_share_1_10", "top10_depth_per_spread"}:
+        depth_levels.add(10)
     active_segment: str | None = None
     previous_time: int | None = None
     previous_mid: float | None = None
@@ -453,7 +517,7 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
                     "hft_factor_depth_invalid",
                 ),
             )
-            for levels in (1, 5, 10)
+            for levels in depth_levels
         }
         returns = np.full(len(frame), np.nan, dtype="float64")
         same_segment = ~boundaries
@@ -464,7 +528,11 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
             returns[0] = mid[0] / previous_mid - 1.0
         volatility = np.full(len(frame), np.nan, dtype="float64")
         return_500ms = np.full(len(frame), np.nan, dtype="float64")
-        for index, value in enumerate(returns):
+        for index, value in (
+            enumerate(returns)
+            if needed & {"return_500ms", "realized_volatility_1s"}
+            else ()
+        ):
             if boundaries[index]:
                 return_tail.clear()
                 mid_tail.clear()
@@ -473,12 +541,18 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
                 return_500ms[index] = mid[index] / mid_tail[0] - 1
             if math.isfinite(value):
                 return_tail.append(float(value))
-            if len(return_tail) >= 2:
+            else:
+                return_tail.clear()
+            if "realized_volatility_1s" in needed and len(return_tail) == 10:
                 volatility[index] = stdev(return_tail)
         output = _identity_frame(frame)
-        output["spread"] = spread
-        output["relative_spread"] = spread / mid
-        for levels in (1, 5, 10):
+        if "spread" in needed:
+            output["spread"] = spread
+        if "relative_spread" in needed:
+            output["relative_spread"] = spread / mid
+        for levels in (
+            level for level in depth_levels if f"imbalance_{level}" in needed
+        ):
             bid_depth, ask_depth = depth[levels]
             imbalance = np.full(len(frame), np.nan, dtype="float64")
             for index, (bid_value, ask_value) in enumerate(
@@ -491,41 +565,50 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
                     # Round once; proportional float depths must stay constant.
                     imbalance[index] = float((bid - ask) / total)
             output[f"imbalance_{levels}"] = imbalance
-        microprice_deviation = 0.5 * spread * output["imbalance_1"].to_numpy()
-        output["microprice"] = mid + microprice_deviation
-        output["microprice_deviation"] = microprice_deviation
-        output["ofi_100ms"] = _finite_column(
-            frame, "book_ofi_100ms", "hft_factor_ofi_invalid"
-        )
-        output["signed_trade_flow_100ms"] = _finite_column(
-            frame,
-            "observed_signed_trade_volume_100ms",
-            "hft_factor_trade_flow_invalid",
-        )
-        output["taker_buy_volume_100ms"] = _finite_column(
-            frame,
-            "observed_taker_buy_volume_100ms",
-            "hft_factor_trade_flow_invalid",
-        )
-        output["taker_sell_volume_100ms"] = _finite_column(
-            frame,
-            "observed_taker_sell_volume_100ms",
-            "hft_factor_trade_flow_invalid",
-        )
-        output["return_100ms"] = returns
-        output["return_500ms"] = return_500ms
-        output["realized_volatility_1s"] = volatility
-        output["top10_depth_per_spread"] = (depth[10][0] + depth[10][1]) / spread
+        if "microprice_deviation" in needed:
+            microprice_deviation = 0.5 * spread * output["imbalance_1"].to_numpy()
+            output["microprice"] = mid + microprice_deviation
+            output["microprice_deviation"] = microprice_deviation
+        for name, source_name, error in (
+            ("ofi_100ms", "book_ofi_100ms", "hft_factor_ofi_invalid"),
+            (
+                "signed_trade_flow_100ms",
+                "observed_signed_trade_volume_100ms",
+                "hft_factor_trade_flow_invalid",
+            ),
+            (
+                "taker_buy_volume_100ms",
+                "observed_taker_buy_volume_100ms",
+                "hft_factor_trade_flow_invalid",
+            ),
+            (
+                "taker_sell_volume_100ms",
+                "observed_taker_sell_volume_100ms",
+                "hft_factor_trade_flow_invalid",
+            ),
+        ):
+            if name in needed:
+                output[name] = _finite_column(frame, source_name, error)
+        for name, values in (
+            ("return_100ms", returns),
+            ("return_500ms", return_500ms),
+            ("realized_volatility_1s", volatility),
+        ):
+            if name in needed:
+                output[name] = values
+        if "top10_depth_per_spread" in needed:
+            output["top10_depth_per_spread"] = (depth[10][0] + depth[10][1]) / spread
         expanded = {
             column: np.full(len(frame), np.nan)
-            for column in HFT_FACTOR_COLUMNS
+            for column in needed
             if column not in output
         }
-        ofi = output["ofi_100ms"].to_numpy()
-        signed = output["signed_trade_flow_100ms"].to_numpy()
-        buys = output["taker_buy_volume_100ms"].to_numpy()
-        sells = output["taker_sell_volume_100ms"].to_numpy()
-        for index in range(len(frame)):
+        if flow_columns:
+            ofi = output["ofi_100ms"].to_numpy()
+            signed = output["signed_trade_flow_100ms"].to_numpy()
+            buys = output["taker_buy_volume_100ms"].to_numpy()
+            sells = output["taker_sell_volume_100ms"].to_numpy()
+        for index in range(len(frame)) if flow_columns else ():
             if boundaries[index]:
                 flow_tail.clear()
             bid, ask = depth[1][0][index], depth[1][1][index]
@@ -533,43 +616,50 @@ def iter_factor_frames(frames: Iterable[pd.DataFrame]) -> Iterator[pd.DataFrame]
                 (signed[index], buys[index], sells[index], ofi[index], bid + ask)
             )
             history = list(flow_tail)
-            for count, suffix in ((1, "100ms"), (5, "500ms"), (10, "1s"), (50, "5s")):
+            for count, suffix in flow_windows:
                 if len(flow_tail) < count:
                     continue
                 window = history[-count:]
                 volume = math.fsum(row[1] + row[2] for row in window)
-                if volume > 0:
+                if volume > 0 and f"trade_flow_imbalance_{suffix}" in needed:
                     expanded[f"trade_flow_imbalance_{suffix}"][index] = (
                         math.fsum(row[0] for row in window) / volume
                     )
                 if count > 1:
                     total_ofi = math.fsum(row[3] for row in window)
-                    expanded[f"ofi_{suffix}"][index] = total_ofi
+                    if f"ofi_{suffix}" in needed:
+                        expanded[f"ofi_{suffix}"][index] = total_ofi
                     average_depth = math.fsum(row[4] / count for row in window)
-                    if average_depth > 0:
+                    if average_depth > 0 and f"depth_normalized_ofi_{suffix}" in needed:
                         expanded[f"depth_normalized_ofi_{suffix}"][index] = (
                             total_ofi / average_depth
                         )
                 if count == 5:
-                    if bid > 0:
+                    if bid > 0 and "taker_sell_pressure_500ms" in needed:
                         expanded["taker_sell_pressure_500ms"][index] = (
                             math.fsum(row[2] for row in window) / bid
                         )
-                    if ask > 0:
+                    if ask > 0 and "taker_buy_pressure_500ms" in needed:
                         expanded["taker_buy_pressure_500ms"][index] = (
                             math.fsum(row[1] for row in window) / ask
                         )
-            total10 = depth[10][0][index] + depth[10][1][index]
-            if total10 > 0:
-                expanded["near_depth_share_1_10"][index] = (bid + ask) / total10
-        expanded["imbalance_1_minus_10"] = (
-            output["imbalance_1"] - output["imbalance_10"]
-        )
-        expanded["imbalance_5_minus_10"] = (
-            output["imbalance_5"] - output["imbalance_10"]
-        )
+        if "near_depth_share_1_10" in needed:
+            total10 = depth[10][0] + depth[10][1]
+            positive = total10 > 0
+            expanded["near_depth_share_1_10"][positive] = (
+                depth[1][0][positive] + depth[1][1][positive]
+            ) / total10[positive]
+        for level in (1, 5):
+            if f"imbalance_{level}_minus_10" in needed:
+                expanded[f"imbalance_{level}_minus_10"] = (
+                    output[f"imbalance_{level}"] - output["imbalance_10"]
+                )
         output = output.assign(**expanded)
-        yield output
+        yield output.loc[
+            :,
+            [name for name in output if name not in HFT_FACTOR_COLUMNS]
+            + [name for name in HFT_FACTOR_COLUMNS if name in selected],
+        ]
         active_segment = str(segments[-1])
         previous_time = int(timestamps[-1])
         previous_mid = float(mid[-1])
@@ -740,7 +830,18 @@ def _microstructure_context_rows(frames):
     """Reuse the microstructure owner; retain only rows needed for causal context."""
     with closing_iterator(iter(frames)) as source:
         panels, inputs = tee(frame for frame in source if not frame.empty)
-        with closing_iterator(iter_factor_frames(inputs)) as factors:
+        with closing_iterator(
+            iter_factor_frames(
+                inputs,
+                columns=(
+                    "return_100ms",
+                    "ofi_500ms",
+                    "depth_normalized_ofi_500ms",
+                    "trade_flow_imbalance_500ms",
+                    "return_500ms",
+                ),
+            )
+        ) as factors:
             for panel, calculated in zip(panels, factors, strict=True):
                 times = (
                     pd.to_datetime(panel["timestamp"])

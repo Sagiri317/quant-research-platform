@@ -268,6 +268,8 @@ def construct_ttm_events(
     for (_asset_id, metric_id), positions in result.groupby(
         ["asset_id", "metric_id"], sort=False
     ).groups.items():
+        if metric_id not in FLOW_METRIC_IDS:
+            continue
         group = result.loc[positions].sort_values(
             ["available_at", "report_period", "version_identity"],
             kind="mergesort",
@@ -280,8 +282,6 @@ def construct_ttm_events(
                 cutoff=pd.Timestamp(row["available_at"]),
                 value_column=value_column,
             )
-        if metric_id not in FLOW_METRIC_IDS:
-            continue
         for period in sorted(
             pd.Timestamp(value) for value in group["report_period"].drop_duplicates()
         ):

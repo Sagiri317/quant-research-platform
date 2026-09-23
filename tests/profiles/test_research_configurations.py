@@ -64,6 +64,8 @@ def test_factor_only_selection_has_no_model_or_financial_dependency():
         "forward_returns",
     )
     assert selected.models.list() == ()
+    assert dataset.feature_columns == ()
+    assert dataset.feature_transforms == ()
     protocol = selected.protocol("pv_expanded")
     assert protocol.terminal_targets("research run") == ("pv_expanded_evaluation",)
     config["evaluation"]["factors"].append("beta_252d")
@@ -91,7 +93,11 @@ def test_model_input_and_evaluation_selection_are_independent():
     assert selected.research_datasets.get("pv_expanded").factor_columns == (
         "share_price",
         "turnover_250d",
+        "log_float_market_cap",
     )
+    dataset = selected.research_datasets.get("pv_expanded")
+    assert dataset.feature_transforms[0].source_columns == ("turnover_250d",)
+    assert "feature_log_float_market_cap" not in dataset.feature_columns
     assert selected.protocol("pv_expanded").portfolio_candidates() == ()
     assert selected.protocol("pv_expanded").model_ids_for_target(
         "pv_expanded_model_selection_refit"
@@ -597,9 +603,12 @@ def test_crypto_named_selections_drive_ledger_statistics_and_asset_calibration(
         protocol.terminal_targets("research run"),
     )
     targets = {item.target_id: item for item in graph}
-    assert calibration in targets[candidates[1].target_id].dependencies
-    statistics = targets[config["scenario_id"] + "_portfolio_statistics"]
-    assert statistics.dependencies == tuple(item.target_id for item in candidates)
+    descriptors = protocol.execution_targets()
+    assert calibration in targets[descriptors[1].target_id].dependencies
+    for descriptor in descriptors:
+        assert targets[descriptor.statistics_target_id].dependencies == (
+            descriptor.target_id,
+        )
     assert not any("latency_30" in key for key in targets)
     config["portfolios"][0]["asset_id"] = "sol_usdt"
     with pytest.raises(ValueError, match="portfolio_configuration_invalid"):
@@ -628,10 +637,6 @@ def test_maker_model_roles_follow_configuration_and_validate_units():
     )
     (candidate,) = profile.protocol(config["scenario_id"]).portfolio_candidates()
     assert candidate.model_ids == ("my_price", "my_pressure")
-    assert crypto_hft.maker_model_ids(config["portfolios"]) == {
-        "my_price",
-        "my_pressure",
-    }
     assert (
         profile.producer_bindings[candidate.calibration_target_id].producer.keywords[
             "model_ids"
@@ -810,3 +815,139 @@ def test_rebinding_drops_previous_auxiliary_context(tmp_path):
             rebound.protocol(baseline["scenario_id"]).manifest()
             == fresh.protocol(baseline["scenario_id"]).manifest()
         )
+
+
+@pytest.mark.parametrize("enhanced", [False, True])
+def test_benchmark_manifest_follows_candidates_instead_of_scenario(enhanced):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration(name="core6")
+    if enhanced:
+        config["scenario_id"] = "pv_expanded"
+        config["portfolios"] = [
+            item
+            for item in config["portfolios"]
+            if item["construction"] == "benchmark_enhanced"
+        ]
+    else:
+        config["portfolios"] = []
+    selected = bind_research_configuration(research_profile(), config)
+    protocol = selected.protocol(config["scenario_id"])
+    expected = {"csi500": "H00905", "csi1000": "H00852"} if enhanced else {}
+    assert protocol.manifest()["benchmark_total_return_indices"] == expected
+    targets = protocol.target_specs("research run")
+    assert (
+        any("benchmark_weights" in target.dependencies for target in targets)
+        == enhanced
+    )
+
+
+def test_crypto_modes_share_models_and_isolate_execution_targets():
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "baseline")
+    profile = research_profile("crypto_binance_hft")
+    base = bind_research_configuration(profile, config).protocol(config["scenario_id"])
+    changed = copy.deepcopy(config)
+    changed["research_plan"]["execution"]["backtest_modes"] = [
+        "independent_segments",
+        "continuous",
+    ]
+    changed["research_plan"]["execution"]["taker_fee_bps"] += 1
+    altered = bind_research_configuration(profile, changed).protocol(
+        config["scenario_id"]
+    )
+    model_id = config["scenario_id"] + "_models"
+    assert base.target_manifest(model_id, "MODEL") == altered.target_manifest(
+        model_id, "MODEL"
+    )
+    targets = altered.execution_targets()
+    assert len(targets) == 2 * len(base.execution_targets())
+    assert [item.execution_mode for item in targets[:2]] == [
+        "continuous",
+        "independent_segments",
+    ]
+    specs = {
+        target.target_id: target for target in altered.target_specs("research run")
+    }
+    for target in targets:
+        assert specs[target.statistics_target_id].dependencies == (target.target_id,)
+    taker = next(
+        item
+        for item in targets
+        if isinstance(item.candidate, crypto_hft.CryptoTakerCandidate)
+        and item.execution_mode == "continuous"
+    )
+    assert canonical_json_hash(
+        base.target_manifest(taker.target_id, "PORTFOLIO")
+    ) != canonical_json_hash(altered.target_manifest(taker.target_id, "PORTFOLIO"))
+    changed["models"][0]["input_factor_columns"] = ["ofi_500ms"]
+    input_changed = bind_research_configuration(profile, changed).protocol(
+        config["scenario_id"]
+    )
+    assert input_changed.target_manifest(model_id, "MODEL") != altered.target_manifest(
+        model_id, "MODEL"
+    )
+
+
+def test_crypto_factor_evaluation_manifest_ignores_model_configuration():
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "baseline")
+    profile = research_profile("crypto_binance_hft")
+    base = bind_research_configuration(profile, config).protocol(config["scenario_id"])
+    changed = copy.deepcopy(config)
+    changed["models"][0]["model_algorithm"] = "linear_regression"
+    changed["models"][0]["hyperparameters"] = {}
+    altered = bind_research_configuration(profile, changed).protocol(
+        config["scenario_id"]
+    )
+
+    factor_evaluation = f"{config['scenario_id']}_evaluation"
+    changed_evaluation = f"{config['models'][0]['model_id']}_oos_evaluation"
+    targets = {item.target_id: item for item in base.target_specs("research run")}
+    assert targets[factor_evaluation].dependencies == (config["scenario_id"],)
+    assert base.target_manifest(factor_evaluation, "EVALUATION") == (
+        altered.target_manifest(factor_evaluation, "EVALUATION")
+    )
+    assert base.target_manifest(changed_evaluation, "EVALUATION") != (
+        altered.target_manifest(changed_evaluation, "EVALUATION")
+    )
+
+
+@pytest.mark.parametrize(
+    "modes", [[], ["continuous", "continuous"], ["unknown"], "continuous"]
+)
+def test_crypto_mode_configuration_rejects_invalid_values(modes):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "baseline")
+    config["research_plan"]["execution"]["backtest_modes"] = modes
+    with pytest.raises(
+        ValueError, match="crypto_(backtest_modes|execution_scenarios)_invalid"
+    ):
+        bind_research_configuration(research_profile("crypto_binance_hft"), config)
+
+
+@pytest.mark.parametrize("inventory,valid", [(0.5, True), (1.1, False)])
+def test_crypto_maker_inventory_uses_candidate_asset_limit(inventory, valid):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "baseline")
+    candidate = next(
+        item
+        for item in config["portfolios"]
+        if item["candidate_id"] == "crypto_hft_maker_baseline"
+    )
+    candidate["asset_id"] = "eth_usdt"
+    config["portfolios"] = [candidate]
+    config["research_plan"]["execution"]["maker"]["inventory_target"] = inventory
+    profile = research_profile("crypto_binance_hft")
+    if valid:
+        bound = bind_research_configuration(profile, config)
+        protocol = bound.protocol(config["scenario_id"])
+        assert protocol.execution_targets()[0].candidate.asset_id == "eth_usdt"
+    else:
+        with pytest.raises(ValueError, match="crypto_maker_inventory_target_invalid"):
+            bind_research_configuration(profile, config)

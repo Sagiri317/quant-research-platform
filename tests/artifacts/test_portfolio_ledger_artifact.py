@@ -978,8 +978,15 @@ def test_portfolio_ledger_trust_boundary_mutations_fail_closed(
         )
 
 
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    (
+        ("manifest", "dataset_metadata_file_identity_changed"),
+        ("member", "semantic_artifact_member_integrity_invalid"),
+    ),
+)
 def test_portfolio_ledger_rechecks_outer_manifest_and_member_set_each_iteration(
-    tmp_path: Path,
+    tmp_path: Path, mutation: str, error: str
 ) -> None:
     frame = _session(
         "2019-01-01",
@@ -997,11 +1004,16 @@ def test_portfolio_ledger_rechecks_outer_manifest_and_member_set_each_iteration(
         ledger_chunks=(frame,),
     )
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    manifest_path = root / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["members"].append({"path": "extra.parquet", "size": 0, "sha256": "0" * 64})
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
+    if mutation == "manifest":
+        manifest_path = root / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["members"].append(
+            {"path": "extra.parquet", "size": 0, "sha256": "0" * 64}
+        )
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    else:
+        (root / "extra.parquet").write_bytes(b"extra")
+    with pytest.raises(ValueError, match=f"^{error}$"):
         next(artifact.iter_chunks())
 
 
@@ -1174,7 +1186,9 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
         if failure == "identity":
             copied = tmp_path / "copy" / root.name
             shutil.copytree(root, copied)
-            artifact = replace(artifact, root=copied)
+            artifact = read_portfolio_ledger_artifact(
+                copied, expected_identity=copied.name
+            )
         closed_indexes = []
         close_index = ledger_artifact.ExactPrimaryKeyIndex.close
 
@@ -1631,3 +1645,48 @@ def test_tiny_adjusted_notional_trade_cannot_reverse_target_direction(tmp_path):
     assert not (
         tmp_path / "wrong_direction" / "instances" / envelope.instance_identity
     ).exists()
+
+
+@pytest.mark.parametrize("entry", ("read", "iterate"))
+def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, entry):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    frame = _session(
+        "2019-01-01",
+        "2019-01-02",
+        pre_asset=0.0,
+        target_asset=100.0,
+        post_asset=100.0,
+        pre_cash=100.0,
+        target_cash=0.0,
+        post_cash=0.0,
+    )
+    root = write_test_sessions(
+        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
+    )
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    native = ledger_artifact.read_semantic_artifact_record
+
+    def replace_after_verification(*args, **kwargs):
+        result = native(*args, **kwargs)
+        member = root / "valuations.parquet"
+        table = pq.read_table(member)
+        rows = table.to_pylist()
+        for row in rows:
+            if row["phase"] == "end" and row["asset_id"] == "asset":
+                row["value"] = 120.0
+                row["mark_price"] = 1.2
+        replacement = tmp_path / "replacement.parquet"
+        pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), replacement)
+        replacement.replace(member)
+        return result
+
+    monkeypatch.setattr(
+        ledger_artifact, "read_semantic_artifact_record", replace_after_verification
+    )
+    with pytest.raises(ValueError, match="identity_changed"):
+        if entry == "read":
+            read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        else:
+            tuple(artifact.iter_chunks())

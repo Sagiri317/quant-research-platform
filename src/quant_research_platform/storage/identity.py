@@ -6,9 +6,12 @@ import hashlib
 import os
 import re
 import stat
-from collections.abc import Iterable
+import sys
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from quant_research_platform.policy.lifecycle import closing_iterator
 
@@ -151,6 +154,40 @@ def content_hash_for_files(
         raise ValueError(error) from exc
 
 
+@contextmanager
+def verified_file_handle(
+    path: Path,
+    handle: BinaryIO,
+    *,
+    expected_identity: DatasetFileIdentity,
+    error: str = "dataset_file_identity_changed",
+) -> Iterator[BinaryIO]:
+    """Borrow one handle, binding its bytes to the captured published identity."""
+
+    def verify() -> None:
+        if (
+            dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+            != expected_identity
+            or dataset_file_identity(path) != expected_identity
+        ):
+            raise ValueError(error)
+
+    verify()
+    try:
+        yield handle
+    finally:
+        primary = sys.exception()
+        try:
+            verify()
+        except BaseException as verification_error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "file identity verification also failed: "
+                f"{type(verification_error).__name__}"
+            )
+
+
 def _hash_file_content(
     path: Path,
     expected: DatasetFileIdentity,
@@ -164,20 +201,15 @@ def _hash_file_content(
     with closing_iterator(
         open(native_filesystem_path(path), "rb", buffering=0)
     ) as handle:
-        handle_identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-        if handle_identity != expected:
-            raise ValueError(error)
-        while True:
-            chunk = handle.read(chunk_size)
-            if not chunk:
-                break
-            digest.update(chunk)
-            del chunk
-        final_handle_identity = dataset_file_identity_from_stat(
-            os.fstat(handle.fileno())
-        )
-    if final_handle_identity != expected or dataset_file_identity(path) != expected:
-        raise ValueError(error)
+        with verified_file_handle(
+            path, handle, expected_identity=expected, error=error
+        ):
+            while True:
+                chunk = handle.read(chunk_size)
+                if not chunk:
+                    break
+                digest.update(chunk)
+                del chunk
     return digest.hexdigest()
 
 

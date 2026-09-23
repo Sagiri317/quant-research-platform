@@ -6,27 +6,6 @@ from quant_research_platform.contracts.data import DataGrain
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.ids import MarketId
 
-FUNDAMENTAL_FACTORS = (
-    "earnings_yield",
-    "book_to_market",
-    "sales_to_price",
-    "cashflow_to_price",
-    "roe",
-    "roa",
-    "gross_profitability",
-    "gross_margin",
-    "cfo_to_assets",
-    "accruals",
-    "asset_growth_yoy",
-    "revenue_growth_ttm_yoy",
-    "earnings_change_to_assets",
-    "parent_equity_growth_yoy",
-    "capex_to_assets",
-    "liabilities_to_assets",
-    "debt_to_assets",
-    "cash_to_assets",
-    "net_debt_to_assets",
-)
 CORE_FUNDAMENTAL_FACTORS = (
     "earnings_yield",
     "book_to_market",
@@ -35,28 +14,85 @@ CORE_FUNDAMENTAL_FACTORS = (
     "asset_growth_yoy",
     "net_debt_to_assets",
 )
-FUNDAMENTAL_INPUT_COLUMNS = (
-    "total_assets",
-    "total_liabilities",
-    "parent_equity",
-    "cash",
-    "short_term_borrowings",
-    "current_portion_noncurrent_liabilities",
-    "long_term_borrowings",
-    "bonds_payable",
-    "operating_revenue_ttm",
-    "operating_cost_ttm",
-    "consolidated_net_income_ttm",
-    "parent_net_income_ttm",
-    "operating_cash_flow_ttm",
-    "capex_cash_paid_ttm",
-    "total_market_cap",
-    "average_total_assets",
-    "average_parent_equity",
-    "prior_year_total_assets",
-    "prior_year_parent_equity",
-    "prior_year_parent_net_income_ttm",
-    "prior_year_operating_revenue_ttm",
+# Signed numerator terms, positive denominator, final growth adjustment.
+FUNDAMENTAL_FORMULAS = {
+    "earnings_yield": (("parent_net_income_ttm",), "total_market_cap", 0),
+    "book_to_market": (("parent_equity",), "total_market_cap", 0),
+    "sales_to_price": (("operating_revenue_ttm",), "total_market_cap", 0),
+    "cashflow_to_price": (("operating_cash_flow_ttm",), "total_market_cap", 0),
+    "roe": (("parent_net_income_ttm",), "average_parent_equity", 0),
+    "roa": (("consolidated_net_income_ttm",), "average_total_assets", 0),
+    "gross_profitability": (
+        ("operating_revenue_ttm", "-operating_cost_ttm"),
+        "average_total_assets",
+        0,
+    ),
+    "gross_margin": (
+        ("operating_revenue_ttm", "-operating_cost_ttm"),
+        "operating_revenue_ttm",
+        0,
+    ),
+    "cfo_to_assets": (("operating_cash_flow_ttm",), "average_total_assets", 0),
+    "accruals": (
+        ("consolidated_net_income_ttm", "-operating_cash_flow_ttm"),
+        "average_total_assets",
+        0,
+    ),
+    "asset_growth_yoy": (("total_assets",), "prior_year_total_assets", -1),
+    "revenue_growth_ttm_yoy": (
+        ("operating_revenue_ttm",),
+        "prior_year_operating_revenue_ttm",
+        -1,
+    ),
+    "earnings_change_to_assets": (
+        ("parent_net_income_ttm", "-prior_year_parent_net_income_ttm"),
+        "average_total_assets",
+        0,
+    ),
+    "parent_equity_growth_yoy": (("parent_equity",), "prior_year_parent_equity", -1),
+    "capex_to_assets": (("capex_cash_paid_ttm",), "average_total_assets", 0),
+    "liabilities_to_assets": (("total_liabilities",), "total_assets", 0),
+    "debt_to_assets": (
+        (
+            "short_term_borrowings",
+            "current_portion_noncurrent_liabilities",
+            "long_term_borrowings",
+            "bonds_payable",
+        ),
+        "total_assets",
+        0,
+    ),
+    "cash_to_assets": (("cash",), "total_assets", 0),
+    "net_debt_to_assets": (
+        (
+            "short_term_borrowings",
+            "current_portion_noncurrent_liabilities",
+            "long_term_borrowings",
+            "bonds_payable",
+            "-cash",
+        ),
+        "total_assets",
+        0,
+    ),
+}
+
+
+FUNDAMENTAL_FACTORS = tuple(FUNDAMENTAL_FORMULAS)
+
+
+def fundamental_inputs(factor: str) -> tuple[str, ...]:
+    terms, denominator, _ = FUNDAMENTAL_FORMULAS[factor]
+    return tuple(
+        dict.fromkeys((*[term.removeprefix("-") for term in terms], denominator))
+    )
+
+
+FUNDAMENTAL_INPUT_COLUMNS = tuple(
+    dict.fromkeys(
+        column
+        for factor in FUNDAMENTAL_FACTORS
+        for column in fundamental_inputs(factor)
+    )
 )
 
 
@@ -73,8 +109,8 @@ def fundamental_factor_definitions(
             factor_set=FactorSet.CORE
             if factor in CORE_FUNDAMENTAL_FACTORS
             else factor_set,
-            input_columns=FUNDAMENTAL_INPUT_COLUMNS,
-            base_input_columns=FUNDAMENTAL_INPUT_COLUMNS,
+            input_columns=fundamental_inputs(factor),
+            base_input_columns=fundamental_inputs(factor),
             derived_input_columns=(),
             output_column=factor,
             display_name=factor,

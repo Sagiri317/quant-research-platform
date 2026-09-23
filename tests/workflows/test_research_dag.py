@@ -323,11 +323,14 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         for window in model_read_windows
     )
     assert {
-        window
+        (pd.Timestamp(window.start), pd.Timestamp(window.end))
         for window in model_read_windows
         if pd.Timestamp(window.start) > pd.Timestamp("2014-01-01")
     } == {
-        TimeWindow(item["validation_start"], item["validation_end"])
+        (
+            pd.Timestamp(item["validation_start"]),
+            pd.Timestamp(item["validation_end"]),
+        )
         for item in artifact.quarterly_selections.values()
     }
     assert all(
@@ -447,7 +450,9 @@ def test_model_failure_blocks_real_semantic_descendant(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    base = research_profile()
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    base = bind_research_configuration(research_profile(), research_configuration())
     layout = StorageLayout(project_root=tmp_path)
     dataset_spec = make_demo_research_dataset_spec(
         data_id="pv_all",
@@ -750,15 +755,12 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
     crypto_specs = {
         spec.target_id: spec for spec in crypto.target_specs("research run")
     }
-    ledger_ids = tuple(
-        candidate.target_id for candidate in crypto.portfolio_candidates()
-    )
+    execution_targets = crypto.execution_targets()
+    ledger_ids = tuple(target.target_id for target in execution_targets)
     assert len(ledger_ids) == 14
-    assert (
-        crypto_specs[
-            "binance_futures_hft_research_100ms_portfolio_statistics"
-        ].dependencies
-        == ledger_ids
+    assert all(
+        crypto_specs[target.statistics_target_id].dependencies == (target.target_id,)
+        for target in execution_targets
     )
     assert all(
         crypto_profile.producer_bindings[target].kind is ProducerKind.PORTFOLIO
@@ -2104,6 +2106,9 @@ def _crypto_plan_payload():
         "final_holdout": {"start": "1970-01-01T00:00:07", "end": "1970-01-01T00:00:08"},
         "initial_capital": 1000.0,
         "valuation_currency": "USDT",
+        "execution": research_configuration("crypto", "baseline")["research_plan"][
+            "execution"
+        ],
         "exposure_limits": {
             asset: {"max_order_quantity": 1.0, "max_position_quantity": 2.0}
             for asset in ("btc_usdt", "eth_usdt")

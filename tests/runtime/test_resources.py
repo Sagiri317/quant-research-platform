@@ -56,7 +56,7 @@ def test_owned_value_release_clears_value_and_lease() -> None:
 def test_soft_target_is_not_an_exact_hard_cap_but_explicit_cap_is() -> None:
     soft = capture_test_policy(available_memory_bytes=1_000_000)
     with runtime_resource_policy_scope(soft):
-        assert soft.operation_headroom_bytes == soft.memory_budget_bytes
+        assert soft.operation_headroom_bytes == soft.captured_available_memory_bytes
         lease = soft.lease("test.soft.target", soft.memory_budget_bytes + 1)
         assert soft.used_memory_bytes == 700_001
         assert soft.planning_headroom_bytes == 0
@@ -71,7 +71,7 @@ def test_soft_target_is_not_an_exact_hard_cap_but_explicit_cap_is() -> None:
     )
     with runtime_resource_policy_scope(high_cap):
         assert high_cap.memory_budget_bytes == 700
-        assert high_cap.operation_headroom_bytes == 700
+        assert high_cap.operation_headroom_bytes == 900
         lease = high_cap.lease("test.high.cap", 701)
         assert high_cap.planning_headroom_bytes == 0
         assert high_cap.operation_headroom_bytes == 199

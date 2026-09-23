@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 import struct
 import sys
@@ -90,94 +89,46 @@ def _compare_datasets_under_policy(
             return _comparison("MISSING_RIGHT")
         issued_policy = resource_policy
         with ExitStack() as retained:
-            with open_dataset_session(
-                left_path,
-                columns=columns,
-                time_window=time_window,
-                resource_policy=issued_policy,
-            ) as left_context:
-                left_owned = _fingerprint_dataset_session_owned(
-                    left_context,
+            left_context = retained.enter_context(
+                open_dataset_session(
+                    left_path,
+                    columns=columns,
+                    time_window=time_window,
                     resource_policy=issued_policy,
                 )
-                left = left_owned.value
-
-                def release_left() -> None:
-                    nonlocal left
-                    left = None
-                    left_owned.release(
-                        owner="storage.dataset.comparison.left.fingerprint"
-                    )
-
-                retained.callback(release_left)
-                left_identity_lease = issued_policy.lease(
-                    "storage.dataset.comparison.left.identity",
-                    hashlib.sha256().digest_size,
-                )
-                left_identity = b""
-                try:
-                    left_identity = _session_identity_token(left_context)
-                except BaseException:
-                    left_identity = b""
-                    _close_lease_preserving_primary(
-                        left_identity_lease,
-                        owner="storage.dataset.comparison.left.identity",
-                    )
-                    raise
-
-                def release_left_identity() -> None:
-                    nonlocal left_identity
-                    left_identity = b""
-                    _close_lease_preserving_primary(
-                        left_identity_lease,
-                        owner="storage.dataset.comparison.left.identity",
-                    )
-
-                retained.callback(release_left_identity)
-            with open_dataset_session(
-                right_path,
-                columns=columns,
-                time_window=time_window,
-                resource_policy=issued_policy,
-            ) as right_context:
-                right_owned = _fingerprint_dataset_session_owned(
-                    right_context,
+            )
+            right_context = retained.enter_context(
+                open_dataset_session(
+                    right_path,
+                    columns=columns,
+                    time_window=time_window,
                     resource_policy=issued_policy,
                 )
-                right = right_owned.value
+            )
+            left_owned = _fingerprint_dataset_session_owned(
+                left_context, resource_policy=issued_policy
+            )
+            left = left_owned.value
 
-                def release_right() -> None:
-                    nonlocal right
-                    right = None
-                    right_owned.release(
-                        owner="storage.dataset.comparison.right.fingerprint"
-                    )
+            def release_left() -> None:
+                nonlocal left
+                left = None
+                left_owned.release(owner="storage.dataset.comparison.left.fingerprint")
 
-                retained.callback(release_right)
-                right_identity_lease = issued_policy.lease(
-                    "storage.dataset.comparison.right.identity",
-                    hashlib.sha256().digest_size,
+            retained.callback(release_left)
+            right_owned = _fingerprint_dataset_session_owned(
+                right_context, resource_policy=issued_policy
+            )
+            right = right_owned.value
+
+            def release_right() -> None:
+                nonlocal right
+                right = None
+                right_owned.release(
+                    owner="storage.dataset.comparison.right.fingerprint"
                 )
-                right_identity = b""
-                try:
-                    right_identity = _session_identity_token(right_context)
-                except BaseException:
-                    right_identity = b""
-                    _close_lease_preserving_primary(
-                        right_identity_lease,
-                        owner="storage.dataset.comparison.right.identity",
-                    )
-                    raise
 
-                def release_right_identity() -> None:
-                    nonlocal right_identity
-                    right_identity = b""
-                    _close_lease_preserving_primary(
-                        right_identity_lease,
-                        owner="storage.dataset.comparison.right.identity",
-                    )
-
-                retained.callback(release_right_identity)
+            retained.callback(release_right)
             comparison_result_lease = issued_policy.lease(
                 "storage.dataset.comparison.result",
                 _comparison_result_bound(left, right),
@@ -242,14 +193,10 @@ def _compare_datasets_under_policy(
             else:
                 try:
                     exact = _exact_comparison_counts(
-                        left_path,
-                        right_path,
-                        columns=columns,
-                        time_window=time_window,
+                        left_context,
+                        right_context,
                         resource_policy=issued_policy,
                         primary_key=left.key_columns,
-                        left_identity=left_identity,
-                        right_identity=right_identity,
                     )
                 except (MemoryError, OSError, ValueError, sqlite3.Error):
                     return _comparison(
@@ -258,8 +205,8 @@ def _compare_datasets_under_policy(
                     )
                 summary["exact"] = exact
                 status = "CONTENT_MISMATCH" if any(exact.values()) else "MATCH"
-            assert summary is not None
-            assert layout_delta is not None
+            left_context.verify()
+            right_context.verify()
             return _comparison(status, summary=summary, layout_delta=layout_delta)
     except (MemoryError, OSError, ValueError, sqlite3.Error):
         return _comparison(
@@ -279,53 +226,23 @@ def _comparison_result_bound(left: Any, right: Any) -> int:
 
 
 def _exact_comparison_counts(
-    left_root: Path,
-    right_root: Path,
+    left: DatasetSession,
+    right: DatasetSession,
     *,
-    columns: tuple[str, ...] | list[str] | None,
-    time_window: TimeWindow | None,
     resource_policy: RuntimeResourcePolicy,
     primary_key: tuple[str, ...],
-    left_identity: bytes,
-    right_identity: bytes,
 ) -> dict[str, int]:
     with resource_policy.lease(
-        "storage.dataset.comparison.index",
-        EXACT_KEY_SQLITE_CACHE_BYTES,
+        "storage.dataset.comparison.index", EXACT_KEY_SQLITE_CACHE_BYTES
     ):
-        with ExactPrimaryKeyIndex(
-            primary_key=primary_key,
-        ) as index:
-            _index_dataset_rows(
-                left_root,
-                columns=columns,
-                time_window=time_window,
-                resource_policy=resource_policy,
-                index=index,
-                namespace="left",
-                expected_identity=left_identity,
-            )
-            _index_dataset_rows(
-                right_root,
-                columns=columns,
-                time_window=time_window,
-                resource_policy=resource_policy,
-                index=index,
-                namespace="right",
-                expected_identity=right_identity,
-            )
-            for root, expected_identity in (
-                (left_root, left_identity),
-                (right_root, right_identity),
-            ):
-                with open_dataset_session(
-                    root,
-                    columns=columns,
-                    time_window=time_window,
+        with ExactPrimaryKeyIndex(primary_key=primary_key) as index:
+            for context, namespace in ((left, "left"), (right, "right")):
+                _index_dataset_rows(
+                    context,
                     resource_policy=resource_policy,
-                ) as context:
-                    if _session_identity_token(context) != expected_identity:
-                        raise ValueError("dataset_identity_changed_during_comparison")
+                    index=index,
+                    namespace=namespace,
+                )
             missing, extra, changed = index.comparison_counts(
                 expected_namespace="left",
                 actual_namespace="right",
@@ -338,93 +255,49 @@ def _exact_comparison_counts(
 
 
 def _index_dataset_rows(
-    root: Path,
+    context: DatasetSession,
     *,
-    columns: tuple[str, ...] | list[str] | None,
-    time_window: TimeWindow | None,
     resource_policy: RuntimeResourcePolicy,
     index: ExactPrimaryKeyIndex,
     namespace: str,
-    expected_identity: bytes,
 ) -> None:
-    with open_dataset_session(
-        root,
-        columns=columns,
-        time_window=time_window,
-        resource_policy=resource_policy,
-    ) as context:
-        if _session_identity_token(context) != expected_identity:
-            raise ValueError("dataset_identity_changed_during_comparison")
-        value_columns = tuple(
-            column
-            for column in context.logical_columns
-            if column not in index.primary_key
-        )
-        comparison_columns = (*index.primary_key, *value_columns)
-        headroom = resource_policy.operation_headroom_bytes
-        if headroom <= 0:
+    value_columns = tuple(
+        column for column in context.logical_columns if column not in index.primary_key
+    )
+    comparison_columns = (*index.primary_key, *value_columns)
+    headroom = resource_policy.operation_headroom_bytes
+    if headroom <= 0:
+        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+    exact_payload_target = headroom
+    reader_headroom = headroom
+    duplicates = 0
+
+    def index_batch(batch: pa.RecordBatch, _frame: Any) -> None:
+        nonlocal duplicates
+        callback_headroom = resource_policy.operation_headroom_bytes
+        callback_target = min(exact_payload_target, callback_headroom)
+        if callback_target <= 0:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        exact_payload_target = headroom
-        reader_headroom = headroom
-        duplicates = 0
+        duplicates += index.add_comparison_table(
+            pa.Table.from_batches([batch]),
+            namespace=namespace,
+            value_columns=value_columns,
+            payload_target_bytes=callback_target,
+        )
 
-        def index_batch(batch: pa.RecordBatch, _frame: Any) -> None:
-            nonlocal duplicates
-            callback_headroom = resource_policy.operation_headroom_bytes
-            callback_target = min(exact_payload_target, callback_headroom)
-            if callback_target <= 0:
-                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-            with resource_policy.lease(
-                "storage.dataset.comparison.payload",
-                callback_target,
-            ):
-                duplicates += index.add_comparison_table(
-                    pa.Table.from_batches([batch]),
-                    namespace=namespace,
-                    value_columns=value_columns,
-                    payload_target_bytes=callback_target,
-                )
-
-        for _path, _frame in iter_dataset_file_batches(
-            context,
-            columns=comparison_columns,
-            target_chunk_bytes=max(
-                1,
-                min(resource_policy.operation_headroom_bytes, reader_headroom),
-            ),
-            operation_headroom_bytes=reader_headroom,
-            batch_observer=index_batch,
-        ):
-            pass
-        if duplicates:
-            raise ValueError("dataset_primary_key_duplicate")
-        if _session_identity_token(context) != expected_identity:
-            raise ValueError("dataset_identity_changed_during_comparison")
-
-
-def _session_identity_token(context: DatasetSession) -> bytes:
-    digest = hashlib.sha256()
-
-    def update(value: bytes) -> None:
-        digest.update(len(value).to_bytes(8, "big"))
-        digest.update(value)
-
-    update(context.spec_bytes)
-    update(context.spec_identity_bytes)
-    update(context.manifest_bytes)
-    update(context.manifest_identity_bytes)
-    for path in context.all_paths:
-        metadata = context.metadata_for(path)
-        identity = metadata.identity
-        update(path.relative_to(context.data_root).as_posix().encode("utf-8"))
-        for value in (
-            identity.device,
-            identity.inode,
-            identity.size,
-            identity.modified_ns,
-        ):
-            update(str(value).encode("ascii"))
-    return digest.digest()
+    for _path, _frame in iter_dataset_file_batches(
+        context,
+        columns=comparison_columns,
+        target_chunk_bytes=max(
+            1,
+            min(resource_policy.planning_headroom_bytes, reader_headroom),
+        ),
+        operation_headroom_bytes=reader_headroom,
+        batch_observer=index_batch,
+    ):
+        pass
+    if duplicates:
+        raise ValueError("dataset_primary_key_duplicate")
 
 
 def _comparison(

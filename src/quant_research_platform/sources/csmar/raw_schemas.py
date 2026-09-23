@@ -102,17 +102,13 @@ def parse_raw_filename(path: str | Path) -> RawFileMetadata:
 
 
 def infer_dataset_from_native_export(path: str | Path) -> str:
-    """Infer the dataset from a native CSMAR table file name or parent path."""
+    """Infer the dataset only from an explicit native CSMAR table file name."""
 
     export_path = Path(path)
     stem = re.sub(r"\d+$", "", export_path.stem)
     for dataset, contract in _field_mappings.RAW_TABLE_CONTRACTS.items():
         if contract.table_code == stem:
             return dataset
-
-    for part in reversed(export_path.parts):
-        if part in _field_mappings.RAW_TABLE_CONTRACTS:
-            return part
 
     raise ValueError(f"Cannot infer CSMAR dataset from native filename: {export_path}")
 
@@ -1074,6 +1070,13 @@ def _inspect_raw_export_file_under_policy(
             resource_policy=policy,
             expected_identity=export_identity,
         )
+    header_matches = [
+        name
+        for name in _field_mappings.RAW_TABLE_CONTRACTS
+        if not _field_mappings.missing_raw_column_names(columns, name)
+    ]
+    if header_matches and dataset not in header_matches:
+        raise ValueError("csmar_raw_export_table_identity_conflict")
     contract = _field_mappings.RAW_TABLE_CONTRACTS[dataset]
 
     _field_mappings.validate_raw_column_names(columns, dataset)

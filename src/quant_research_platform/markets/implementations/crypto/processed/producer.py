@@ -33,6 +33,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     canonical_crypto_asset_id,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.protocols.crypto_hft import HFT_FACTOR_COLUMNS
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
@@ -99,9 +100,10 @@ def produce_hft_processed_data(
                 _milliseconds(time_window.end),
             )
             stats = {symbol: make_stats() for symbol in symbols}
-            target = resource_policy.operation_headroom_bytes // 2
-            if target <= _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES:
-                raise MemoryError("runtime_memory_budget_exceeded")
+            target = max(
+                _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
+                resource_policy.planning_headroom_bytes // 2,
+            )
             batch_rows = (target - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES
             bound = _FRAME_FIXED_BYTES + batch_rows * _PANEL_ROW_BUFFER_BYTES
             symbol_rows = max(1, batch_rows // len(symbols))
@@ -114,6 +116,7 @@ def produce_hft_processed_data(
                         market_type,
                         symbol=symbol,
                         stats=active,
+                        output_levels=10,
                         end_ns=end_ms * 1_000_000,
                     ),
                     read_trades(
@@ -198,7 +201,16 @@ def produce_hft_processed_data(
                 input_id: dataset_identity_payload(session.spec, session.manifest)
             }
             transform = (
-                iter_factor_frames
+                (
+                    lambda frames: iter_factor_frames(
+                        frames,
+                        columns=tuple(
+                            name
+                            for name in spec.required_columns
+                            if name in HFT_FACTOR_COLUMNS
+                        ),
+                    )
+                )
                 if spec.data_id != HFT_LABEL_DATA_ID
                 else lambda frames: iter_label_frames(
                     frames,
@@ -382,10 +394,11 @@ def _panel_frame_producer(
     resource_policy: RuntimeResourcePolicy,
     asset_ids: tuple[str, ...],
 ) -> Iterator[object]:
-    target_chunk_bytes = max(1, resource_policy.operation_headroom_bytes // 8)
-    producer_bound = resource_policy.operation_headroom_bytes // 2
-    if producer_bound <= _FRAME_FIXED_BYTES:
-        raise MemoryError("runtime_memory_budget_exceeded")
+    target_chunk_bytes = max(1, resource_policy.planning_headroom_bytes // 8)
+    producer_bound = max(
+        _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
+        resource_policy.planning_headroom_bytes // 2,
+    )
 
     def frames() -> Iterator[pd.DataFrame]:
         for asset in asset_ids:
@@ -539,10 +552,11 @@ def produce_spot_perp_context(
                 ),
             },
         }
-        target_bytes = max(1, resource_policy.operation_headroom_bytes // 32)
-        producer_bound = resource_policy.operation_headroom_bytes // 2
-        if producer_bound <= _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES:
-            raise MemoryError("runtime_memory_budget_exceeded")
+        target_bytes = max(1, resource_policy.planning_headroom_bytes // 32)
+        producer_bound = max(
+            _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
+            resource_policy.planning_headroom_bytes // 2,
+        )
         batch_rows = (producer_bound - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES
 
         def frames():
@@ -636,7 +650,10 @@ def produce_information_panel(
             identities[data_id] = dataset_identity_payload(
                 session.spec, session.manifest
             )
-        bound = resource_policy.operation_headroom_bytes // 2
+        bound = max(
+            _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
+            resource_policy.planning_headroom_bytes // 2,
+        )
 
         def frames():
             for session in sessions:
@@ -702,11 +719,12 @@ def produce_cross_asset_context(
                 "execution_assets": ["btc_usdt", "eth_usdt"],
             },
         }
-        bound = resource_policy.operation_headroom_bytes // 2
-        if bound <= _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES:
-            raise MemoryError("runtime_memory_budget_exceeded")
+        bound = max(
+            _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
+            resource_policy.planning_headroom_bytes // 2,
+        )
         batch_rows = (bound - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES
-        chunk_bytes = max(1, resource_policy.operation_headroom_bytes // 64)
+        chunk_bytes = max(1, resource_policy.planning_headroom_bytes // 64)
 
         def asset_chunks(session, asset):
             view = replace(

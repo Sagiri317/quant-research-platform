@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import math
 import os
-import sys
 from collections.abc import Callable, Generator, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
@@ -33,8 +32,8 @@ from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
-    dataset_file_identity_from_stat,
     open_filesystem_file,
+    verified_file_handle,
 )
 
 _DECODED_ROW_BOUNDS_KEY = b"qrp.decoded-row-bounds"
@@ -522,92 +521,37 @@ def _opened_parquet(
     expected_identity: DatasetFileIdentity | None,
 ) -> Iterator[tuple[pq.ParquetFile, DatasetFileIdentity, Any]]:
     resolved = Path(path)
-    path_identity = dataset_file_identity(resolved)
-    if expected_identity is not None and path_identity != expected_identity:
+    identity = dataset_file_identity(resolved)
+    if expected_identity is not None and identity != expected_identity:
         raise ValueError("dataset_file_identity_changed")
-    handle = open_filesystem_file(resolved)
-    try:
-        before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-        if before != path_identity:
-            raise ValueError("dataset_file_identity_changed")
-        footer_length = _parquet_footer_length(handle)
-        with ExitStack() as parquet_stack:
-            policy = current_runtime_resource_policy()
-            if policy is not None:
-                parquet_stack.enter_context(
-                    policy.lease(
-                        "storage.parquet.metadata",
-                        _PARQUET_METADATA_FIXED_WORKSPACE_BYTES + 20 * footer_length,
+    with handle_preserving_primary(open_filesystem_file(resolved)) as handle:
+        with verified_file_handle(resolved, handle, expected_identity=identity):
+            footer_length = _parquet_footer_length(handle)
+            with ExitStack() as resources:
+                policy = current_runtime_resource_policy()
+                if policy is not None:
+                    resources.enter_context(
+                        policy.lease(
+                            "storage.parquet.metadata",
+                            _PARQUET_METADATA_FIXED_WORKSPACE_BYTES
+                            + 20 * footer_length,
+                        )
+                    )
+                    policy.require_working_set(
+                        0, error="dataset_working_set_exceeds_task_memory_budget"
+                    )
+                parquet = resources.enter_context(
+                    handle_preserving_primary(
+                        pq.ParquetFile(
+                            handle,
+                            thrift_string_size_limit=max(1, footer_length),
+                            thrift_container_size_limit=max(1, footer_length),
+                            buffer_size=_PARQUET_READ_BUFFER_BYTES,
+                            pre_buffer=False,
+                        )
                     )
                 )
-                policy.require_working_set(
-                    0, error="dataset_working_set_exceeds_task_memory_budget"
-                )
-            parquet_file = pq.ParquetFile(
-                handle,
-                thrift_string_size_limit=max(1, footer_length),
-                thrift_container_size_limit=max(1, footer_length),
-                buffer_size=_PARQUET_READ_BUFFER_BYTES,
-                pre_buffer=False,
-            )
-            try:
-                yield parquet_file, before, handle
-            finally:
-                primary = sys.exception()
-                if primary is not None:
-                    try:
-                        after = dataset_file_identity_from_stat(
-                            os.fstat(handle.fileno())
-                        )
-                        if after != before:
-                            raise ValueError("dataset_file_identity_changed")
-                    except BaseException as verify_error:
-                        primary.add_note(
-                            "parquet handle verification also failed: "
-                            f"{type(verify_error).__name__}"
-                        )
-                    try:
-                        parquet_file.close()
-                    except BaseException as close_error:
-                        primary.add_note(
-                            "parquet file close also failed: "
-                            f"{type(close_error).__name__}"
-                        )
-                else:
-                    try:
-                        after = dataset_file_identity_from_stat(
-                            os.fstat(handle.fileno())
-                        )
-                    except BaseException as primary:
-                        try:
-                            parquet_file.close()
-                        except BaseException as close_error:
-                            primary.add_note(
-                                "parquet file close also failed: "
-                                f"{type(close_error).__name__}"
-                            )
-                        raise
-                    parquet_file.close()
-                    if after != before:
-                        raise ValueError("dataset_file_identity_changed")
-    finally:
-        primary = sys.exception()
-        if primary is None:
-            first_error: BaseException | None = None
-            try:
-                handle.close()
-            except BaseException as close_error:
-                first_error = close_error
-            if first_error is not None:
-                raise first_error
-
-        else:
-            try:
-                handle.close()
-            except BaseException as close_error:
-                primary.add_note(
-                    f"parquet handle close also failed: {type(close_error).__name__}"
-                )
+                yield parquet, identity, handle
 
 
 def _parquet_footer_length(handle: Any) -> int:
@@ -660,6 +604,11 @@ def _target_batch_rows(
     membership: bool = False,
     membership_max_scalar_bytes: int = 0,
 ) -> int:
+    policy = current_runtime_resource_policy()
+    if policy is not None:
+        target_chunk_bytes = min(
+            target_chunk_bytes, max(1, policy.planning_headroom_bytes)
+        )
     target_rows = max(1, target_chunk_bytes // maximum_row_bytes)
     if operation_headroom_bytes is None:
         return target_rows
@@ -1510,6 +1459,13 @@ def _parquet_table_write_state(
     )
     if minimum_bytes > page_headroom:
         raise MemoryError("runtime_memory_budget_exceeded")
+    page_headroom = min(
+        page_headroom,
+        max(
+            minimum_bytes,
+            policy.planning_headroom_bytes + retained_page_bytes - footer_increment,
+        ),
+    )
     batch_rows = max(1, persisted.num_rows)
     working_bytes = minimum_bytes
     low = 1

@@ -63,7 +63,9 @@ MODEL_SELECTION_METRIC_DIRECTIONS = {
     "validation_rankic": "maximize",
     "validation_mse": "minimize",
 }
-A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID = "qrp-a-share-quarterly-predictor-artifact"
+A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID = (
+    "qrp-a-share-quarterly-predictor-artifact-v2"
+)
 _PARALLEL_MODEL_ALGORITHMS = frozenset(
     algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
 )
@@ -310,10 +312,20 @@ def validate_model_metadata_core(
         "model_selection",
     }
     if quarterly:
-        allowed = (allowed - {"model_selection"}) | {"fit_cutoff", "rank_parameters"}
+        allowed = (allowed - {"model_selection"}) | {
+            "fit_cutoff",
+            "rank_parameters",
+            "fit_coverage_id",
+        }
     if set(metadata).difference(allowed):
         raise ValueError("invalid_model_metadata")
     if quarterly and type(metadata.get("fit_cutoff")) is not str:
+        raise ValueError("invalid_model_metadata")
+    if quarterly and (
+        type(metadata.get("fit_coverage_id")) is not str
+        or len(metadata["fit_coverage_id"]) != 64
+        or any(c not in "0123456789abcdef" for c in metadata["fit_coverage_id"])
+    ):
         raise ValueError("invalid_model_metadata")
     if quarterly and (
         type(metadata.get("random_seed")) is not int or metadata["random_seed"] < 0
@@ -636,11 +648,24 @@ def validate_a_share_model_selection_metadata(value: object) -> None:
         "selected_family_id",
         "selected_model_id",
         "families",
+        "common_validation_coverage",
     }
     if (
         type(value) is not dict
         or set(value) != required
         or value["status"] != "selected"
+    ):
+        raise ValueError("invalid_model_metadata")
+    coverage = value["common_validation_coverage"]
+    if (
+        type(coverage) is not dict
+        or set(coverage) != {"path", "semantic_identity", "row_count"}
+        or type(coverage["path"]) is not str
+        or type(coverage["semantic_identity"]) is not str
+        or len(coverage["semantic_identity"]) != 64
+        or any(c not in "0123456789abcdef" for c in coverage["semantic_identity"])
+        or type(coverage["row_count"]) is not int
+        or coverage["row_count"] < 1
     ):
         raise ValueError("invalid_model_metadata")
     for key in (
@@ -823,4 +848,4 @@ def validate_completed_model_trial_metrics(
     _validate_model_selection_trial_record(trial, require_facts=False)
 
 
-CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID = "qrp-crypto-fold-predictor-artifact"
+CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID = "qrp-crypto-fold-predictor-artifact-v2"

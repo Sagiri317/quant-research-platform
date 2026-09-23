@@ -29,6 +29,9 @@ from quant_research_platform.contracts.time import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.features.transforms import (
+    canonical_feature_validity_columns,
+)
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
 )
@@ -123,13 +126,15 @@ def build_prediction_result_from_frames(
     rank_inputs_allow_missing = facts.input_kind == "rank_ensemble_inputs"
     reject_filter_input_columns(input_columns)
     coordinates = ("quarter_id",) if spec.prediction_mode == "a_share_oos" else ()
-    required = set((*spec.primary_key, *input_columns, *coordinates))
+    validity_columns = canonical_feature_validity_columns(input_columns)
+    required = set((*spec.primary_key, *input_columns, *validity_columns, *coordinates))
     work_columns = tuple(
         dict.fromkeys(
             (
                 *spec.primary_key,
                 *coordinates,
                 *input_columns,
+                *validity_columns,
                 *required_filter_columns(spec.sample_filter_mode),
             )
         )
@@ -336,10 +341,20 @@ def _iter_prediction_output_frames(
                 output = None
                 owned_output: OwnedValue[pd.DataFrame] | None = None
                 try:
+                    validity_inputs = tuple(
+                        dict.fromkeys(
+                            (
+                                *canonical_feature_validity_columns(input_columns),
+                                *(
+                                    input_columns
+                                    if not rank_inputs_allow_missing
+                                    else ()
+                                ),
+                            )
+                        )
+                    )
                     usable_mask = (
-                        pd.Series(True, index=filtered.index, dtype="bool")
-                        if rank_inputs_allow_missing
-                        else filtered.loc[:, list(input_columns)].notna().all(axis=1)
+                        filtered.loc[:, list(validity_inputs)].notna().all(axis=1)
                     )
                     build_state.record_input_dropna_rows(int(usable_mask.sum()))
                     usable_mask &= filtered["timestamp"] >= pd.Timestamp(

@@ -89,7 +89,7 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
             ),
             run_id=f"run_{name}",
             normalized_parameters={"alpha": alpha},
-            validation_metrics={"rankic": metric},
+            metrics={"rankic": metric},
             thread_settings={"native_threads": threads},
         )
         append_trial_record(
@@ -301,10 +301,10 @@ def test_inventory_closes_all_ancestors_without_replacing_primary(
 
     actual_record = storage._member_record
 
-    def record(relative, path):
+    def record(relative, path, **kwargs):
         if relative == "nested/bad.bin":
             raise primary
-        return actual_record(relative, path)
+        return actual_record(relative, path, **kwargs)
 
     monkeypatch.setattr(storage.os, "scandir", Entries)
     monkeypatch.setattr(storage, "_member_record", record)
@@ -599,3 +599,24 @@ def test_member_manifest_rejects_windows_anchored_paths(monkeypatch, value):
         )[0]["path"]
         == "safe/file.json"
     )
+
+
+@pytest.mark.parametrize("member", ("manifest.json", "model.pkl"))
+def test_parent_capture_is_preserved_even_for_same_content_replacement(
+    tmp_path, member
+):
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact_record,
+    )
+
+    root = _write_artifact(tmp_path)
+    identities = {}
+    read_semantic_artifact_record(root, member_identities=identities)
+    assert set(identities) == {"manifest.json", "model.json", "model.pkl"}
+    read_semantic_artifact_record(root, expected_member_identities=identities)
+    path = root / member
+    replacement = tmp_path / "replacement"
+    replacement.write_bytes(path.read_bytes())
+    replacement.replace(path)
+    with pytest.raises(ValueError, match="identity_changed"):
+        read_semantic_artifact_record(root, expected_member_identities=identities)

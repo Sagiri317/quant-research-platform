@@ -1132,6 +1132,9 @@ def test_opened_parquet_close_preserves_generator_exit(
         lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
     monkeypatch.setattr(
+        identity, "dataset_file_identity", physical.dataset_file_identity
+    )
+    monkeypatch.setattr(
         physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
     )
 
@@ -1194,6 +1197,9 @@ def test_opened_parquet_reserves_metadata_for_lifetime_and_scales_with_footer(
             physical,
             "dataset_file_identity",
             lambda _path: identity.dataset_file_identity_from_stat(metadata),
+        )
+        monkeypatch.setattr(
+            identity, "dataset_file_identity", physical.dataset_file_identity
         )
 
         class Parquet:
@@ -1271,6 +1277,9 @@ def test_opened_parquet_rejects_metadata_before_constructor_and_releases_lease(
         physical,
         "dataset_file_identity",
         lambda _path: identity.dataset_file_identity_from_stat(metadata),
+    )
+    monkeypatch.setattr(
+        identity, "dataset_file_identity", physical.dataset_file_identity
     )
 
     def construct(_handle: object, **_kwargs) -> object:
@@ -1399,6 +1408,9 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
         lambda _path: identity.dataset_file_identity_from_stat(metadata),
     )
     monkeypatch.setattr(
+        identity, "dataset_file_identity", physical.dataset_file_identity
+    )
+    monkeypatch.setattr(
         physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
     )
 
@@ -1451,6 +1463,9 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
         physical,
         "dataset_file_identity",
         lambda _path: identity.dataset_file_identity_from_stat(metadata),
+    )
+    monkeypatch.setattr(
+        identity, "dataset_file_identity", physical.dataset_file_identity
     )
     monkeypatch.setattr(
         physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
@@ -2157,3 +2172,120 @@ def test_public_parquet_footer_preserves_system_io(
         getattr(datasets, operation + "_dataset")(root)
     assert caught.value is primary
     assert opened and all(handle.closed for handle in opened)
+
+
+@pytest.mark.parametrize("memory_fs", (False, True))
+def test_scratch_growth_is_charged_only_for_memory_filesystem(
+    tmp_path, monkeypatch, memory_fs
+):
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import _scratch_ownership as scratch
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    monkeypatch.setattr(scratch, "_memory_filesystem", lambda path: memory_fs)
+    policy = capture_test_policy(available_memory_bytes=1024**2)
+    with runtime_resource_policy_scope(policy):
+        with scratch.ScratchReservation(
+            tmp_path, resource_policy=policy
+        ) as reservation:
+            reservation.resize(800_000)
+            assert policy.used_memory_bytes == (800_000 if memory_fs else 0)
+            if memory_fs:
+                with pytest.raises(
+                    ValueError, match="storage_scratch_exceeds_memory_capacity"
+                ):
+                    reservation.resize(2 * 1024**2)
+                assert policy.used_memory_bytes == 800_000
+            reservation.resize(0)
+        assert policy.used_memory_bytes == 0
+
+
+def test_reserved_spool_releases_only_after_actual_close(monkeypatch):
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import _scratch_ownership as scratch
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    monkeypatch.setattr(scratch, "_memory_filesystem", lambda path: True)
+    policy = capture_test_policy(available_memory_bytes=1024**2)
+    primary = RuntimeError("producer failed")
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(RuntimeError) as raised:
+            with scratch.reserved_temporary_file(resource_policy=policy) as (
+                handle,
+                reservation,
+            ):
+                reservation.resize(3)
+                handle.write(b"abc")
+                assert policy.used_memory_bytes == 3
+                raise primary
+        assert raised.value is primary
+        assert handle.closed
+        assert policy.used_memory_bytes == 0
+
+
+def test_spool_close_failure_preserves_primary_and_memory_charge(monkeypatch):
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import _scratch_ownership as scratch
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    class FailedFile:
+        closed = False
+
+        def close(self):
+            raise OSError("close failed")
+
+    monkeypatch.setattr(scratch, "_memory_filesystem", lambda path: True)
+    monkeypatch.setattr(scratch, "TemporaryFile", lambda **kwargs: FailedFile())
+    policy = capture_test_policy(available_memory_bytes=1024**2)
+    primary = RuntimeError("producer failed")
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(RuntimeError) as raised:
+            with scratch.reserved_temporary_file(resource_policy=policy) as (
+                _,
+                reservation,
+            ):
+                reservation.resize(3)
+                raise primary
+        assert raised.value is primary
+        assert policy.used_memory_bytes == 3
+        assert any("OSError" in note for note in primary.__notes__)
+        # Simulate the owner completing cleanup, then release the retained charge.
+        reservation.resize(0)
+        reservation.close()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("phase", ("before", "after", "primary"))
+def test_verified_file_handle_binds_decoder_and_preserves_primary(tmp_path, phase):
+    from quant_research_platform.storage.identity import (
+        dataset_file_identity,
+        verified_file_handle,
+    )
+
+    path = tmp_path / "member.bin"
+    replacement = tmp_path / "replacement.bin"
+    path.write_bytes(b"trusted")
+    replacement.write_bytes(b"changed")
+    expected = dataset_file_identity(path)
+    opened = replacement if phase == "before" else path
+    primary = RuntimeError("decode failed")
+    with opened.open("rb") as handle:
+        if phase == "before":
+            with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+                with verified_file_handle(path, handle, expected_identity=expected):
+                    pytest.fail("unverified handle reached decoder")
+        else:
+            with pytest.raises(
+                RuntimeError if phase == "primary" else ValueError
+            ) as caught:
+                with verified_file_handle(path, handle, expected_identity=expected):
+                    assert handle.read() == b"trusted"
+                    replacement.replace(path)
+                    if phase == "primary":
+                        raise primary
+            if phase == "primary":
+                assert caught.value is primary
+                assert any(
+                    "identity verification" in note for note in primary.__notes__
+                )
+        assert not handle.closed  # The context borrows; this caller owns close.

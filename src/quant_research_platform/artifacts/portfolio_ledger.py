@@ -30,7 +30,10 @@ from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
-from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
     _parquet_frame_reservation,
@@ -85,14 +88,21 @@ class PortfolioLedgerArtifact:
     root: Path
     identity: str
     capital: PortfolioCapital
+    member_identities: Mapping[str, DatasetFileIdentity]
 
     def iter_chunks(self) -> Iterator[PortfolioLedgerBatch]:
+        identities: dict[str, DatasetFileIdentity] = {}
         envelope, _members = read_semantic_artifact_record(
-            self.root, expected_identity=self.identity
+            self.root,
+            expected_identity=self.identity,
+            member_identities=identities,
+            expected_member_identities=self.member_identities,
         )
         if _capital(envelope) != self.capital:
             raise ValueError("portfolio_ledger_capital_invalid")
-        yield from _iter_batches(self.root, self.capital, envelope["research_window"])
+        yield from _iter_batches(
+            self.root, self.capital, envelope["research_window"], identities
+        )
 
 
 def _capital(envelope: Mapping[str, object]) -> PortfolioCapital:
@@ -238,20 +248,27 @@ def read_portfolio_ledger_artifact(
     *,
     expected_identity: str,
     consume_batches: Callable[[Iterator[PortfolioLedgerBatch]], object] | None = None,
+    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
 ) -> PortfolioLedgerArtifact:
     """Validate once, optionally consuming batches during that same full pass."""
+    identities: dict[str, DatasetFileIdentity] = {}
     envelope, members = read_semantic_artifact_record(
-        instance_root, expected_identity=expected_identity
+        instance_root,
+        expected_identity=expected_identity,
+        member_identities=identities,
+        expected_member_identities=expected_member_identities,
     )
     if {member["path"] for member in members} != {
         f"{name}.parquet" for name in _TABLE_TYPES
     }:
         raise ValueError("portfolio_ledger_member_invalid")
     artifact = PortfolioLedgerArtifact(
-        Path(instance_root), expected_identity, _capital(envelope)
+        Path(instance_root), expected_identity, _capital(envelope), identities
     )
     with closing_iterator(
-        _iter_batches(artifact.root, artifact.capital, envelope["research_window"])
+        _iter_batches(
+            artifact.root, artifact.capital, envelope["research_window"], identities
+        )
     ) as batches:
         if consume_batches is not None:
             consume_batches(batch for batch in batches)
@@ -309,8 +326,12 @@ def summarize_portfolio_ledger(artifact: PortfolioLedgerArtifact) -> dict[str, o
     }
 
 
-def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
-    with _opened_parquet(root / f"{name}.parquet", expected_identity=None) as (
+def _table_records(
+    root: Path, name: str, expected_identity: DatasetFileIdentity | None
+) -> Iterator[dict[str, object]]:
+    with _opened_parquet(
+        root / f"{name}.parquet", expected_identity=expected_identity
+    ) as (
         parquet,
         identity,
         _handle,
@@ -349,7 +370,10 @@ def _table_records(root: Path, name: str) -> Iterator[dict[str, object]]:
 
 
 def _iter_batches(
-    root: Path, capital: PortfolioCapital, research_window: Mapping[str, object]
+    root: Path,
+    capital: PortfolioCapital,
+    research_window: Mapping[str, object],
+    identities: Mapping[str, DatasetFileIdentity] | None = None,
 ) -> Iterator[PortfolioLedgerBatch]:
     bounds = tuple(pd.Timestamp(research_window[key]).value for key in ("start", "end"))
     with handle_preserving_primary(ExitStack()) as stack:
@@ -369,7 +393,15 @@ def _iter_batches(
             )
         )
         readers = {
-            name: stack.enter_context(closing_iterator(_table_records(root, name)))
+            name: stack.enter_context(
+                closing_iterator(
+                    _table_records(
+                        root,
+                        name,
+                        None if identities is None else identities[f"{name}.parquet"],
+                    )
+                )
+            )
             for name in _TABLE_TYPES
         }
         groups = {

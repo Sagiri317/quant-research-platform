@@ -405,6 +405,10 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
 def test_dataset_inventory_selected_count_is_selection_index_driven(
     tmp_path: Path,
 ) -> None:
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+
+    if _memory_filesystem(tmp_path):
+        pytest.skip("disk spill contract requires a non-memory TMPDIR")
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with (
         runtime_resource_policy_scope(policy),
@@ -776,10 +780,7 @@ def test_inspection_window_file_count_counts_consecutive_file_batches_once(
 
     assert runtime["file_count"] == 1
     assert runtime["row_count"] == 2
-    assert observed_headroom == [
-        context.resource_policy.memory_budget_bytes
-        - context.resource_policy.used_memory_bytes
-    ]
+    assert observed_headroom == [context.resource_policy.working_set_headroom_bytes]
 
 
 def test_inspection_rejects_output_overlap_after_partition_traversal(
@@ -958,28 +959,6 @@ def test_fingerprint_admits_result_before_result_construction(
     assert policy.used_memory_bytes == 0
 
 
-def test_private_writer_owned_result_retains_one_lease(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "writer_owned_result")
-    policy = _writer_test_policy()
-
-    with runtime_resource_policy_scope(policy):
-        owned = dataset_writing._write_dataset_owned(
-            root,
-            _bound_first_frames((make_default_dataset_frame(),)),
-            spec=make_processed_dataset_spec("writer_owned_result"),
-        )
-        assert isinstance(owned, runtime_resources.OwnedValue)
-        assert owned.lease.active
-        assert owned.value.root == root
-        assert policy.used_memory_bytes >= owned.lease.reserved_bytes
-        owned.value = None
-        owned.lease.close()
-
-    assert policy.used_memory_bytes == 0
-
-
 def test_private_writer_releases_result_when_publish_loses_race(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1037,9 +1016,7 @@ def test_compare_uses_one_fingerprint_lease_per_side(
     )
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     observed: list[int] = []
-    identity_reserved: list[int] = []
     original_exact = dataset_comparison._exact_comparison_counts
-    original_identity = dataset_comparison._session_identity_token
 
     def observe_exact(*args: object, **kwargs: object) -> dict[str, int]:
         assert "retained_payload_bytes" not in kwargs
@@ -1047,16 +1024,6 @@ def test_compare_uses_one_fingerprint_lease_per_side(
         return original_exact(*args, **kwargs)  # type: ignore[arg-type]
 
     monkeypatch.setattr(dataset_comparison, "_exact_comparison_counts", observe_exact)
-
-    def observe_identity(context: object) -> bytes:
-        identity_reserved.append(policy.used_memory_bytes)
-        return original_identity(context)  # type: ignore[arg-type]
-
-    monkeypatch.setattr(
-        dataset_comparison,
-        "_session_identity_token",
-        observe_identity,
-    )
 
     with runtime_resource_policy_scope(policy):
         comparison = dataset_comparison.compare_datasets(
@@ -1067,8 +1034,6 @@ def test_compare_uses_one_fingerprint_lease_per_side(
 
     assert comparison.status == "MATCH"
     assert observed and observed[0] > 0
-    assert len(identity_reserved) >= 4
-    assert all(value > 0 for value in identity_reserved)
     assert policy.used_memory_bytes == 0
 
 
@@ -1297,3 +1262,86 @@ def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
     assert probed and set(probed) == {temporary_root.resolve()}
     assert sentinel.read_bytes() == b"old-good"
     assert list(temporary_root.iterdir()) == []
+
+
+def test_dataset_inventory_tmpfs_growth_rejects_captured_capacity(tmp_path):
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+
+    if not _memory_filesystem(tmp_path):
+        pytest.skip("requires an actual memory filesystem")
+    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    with runtime_resource_policy_scope(policy):
+        with dataset_inventory.DatasetSessionInventory(
+            data_root=tmp_path / "data", resource_policy=policy
+        ) as inventory:
+            before = policy.used_memory_bytes
+            with pytest.raises(
+                ValueError, match="storage_scratch_exceeds_memory_capacity"
+            ):
+                inventory._gate_physical_write(logical_bytes=500_000, row_count=5_000)
+            assert policy.used_memory_bytes == before
+            assert inventory.path_count(selected=False) == 0
+        assert policy.used_memory_bytes == 0
+
+
+def test_inventory_shares_exact_metadata_without_losing_part_variants(tmp_path):
+    from quant_research_platform.storage.identity import dataset_file_identity
+    from quant_research_platform.storage.parquet import _part_metadata
+
+    data_root = tmp_path / "data"
+    data_root.mkdir()
+    policy = capture_test_policy(available_memory_bytes=4 * 1024**2)
+    expected = {}
+    repeated_bytes = 0
+    with runtime_resource_policy_scope(policy):
+        with dataset_inventory.DatasetSessionInventory(
+            data_root=data_root, resource_policy=policy
+        ) as inventory:
+            for index in range(64):
+                frame = pd.DataFrame(
+                    {f"value_{column}": [1.0] for column in range(100)}
+                )
+                if index >= 62:
+                    frame["value_0"] = pd.Categorical(["a" if index == 62 else "b"])
+                table = pa.Table.from_pandas(frame, preserve_index=False)
+                logical = dataset_schema.logical_dtype_metadata_bytes(
+                    dataset_schema.logical_dtype_payload_from_frame(frame)
+                )
+                table = table.replace_schema_metadata({b"qrp.logical-dtypes": logical})
+                path = data_root / f"part-{index}.parquet"
+                pq.write_table(table, path)
+                with pq.ParquetFile(path) as parquet:
+                    metadata = _part_metadata(
+                        parquet, identity=dataset_file_identity(path)
+                    )
+                inventory.add(path, metadata, selected=True)
+                inventory.observe(path, metadata, selected=True)
+                expected[path] = metadata
+                repeated_bytes += metadata.schema.serialize().size + len(
+                    metadata.logical_dtype_payload
+                )
+            actual = dict(inventory.iter_entries())
+            assert actual.keys() == expected.keys()
+            for path, metadata in expected.items():
+                for restored in (actual[path], inventory.metadata_for(path)):
+                    assert restored.identity == metadata.identity
+                    assert restored.schema.equals(metadata.schema, check_metadata=True)
+                    assert (
+                        restored.logical_dtype_payload == metadata.logical_dtype_payload
+                    )
+                    assert restored.row_count == metadata.row_count
+                    assert restored.file_size_bytes == metadata.file_size_bytes
+                assert (
+                    inventory.schema_payload_bytes_for(path)
+                    == metadata.schema.serialize().size
+                )
+            # Repeated footer bytes must not become a retained per-part copy.
+            assert inventory._scratch_reservation.reserved_bytes * 4 < repeated_bytes
+            assert expected[data_root / "part-62.parquet"].schema.equals(
+                expected[data_root / "part-63.parquet"].schema
+            )
+            assert (
+                expected[data_root / "part-62.parquet"].logical_dtype_payload
+                != expected[data_root / "part-63.parquet"].logical_dtype_payload
+            )
+        assert policy.used_memory_bytes == 0

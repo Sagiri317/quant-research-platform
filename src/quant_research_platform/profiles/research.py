@@ -254,17 +254,8 @@ def _a_share_profile() -> ResearchProfile:
 def _crypto_profile() -> ResearchProfile:
     from quant_research_platform.artifacts.crypto_hft import (
         produce_crypto_report,
-        summarize_crypto_execution,
-        summarize_crypto_ledger_windows,
     )
     from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        read_portfolio_ledger_artifact,
-        summarize_portfolio_ledger,
-    )
-    from quant_research_platform.artifacts.statistics import (
-        STATISTICS_TABLE_COLUMNS,
-    )
     from quant_research_platform.markets.implementations.crypto.ids import (
         HFT_PANEL_DATA_ID,
     )
@@ -288,9 +279,6 @@ def _crypto_profile() -> ResearchProfile:
     )
     from quant_research_platform.research.models.production import (
         build_crypto_fold_models,
-    )
-    from quant_research_platform.research.portfolios.diagnostics import (
-        build_crypto_portfolio_statistics_tables,
     )
     from quant_research_platform.research.predictions.runner import (
         build_crypto_predictions,
@@ -333,17 +321,6 @@ def _crypto_profile() -> ResearchProfile:
                     expected_symbols=RESEARCH_SYMBOLS,
                     read_reconstruction=ReconstructionStats.from_payload,
                     validate_maker_calibration=validate_maker_calibration,
-                ),
-            ),
-            f"{scenario}_portfolio_statistics": ProducerBinding(
-                ProducerKind.STATISTIC,
-                partial(
-                    build_crypto_portfolio_statistics_tables,
-                    read_ledger=read_portfolio_ledger_artifact,
-                    summarize_ledger=summarize_portfolio_ledger,
-                    summarize_windows=summarize_crypto_ledger_windows,
-                    summarize_execution=summarize_crypto_execution,
-                    table_columns=STATISTICS_TABLE_COLUMNS,
                 ),
             ),
             **{
@@ -461,10 +438,20 @@ def bind_research_configuration(
             }
         )
     if str(profile.market_id) == "crypto":
+        from quant_research_platform.artifacts.crypto_hft import (
+            read_crypto_episode_artifact,
+            summarize_crypto_execution,
+            summarize_crypto_ledger_windows,
+        )
         from quant_research_platform.artifacts.outputs import (
             read_prediction_output_bundle,
         )
+        from quant_research_platform.artifacts.portfolio_ledger import (
+            read_portfolio_ledger_artifact,
+            summarize_portfolio_ledger,
+        )
         from quant_research_platform.artifacts.statistics import (
+            STATISTICS_TABLE_COLUMNS,
             read_statistics_artifact,
         )
         from quant_research_platform.markets.implementations.crypto.portfolio import (
@@ -474,6 +461,9 @@ def bind_research_configuration(
         )
         from quant_research_platform.research.models.persisted import (
             read_crypto_model_artifact,
+        )
+        from quant_research_platform.research.portfolios.diagnostics import (
+            build_crypto_portfolio_statistics_tables,
         )
         from quant_research_platform.sources.binance.funding import (
             read_funding_observations,
@@ -534,11 +524,26 @@ def bind_research_configuration(
                         read_model_artifact=read_crypto_model_artifact,
                     ),
                 )
-            bindings[candidate.target_id] = ProducerBinding(
-                ProducerKind.PORTFOLIO,
-                producer,
-                source_identity=partial(market_funding_identity, symbol=symbol),
-            )
+            for target in bound.execution_targets():
+                if target.candidate != candidate:
+                    continue
+                bindings[target.target_id] = ProducerBinding(
+                    ProducerKind.PORTFOLIO,
+                    partial(producer, execution_mode=target.execution_mode),
+                    source_identity=partial(market_funding_identity, symbol=symbol),
+                )
+                bindings[target.statistics_target_id] = ProducerBinding(
+                    ProducerKind.STATISTIC,
+                    partial(
+                        build_crypto_portfolio_statistics_tables,
+                        read_ledger=read_portfolio_ledger_artifact,
+                        read_episodes=read_crypto_episode_artifact,
+                        summarize_ledger=summarize_portfolio_ledger,
+                        summarize_windows=summarize_crypto_ledger_windows,
+                        summarize_execution=summarize_crypto_execution,
+                        table_columns=STATISTICS_TABLE_COLUMNS,
+                    ),
+                )
     auxiliary = config.get("auxiliary_sources", {})
     if type(auxiliary) is not dict or set(auxiliary) - {
         "derivatives_state",

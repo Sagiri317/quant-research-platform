@@ -449,6 +449,7 @@
       }
     },
     "execution": {
+      "backtest_modes": ["continuous"],
       "taker_fee_bps": 5.0,
       "latency_ms": 100,
       "markout_horizon_ms": 500,

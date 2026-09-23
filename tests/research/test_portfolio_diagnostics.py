@@ -497,11 +497,17 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     )
     panel["industry_level1_code"] = np.tile(["A01"] * 52 + ["B01"] * 53, 350)
     panel["is_nonfinancial_industry"] = True
-    styles = tuple(
-        name
-        for name in RISK_STYLE_COLUMNS
-        if name not in {"beta_252d", "residual_volatility_60d"}
+    panel = panel.assign(
+        is_a_share_scope=True,
+        is_trading=True,
+        is_st=False,
+        is_pt=False,
+        listing_age_trading_days=300,
+        close=panel.adj_close,
+        volume=1000.0,
+        turnover=0.01,
     )
+    styles = RISK_STYLE_COLUMNS
     data = panel[["market_id", "timestamp", "asset_id"]].copy()
     data["eligible"] = True
     data["label"] = 0.0
@@ -553,7 +559,7 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
         weights,
         spec=_processed_specs().get("benchmark_weights"),
     )
-    risk_targets = ("price_volume_facts", "fundamental_factors")
+    risk_targets = ("price_volume_facts", "fundamental_factors", "market_model_factors")
     for target in risk_targets:
         context_spec = _processed_specs().get(target)
         roots[target] = base_layout.processed_data_root(
@@ -571,7 +577,6 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
         source = iter_holding_factor_inputs(
             benchmark_required=True,
             layout=layout,
-            dataset_spec=spec,
             calendar=calendar,
             time_window=window,
             resource_policy=policy,
@@ -626,7 +631,6 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
         source = iter_holding_factor_inputs(
             benchmark_required=True,
             layout=missing_layout,
-            dataset_spec=spec,
             calendar=calendar,
             time_window=window,
             resource_policy=policy,

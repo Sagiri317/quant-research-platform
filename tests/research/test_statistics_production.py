@@ -22,7 +22,7 @@ from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import unmeasured_operation_evidence
 from quant_research_platform.contracts.time import TimeWindow
@@ -58,14 +58,20 @@ from tests.helpers.research_configuration import (
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
-from tests.research.workflow_test_support import _selection_metadata, _trial_reference
+from tests.research.workflow_test_support import (
+    _selection_metadata,
+    _trial_reference,
+    fixture_quarterly_results,
+    fixture_refit_reference,
+    fixture_validation_coverage,
+)
 
 
-def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
+def _statistics_models(layout, spec, protocol, window):
     factor = spec.factor_columns[0]
     models = tuple(
         ModelSpec(
-            model_id=f"{spec.data_id}_{algorithm}{config_suffix}",
+            model_id=f"{spec.data_id}_{algorithm}",
             model_algorithm=algorithm,
             input_factor_columns=(factor,),
             label_column=a_share.PRIMARY_LABEL_COLUMN,
@@ -128,6 +134,7 @@ def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
                     protocol=protocol,
                     model_spec=model,
                     root_seed=42,
+                    validation_specs=models,
                 )
                 for family, model in zip(families, models, strict=True)
             )
@@ -135,6 +142,7 @@ def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
                 family_id=families[0], model_id=models[0].model_id, columns=(factor,)
             )
             selection.update(
+                common_validation_coverage=fixture_validation_coverage(fold, models),
                 validation_start=f"{year - 1}-01-01",
                 validation_end=f"{year - 1}-12-31",
                 candidate_family_ids=list(families),
@@ -168,7 +176,15 @@ def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
                 )
                 owned = OwnedValue(
                     QuarterlyModelResult(
-                        fold, model.model_id, result, family, selection, (reference,)
+                        fold,
+                        model.model_id,
+                        result,
+                        family,
+                        selection,
+                        (
+                            reference,
+                            fixture_refit_reference(layout, reference, result.metadata),
+                        ),
                     ),
                     lease,
                 )
@@ -193,7 +209,7 @@ def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
         semantic_metadata={
             "target_contract": {
                 "protocol": protocol,
-                "model_specs": [{"model_id": family} for family in families],
+                "model_specs": [model_spec_payload(model) for model in models],
             }
         },
     )
@@ -202,7 +218,7 @@ def _statistics_models(layout, spec, protocol, window, *, config_suffix=""):
             layout.semantic_artifact_root("a_share", "model-artifact"),
             model_id="model-artifact",
             envelope=envelope,
-            quarterly_results=fitted(),
+            quarterly_results=fixture_quarterly_results(fitted()),
             trial_layout=layout,
         )
         return read_quarterly_model_artifact(root, trial_layout=layout)
@@ -650,9 +666,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             "price_volume": list(PV25_FACTORS)
         }
         protocol["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
-        model = _statistics_models(
-            layout, spec, protocol, TimeWindow(dates[0], cutoff), config_suffix="_0"
-        )
+        model = _statistics_models(layout, spec, protocol, TimeWindow(dates[0], cutoff))
         policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
         with runtime_resource_policy_scope(policy):
             owned_tables = build_a_share_statistics_tables(
@@ -706,7 +720,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     assert trials.loc[0, ["quarter_id", "family_id", "config_id"]].tolist() == [
         "2023Q1",
         "stats_demo_equal_weight_rank_ensemble",
-        "stats_demo_equal_weight_rank_ensemble_0",
+        "stats_demo_equal_weight_rank_ensemble",
     ]
     assert trials.loc[0, "selection_status"] == "CHAMPION"
     assert set(outputs[0]["robustness"]["reason"]) == {

@@ -202,3 +202,44 @@ def test_discovery_rejects_symlink_instance_child(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="dataset_instance_child_invalid"):
         discover_dataset_instances(logical_root)
+
+
+def test_exact_requested_instance_ignores_corrupt_history_but_discovery_rejects(
+    tmp_path, monkeypatch
+):
+    from dataclasses import replace
+
+    from quant_research_platform.catalog.processed import ProcessedDataCatalog
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.workflows import research
+
+    spec = make_processed_dataset_spec("demo")
+    profile = replace(research_profile(), processed=ProcessedDataCatalog((spec,)))
+    layout = StorageLayout(tmp_path)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    good = _write_instance(root, spec, _envelope(spec, seed=1))
+    bad = _write_instance(root, spec, _envelope(spec, seed=2))
+    (bad / "_manifest" / "manifest.json").write_text("invalid")
+    assert research._matching_instance(
+        profile=profile, layout=layout, target_id="demo", requested_identity=good.name
+    ) == (good.name, None)
+    assert research._matching_instance(
+        profile=profile, layout=layout, target_id="demo", requested_identity=bad.name
+    ) == (None, "persisted_instance_invalid")
+    with pytest.raises(ValueError):
+        discover_dataset_instances(root)
+    real_stat = Path.stat
+
+    def denied(path, *args, **kwargs):
+        if path == good:
+            raise PermissionError("synthetic_permission_denied")
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied)
+    with pytest.raises(PermissionError, match="synthetic_permission_denied"):
+        research._matching_instance(
+            profile=profile,
+            layout=layout,
+            target_id="demo",
+            requested_identity=good.name,
+        )

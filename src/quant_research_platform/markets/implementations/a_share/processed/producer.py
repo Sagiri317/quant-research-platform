@@ -253,7 +253,7 @@ def _owned_frame(session, retained):
     owned = materialize_dataset_session_owned(
         session,
         target_chunk_bytes=max(
-            1, min(8 * 1024**2, session.resource_policy.operation_headroom_bytes // 8)
+            1, min(8 * 1024**2, session.resource_policy.planning_headroom_bytes // 8)
         ),
     )
     retained.callback(owned.release, owner="a_share.processed.input")
@@ -330,7 +330,7 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
         1,
         min(
             len(sessions),
-            (policy.operation_headroom_bytes - 1024**2) // (3 * asset_count * per_row)
+            (policy.planning_headroom_bytes - 1024**2) // (3 * asset_count * per_row)
             - lookback
             - lookahead,
         ),
@@ -449,7 +449,7 @@ def _benchmark_frames(source, session, policy, retained):
         1,
         min(
             len(sessions),
-            (policy.operation_headroom_bytes - 1024**2) // (3 * rows_per_day * 4096),
+            (policy.planning_headroom_bytes - 1024**2) // (3 * rows_per_day * 4096),
         ),
     )
     bound = 1024**2 + rows_per_day * block_size * 4096
@@ -530,7 +530,18 @@ def _processed_axis(
                 for row in new_assets.itertuples(index=False, name=None):
                     assets[row[0]] = row[2] if panel_source else 0
                 del frame, first, new_assets, new_dates
-    return tuple(sorted(pd.Timestamp(value) for value in dates)), pd.Series(assets)
+    sessions = tuple(sorted(pd.Timestamp(value) for value in dates))
+    asset_types = pd.Series(assets)
+    del dates, assets
+    # Materialize the index lookup cache before measuring retained axis state.
+    _ = asset_types.index.is_unique
+    lease.shrink_to(
+        sys.getsizeof(sessions)
+        + sum(sys.getsizeof(value) for value in sessions)
+        + sys.getsizeof(asset_types)
+        + sys.getsizeof(asset_types.index)
+    )
+    return sessions, asset_types
 
 
 def _compute_processed_frame(

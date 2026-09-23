@@ -71,26 +71,6 @@ def calculate_price_volume_factors(
             ).to_numpy(dtype="float64", copy=False)
             for name in names
         }
-        if any("turnover" in factor for factor in requested):
-            float_cap, close, volume = (
-                values["float_market_cap"],
-                values["close"],
-                values["volume"],
-            )
-            free_shares = np.divide(
-                float_cap,
-                close,
-                out=np.full(len(group), np.nan),
-                where=np.isfinite(float_cap) & np.isfinite(close) & (close != 0.0),
-            )
-            values["turnover"] = np.divide(
-                volume,
-                free_shares,
-                out=np.full(len(group), np.nan),
-                where=np.isfinite(volume)
-                & np.isfinite(free_shares)
-                & (free_shares > 0.0),
-            )
         start, stop = 0, len(group)
         if bounds is not None:
             lower, upper, closed = bounds

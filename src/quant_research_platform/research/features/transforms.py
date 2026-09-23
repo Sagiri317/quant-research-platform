@@ -18,6 +18,19 @@ from quant_research_platform.runtime.resources import (
     pandas_frame_payload_bytes,
 )
 
+_CANONICAL_FEATURE_PREFIXES = ("feature_", "feature_missing_", "feature_observed_")
+
+
+def canonical_feature_validity_columns(input_columns):
+    """Project consumed encodings to their canonical structural-validity values."""
+    values = []
+    for column in input_columns:
+        for prefix in reversed(_CANONICAL_FEATURE_PREFIXES):
+            if column.startswith(prefix):
+                values.append(_CANONICAL_FEATURE_PREFIXES[0] + column[len(prefix) :])
+                break
+    return tuple(dict.fromkeys(values))
+
 
 def apply_feature_transforms(
     frame: pd.DataFrame,
@@ -320,6 +333,8 @@ def _industry_size_residuals(target, industries, sizes):
                 ),
                 Fraction(),
             )
+            if xx == 0:
+                return np.full(len(target), np.nan)
             slope = xy / xx
         residuals = np.empty(len(target), dtype="float64")
         for index, (group, value) in enumerate(zip(industries, target, strict=True)):
@@ -374,30 +389,27 @@ def neutralize_cross_section(
                     allow_null=True,
                 )
                 valid &= size.notna()
-            design = pd.get_dummies(
-                industry.loc[valid_industry].loc[valid], dtype="float64"
-            )
-            design = design.loc[:, design.any(axis=0)]
-            if factor != size_column:
-                design = pd.concat(
-                    [
-                        design,
-                        (size.loc[valid] - size.loc[valid].mean()).rename("size"),
-                    ],
-                    axis=1,
-                )
-            if len(design) < max(minimum_observations, 5 * design.shape[1]):
+            indices = values.index[valid]
+            groups = industry.loc[indices]
+            parameters = groups.nunique() + (factor != size_column)
+            if len(indices) < max(minimum_observations, 5 * parameters):
                 continue
-            matrix = design.to_numpy(dtype="float64", copy=False)
-            if np.linalg.matrix_rank(matrix) != matrix.shape[1]:
-                continue
-            target = values.loc[design.index].to_numpy(dtype="float64", copy=False)
-            result.loc[design.index, factor] = _industry_size_residuals(
+            target = values.loc[indices].to_numpy(dtype="float64", copy=False)
+            result.loc[indices, factor] = _industry_size_residuals(
                 target,
-                industry.loc[design.index],
-                None if factor == size_column else size.loc[design.index].to_numpy(),
+                groups,
+                None if factor == size_column else size.loc[indices].to_numpy(),
             )
     return result
+
+
+def canonical_feature_input_factors(
+    factor_columns: tuple[str, ...], *, size_column: str = "log_float_market_cap"
+) -> tuple[str, ...]:
+    """Own the economic inputs of canonical outputs, including auxiliary size."""
+    return (
+        tuple(dict.fromkeys((*factor_columns, size_column))) if factor_columns else ()
+    )
 
 
 def canonical_feature_pipeline(
@@ -417,13 +429,12 @@ def canonical_feature_pipeline(
     scoped = frame.loc[universe].copy()
     if industry_column not in scoped:
         raise ValueError("feature_industry_context_missing")
-    if scoped[industry_column].isna().any():
-        raise ValueError("feature_industry_context_missing")
-    if size_column in factor_columns:
-        if size_column not in scoped or scoped[size_column].isna().any():
-            raise ValueError("feature_size_context_missing")
+    if factor_columns and size_column not in scoped:
+        raise ValueError("feature_size_context_missing")
     winsorized = scoped.copy()
-    for factor in factor_columns:
+    for factor in canonical_feature_input_factors(
+        factor_columns, size_column=size_column
+    ):
         values = strict_finite_numeric_series(
             winsorized[factor],
             error=f"invalid_feature_factor: {factor}",
@@ -449,14 +460,22 @@ def canonical_feature_pipeline(
         )
         final_missing = raw_missing | scoped_feature.isna()
         feature = pd.Series(np.nan, index=result.index, dtype="float64")
-        feature.loc[scoped.index] = scoped_feature.fillna(0.0)
+        identifiable = (
+            values.notna().groupby(scoped["timestamp"], sort=False).transform("any")
+        )
+        context_valid = scoped[industry_column].notna()
+        if factor != size_column:
+            context_valid &= scoped[size_column].notna()
+        ordinary_missing = raw_missing & identifiable & context_valid
+        feature.loc[scoped.index] = scoped_feature.mask(ordinary_missing, 0.0)
         missing = pd.Series(0, index=result.index, dtype="int8")
         observed = pd.Series(0, index=result.index, dtype="int8")
         missing.loc[scoped.index] = final_missing.astype("int8")
         observed.loc[scoped.index] = final_missing.eq(False).astype("int8")
-        feature_values[f"feature_{factor}"] = feature
-        feature_values[f"feature_missing_{factor}"] = missing
-        feature_values[f"feature_observed_{factor}"] = observed
+        for prefix, values in zip(
+            _CANONICAL_FEATURE_PREFIXES, (feature, missing, observed), strict=True
+        ):
+            feature_values[prefix + factor] = values
     return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)
 
 
@@ -485,7 +504,7 @@ def canonical_feature_transforms(factor_columns):
             output_columns=tuple(
                 prefix + column
                 for column in factor_columns
-                for prefix in ("feature_", "feature_missing_", "feature_observed_")
+                for prefix in _CANONICAL_FEATURE_PREFIXES
             ),
             transform="a_share_canonical",
         ),

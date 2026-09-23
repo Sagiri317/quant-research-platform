@@ -206,7 +206,7 @@ def _merge_family_predictions(paths, columns):
         target_bytes = max(
             64 * 1024,
             min(
-                16 * 1024 * 1024, policy.operation_headroom_bytes // (64 * len(members))
+                16 * 1024 * 1024, policy.planning_headroom_bytes // (64 * len(members))
             ),
         )
 

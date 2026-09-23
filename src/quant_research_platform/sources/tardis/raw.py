@@ -32,6 +32,7 @@ from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     SPOT_MARKET_TYPE,
 )
+from quant_research_platform.sources.binance.replay import native_trade_identities
 from quant_research_platform.sources.binance.validation import (
     strict_iso_timestamp,
     strict_non_negative_float,
@@ -255,7 +256,7 @@ def iter_native_slice(
             with resource_policy.lease(
                 "tardis.native_record",
                 json_record_working_set_bytes(MAX_RECORD_BYTES),
-            ):
+            ) as record_lease:
                 line = value = payload = native = parts = timestamp = None
                 try:
                     line = stream.readline(MAX_RECORD_BYTES + 1)
@@ -264,6 +265,7 @@ def iter_native_slice(
                     number += 1
                     if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
                         raise ValueError("tardis_native_record_invalid")
+                    record_lease.shrink_to(json_record_working_set_bytes(len(line)))
                     if line in (b"\n", b"\r\n"):
                         yield number, None, None
                         continue
@@ -340,10 +342,9 @@ def iter_native_slice(
 class _ObservedStreams:
     """One authority for native continuity and vendor observation identities."""
 
-    def __init__(self, exchange=EXCHANGE, *, trade_lease):
+    def __init__(self, exchange=EXCHANGE, *, observe_trade):
         self.exchange = exchange
-        self.trade_lease = trade_lease
-        self.trade_fingerprints = set()
+        self.observe_trade = observe_trade
         self.active = {}
         self.previous = {}
         self.epoch = 0
@@ -366,30 +367,17 @@ class _ObservedStreams:
             current = native["a" if channel == "aggTrade" else "u"]
             previous = self.previous.get(key)
             if channel == "aggTrade":
-                # A resend can change E while all trade facts retain their identity.
-                fingerprint = hashlib.sha256(
-                    json.dumps(
-                        {
-                            field: value
-                            for field, value in native.items()
-                            if field != "E"
-                        },
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    ).encode()
-                ).digest()
+                accepted, _ = self.observe_trade(
+                    FUTURES_MARKET_TYPE
+                    if self.exchange == EXCHANGE
+                    else SPOT_MARKET_TYPE,
+                    symbol.upper(),
+                    native,
+                )
+                if not accepted:
+                    return None, closed, None
             if previous is not None:
                 identifier, epoch = previous
-                if current <= identifier and kind == "agg_trades":
-                    if (symbol, fingerprint) in self.trade_fingerprints:
-                        return None, closed, None
-                    error = ValueError("tardis_native_sequence_non_monotonic")
-                    error.add_note(
-                        f"stream={value['stream']};offset={offset};line={number};"
-                        f"previous_id={identifier};current_id={current};"
-                        f"after_disconnect={epoch != self.epoch}"
-                    )
-                    raise error
                 if current > identifier and (
                     kind == "depth"
                     and (
@@ -408,10 +396,6 @@ class _ObservedStreams:
                     }
                     if key in self.active:
                         closed.append(self.active.pop(key))
-            if channel == "aggTrade":
-                # Budget the symbol, digest, tuple, and set growth before insertion.
-                self.trade_lease.grow(512)
-                self.trade_fingerprints.add((symbol, fingerprint))
             # The shared book engine discards stale depth updates. Retain raw
             # observations without moving the continuity high-water mark backwards.
             if previous is None or current > previous[0]:
@@ -483,11 +467,10 @@ def _publish_slices(
         with (
             runtime_resource_policy_scope(resource_policy) as policy,
             policy.lease("tardis.archive_metadata", 0) as metadata_lease,
-            policy.lease("tardis.trade_identities", 0) as trade_lease,
+            native_trade_identities(policy) as observe_trade,
             ExitStack() as streams,
         ):
-            tracker = _ObservedStreams(exchange, trade_lease=trade_lease)
-            streams.callback(tracker.trade_fingerprints.clear)
+            tracker = _ObservedStreams(exchange, observe_trade=observe_trade)
             gaps = streams.enter_context(
                 handle_preserving_primary(gzip.open(gap_path, "wt", encoding="utf-8"))
             )

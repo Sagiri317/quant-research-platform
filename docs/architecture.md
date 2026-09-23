@@ -48,7 +48,10 @@ signal 是评估/组合使用的排序、权重或交易意图，evaluation 是�
 research run 不再接受独立的 profile/scenario/start-date/end-date 覆盖参数，避免双重选择来源。
 配置窗口必须位于原有访问边界内；选择窗口不会授予留出访问权。CORE6、PV25、Crypto baseline 是普通示例配置，
 运行入口不隐式选择它们，不动态展开“全部因子”。仅评估和完整研究复用同一 DAG。
-profiles 把确定的配置绑定到现有 catalog/protocol/producer，解析后的配置进入 protocol 与 run 身份。
+profiles 把确定的配置绑定到现有 catalog/protocol/producer，完整配置保存在 protocol 与 run 记录。
+每个 target 仅绑定真正影响其计算的规范合同；workflow、业务 envelope、trial、writer 和 reader
+消费同一合同投影。只改变执行模式或未消费的费率，不改变模型、预测或校准的身份；
+真实输入、标签、成熟截止或参数变化仍使相关目标失效。不在各层复制字段排除名单。
 
 Crypto 的训练、评估资产由每个模型的显式范围决定，不由模型名称推断。
 执行仍限定 Binance BTC/ETH USDT perpetual。模型各自保留完整预测和有效样本数；
@@ -69,6 +72,12 @@ Crypto 的训练、评估资产由每个模型的显式范围决定，不由模�
 模型拟合前先在现有 trial ledger 发布 attempted 事件，结束后追加同 attempt 的不可变终态事件；
 读取者核对不变身份后投影当前状态。硬退出留下 attempted，不能宣称从未开始或已完成；
 不自动重试、不改写旧事件，也不因此解锁 HOLDOUT_LOCKED。
+ExperimentPlan.stage 是 selection/refit 阶段的唯一事实，TrialRecord 通过 plan/protocol_hash 绑定。
+同一 TrialRecorder/存储机制分别记录选择与真实 refit；refit 使用实际 resolved spec、seed、
+单候选单 fold 及 budget=1，并绑定父 selection 语义身份。refit 不复用选择预算或伪造验证成绩。
+TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指标，refit 记录真实 n_train。
+选型统计只消费 selection，不能按引用位置猜阶段或把 refit 计为第二次选型。
+受本次合同变更影响的旧机器可读派生产物重建，不保留旧字段别名或双写；raw、归档和旧报告保留。
 
 数据集身份包含 schema、dtype、PK、逻辑窗口、来源谱系和精确内容。
 指纹仅快速拒绝；只有精确比较才能给出 MATCH。
@@ -163,5 +172,5 @@ A股因子评估报告不依赖模型统计产物。
 配置字段必须有真实消费者。A股沿用季度选择 owner，允许按顺序列出
 `parameter_candidates`；Crypto 沿用每个显式模型一组 `hyperparameters` 的 trial，
 不同参数实验写成不同模型/研究配置，不接受会被忽略的 `parameter_candidates`。
-Crypto 必须声明 episode 的 `research_plan`；A股不接受该字段，时间访问范围来自
+Crypto 的训练、验证和OOS时段必须由 `research_plan` 声明；A股不接受该字段，时间访问范围来自
 `windows`，季度选择规则仍由既有 A股 protocol 管理。

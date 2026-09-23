@@ -35,8 +35,10 @@ from quant_research_platform.research.predictions.alignment import (
 )
 from quant_research_platform.research.protocols.crypto_hft import (
     HFT_EXECUTION_CONTEXT_COLUMNS,
+    CryptoMakerCandidate,
     CryptoMakerPlan,
     execution_windows,
+    portfolio_candidates,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -106,9 +108,8 @@ def _prediction_rows(
     ) as (manifest, lookup):
         metadata = manifest["metadata"]["prediction_metadata"]
         inputs = tuple(metadata["input_columns"])
-        assets = tuple(
-            protocol_manifest["model_scopes"][model_id]["evaluation_asset_ids"]
-        )
+        scope = protocol_manifest["model_scopes"][model_id]
+        assets = tuple(scope["evaluation_asset_ids"])
         columns = tuple(
             dict.fromkeys(
                 (
@@ -149,6 +150,7 @@ def _prediction_rows(
         joined = _iter_prediction_joined_chunks(
             frames(),
             prediction_lookup=lookup,
+            model_algorithm=scope["model_algorithm"],
             input_columns=inputs,
             sample_filter_mode=metadata["sample_filter_mode"],
             test_start=pd.Timestamp(output_window.start).isoformat(),
@@ -208,6 +210,229 @@ def _maker_config(plan, asset_id, *, calibration=False):
     )
 
 
+class _EpisodeCursor:
+    """Own one source lookahead and an explicitly handed-back book or forecast."""
+
+    def __init__(self, source, key, *, sticky=False):
+        self.source = iter(source)
+        self.key = key
+        self.pending = self.carried = None
+        self.sticky = sticky
+        self.exhausted = False
+
+    def retain(self, value):
+        if isinstance(self.carried, OwnedValue):
+            self.carried.release(owner="crypto.episode.carry")
+        self.carried = None if isinstance(value, BookBoundary) else value
+
+    def _next(self):
+        if self.pending is None and not self.exhausted:
+            self.pending = next(self.source, None)
+            self.exhausted = self.pending is None
+
+    def window(self, start, stop, *, bootstrap=False):
+        self._next()
+        while self.pending is not None and self.key(self.pending) < start:
+            value, self.pending = self.pending, None
+            if bootstrap or self.sticky:
+                self.retain(value)
+            elif isinstance(value, OwnedValue):
+                value.release(owner="crypto.episode.discard")
+            self._next()
+        if self.carried is not None:
+            value = self.carried
+            if not self.sticky:
+                self.carried = None
+            yield value
+        while self.pending is not None and self.key(self.pending) < stop:
+            value, self.pending = self.pending, None
+            if self.sticky:
+                self.retain(value)
+            yield value
+            self._next()
+
+    def close(self):
+        for value in (self.pending, self.carried):
+            if isinstance(value, OwnedValue):
+                value.release(owner="crypto.episode.cursor")
+        self.pending = self.carried = None
+
+
+def _episode_book_time(event):
+    value = event.value if isinstance(event, OwnedValue) else event
+    return value.observed_time_ns
+
+
+def _qualified_episodes(coverage, trade_coverage, funding, bounds):
+    start, final = bounds[0][0], bounds[-1][1]
+    if final == np.iinfo(np.int64).max:
+        raise ValueError("crypto_execution_window_overflow")
+    stop = final + 1
+    book_intervals = iter(sorted(coverage.values()))
+    trades = trade_coverage.intervals()
+    bad_settlements = tuple(
+        event.timestamp_ns
+        for event in funding.events
+        if event.rate is None or event.mark_price is None
+    )
+    with closing_iterator(trades):
+        book, trade = next(book_intervals, None), next(trades, None)
+        while book is not None and trade is not None:
+            left = max(start, book[0], trade[0], funding.coverage[0])
+            right = min(stop, book[1], trade[1], funding.coverage[1] + 1)
+            if left < right:
+                cuts = (stamp for stamp in bad_settlements if left <= stamp < right)
+                for cut in cuts:
+                    if left < cut:
+                        yield left, cut, "TRUNCATED", ("funding_coverage_end",)
+                    left = cut + 1
+                if left < right:
+                    reasons = []
+                    if right == stop:
+                        reasons.append("planned_oos_end")
+                    if right == book[1]:
+                        reasons.append("book_coverage_end")
+                    if right == trade[1]:
+                        reasons.append("trade_coverage_end")
+                    if right == funding.coverage[1] + 1:
+                        reasons.append("funding_coverage_end")
+                    yield (
+                        left,
+                        right,
+                        "PLANNED_END" if right == stop else "TRUNCATED",
+                        tuple(sorted(reasons)),
+                    )
+            if book[1] <= trade[1]:
+                book = next(book_intervals, None)
+            else:
+                trade = next(trades, None)
+
+
+def _execute_episodes(
+    *,
+    books,
+    trades,
+    decisions,
+    forecasts,
+    funding,
+    coverage,
+    trade_coverage,
+    bounds,
+    resources,
+    execute,
+    on_episode,
+):
+    streams = {}
+    for name, source, key, sticky in (
+        ("books", books, _episode_book_time, False),
+        ("decisions", decisions, lambda row: row["timestamp_ms"] * 1_000_000, False),
+        ("forecasts", forecasts, lambda row: row.available_at_ns, True),
+        ("trades", trades, lambda row: row.observed_time_ns, False),
+    ):
+        if source is None:
+            continue
+        iterator = resources.enter_context(closing_iterator(iter(source)))
+        cursor = _EpisodeCursor(iterator, key, sticky=sticky)
+        resources.callback(cursor.close)
+        streams[name] = cursor
+    count = 0
+    for start, stop, termination, reasons in _qualified_episodes(
+        coverage, trade_coverage, funding, bounds
+    ):
+
+        def produce(emit, start=start, stop=stop):
+            kwargs = {
+                "book_events": streams["books"].window(start, stop, bootstrap=True),
+                "funding_events": tuple(
+                    event
+                    for event in funding.events
+                    if start <= event.timestamp_ns < stop
+                ),
+                "funding_forecasts": streams["forecasts"].window(start, stop),
+                "observation_window_ns": (start, stop),
+                "on_ledger": emit,
+                "on_terminal_book": streams["books"].retain,
+            }
+            if "trades" in streams:
+                kwargs["trades"] = streams["trades"].window(start, stop)
+                kwargs["quote_schedule"] = streams["decisions"].window(start, stop)
+            else:
+                kwargs["decisions"] = streams["decisions"].window(start, stop)
+            result = execute(**kwargs)
+            if result["selection_status"] == "BLOCKED":
+                raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
+            if result["net_pnl"] is None:
+                raise PortfolioTargetBlocked("portfolio_terminal_valuation_missing")
+            return result
+
+        on_episode(
+            start_ns=start,
+            stop_ns=stop,
+            termination=termination,
+            stop_reasons=reasons,
+            produce=produce,
+        )
+        count += 1
+    if not count:
+        raise PortfolioTargetBlocked("crypto_execution_qualified_episode_missing")
+    return {"episode_count": count}
+
+
+def _execute_portfolio(
+    *,
+    execution_mode,
+    execute,
+    books,
+    trades,
+    decisions,
+    funding,
+    expected_funding_identity,
+    coverage,
+    trade_coverage,
+    bounds,
+    on_ledger,
+    on_episode,
+):
+    if funding.identity != expected_funding_identity:
+        raise ValueError("crypto_execution_funding_identity_mismatch")
+    if execution_mode == "independent_segments":
+        with handle_preserving_primary(ExitStack()) as resources:
+            return _execute_episodes(
+                books=books,
+                trades=trades,
+                decisions=decisions,
+                forecasts=funding.forecasts,
+                funding=funding,
+                coverage=coverage,
+                trade_coverage=trade_coverage,
+                bounds=bounds,
+                resources=resources,
+                execute=execute,
+                on_episode=on_episode,
+            )
+    if execution_mode != "continuous":
+        raise ValueError("crypto_execution_mode_invalid")
+    _funding_check(funding, expected_funding_identity, bounds)
+    _market_coverage_check(coverage, trade_coverage, bounds)
+    kwargs = {
+        "book_events": books,
+        "funding_events": funding.events,
+        "funding_forecasts": funding.forecasts,
+        "on_ledger": on_ledger,
+    }
+    if trades is None:
+        kwargs["decisions"] = decisions
+    else:
+        kwargs["trades"] = trades
+        kwargs["quote_schedule"] = decisions
+    result = execute(**kwargs)
+    if result["selection_status"] == "BLOCKED":
+        raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
+    if result["net_pnl"] is None:
+        raise PortfolioTargetBlocked("portfolio_terminal_valuation_missing")
+    return result
+
+
 def produce_taker_ledger(
     *,
     layout,
@@ -219,7 +444,9 @@ def produce_taker_ledger(
     expected_funding_identity,
     raw_root,
     resource_policy,
-    on_ledger,
+    execution_mode,
+    on_ledger=None,
+    on_episode=None,
     symbol,
     open_run,
     reconstruct_depth,
@@ -255,15 +482,10 @@ def produce_taker_ledger(
     ):
         if run.source_identity != panel["source_artifact_identity"]:
             raise ValueError("crypto_execution_recorder_identity_mismatch")
-        _funding_check(funding, expected_funding_identity, bounds)
-        _market_coverage_check(
-            coverage,
-            run.observation_coverage(
-                market_type=binance_ids.FUTURES_MARKET_TYPE,
-                data_kind="agg_trades",
-                symbol=symbol,
-            ),
-            bounds,
+        trade_coverage = run.observation_coverage(
+            market_type=binance_ids.FUTURES_MARKET_TYPE,
+            data_kind="agg_trades",
+            symbol=symbol,
         )
 
         def decisions():
@@ -283,14 +505,8 @@ def produce_taker_ledger(
                     if row["prediction_score"] is not None:
                         yield row
 
-        result = simulate_taker(
-            _books_until(
-                run,
-                reconstruct_depth=reconstruct_depth,
-                symbol=symbol,
-                end_ns=bounds[-1][1],
-            ),
-            decisions(),
+        execute = partial(
+            simulate_taker,
             prediction_column="prediction_score",
             prediction_horizon_ms=protocol_manifest["model_scopes"][candidate.model_id][
                 "label_horizon_ms"
@@ -305,16 +521,27 @@ def produce_taker_ledger(
                 "linear_perpetual",
             ),
             asset_id=candidate.asset_id,
-            funding_events=funding.events,
-            funding_forecasts=funding.forecasts,
             decision_windows_ns=bounds,
-            on_ledger=on_ledger,
         )
-        if result["selection_status"] == "BLOCKED":
-            raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
-        if result["net_pnl"] is None:
-            raise PortfolioTargetBlocked("portfolio_terminal_valuation_missing")
-        return result
+        return _execute_portfolio(
+            execution_mode=execution_mode,
+            execute=execute,
+            books=_books_until(
+                run,
+                reconstruct_depth=reconstruct_depth,
+                symbol=symbol,
+                end_ns=bounds[-1][1],
+            ),
+            trades=None,
+            decisions=decisions(),
+            funding=funding,
+            expected_funding_identity=expected_funding_identity,
+            coverage=coverage,
+            trade_coverage=trade_coverage,
+            bounds=bounds,
+            on_ledger=on_ledger,
+            on_episode=on_episode,
+        )
 
 
 def _validation_rows(artifact, *, fold_id, model_id, asset_id):
@@ -486,7 +713,7 @@ def produce_maker_calibration(
             1,
             min(
                 _CALIBRATION_BATCH_BYTES,
-                (resource_policy.operation_headroom_bytes + sum(sizes.values())) // 8,
+                (resource_policy.planning_headroom_bytes + sum(sizes.values())) // 8,
             ),
         )
         if sum(sizes.values()) and sum(sizes.values()) + row_bytes > target:
@@ -665,7 +892,9 @@ def produce_maker_ledger(
     expected_funding_identity,
     raw_root,
     resource_policy,
-    on_ledger,
+    execution_mode,
+    on_ledger=None,
+    on_episode=None,
     symbol,
     market_type,
     open_run,
@@ -795,20 +1024,11 @@ def produce_maker_ledger(
         ):
             if run.source_identity != panel["source_artifact_identity"]:
                 raise ValueError("crypto_execution_recorder_identity_mismatch")
-            _funding_check(funding, expected_funding_identity, bounds)
             trade_coverage = run.observation_coverage(
                 market_type=market_type, data_kind="agg_trades", symbol=symbol
             )
-            _market_coverage_check(coverage, trade_coverage, bounds)
-            result = simulate_maker(
-                _books_until(
-                    run,
-                    reconstruct_depth=reconstruct_depth,
-                    symbol=symbol,
-                    end_ns=bounds[-1][1],
-                ),
-                read_trades(run, symbol=symbol, end_ms=bounds[-1][1] // 1_000_000),
-                quotes(),
+            execute = partial(
+                simulate_maker,
                 config=config,
                 observed_coverage=coverage,
                 trade_coverage=trade_coverage,
@@ -820,16 +1040,30 @@ def produce_maker_ledger(
                     "linear_perpetual",
                 ),
                 asset_id=candidate.asset_id,
-                funding_events=funding.events,
-                funding_forecasts=funding.forecasts,
                 calibrations=calibrations,
                 decision_windows_ns=bounds,
-                on_ledger=on_ledger,
             )
-            if result["selection_status"] == "BLOCKED":
-                raise PortfolioTargetBlocked("portfolio_expected_funding_missing")
-            if result["net_pnl"] is None:
-                raise PortfolioTargetBlocked("portfolio_terminal_valuation_missing")
+            result = _execute_portfolio(
+                execution_mode=execution_mode,
+                execute=execute,
+                books=_books_until(
+                    run,
+                    reconstruct_depth=reconstruct_depth,
+                    symbol=symbol,
+                    end_ns=bounds[-1][1],
+                ),
+                trades=read_trades(
+                    run, symbol=symbol, end_ms=bounds[-1][1] // 1_000_000
+                ),
+                decisions=quotes(),
+                funding=funding,
+                expected_funding_identity=expected_funding_identity,
+                coverage=coverage,
+                trade_coverage=trade_coverage,
+                bounds=bounds,
+                on_ledger=on_ledger,
+                on_episode=on_episode,
+            )
             if candidate.calibrated:
                 artifact._verify()
             return result
@@ -1027,7 +1261,15 @@ def validate_maker_calibration(artifact, envelope):
         and pd.Timestamp(fold["development_test"]["end"])
         >= pd.Timestamp(output["start"])
     }
-    reference_config = _maker_config(plan, "btc_usdt", calibration=True)
+    candidates = portfolio_candidates(protocol["portfolio_candidates"])
+    if (
+        len(candidates) != 1
+        or not isinstance(candidates[0], CryptoMakerCandidate)
+        or not candidates[0].calibrated
+        or candidates[0].calibration_target_id != envelope["logical_artifact_id"]
+    ):
+        raise ValueError("crypto_calibration_candidate_invalid")
+    reference_config = _maker_config(plan, candidates[0].asset_id, calibration=True)
     policy = current_runtime_resource_policy()
     totals = dict.fromkeys(("samples", "events", "calibration"), 0)
     paired_columns = tuple(
@@ -1207,6 +1449,10 @@ def validate_maker_calibration(artifact, envelope):
                                     lifetime_ns=CryptoMakerPlan.quote_horizon_ms
                                     * 1000000,
                                     replace_quantity=row.quote_quantity,
+                                    events=model.events(
+                                        int(sample["event_start"]),
+                                        int(sample["event_end"]),
+                                    ),
                                 )
                             ) as response:
                                 while True:

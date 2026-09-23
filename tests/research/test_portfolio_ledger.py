@@ -23,7 +23,9 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 )
 from quant_research_platform.research.portfolios.accounting import (
     drift_continuous_holdings,
-    execute_continuous_target,
+)
+from quant_research_platform.research.portfolios.accounting import (
+    execute_continuous_target as _execute_continuous_target,
 )
 from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
@@ -34,6 +36,27 @@ from quant_research_platform.sources.reference.a_share_fees import (
     FEE_CSV_COLUMNS,
     load_a_share_fee_source,
 )
+
+
+def execute_continuous_target(*args, **kwargs):
+    def totals(assets, amounts, adv):
+        return np.asarray(
+            [
+                kwargs["cost_for_trade"](
+                    kwargs["execution_date"],
+                    asset,
+                    "buy",
+                    float(amount),
+                    float(volume),
+                    kwargs["assumptions"],
+                ).total_cost
+                if amount > 0
+                else 0.0
+                for asset, amount, volume in zip(assets, amounts, adv, strict=True)
+            ]
+        )
+
+    return _execute_continuous_target(*args, cost_totals_for_buys=totals, **kwargs)
 
 
 def _cash_constrained_inputs(
@@ -1183,3 +1206,47 @@ def test_scaled_execution_costs_reconcile_cash(nav):
     assert result.nav_after / nav == pytest.approx(0.997, rel=1e-14, abs=0)
     assert result.post_trade_cash == result.nav_after
     assert result.asset_ledger["post_trade_notional"].tolist() == [0.0]
+
+
+def test_cash_search_vector_costs_build_trade_details_only_once():
+    from quant_research_platform.markets.implementations.a_share.execution import (
+        prepare_trade_cost,
+    )
+
+    schedule = _schedule(broker_rate=0.1, transfer_rate=0.0, stamp_rate=0.0)
+    assumptions = replace(
+        _assumptions(), slippage_bps=0.0, impact_bps=0.0, adv_participation=1.0
+    )
+    when = date(2023, 8, 28)
+    evaluator = prepare_trade_cost(when, "shanghai", "buy", schedule, assumptions)
+    details, vectors = [], []
+
+    def trade(_date, asset, side, amount, adv, _assumptions):
+        assert side == "buy"
+        details.append(asset)
+        return evaluator.trade(amount, adv)
+
+    def totals(assets, amounts, adv):
+        vectors.append(len(assets))
+        return evaluator.totals(amounts, adv)
+
+    result = _execute_continuous_target(
+        pd.Series({"a": 0.0, "b": 0.0}),
+        pd.Series({"a": 0.5, "b": 0.5}),
+        nav=88.0,
+        average_daily_volume=pd.Series({"a": 1000.0, "b": 1000.0}),
+        can_enter=pd.Series({"a": True, "b": True}),
+        can_exit=pd.Series({"a": True, "b": True}),
+        execution_date=when,
+        cost_for_trade=trade,
+        cost_totals_for_buys=totals,
+        assumptions=assumptions,
+        cost_source_identity=schedule.content_identity,
+    )
+    assert details == ["a", "b"]
+    assert len(vectors) > 1
+    assert result.asset_ledger.executed_delta_notional.tolist() == pytest.approx(
+        [40.0, 40.0]
+    )
+    assert result.total_cost == pytest.approx(8.0)
+    assert result.post_trade_cash == pytest.approx(0.0, abs=1e-12)

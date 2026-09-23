@@ -9,7 +9,7 @@ import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
-from quant_research_platform.contracts.experiments import legal_training_rows
+from quant_research_platform.contracts.experiments import label_maturity_mask
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -20,6 +20,9 @@ from quant_research_platform.research.datasets.validation import (
 from quant_research_platform.research.evaluations.engine import (
     EvaluationResult,
     build_evaluation_result_from_frames,
+)
+from quant_research_platform.research.features.transforms import (
+    canonical_feature_validity_columns,
 )
 from quant_research_platform.research.predictions.alignment import (
     _iter_common_prediction_chunks,
@@ -95,14 +98,14 @@ def build_crypto_evaluation_result(
             )
             metadata = manifest["metadata"]["prediction_metadata"]
             input_columns = tuple(metadata["input_columns"])
-            assets = tuple(
-                protocol_manifest["model_scopes"][model_id]["evaluation_asset_ids"]
-            )
+            scope = protocol_manifest["model_scopes"][model_id]
+            assets = tuple(scope["evaluation_asset_ids"])
         columns = tuple(
             dict.fromkeys(
                 (
                     *dataset.primary_key,
                     *input_columns,
+                    *canonical_feature_validity_columns(input_columns),
                     *spec.label_columns,
                     *spec.label_availability_columns.values(),
                     *required_filter_columns(spec.filter_mode),
@@ -138,6 +141,7 @@ def build_crypto_evaluation_result(
                 chunks,
                 prediction_lookup=lookup,
                 input_columns=input_columns,
+                model_algorithm=scope["model_algorithm"],
                 sample_filter_mode=metadata["sample_filter_mode"],
                 test_start=pd.Timestamp(time_window.start).isoformat(),
                 test_end=pd.Timestamp(time_window.end).isoformat(),
@@ -165,15 +169,13 @@ def build_crypto_evaluation_result(
                             label,
                             availability,
                         ) in spec.label_availability_columns.items():
-                            legal = legal_training_rows(
+                            mature = label_maturity_mask(
                                 scoped,
                                 fitting_cutoff=window.end,
                                 availability_column=availability,
                                 target_column=label,
                             )
-                            prepared.loc[
-                                scoped.index.difference(legal.index), label
-                            ] = pd.NA
+                            prepared.loc[scoped.index[~mature], label] = pd.NA
                     yield prepared
 
         result = build_evaluation_result_from_frames(
@@ -266,13 +268,13 @@ def build_evaluation_result_from_research_dataset(
                 ):
                     prepared = chunk.copy()
                     for label, availability in spec.label_availability_columns.items():
-                        legal = legal_training_rows(
+                        mature = label_maturity_mask(
                             chunk,
                             fitting_cutoff=time_window.end,
                             availability_column=availability,
                             target_column=label,
                         )
-                        prepared.loc[~prepared.index.isin(legal.index), label] = pd.NA
+                        prepared.loc[~mature, label] = pd.NA
                     yield prepared
 
         result = build_evaluation_result_from_frames(

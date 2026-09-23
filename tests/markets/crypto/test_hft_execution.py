@@ -1069,3 +1069,93 @@ def coordinate_scale(request, monkeypatch):
 
     monkeypatch.setattr(sys.modules[__name__], "_state", state)
     monkeypatch.setattr(sys.modules[__name__], "_trade", trade)
+
+
+def test_observation_stop_does_not_rewrite_maker_decision_or_cancel_pending_quote():
+    results = []
+    for stop in (400_000_000, 1_000_000_000):
+        batches, equity, fills = [], [], []
+        with runtime_resource_policy_scope() as policy:
+            result = _simulate_maker(
+                [_state(stamp) for stamp in (0, 350, 390, 500, 900)],
+                [],
+                [_quote(350, book_segment_id="s1")],
+                config=replace(_maker_config(), latency_ms=100),
+                observed_coverage={"s1": (0, 2_000_000_001)},
+                trade_coverage={"trade-connection-1": (0, 2_000_000_001)},
+                resource_policy=policy,
+                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                asset_id="btc_usdt",
+                funding_events=(),
+                decision_windows_ns=((0, 2_000_000_000),),
+                observation_window_ns=(0, stop),
+                on_ledger=batches.append,
+                on_equity=equity.append,
+                on_fill=fills.append,
+            )
+        results.append((result, batches, equity, fills))
+    assert results[0][2] == results[1][2]
+    assert results[0][0]["cancelled_orders"] == 0
+    assert results[0][0]["censored_pending_command_count"] == 2
+    assert results[0][0]["average_order_lifetime_ms"] is None
+    assert not results[0][3]
+    assert (
+        max(row.timestamp_ns for batch in results[0][1] for row in batch.valuations)
+        == 390_000_000
+    )
+    prefixes = [
+        [
+            batch
+            for batch in rows
+            if max(value.timestamp_ns for value in batch.valuations) <= 350_000_000
+        ]
+        for _result, rows, _equity, _fills in results
+    ]
+    assert len(prefixes[0]) >= 2
+    assert prefixes[0] == prefixes[1]
+
+
+@pytest.mark.parametrize("kind", ["maker", "taker"])
+def test_complete_observation_window_preserves_continuous_economic_batches(kind):
+    produced = []
+    for observed in (None, (0, 1_000_000_001)):
+        batches = []
+        with runtime_resource_policy_scope() as policy:
+            common = dict(
+                observed_coverage={"s1": (0, 1_000_000_001)},
+                resource_policy=policy,
+                capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+                asset_id="btc_usdt",
+                funding_events=(),
+                decision_windows_ns=((0, 1_000_000_000),),
+                observation_window_ns=observed,
+                on_ledger=batches.append,
+            )
+            books = [_state(stamp) for stamp in (0, 350, 500, 900, 1000)]
+            if kind == "maker":
+                _simulate_maker(
+                    books,
+                    [],
+                    [_quote(350, book_segment_id="s1")],
+                    config=_maker_config(),
+                    trade_coverage={"trade-connection-1": (0, 1_000_000_001)},
+                    **common,
+                )
+            else:
+                _simulate_taker(
+                    books,
+                    [],
+                    prediction_column="score",
+                    prediction_horizon_ms=500,
+                    config=TakerConfig(
+                        order_quantity=1.0,
+                        position_size=1.0,
+                        latency_ms=100,
+                        taker_fee_bps=0.0,
+                        markout_horizon_ms=500,
+                    ),
+                    funding_forecasts=(),
+                    **common,
+                )
+        produced.append(batches)
+    assert produced[0] == produced[1]

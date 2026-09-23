@@ -38,7 +38,6 @@ from quant_research_platform.storage.datasets.inspection import (
     inspection_from_persisted_session,
 )
 from quant_research_platform.storage.datasets.inventory import (
-    DATASET_INVENTORY_RESERVE_BYTES,
     DatasetSessionInventory,
 )
 from quant_research_platform.storage.datasets.observation import (
@@ -97,9 +96,7 @@ from quant_research_platform.storage.parquet import (
 _TIMESTAMP_PREPARATION_BYTES_PER_ROW = 256
 _ARROW_CELL_OVERHEAD_BYTES = 9
 _ARROW_FRAME_FIXED_BYTES = 4 * 1024
-_DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES = (
-    EXACT_KEY_SQLITE_CACHE_BYTES + DATASET_INVENTORY_RESERVE_BYTES
-)
+_DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES = EXACT_KEY_SQLITE_CACHE_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,46 +386,26 @@ def write_dataset(
     resource_policy: RuntimeResourcePolicy | None,
     borrowed_input: bool = False,
 ) -> DatasetInspection:
-    with runtime_resource_policy_scope(resource_policy):
-        owned = _write_dataset_owned(
-            dataset_root,
-            data,
-            spec=spec,
-            instance_metadata=instance_metadata,
-            staged_validator=staged_validator,
-            borrowed_input=borrowed_input,
-        )
+    with runtime_resource_policy_scope(resource_policy) as policy:
+        final_root = Path(dataset_root)
+        validate_dataset_spec(spec)
+        validate_dataset_artifact_root(final_root, spec)
+        final_root = require_artifact_root(final_root)
+        with policy.lease(
+            "storage.dataset.write", _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+        ):
+            owned = _write_dataset_body(
+                final_root,
+                data,
+                spec=spec,
+                instance_metadata=instance_metadata,
+                staged_validator=staged_validator,
+                borrowed_input=borrowed_input,
+                resource_policy=policy,
+            )
         result = owned.value
         owned.release(owner="storage.dataset.write.result")
         return result
-
-
-def _write_dataset_owned(
-    dataset_root: Path,
-    data: pd.DataFrame | Iterable[object],
-    *,
-    spec: DataSpec,
-    instance_metadata: Mapping[str, Any] | None = None,
-    staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
-    borrowed_input: bool = False,
-) -> OwnedValue[DatasetInspection]:
-    resource_policy = current_runtime_resource_policy()
-    if resource_policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
-    final_root = Path(dataset_root)
-    validate_dataset_spec(spec)
-    validate_dataset_artifact_root(final_root, spec)
-    final_root = require_artifact_root(final_root)
-    owner_reserve_bytes = _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-    with resource_policy.lease("storage.dataset.write", owner_reserve_bytes):
-        return _write_dataset_body(
-            final_root,
-            data,
-            spec=spec,
-            instance_metadata=instance_metadata,
-            staged_validator=staged_validator,
-            borrowed_input=borrowed_input,
-        )
 
 
 def _write_dataset_body(
@@ -439,10 +416,8 @@ def _write_dataset_body(
     instance_metadata: Mapping[str, Any] | None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None,
     borrowed_input: bool,
+    resource_policy: RuntimeResourcePolicy,
 ) -> OwnedValue[DatasetInspection]:
-    resource_policy = current_runtime_resource_policy()
-    if resource_policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     close = getattr(input_chunks, "close", None)
     input_closed = close is None
@@ -748,6 +723,10 @@ def _write_contents(
                 operation_headroom_bytes=metadata_budget,
                 timestamp_key_count=timestamp_key_count,
                 partitioned=bool(spec.partition_columns),
+            )
+            operator_target_bytes = min(
+                operator_target_bytes,
+                max(1, resource_policy.planning_headroom_bytes),
             )
             declared = accumulator.declared_frame(
                 chunk,
@@ -1097,6 +1076,10 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
         )
         if minimum_bytes > page_headroom:
             raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        page_headroom = min(
+            page_headroom,
+            max(minimum_bytes, policy.planning_headroom_bytes - footer_bytes),
+        )
         batch_rows = 1
         page_working_bytes = minimum_bytes
         if persisted.num_rows:

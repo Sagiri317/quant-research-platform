@@ -94,14 +94,14 @@ def test_curve_output_growth_is_admitted_before_retention(
     monkeypatch.setattr(
         queries.report_artifact,
         "read_validated_reference",
-        lambda *args: (tmp_path, {}),
+        lambda *args, **kwargs: (tmp_path, {}),
     )
     monkeypatch.setattr(
         queries, "read_portfolio_ledger_artifact", lambda *args, **kwargs: artifact
     )
     with runtime_resource_policy_scope(policy):
         kwargs = dict(
-            profile=SimpleNamespace(profile_id="synthetic"),
+            profile=SimpleNamespace(profile_id="synthetic", market_id="a_share"),
             layout=StorageLayout(tmp_path),
             run_id="run_" + "a" * 32,
             target_id="ledger",

@@ -12,7 +12,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.compute.market_model import MarketModelRiskState
 from quant_research_platform.contracts.portfolios import (
     CONTINUOUS_EXECUTION_COLUMNS,
     PORTFOLIO_CASH_ASSET_ID,
@@ -29,6 +28,10 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.filtering import (
+    A_SHARE_ELIGIBILITY_FACTS,
+    a_share_eligibility,
+)
 from quant_research_platform.research.portfolios.accounting import (
     AlphaCalibration,
     ExecutionAccounting,
@@ -92,6 +95,11 @@ _ENHANCED_PANEL_COLUMNS = (
     "float_market_cap",
     "industry_level1_code",
     "is_nonfinancial_industry",
+    *tuple(
+        column
+        for column in A_SHARE_ELIGIBILITY_FACTS
+        if column not in {"adj_close", "amount"}
+    ),
 )
 _EXECUTION_COLUMNS = ("asset_id", "timestamp", "can_enter", "can_exit")
 _BENCHMARK_COLUMNS = ("benchmark_id", "asset_id", "timestamp", "weight")
@@ -253,7 +261,12 @@ def build_portfolio_ledger(
     output_start = pd.Timestamp(output_window.start).normalize()
     output_positions = np.flatnonzero(sessions >= output_start)
     if len(output_positions):
-        warmup_sessions = 564 if enhanced else 19
+        config = risk_config or FactorRiskConfig()
+        warmup_sessions = (
+            max(19, config.factor_window, config.specific_window) + 1
+            if enhanced
+            else 19
+        )
         warmup_start = max(0, int(output_positions[0]) - warmup_sessions)
         session_start = max(session_start, sessions[warmup_start])
     calibration_intervals = alpha_calibration_intervals(
@@ -348,7 +361,6 @@ def build_portfolio_ledger(
     nav = cash
     amount_history: dict[str, deque[float]] = {}
     risk_assets: set[str] = set()
-    market_model = MarketModelRiskState() if enhanced else None
     factor_risk = (
         FactorRiskState(style_columns=risk_style_columns, config=risk_config)
         if enhanced
@@ -482,7 +494,7 @@ def build_portfolio_ledger(
                     alpha: pd.Series | None = None
                     current_cross: pd.DataFrame | None = None
                     if enhanced:
-                        assert market_model is not None and factor_risk is not None
+                        assert factor_risk is not None
                         dataset = _read_next_session(
                             dataset_frames,
                             _DATASET_COLUMNS,
@@ -504,18 +516,9 @@ def build_portfolio_ledger(
                             )
                             _validate_input_keys(panel, context)
                             risk_frames.append(context)
-                        market_panel = panel.merge(
-                            dataset.loc[:, ["asset_id", "eligible"]],
-                            on="asset_id",
-                            how="inner",
-                            validate="one_to_one",
-                        )
-                        market_styles = market_model.observe(market_panel)
                         current_cross = _enhanced_risk_cross(
                             panel=panel,
-                            dataset=dataset,
                             risk_frames=risk_frames,
-                            market_styles=market_styles,
                             style_columns=risk_style_columns,
                         )
                         risk_frames.clear()
@@ -823,7 +826,7 @@ def build_portfolio_ledger(
         risk_assets.clear()
         previous_risk_cross = pending_calibration = waiting_alpha = holdings = None
         risk_frames = context = None
-        market_model = factor_risk = None
+        factor_risk = None
         account = output = current_cross = dataset = panel = next_panel = (
             endpoint_panel
         ) = None
@@ -966,8 +969,7 @@ def _risk_context_input_columns(
     timestamp: pd.Timestamp,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> dict[Path, tuple[str, ...]]:
-    market_styles = {"beta_252d", "residual_volatility_60d"}
-    required = set(style_columns).difference(market_styles)
+    required = set(style_columns)
     available: set[str] = set()
     inputs = {}
     for root in roots:
@@ -980,7 +982,7 @@ def _risk_context_input_columns(
             columns = tuple(
                 column
                 for column in style_columns
-                if column in session.arrow_schema.names and column not in market_styles
+                if column in session.arrow_schema.names
             )
         if available.intersection(columns):
             raise ValueError("portfolio_risk_context_owner_duplicate")
@@ -994,13 +996,10 @@ def _risk_context_input_columns(
 def _enhanced_risk_cross(
     *,
     panel: pd.DataFrame,
-    dataset: pd.DataFrame,
     risk_frames: list[pd.DataFrame],
-    market_styles: object,
     style_columns: tuple[str, ...],
 ) -> pd.DataFrame:
     panel_by_asset = panel.set_index("asset_id")
-    dataset_by_asset = dataset.set_index("asset_id")
     assets = pd.Index(sorted(set(panel_by_asset.index)), dtype="string")
     result = pd.DataFrame(index=assets)
     result["timestamp"] = pd.Timestamp(panel["timestamp"].iloc[0])
@@ -1017,7 +1016,9 @@ def _enhanced_risk_cross(
     result["industry_level1_code"] = (
         panel_by_asset["industry_level1_code"].astype("string").reindex(assets)
     )
-    result["eligible"] = dataset_by_asset["eligible"].reindex(assets)
+    result["eligible"] = a_share_eligibility(panel_by_asset, "pv_expanded").reindex(
+        assets
+    )
     for frame in risk_frames:
         context = frame.set_index("asset_id")
         for column in style_columns:
@@ -1027,13 +1028,6 @@ def _enhanced_risk_cross(
                     .reindex(assets)
                     .astype("float64")
                 )
-    for column in style_columns:
-        if column in {"beta_252d", "residual_volatility_60d"}:
-            values = getattr(
-                market_styles,
-                ("beta" if column == "beta_252d" else "residual_volatility"),
-            )
-            result[column] = pd.to_numeric(values, errors="raise").reindex(assets)
     return result.reset_index(names="asset_id")
 
 
@@ -1376,6 +1370,18 @@ def _build_session(
     ):
         return prepared[market_by_asset[asset], side].trade(notional, adv20)
 
+    def cost_totals_for_buys(buy_assets, notionals, adv_values):
+        totals = np.zeros(len(buy_assets), dtype="float64")
+        for market in set(market_by_asset.values()):
+            mask = np.asarray(
+                [market_by_asset[asset] == market for asset in buy_assets]
+            ) & (notionals > 0.0)
+            if mask.any():
+                totals[mask] = prepared[market, "buy"].totals(
+                    notionals[mask], adv_values[mask]
+                )
+        return totals
+
     if (
         target_override is None
         and enhanced_decision is not None
@@ -1474,6 +1480,7 @@ def _build_session(
             can_exit=masks["can_exit"],
             execution_date=next_timestamp.date(),
             cost_for_trade=cost_for_trade,
+            cost_totals_for_buys=cost_totals_for_buys,
             assumptions=assumptions,
             cost_source_identity=fee_identity,
         )

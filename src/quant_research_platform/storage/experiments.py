@@ -117,7 +117,7 @@ def _validate_trial_completion(start: TrialRecord, terminal: TrialRecord) -> Non
         start,
         event_id=terminal.event_id,
         status=terminal.status,
-        validation_metrics=terminal.validation_metrics,
+        metrics=terminal.metrics,
         thread_settings=terminal.thread_settings,
         undefined_reasons=terminal.undefined_reasons,
     )
@@ -198,7 +198,14 @@ def read_model_trial_ledger_reference(
     plan, records = read_trial_ledger_reference(layout, reference)
     for record in records:
         if record.status == "completed":
-            validate_completed_model_trial_metrics(
-                record.candidate_id, record.validation_metrics
-            )
+            if plan.stage == "selection":
+                validate_completed_model_trial_metrics(
+                    record.candidate_id, record.metrics
+                )
+            elif (
+                set(record.metrics) != {"n_train"}
+                or type(record.metrics["n_train"]) is not int
+                or record.metrics["n_train"] <= 0
+            ):
+                raise ValueError("refit_metrics_invalid")
     return plan, records

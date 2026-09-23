@@ -326,7 +326,7 @@ def read_dataset(
                             context,
                             target_chunk_bytes=max(
                                 1,
-                                context.resource_policy.operation_headroom_bytes,
+                                context.resource_policy.planning_headroom_bytes,
                             ),
                         )
                 return
@@ -340,7 +340,7 @@ def read_dataset(
                     context,
                     target_chunk_bytes=max(
                         1,
-                        context.resource_policy.operation_headroom_bytes,
+                        context.resource_policy.planning_headroom_bytes,
                     ),
                 )
 
@@ -359,7 +359,7 @@ def read_dataset(
             context,
             target_chunk_bytes=max(
                 1,
-                context.resource_policy.operation_headroom_bytes,
+                context.resource_policy.planning_headroom_bytes,
             ),
         )
 

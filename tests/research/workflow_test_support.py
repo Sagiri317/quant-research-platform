@@ -17,21 +17,33 @@ from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.research.models.fitting import ModelFitResult
-from quant_research_platform.research.models.production import QuarterlyModelResult
+from quant_research_platform.research.models.production import (
+    QuarterlyModelResult,
+    _refit_model_spec,
+    _selection_model_specs,
+)
 from quant_research_platform.research.models.rank_ensemble import (
-    ICWeightedRankEnsemble,
     RankEnsemblePredictor,
 )
 from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
     ModelMatrixScaler,
 )
+from quant_research_platform.research.models.trial_selection import (
+    ModelSampleCoverage,
+    model_validation_coverage_scope,
+)
 from quant_research_platform.research.protocols.a_share import (
     quarter_id_for_fold,
 )
 from quant_research_platform.research.randomness import derive_seed
-from quant_research_platform.storage.experiments import append_trial_record
+from quant_research_platform.storage.experiments import (
+    append_trial_record,
+    read_model_trial_ledger_reference,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 QUARTERLY_FIXTURE_PROTOCOL = {
@@ -39,11 +51,7 @@ QUARTERLY_FIXTURE_PROTOCOL = {
     "research_configuration": {
         "models": [
             {"model_id": algorithm, "hyperparameters": {}}
-            for algorithm in (
-                "linear_regression",
-                "equal_weight_rank_ensemble",
-                "ic_weighted_rank_ensemble",
-            )
+            for algorithm in ("linear_regression",)
         ]
     },
 }
@@ -91,9 +99,113 @@ def _metadata(
         "feature_importance": {column: 1.0 for column in columns},
         "fit_cutoff": "2018-12-31",
     }
+    coverage = ModelSampleCoverage(
+        {"fixture_training": model_id, "inputs": list(columns)}
+    )
+    coverage.add(
+        pd.DataFrame(
+            {
+                "timestamp": pd.to_datetime(
+                    [result["train_start"], result["train_end"]]
+                ),
+                "asset_id": ["asset_0", "asset_0"],
+            }
+        )
+    )
+    result["fit_coverage_id"] = coverage.semantic_identity
     if rank_parameters is not None:
         result["rank_parameters"] = rank_parameters
     return result
+
+
+def fixture_validation_keys(fold):
+    return pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime([fold.validation.start] * 2),
+            "asset_id": ["asset_0", "asset_1"],
+        }
+    )
+
+
+def fixture_validation_coverage(fold, specs, data_identity="d" * 64):
+    coverage = ModelSampleCoverage(
+        model_validation_coverage_scope(data_identity, fold, specs)
+    )
+    coverage.add(fixture_validation_keys(fold))
+    return {
+        "path": f"models/{quarter_id_for_fold(fold)}/validation-coverage.parquet",
+        "semantic_identity": coverage.semantic_identity,
+        "row_count": coverage.row_count,
+    }
+
+
+def fixture_quarterly_results(results, *, validation_keys=None):
+    def produce(*, on_validation_coverage):
+        written = set()
+        with closing_iterator(iter(results)) as source:
+            for item in source:
+                quarterly = item.value
+                quarter_id = quarter_id_for_fold(quarterly.quarter)
+                if quarter_id not in written:
+                    on_validation_coverage(
+                        quarterly.quarter,
+                        iter(
+                            (
+                                fixture_validation_keys(quarterly.quarter)
+                                if validation_keys is None
+                                else validation_keys,
+                            )
+                        ),
+                    )
+                    written.add(quarter_id)
+                yield item
+
+    return produce
+
+
+def fixture_refit_reference(
+    layout, reference, metadata, *, candidate_parameters=None, fit_keys=None
+):
+    selection_plan, records = read_model_trial_ledger_reference(layout, reference)
+    value = records[0].payload()["normalized_parameters"]
+    spec = ModelSpec(
+        **{
+            **value,
+            "input_factor_columns": tuple(value["input_factor_columns"]),
+            "input_feature_columns": tuple(value["input_feature_columns"]),
+        }
+    )
+    refit = _refit_model_spec(
+        spec,
+        candidate_parameters=(
+            dict(spec.hyperparameters)
+            if candidate_parameters is None
+            else candidate_parameters
+        ),
+        n_train=metadata["rows_after_input_label_dropna"],
+        quarter_id=quarter_id_for_fold(selection_plan.folds[0]),
+        root_seed=selection_plan.random_seed,
+    )
+    coverage = ModelSampleCoverage({"fixture_refit": model_spec_payload(refit)})
+    if fit_keys is None:
+        fit_keys = pd.DataFrame(
+            {
+                "timestamp": pd.date_range(
+                    metadata["train_start"],
+                    metadata["train_end"],
+                    periods=metadata["rows_after_input_label_dropna"],
+                ),
+                "asset_id": ["asset_0"] * metadata["rows_after_input_label_dropna"],
+            }
+        )
+    coverage.add(fit_keys)
+    metadata["fit_coverage_id"] = coverage.semantic_identity
+    selection_recorder = TrialRecorder(layout, reference["run_id"], selection_plan)
+    recorder, attempted = selection_recorder.begin_refit(
+        refit, common_coverage_id=coverage.semantic_identity
+    )
+    recorder.finish(attempted, model_metadata=metadata)
+    return recorder.reference()
 
 
 def _selection_metadata(
@@ -102,8 +214,14 @@ def _selection_metadata(
     model_id: str,
     columns: tuple[str, ...],
 ) -> dict[str, object]:
-    del columns
+    coverage = ModelSampleCoverage({"fixture_selection_inputs": list(columns)})
+    coverage.add(fixture_validation_keys(_fold(1)))
     return {
+        "common_validation_coverage": {
+            "path": "models/2019Q1/validation-coverage.parquet",
+            "semantic_identity": coverage.semantic_identity,
+            "row_count": coverage.row_count,
+        },
         "status": "selected",
         "selection_metric": "validation_rankic",
         "selection_direction": "maximize",
@@ -148,6 +266,7 @@ def _trial_reference(
     rankic: float = 0.2,
     model_spec: ModelSpec | None = None,
     root_seed: int = 11,
+    validation_specs=None,
 ) -> dict[str, str]:
     base = model_spec or ModelSpec(
         model_id=model_id,
@@ -168,6 +287,7 @@ def _trial_reference(
         hyperparameters=dict(base.hyperparameters),
     )
     plan = ExperimentPlan(
+        stage="selection",
         experiment_id=f"experiment_{uuid4().hex}",
         market_id=MarketId("a_share"),
         research_dataset_id=dataset_id,
@@ -207,11 +327,15 @@ def _trial_reference(
         research_dataset_id=dataset_id,
         target_id=target_id,
         horizon_id="label",
-        common_coverage_id=data_identity,
+        common_coverage_id=fixture_validation_coverage(
+            fold,
+            (base,) if validation_specs is None else validation_specs,
+            data_identity,
+        )["semantic_identity"],
         random_seed=trial_spec.random_seed,
         normalized_parameters=model_spec_payload(trial_spec),
         status="completed",
-        validation_metrics={
+        metrics={
             "validation_rankic": rankic,
             "validation_ic": 0.1,
             "validation_mse": 1.0,
@@ -238,29 +362,52 @@ def _quarterly_result(
     quarter: int,
     *,
     trial_layout: StorageLayout,
-    model_id: str,
-    columns: tuple[str, ...],
+    model_spec: ModelSpec,
+    protocol: dict[str, object] | None = None,
     predictor: object | None = None,
+    validation_specs=None,
+    validation_rankic=0.2,
 ) -> QuarterlyModelResult:
+    validation_specs = (model_spec,) if validation_specs is None else validation_specs
+    columns = model_spec.input_columns
+    model_id = model_spec.model_id
+    algorithm = model_spec.model_algorithm
+    selected_protocol = QUARTERLY_FIXTURE_PROTOCOL if protocol is None else protocol
+    configuration = next(
+        item
+        for item in selected_protocol["research_configuration"]["models"]
+        if item["model_id"] == model_id
+    )
+    trial_spec = _selection_model_specs(
+        model_spec,
+        configuration.get("parameter_candidates", [configuration["hyperparameters"]]),
+        n_train=2,
+        root_seed=11,
+        quarter_id=quarter_id_for_fold(_fold(quarter)),
+    )[0]
+    model_id = trial_spec.model_id
     model = predictor or LinearScaledPredictor(
         (0.0, 1.0, *([0.0] * (len(columns) - 1))),
         ModelMatrixScaler(columns, (0.0,) * len(columns), (1.0,) * len(columns)),
     )
-    algorithm = (
-        "ic_weighted_rank_ensemble"
-        if isinstance(model, ICWeightedRankEnsemble)
-        else "equal_weight_rank_ensemble"
-        if isinstance(model, RankEnsemblePredictor)
-        else "linear_regression"
-    )
     metadata = _metadata(columns, algorithm=algorithm, model_id=model_id)
-    metadata["random_seed"] = derive_seed(
-        11,
-        "a_share_model_refit",
-        algorithm,
-        model_id,
-        quarter_id_for_fold(_fold(quarter)),
+    refit_spec = _refit_model_spec(
+        trial_spec,
+        n_train=2,
+        quarter_id=quarter_id_for_fold(_fold(quarter)),
+        root_seed=11,
+        candidate_parameters=configuration.get(
+            "parameter_candidates", [configuration["hyperparameters"]]
+        )[0],
     )
+    metadata.update(
+        {
+            key: value
+            for key, value in model_spec_payload(refit_spec).items()
+            if key in metadata
+        }
+    )
+    metadata["resolved_hyperparameters"] = dict(refit_spec.hyperparameters)
     if isinstance(model, LinearScaledPredictor):
         metadata["scaler"] = model.scaler.to_payload()
         metadata["feature_importance"] = {
@@ -276,21 +423,23 @@ def _quarterly_result(
     reference = _trial_reference(
         trial_layout,
         _fold(quarter),
-        family_id=algorithm,
+        family_id=model_spec.model_id,
         model_id=model_id,
-        model_spec=ModelSpec(
-            model_id=model_id,
-            model_algorithm=algorithm,
-            input_factor_columns=columns,
-            label_column="label",
-        ),
+        model_spec=trial_spec,
+        protocol=selected_protocol,
+        validation_specs=validation_specs,
+        rankic=validation_rankic,
     )
     selection = _selection_metadata(
-        family_id=algorithm, model_id=model_id, columns=columns
+        family_id=model_spec.model_id, model_id=model_id, columns=columns
     )
     selection["families"][0]["trial_ledger_semantic_identity"] = reference[
         "semantic_identity"
     ]
+    selection["common_validation_coverage"] = fixture_validation_coverage(
+        _fold(quarter), validation_specs
+    )
+    refit_reference = fixture_refit_reference(trial_layout, reference, metadata)
     return QuarterlyModelResult(
         quarter=_fold(quarter),
         model_id=model_id,
@@ -298,9 +447,9 @@ def _quarterly_result(
             metadata=metadata,
             prediction_model=model,
         ),
-        family_id=algorithm,
+        family_id=model_spec.model_id,
         selection_metadata=selection,
-        trial_ledgers=(reference,),
+        trial_ledgers=(reference, refit_reference),
     )
 
 

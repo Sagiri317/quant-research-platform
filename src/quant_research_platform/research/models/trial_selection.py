@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 import tempfile
 from collections.abc import Callable, Collection, Iterable, Iterator
@@ -24,6 +25,7 @@ from quant_research_platform.contracts.experiments import (
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
     _model_algorithm_facts,
@@ -31,6 +33,9 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.experiments import TrialRecorder
+from quant_research_platform.research.features.transforms import (
+    canonical_feature_validity_columns,
+)
 from quant_research_platform.research.filtering import (
     _filter_working_set_bound,
     apply_filter_mode,
@@ -147,9 +152,9 @@ def validate_trial_metric_columns(
 ) -> None:
     """Ensure model selection uses validation metrics only."""
 
-    validation_metrics = set(validation_metric_columns)
+    metrics = set(validation_metric_columns)
     test_metrics = set(test_metric_columns)
-    if selection_metric not in validation_metrics:
+    if selection_metric not in metrics:
         raise ValueError("selection_metric_must_be_validation_metric")
     if selection_metric in test_metrics:
         raise ValueError("selection_metric_must_not_be_test_metric")
@@ -223,14 +228,109 @@ def select_best_validation_trial(
     return str(ordered.iloc[0][trial_id_column])
 
 
+def model_validation_inputs(specs):
+    return tuple(
+        dict.fromkeys(
+            column
+            for spec in specs
+            for column in (
+                *canonical_feature_validity_columns(spec.input_columns),
+                *(
+                    spec.input_columns
+                    if _model_algorithm_facts(spec.model_algorithm).input_kind
+                    != "rank_ensemble_inputs"
+                    else ()
+                ),
+            )
+        )
+    )
+
+
+def model_validation_coverage_scope(dataset_identity, fold, specs):
+    labels = {spec.label_column for spec in specs}
+    if len(labels) != 1:
+        raise ValueError("model_selection_label_mismatch")
+    label = specs[0].label_column
+    return {
+        "dataset_identity": dataset_identity,
+        "fold_id": fold.fold_id,
+        "validation_start": str(fold.validation.start),
+        "validation_end": str(fold.validation.end),
+        "label": label,
+        "availability": training_availability_columns(label)[0],
+        "inputs": list(model_validation_inputs(specs)),
+        "eligible": True,
+    }
+
+
+def crypto_validation_coverage_scope(plan, spec, asset_ids):
+    return {
+        "dataset_identity": plan.data_snapshot_id,
+        "fold": plan.protocol_payload()["folds"][0],
+        "label": spec.label_column,
+        "availability": training_availability_columns(spec.label_column)[0],
+        "inputs": list(spec.input_columns),
+        "asset_ids": list(asset_ids),
+    }
+
+
+class ModelSampleCoverage:
+    """Identity for per-asset ordered PK streams, independent of interleaving."""
+
+    def __init__(self, scope):
+        self.scope = scope
+        self.row_count = 0
+        self._assets = {}
+
+    def add(self, frame):
+        for timestamp, asset in frame.loc[:, ["timestamp", "asset_id"]].itertuples(
+            index=False, name=None
+        ):
+            if pd.isna(timestamp) or type(asset) is not str or not asset:
+                raise ValueError("model_coverage_key_invalid")
+            timestamp_ns = pd.Timestamp(timestamp).value
+            state = self._assets.get(asset)
+            if state is None:
+                digest = hashlib.sha256()
+            else:
+                last_timestamp_ns, digest = state
+                if timestamp_ns <= last_timestamp_ns:
+                    raise ValueError("model_coverage_key_order_invalid")
+            digest.update(timestamp_ns.to_bytes(8, "big", signed=True))
+            self._assets[asset] = (timestamp_ns, digest)
+            self.row_count += 1
+
+    @property
+    def semantic_identity(self):
+        digest = hashlib.sha256()
+        for asset in sorted(self._assets):
+            encoded = asset.encode("utf-8")
+            digest.update(len(encoded).to_bytes(8, "big"))
+            digest.update(encoded)
+            digest.update(self._assets[asset][1].digest())
+        return canonical_json_hash(
+            {
+                "scope": self.scope,
+                "row_count": self.row_count,
+                "keys_sha256": digest.hexdigest(),
+            }
+        )
+
+
 def evaluate_model_trial_metrics_from_chunks(
     chunks: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]],
     *,
     model_id: str,
     label_column: str,
     prediction_column: str,
+    expected_coverage: ModelSampleCoverage | None = None,
 ) -> dict[str, object]:
     """Evaluate model-selection metrics from bounded prediction chunks."""
+    coverage = (
+        None
+        if expected_coverage is None
+        else ModelSampleCoverage(expected_coverage.scope)
+    )
 
     policy = current_runtime_resource_policy()
     with ExitStack() as operation:
@@ -277,6 +377,8 @@ def evaluate_model_trial_metrics_from_chunks(
                                 owned_lease.close()
                             continue
                         try:
+                            if coverage is not None:
+                                coverage.add(frame)
                             _admit_model_selection_disk_growth(
                                 database,
                                 Path(scratch),
@@ -301,6 +403,11 @@ def evaluate_model_trial_metrics_from_chunks(
                         else:
                             if owned_lease is not None:
                                 owned_lease.close()
+                if coverage is not None and (
+                    coverage.semantic_identity != expected_coverage.semantic_identity
+                    or coverage.row_count != expected_coverage.row_count
+                ):
+                    raise ValueError("model_trial_common_coverage_mismatch")
                 database.commit()
                 validation_row_count = int(
                     database.execute("SELECT COUNT(*) FROM validation_rows").fetchone()[
@@ -670,6 +777,7 @@ def select_prediction_model_spec(
     chunks,
     validation_input_columns: tuple[str, ...] | None = None,
     trial_recorder: TrialRecorder | None = None,
+    validation_coverage: ModelSampleCoverage | None = None,
 ):
     """Select one model spec from validation trials for model-owned callers."""
 
@@ -682,15 +790,7 @@ def select_prediction_model_spec(
         raise ValueError("model_selection_label_column_mismatch")
     label_column = candidate_specs[0].label_column
     common_validation_input_columns = (
-        tuple(
-            dict.fromkeys(
-                column
-                for spec in candidate_specs
-                if _model_algorithm_facts(spec.model_algorithm).input_kind
-                != "rank_ensemble_inputs"
-                for column in spec.input_columns
-            )
-        )
+        model_validation_inputs(candidate_specs)
         if validation_input_columns is None
         else validation_input_columns
     )
@@ -710,6 +810,7 @@ def select_prediction_model_spec(
                     *dataset_spec.primary_key,
                     *common_validation_input_columns,
                     *candidate_spec.input_columns,
+                    *canonical_feature_validity_columns(candidate_spec.input_columns),
                     label_column,
                     *training_availability_columns(label_column),
                     *required_filter_columns(prediction_spec.sample_filter_mode),
@@ -722,7 +823,12 @@ def select_prediction_model_spec(
         primary_error: BaseException | None = None
         owned_model = model_result = model_lease = None
         attempt = (
-            trial_recorder.begin(candidate_spec) if trial_recorder is not None else None
+            trial_recorder.begin(
+                candidate_spec,
+                common_coverage_id=validation_coverage.semantic_identity,
+            )
+            if trial_recorder is not None
+            else None
         )
         try:
             owned_model = fitting._fit_model_result_owned_from_frames(  # noqa: SLF001
@@ -777,6 +883,7 @@ def select_prediction_model_spec(
                 model_id=candidate_spec.model_id,
                 label_column=label_column,
                 prediction_column=prediction_spec.prediction_column,
+                expected_coverage=validation_coverage,
             )
             trial_metrics.update(
                 {
@@ -931,15 +1038,23 @@ def iter_validation_prediction_chunks(
                         filtered,
                         label_column=candidate_spec.label_column,
                     )
-                    prediction_rows = (
-                        filtered
-                        if rank_inputs_allow_missing
-                        else filtered.loc[
-                            filtered.loc[:, list(candidate_spec.input_columns)]
-                            .notna()
-                            .all(axis=1)
-                        ]
+                    prediction_inputs = tuple(
+                        dict.fromkeys(
+                            (
+                                *canonical_feature_validity_columns(
+                                    candidate_spec.input_columns
+                                ),
+                                *(
+                                    candidate_spec.input_columns
+                                    if not rank_inputs_allow_missing
+                                    else ()
+                                ),
+                            )
+                        )
                     )
+                    prediction_rows = filtered.loc[
+                        filtered.loc[:, list(prediction_inputs)].notna().all(axis=1)
+                    ]
                     usable = legal_training_rows(
                         prediction_rows,
                         fitting_cutoff=validation_end,
@@ -947,7 +1062,9 @@ def iter_validation_prediction_chunks(
                         feature_columns=(
                             usable_input_columns
                             if usable_input_columns is not None
-                            else ()
+                            else canonical_feature_validity_columns(
+                                candidate_spec.input_columns
+                            )
                             if rank_inputs_allow_missing
                             else candidate_spec.input_columns
                         ),

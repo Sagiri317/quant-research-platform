@@ -13,6 +13,7 @@ from quant_research_platform.contracts.filtering import (
 )
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.storage.identity import require_unaliased_path
 from quant_research_platform.storage.layout import StorageLayout
 
 _SIGNAL_METADATA_KEYS = frozenset(
@@ -168,9 +169,9 @@ def derive_output_bundle_root(
     if output_spec.scope != OutputScope.LOCAL_ONLY:
         raise ValueError("output_scope_must_be_local_only")
     output_bundle = Path(layout.project_root) / "outputs" / output_spec.output_id
-    if any(
-        f"data/{layer}" in output_bundle.as_posix()
-        for layer in ("raw", "interim", "processed", "research")
-    ):
+    require_unaliased_path(
+        output_bundle, error="output_bundle_must_not_be_dataset_root"
+    )
+    if output_bundle.resolve().is_relative_to((layout.project_root / "data").resolve()):
         raise ValueError("output_bundle_must_not_be_dataset_root")
     return output_bundle

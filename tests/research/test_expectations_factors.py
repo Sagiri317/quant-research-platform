@@ -191,7 +191,7 @@ def test_asset_candidate_scan_preserves_interleaved_observation_positions(monkey
     candidate_rows = []
 
     def observed(asset_id, timestamp, close, forecast, **kwargs):
-        assert forecast.empty or forecast.asset_id.eq(asset_id).all()
+        assert all(event.asset_id == asset_id for event in forecast)
         candidate_rows.append(len(forecast))
         return original(asset_id, timestamp, close, forecast, **kwargs)
 

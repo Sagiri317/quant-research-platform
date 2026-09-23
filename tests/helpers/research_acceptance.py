@@ -51,20 +51,26 @@ def run_a_share_acceptance(project_root: Path):
     """Exercise provider CSV through actual model selection and active enhancement."""
     layout = StorageLayout(project_root=project_root)
     raw_root = project_root / "data/raw"
-    write_a_share_raw_fixture(layout)
     profile = research_profile()
     configuration = research_configuration(name="core6", small_models=True)
     configuration["windows"]["development"] = {
         "start": "2019-03-04",
         "end": "2019-03-15",
     }
+    bound_profile = bind_research_configuration(profile, configuration)
+    write_a_share_raw_fixture(
+        layout,
+        benchmark_total_return_indices=bound_profile.protocol(
+            configuration["scenario_id"]
+        ).manifest()["benchmark_total_return_indices"],
+    )
     result = research.research_run(
         profile=profile,
         layout=layout,
         research_plan=configuration,
         raw_root=raw_root,
     )
-    profile = bind_research_configuration(profile, configuration)
+    profile = bound_profile
     assert result["status"] == "COMPLETE", [
         (row["target_id"], row["status"], row["reason"])
         for row in result["target_results"]
@@ -158,7 +164,11 @@ def run_crypto_acceptance(project_root: Path):
     evaluations = profile.evaluations.list()
     assert len(evaluations) == 17
     assert all(targets[item.evaluation_id]["status"] == "BUILT" for item in evaluations)
-    candidates = profile.protocol(HFT_RESEARCH_DATASET_ID).portfolio_candidates()
+    protocol = profile.protocol(HFT_RESEARCH_DATASET_ID)
+    candidates = protocol.portfolio_candidates()
+    execution_targets = {
+        target.candidate.candidate_id: target for target in protocol.execution_targets()
+    }
     makers = tuple(
         item for item in candidates if isinstance(item, CryptoMakerCandidate)
     )
@@ -168,8 +178,9 @@ def run_crypto_acceptance(project_root: Path):
     for candidate in makers:
         if candidate.calibrated:
             assert targets[candidate.calibration_target_id]["status"] == "BUILT"
-    assert (
-        targets[f"{HFT_RESEARCH_DATASET_ID}_portfolio_statistics"]["status"] == "BUILT"
+    assert all(
+        targets[target.statistics_target_id]["status"] == "BUILT"
+        for target in execution_targets.values()
     )
     report = research.report_build(
         profile=profile, layout=layout, run_id=result["run_id"]
@@ -212,10 +223,12 @@ def run_crypto_acceptance(project_root: Path):
     assert len(takers) == 12 and len(makers) == 2
     with runtime_resource_policy_scope() as policy:
         for candidate in (*takers, *makers):
-            target = targets[candidate.target_id]
+            target = targets[execution_targets[candidate.candidate_id].target_id]
             assert target["status"] == "BUILT"
             root = layout.instance_root(
-                layout.semantic_artifact_root("crypto", candidate.target_id),
+                layout.semantic_artifact_root(
+                    "crypto", execution_targets[candidate.candidate_id].target_id
+                ),
                 target["instance_identity"],
             )
             ledger = read_portfolio_ledger_artifact(

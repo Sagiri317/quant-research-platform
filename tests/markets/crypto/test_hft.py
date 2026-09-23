@@ -561,8 +561,7 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
     volatility = restored["realized_volatility_1s"]
     assert len(returns) == 10
     assert returns.iloc[:9].nunique() == 1
-    assert volatility.iloc[:2].isna().all()
-    assert volatility.iloc[2:10].tolist() == [0.0] * 8
+    assert volatility.iloc[:10].isna().all()
     if perturb:
         assert returns.iloc[-1] != returns.iloc[0]
         # Nine equal observations and one delta have sample std abs(delta)/sqrt(10).
@@ -579,7 +578,7 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
         iter_factor_frames((reset_panel.iloc[:9], reset_panel.iloc[9:])),
         ignore_index=True,
     )
-    assert reset_factors["realized_volatility_1s"].iloc[8:10].isna().all()
+    assert reset_factors["realized_volatility_1s"].iloc[8:].isna().all()
     assert reset_factors["return_100ms"].iloc[8:9].isna().all()
 
 
@@ -813,6 +812,38 @@ def test_l0_full_windows_chunk_segments_assets_causality_and_persistence(tmp_pat
         }
     )
     full = pd.concat(iter_factor_frames([panel]), ignore_index=True)
+    for names in (
+        (
+            "return_100ms",
+            "ofi_500ms",
+            "depth_normalized_ofi_500ms",
+            "trade_flow_imbalance_500ms",
+            "return_500ms",
+        ),
+        ("microprice",),
+        ("imbalance_5_minus_10",),
+        ("realized_volatility_1s",),
+    ):
+        projected = pd.concat(
+            iter_factor_frames([panel.iloc[:7], panel.iloc[7:]], columns=names),
+            ignore_index=True,
+        )
+        pd.testing.assert_frame_equal(
+            projected.loc[:, list(names)], full.loc[:, list(names)]
+        )
+
+    extreme = panel.iloc[:25].copy()
+    extreme.loc[:, "mid"] = 100.0
+    extreme.loc[12, "mid"] = np.finfo(float).tiny
+    extreme.loc[13:, "mid"] = 1e308
+    with np.errstate(over="ignore", invalid="ignore"):
+        extreme_vol = pd.concat(
+            iter_factor_frames([extreme], columns=("realized_volatility_1s",)),
+            ignore_index=True,
+        )["realized_volatility_1s"]
+    assert extreme_vol.iloc[13:23].isna().all()
+    assert extreme_vol.iloc[23] == 0.0
+
     chunked = pd.concat(
         iter_factor_frames([panel.iloc[i : i + 7] for i in range(0, size, 7)]),
         ignore_index=True,

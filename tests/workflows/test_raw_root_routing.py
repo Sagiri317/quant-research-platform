@@ -151,8 +151,6 @@ def test_crypto_plan_preserves_source_system_io_failure(tmp_path, monkeypatch):
 
 
 def test_plan_preserves_persisted_instance_system_io_failure(tmp_path, monkeypatch):
-    import os
-
     import pytest
 
     from tests.sources.reference.test_interim import _write_reference_root
@@ -177,17 +175,21 @@ def test_plan_preserves_persisted_instance_system_io_failure(tmp_path, monkeypat
         layout=layout,
         raw_root=raw,
     )
-    assert research.plan_targets(**arguments)["targets"][0]["decision"] == "REUSE"
-    target = layout.interim_data_root("reference", data_id) / "instances"
+    planned = research.plan_targets(**arguments)
+    assert planned["targets"][0]["decision"] == "REUSE"
+    target = layout.instance_root(
+        layout.interim_data_root("reference", data_id),
+        planned["targets"][0]["requested_identity"],
+    )
     primary = OSError(5, "synthetic_storage_io")
-    original = os.scandir
+    original = Path.stat
 
-    def scan(path):
-        if str(path) == str(target):
+    def stat(path, *args, **kwargs):
+        if path == target:
             raise primary
-        return original(path)
+        return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(os, "scandir", scan)
+    monkeypatch.setattr(Path, "stat", stat)
     with pytest.raises(OSError) as caught:
         research.plan_targets(**arguments)
     assert caught.value is primary

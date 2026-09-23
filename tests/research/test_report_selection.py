@@ -61,7 +61,7 @@ def test_crypto_factor_only_report_does_not_claim_missing_unrequested_models():
     result = build_crypto_research_report(
         record=record(),
         evidence={
-            "statistics": {"status": "BLOCKED", "reason": "target_unavailable"},
+            "statistics": [],
             "data": {"status": "DEFINED"},
             "evaluations": [{"status": "DEFINED"}],
             "models": {"status": "BLOCKED"},
@@ -109,7 +109,7 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
     monkeypatch.setattr(
         research,
         "read_validated_reference",
-        lambda layout, result: checked.append(result.target_id),
+        lambda layout, result, **kwargs: checked.append(result.target_id),
     )
     manifest = {
         "row_count": 12,
@@ -124,7 +124,7 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
         "label_nan_profile": {},
     }
     monkeypatch.setattr(
-        research, "read_dataset_manifest_evidence", lambda root: manifest
+        research, "read_dataset_manifest_evidence", lambda root, **kwargs: manifest
     )
     monkeypatch.setattr(
         research,
@@ -200,3 +200,76 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(tmp_
             report_lease=None,
         )
     assert len(calls) == 1
+
+
+def test_crypto_report_keeps_segment_results_when_continuous_is_blocked():
+    from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_GROUPS
+
+    run = record()
+    run.protocol["research_configuration"].update(
+        stage="portfolio",
+        portfolios=[{"candidate_id": "candidate", "asset_id": "btc_usdt"}],
+    )
+    run.status = RunStatus.BLOCKED
+    tables = {
+        member.removesuffix(".parquet"): []
+        for member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]
+    }
+    tables["crypto_portfolio_intervals"] = [
+        {
+            "candidate_id": "candidate",
+            "execution_mode": "independent_segments",
+            "episode_id": "a" * 64,
+            "net_pnl": 99.0,
+        }
+    ]
+    tables["crypto_portfolio_coverage"] = [
+        {"kind": "missing", "reason": "not_covered_by_qualified_episode"}
+    ]
+    blocked = {
+        "target_id": "candidate_continuous_statistics",
+        "status": "BLOCKED",
+        "reason": "book_gap",
+    }
+    segmented = {
+        "target_id": "candidate_independent_segments_statistics",
+        "candidate_id": "candidate",
+        "execution_mode": "independent_segments",
+        "status": "DEFINED",
+        "identity": "b" * 64,
+        "tables": tables,
+    }
+    report = build_crypto_research_report(
+        record=run,
+        evidence={
+            "statistics": [blocked, segmented],
+            "data": {"status": "DEFINED"},
+            "evaluations": [],
+            "models": {"status": "DEFINED"},
+            "predictions": {"status": "DEFINED"},
+            "model_comparisons": [],
+            "calibrations": [],
+            "portfolios": [
+                {
+                    "status": "BLOCKED",
+                    "execution_mode": "continuous",
+                    "reason": "book_gap",
+                },
+                {
+                    "status": "DEFINED",
+                    "execution_mode": "independent_segments",
+                    "episodes": [{"episode_id": "a" * 64, "termination": "TRUNCATED"}],
+                },
+            ],
+            "issues": [blocked],
+        },
+    )
+    assert report["report_status"] == "BLOCKED"
+    portfolio = report["sections"]["portfolio"]
+    assert portfolio["intervals"]["results"] == tables["crypto_portfolio_intervals"]
+    assert portfolio["intervals"]["statistics_artifacts"][0] == blocked
+    assert (
+        report["sections"]["Data/Coverage"]["execution_coverage"]["results"]
+        == tables["crypto_portfolio_coverage"]
+    )
+    assert portfolio["candidates"][1]["episodes"][0]["termination"] == "TRUNCATED"

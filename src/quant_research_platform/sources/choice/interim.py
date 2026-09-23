@@ -560,7 +560,7 @@ def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
 def _frames(rows, spec, policy):
     columns = spec.required_columns
     row_bound = 512 + 128 * len(columns)
-    count = min(1024, max(1, policy.operation_headroom_bytes // (4 * row_bound)))
+    count = min(1024, max(1, policy.planning_headroom_bytes // (4 * row_bound)))
     bound = 65536 + count * row_bound
     lease = None
     frame = pending = owned = None

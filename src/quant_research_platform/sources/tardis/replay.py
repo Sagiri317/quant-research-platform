@@ -5,9 +5,8 @@ from __future__ import annotations
 import json
 import struct
 import sys
-import tempfile
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 
@@ -21,7 +20,6 @@ from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
-    require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
@@ -34,6 +32,7 @@ from quant_research_platform.sources.binance.replay import (
     _capture_raw_file_identity,
     _raw_path_session,
     _sha256_file,
+    native_trade_identities,
 )
 from quant_research_platform.sources.binance.validation import strict_iso_timestamp
 from quant_research_platform.sources.tardis.raw import (
@@ -49,7 +48,10 @@ from quant_research_platform.sources.tardis.raw import (
     _stream_suffix,
     iter_native_slice,
 )
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.storage._scratch_ownership import (
+    handle_preserving_primary,
+    reserved_temporary_file,
+)
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
 _MANIFEST_KEYS = {
@@ -228,6 +230,144 @@ class TardisArchive:
     source_identity: dict
     resource_policy: object
     _coverage_index: ObservationCoverageIndex
+    _replay_resources: ExitStack
+    _spools: dict = field(default_factory=dict)
+    _native_records: object = field(init=False)
+
+    def __post_init__(self):
+        self._native_records = self._replay_resources.enter_context(
+            closing_iterator(self._iter_canonical_records())
+        )
+
+    def _iter_canonical_records(self):
+        """Decode and validate native continuity once for this archive session."""
+        market_type = (
+            FUTURES_MARKET_TYPE
+            if self.manifest["exchange"] == EXCHANGE
+            else SPOT_MARKET_TYPE
+        )
+        prefix = 0
+        with native_trade_identities(self.resource_policy) as observe_trade:
+            tracker = _ObservedStreams(
+                self.manifest["exchange"], observe_trade=observe_trade
+            )
+            for member in self.manifest["files"]:
+                with closing_iterator(
+                    iter_native_slice(
+                        self.root / member["path"],
+                        date=self.manifest["date"],
+                        offset_minutes=member["offset_minutes"],
+                        expected_sha256=member["sha256"],
+                        resource_policy=self.resource_policy,
+                        exchange=self.manifest["exchange"],
+                        symbols=tuple(self.manifest["symbols"]),
+                        channels=tuple(self.manifest["requested_channels"]),
+                    )
+                ) as records:
+                    for number, timestamp, value in records:
+                        identity, closed, _gap = tracker.observe(
+                            member["offset_minutes"], number, timestamp, value
+                        )
+                        for interval in closed:
+                            self._check_interval(interval)
+                        if value is None:
+                            continue
+                        raw_symbol, channel, *_ = value["stream"].split("@")
+                        symbol = raw_symbol.upper()
+                        if channel in STATE_CHANNELS:
+                            yield (
+                                (symbol, "state"),
+                                {
+                                    "receive_time": timestamp,
+                                    "channel": channel,
+                                    "payload": value["data"],
+                                    "epoch": tracker.epoch,
+                                },
+                            )
+                            continue
+                        if identity is None:
+                            continue
+                        depth = channel != "aggTrade"
+                        payload = value["data"]
+                        if market_type == SPOT_MARKET_TYPE:
+                            payload = dict(payload)
+                            for clock in ("E", "T"):
+                                if clock in payload and payload[clock] > 10**15:
+                                    payload[clock] //= 1000
+                        yield (
+                            (symbol, "depth" if depth else "agg_trades"),
+                            {
+                                "source_sequence": prefix + number,
+                                "market_type": market_type,
+                                "data_kind": "depth_snapshot"
+                                if channel == "depthSnapshot"
+                                else "depth"
+                                if depth
+                                else "agg_trades",
+                                "payload": payload,
+                                "receive_time": timestamp,
+                                "receive_monotonic_ns": None,
+                                "observation_id": identity,
+                                "segment_id": identity if depth else None,
+                                "price_unit": self.manifest["price_units"][symbol],
+                            },
+                        )
+                prefix += member["line_count"]
+            for interval in tracker.finish():
+                self._check_interval(interval)
+
+    def _stream_records(self, symbol, data_kind, end_ns):
+        """Independent disk cursors over a single lazily advanced native scan."""
+        requested = symbol, data_kind
+        position = 0
+        while True:
+            pair = self._spools.get(requested)
+            if pair is not None:
+                spool, _reservation = pair
+                spool.seek(position)
+                header = spool.read(8)
+                if header:
+                    size = struct.unpack(">Q", header)[0]
+                    with self.resource_policy.lease(
+                        "tardis.canonical_record",
+                        json_record_working_set_bytes(size) + 64 * 1024,
+                    ):
+                        record = None
+                        try:
+                            record = parse_qrp_json_object(spool.read(size))
+                            position = spool.tell()
+                            if (
+                                end_ns is not None
+                                and strict_iso_timestamp(
+                                    record["receive_time"],
+                                    error="tardis_observed_time_invalid",
+                                ).value
+                                > end_ns
+                            ):
+                                return
+                            yield record
+                        finally:
+                            record = None
+                    continue
+            item = next(self._native_records, None)
+            if item is None:
+                return
+            key, record = item
+            encoded = json.dumps(
+                record, separators=(",", ":"), allow_nan=False
+            ).encode()
+            pair = self._spools.get(key)
+            if pair is None:
+                pair = self._replay_resources.enter_context(
+                    reserved_temporary_file(resource_policy=self.resource_policy)
+                )
+                self._spools[key] = pair
+            target, reservation = pair
+            end = target.seek(0, 2)
+            reservation.resize(end + len(encoded) + 8)
+            target.write(struct.pack(">Q", len(encoded)))
+            target.write(encoded)
+            item = record = encoded = None
 
     def funding_root(self, symbol):
         return self.root / "funding" / symbol / "observations"
@@ -285,199 +425,75 @@ class TardisArchive:
             or not set(STATE_CHANNELS) <= set(self.manifest["requested_channels"])
         ):
             raise ValueError("tardis_derivative_scope_invalid")
-        epoch = 0
-        for member in self.manifest["files"]:
-            records = iter_native_slice(
-                self.root / member["path"],
-                date=self.manifest["date"],
-                offset_minutes=member["offset_minutes"],
-                expected_sha256=member["sha256"],
-                resource_policy=self.resource_policy,
-                exchange=self.manifest["exchange"],
-                symbols=tuple(self.manifest["symbols"]),
-                channels=tuple(self.manifest["requested_channels"]),
-            )
-            with closing_iterator(records):
-                for _number, timestamp, value in records:
-                    if value is None:
-                        epoch += 1
-                        continue
-                    raw_symbol, channel, *_ = value["stream"].split("@")
-                    if raw_symbol.upper() == symbol and channel in STATE_CHANNELS:
-                        observed = strict_iso_timestamp(
-                            timestamp, error="tardis_observed_time_invalid"
-                        ).value
-                        yield observed, channel, dict(value["data"]), epoch
+        with closing_iterator(self._stream_records(symbol, "state", None)) as records:
+            for record in records:
+                observed = strict_iso_timestamp(
+                    record["receive_time"], error="tardis_observed_time_invalid"
+                ).value
+                yield observed, record["channel"], record["payload"], record["epoch"]
 
     def iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
-        metadata = self.market_metadata(market_type, symbol)
+        self.market_metadata(market_type, symbol)
         depth = tuple(data_kinds) == ("depth_snapshot", "depth")
         if not depth and tuple(data_kinds) != ("agg_trades",):
             raise ValueError("tardis_market_record_kind_invalid")
-        prefix = 0
         active_observation = None
         snapshot_ready = False
         with ExitStack() as resources:
-            trade_lease = resources.enter_context(
-                self.resource_policy.lease("tardis.trade_identities", 0)
-            )
-            tracker = _ObservedStreams(
-                self.manifest["exchange"], trade_lease=trade_lease
-            )
-            resources.callback(tracker.trade_fingerprints.clear)
-            spool = None
-            if depth:
-                require_free_disk_headroom(
-                    Path(tempfile.gettempdir()), reserve_bytes=128 * 1024
-                )
-                spool = resources.enter_context(
-                    handle_preserving_primary(tempfile.TemporaryFile(mode="w+b"))
-                )
-            try:
-                for member in self.manifest["files"]:
-                    records = iter_native_slice(
-                        self.root / member["path"],
-                        date=self.manifest["date"],
-                        offset_minutes=member["offset_minutes"],
-                        expected_sha256=member["sha256"],
-                        resource_policy=self.resource_policy,
-                        exchange=self.manifest["exchange"],
-                        symbols=tuple(self.manifest["symbols"]),
-                        channels=tuple(self.manifest["requested_channels"]),
+            records = resources.enter_context(
+                closing_iterator(
+                    self._stream_records(
+                        symbol, "depth" if depth else "agg_trades", end_ns
                     )
-                    with closing_iterator(records):
-                        try:
-                            for number, timestamp, value in records:
-                                if (
-                                    end_ns is not None
-                                    and timestamp is not None
-                                    and strict_iso_timestamp(
-                                        timestamp, error="tardis_observed_time_invalid"
-                                    ).value
-                                    > end_ns
-                                ):
-                                    return
-                                identity, closed, _gap = tracker.observe(
-                                    member["offset_minutes"], number, timestamp, value
-                                )
-                                for interval in closed:
-                                    self._check_interval(interval)
-                                if value is None or identity is None:
-                                    continue
-                                raw_symbol, channel, *_ = value["stream"].split("@")
-                                if raw_symbol.upper() != symbol or channel not in {
-                                    "depth",
-                                    "depthSnapshot",
-                                    "aggTrade",
-                                }:
-                                    value = None
-                                    continue
-                                if depth != (channel in ("depth", "depthSnapshot")):
-                                    value = None
-                                    continue
-                                kind = (
-                                    "depth_snapshot"
-                                    if channel == "depthSnapshot"
-                                    else "depth"
-                                    if depth
-                                    else "agg_trades"
-                                )
-                                payload = value["data"]
-                                if market_type == SPOT_MARKET_TYPE:
-                                    payload = dict(payload)
-                                    # Tardis maps native ms/us clocks by magnitude.
-                                    # Raw bytes retain exact provider clocks.
-                                    for clock in ("E", "T"):
-                                        if clock in payload and payload[clock] > 10**15:
-                                            payload[clock] //= 1000
-                                record = {
-                                    "source_sequence": prefix + number,
-                                    "market_type": market_type,
-                                    "data_kind": kind,
-                                    "payload": payload,
-                                    "receive_time": timestamp,
-                                    "receive_monotonic_ns": None,
-                                    "observation_id": identity,
-                                    "segment_id": identity if depth else None,
-                                    "price_unit": metadata["price_unit"],
-                                }
-                                if not depth:
-                                    try:
-                                        yield record
-                                    finally:
-                                        record = value = None
-                                    continue
-                                assert spool is not None
-                                if identity != active_observation:
-                                    spool.seek(0)
-                                    spool.truncate(0)
-                                    active_observation = identity
-                                    snapshot_ready = False
-                                if kind == "depth_snapshot":
-                                    if snapshot_ready:
-                                        # Keep the already initialized stream.
-                                        record = value = None
-                                        continue
-                                    yield record
-                                    spool.seek(0)
-                                    while header := spool.read(8):
-                                        if len(header) != 8:
-                                            raise ValueError(
-                                                "tardis_pending_depth_truncated"
-                                            )
-                                        size = struct.unpack(">Q", header)[0]
-                                        with self.resource_policy.lease(
-                                            "tardis.pending_depth_record",
-                                            json_record_working_set_bytes(size)
-                                            + 64 * 1024,
-                                        ):
-                                            buffered = raw = None
-                                            try:
-                                                raw = spool.read(size)
-                                                if len(raw) != size:
-                                                    raise ValueError(
-                                                        "tardis_pending_depth_truncated"
-                                                    )
-                                                buffered = parse_qrp_json_object(raw)
-                                                buffered["data_kind"] = (
-                                                    "depth_bootstrap"
-                                                )
-                                                yield buffered
-                                            finally:
-                                                buffered = raw = None
-                                    spool.seek(0)
-                                    spool.truncate(0)
-                                    snapshot_ready = True
-                                elif snapshot_ready:
-                                    yield record
-                                else:
-                                    encoded = json.dumps(
-                                        record,
-                                        ensure_ascii=False,
-                                        allow_nan=False,
-                                        separators=(",", ":"),
-                                    ).encode()
-                                    require_free_disk_headroom(
-                                        Path(tempfile.gettempdir()),
-                                        reserve_bytes=len(encoded) + 8,
-                                    )
-                                    spool.write(struct.pack(">Q", len(encoded)))
-                                    spool.write(encoded)
-                                    encoded = None
-                                record = value = closed = interval = None
-                        except BaseException as error:
-                            clear_exception_frames(error)
-                            raise
-                        finally:
-                            record = value = closed = interval = encoded = None
-                    prefix += member["line_count"]
-                for interval in tracker.finish():
-                    self._check_interval(interval)
-            except BaseException as error:
-                clear_exception_frames(error)
-                raise
-            finally:
-                record = value = closed = interval = encoded = None
+                )
+            )
+            if not depth:
+                yield from records
+                return
+            spool, reservation = resources.enter_context(
+                reserved_temporary_file(resource_policy=self.resource_policy)
+            )
+            for record in records:
+                identity = record["observation_id"]
+                if identity != active_observation:
+                    spool.seek(0)
+                    spool.truncate(0)
+                    reservation.resize(0)
+                    active_observation = identity
+                    snapshot_ready = False
+                if record["data_kind"] == "depth_snapshot":
+                    if snapshot_ready:
+                        continue
+                    yield record
+                    spool.seek(0)
+                    while header := spool.read(8):
+                        size = struct.unpack(">Q", header)[0]
+                        with self.resource_policy.lease(
+                            "tardis.pending_depth_record",
+                            json_record_working_set_bytes(size) + 64 * 1024,
+                        ):
+                            buffered = None
+                            try:
+                                buffered = parse_qrp_json_object(spool.read(size))
+                                buffered["data_kind"] = "depth_bootstrap"
+                                yield buffered
+                            finally:
+                                buffered = None
+                    spool.seek(0)
+                    spool.truncate(0)
+                    reservation.resize(0)
+                    snapshot_ready = True
+                elif snapshot_ready:
+                    yield record
+                else:
+                    encoded = json.dumps(
+                        record, separators=(",", ":"), allow_nan=False
+                    ).encode()
+                    reservation.resize(spool.tell() + len(encoded) + 8)
+                    spool.write(struct.pack(">Q", len(encoded)))
+                    spool.write(encoded)
+                    encoded = None
+                record = None
 
 
 @contextmanager
@@ -534,6 +550,7 @@ def open_tardis_archive(root, resource_policy=None):
                         symbols={symbol.upper() for symbol in manifest["symbols"]},
                     ),
                 )
+                replay_resources = ExitStack()
                 run = TardisArchive(
                     root,
                     manifest,
@@ -544,8 +561,9 @@ def open_tardis_archive(root, resource_policy=None):
                     },
                     policy,
                     index,
+                    replay_resources,
                 )
-                with handle_preserving_primary(index):
+                with handle_preserving_primary(index), replay_resources:
                     try:
                         yield run
                     finally:

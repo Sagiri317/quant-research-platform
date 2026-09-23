@@ -8,8 +8,12 @@ from contextlib import ExitStack
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.features.transforms import (
+    canonical_feature_validity_columns,
+)
 from quant_research_platform.research.filtering import (
     _filter_working_set_bound,
     apply_filter_mode,
@@ -24,6 +28,7 @@ def _required_prediction_rows(
     chunk: pd.DataFrame,
     *,
     input_columns: tuple[str, ...],
+    model_algorithm: str,
     sample_filter_mode: str,
     test_start: str,
     test_end: str | None,
@@ -33,7 +38,21 @@ def _required_prediction_rows(
         mode=sample_filter_mode,
         metadata_key="sample_filter_mode",
     )
-    eligible = eligible.dropna(subset=list(input_columns))
+    eligible = eligible.dropna(
+        subset=list(
+            dict.fromkeys(
+                (
+                    *canonical_feature_validity_columns(input_columns),
+                    *(
+                        input_columns
+                        if _model_algorithm_facts(model_algorithm).input_kind
+                        != "rank_ensemble_inputs"
+                        else ()
+                    ),
+                )
+            )
+        )
+    )
     timestamps = strict_timestamp_series(
         eligible["timestamp"],
         error="invalid_prediction_timestamp_values",
@@ -49,6 +68,7 @@ def _iter_prediction_joined_chunks(
     *,
     prediction_lookup,
     input_columns: tuple[str, ...],
+    model_algorithm: str,
     sample_filter_mode: str,
     test_start: str,
     test_end: str | None,
@@ -91,6 +111,7 @@ def _iter_prediction_joined_chunks(
                 required = _required_prediction_rows(
                     chunk,
                     input_columns=input_columns,
+                    model_algorithm=model_algorithm,
                     sample_filter_mode=sample_filter_mode,
                     test_start=test_start,
                     test_end=test_end,

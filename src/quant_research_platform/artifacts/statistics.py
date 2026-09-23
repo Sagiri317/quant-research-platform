@@ -46,577 +46,444 @@ from quant_research_platform.storage.semantic_artifacts import (
     write_semantic_artifact,
 )
 
-_TABLE_COLUMNS = {
-    "factor_diagnostics.parquet": (
-        "family_id",
-        "factor_id",
-        "observation_count",
-        "status",
-        "reason",
-        "mean",
-        "standard_error",
-        "t_statistic",
-        "p_value",
-        "ci_lower",
-        "ci_upper",
-        "fdr_method",
-        "fdr_alpha",
-        "fdr_adjusted_p_value",
-        "planned_hypothesis_count",
-        "defined_hypothesis_count",
-        "missing_hypothesis_count",
+_ARROW_SCHEMAS = {
+    "factor_diagnostics.parquet": pa.schema(
+        [
+            pa.field("family_id", pa.string()),
+            pa.field("factor_id", pa.string()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("mean", pa.float64()),
+            pa.field("standard_error", pa.float64()),
+            pa.field("t_statistic", pa.float64()),
+            pa.field("p_value", pa.float64()),
+            pa.field("ci_lower", pa.float64()),
+            pa.field("ci_upper", pa.float64()),
+            pa.field("fdr_method", pa.string()),
+            pa.field("fdr_alpha", pa.float64()),
+            pa.field("fdr_adjusted_p_value", pa.float64()),
+            pa.field("planned_hypothesis_count", pa.int64()),
+            pa.field("defined_hypothesis_count", pa.int64()),
+            pa.field("missing_hypothesis_count", pa.int64()),
+        ]
     ),
-    "prediction_diagnostics.parquet": (
-        "prediction_id",
-        "observation_count",
-        "status",
-        "reason",
-        "mean",
-        "standard_error",
-        "t_statistic",
-        "p_value",
-        "ci_lower",
-        "ci_upper",
-        "bootstrap_lower",
-        "bootstrap_upper",
-        "bootstrap_block_size",
-        "bootstrap_repetitions",
-        "bootstrap_seed",
+    "prediction_diagnostics.parquet": pa.schema(
+        [
+            pa.field("prediction_id", pa.string()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("mean", pa.float64()),
+            pa.field("standard_error", pa.float64()),
+            pa.field("t_statistic", pa.float64()),
+            pa.field("p_value", pa.float64()),
+            pa.field("ci_lower", pa.float64()),
+            pa.field("ci_upper", pa.float64()),
+            pa.field("bootstrap_lower", pa.float64()),
+            pa.field("bootstrap_upper", pa.float64()),
+            pa.field("bootstrap_block_size", pa.int64()),
+            pa.field("bootstrap_repetitions", pa.int64()),
+            pa.field("bootstrap_seed", pa.int64()),
+        ]
     ),
-    "model_trials.parquet": (
-        "quarter_id",
-        "family_id",
-        "config_id",
-        "metric_id",
-        "value",
-        "observation_count",
-        "status",
-        "reason",
-        "selection_status",
+    "model_trials.parquet": pa.schema(
+        [
+            pa.field("quarter_id", pa.string()),
+            pa.field("family_id", pa.string()),
+            pa.field("config_id", pa.string()),
+            pa.field("metric_id", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("selection_status", pa.string()),
+        ]
     ),
-    "robustness.parquet": (
-        "test_id",
-        "status",
-        "reason",
-        "observation_count",
+    "robustness.parquet": pa.schema(
+        [
+            pa.field("test_id", pa.string()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("observation_count", pa.int64()),
+        ]
     ),
-    "fama_macbeth.parquet": (
-        "regression_id",
-        "coefficient_id",
-        "period_count",
-        "status",
-        "reason",
-        "mean",
-        "standard_error",
-        "t_statistic",
-        "p_value",
-        "ci_lower",
-        "ci_upper",
-        "white_defined_period_count",
-        "white_undefined_period_count",
+    "fama_macbeth.parquet": pa.schema(
+        [
+            pa.field("regression_id", pa.string()),
+            pa.field("coefficient_id", pa.string()),
+            pa.field("period_count", pa.int64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("mean", pa.float64()),
+            pa.field("standard_error", pa.float64()),
+            pa.field("t_statistic", pa.float64()),
+            pa.field("p_value", pa.float64()),
+            pa.field("ci_lower", pa.float64()),
+            pa.field("ci_upper", pa.float64()),
+            pa.field("white_defined_period_count", pa.int64()),
+            pa.field("white_undefined_period_count", pa.int64()),
+        ]
     ),
-    "fama_macbeth_periods.parquet": (
-        "regression_id",
-        "coefficient_id",
-        "timestamp",
-        "status",
-        "reason",
-        "observation_count",
-        "value",
-        "white_p_value",
-        "white_reason",
+    "fama_macbeth_periods.parquet": pa.schema(
+        [
+            pa.field("regression_id", pa.string()),
+            pa.field("coefficient_id", pa.string()),
+            pa.field("timestamp", pa.timestamp("ns")),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("value", pa.float64()),
+            pa.field("white_p_value", pa.float64()),
+            pa.field("white_reason", pa.string()),
+        ]
     ),
-}
-_STRING_COLUMNS = {
-    "factor_diagnostics.parquet": (
-        "family_id",
-        "factor_id",
-        "status",
-        "reason",
-        "fdr_method",
+    "model_losses.parquet": pa.schema(
+        [
+            pa.field("timestamp", pa.timestamp("ns")),
+            pa.field("access_window", pa.string()),
+            pa.field("quarter_id", pa.string()),
+            pa.field("family_id", pa.string()),
+            pa.field("config_id", pa.string()),
+            pa.field("loss", pa.float64()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("common_date", pa.int64()),
+            pa.field("common_observation_count", pa.int64()),
+        ]
     ),
-    "prediction_diagnostics.parquet": ("prediction_id", "status", "reason"),
-    "model_trials.parquet": (
-        "quarter_id",
-        "family_id",
-        "config_id",
-        "metric_id",
-        "status",
-        "reason",
-        "selection_status",
+    "model_comparison.parquet": pa.schema(
+        [
+            pa.field("access_window", pa.string()),
+            pa.field("benchmark_id", pa.string()),
+            pa.field("prediction_id", pa.string()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("mean", pa.float64()),
+            pa.field("standard_error", pa.float64()),
+            pa.field("t_statistic", pa.float64()),
+            pa.field("p_value", pa.float64()),
+            pa.field("ci_lower", pa.float64()),
+            pa.field("ci_upper", pa.float64()),
+            pa.field("bootstrap_lower", pa.float64()),
+            pa.field("bootstrap_upper", pa.float64()),
+            pa.field("bootstrap_block_size", pa.int64()),
+            pa.field("bootstrap_repetitions", pa.int64()),
+            pa.field("bootstrap_seed", pa.int64()),
+        ]
     ),
-    "robustness.parquet": ("test_id", "status", "reason"),
-    "fama_macbeth.parquet": (
-        "regression_id",
-        "coefficient_id",
-        "status",
-        "reason",
+    "model_reality_checks.parquet": pa.schema(
+        [
+            pa.field("test_id", pa.string()),
+            pa.field("access_window", pa.string()),
+            pa.field("family_id", pa.string()),
+            pa.field("statistic_id", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("block_size", pa.int64()),
+            pa.field("repetitions", pa.int64()),
+            pa.field("alpha", pa.float64()),
+            pa.field("seed", pa.int64()),
+        ]
     ),
-    "fama_macbeth_periods.parquet": (
-        "regression_id",
-        "coefficient_id",
-        "status",
-        "reason",
-        "white_reason",
+    "portfolio_daily.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("entry_at", pa.timestamp("ns")),
+            pa.field("end_at", pa.timestamp("ns")),
+            pa.field("nav_before", pa.float64()),
+            pa.field("nav_post", pa.float64()),
+            pa.field("nav_end", pa.float64()),
+            pa.field("gross_return", pa.float64()),
+            pa.field("net_return", pa.float64()),
+            pa.field("cost_drag", pa.float64()),
+            pa.field("target_turnover", pa.float64()),
+            pa.field("requested_turnover", pa.float64()),
+            pa.field("realized_turnover", pa.float64()),
+            pa.field("benchmark_return", pa.float64()),
+            pa.field("active_return", pa.float64()),
+            pa.field("relative_wealth", pa.float64()),
+            pa.field("benchmark_status", pa.string()),
+            pa.field("benchmark_reason", pa.string()),
+            pa.field("access_window", pa.string()),
+        ]
     ),
-}
-_COUNT_COLUMNS = {
-    "factor_diagnostics.parquet": (
-        "observation_count",
-        "planned_hypothesis_count",
-        "defined_hypothesis_count",
-        "missing_hypothesis_count",
+    "portfolio_performance.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("metric_id", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("access_window", pa.string()),
+        ]
     ),
-    "prediction_diagnostics.parquet": (
-        "observation_count",
-        "bootstrap_block_size",
-        "bootstrap_repetitions",
-        "bootstrap_seed",
+    "portfolio_capacity.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("decision_timestamp", pa.timestamp("ns")),
+            pa.field("entry_at", pa.timestamp("ns")),
+            pa.field("participation", pa.float64()),
+            pa.field("capacity", pa.float64()),
+            pa.field("bottleneck_asset_id", pa.string()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+        ]
     ),
-    "model_trials.parquet": ("observation_count",),
-    "robustness.parquet": ("observation_count",),
-    "fama_macbeth.parquet": (
-        "period_count",
-        "white_defined_period_count",
-        "white_undefined_period_count",
+    "portfolio_capacity_summary.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("participation", pa.float64()),
+            pa.field("period", pa.string()),
+            pa.field("metric_id", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("observation_count", pa.int64()),
+        ]
     ),
-    "fama_macbeth_periods.parquet": ("observation_count",),
-}
-_TABLE_COLUMNS.update(
-    {
-        "model_losses.parquet": (
-            "timestamp",
-            "access_window",
-            "quarter_id",
-            "family_id",
-            "config_id",
-            "loss",
-            "observation_count",
-            "status",
-            "reason",
-            "common_date",
-            "common_observation_count",
-        ),
-        "model_comparison.parquet": (
-            "access_window",
-            "benchmark_id",
-            *_TABLE_COLUMNS["prediction_diagnostics.parquet"],
-        ),
-        "model_reality_checks.parquet": (
-            "test_id",
-            "access_window",
-            "family_id",
-            "statistic_id",
-            "value",
-            "status",
-            "reason",
-            "observation_count",
-            "block_size",
-            "repetitions",
-            "alpha",
-            "seed",
-        ),
-    }
-)
-_STRING_COLUMNS.update(
-    {
-        "model_losses.parquet": (
-            "access_window",
-            "quarter_id",
-            "family_id",
-            "config_id",
-            "status",
-            "reason",
-        ),
-        "model_comparison.parquet": (
-            "access_window",
-            "benchmark_id",
-            *_STRING_COLUMNS["prediction_diagnostics.parquet"],
-        ),
-        "model_reality_checks.parquet": (
-            "test_id",
-            "access_window",
-            "family_id",
-            "statistic_id",
-            "status",
-            "reason",
-        ),
-    }
-)
-_COUNT_COLUMNS.update(
-    {
-        "model_losses.parquet": (
-            "observation_count",
-            "common_date",
-            "common_observation_count",
-        ),
-        "model_comparison.parquet": _COUNT_COLUMNS["prediction_diagnostics.parquet"],
-        "model_reality_checks.parquet": (
-            "observation_count",
-            "block_size",
-            "repetitions",
-            "seed",
-        ),
-    }
-)
-_TIMESTAMP_COLUMNS = {
-    "fama_macbeth_periods.parquet": ("timestamp",),
-    "model_losses.parquet": ("timestamp",),
-}
-STATISTICS_TABLE_GROUPS = {"research": tuple(_TABLE_COLUMNS)}
-_PORTFOLIO_COLUMNS = {
-    "portfolio_daily.parquet": (
-        "candidate_id",
-        "entry_at",
-        "end_at",
-        "nav_before",
-        "nav_post",
-        "nav_end",
-        "gross_return",
-        "net_return",
-        "cost_drag",
-        "target_turnover",
-        "requested_turnover",
-        "realized_turnover",
-        "benchmark_return",
-        "active_return",
-        "relative_wealth",
-        "benchmark_status",
-        "benchmark_reason",
-        "access_window",
+    "portfolio_attribution.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("decision_at", pa.timestamp("ns")),
+            pa.field("entry_at", pa.timestamp("ns")),
+            pa.field("end_at", pa.timestamp("ns")),
+            pa.field("component_id", pa.string()),
+            pa.field("component_type", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+        ]
     ),
-    "portfolio_performance.parquet": (
-        "candidate_id",
-        "metric_id",
-        "value",
-        "status",
-        "reason",
-        "observation_count",
-        "access_window",
+    "portfolio_robustness.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("test_id", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("candidate_count", pa.int64()),
+            pa.field("access_window", pa.string()),
+        ]
     ),
-    "portfolio_capacity.parquet": (
-        "candidate_id",
-        "decision_timestamp",
-        "entry_at",
-        "participation",
-        "capacity",
-        "bottleneck_asset_id",
-        "status",
-        "reason",
+    "portfolio_exposures.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("decision_at", pa.timestamp("ns")),
+            pa.field("entry_at", pa.timestamp("ns")),
+            pa.field("factor_id", pa.string()),
+            pa.field("value", pa.float64()),
+        ]
     ),
-    "portfolio_capacity_summary.parquet": (
-        "candidate_id",
-        "participation",
-        "period",
-        "metric_id",
-        "value",
-        "status",
-        "reason",
-        "observation_count",
+    "holding_factor_returns.parquet": pa.schema(
+        [
+            pa.field("decision_at", pa.timestamp("ns")),
+            pa.field("entry_at", pa.timestamp("ns")),
+            pa.field("end_at", pa.timestamp("ns")),
+            pa.field("factor_id", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("observation_count", pa.int64()),
+        ]
     ),
-    "portfolio_attribution.parquet": (
-        "candidate_id",
-        "decision_at",
-        "entry_at",
-        "end_at",
-        "component_id",
-        "component_type",
-        "value",
-        "status",
-        "reason",
+    "crypto_maker_samples.parquet": pa.schema(
+        [
+            pa.field("fold_id", pa.string()),
+            pa.field("side", pa.string()),
+            pa.field("sample_id", pa.int64()),
+            pa.field("decision_at", pa.timestamp("ns")),
+            pa.field("prediction_end", pa.timestamp("ns")),
+            pa.field("label_available_at", pa.timestamp("ns")),
+            pa.field("price_prediction", pa.float64()),
+            pa.field("observed_return", pa.float64()),
+            pa.field("forecast_error", pa.float64()),
+            pa.field("filled_quantity", pa.float64()),
+            pa.field("quote_quantity", pa.float64()),
+            pa.field("terminal_reason", pa.string()),
+            pa.field("book_segment_id", pa.string()),
+            pa.field("trade_observation_id", pa.string()),
+            pa.field("initial_book_event_id", pa.int64()),
+            pa.field("initial_bid_index", pa.int64()),
+            pa.field("initial_ask_index", pa.int64()),
+            pa.field("event_start", pa.int64()),
+            pa.field("event_end", pa.int64()),
+        ]
     ),
-    "portfolio_robustness.parquet": (
-        "candidate_id",
-        "test_id",
-        "value",
-        "status",
-        "reason",
-        "observation_count",
-        "candidate_count",
-        "access_window",
+    "crypto_maker_events.parquet": pa.schema(
+        [
+            pa.field("fold_id", pa.string()),
+            pa.field("event_id", pa.int64()),
+            pa.field("event_at", pa.timestamp("ns")),
+            pa.field("event_kind", pa.string()),
+            pa.field("context_id", pa.string()),
+            pa.field("side", pa.string()),
+            pa.field("level_index", pa.int64()),
+            pa.field("price_index", pa.int64()),
+            pa.field("quantity", pa.float64()),
+        ]
     ),
-    "portfolio_exposures.parquet": (
-        "candidate_id",
-        "decision_at",
-        "entry_at",
-        "factor_id",
-        "value",
+    "crypto_maker_calibration.parquet": pa.schema(
+        [
+            pa.field("fold_id", pa.string()),
+            pa.field("side", pa.string()),
+            pa.field("sample_count", pa.int64()),
+            pa.field("zero_fill_count", pa.int64()),
+            pa.field("post_only_rejection_count", pa.int64()),
+            pa.field("excluded_decisions", pa.int64()),
+            pa.field("minimum_samples", pa.int64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+        ]
     ),
-    "holding_factor_returns.parquet": (
-        "decision_at",
-        "entry_at",
-        "end_at",
-        "factor_id",
-        "value",
-        "observation_count",
+    "crypto_portfolio_intervals.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("execution_mode", pa.string()),
+            pa.field("episode_id", pa.string()),
+            pa.field("kind", pa.string()),
+            pa.field("start_at", pa.timestamp("ns")),
+            pa.field("end_at", pa.timestamp("ns")),
+            pa.field("start_nav", pa.float64()),
+            pa.field("end_nav", pa.float64()),
+            pa.field("gross_pnl", pa.float64()),
+            pa.field("net_pnl", pa.float64()),
+            pa.field("fees", pa.float64()),
+            pa.field("funding", pa.float64()),
+            pa.field("turnover", pa.float64()),
+            pa.field("fill_events", pa.int64()),
+        ]
     ),
-}
-STATISTICS_TABLE_GROUPS["portfolio"] = tuple(_PORTFOLIO_COLUMNS)
-_TABLE_COLUMNS.update(_PORTFOLIO_COLUMNS)
-_STRING_COLUMNS.update(
-    {
-        "portfolio_daily.parquet": (
-            "candidate_id",
-            "benchmark_status",
-            "benchmark_reason",
-            "access_window",
-        ),
-        "portfolio_performance.parquet": (
-            "candidate_id",
-            "metric_id",
-            "status",
-            "reason",
-            "access_window",
-        ),
-        "portfolio_capacity.parquet": (
-            "candidate_id",
-            "bottleneck_asset_id",
-            "status",
-            "reason",
-        ),
-        "portfolio_capacity_summary.parquet": (
-            "candidate_id",
-            "period",
-            "metric_id",
-            "status",
-            "reason",
-        ),
-        "portfolio_attribution.parquet": (
-            "candidate_id",
-            "component_id",
-            "component_type",
-            "status",
-            "reason",
-        ),
-        "portfolio_robustness.parquet": (
-            "candidate_id",
-            "test_id",
-            "status",
-            "reason",
-            "access_window",
-        ),
-        "portfolio_exposures.parquet": ("candidate_id", "factor_id"),
-        "holding_factor_returns.parquet": ("factor_id",),
-    }
-)
-_COUNT_COLUMNS.update(
-    {
-        "portfolio_daily.parquet": (),
-        "portfolio_performance.parquet": ("observation_count",),
-        "portfolio_capacity.parquet": (),
-        "portfolio_capacity_summary.parquet": ("observation_count",),
-        "portfolio_attribution.parquet": (),
-        "portfolio_exposures.parquet": (),
-        "holding_factor_returns.parquet": ("observation_count",),
-        "portfolio_robustness.parquet": ("observation_count", "candidate_count"),
-    }
-)
-_TIMESTAMP_COLUMNS.update(
-    {
-        "portfolio_daily.parquet": ("entry_at", "end_at"),
-        "portfolio_capacity.parquet": ("decision_timestamp", "entry_at"),
-        "portfolio_attribution.parquet": ("decision_at", "entry_at", "end_at"),
-        "portfolio_exposures.parquet": ("decision_at", "entry_at"),
-        "holding_factor_returns.parquet": ("decision_at", "entry_at", "end_at"),
-    }
-)
-_CRYPTO_TABLES = {
-    "crypto_maker_samples.parquet": (
-        "fold_id",
-        "side",
-        "sample_id",
-        "decision_at",
-        "prediction_end",
-        "label_available_at",
-        "price_prediction",
-        "observed_return",
-        "forecast_error",
-        "filled_quantity",
-        "quote_quantity",
-        "terminal_reason",
-        "book_segment_id",
-        "trade_observation_id",
-        "initial_book_event_id",
-        "initial_bid_index",
-        "initial_ask_index",
-        "event_start",
-        "event_end",
+    "crypto_portfolio_daily.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("execution_mode", pa.string()),
+            pa.field("episode_id", pa.string()),
+            pa.field("fold_id", pa.string()),
+            pa.field("start_at", pa.timestamp("ns")),
+            pa.field("end_at", pa.timestamp("ns")),
+            pa.field("start_nav", pa.float64()),
+            pa.field("end_nav", pa.float64()),
+            pa.field("net_return", pa.float64()),
+            pa.field("benchmark_return", pa.float64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+        ]
     ),
-    "crypto_maker_events.parquet": (
-        "fold_id",
-        "event_id",
-        "event_at",
-        "event_kind",
-        "context_id",
-        "side",
-        "level_index",
-        "price_index",
-        "quantity",
+    "crypto_portfolio_statistics.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("execution_mode", pa.string()),
+            pa.field("episode_id", pa.string()),
+            pa.field("metric_id", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("observation_count", pa.int64()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+        ]
     ),
-    "crypto_maker_calibration.parquet": (
-        "fold_id",
-        "side",
-        "sample_count",
-        "zero_fill_count",
-        "post_only_rejection_count",
-        "excluded_decisions",
-        "minimum_samples",
-        "status",
-        "reason",
+    "crypto_execution_diagnostics.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("execution_mode", pa.string()),
+            pa.field("episode_id", pa.string()),
+            pa.field("metric_id", pa.string()),
+            pa.field("value", pa.float64()),
+            pa.field("text", pa.string()),
+            pa.field("status", pa.string()),
+            pa.field("reason", pa.string()),
+        ]
     ),
-    "crypto_portfolio_intervals.parquet": (
-        "candidate_id",
-        "kind",
-        "start_at",
-        "end_at",
-        "start_nav",
-        "end_nav",
-        "gross_pnl",
-        "net_pnl",
-        "fees",
-        "funding",
-        "turnover",
-        "fill_events",
+    "crypto_cost_sensitivity.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string()),
+            pa.field("execution_mode", pa.string()),
+            pa.field("episode_id", pa.string()),
+            pa.field("fee_bps", pa.float64()),
+            pa.field("additional_spread_bps", pa.float64()),
+            pa.field("cost_delta", pa.float64()),
+            pa.field("net_pnl", pa.float64()),
+            pa.field("method", pa.string()),
+        ]
     ),
-    "crypto_portfolio_daily.parquet": (
-        "candidate_id",
-        "fold_id",
-        "start_at",
-        "end_at",
-        "start_nav",
-        "end_nav",
-        "net_return",
-        "benchmark_return",
-        "status",
-        "reason",
-    ),
-    "crypto_portfolio_statistics.parquet": (
-        "candidate_id",
-        "metric_id",
-        "value",
-        "observation_count",
-        "status",
-        "reason",
-    ),
-    "crypto_execution_diagnostics.parquet": (
-        "candidate_id",
-        "metric_id",
-        "value",
-        "text",
-        "status",
-        "reason",
-    ),
-    "crypto_cost_sensitivity.parquet": (
-        "candidate_id",
-        "fee_bps",
-        "additional_spread_bps",
-        "cost_delta",
-        "net_pnl",
-        "method",
+    "crypto_portfolio_coverage.parquet": pa.schema(
+        [
+            pa.field("candidate_id", pa.string(), nullable=False),
+            pa.field("execution_mode", pa.string(), nullable=False),
+            pa.field("start_at", pa.timestamp("ns"), nullable=False),
+            pa.field("stop_at", pa.timestamp("ns"), nullable=False),
+            pa.field("kind", pa.string(), nullable=False),
+            pa.field("reason", pa.string(), nullable=False),
+        ]
     ),
 }
-STATISTICS_TABLE_GROUPS["crypto_maker_calibration"] = tuple(_CRYPTO_TABLES)[:3]
-STATISTICS_TABLE_GROUPS["crypto_portfolio"] = tuple(_CRYPTO_TABLES)[3:]
-_TABLE_COLUMNS.update(_CRYPTO_TABLES)
-_STRING_COLUMNS.update(
-    {
-        "crypto_maker_samples.parquet": (
-            "fold_id",
-            "side",
-            "terminal_reason",
-            "book_segment_id",
-            "trade_observation_id",
-        ),
-        "crypto_maker_events.parquet": ("fold_id", "event_kind", "context_id", "side"),
-        "crypto_maker_calibration.parquet": ("fold_id", "side", "status", "reason"),
-        "crypto_portfolio_intervals.parquet": ("candidate_id", "kind"),
-        "crypto_portfolio_daily.parquet": (
-            "candidate_id",
-            "fold_id",
-            "status",
-            "reason",
-        ),
-        "crypto_portfolio_statistics.parquet": (
-            "candidate_id",
-            "metric_id",
-            "status",
-            "reason",
-        ),
-        "crypto_execution_diagnostics.parquet": (
-            "candidate_id",
-            "metric_id",
-            "text",
-            "status",
-            "reason",
-        ),
-        "crypto_cost_sensitivity.parquet": ("candidate_id", "method"),
-    }
-)
-_COUNT_COLUMNS.update(
-    {
-        "crypto_maker_samples.parquet": (
-            "sample_id",
-            "initial_book_event_id",
-            "initial_bid_index",
-            "initial_ask_index",
-            "event_start",
-            "event_end",
-        ),
-        "crypto_maker_events.parquet": ("event_id", "level_index", "price_index"),
-        "crypto_maker_calibration.parquet": (
-            "sample_count",
-            "zero_fill_count",
-            "post_only_rejection_count",
-            "excluded_decisions",
-            "minimum_samples",
-        ),
-        "crypto_portfolio_intervals.parquet": ("fill_events",),
-        "crypto_portfolio_daily.parquet": (),
-        "crypto_portfolio_statistics.parquet": ("observation_count",),
-        "crypto_execution_diagnostics.parquet": (),
-        "crypto_cost_sensitivity.parquet": (),
-    }
-)
-_TIMESTAMP_COLUMNS.update(
-    {
-        "crypto_maker_samples.parquet": (
-            "decision_at",
-            "prediction_end",
-            "label_available_at",
-        ),
-        "crypto_maker_events.parquet": ("event_at",),
-        "crypto_portfolio_intervals.parquet": ("start_at", "end_at"),
-        "crypto_portfolio_daily.parquet": ("start_at", "end_at"),
-    }
-)
-_EMPTY_TABLE_MEMBERS = frozenset(
-    {
+STATISTICS_TABLE_GROUPS = {
+    "research": (
+        "factor_diagnostics.parquet",
+        "prediction_diagnostics.parquet",
+        "model_trials.parquet",
+        "robustness.parquet",
+        "fama_macbeth.parquet",
+        "fama_macbeth_periods.parquet",
         "model_losses.parquet",
         "model_comparison.parquet",
-        "fama_macbeth_periods.parquet",
+        "model_reality_checks.parquet",
+    ),
+    "portfolio": (
+        "portfolio_daily.parquet",
+        "portfolio_performance.parquet",
         "portfolio_capacity.parquet",
+        "portfolio_capacity_summary.parquet",
+        "portfolio_attribution.parquet",
+        "portfolio_robustness.parquet",
         "portfolio_exposures.parquet",
         "holding_factor_returns.parquet",
+    ),
+    "crypto_maker_calibration": (
         "crypto_maker_samples.parquet",
         "crypto_maker_events.parquet",
+        "crypto_maker_calibration.parquet",
+    ),
+    "crypto_portfolio": (
+        "crypto_portfolio_intervals.parquet",
         "crypto_portfolio_daily.parquet",
+        "crypto_portfolio_statistics.parquet",
+        "crypto_execution_diagnostics.parquet",
+        "crypto_cost_sensitivity.parquet",
+        "crypto_portfolio_coverage.parquet",
+    ),
+}
+_EMPTY_TABLE_MEMBERS = frozenset(
+    {
+        "crypto_maker_events.parquet",
+        "crypto_maker_samples.parquet",
+        "crypto_portfolio_daily.parquet",
+        "fama_macbeth_periods.parquet",
+        "holding_factor_returns.parquet",
+        "model_comparison.parquet",
+        "model_losses.parquet",
+        "portfolio_capacity.parquet",
+        "portfolio_exposures.parquet",
     }
 )
-_ARROW_SCHEMAS = {
-    member: pa.schema(
-        pa.field(
-            column,
-            pa.string()
-            if column in _STRING_COLUMNS[member]
-            else pa.timestamp("ns")
-            if column in _TIMESTAMP_COLUMNS.get(member, ())
-            else pa.int64()
-            if column in _COUNT_COLUMNS[member]
-            else pa.float64(),
-        )
-        for column in columns
-    )
-    for member, columns in _TABLE_COLUMNS.items()
+_TABLE_COLUMNS = {
+    member: tuple(schema.names) for member, schema in _ARROW_SCHEMAS.items()
+}
+_STRING_COLUMNS = {
+    member: tuple(field.name for field in schema if pa.types.is_string(field.type))
+    for member, schema in _ARROW_SCHEMAS.items()
+}
+_COUNT_COLUMNS = {
+    member: tuple(field.name for field in schema if pa.types.is_integer(field.type))
+    for member, schema in _ARROW_SCHEMAS.items()
+}
+_TIMESTAMP_COLUMNS = {
+    member: tuple(field.name for field in schema if pa.types.is_timestamp(field.type))
+    for member, schema in _ARROW_SCHEMAS.items()
 }
 STATISTICS_TABLE_COLUMNS = _TABLE_COLUMNS
 
@@ -644,7 +511,7 @@ class StatisticsArtifact:
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
         with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
-            target = max(1, min(1024**2, policy.operation_headroom_bytes // 8))
+            target = max(1, min(1024**2, policy.planning_headroom_bytes // 8))
             with closing_iterator(
                 iter_declared_parquet_member_batches(
                     self.root / member,
@@ -831,7 +698,7 @@ def write_statistics_artifact(
     )
 
 
-def _statistics_artifact(root, identity, members):
+def _statistics_artifact(root, identity, members, member_identities=None):
     by_path = {str(member.get("path")): member for member in members}
     if not any(
         set(by_path) == set(group) for group in STATISTICS_TABLE_GROUPS.values()
@@ -840,9 +707,12 @@ def _statistics_artifact(root, identity, members):
     identities, row_counts = {}, {}
     for member in by_path:
         path = root / member
-        physical = dataset_file_identity(path)
-        verify_semantic_artifact_member(
-            root, relative_path=member, expected=dict(by_path[member])
+        physical = (
+            verify_semantic_artifact_member(
+                root, relative_path=member, expected=dict(by_path[member])
+            )
+            if member_identities is None
+            else member_identities[member]
         )
         with _opened_parquet(path, expected_identity=physical) as (parquet, _, _handle):
             if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
@@ -866,13 +736,19 @@ def read_statistics_artifact(
     *,
     expected_identity: str,
     validate_tables=None,
+    expected_member_identities=None,
 ) -> StatisticsArtifact:
+    identities = {}
     envelope, members = read_semantic_artifact_record(
         Path(instance_root),
         expected_identity=expected_identity,
+        member_identities=identities,
+        expected_member_identities=expected_member_identities,
     )
     with runtime_resource_policy_scope(current_runtime_resource_policy()):
-        artifact = _statistics_artifact(Path(instance_root), expected_identity, members)
+        artifact = _statistics_artifact(
+            Path(instance_root), expected_identity, members, identities
+        )
         if set(artifact._members) == set(
             STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]
         ):
@@ -889,6 +765,9 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
     ):
         raise ValueError(f"statistics_table_schema_invalid:{member}")
     result = frame.copy()
+    for field in _ARROW_SCHEMAS[member]:
+        if not field.nullable and result[field.name].isna().any():
+            raise ValueError("statistics_table_null_invalid")
     for column in _STRING_COLUMNS[member]:
         values = result[column]
         if values.isna().any():
@@ -1060,7 +939,61 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             or result.loc[defined, "start_nav"].le(0).any()
         ):
             raise ValueError("statistics_table_status_value_invalid")
-    if member in _PORTFOLIO_COLUMNS:
+    if member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]:
+        if not result.execution_mode.isin(("continuous", "independent_segments")).all():
+            raise ValueError("statistics_execution_mode_invalid")
+        if result.candidate_id.str.strip().eq("").any():
+            raise ValueError("statistics_candidate_id_invalid")
+        if member == "crypto_portfolio_coverage.parquet":
+            keys = ("candidate_id", "execution_mode", "start_at", "stop_at", "kind")
+            covered = result.kind.eq("covered")
+            if (
+                not result.kind.isin(("covered", "missing")).all()
+                or not result.start_at.lt(result.stop_at).all()
+                or result.loc[covered, "reason"].ne("").any()
+                or result.loc[~covered, "reason"].str.strip().eq("").any()
+            ):
+                raise ValueError("statistics_coverage_invalid")
+        else:
+            aggregate = result.episode_id.eq("all")
+            continuous = result.execution_mode.eq("continuous")
+            valid_episode = result.episode_id.str.fullmatch("[0-9a-f]{64}")
+            if (
+                (~aggregate & continuous & ~result.episode_id.eq("continuous"))
+                | (~aggregate & ~continuous & ~valid_episode)
+            ).any():
+                raise ValueError("statistics_episode_id_invalid")
+            if aggregate.any() and (
+                member != "crypto_portfolio_statistics.parquet"
+                or not result.loc[aggregate, "metric_id"]
+                .isin(
+                    (
+                        "covered_seconds",
+                        "missing_seconds",
+                        "coverage_fraction",
+                        "episode_count",
+                        "truncated_episode_count",
+                        "fees",
+                        "funding",
+                        "turnover",
+                        "fill_events",
+                        "fill_quantity",
+                    )
+                )
+                .all()
+            ):
+                raise ValueError("statistics_cross_episode_metric_invalid")
+            suffix = {
+                "crypto_portfolio_intervals.parquet": ("kind", "start_at", "end_at"),
+                "crypto_portfolio_daily.parquet": ("fold_id", "start_at", "end_at"),
+                "crypto_portfolio_statistics.parquet": ("metric_id",),
+                "crypto_execution_diagnostics.parquet": ("metric_id",),
+                "crypto_cost_sensitivity.parquet": ("fee_bps", "additional_spread_bps"),
+            }[member]
+            keys = ("candidate_id", "execution_mode", "episode_id", *suffix)
+        if result.duplicated(list(keys)).any():
+            raise ValueError("statistics_table_duplicate_keys")
+    if member in STATISTICS_TABLE_GROUPS["portfolio"]:
         keys = {
             "portfolio_daily.parquet": ("candidate_id", "entry_at"),
             "portfolio_performance.parquet": ("candidate_id", "metric_id"),

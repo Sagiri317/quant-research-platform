@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from quant_research_platform.artifacts import research as report_artifact
+from quant_research_platform.artifacts.crypto_hft import read_crypto_episode_artifact
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
 )
@@ -128,68 +129,74 @@ def portfolio_curve(
             initial_bytes, error="portfolio_curve_exceeds_task_memory_budget"
         )
         with policy.lease("queries.portfolio_curve", initial_bytes) as retained:
-            root, _envelope = report_artifact.read_validated_reference(layout, result)
-            artifact = read_portfolio_ledger_artifact(
-                root,
-                expected_identity=result.instance_identity,
+            identities = {}
+            root, envelope = report_artifact.read_validated_reference(
+                layout, result, member_identities=identities
             )
-            points, boundaries = [], []
-            total_points = 0
-            last_points = []
-            last_retained_sequence = -1
-            with closing_iterator(artifact.iter_chunks()) as batches:
-                for batch in batches:
-                    last_points = [
-                        {
-                            "sequence": batch.sequence,
-                            "timestamp_ns": max(
-                                row.timestamp_ns
-                                for row in batch.valuations
-                                if row.phase == phase
-                            ),
-                            "phase": phase,
-                            "nav": sum(
-                                row.value
-                                for row in batch.valuations
-                                if row.phase == phase
-                            ),
-                        }
-                        for phase in ("before", "after", "end")
-                    ]
-                    total_points += len(last_points)
-                    has_marker = any(
-                        row.name in {"oos_window_start", "oos_window_end"}
-                        for row in batch.diagnostics
-                    )
-                    if batch.sequence % stride == 0 or has_marker:
-                        policy.require_working_set(
-                            1024 * len(last_points),
-                            error="portfolio_curve_exceeds_task_memory_budget",
-                        )
-                        retained.grow(1024 * len(last_points))
-                        points.extend(last_points)
-                        last_retained_sequence = batch.sequence
-                    for marker in batch.diagnostics:
-                        if marker.name not in {"oos_window_start", "oos_window_end"}:
-                            continue
-                        policy.require_working_set(
-                            1024, error="portfolio_curve_exceeds_task_memory_budget"
-                        )
-                        retained.grow(1024)
-                        boundaries.append(
+            mode = (
+                envelope["semantic_metadata"]["target_contract"]["execution_contract"][
+                    "execution_mode"
+                ]
+                if str(profile.market_id) == "crypto"
+                else "continuous"
+            )
+            if mode == "independent_segments":
+                artifact = read_crypto_episode_artifact(
+                    root,
+                    expected_identity=result.instance_identity,
+                    expected_member_identities=identities,
+                )
+                episodes = []
+                with closing_iterator(artifact.iter_episodes()) as children:
+                    for index, child in children:
+                        retained.grow(8192)
+                        episodes.append(
                             {
-                                "timestamp_ns": last_points[-1]["timestamp_ns"],
-                                "kind": marker.name,
-                                "window_index": int(marker.number),
+                                **{
+                                    key: index[key]
+                                    for key in (
+                                        "episode_id",
+                                        "start_ns",
+                                        "stop_ns",
+                                        "terminal_valuation_ns",
+                                        "termination",
+                                        "stop_reasons",
+                                    )
+                                },
+                                "instance_identity": child.identity,
+                                **_ledger_curve(
+                                    child,
+                                    stride=stride,
+                                    policy=policy,
+                                    retained=retained,
+                                ),
                             }
                         )
-            if last_points and last_retained_sequence != last_points[-1]["sequence"]:
-                policy.require_working_set(
-                    1024 * len(last_points),
-                    error="portfolio_curve_exceeds_task_memory_budget",
+                curve = {
+                    "episodes": episodes,
+                    "episode_count": len(episodes),
+                    "source_point_count": sum(
+                        item["source_point_count"] for item in episodes
+                    ),
+                    "displayed_point_count": sum(
+                        item["displayed_point_count"] for item in episodes
+                    ),
+                    "stride": stride,
+                }
+            elif mode == "continuous":
+                artifact = read_portfolio_ledger_artifact(
+                    root,
+                    expected_identity=result.instance_identity,
+                    expected_member_identities=identities,
                 )
-                retained.grow(1024 * len(last_points))
-                points.extend(last_points)
+                curve = {
+                    "episode_id": "continuous",
+                    **_ledger_curve(
+                        artifact, stride=stride, policy=policy, retained=retained
+                    ),
+                }
+            else:
+                raise ValueError("portfolio_curve_execution_mode_invalid")
             return {
                 "profile_id": profile.profile_id,
                 "run_id": run_id,
@@ -199,10 +206,72 @@ def portfolio_curve(
                 "candidate_id": artifact.capital.candidate_id,
                 "valuation_currency": artifact.capital.valuation_currency,
                 "initial_capital": artifact.capital.initial_capital,
-                "points": points,
-                "boundaries": boundaries,
-                "source_point_count": total_points,
-                "displayed_point_count": len(points),
-                "stride": stride,
-                "selection": "every_nth_ledger_transition_plus_boundaries_and_last",
+                "execution_mode": mode,
+                **curve,
             }
+
+
+def _ledger_curve(artifact, *, stride, policy, retained):
+    points, boundaries = [], []
+    total_points = 0
+    last_points = []
+    last_retained_sequence = -1
+    with closing_iterator(artifact.iter_chunks()) as batches:
+        for batch in batches:
+            last_points = [
+                {
+                    "sequence": batch.sequence,
+                    "timestamp_ns": max(
+                        row.timestamp_ns
+                        for row in batch.valuations
+                        if row.phase == phase
+                    ),
+                    "phase": phase,
+                    "nav": sum(
+                        row.value for row in batch.valuations if row.phase == phase
+                    ),
+                }
+                for phase in ("before", "after", "end")
+            ]
+            total_points += len(last_points)
+            has_marker = any(
+                row.name in {"oos_window_start", "oos_window_end"}
+                for row in batch.diagnostics
+            )
+            if batch.sequence % stride == 0 or has_marker:
+                policy.require_working_set(
+                    1024 * len(last_points),
+                    error="portfolio_curve_exceeds_task_memory_budget",
+                )
+                retained.grow(1024 * len(last_points))
+                points.extend(last_points)
+                last_retained_sequence = batch.sequence
+            for marker in batch.diagnostics:
+                if marker.name not in {"oos_window_start", "oos_window_end"}:
+                    continue
+                policy.require_working_set(
+                    1024, error="portfolio_curve_exceeds_task_memory_budget"
+                )
+                retained.grow(1024)
+                boundaries.append(
+                    {
+                        "timestamp_ns": last_points[-1]["timestamp_ns"],
+                        "kind": marker.name,
+                        "window_index": int(marker.number),
+                    }
+                )
+    if last_points and last_retained_sequence != last_points[-1]["sequence"]:
+        policy.require_working_set(
+            1024 * len(last_points),
+            error="portfolio_curve_exceeds_task_memory_budget",
+        )
+        retained.grow(1024 * len(last_points))
+        points.extend(last_points)
+    return {
+        "points": points,
+        "boundaries": boundaries,
+        "source_point_count": total_points,
+        "displayed_point_count": len(points),
+        "stride": stride,
+        "selection": "every_nth_ledger_transition_plus_boundaries_and_last",
+    }

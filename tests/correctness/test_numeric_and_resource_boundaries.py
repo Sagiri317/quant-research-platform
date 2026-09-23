@@ -255,8 +255,8 @@ def test_semantic_read_rechecks_earlier_members_and_manifest(
     original = semantic_artifacts._member_record
     visited = []
 
-    def record(relative, path):
-        result = original(relative, path)
+    def record(relative, path, *, identity=None):
+        result = original(relative, path, identity=identity)
         visited.append(path)
         if len(visited) == 2:
             (visited[0] if target == "member" else root / "manifest.json").write_bytes(

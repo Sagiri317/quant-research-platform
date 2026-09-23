@@ -53,6 +53,7 @@ from quant_research_platform.research.randomness import ROOT_SEED
 
 PROTOCOL_ID = "a_share_low_frequency"
 MARKET_MODEL_FACTORS = ("beta_252d", "residual_volatility_60d")
+BENCHMARK_TOTAL_RETURN_INDICES = {"csi500": "H00905", "csi1000": "H00852"}
 RESEARCH_DATASET_IDS = {
     "pv_all": "pv_all",
     "pv_expanded": "pv_expanded",
@@ -204,9 +205,14 @@ class AShareProtocol:
             },
             "model_chronology": {"validation_months": 12},
             "root_seed": self.root_seed,
-            "benchmark_total_return_indices": {}
-            if self.scenario_id == "pv_expanded"
-            else {"csi500": "H00905", "csi1000": "H00852"},
+            "benchmark_total_return_indices": {
+                benchmark: BENCHMARK_TOTAL_RETURN_INDICES[benchmark]
+                for benchmark in dict.fromkeys(
+                    candidate.benchmark_id
+                    for candidate in self.portfolio_candidates()
+                    if candidate.benchmark_id is not None
+                )
+            },
             "execution_assumptions": {
                 "initial_nav": EXECUTION_ASSUMPTIONS.initial_nav,
                 "valuation_currency": "CNY",
@@ -236,6 +242,86 @@ class AShareProtocol:
                 candidate.candidate_id for candidate in self.portfolio_candidates()
             ],
         }
+
+    def target_manifest(self, target_id, producer_kind):
+        """Bind consumed facts; upstream identities bind target inputs."""
+        full = self.manifest()
+        if producer_kind == "REPORT":
+            return full
+        base = {
+            key: full[key] for key in ("protocol_id", "scenario_id", "access_window")
+        }
+        if producer_kind == "MODEL":
+            base.update(
+                {
+                    key: full[key]
+                    for key in (
+                        "formal_dataset_window",
+                        "development_window",
+                        "holdout_window",
+                        "model_chronology",
+                        "root_seed",
+                    )
+                }
+            )
+            base["research_configuration"] = {"models": self.configuration()["models"]}
+        elif producer_kind == "PREDICTION":
+            pass
+        elif producer_kind == "EVALUATION":
+            base.update(
+                {
+                    key: full[key]
+                    for key in (
+                        "formal_dataset_window",
+                        "development_window",
+                        "holdout_window",
+                    )
+                }
+            )
+        elif (
+            producer_kind == "STATISTIC"
+            and target_id == f"{self.scenario_id}_statistics"
+        ):
+            base.update(
+                {
+                    key: full[key]
+                    for key in (
+                        "formal_dataset_window",
+                        "development_window",
+                        "holdout_window",
+                        "statistics",
+                        "root_seed",
+                    )
+                }
+            )
+            base["research_configuration"] = {
+                key: self.configuration()[key]
+                for key in ("evaluation", "comparison_model_id")
+            }
+        else:
+            base.update(
+                {
+                    key: full[key]
+                    for key in (
+                        "formal_dataset_window",
+                        "development_window",
+                        "holdout_window",
+                        "execution_assumptions",
+                        "risk",
+                        "optimizer",
+                        "benchmark_total_return_indices",
+                    )
+                }
+            )
+            if (
+                producer_kind == "STATISTIC"
+                and target_id == f"{self.scenario_id}_portfolio_statistics"
+            ):
+                base["portfolio_candidates"] = full["portfolio_candidates"]
+                base["statistics"] = full["statistics"]
+            if self.frozen_development is not None:
+                base["frozen_development"] = self.frozen_development
+        return base
 
     def target_window(self, action, data_spec, window, target_id=None):
         from quant_research_platform.contracts.data import (
@@ -437,6 +523,8 @@ class AShareProtocol:
             }:
                 raise ValueError("research_portfolio_configuration_invalid")
             enhanced = item["construction"] == "benchmark_enhanced"
+            if enhanced and item["benchmark_id"] not in BENCHMARK_TOTAL_RETURN_INDICES:
+                raise ValueError("a_share_benchmark_not_supported")
             result.append(
                 PortfolioCandidateSpec(
                     **item,
@@ -449,6 +537,7 @@ class AShareProtocol:
                     else RISK_STYLE_COLUMNS[:-1],
                     risk_context_target_ids=(
                         market_ids.PRICE_VOLUME_DATA_ID,
+                        "market_model_factors",
                         "fundamental_factors",
                     )
                     if enhanced

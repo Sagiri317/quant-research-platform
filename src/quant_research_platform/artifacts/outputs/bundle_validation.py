@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 
@@ -55,6 +55,7 @@ def validate_output_bundle(
     *,
     expected_run_id: str | None = None,
     expected_output_id: str | None = None,
+    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
     observer: Callable[
         [
             dict[str, object],
@@ -82,6 +83,11 @@ def validate_output_bundle(
         manifest_path,
         resolved_root=resolved_root,
         error="output_manifest_physical_identity_invalid",
+        expected_identity=(
+            None
+            if expected_member_identities is None
+            else expected_member_identities["manifest.json"]
+        ),
     )
     try:
         _manifest_bytes, manifest = read_bounded_qrp_json(
@@ -98,6 +104,10 @@ def validate_output_bundle(
 
     declared_names = tuple(manifest["files"])
     expected_names = ("manifest.json", *declared_names)
+    if expected_member_identities is not None and set(
+        expected_member_identities
+    ) != set(expected_names):
+        raise ValueError("output_member_set_mismatch")
     _require_exact_member_set(bundle_root, expected_names)
 
     physical_identities = {manifest_identity}
@@ -108,6 +118,11 @@ def validate_output_bundle(
             path,
             resolved_root=resolved_root,
             error="output_member_physical_identity_invalid",
+            expected_identity=(
+                None
+                if expected_member_identities is None
+                else expected_member_identities[name]
+            ),
         )
         if identity in physical_identities:
             raise ValueError("output_member_physical_identity_invalid")
@@ -247,6 +262,7 @@ def read_prediction_output_bundle(
     *,
     expected_output_id: str,
     expected_run_id: str | None = None,
+    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
     time_window=None,  # noqa: ANN001
     family_selection: str | None = None,
 ) -> Iterator[tuple[dict[str, object], _PredictionLookup]]:
@@ -339,7 +355,17 @@ def read_prediction_output_bundle(
                     raise MemoryError("runtime_memory_budget_exceeded")
                 batch_size = max(
                     1,
-                    (batch_headroom - decode_fixed_bytes) // batch_row_bytes,
+                    (
+                        min(
+                            batch_headroom,
+                            max(
+                                decode_fixed_bytes + batch_row_bytes,
+                                policy.planning_headroom_bytes,
+                            ),
+                        )
+                        - decode_fixed_bytes
+                    )
+                    // batch_row_bytes,
                 )
                 batch_working_bytes = decode_fixed_bytes + batch_size * batch_row_bytes
                 batches = iter(
@@ -473,6 +499,7 @@ def read_prediction_output_bundle(
             root,
             expected_output_id=expected_output_id,
             expected_run_id=expected_run_id,
+            expected_member_identities=expected_member_identities,
             observer=read_prediction,
         )
         if lookup is None:
@@ -515,6 +542,7 @@ def _validated_regular_member(
     *,
     resolved_root: Path,
     error: str,
+    expected_identity: DatasetFileIdentity | None = None,
 ) -> DatasetFileIdentity:
     try:
         identity = dataset_file_identity(path)
@@ -522,4 +550,8 @@ def _validated_regular_member(
         raise ValueError(error) from exc
     if path.parent != resolved_root:
         raise ValueError(error)
+    if expected_identity is not None:
+        if identity != expected_identity:
+            raise ValueError("output_bundle_identity_changed")
+        return expected_identity
     return identity

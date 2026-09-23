@@ -561,7 +561,14 @@ def _prediction_summary(
 
 def _model_trials(persisted_model: object, layout: StorageLayout) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
-    references = iter(persisted_model.trial_ledgers)
+    selections = {}
+    for reference in persisted_model.trial_ledgers:
+        plan, records = read_model_trial_ledger_reference(layout, reference)
+        if plan.stage == "selection":
+            identity = reference["semantic_identity"]
+            if identity in selections:
+                raise ValueError("statistics_trial_reference_mismatch")
+            selections[identity] = (plan, records)
     for quarter_id, selection in persisted_model.quarterly_selections.items():
         if type(quarter_id) is not str or type(selection) is not dict:
             raise ValueError("statistics_model_selection_metadata_missing")
@@ -571,18 +578,16 @@ def _model_trials(persisted_model: object, layout: StorageLayout) -> pd.DataFram
                 raise ValueError("statistics_model_family_metadata_invalid")
             family_id = family["family_id"]
             selected_config = family.get("selected_config_id")
-            reference = next(references)
-            plan, records = read_model_trial_ledger_reference(layout, reference)
-            if (
-                reference["semantic_identity"]
-                != family["trial_ledger_semantic_identity"]
-                or plan.candidate_family_id != family_id
-            ):
+            identity = family["trial_ledger_semantic_identity"]
+            if identity not in selections:
+                raise ValueError("statistics_trial_reference_mismatch")
+            plan, records = selections.pop(identity)
+            if plan.candidate_family_id != family_id:
                 raise ValueError("statistics_trial_reference_mismatch")
             for record in records:
                 trial = {
                     "model_id": record.candidate_id,
-                    **dict(record.validation_metrics),
+                    **dict(record.metrics),
                 }
                 config_id = trial["model_id"]
                 value = trial["validation_rankic"]
@@ -609,6 +614,8 @@ def _model_trials(persisted_model: object, layout: StorageLayout) -> pd.DataFram
                         ),
                     }
                 )
+    if selections:
+        raise ValueError("statistics_trial_reference_mismatch")
     if not rows:
         raise ValueError("statistics_model_trials_empty")
     return pd.DataFrame(rows)

@@ -125,7 +125,10 @@ from quant_research_platform.storage.datasets.schema import (
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.experiments import research_run_trial_references
-from quant_research_platform.storage.identity import validate_instance_identity
+from quant_research_platform.storage.identity import (
+    require_unaliased_path,
+    validate_instance_identity,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from quant_research_platform.storage.rebuild import (
@@ -136,6 +139,7 @@ from quant_research_platform.storage.semantic_artifacts import (
     compare_semantic_artifacts,
     discover_semantic_artifact_instances,
     read_semantic_artifact,
+    read_semantic_artifact_record,
     write_semantic_artifact,
 )
 from quant_research_platform.storage.software_identity import (
@@ -764,13 +768,28 @@ def _frozen_holdout_protocol(
             reference = references.get(target_id)
             if reference is None:
                 raise ValueError("holdout_development_reference_missing")
-            root, envelope = read_validated_reference(layout, reference)
-            validated[target_id] = root, envelope
+            identities = {}
+            root, envelope = read_validated_reference(
+                layout, reference, member_identities=identities
+            )
+            validated[target_id] = root, envelope, identities
             if reference.producer_kind is ProducerKind.PORTFOLIO:
+                reader = read_portfolio_ledger_artifact
+                if (
+                    str(profile.market_id) == "crypto"
+                    and protocol.execution_target_for_target(target_id).execution_mode
+                    == "independent_segments"
+                ):
+                    from quant_research_platform.artifacts.crypto_hft import (
+                        read_crypto_episode_artifact,
+                    )
+
+                    reader = read_crypto_episode_artifact
                 artifacts[target_id] = partial(
-                    read_portfolio_ledger_artifact,
+                    reader,
                     root,
                     expected_identity=reference.instance_identity,
+                    expected_member_identities=identities,
                 )
         frozen = {
             "run_id": record.run_id,
@@ -779,7 +798,7 @@ def _frozen_holdout_protocol(
         }
         for target_id in protocol.frozen_target_ids():
             reference = references[target_id]
-            root, envelope = validated[target_id]
+            root, envelope, identities = validated[target_id]
             artifacts[target_id] = _validate_semantic_target_root(
                 profile,
                 protocol,
@@ -791,6 +810,7 @@ def _frozen_holdout_protocol(
                 root,
                 reference.instance_identity,
                 trial_layout=layout,
+                expected_member_identities=identities,
             )
             frozen["targets"][target_id] = {
                 "reference": reference.payload(),
@@ -1544,6 +1564,9 @@ def _build_semantic_target(
     logical_root = _target_logical_root(profile, layout, spec.target_id)
     if logical_root is None:
         raise ValueError("target_logical_root_missing")
+    target_protocol = envelope.payload()["semantic_metadata"]["target_contract"][
+        "protocol"
+    ]
     if protocol.protocol_id == "crypto_hft" and binding.kind in {
         ProducerKind.MODEL,
         ProducerKind.PREDICTION,
@@ -1560,9 +1583,9 @@ def _build_semantic_target(
                 tie_break_order=ids,
                 time_window=time_window,
                 resource_policy=policy,
-                protocol_manifest=protocol.manifest(),
+                protocol_manifest=target_protocol,
                 run_id=run_id,
-                research_protocol_identity=canonical_json_hash(protocol.manifest()),
+                research_protocol_identity=canonical_json_hash(target_protocol),
                 model_target_id=spec.target_id,
                 backend_versions=software_identity.payload["dependency_versions"],
             )
@@ -1617,7 +1640,7 @@ def _build_semantic_target(
             time_window=time_window,
             resource_policy=policy,
             **(
-                {"protocol_manifest": protocol.manifest()}
+                {"protocol_manifest": target_protocol}
                 if protocol.protocol_id == "crypto_hft"
                 else {"access_window": protocol.access_window}
             ),
@@ -1662,7 +1685,8 @@ def _build_semantic_target(
             time_window=_research_dataset_access_window(dataset_spec.market_id, None),
             resource_policy=policy,
         ) as dataset_session:
-            model_result = binding.producer(
+            model_result = partial(
+                binding.producer,
                 layout=target_layout,
                 dataset_session=dataset_session,
                 dataset_catalog=profile.research_datasets,
@@ -1672,9 +1696,9 @@ def _build_semantic_target(
                 tie_break_order=model_ids,
                 time_window=time_window,
                 resource_policy=policy,
-                protocol_manifest=protocol.manifest(),
+                protocol_manifest=target_protocol,
                 run_id=run_id,
-                research_protocol_identity=canonical_json_hash(protocol.manifest()),
+                research_protocol_identity=canonical_json_hash(target_protocol),
                 model_target_id=spec.target_id,
                 backend_versions=software_identity.payload["dependency_versions"],
             )
@@ -1754,7 +1778,7 @@ def _build_semantic_target(
         producer = partial(
             binding.producer,
             layout=target_layout,
-            protocol_manifest=protocol.manifest(),
+            protocol_manifest=target_protocol,
             time_window=time_window,
             upstream_identities=planned["upstream_identities"],
             resource_policy=policy,
@@ -1799,11 +1823,10 @@ def _build_semantic_target(
         owned_tables = binding.producer(
             ledgers=ledgers,
             candidates=candidates,
-            protocol_manifest=protocol.manifest(),
+            protocol_manifest=target_protocol,
             time_window=time_window,
             resource_policy=policy,
             layout=target_layout,
-            dataset_spec=profile.research_datasets.get(protocol.scenario_id),
         )
         try:
             write_statistics_artifact(
@@ -1872,7 +1895,7 @@ def _build_semantic_target(
                 dataset_id=dataset_target,
                 prediction_id=prediction_target,
                 persisted_model=persisted,
-                protocol_manifest=protocol.manifest(),
+                protocol_manifest=target_protocol,
                 time_window=time_window,
                 prediction_lookup=prediction_lookup,
                 resource_policy=policy,
@@ -1888,25 +1911,37 @@ def _build_semantic_target(
     elif (
         binding.kind is ProducerKind.PORTFOLIO and protocol.protocol_id == "crypto_hft"
     ):
-        candidate = protocol.portfolio_candidate_for_target(spec.target_id)
+        target = protocol.execution_target_for_target(spec.target_id)
+        candidate = target.candidate
 
         def produce_ledger(emit):
+            callback = (
+                {"on_ledger": emit}
+                if target.execution_mode == "continuous"
+                else {"on_episode": emit}
+            )
             binding.producer(
                 layout=target_layout,
                 candidate=candidate,
-                protocol_manifest=protocol.manifest(),
+                protocol_manifest=target_protocol,
                 dataset_catalog=profile.research_datasets,
                 output_window=time_window,
                 upstream_identities=planned["upstream_identities"],
                 expected_funding_identity=raw_identity,
                 raw_root=raw_root,
                 resource_policy=policy,
-                on_ledger=emit,
+                **callback,
             )
 
-        write_portfolio_ledger_artifact(
-            logical_root, envelope=envelope, produce=produce_ledger
-        )
+        if target.execution_mode == "continuous":
+            writer = write_portfolio_ledger_artifact
+        else:
+            from quant_research_platform.artifacts.crypto_hft import (
+                write_crypto_episode_artifact,
+            )
+
+            writer = write_crypto_episode_artifact
+        writer(logical_root, envelope=envelope, produce=produce_ledger)
     elif binding.kind is ProducerKind.PORTFOLIO:
         candidate = protocol.portfolio_candidate_for_target(spec.target_id)
         prediction_target = candidate.prediction_target_id
@@ -2167,23 +2202,32 @@ def _build_report_from_run(
     report_inputs = {}
     if str(profile.market_id) == "a_share":
         selections = {}
+        reference_member_identities = {}
         for result in record.target_results:
             if result.producer_kind is not ProducerKind.MODEL or result.status in {
                 TargetStatus.BLOCKED,
                 TargetStatus.FAILED,
             }:
                 continue
+            identities = {}
             try:
-                read_validated_reference(layout, result)
+                read_validated_reference(layout, result, member_identities=identities)
             except (FileNotFoundError, OSError, ValueError):
                 continue
             persisted = read_quarterly_model_artifact(
                 _instance_root(layout, result),
                 expected_identity=result.instance_identity,
                 trial_layout=layout,
+                expected_member_identities=identities,
             )
             selections = persisted.quarterly_selections
+            reference_member_identities[result.target_id] = identities
         report_inputs["quarterly_selections"] = selections
+        report_inputs["reference_member_identities"] = reference_member_identities
+    elif str(profile.market_id) == "crypto":
+        report_inputs["execution_targets"] = profile.protocol(
+            record.scenario_id
+        ).execution_targets()
     payload = binding.producer(
         layout=layout, record=record, report_lease=report_lease, **report_inputs
     )
@@ -2447,17 +2491,34 @@ def _validate_semantic_target_root(
     expected_identity: str,
     *,
     trial_layout: StorageLayout | None = None,
+    expected_member_identities=None,
 ) -> None:
     binding = profile.producer_bindings.get(spec.producer_id or "")
     if binding is None:
         raise ValueError("producer_binding_missing")
-    envelope = read_semantic_artifact(root, expected_identity=expected_identity)
+    identities = {}
+    envelope, _members = read_semantic_artifact_record(
+        root,
+        expected_identity=expected_identity,
+        expected_member_identities=expected_member_identities,
+        member_identities=identities,
+    )
     if envelope["logical_artifact_id"] != spec.target_id:
         raise ValueError("semantic_artifact_logical_id_mismatch")
+
+    def output_identities(output_id):
+        prefix = f"outputs/{output_id}/"
+        return {
+            path[len(prefix) :]: identity
+            for path, identity in identities.items()
+            if path.startswith(prefix)
+        }
+
     if binding.kind is ProducerKind.STATISTIC:
         read_statistics_artifact(
             root,
             expected_identity=expected_identity,
+            expected_member_identities=identities,
             validate_tables=validate_maker_calibration
             if protocol.protocol_id == "crypto_hft"
             and protocol.statistics_table_group(spec.target_id)
@@ -2466,10 +2527,26 @@ def _validate_semantic_target_root(
         )
         return
     if binding.kind is ProducerKind.PORTFOLIO:
-        read_portfolio_ledger_artifact(
-            root,
-            expected_identity=expected_identity,
-        )
+        if (
+            protocol.protocol_id == "crypto_hft"
+            and protocol.execution_target_for_target(spec.target_id).execution_mode
+            == "independent_segments"
+        ):
+            from quant_research_platform.artifacts.crypto_hft import (
+                read_crypto_episode_artifact,
+            )
+
+            read_crypto_episode_artifact(
+                root,
+                expected_identity=expected_identity,
+                expected_member_identities=identities,
+            )
+        else:
+            read_portfolio_ledger_artifact(
+                root,
+                expected_identity=expected_identity,
+                expected_member_identities=identities,
+            )
         return
     if protocol.protocol_id == "crypto_hft" and binding.kind in {
         ProducerKind.MODEL,
@@ -2477,7 +2554,10 @@ def _validate_semantic_target_root(
     }:
         if binding.kind is ProducerKind.MODEL:
             return read_crypto_model_artifact(
-                root, expected_identity=expected_identity, trial_layout=trial_layout
+                root,
+                expected_identity=expected_identity,
+                trial_layout=trial_layout,
+                expected_member_identities=identities,
             )
         else:
             model_target = f"{protocol.scenario_id}_models"
@@ -2498,6 +2578,7 @@ def _validate_semantic_target_root(
                     root / "outputs" / output_id,
                     expected_output_id=output_id,
                     expected_run_id=f"run_{output_id}",
+                    expected_member_identities=output_identities(output_id),
                 ) as (manifest, _lookup):
                     if manifest["metadata"][
                         "model_metadata"
@@ -2516,6 +2597,7 @@ def _validate_semantic_target_root(
             root,
             expected_identity=expected_identity,
             trial_layout=trial_layout,
+            expected_member_identities=identities,
         )
         expected_model_ids = protocol.model_ids_for_target(spec.target_id)
         for quarter in persisted.quarterly_models:
@@ -2542,6 +2624,7 @@ def _validate_semantic_target_root(
                 root / "outputs" / spec.target_id,
                 expected_output_id=spec.target_id,
                 expected_run_id=f"run_{spec.target_id}",
+                expected_member_identities=output_identities(spec.target_id),
             )
             validate_evaluation_output_metadata_shape(manifest["metadata"])
         except (KeyError, TypeError, ValueError) as exc:
@@ -2555,6 +2638,7 @@ def _validate_semantic_target_root(
                 root / "outputs" / spec.target_id,
                 expected_output_id=spec.target_id,
                 expected_run_id=f"run_{spec.target_id}",
+                expected_member_identities=output_identities(spec.target_id),
             ) as (manifest, _lookup):
                 validate_prediction_output_metadata_shape(manifest["metadata"])
                 prediction_metadata = manifest["metadata"]
@@ -2773,7 +2857,7 @@ def _semantic_target_payload(
         "target_id": target_spec.target_id,
         "dependencies": list(target_spec.dependencies),
         "producer_kind": binding.kind.value,
-        "protocol": protocol.manifest(),
+        "protocol": protocol.target_manifest(target_spec.target_id, binding.kind.value),
     }
     if binding.kind is ProducerKind.EVALUATION:
         spec = profile.evaluations.get(target_spec.target_id)
@@ -2827,6 +2911,17 @@ def _semantic_target_payload(
                 name: list(columns)
                 for name, columns in PORTFOLIO_LEDGER_TABLE_COLUMNS.items()
             }
+            if (
+                protocol.execution_target_for_target(
+                    target_spec.target_id
+                ).execution_mode
+                == "independent_segments"
+            ):
+                from quant_research_platform.artifacts.crypto_hft import (
+                    crypto_episode_schema_payload,
+                )
+
+                payload["episode_index_schema"] = crypto_episode_schema_payload()
             payload["portfolio_capital"] = {
                 "candidate_id": candidate.candidate_id,
                 "initial_capital": protocol.research_plan.initial_capital,
@@ -2993,18 +3088,25 @@ def _matching_instance(
     if logical_root is None:
         return None, "target_logical_root_missing"
     try:
+        instance_root = require_unaliased_path(
+            layout.instance_root(logical_root, requested_identity),
+            error="persisted_instance_invalid",
+        )
+        try:
+            instance_root.stat()
+        except FileNotFoundError:
+            return None, None
         if _catalog_data_spec(profile, target_id) is None:
-            instances = discover_semantic_artifact_instances(logical_root)
+            envelope = read_semantic_artifact(
+                instance_root, expected_identity=requested_identity
+            )
         else:
-            instances = discover_dataset_instances(logical_root)
-    except ValueError:
+            envelope = _validate_published_target(instance_root, requested_identity)
+        if envelope["logical_artifact_id"] != target_id:
+            raise ValueError("persisted_instance_logical_id_mismatch")
+    except (ValueError, KeyError, FileNotFoundError, NotADirectoryError):
         return None, "persisted_instance_invalid"
-    matching = tuple(
-        instance.name for instance in instances if instance.name == requested_identity
-    )
-    if matching:
-        return matching[0], None
-    return None, None
+    return requested_identity, None
 
 
 def _target_instance_root(

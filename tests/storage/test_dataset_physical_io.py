@@ -1111,3 +1111,24 @@ def test_writer_persisted_readback_preserves_schema_and_rows(
         assert sorted(
             zip(persisted["asset_id"], persisted["timestamp"], strict=True)
         ) == sorted(zip(frame["asset_id"], frame["timestamp"], strict=True))
+
+
+@pytest.mark.parametrize("offset", (-1, 0, 1))
+@pytest.mark.parametrize("writer", ("dataset", "artifact"))
+def test_parquet_writers_admit_one_page_above_soft_target(tmp_path, offset, writer):
+    table = pa.table({"value": ["x" * 4096] * 3})
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("test.retained", policy.memory_budget_bytes + offset):
+            if writer == "dataset":
+                path = tmp_path / "over-soft.parquet"
+                dataset_writing.write_parquet_file(table, path)
+                assert pq.read_table(path).to_pydict() == table.to_pydict()
+            else:
+                persisted, resources, batch_rows, _ = (
+                    dataset_physical._parquet_table_write_state(table)
+                )
+                with resources:
+                    assert persisted.to_pydict() == table.to_pydict()
+                    assert batch_rows == 1
+        assert policy.used_memory_bytes == 0

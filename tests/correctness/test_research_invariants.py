@@ -327,6 +327,7 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
             "close": values,
             "amount": 1_000.0,
             "volume": 100.0,
+            "turnover": 0.01,
             "float_market_cap": 100_000.0,
             "total_market_cap": 150_000.0,
         }
@@ -1513,3 +1514,86 @@ def test_compound_fundamental_ratio_preserves_cancellation() -> None:
     actual = calculate_fundamental_factors(frame)
     assert actual["debt_to_assets"].iloc[0] == 1.0
     assert actual["net_debt_to_assets"].iloc[0] == 1.0
+
+
+def test_fundamental_subset_requires_only_its_formula_inputs():
+    from quant_research_platform.research.factors.fundamental.calculations import (
+        calculate_fundamental_factors,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a"],
+            "timestamp": [pd.Timestamp("2024-01-02")],
+            "parent_equity": [20.0],
+            "total_market_cap": [100.0],
+        }
+    )
+    result = calculate_fundamental_factors(frame, factor_columns=("book_to_market",))
+    assert result.book_to_market.iloc[0] == 0.2
+    with pytest.raises(ValueError, match="fundamental_factor_input_columns_missing"):
+        calculate_fundamental_factors(frame, factor_columns=("roe",))
+
+
+def test_label_maturity_preserves_ineligible_observations_for_unfiltered_evaluation():
+    from quant_research_platform.contracts.experiments import label_maturity_mask
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"] * 3),
+            "label_available_at": pd.to_datetime(
+                ["2024-01-02", "2024-01-02", "2024-01-03"]
+            ),
+            "eligible": [True, False, True],
+            "label": [0.1, 0.2, 0.3],
+        }
+    )
+    mature = label_maturity_mask(
+        frame, fitting_cutoff="2024-01-02", target_column="label"
+    )
+    assert frame.loc[mature].index.tolist() == [0, 1]
+    assert label_maturity_mask(
+        frame.drop(columns="eligible"),
+        fitting_cutoff="2024-01-02",
+        target_column="label",
+    ).equals(mature)
+    assert legal_training_rows(
+        frame, fitting_cutoff="2024-01-02", target_column="label"
+    ).index.tolist() == [0]
+
+
+def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missing():
+    from quant_research_platform.research.models.fitting import (
+        iter_legal_training_chunks,
+        model_training_read_columns,
+    )
+
+    inputs = ("feature_missing_x", "feature_observed_x")
+    columns = model_training_read_columns(
+        ("timestamp", "asset_id"),
+        inputs,
+        label_column="label",
+        sample_filter_mode="unfiltered",
+    )
+    assert "feature_x" in columns
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"] * 3),
+            "asset_id": ["a", "b", "c"],
+            "eligible": [True] * 3,
+            "label_available_at": pd.to_datetime(["2024-01-02"] * 3),
+            "label": [0.1, 0.2, 0.3],
+            "feature_x": [2.0, 0.0, np.nan],
+            "feature_missing_x": [0, 1, 1],
+            "feature_observed_x": [1, 0, 0],
+        }
+    )
+    chunks = list(
+        iter_legal_training_chunks(
+            [frame],
+            train_end=pd.Timestamp("2024-01-02"),
+            label_column="label",
+            input_columns=inputs,
+        )
+    )
+    assert chunks[0].asset_id.tolist() == ["a", "b"]

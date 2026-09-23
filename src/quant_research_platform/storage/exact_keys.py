@@ -10,6 +10,7 @@ import sys
 from array import array
 from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -20,8 +21,14 @@ from uuid import uuid4
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.runtime.resources import require_free_disk_headroom
+from quant_research_platform.runtime.resources import (
+    MemoryLease,
+    current_runtime_resource_policy,
+    require_free_disk_headroom,
+)
 from quant_research_platform.storage._scratch_ownership import (
+    ScratchReservation,
+    handle_preserving_primary,
     owned_scratch_name,
     remove_owned_scratch,
 )
@@ -73,6 +80,7 @@ class ExactPrimaryKeyIndex:
         self._sqlite_cache_kib = EXACT_KEY_SQLITE_CACHE_BYTES // 1024
         self._temporary_directory: Path | None = None
         self._connection: sqlite3.Connection | None = None
+        self._scratch_reservation: ScratchReservation | None = None
 
     @property
     def database_path(self) -> Path:
@@ -115,6 +123,10 @@ class ExactPrimaryKeyIndex:
         claimed_temporary = False
         connection: sqlite3.Connection | None = None
         try:
+            self._scratch_reservation = ScratchReservation(self._scratch_parent)
+            self._scratch_reservation.resize(
+                2 * _EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES
+            )
             os.mkdir(native_filesystem_path(temporary_directory), mode=0o700)
             claimed_temporary = True
             self._temporary_directory = temporary_directory
@@ -155,21 +167,42 @@ class ExactPrimaryKeyIndex:
                 "ON comparison_rows(namespace, payload)"
             )
             connection.commit()
+            self._scratch_reservation.resize(
+                sum(
+                    int(connection.execute(f"PRAGMA {schema}.page_count").fetchone()[0])
+                    for schema in ("main", "temp")
+                )
+                * EXACT_KEY_SQLITE_PAGE_BYTES
+            )
         except BaseException as primary:
+            connection_closed = True
             if connection is not None:
                 try:
                     connection.close()
                 except BaseException as close_error:
+                    connection_closed = False
                     primary.add_note(
                         "exact key connection close also failed: "
                         f"{type(close_error).__name__}"
                     )
+            removed = not claimed_temporary
             if claimed_temporary:
                 try:
                     remove_owned_scratch(temporary_directory)
+                    removed = True
                 except BaseException as cleanup_error:
                     primary.add_note(
                         "exact key scratch cleanup also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+            if self._scratch_reservation is not None:
+                if removed and connection_closed:
+                    self._scratch_reservation.resize(0)
+                try:
+                    self._scratch_reservation.close()
+                except BaseException as cleanup_error:
+                    primary.add_note(
+                        "exact key scratch reservation close also failed: "
                         f"{type(cleanup_error).__name__}"
                     )
             self._temporary_directory = None
@@ -194,6 +227,36 @@ class ExactPrimaryKeyIndex:
                 f"exact key index cleanup also failed: {type(cleanup_error).__name__}"
             )
 
+    @contextmanager
+    def _transaction(self):
+        connection = self._connection
+        try:
+            with connection:
+                yield
+        finally:
+            primary = sys.exception()
+            try:
+                if not connection.in_transaction:
+                    # Commit/rollback removes journal files and unused growth
+                    # reservations; only actual database pages remain resident.
+                    self._scratch_reservation.resize(
+                        sum(
+                            int(
+                                connection.execute(
+                                    f"PRAGMA {schema}.page_count"
+                                ).fetchone()[0]
+                            )
+                            for schema in ("main", "temp")
+                        )
+                        * EXACT_KEY_SQLITE_PAGE_BYTES
+                    )
+            except BaseException as cleanup_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    f"scratch settlement also failed: {type(cleanup_error).__name__}"
+                )
+
     def close(self) -> None:
         primary = sys.exception()
         first_error: BaseException | None = None
@@ -201,10 +264,13 @@ class ExactPrimaryKeyIndex:
         temporary_directory = self._temporary_directory
         self._connection = None
         self._temporary_directory = None
+        connection_closed = True
+        removed = temporary_directory is None
         if connection is not None:
             try:
                 connection.close()
             except BaseException as close_error:
+                connection_closed = False
                 if primary is not None:
                     primary.add_note(
                         "exact key connection close also failed: "
@@ -215,6 +281,7 @@ class ExactPrimaryKeyIndex:
         if temporary_directory is not None:
             try:
                 remove_owned_scratch(temporary_directory)
+                removed = True
             except BaseException as cleanup_error:
                 if primary is not None:
                     primary.add_note(
@@ -228,6 +295,19 @@ class ExactPrimaryKeyIndex:
                         "exact key scratch cleanup also failed: "
                         f"{type(cleanup_error).__name__}"
                     )
+        if self._scratch_reservation is not None:
+            if connection_closed and removed:
+                self._scratch_reservation.resize(0)
+            try:
+                self._scratch_reservation.close()
+            except BaseException as cleanup_error:
+                if primary is not None:
+                    primary.add_note(
+                        "exact key scratch reservation close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                elif first_error is None:
+                    first_error = cleanup_error
         if first_error is not None:
             raise first_error
 
@@ -257,7 +337,7 @@ class ExactPrimaryKeyIndex:
         if any(column.null_count for column in keys.columns):
             raise ValueError("dataset_primary_key_null")
         before = connection.total_changes
-        with connection:
+        with self._transaction():
             connection.executemany(
                 "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
                 "VALUES (?, ?, ?)",
@@ -295,7 +375,7 @@ class ExactPrimaryKeyIndex:
                     raise ValueError("invalid_exact_key_namespace")
                 yield namespace, bytes(identity), bytes(value)
 
-        with connection:
+        with self._transaction():
             connection.executemany(
                 "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
                 "VALUES (?, ?, ?)",
@@ -311,7 +391,7 @@ class ExactPrimaryKeyIndex:
         value_column: str,
         payload_target_bytes: int,
     ) -> int:
-        """Index one bounded Arrow key/value batch with exact float values."""
+        """Borrow an admitted Arrow batch; bound each streamed key in its workspace."""
 
         connection = self._connection
         if connection is None:
@@ -340,7 +420,9 @@ class ExactPrimaryKeyIndex:
 
         def rows() -> Iterator[tuple[str, bytearray, bytes]]:
             for (row_namespace, payload, _), scalar in zip(
-                self._payload_rows(keys, namespace=namespace),
+                self._payload_rows(
+                    keys, namespace=namespace, payload_target_bytes=payload_target_bytes
+                ),
                 values,
                 strict=True,
             ):
@@ -350,7 +432,7 @@ class ExactPrimaryKeyIndex:
                 yield row_namespace, payload, struct.pack(">d", float(value))
 
         before = connection.total_changes
-        with connection:
+        with self._transaction():
             connection.executemany(
                 "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
                 "VALUES (?, ?, ?)",
@@ -386,7 +468,7 @@ class ExactPrimaryKeyIndex:
             raise ValueError("exact_key_position_state_exceeds_payload_target")
         values = array("d", [math.nan]) * table.num_rows
         found = bytearray(table.num_rows)
-        with connection:
+        with self._transaction():
             connection.executemany(
                 "INSERT INTO comparison_rows(position, namespace, payload, value) "
                 "VALUES (?, ?, ?, ?)",
@@ -413,15 +495,24 @@ class ExactPrimaryKeyIndex:
                 values[int(position)] = struct.unpack(">d", encoded)[0]
                 found[int(position)] = 1
             if matched_namespace is not None:
-                connection.execute(
-                    "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                    "SELECT ?, incoming.payload, existing.value "
-                    "FROM comparison_rows AS incoming "
-                    "JOIN exact_keys AS existing "
-                    "ON existing.namespace = ? "
-                    "AND existing.payload = incoming.payload",
-                    (matched_namespace, source_namespace),
-                )
+                with (
+                    handle_preserving_primary(
+                        connection.execute(
+                            "SELECT ?, incoming.payload, existing.value "
+                            "FROM comparison_rows AS incoming "
+                            "JOIN exact_keys AS existing "
+                            "ON existing.namespace = ? "
+                            "AND existing.payload = incoming.payload",
+                            (matched_namespace, source_namespace),
+                        )
+                    ) as matches,
+                    handle_preserving_primary(self._gated_rows(matches)) as admitted,
+                ):
+                    connection.executemany(
+                        "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
+                        "VALUES (?, ?, ?)",
+                        admitted,
+                    )
             connection.execute("DELETE FROM comparison_rows")
         return values, found
 
@@ -439,7 +530,11 @@ class ExactPrimaryKeyIndex:
         if connection is None:
             raise RuntimeError("exact_primary_key_index_not_open")
         before = connection.total_changes
-        with connection:
+        policy = current_runtime_resource_policy()
+        with (
+            policy.lease("storage.dataset.comparison.payload", 0) as payload_lease,
+            self._transaction(),
+        ):
             connection.executemany(
                 "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
                 "VALUES (?, ?, ?)",
@@ -448,6 +543,7 @@ class ExactPrimaryKeyIndex:
                     namespace=namespace,
                     value_columns=value_columns,
                     payload_target_bytes=payload_target_bytes,
+                    payload_lease=payload_lease,
                 ),
             )
         inserted = connection.total_changes - before
@@ -484,7 +580,7 @@ class ExactPrimaryKeyIndex:
             validated_columns=selected,
         )
         keep_count = 0
-        with connection:
+        with self._transaction():
             connection.executemany(
                 "INSERT INTO comparison_rows(position, namespace, payload, value) "
                 "VALUES (?, ?, ?, ?)",
@@ -560,6 +656,7 @@ class ExactPrimaryKeyIndex:
         value_columns: Sequence[str],
         payload_target_bytes: int,
         validated_columns: tuple[str, ...] | None = None,
+        payload_lease: MemoryLease | None = None,
     ) -> Iterator[tuple[str, bytes, bytes]]:
         selected = validated_columns
         if selected is None:
@@ -589,6 +686,7 @@ class ExactPrimaryKeyIndex:
                 table.select(selected),
                 namespace=namespace,
                 payload_target_bytes=payload_target_bytes,
+                payload_lease=payload_lease,
             )
         )
 
@@ -737,11 +835,12 @@ class ExactPrimaryKeyIndex:
         keys: pa.Table,
         *,
         namespace: str,
+        payload_target_bytes: int | None = None,
     ) -> Iterator[tuple[str, bytearray, None]]:
         fields = tuple(keys.schema.field(column) for column in self._primary_key)
         columns = tuple(keys.column(column) for column in self._primary_key)
         for row_index in range(keys.num_rows):
-            payload = _BoundedPayloadSink(None)
+            payload = _BoundedPayloadSink(payload_target_bytes)
             for column, field in zip(columns, fields, strict=True):
                 _append_arrow_scalar_payload(
                     payload,
@@ -761,6 +860,7 @@ class ExactPrimaryKeyIndex:
         *,
         namespace: str,
         payload_target_bytes: int,
+        payload_lease: MemoryLease | None = None,
     ) -> Iterator[tuple[str, bytearray, bytearray]]:
         key_fields = tuple(keys.schema.field(column) for column in self._primary_key)
         key_columns = tuple(keys.column(column) for column in self._primary_key)
@@ -769,7 +869,10 @@ class ExactPrimaryKeyIndex:
         )
         value_arrays = tuple(values.column(column) for column in values.column_names)
         for row_index in range(keys.num_rows):
-            key_payload = _BoundedPayloadSink(payload_target_bytes)
+            key_payload = value_payload = None
+            if payload_lease is not None:
+                payload_lease.shrink_to(0)
+            key_payload = _BoundedPayloadSink(payload_target_bytes, payload_lease)
             for column, field in zip(key_columns, key_fields, strict=True):
                 _append_arrow_scalar_payload(
                     key_payload,
@@ -780,7 +883,9 @@ class ExactPrimaryKeyIndex:
                         or pa.types.is_float64(field.type)
                     ),
                 )
-            value_payload = _BoundedPayloadSink(key_payload.remaining_bytes)
+            value_payload = _BoundedPayloadSink(
+                key_payload.remaining_bytes, payload_lease
+            )
             for column, field in zip(value_arrays, value_fields, strict=True):
                 _append_arrow_scalar_payload(
                     value_payload,
@@ -804,39 +909,72 @@ class ExactPrimaryKeyIndex:
                 logical_row_bytes + 27 + key_bytes + 4 * EXACT_KEY_SQLITE_PAGE_BYTES
             )
             if reserve_bytes > admitted_bytes:
-                admitted_bytes = max(_DISK_RESERVE_BATCH_BYTES, reserve_bytes)
-                self._admit_physical_write(admitted_bytes)
+                admitted_bytes = self._admit_physical_write(
+                    max(_DISK_RESERVE_BATCH_BYTES, reserve_bytes),
+                    minimum_bytes=reserve_bytes,
+                )
             admitted_bytes -= reserve_bytes
             yield namespace, payload, value
+            payload = value = None
 
-    def _admit_physical_write(self, reserve_bytes: int) -> None:
-        schemas = ("main", "temp")
-        require_free_disk_headroom(
-            self._scratch_parent,
-            reserve_bytes=reserve_bytes * len(schemas),
-        )
+    def _admit_physical_write(
+        self, reserve_bytes: int, *, minimum_bytes: int | None = None
+    ) -> int:
         connection = self._connection
         if connection is None:
             raise RuntimeError("exact_primary_key_index_not_open")
-        growth_pages = (
-            reserve_bytes + EXACT_KEY_SQLITE_PAGE_BYTES - 1
-        ) // EXACT_KEY_SQLITE_PAGE_BYTES
-        for schema in schemas:
-            current_pages = int(
-                connection.execute(f"PRAGMA {schema}.page_count").fetchone()[0]
+        pages = {
+            schema: int(connection.execute(f"PRAGMA {schema}.page_count").fetchone()[0])
+            for schema in ("main", "temp")
+        }
+        row_admission = (
+            self._scratch_reservation.memory_capacity_bytes is not None
+            and minimum_bytes is not None
+        )
+        if row_admission:
+            # A row can split every level of the table and its secondary index.
+            # Page count bounds B-tree depth; reserve two pages per level per tree.
+            split_pages = max(4, 4 * max(pages.values()).bit_length())
+            reserve_bytes = (
+                minimum_bytes + 2 * (split_pages - 4) * EXACT_KEY_SQLITE_PAGE_BYTES
             )
-            connection.execute(
-                f"PRAGMA {schema}.max_page_count={current_pages + growth_pages}"
+        require_free_disk_headroom(
+            self._scratch_parent, reserve_bytes=reserve_bytes * len(pages)
+        )
+        # reserve_bytes already includes the rollback journal; page limits cover
+        # only database growth, with old and journal pages charged separately.
+        growth_pages = (reserve_bytes + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
+            2 * EXACT_KEY_SQLITE_PAGE_BYTES
+        )
+        bounds = {schema: current + growth_pages for schema, current in pages.items()}
+        self._scratch_reservation.resize(
+            max(
+                self._scratch_reservation.reserved_bytes,
+                2 * sum(bounds.values()) * EXACT_KEY_SQLITE_PAGE_BYTES,
             )
+        )
+        for schema, limit in bounds.items():
+            connection.execute(f"PRAGMA {schema}.max_page_count={limit}")
+        # The depth allowance covers this row only, not a credit for later rows.
+        return minimum_bytes if row_admission else reserve_bytes
 
 
 class _BoundedPayloadSink:
-    __slots__ = ("buffer", "_auxiliary_bytes", "_limit")
+    __slots__ = ("buffer", "_auxiliary_bytes", "_limit", "_lease")
 
-    def __init__(self, limit: int | None) -> None:
+    def __init__(self, limit: int | None, lease: MemoryLease | None = None) -> None:
         self.buffer = bytearray()
         self._auxiliary_bytes = 0
         self._limit = limit
+        self._lease = lease
+
+    def _reserve(self, size: int) -> None:
+        if self._lease is not None:
+            policy = current_runtime_resource_policy()
+            policy.require_working_set(
+                2 * size, error="dataset_comparison_payload_exceeds_capacity"
+            )
+            self._lease.grow(2 * size)
 
     @property
     def remaining_bytes(self) -> int | None:
@@ -848,16 +986,20 @@ class _BoundedPayloadSink:
         remaining = self.remaining_bytes
         if remaining is not None and len(payload) > remaining:
             raise ValueError("dataset_comparison_payload_exceeds_target_bytes")
+        self._reserve(len(payload))
         self.buffer.extend(payload)
 
     def reserve_auxiliary(self, size: int) -> None:
         remaining = self.remaining_bytes
         if remaining is not None and size > remaining:
             raise ValueError("dataset_comparison_payload_exceeds_target_bytes")
+        self._reserve(size)
         self._auxiliary_bytes += size
 
     def release_auxiliary(self, size: int) -> None:
         self._auxiliary_bytes -= size
+        if self._lease is not None:
+            self._lease.shrink_to(self._lease.reserved_bytes - 2 * size)
 
 
 def _append_arrow_scalar_payload(

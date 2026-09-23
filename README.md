@@ -36,7 +36,7 @@ qrp report build --profile <profile> --project-root <project> --run-id <run_id>
 
 两市场的 research run 均通过 --research-plan <configuration.json> 读取显式研究配置。
 profile、scenario、研究窗口、因子、模型与组合选择都来自该文件；示例位于 configs/research/。
-Crypto 配置的 research_plan 还须给出时间切分与执行假设，每个 UTC 日独立运行。
+Crypto 配置的 research_plan 还须给出时间切分与执行假设；可选择连续回测或遇真实缺口独立分段，午夜不重置账户。
 研究运行返回不可变尝试标识 run_id；报告只消费指定运行引用的已发布产物。
 默认运行开发区间；没有合法开发冻结产物时，--holdout 必须明确拒绝。
 status 未指定 run_id 时只列已有运行；空目录返回空列表，不规划或启动研究。
@@ -51,6 +51,7 @@ API 使用 profile 查询参数选择市场。报告查询核对 run 与 report_
 
 Notebook 使用 quantlab313 kernel，填写项目、profile、run_id 和 report_identity 后运行。
 它只读取已有诊断和聚合 NAV；A 股采用交易日/CNY，Crypto 采用 UTC/USDT 并区分 OOS 与空档。
+独立分段各自绘图，不连接成跨缺口资金曲线。
 NAV_STRIDE 只改变图形采样，同时显示源点数和显示点数；短区间不冒充正式日频统计。
 核心 CLI/API 不需要导入 Notebook 的 Matplotlib/Jupyter 开发依赖。
 

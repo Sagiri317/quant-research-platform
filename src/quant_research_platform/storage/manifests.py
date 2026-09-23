@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -23,11 +24,11 @@ from quant_research_platform.storage.datasets.schema import (
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
-    dataset_file_identity_from_stat,
     native_filesystem_path,
     open_filesystem_file,
     require_artifact_root,
     require_unaliased_path,
+    verified_file_handle,
 )
 
 
@@ -55,19 +56,19 @@ def read_bounded_qrp_json(
     try:
         handle = open_filesystem_file(candidate)
         with scratch_owner.handle_preserving_primary(handle):
-            before = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
-            if before != identity:
-                raise ValueError("dataset_metadata_file_identity_changed")
-            raw = handle.read(max_bytes + 1)
-            after = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
+            with verified_file_handle(
+                candidate,
+                handle,
+                expected_identity=identity,
+                error="dataset_metadata_file_identity_changed",
+            ):
+                raw = handle.read(max_bytes + 1)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     except ValueError as exc:
         raise ValueError("dataset_metadata_file_identity_changed") from exc
     if len(raw) > max_bytes:
         raise ValueError("dataset_metadata_file_too_large")
-    if before != identity or after != identity:
-        raise ValueError("dataset_metadata_file_identity_changed")
     return raw, parse_qrp_json_object(raw)
 
 
@@ -131,14 +132,20 @@ def read_qrp_json(
     *,
     expected_schema_id: str,
     error: str,
+    expected_identity: DatasetFileIdentity | None = None,
 ) -> dict[str, Any]:
-    payload = read_manifest(path)
+    payload = read_bounded_qrp_json(path, expected_identity=expected_identity)[1]
     if payload.get("schema_id") != expected_schema_id:
         raise ValueError(error)
     return payload
 
 
-def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
+def read_dataset_manifest_evidence(
+    dataset_root: Path,
+    *,
+    member_identities: dict[str, DatasetFileIdentity] | None = None,
+    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
+) -> dict[str, Any]:
     root = require_artifact_root(Path(dataset_root))
     spec_path = root / "spec.json"
     manifest_path = root / "_manifest" / "manifest.json"
@@ -148,17 +155,37 @@ def read_dataset_manifest_evidence(dataset_root: Path) -> dict[str, Any]:
         native_filesystem_path(manifest_path)
     ):
         raise FileNotFoundError("dataset_manifest_evidence_missing")
+    paths = {"spec.json": spec_path, "_manifest/manifest.json": manifest_path}
+    if expected_member_identities is not None and set(
+        expected_member_identities
+    ) != set(paths):
+        raise ValueError("dataset_metadata_member_set_mismatch")
+    identities = {
+        name: _qrp_json_file_identity(path)
+        if expected_member_identities is None
+        else expected_member_identities[name]
+        for name, path in paths.items()
+    }
     spec = read_qrp_json(
         spec_path,
+        expected_identity=identities["spec.json"],
         expected_schema_id="qrp-dataset-spec",
         error="dataset_spec_schema_id_invalid",
     )
     payload = read_qrp_json(
         manifest_path,
+        expected_identity=identities["_manifest/manifest.json"],
         expected_schema_id="qrp-dataset-manifest",
         error="dataset_manifest_schema_id_invalid",
     )
     validate_dataset_manifest_payload(payload, spec=spec)
+    if any(
+        _qrp_json_file_identity(path) != identities[name]
+        for name, path in paths.items()
+    ):
+        raise ValueError("dataset_metadata_file_identity_changed")
+    if member_identities is not None:
+        member_identities.update(identities)
     return payload
 
 

@@ -389,6 +389,9 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
         development=("1970-01-01T00:00:04", "1970-01-01T00:00:06"),
         plan=_crypto_plan_payload(),
     )
+    configuration.update(
+        stage="evaluation", models=[], portfolios=[], comparison_model_id=None
+    )
     request = dict(profile=profile, layout=layout, raw_root=raw_root)
     offset_configuration = deepcopy(configuration)
     offset_configuration["windows"]["development"] = {
@@ -396,7 +399,7 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
         "end": "1970-01-01T08:00:06+08:00",
     }
     first = research.research_run(**request, research_plan=offset_configuration)
-    assert first["status"] == "BLOCKED"
+    assert first["status"] == "COMPLETE"
     first_record = read_research_run_record(layout.research_run_path(first["run_id"]))
     changed = deepcopy(configuration)
     changed["research_plan"]["initial_capital"] = 2000.0

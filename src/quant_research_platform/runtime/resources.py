@@ -171,22 +171,8 @@ class RuntimeResourcePolicy:
 
     @property
     def operation_headroom_bytes(self) -> int:
-        """Return the bounded headroom for one managed operation."""
-
-        with self._ledger_lock:
-            used = self._used_memory_bytes()
-            planning = self.memory_budget_bytes - used
-            if planning > 0:
-                return planning
-            if self.explicit_memory_cap_bytes is None:
-                return max(0, self.captured_available_memory_bytes - used)
-            return max(
-                0,
-                min(
-                    self.memory_budget_bytes,
-                    self.explicit_memory_cap_bytes - used,
-                ),
-            )
+        """Return physical admission capacity, independently of soft batch planning."""
+        return max(0, self.working_set_headroom_bytes)
 
     @property
     def working_set_headroom_bytes(self) -> int:

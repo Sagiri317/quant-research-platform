@@ -1558,20 +1558,13 @@ def _iter_pruned_interim_frames(
                             )
                             downsized = True
                             continue
-                        if data_id == "analyst_forecast":
-                            counts = report.pop("source_row_counts")
-                        if source_row_counts is not None:
-                            for key, count in counts.items():
-                                source_row_counts[key] = (
-                                    source_row_counts.get(key, 0) + count
-                                )
-                        if report:
-                            _merge_pruning_report(local_reports, report)
+                        skip_duplicate = False
                         if not pruned.empty:
                             frame_bytes = pandas_frame_payload_bytes(pruned)
                             dedupe_bound = (
                                 chunk_bytes + _deduplication_working_set_bytes(pruned)
                             )
+                            reservation_before = lease.reserved_bytes
                             if dedupe_bound > lease.reserved_bytes:
                                 policy.require_working_set(
                                     dedupe_bound - lease.reserved_bytes,
@@ -1579,6 +1572,7 @@ def _iter_pruned_interim_frames(
                                 )
                                 lease.grow(dedupe_bound - lease.reserved_bytes)
                             table = pa.Table.from_pandas(pruned, preserve_index=False)
+                            retry_scratch = False
                             try:
                                 if table.nbytes > 2 * frame_bytes + 64 * 1024:
                                     raise ValueError("csmar_interim_bound_invalid")
@@ -1604,25 +1598,35 @@ def _iter_pruned_interim_frames(
                             except ValueError as error:
                                 if (
                                     str(error)
+                                    == "storage_scratch_exceeds_memory_capacity"
+                                    and stop - start > 1
+                                ):
+                                    retry_scratch = True
+                                elif (
+                                    str(error)
                                     == "conflicting_exact_primary_key_payload"
                                 ):
                                     raise ValueError(
                                         "conflicting_csmar_primary_key_duplicates: "
                                         f"{data_id}"
                                     ) from error
-                                raise
+                                else:
+                                    raise
                             finally:
                                 del table
+                            if retry_scratch:
+                                del pruned, report, candidate
+                                lease.shrink_to(reservation_before)
+                                span = max(1, (stop - start) // 2)
+                                continue
                             exact_duplicate_count += duplicate_count
                             if producer_diagnostics is not None:
                                 producer_diagnostics["exact_duplicate_count"] = (
                                     exact_duplicate_count
                                 )
                             if not positions:
-                                del positions, pruned, report, candidate
-                                start = stop
-                                continue
-                            if len(positions) != len(pruned):
+                                skip_duplicate = True
+                            elif len(positions) != len(pruned):
                                 selected = pruned.iloc[positions.view].reset_index(
                                     drop=True
                                 )
@@ -1638,6 +1642,19 @@ def _iter_pruned_interim_frames(
                                 pruned = selected
                                 del selected
                             del positions
+                        if data_id == "analyst_forecast":
+                            counts = report.pop("source_row_counts")
+                        if source_row_counts is not None:
+                            for key, count in counts.items():
+                                source_row_counts[key] = (
+                                    source_row_counts.get(key, 0) + count
+                                )
+                        if report:
+                            _merge_pruning_report(local_reports, report)
+                        if skip_duplicate:
+                            del pruned, report, candidate
+                            start = stop
+                            continue
                         if pruned.empty and data_id != "analyst_forecast":
                             del pruned, report, candidate
                             start = stop

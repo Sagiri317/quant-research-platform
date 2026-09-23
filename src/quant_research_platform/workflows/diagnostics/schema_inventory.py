@@ -502,7 +502,7 @@ def _aggregate_dataset_stats(
     duplicate_primary_key_count = exact_duplicate_count
     chunks = iter_dataset_chunks(
         session,
-        target_chunk_bytes=resource_policy.operation_headroom_bytes,
+        target_chunk_bytes=max(1, resource_policy.planning_headroom_bytes),
     )
     with closing_iterator(chunks):
         for frame in chunks:

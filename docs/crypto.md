@@ -122,10 +122,11 @@ SOL→BTC、BTC/ETH→SOL 的迁移选择。只有训练或评估需要 SOL 行�
 各模型显式选择标签；baseline.json 的价格模型选择500ms收益，另有 maker_bid_sell_pressure_proxy_500ms。
 每个标签有独立 available_at，短期限必须由实际事件分辨率和观测覆盖支持。
 
-07/01、08/01、09/01 为独立 UTC 日 episode；每个配置中的训练、验证、OOS 和留出窗口
-必须落在同一天，分别进入既有 run/trial/model/prediction/ledger/report。
-滚动状态、订单簿、仓位、现金、NAV、资金费状态与标签不能跨 episode 延续。
-多日结论只能引用各日精确 run 证据，不能把稀疏月初日期拼成连续年化业绩；不新增调度框架。
+研究窗口由连续UTC时点定义，午夜、文件块或普通fold交界不是账户重置边界。
+execution.backtest_modes显式选择continuous、independent_segments中的非空不重复集合，
+规范顺序为continuous在前。无execution的evaluation-only配置不要求此字段。
+连续模式覆盖不足不自动退化；独立分段在每个最大合法连续区间从相同初始资本、空仓、
+无挂单开始，复用同一执行引擎和原冻结模型，不在新段重新拟合。不得跨缺口拼连续收益。
 
 研究计划必须显式给定滚动训练、验证、开发OOS、锁定留出窗口，初始资金、估值币种和暴露上限；
 不为适应短录制而缩窗，不随机打乱事件行，不用排序掩盖同时间戳顺序歧义。
@@ -294,6 +295,28 @@ Tardis 接收 UTC 是供应商的观测时钟，不是本机接收时钟；缺�
 包括折间空档；同一区间还须有唯一完整的成交观测覆盖，因为 taker 与 maker 的决策
 都消费成交特征。不足时仅阻塞相应账本
 及其下游，不删改训练样本门槛，不把未知期解释为无成交或提前取消。
+独立分段按实际candidate所需盘口、成交和结算覆盖，在首OOS至末OOS的时间包络内求最大合法段；
+决策窗口仍是原OOS窗口并集，折间空档保持合法估值/持仓/资金费但不产生新信号。
+事先已知计划末端与事后观察截断严格区分：后者不能提前改变数量、TTL、KEEP、撤单或markout目标。
+截断时仅保留已观察事件；待生效指令、活跃挂单和未成熟markout记截断/未知，不制造未来成交、
+取消成功、强平或费用。最后可靠价格估值不等于平仓。资金费在同刻新成交前按旧仓位结算；
+新段空仓不承担旧段资金费；观察stop为半开边界，事件恰好在stop不属于前段。
+每段使用现四表ledger；父semantic artifact的episodes.parquet只保存边界、原因与精确子引用，
+所有子账本验证完成才原子发布父集合。失败或取消保留旧好产物，不发布半个COMPLETE集合。
+报告逐段展示收益/估值、回撤与持仓、成本、覆盖及截断状态；汇总仅为覆盖/缺失范围和
+同币种观察段内成本，不输出跨段总体收益、连续最大回撤、Sharpe、假年化或收益均值。
+统计按candidate与mode各自依赖结果，连续BLOCKED不阻塞已完成的分段结果。
+执行模式在现有配置的 `research_plan.execution.backtest_modes` 中选择 `continuous`、
+`independent_segments`，可以同时请求；共用同一模型和预测目标。
+连续执行目标为 `{candidate_id}_ledger`，分段为 `{candidate_id}_episodes`，
+各自统计为 `{candidate_id}_{mode}_statistics`，不存在所有候选共用的组合统计依赖。
+统计行携带 `execution_mode`、`episode_id`；`continuous` 表示连续账本，真实独立段使用段身份，
+`all` 仅表示覆盖、段数、观察段费用/资金费、成交数量和turnover汇总。
+`crypto_portfolio_coverage.parquet` 从研究时间包络和已验证段索引派生半开覆盖/缺失区间，
+未覆盖原因保持 `not_covered_by_qualified_episode`，不另做一次资格判定。
+同资产只有段边界及执行假设一致时才可直接并列比较；覆盖不同明确
+`different_coverage_not_comparable`，不按段序号配对或重拼现账本。
+段间只重置经济状态，不抹掉当时合法已知forecast；价格特征窗口只由真实行情gap按原规则重置。
 规范盘口使用 `price_unit` 和整数 `price_index` 作为无损价格坐标，
 它们不表示交易所最小下单增量。官方原生 `tick_size` 及其来源保留，
 在解码边界映射为价格单位；Tardis 按同一输入日、同一资产的全部执行价格

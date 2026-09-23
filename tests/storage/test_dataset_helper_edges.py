@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 import tracemalloc
 from copy import deepcopy
 from dataclasses import replace
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
+from textwrap import dedent
 from types import MappingProxyType
 
 import pandas as pd
@@ -34,6 +36,7 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage import datasets
+from quant_research_platform.storage._scratch_ownership import _memory_filesystem
 from quant_research_platform.storage.datasets.inventory import DatasetSessionInventory
 from quant_research_platform.storage.datasets.paths import (
     partition_frames,
@@ -105,12 +108,17 @@ def test_dataset_inventory_lease_admits_shrinks_and_closes(
         explicit_cap_bytes=64 * 1024,
     )
     with runtime_resource_policy_scope(policy):
-        inventory = DatasetSessionInventory(
+        with DatasetSessionInventory(
             data_root=data_root,
             resource_policy=policy,
-        )
-        assert policy.used_memory_bytes == 1024
-        inventory.close()
+        ) as inventory:
+            assert inventory._lease.reserved_bytes == 1024
+            scratch_bytes = (inventory.scratch_path / "i.db").stat().st_size
+            assert inventory._scratch_reservation is not None
+            assert inventory._scratch_reservation.reserved_bytes == scratch_bytes
+            assert policy.used_memory_bytes == 1024 + (
+                scratch_bytes if _memory_filesystem(tmp_path) else 0
+            )
         assert policy.used_memory_bytes == 0
     assert not list(tmp_path.glob(".i-*"))
 
@@ -448,11 +456,25 @@ def test_exact_key_classifier_renews_disk_gate_for_secondary_index_before_mutati
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
     ) as index:
-        reserves: list[int] = []
+        assert index._connection is not None
+        connection = index._connection
+        initial_pages = connection.execute("PRAGMA main.page_count").fetchone()[0]
+        staged_at_gate: list[int] = []
 
         def gate(_path: Path, *, reserve_bytes: int) -> None:
-            reserves.append(reserve_bytes)
-            if len(reserves) == 2 and reserve_bytes == reserves[0]:
+            assert reserve_bytes > 0
+            staged = connection.execute(
+                "SELECT COUNT(*) FROM comparison_rows"
+            ).fetchone()[0]
+            staged_at_gate.append(staged)
+            if staged == 1:
+                assert (
+                    connection.execute("PRAGMA main.page_count").fetchone()[0]
+                    > initial_pages
+                )
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM exact_keys"
+                ).fetchone() == (0,)
                 raise OSError("disk_headroom_exhausted")
 
         monkeypatch.setattr(key_tracking, "require_free_disk_headroom", gate)
@@ -463,11 +485,12 @@ def test_exact_key_classifier_renews_disk_gate_for_secondary_index_before_mutati
                 value_columns=(),
                 payload_target_bytes=1024**2,
             )
-        assert index._connection is not None
-        assert index._connection.execute(
+        assert staged_at_gate[0] == 0
+        assert staged_at_gate[-1] == 1
+        assert connection.execute(
             "SELECT COUNT(*) FROM comparison_rows"
         ).fetchone() == (0,)
-        assert index._connection.execute(
+        assert connection.execute(
             "SELECT COUNT(*) FROM exact_keys WHERE namespace = ?",
             ("indexed-overlap",),
         ).fetchone() == (0,)
@@ -484,11 +507,21 @@ def test_exact_key_classifier_gates_exact_insert_physical_growth_before_mutation
     with ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
     ) as index:
-        reserves: list[int] = []
+        assert index._connection is not None
+        connection = index._connection
+        staged_at_gate: list[int] = []
 
         def gate(_path: Path, *, reserve_bytes: int) -> None:
-            reserves.append(reserve_bytes)
-            if len(reserves) == 3 and reserve_bytes >= reserves[0]:
+            assert reserve_bytes > 0
+            staged = connection.execute(
+                "SELECT COUNT(*) FROM comparison_rows"
+            ).fetchone()[0]
+            staged_at_gate.append(staged)
+            if staged == table.num_rows:
+                assert connection.execute(
+                    "SELECT COUNT(*) FROM exact_keys WHERE namespace = ?",
+                    ("exact-overlap",),
+                ).fetchone() == (0,)
                 raise OSError("disk_headroom_exhausted")
 
         monkeypatch.setattr(key_tracking, "require_free_disk_headroom", gate)
@@ -499,12 +532,11 @@ def test_exact_key_classifier_gates_exact_insert_physical_growth_before_mutation
                 value_columns=(),
                 payload_target_bytes=1024**2,
             )
-        assert len(reserves) == 3
-        assert index._connection is not None
-        assert index._connection.execute(
+        assert set(staged_at_gate) == {0, 1, table.num_rows}
+        assert connection.execute(
             "SELECT COUNT(*) FROM comparison_rows"
         ).fetchone() == (0,)
-        assert index._connection.execute(
+        assert connection.execute(
             "SELECT COUNT(*) FROM exact_keys WHERE namespace = ?",
             ("exact-overlap",),
         ).fetchone() == (0,)
@@ -1069,30 +1101,64 @@ def test_exact_key_index_cleans_scratch_when_open_is_cancelled(
 
 def test_exact_key_index_preserves_open_failure_when_close_also_fails(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
+    script = dedent(
+        """
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
+
+        import quant_research_platform.runtime.resources as resources
+        import quant_research_platform.storage.exact_keys as key_tracking
+        from quant_research_platform.storage._scratch_ownership import (
+            _memory_filesystem,
+        )
+
+        scratch = Path(sys.argv[1])
+
+        class FailingConnection:
+            def execute(self, _statement: str) -> None:
+                raise RuntimeError("index_initialization_failed")
+
+            def close(self) -> None:
+                raise RuntimeError("index_close_failed")
+
+        def connect(path: str) -> FailingConnection:
+            Path(path).touch()
+            return FailingConnection()
+
+        with (
+            patch.object(key_tracking, "gettempdir", return_value=str(scratch)),
+            patch.object(key_tracking.sqlite3, "connect", side_effect=connect),
+        ):
+            try:
+                key_tracking.ExactPrimaryKeyIndex(
+                    primary_key=("asset_id",)
+                ).__enter__()
+            except RuntimeError as error:
+                assert str(error) == "index_initialization_failed"
+                assert any(
+                    "connection close also failed" in note
+                    for note in error.__notes__
+                )
+                assert any(
+                    "scratch reservation close also failed" in note
+                    for note in error.__notes__
+                )
+            else:
+                raise AssertionError("expected index initialization failure")
+
+        assert tuple(scratch.iterdir()) == ()
+        assert resources._PROCESS_POISONED == _memory_filesystem(scratch)
+        """
     )
-
-    class FailingConnection:
-        def execute(self, _statement: str) -> None:
-            raise RuntimeError("index_initialization_failed")
-
-        def close(self) -> None:
-            raise RuntimeError("index_close_failed")
-
-    def connect(path: Path) -> FailingConnection:
-        Path(path).touch()
-        return FailingConnection()
-
-    monkeypatch.setattr(key_tracking.sqlite3, "connect", connect)
-
-    with pytest.raises(RuntimeError, match="index_initialization_failed"):
-        ExactPrimaryKeyIndex(
-            primary_key=("asset_id",),
-        ).__enter__()
-
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
     assert tuple(tmp_path.iterdir()) == ()
 
 
@@ -1595,25 +1661,62 @@ def test_exact_map_high_cardinality_and_multiplicity_are_order_independent() -> 
 def test_exact_key_index_close_failure_does_not_replace_primary(
     tmp_path: Path,
 ) -> None:
-    class FailingCloseConnection:
-        def __init__(self, connection: object) -> None:
-            self.connection = connection
+    script = dedent(
+        """
+        import sys
+        from pathlib import Path
+        from unittest.mock import patch
 
-        def close(self) -> None:
-            self.connection.close()  # type: ignore[attr-defined]
-            raise RuntimeError("close_failure")
+        import quant_research_platform.runtime.resources as resources
+        import quant_research_platform.storage.exact_keys as key_tracking
+        from quant_research_platform.storage._scratch_ownership import (
+            _memory_filesystem,
+        )
 
-    index = ExactPrimaryKeyIndex(
-        primary_key=("asset_id",),
+        scratch = Path(sys.argv[1])
+
+        class FailingCloseConnection:
+            def __init__(self, connection: object) -> None:
+                self.connection = connection
+
+            def close(self) -> None:
+                self.connection.close()
+                raise RuntimeError("close_failure")
+
+        with patch.object(key_tracking, "gettempdir", return_value=str(scratch)):
+            index = key_tracking.ExactPrimaryKeyIndex(
+                primary_key=("asset_id",)
+            )
+            try:
+                with index:
+                    assert index._connection is not None
+                    index._connection = FailingCloseConnection(index._connection)
+                    raise RuntimeError("primary_failure")
+            except RuntimeError as error:
+                assert str(error) == "primary_failure"
+                assert any(
+                    "connection close also failed" in note
+                    for note in error.__notes__
+                )
+                assert any(
+                    "scratch reservation close also failed" in note
+                    for note in error.__notes__
+                )
+            else:
+                raise AssertionError("expected primary failure")
+
+        assert tuple(scratch.iterdir()) == ()
+        assert resources._PROCESS_POISONED == _memory_filesystem(scratch)
+        """
     )
-    with pytest.raises(RuntimeError, match="primary_failure"):
-        with index:
-            scratch = index.database_path.parent
-            assert index._connection is not None
-            index._connection = FailingCloseConnection(index._connection)  # type: ignore[assignment]
-            raise RuntimeError("primary_failure")
-
-    assert not scratch.exists()
+    child = subprocess.run(
+        [sys.executable, "-c", script, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+    assert tuple(tmp_path.iterdir()) == ()
 
 
 def test_dataset_comparison_failure_summary_does_not_expose_local_path(
@@ -1638,7 +1741,7 @@ def test_dataset_comparison_failure_summary_does_not_expose_local_path(
 
 def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    policy = capture_test_policy(available_memory_bytes=256 * 1024)
     with (
         runtime_resource_policy_scope(policy),
         ExactPrimaryKeyIndex(
@@ -1714,7 +1817,7 @@ def test_exact_index_preserves_unclaimed_key_scratch_directory(
 
 def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    policy = capture_test_policy(available_memory_bytes=64 * 1024)
+    policy = capture_test_policy(available_memory_bytes=256 * 1024)
     with (
         runtime_resource_policy_scope(policy),
         ExactPrimaryKeyIndex(

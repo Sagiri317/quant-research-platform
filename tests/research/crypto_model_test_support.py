@@ -106,12 +106,12 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                         )
 
                     _, records = read_trial_ledger_reference(
-                        layout, member.trial_reference
+                        layout, member.selection_trial_reference
                     )
-                    assert records[0].validation_metrics["n_train"] == count(
+                    assert records[0].metrics["n_train"] == count(
                         (member.fold.train,), member.fold.train.end
                     )
-                    assert records[0].validation_metrics["validation_rows"] == count(
+                    assert records[0].metrics["validation_rows"] == count(
                         (member.fold.validation,), member.fold.validation.end
                     )
                     assert member.result.metadata[
@@ -172,7 +172,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
             release = OwnedValue.release
 
             def fail_finish(self, *args, **kwargs):
-                if kwargs.get("error") is None:
+                if self.plan.stage == "refit" and kwargs.get("error") is None:
                     raise primary
                 return finish(self, *args, **kwargs)
 
@@ -304,9 +304,6 @@ def check_crypto_model_staging(*, layout, profile, saved):
         _read_model_member,
         write_crypto_model_artifact,
     )
-    from quant_research_platform.research.protocols.crypto_hft import (
-        protocol as crypto_protocol,
-    )
     from quant_research_platform.runtime import resources
     from quant_research_platform.storage import parquet as parquet_storage
     from quant_research_platform.storage.identity import native_filesystem_path
@@ -320,9 +317,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
         "model_trial_ledgers"
     ]
     contract = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
-    protocol = crypto_protocol(
-        contract["scenario_id"], research_plan=contract["research_plan"]
-    )
+    protocol = profile.protocol(contract["scenario_id"])
     logical_root = saved.instance_root.parent.parent
     previous_instances = {p.name for p in saved.instance_root.parent.iterdir()}
     with runtime_resource_policy_scope() as policy:
@@ -471,8 +466,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
         )
         validation_spec = profile.models.get(validation_entry["model_id"])
         validation = pd.concat(
-            persisted._crypto_validation_chunks(
-                saved.instance_root, saved.member_records, validation_entry
+            saved.validation_chunks(
+                fold_id=validation_entry["fold_id"],
+                model_id=validation_entry["model_id"],
             ),
             ignore_index=True,
         ).rename(columns={"label": validation_spec.label_column})
@@ -572,11 +568,13 @@ def check_crypto_model_staging(*, layout, profile, saved):
         for index, failure in enumerate(
             (
                 "seed",
+                "parameters",
                 "missing_fold",
                 "training_assets",
                 "evaluation_assets",
                 "refit_window",
                 "trial_reference",
+                "trial_binding",
                 "disk",
                 "primary",
             )
@@ -586,7 +584,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                     key: (
                         dict(
                             saved.envelope[key],
-                            start=f"1970-01-01T00:00:04.00{index + 1}",
+                            start=f"1970-01-01T00:00:04.{index + 1:06d}",
                         )
                         if key == "research_window"
                         else saved.envelope[key]
@@ -618,6 +616,12 @@ def check_crypto_model_staging(*, layout, profile, saved):
                         metadata = deepcopy(entry["model_metadata"])
                         if failure == "seed" and number == 0:
                             metadata["random_seed"] += 1
+                        if failure == "parameters" and number == 0:
+                            metadata["max_train_rows"] = (
+                                1
+                                if metadata["max_train_rows"] is None
+                                else metadata["max_train_rows"] + 1
+                            )
                         if failure == "refit_window" and number == 0:
                             metadata["train_end"] = entry["prediction_window"]["end"]
                         member = production.CryptoFoldModelResult(
@@ -636,7 +640,23 @@ def check_crypto_model_staging(*, layout, profile, saved):
                             else tuple(entry["evaluation_asset_ids"]),
                             references[1]
                             if failure == "trial_reference" and number == 0
-                            else references[number],
+                            else next(
+                                ref
+                                for ref in references
+                                if ref["semantic_identity"]
+                                == (
+                                    saved.models[1 - number]["trial_semantic_identity"]
+                                    if failure == "trial_binding" and number < 2
+                                    else entry["trial_semantic_identity"]
+                                )
+                            ),
+                            next(
+                                ref
+                                for ref in references
+                                if ref["semantic_identity"]
+                                == entry["refit_trial_semantic_identity"]
+                            ),
+                            entry["fit_coverage_id"],
                         )
                         owned.value = member
                         member = payload = None
@@ -647,12 +667,14 @@ def check_crypto_model_staging(*, layout, profile, saved):
                             assert not owned.lease.active
 
             message = {
-                "seed": "crypto_model_parameters_misaligned",
+                "seed": "crypto_model_refit_binding_invalid",
+                "parameters": "crypto_model_parameters_misaligned",
                 "missing_fold": "crypto_model_fold_coverage_invalid",
                 "training_assets": "crypto_model_fold_binding_invalid",
                 "evaluation_assets": "crypto_model_fold_binding_invalid",
                 "refit_window": "crypto_model_refit_window_invalid",
-                "trial_reference": "crypto_model_trial_binding_invalid",
+                "trial_reference": "crypto_model_trial_references_invalid",
+                "trial_binding": "crypto_model_trial_binding_invalid",
                 "disk": "insufficient_free_disk",
                 "primary": "model_pickle_primary",
             }[failure]
@@ -720,7 +742,8 @@ def check_crypto_wide_fold_artifact(
     from quant_research_platform.research.models import persisted
 
     original = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
-    plan = deepcopy(original["research_plan"])
+    full_protocol = profile.protocol(original["scenario_id"])
+    plan = deepcopy(full_protocol.manifest()["research_plan"])
     template = deepcopy(plan["folds"][0])
     plan["folds"] = []
     for index in range(22):
@@ -739,7 +762,7 @@ def check_crypto_wide_fold_artifact(
         "start": (last + pd.Timedelta(seconds=10)).isoformat(),
         "end": (last + pd.Timedelta(seconds=11)).isoformat(),
     }
-    configuration = deepcopy(original["research_configuration"])
+    configuration = deepcopy(full_protocol.configuration())
     configuration["research_plan"] = plan
     configuration["windows"] = {
         "development": {
@@ -749,7 +772,9 @@ def check_crypto_wide_fold_artifact(
         "holdout": dict(plan["final_holdout"]),
     }
     profile = bind_research_configuration(profile, configuration)
-    protocol = profile.protocol(original["scenario_id"]).manifest()
+    protocol = profile.protocol(original["scenario_id"]).target_manifest(
+        saved.envelope["logical_artifact_id"], "MODEL"
+    )
     fields = {
         key: saved.envelope[key]
         for key in (
@@ -837,10 +862,256 @@ def check_crypto_wide_fold_artifact(
             root, expected_identity=envelope.instance_identity, trial_layout=layout
         )
         assert len(loaded.models) == 22 * 9
-        assert len(loaded.member_records) == 265
+        assert len(loaded.member_records) == 1 + 22 * (1 + 2 * 9)
         for entry in loaded.models:
             with persisted.read_crypto_model_member(
                 loaded, entry, resource_policy=policy
             ) as model:
                 assert model is not None
         assert policy.used_memory_bytes == 0
+
+
+def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
+    """Exercise one real fitted artifact and two terminal refit failures."""
+    import hashlib
+
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.research.models import persisted
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows.research import (
+        _target_envelope_for_spec,
+        production_software_identity,
+    )
+    from tests.helpers.binance_hft import hft_research_plan
+    from tests.helpers.research_configuration import research_configuration
+
+    plan = hft_research_plan()
+    plan["folds"] = plan["folds"][:1]
+    window = TimeWindow(**plan["folds"][0]["development_test"])
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        plan=plan,
+        development=(window.start.isoformat(), window.end.isoformat()),
+    )
+    model = next(
+        item
+        for item in configuration["models"]
+        if item["model_algorithm"] == "linear_regression"
+    )
+    model.update(
+        input_factor_columns=["imbalance_1"],
+        input_feature_columns=[],
+        training_asset_ids=["btc_usdt"],
+        evaluation_asset_ids=["btc_usdt"],
+    )
+    configuration.update(
+        models=[model], portfolios=[], comparison_model_id=model["model_id"]
+    )
+    configuration["evaluation"].update(
+        factors=["imbalance_1"],
+        labels=[model["label_column"]],
+        primary_label=model["label_column"],
+    )
+    profile = bind_research_configuration(
+        research_profile(CRYPTO_PROFILE_ID), configuration
+    )
+    bound = profile.protocol(configuration["scenario_id"])
+    target_id = configuration["scenario_id"] + "_models"
+    target = next(
+        item
+        for item in bound.target_specs("research run")
+        if item.target_id == target_id
+    )
+    dataset_id = configuration["scenario_id"]
+    dataset_identity = "a" * 64
+    layout = StorageLayout(tmp_path).with_target_roots(
+        {dataset_id: tmp_path / dataset_identity}
+    )
+    envelope = _target_envelope_for_spec(
+        profile=profile,
+        protocol=bound,
+        target_spec=target,
+        data_spec=None,
+        research_window={
+            "start": window.start.isoformat(),
+            "end": window.end.isoformat(),
+            "access": "development",
+        },
+        upstream_identities={dataset_id: dataset_identity},
+        software_identity=production_software_identity(),
+        raw_content_identity=None,
+    )
+    protocol = envelope.payload()["semantic_metadata"]["target_contract"]["protocol"]
+    timestamps = pd.date_range("1970-01-01", periods=56, freq="100ms")
+    x = np.sin(np.arange(56) / 3)
+    frame = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": timestamps,
+            "imbalance_1": x,
+            model["label_column"]: 0.001 * x + 0.0001 * np.cos(np.arange(56)),
+            model["label_column"] + "_available_at": timestamps
+            + pd.Timedelta(milliseconds=500),
+            "eligible": True,
+            "book_segment_id": "book",
+            "trade_observation_id": "trade",
+            "segment_id": "segment",
+        }
+    )
+
+    def chunks(_layout, *, time_window, columns, **_kwargs):
+        yield frame.loc[
+            frame.timestamp.between(
+                pd.Timestamp(time_window.start), pd.Timestamp(time_window.end)
+            ),
+            list(columns),
+        ].copy()
+
+    monkeypatch.setattr(production, "iter_research_dataset_chunks", chunks)
+    original_begin = production.TrialRecorder.begin_refit
+    original_fit = fitting.ModelMatrixScaler.fit
+    captured = []
+    failure = None
+    observed_attempts = []
+
+    def begin_refit(recorder, *args, **kwargs):
+        refit, attempt = original_begin(recorder, *args, **kwargs)
+        captured.append((recorder, recorder.reference(), refit))
+        return refit, attempt
+
+    def fit_scaler(cls, matrix, **kwargs):
+        if captured:
+            selection, reference, refit = captured[-1]
+            selected_plan, selected_records = read_trial_ledger_reference(
+                layout, reference
+            )
+            refit_plan, refit_records = read_trial_ledger_reference(
+                layout, refit.reference()
+            )
+            assert (
+                selected_plan.stage == "selection"
+                and selected_records[0].status == "completed"
+            )
+            assert (
+                refit_plan.stage == "refit" and refit_records[0].status == "attempted"
+            )
+            assert (
+                refit_plan.selection_ledger_semantic_identity
+                == reference["semantic_identity"]
+            )
+            assert (
+                refit_records[0].common_coverage_id
+                != selected_records[0].common_coverage_id
+            )
+            observed_attempts.append(len(matrix))
+            if failure is not None:
+                raise failure
+        return original_fit(matrix, **kwargs)
+
+    monkeypatch.setattr(production.TrialRecorder, "begin_refit", begin_refit)
+    monkeypatch.setattr(fitting.ModelMatrixScaler, "fit", classmethod(fit_scaler))
+    logical_root = tmp_path / "models"
+    with runtime_resource_policy_scope() as policy:
+
+        def publish(target_envelope, run_id):
+            def results(*, on_validation):
+                return production.build_crypto_fold_models(
+                    layout=layout,
+                    dataset_catalog=profile.research_datasets,
+                    model_catalog=profile.models,
+                    dataset_id=dataset_id,
+                    model_ids=(model["model_id"],),
+                    tie_break_order=(model["model_id"],),
+                    time_window=window,
+                    resource_policy=policy,
+                    protocol_manifest=protocol,
+                    run_id=run_id,
+                    research_protocol_identity=canonical_json_hash(protocol),
+                    model_target_id=target_id,
+                    backend_versions={"fixture": "1"},
+                    on_validation=on_validation,
+                )
+
+            return persisted.write_crypto_model_artifact(
+                logical_root,
+                envelope=target_envelope,
+                model_results=results,
+                trial_layout=layout,
+            )
+
+        root = publish(envelope, "run_crypto_refit_success")
+        saved = persisted.read_crypto_model_artifact(
+            root, expected_identity=envelope.instance_identity, trial_layout=layout
+        )
+        assert len(saved.models) == 1 and len(captured) == 1
+        entry = saved.models[0]
+        selection, selection_ref, refit = captured[0]
+        selection_plan, selected = read_trial_ledger_reference(layout, selection_ref)
+        refit_plan, refitted = read_trial_ledger_reference(layout, refit.reference())
+        assert entry["trial_semantic_identity"] == selection_ref["semantic_identity"]
+        assert (
+            entry["refit_trial_semantic_identity"]
+            == refit.reference()["semantic_identity"]
+        )
+        assert entry["fit_coverage_id"] == refitted[0].common_coverage_id
+        assert (
+            refit_plan.selection_ledger_semantic_identity
+            == selection_ref["semantic_identity"]
+        )
+        assert refitted[0].status == "completed"
+        assert refitted[0].metrics["n_train"] == observed_attempts[0]
+        assert refitted[0].metrics["n_train"] > selected[0].metrics["n_train"]
+        with persisted.read_crypto_model_member(
+            saved, entry, resource_policy=policy
+        ) as predictor:
+            predictions = fitting.prediction_callable(("imbalance_1",), predictor)(
+                frame.iloc[:3]
+            )
+            assert np.isfinite(predictions).all()
+        assert policy.used_memory_bytes == 0
+        original = {
+            p.relative_to(root): hashlib.sha256(p.read_bytes()).hexdigest()
+            for p in root.rglob("*")
+            if p.is_file()
+        }
+        for index, error in enumerate(
+            (RuntimeError("refit_failure"), KeyboardInterrupt("refit_cancel"))
+        ):
+            captured.clear()
+            failure = error
+            payload = envelope.payload()
+            other = build_business_manifest_envelope(
+                **{
+                    key: (str(index + 1) * 64 if key == "software_identity" else value)
+                    for key, value in payload.items()
+                    if key not in {"instance_identity", "status"}
+                }
+            )
+            with pytest.raises(type(error)) as raised:
+                publish(other, "run_crypto_refit_failure_" + str(index))
+            assert raised.value is error and len(captured) == 1
+            selection, selection_ref, refit = captured[0]
+            assert selection.reference() == selection_ref
+            _, selected = read_trial_ledger_reference(layout, selection_ref)
+            _, refitted = read_trial_ledger_reference(layout, refit.reference())
+            assert selected[0].status == "completed"
+            assert refitted[0].status == (
+                "failed" if isinstance(error, Exception) else "abandoned"
+            )
+            assert not (logical_root / "instances" / other.instance_identity).exists()
+            assert original == {
+                p.relative_to(root): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in root.rglob("*")
+                if p.is_file()
+            }
+            assert policy.used_memory_bytes == 0
+        assert len(observed_attempts) == 3

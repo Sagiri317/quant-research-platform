@@ -729,3 +729,110 @@ def test_trade_resends_preserve_raw_bytes_and_count_each_identity_once(
                 1788220804000,
             ]
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("cancel", [False, True, "early"])
+def test_archive_four_cursors_share_one_native_scan_and_close(
+    tmp_path, monkeypatch, cancel
+):
+    import quant_research_platform.sources.tardis.replay as replay
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    snapshot = _line(
+        0,
+        "depthSnapshot",
+        {
+            "lastUpdateId": 100,
+            "bids": [[str(100 - i), "2"] for i in range(12)],
+            "asks": [[str(101 + i), "2"] for i in range(12)],
+        },
+    )
+    trade = _line(
+        2,
+        "aggTrade",
+        {
+            "e": "aggTrade",
+            "E": 1788220802000,
+            "T": 1788220802000,
+            "s": "BTCUSDT",
+            "st": 1,
+            "a": 10,
+            "p": "100",
+            "q": "2",
+            "nq": "1",
+            "f": 10,
+            "l": 10,
+            "m": True,
+        },
+    )
+    native = b"".join(
+        row + row.replace(b"btcusdt", b"ethusdt").replace(b"BTCUSDT", b"ETHUSDT")
+        for row in (snapshot, _delta(1, 99, 101, 98), trade, _delta(3, 102, 102, 101))
+    )
+    slices = _slices(tmp_path / "native", native, count=1)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    published = tmp_path / "published"
+    with runtime_resource_policy_scope(policy):
+        import_slices(
+            published,
+            date="2026-09-01",
+            slices=slices,
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        original = replay.iter_native_slice
+        calls = rows = 0
+
+        def counted(*args, **kwargs):
+            nonlocal calls, rows
+            calls += 1
+            with closing_iterator(original(*args, **kwargs)) as source:
+                for row in source:
+                    rows += 1
+                    if cancel is True and rows == 4:
+                        raise KeyboardInterrupt("cancel_native_scan")
+                    yield row
+
+        monkeypatch.setattr(replay, "iter_native_slice", counted)
+        spools = []
+        try:
+            with open_market_source(published, resource_policy=policy) as source:
+                assert calls == 0
+                slow = source.iter_market_records(
+                    symbol="BTCUSDT",
+                    market_type=FUTURES_MARKET_TYPE,
+                    data_kinds=("depth_snapshot", "depth"),
+                )
+                with closing_iterator(slow):
+                    first = next(slow)
+                    assert first["data_kind"] == "depth_snapshot"
+                    assert rows == 1
+                    if cancel != "early":
+                        for symbol in ("ETHUSDT", "BTCUSDT"):
+                            for kinds in (("agg_trades",), ("depth_snapshot", "depth")):
+                                result = list(
+                                    source.iter_market_records(
+                                        symbol=symbol,
+                                        market_type=FUTURES_MARKET_TYPE,
+                                        data_kinds=kinds,
+                                    )
+                                )
+                                assert len(result) == (
+                                    1 if kinds == ("agg_trades",) else 3
+                                )
+                        assert len(list(slow)) == 2
+                        assert calls == 1 and rows == 8
+                        repeated = list(
+                            source.iter_market_records(
+                                symbol="BTCUSDT",
+                                market_type=FUTURES_MARKET_TYPE,
+                                data_kinds=("agg_trades",),
+                            )
+                        )
+                        assert len(repeated) == 1 and calls == 1
+                spools = [pair[0] for pair in source._spools.values()]
+        except KeyboardInterrupt as error:
+            assert cancel and str(error) == "cancel_native_scan"
+            spools = [pair[0] for pair in source._spools.values()]
+        assert all(spool.closed for spool in spools)
+    assert policy.used_memory_bytes == 0

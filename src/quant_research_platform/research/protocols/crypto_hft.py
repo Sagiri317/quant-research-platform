@@ -253,6 +253,7 @@ class CryptoMakerPlan:
 
 @dataclass(frozen=True)
 class CryptoExecutionPlan:
+    backtest_modes: tuple[str, ...]
     taker_fee_bps: float
     latency_ms: int
     markout_horizon_ms: int
@@ -262,6 +263,22 @@ class CryptoExecutionPlan:
     maker: CryptoMakerPlan | None = None
 
     def __post_init__(self):
+        modes = ("continuous", "independent_segments")
+        if (
+            type(self.backtest_modes) is not tuple
+            or not self.backtest_modes
+            or any(
+                type(mode) is not str or mode not in modes
+                for mode in self.backtest_modes
+            )
+            or len(set(self.backtest_modes)) != len(self.backtest_modes)
+        ):
+            raise ValueError("crypto_backtest_modes_invalid")
+        object.__setattr__(
+            self,
+            "backtest_modes",
+            tuple(mode for mode in modes if mode in self.backtest_modes),
+        )
         fee = strict_finite_float(self.taker_fee_bps, error="crypto_taker_fee_invalid")
         if (
             fee < 0
@@ -300,10 +317,6 @@ class CryptoTakerCandidate:
     model_id: str
     latency_ms: int | None = None
 
-    @property
-    def target_id(self):
-        return f"{self.candidate_id}_ledger"
-
 
 @dataclass(frozen=True)
 class CryptoMakerCandidate:
@@ -321,12 +334,16 @@ class CryptoMakerCandidate:
         return (self.price_model_id, self.proxy_model_id) if self.calibrated else ()
 
     @property
-    def target_id(self):
-        return f"{self.candidate_id}_ledger"
-
-    @property
     def calibration_target_id(self):
         return f"{self.candidate_id}_calibration"
+
+
+@dataclass(frozen=True)
+class CryptoExecutionTarget:
+    candidate: CryptoTakerCandidate | CryptoMakerCandidate
+    execution_mode: str
+    target_id: str
+    statistics_target_id: str
 
 
 def portfolio_candidates(selection):
@@ -368,16 +385,6 @@ def portfolio_candidates(selection):
             raise ValueError("research_portfolio_configuration_invalid")
         result.append(candidate)
     return tuple(result)
-
-
-def maker_model_ids(selection):
-    """Derive validation persistence roles from actual maker consumers."""
-    return frozenset(
-        model_id
-        for candidate in portfolio_candidates(selection)
-        if isinstance(candidate, CryptoMakerCandidate)
-        for model_id in candidate.model_ids
-    )
 
 
 @dataclass(frozen=True)
@@ -423,16 +430,11 @@ class _CryptoResearchPlan:
         return result
 
 
-def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
+def research_chronology(value):
+    """Decode the chronology shared by model artifacts and execution plans."""
     snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=1024 * 1024)
-    if set(snapshot) - {"execution"} != {
-        "folds",
-        "final_holdout",
-        "initial_capital",
-        "valuation_currency",
-        "exposure_limits",
-    }:
-        raise ValueError("crypto_research_plan_fields_invalid")
+    if set(snapshot) != {"folds", "final_holdout"}:
+        raise ValueError("crypto_research_chronology_fields_invalid")
 
     def window(value):
         if type(value) is not dict or set(value) != {"start", "end"}:
@@ -468,6 +470,23 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
     holdout = window(snapshot["final_holdout"])
     if folds[-1].development_test.end >= holdout.start:
         raise ValueError("crypto_research_plan_holdout_overlap")
+    return tuple(folds), holdout
+
+
+def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
+    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=1024 * 1024)
+    if set(snapshot) - {"execution"} != {
+        "folds",
+        "final_holdout",
+        "initial_capital",
+        "valuation_currency",
+        "exposure_limits",
+    }:
+        raise ValueError("crypto_research_plan_fields_invalid")
+
+    folds, holdout = research_chronology(
+        {key: snapshot[key] for key in ("folds", "final_holdout")}
+    )
     capital = PortfolioCapital(
         "crypto_plan",
         snapshot["initial_capital"],
@@ -501,6 +520,7 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
     if "execution" in snapshot:
         value = snapshot["execution"]
         if type(value) is not dict or set(value) - {"maker"} != {
+            "backtest_modes",
             "taker_fee_bps",
             "latency_ms",
             "markout_horizon_ms",
@@ -510,6 +530,7 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
         }:
             raise ValueError("crypto_execution_fields_invalid")
         for key in (
+            "backtest_modes",
             "latency_scenarios_ms",
             "fee_scenarios_bps",
             "additional_spread_scenarios_bps",
@@ -540,10 +561,6 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
         )
         if "maker" in value and type(execution.maker) is not CryptoMakerPlan:
             raise ValueError("crypto_maker_parameters_invalid")
-        if execution.maker is not None and abs(execution.maker.inventory_target) > next(
-            position for asset, _order, position in limits if asset == "btc_usdt"
-        ):
-            raise ValueError("crypto_maker_inventory_target_invalid")
     return _CryptoResearchPlan(
         tuple(folds),
         holdout,
@@ -571,6 +588,21 @@ class CryptoProtocol:
             raise TypeError("crypto_research_plan_invalid")
         if self.access_window not in {"development", "holdout"}:
             raise ValueError("unknown_crypto_access_window")
+        if (
+            self.research_plan is not None
+            and self.research_plan.execution is not None
+            and self.research_plan.execution.maker is not None
+        ):
+            maker = self.research_plan.execution.maker
+            for candidate in self.portfolio_candidates():
+                if isinstance(candidate, CryptoMakerCandidate) and abs(
+                    maker.inventory_target
+                ) > next(
+                    position
+                    for asset, _order, position in self.research_plan.exposure_limits
+                    if asset == candidate.asset_id
+                ):
+                    raise ValueError("crypto_maker_inventory_target_invalid")
 
     def configuration(self):
         import json
@@ -609,6 +641,7 @@ class CryptoProtocol:
             },
             "model_scopes": {
                 item["model_id"]: {
+                    "model_algorithm": item["model_algorithm"],
                     "training_asset_ids": item["training_asset_ids"],
                     "validation_asset_ids": item["training_asset_ids"],
                     "evaluation_asset_ids": item["evaluation_asset_ids"],
@@ -635,6 +668,101 @@ class CryptoProtocol:
             )
         return result
 
+    def target_manifest(self, target_id, producer_kind):
+        """Own the semantic projection used by hashing, producers and readers."""
+        full = self.manifest()
+        if producer_kind == "REPORT":
+            return full
+        result = {
+            key: full[key] for key in ("protocol_id", "scenario_id", "access_window")
+        }
+        if self.research_plan is None:
+            return result
+        plan = self.research_plan.payload()
+        selected_plan = {key: plan[key] for key in ("folds", "final_holdout")}
+        result["research_plan"] = selected_plan
+        if producer_kind == "MODEL":
+            result["research_configuration"] = {
+                "models": self.configuration()["models"]
+            }
+            return result
+        if producer_kind == "EVALUATION":
+            evaluation = build_crypto_evaluation_catalog(
+                configuration=self.configuration()
+            ).get(target_id)
+            model_ids = {
+                signal.signal_id
+                for signal in evaluation.signals
+                if signal.source_kind == "prediction"
+            }
+            result["model_scopes"] = {
+                key: value
+                for key, value in full["model_scopes"].items()
+                if key in model_ids
+            }
+            return result
+        result["model_scopes"] = full["model_scopes"]
+        if producer_kind == "PREDICTION":
+            return result
+        calibration = next(
+            (
+                candidate
+                for candidate in self.portfolio_candidates()
+                if isinstance(candidate, CryptoMakerCandidate)
+                and candidate.calibrated
+                and candidate.calibration_target_id == target_id
+            ),
+            None,
+        )
+        descriptor = (
+            None
+            if calibration is not None
+            else self.execution_target_for_target(target_id)
+        )
+        candidate = calibration if calibration is not None else descriptor.candidate
+        result["portfolio_candidates"] = [asdict(candidate)]
+        model_ids = (
+            candidate.model_ids
+            if isinstance(candidate, CryptoMakerCandidate)
+            else (candidate.model_id,)
+        )
+        result["model_scopes"] = {
+            key: value
+            for key, value in full["model_scopes"].items()
+            if key in model_ids
+        }
+        selected_plan["exposure_limits"] = {
+            candidate.asset_id: plan["exposure_limits"][candidate.asset_id]
+        }
+        execution = plan["execution"]
+        selected_plan["execution"] = {
+            key: execution[key]
+            for key in (
+                ("maker", "markout_horizon_ms")
+                if isinstance(candidate, CryptoMakerCandidate)
+                else ("taker_fee_bps", "latency_ms", "markout_horizon_ms")
+            )
+        }
+        if calibration is None:
+            result["execution_mode"] = descriptor.execution_mode
+            result["execution_target_id"] = descriptor.target_id
+            selected_plan.update(
+                {key: plan[key] for key in ("initial_capital", "valuation_currency")}
+            )
+            if producer_kind == "STATISTIC":
+                result["portfolio_statistics"] = full["portfolio_statistics"]
+                selected_plan["execution"].update(
+                    {
+                        key: execution[key]
+                        for key in (
+                            "latency_scenarios_ms",
+                            "fee_scenarios_bps",
+                            "additional_spread_scenarios_bps",
+                        )
+                    }
+                )
+        return result
+
     def model_ids_for_target(self, target_id):
         if target_id != f"{self.scenario_id}_models":
             raise ValueError("crypto_model_target_invalid")
@@ -647,12 +775,33 @@ class CryptoProtocol:
             ).list()
         )
 
-    def portfolio_candidate_for_target(self, target_id):
-        return next(
-            candidate
-            for candidate in self.portfolio_candidates()
-            if candidate.target_id == target_id
+    def execution_targets(self):
+        candidates = self.portfolio_candidates()
+        if not candidates:
+            return ()
+        if self.research_plan is None or self.research_plan.execution is None:
+            raise PortfolioTargetBlocked("crypto_execution_plan_missing")
+        return tuple(
+            CryptoExecutionTarget(
+                candidate,
+                mode,
+                candidate.candidate_id
+                + ("_ledger" if mode == "continuous" else "_episodes"),
+                f"{candidate.candidate_id}_{mode}_statistics",
+            )
+            for candidate in candidates
+            for mode in self.research_plan.execution.backtest_modes
         )
+
+    def execution_target_for_target(self, target_id):
+        return next(
+            target
+            for target in self.execution_targets()
+            if target_id in (target.target_id, target.statistics_target_id)
+        )
+
+    def portfolio_candidate_for_target(self, target_id):
+        return self.execution_target_for_target(target_id).candidate
 
     def portfolio_candidates(self):
         return portfolio_candidates(
@@ -675,7 +824,10 @@ class CryptoProtocol:
             ):
                 raise PortfolioTargetBlocked("crypto_maker_plan_missing")
             return "crypto_maker_calibration"
-        if target_id == f"{self.scenario_id}_portfolio_statistics":
+        if any(
+            target.statistics_target_id == target_id
+            for target in self.execution_targets()
+        ):
             return "crypto_portfolio"
         raise ValueError("crypto_statistics_target_invalid")
 
@@ -690,7 +842,12 @@ class CryptoProtocol:
             raise PortfolioTargetBlocked("crypto_maker_plan_missing")
         return {
             "candidate": asdict(candidate),
-            "execution": self.research_plan.payload()["execution"],
+            "execution_mode": self.execution_target_for_target(
+                target_id
+            ).execution_mode,
+            "execution": self.target_manifest(target_id, "PORTFOLIO")["research_plan"][
+                "execution"
+            ],
         }
 
     def target_window(self, action, data_spec, window, target_id=None):
@@ -733,7 +890,6 @@ class CryptoProtocol:
         dataset = self.scenario_id
         models = f"{dataset}_models"
         predictions = f"{dataset}_predictions"
-        statistics = f"{dataset}_portfolio_statistics"
         panel = build_hft_research_dataset_catalog().get(dataset).base_input_data_id
         return (
             *(
@@ -774,25 +930,31 @@ class CryptoProtocol:
             ),
             *(
                 TargetSpec(
-                    candidate.target_id,
+                    target.target_id,
                     dependencies=(
-                        (candidate.calibration_target_id, predictions, dataset, panel)
-                        if isinstance(candidate, CryptoMakerCandidate)
-                        and candidate.calibrated
+                        (
+                            target.candidate.calibration_target_id,
+                            predictions,
+                            dataset,
+                            panel,
+                        )
+                        if isinstance(target.candidate, CryptoMakerCandidate)
+                        and target.candidate.calibrated
                         else (dataset, panel)
-                        if isinstance(candidate, CryptoMakerCandidate)
+                        if isinstance(target.candidate, CryptoMakerCandidate)
                         else (predictions, dataset, panel)
                     ),
-                    producer_id=candidate.target_id,
+                    producer_id=target.target_id,
                 )
-                for candidate in self.portfolio_candidates()
+                for target in self.execution_targets()
             ),
-            TargetSpec(
-                statistics,
-                dependencies=tuple(
-                    candidate.target_id for candidate in self.portfolio_candidates()
-                ),
-                producer_id=statistics,
+            *(
+                TargetSpec(
+                    target.statistics_target_id,
+                    dependencies=(target.target_id,),
+                    producer_id=target.statistics_target_id,
+                )
+                for target in self.execution_targets()
             ),
         )
 
@@ -821,11 +983,10 @@ class CryptoProtocol:
                         if len(spec.signals) > 1
                         and spec.signals[0].source_kind == "prediction"
                     ),
-                    *(candidate.target_id for candidate in self.portfolio_candidates()),
                     *(
-                        (f"{self.scenario_id}_portfolio_statistics",)
-                        if selected["portfolios"]
-                        else ()
+                        name
+                        for target in self.execution_targets()
+                        for name in (target.target_id, target.statistics_target_id)
                     ),
                 )
             return (
@@ -835,8 +996,11 @@ class CryptoProtocol:
                         configuration=self.configuration()
                     ).list()
                 ),
-                *(candidate.target_id for candidate in self.portfolio_candidates()),
-                f"{self.scenario_id}_portfolio_statistics",
+                *(
+                    name
+                    for target in self.execution_targets()
+                    for name in (target.target_id, target.statistics_target_id)
+                ),
             )
         if action == "data materialize":
             return (

@@ -12,7 +12,6 @@ import pytest
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
 )
-from quant_research_platform.compute.market_model import MarketModelRiskStyles
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
@@ -37,7 +36,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 )
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.accounting import (
-    execute_continuous_target,
+    execute_continuous_target as _execute_continuous_target,
 )
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskConfig,
@@ -49,6 +48,27 @@ from quant_research_platform.runtime.resources import runtime_resource_policy_sc
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
+
+
+def execute_continuous_target(*args, **kwargs):
+    def totals(assets, amounts, adv):
+        return np.asarray(
+            [
+                kwargs["cost_for_trade"](
+                    kwargs["execution_date"],
+                    asset,
+                    "buy",
+                    float(amount),
+                    float(volume),
+                    kwargs["assumptions"],
+                ).total_cost
+                if amount > 0
+                else 0.0
+                for asset, amount, volume in zip(assets, amounts, adv, strict=True)
+            ]
+        )
+
+    return _execute_continuous_target(*args, cost_totals_for_buys=totals, **kwargs)
 
 
 def test_enhanced_decision_requires_history_for_current_industry_domain() -> None:
@@ -155,6 +175,14 @@ def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
                 "adj_close": 100.0 + (timestamp.day * (1 if asset == "a" else 2)),
                 "amount": 1_000.0,
                 "market_type": 1,
+                "is_a_share_scope": True,
+                "is_trading": True,
+                "is_st": False,
+                "is_pt": False,
+                "listing_age_trading_days": 300,
+                "close": 100.0,
+                "volume": 10.0,
+                "turnover": 0.01,
             }
             for asset in assets
             for timestamp in dates
@@ -253,11 +281,7 @@ def _build_producer(
 ):
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
     if enhanced:
-        risk_columns = [
-            column
-            for column in RISK_STYLE_COLUMNS
-            if column not in {"beta_252d", "residual_volatility_60d"}
-        ]
+        risk_columns = list(RISK_STYLE_COLUMNS)
         frames = {
             **frames,
             "risk_context": frames["dataset"].reindex(
@@ -914,31 +938,8 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         annualization_factor=252.0,
     )
 
-    original_market_observe = production.MarketModelRiskState.observe
-
-    def fixed_market_styles(self, panel):
-        from quant_research_platform.runtime.resources import (
-            current_runtime_resource_policy,
-        )
-
-        current_policy = current_runtime_resource_policy()
-        state = next(
-            lease
-            for lease in current_policy._leases
-            if lease.owner == "research.portfolio.state"
-        )
-        assert state.reserved_bytes >= 65536
-        original_market_observe(self, panel)
-        return MarketModelRiskStyles(
-            beta=pd.Series({"a": 1.0, "b": 1.0}),
-            residual_volatility=pd.Series({"a": 0.1, "b": 0.1}),
-        )
-
-    monkeypatch.setattr(
-        production.MarketModelRiskState,
-        "observe",
-        fixed_market_styles,
-    )
+    frames["dataset"]["beta_252d"] = 1.0
+    frames["dataset"]["residual_volatility_60d"] = 0.1
     monkeypatch.setattr(
         production.FactorRiskState,
         "estimate",
@@ -1817,3 +1818,44 @@ def test_zero_mad_risk_style_preserves_identifiable_factor_return():
     assert fit is not None
     assert fit.factor_returns["style"] == pytest.approx(0.02 * np.sqrt(0.24))
     np.testing.assert_allclose(fit.residuals, 0.0, atol=1e-15)
+
+
+def test_risk_cross_uses_all_a_facts_and_persisted_styles():
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["a", "b"],
+            "timestamp": pd.Timestamp("2024-01-02"),
+            "period_return": [0.01, -0.01],
+            "float_market_cap": [100.0, 200.0],
+            "industry_level1_code": ["A", "B"],
+            "is_a_share_scope": True,
+            "is_trading": True,
+            "is_st": False,
+            "is_pt": False,
+            "listing_age_trading_days": 300,
+            "close": 10.0,
+            "adj_close": 10.0,
+            "volume": 100.0,
+            "amount": 1000.0,
+            "turnover": 0.01,
+            "is_nonfinancial_industry": [True, False],
+        }
+    )
+    facts = pd.DataFrame(
+        {
+            "asset_id": ["a", "b"],
+            "beta_252d": [0.25, 1.5],
+            "residual_volatility_60d": [0.01, 0.02],
+        }
+    )
+    cross = production._enhanced_risk_cross(
+        panel=panel,
+        risk_frames=[facts],
+        style_columns=("beta_252d", "residual_volatility_60d"),
+    )
+    assert cross.eligible.tolist() == [True, True]
+    assert cross.beta_252d.tolist() == [0.25, 1.5]
+    panel.loc[1, "is_st"] = True
+    assert production._enhanced_risk_cross(
+        panel=panel, risk_frames=[facts], style_columns=("beta_252d",)
+    ).eligible.tolist() == [True, False]

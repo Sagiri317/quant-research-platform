@@ -36,6 +36,7 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
 )
+from quant_research_platform.storage.datasets.types import DatasetFingerprint
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _bound_first_frames,
@@ -246,22 +247,25 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
     left.mkdir()
     right.mkdir()
     observed: list[RuntimeResourcePolicy] = []
+    fingerprint_refs: list[weakref.ReferenceType[DatasetFingerprint]] = []
     active_contexts = 0
     maximum_active_contexts = 0
 
     def fake_fingerprint(*_args, resource_policy, **_kwargs):
-        assert active_contexts == 1
+        assert active_contexts == 2
         observed.append(resource_policy)
+        fingerprint = DatasetFingerprint(
+            schema_hash="schema",
+            column_names=("value",),
+            row_count=0,
+            key_columns=("value",),
+            content_hash="content",
+            partition_fingerprints=(),
+            file_count=1,
+        )
+        fingerprint_refs.append(weakref.ref(fingerprint))
         return runtime_resources.OwnedValue(
-            SimpleNamespace(
-                schema_hash="schema",
-                column_names=("value",),
-                row_count=0,
-                key_columns=("value",),
-                content_hash="content",
-                partition_fingerprints=(),
-                file_count=1,
-            ),
+            fingerprint,
             resource_policy.lease("test.compare.fingerprint", 0),
         )
 
@@ -269,6 +273,9 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
         def __init__(self, root: Path) -> None:
             self.root = root
             self.retained_memory_bytes = 0
+
+        def verify(self):
+            pass
 
         def __enter__(self):  # noqa: ANN204
             nonlocal active_contexts, maximum_active_contexts
@@ -278,6 +285,8 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
 
         def __exit__(self, *_args):  # noqa: ANN204
             nonlocal active_contexts
+            assert len(fingerprint_refs) == 2
+            assert all(reference() is None for reference in fingerprint_refs)
             active_contexts -= 1
             return None
 
@@ -291,7 +300,6 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
         "_fingerprint_dataset_session_owned",
         fake_fingerprint,
     )
-    monkeypatch.setattr(dataset_comparison, "_session_identity_token", lambda _: b"id")
     monkeypatch.setattr(
         dataset_comparison,
         "_exact_comparison_counts",
@@ -310,7 +318,7 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
 
     assert comparison.status == "MATCH"
     assert observed == [policy, policy]
-    assert maximum_active_contexts == 1
+    assert maximum_active_contexts == 2
     assert active_contexts == 0
 
 
@@ -611,71 +619,6 @@ def test_owned_result_release_clears_payload_before_close_failure(
     assert policy.used_memory_bytes == 0
 
 
-def test_compare_identity_lease_close_failure_preserves_primary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(runtime_resources, "_PROCESS_POISONED", False)
-    root = make_dataset_artifact_root(tmp_path, "compare_identity_close_failure")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("compare_identity_close_failure"),
-    )
-    policy = _issued_test_policy()
-    original_close = runtime_resources.MemoryLease.close
-    failed_leases: list[runtime_resources.MemoryLease] = []
-
-    def close_with_failure(current: runtime_resources.MemoryLease) -> None:
-        if (
-            current.owner == "storage.dataset.comparison.left.identity"
-            and not failed_leases
-        ):
-            failed_leases.append(current)
-            raise OSError("identity_lease_close_failure")
-        original_close(current)
-
-    monkeypatch.setattr(
-        runtime_resources.MemoryLease,
-        "close",
-        close_with_failure,
-    )
-    primary = RuntimeError("comparison_identity_primary")
-    try:
-        with runtime_resource_policy_scope(policy):
-            monkeypatch.setattr(
-                dataset_comparison,
-                "_session_identity_token",
-                lambda *_args: (_ for _ in ()).throw(primary),
-            )
-            with pytest.raises(RuntimeError) as raised:
-                dataset_comparison.compare_datasets(
-                    root,
-                    root,
-                    resource_policy=policy,
-                )
-            assert raised.value is primary
-            assert any(
-                "OSError" in note and "identity_lease_close_failure" not in note
-                for note in primary.__notes__
-            )
-            monkeypatch.setattr(
-                runtime_resources.MemoryLease,
-                "close",
-                original_close,
-            )
-            for lease in failed_leases:
-                if lease.active:
-                    lease.close()
-    finally:
-        monkeypatch.setattr(runtime_resources.MemoryLease, "close", original_close)
-        for lease in failed_leases:
-            if lease.active:
-                lease.close()
-        if policy.state == "POISONED":
-            policy._lock.close()  # noqa: SLF001
-
-
 def test_compare_result_cleanup_handles_primary_before_payload_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -726,11 +669,6 @@ def test_compare_result_cleanup_handles_primary_before_payload_allocation(
         "_comparison_result_bound",
         lambda *_args: 128,
     )
-    monkeypatch.setattr(
-        dataset_comparison,
-        "_session_identity_token",
-        lambda *_args: b"identity",
-    )
 
     with pytest.raises(RuntimeError) as raised:
         dataset_comparison.compare_datasets(
@@ -772,19 +710,21 @@ def test_compare_rejects_mutation_between_fingerprint_and_exact_pass(
     frame = make_default_dataset_frame()
     write_dataset(left, frame, spec=make_processed_dataset_spec("mutation_left"))
     write_dataset(right, frame, spec=make_processed_dataset_spec("mutation_right"))
-    identity_digest = dataset_comparison._session_identity_token
+    fingerprint = dataset_comparison._fingerprint_dataset_session_owned
     calls = 0
 
-    def changing_identity(context: object) -> bytes:
+    def changing_identity(context, **kwargs):
         nonlocal calls
+        result = fingerprint(context, **kwargs)
         calls += 1
-        digest = identity_digest(context)  # type: ignore[arg-type]
-        return digest if calls <= 2 else b"changed"
+        if calls == 2:
+            part = next((left / "data").rglob("*.parquet"))
+            stat = part.stat()
+            os.utime(part, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000))
+        return result
 
     monkeypatch.setattr(
-        dataset_comparison,
-        "_session_identity_token",
-        changing_identity,
+        dataset_comparison, "_fingerprint_dataset_session_owned", changing_identity
     )
 
     comparison = compare_datasets(left, right)
@@ -812,11 +752,11 @@ def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
         )
     index_rows = dataset_comparison._index_dataset_rows
 
-    def index_then_mutate(root: Path, **kwargs: object) -> None:
-        index_rows(root, **kwargs)  # type: ignore[arg-type]
+    def index_then_mutate(context, **kwargs: object) -> None:
+        index_rows(context, **kwargs)  # type: ignore[arg-type]
         if kwargs["namespace"] != mutated_side:
             return
-        part = next((root / "data").rglob("*.parquet"))
+        part = next((context.root / "data").rglob("*.parquet"))
         stat = part.stat()
         os.utime(
             part,
@@ -1194,8 +1134,24 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
 
 
 def test_aggregate_chunks_stream_under_budget_without_terminal_materialization(
-    tmp_path: Path,
-) -> None:
+    tmp_path,
+):
+    _aggregate_streaming_case(tmp_path, tmpfs_failure=False)
+
+
+def test_aggregate_chunks_tmpfs_growth_obeys_physical_capacity(tmp_path):
+    _aggregate_streaming_case(tmp_path, tmpfs_failure=True)
+
+
+def _aggregate_streaming_case(tmp_path: Path, *, tmpfs_failure: bool) -> None:
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+
+    if _memory_filesystem(tmp_path) != tmpfs_failure:
+        pytest.skip(
+            "requires actual tmpfs"
+            if tmpfs_failure
+            else "disk spill requires non-memory TMPDIR"
+        )
     chunk_rows = 2_000
     chunk_count = 16
     total_rows = chunk_rows * chunk_count
@@ -1236,6 +1192,16 @@ def test_aggregate_chunks_stream_under_budget_without_terminal_materialization(
 
     for root in (left, right):
         policy = fresh_policy()
+        if tmpfs_failure:
+            with pytest.raises(
+                ValueError, match="storage_scratch_exceeds_memory_capacity"
+            ):
+                dataset_writing.write_dataset(
+                    root, chunks, spec=spec, resource_policy=policy, borrowed_input=True
+                )
+            assert policy.used_memory_bytes == 0
+            assert not root.exists()
+            return
         inspection = dataset_writing.write_dataset(
             root,
             chunks,

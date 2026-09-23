@@ -8,6 +8,7 @@ import re
 import sqlite3
 import sys
 from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from pathlib import Path
 from tempfile import gettempdir
 from typing import Any
@@ -21,6 +22,7 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
 )
 from quant_research_platform.storage._scratch_ownership import (
+    ScratchReservation,
     handle_preserving_primary,
     owned_scratch_name,
     remove_owned_scratch,
@@ -113,6 +115,7 @@ class DatasetSessionInventory:
         self._scratch_parent = Path(gettempdir())
         self._temporary_directory: Path | None = None
         self._connection: sqlite3.Connection | None = None
+        self._scratch_reservation: ScratchReservation | None = None
         self._next_selection_id = 0
         self._lease = resource_policy.lease(
             "storage.dataset.inventory",
@@ -139,6 +142,12 @@ class DatasetSessionInventory:
             )
             temporary_directory = self._scratch_parent / owned_scratch_name(
                 _PREFIX, uuid4().hex[:8]
+            )
+            self._scratch_reservation = ScratchReservation(
+                self._scratch_parent, resource_policy=resource_policy
+            )
+            self._scratch_reservation.resize(
+                _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
             )
             os.mkdir(native_filesystem_path(temporary_directory), mode=0o700)
             claimed_temporary = True
@@ -169,12 +178,17 @@ class DatasetSessionInventory:
                 "label TEXT UNIQUE NOT NULL)"
             )
             connection.execute(
+                "CREATE TABLE part_metadata (id INTEGER PRIMARY KEY, "
+                "schema BLOB NOT NULL, logical_dtypes BLOB NOT NULL, "
+                "UNIQUE(schema, logical_dtypes))"
+            )
+            connection.execute(
                 "CREATE TABLE parts (relative_path TEXT PRIMARY KEY, "
                 "partition_kind INTEGER NOT NULL, partition_year INTEGER NOT NULL, "
                 "part_index INTEGER NOT NULL, selected INTEGER NOT NULL, "
                 "device TEXT NOT NULL, inode TEXT NOT NULL, size TEXT NOT NULL, "
-                "modified_ns TEXT NOT NULL, schema BLOB, row_count INTEGER, "
-                "file_size_bytes INTEGER, logical_dtypes BLOB, "
+                "modified_ns TEXT NOT NULL, metadata_id INTEGER, "
+                "row_count INTEGER, file_size_bytes INTEGER, "
                 "UNIQUE(partition_kind, partition_year, part_index), "
                 "UNIQUE(device, inode))"
             )
@@ -182,6 +196,10 @@ class DatasetSessionInventory:
                 "CREATE TABLE path_selections ("
                 "selection_id INTEGER NOT NULL, relative_path TEXT NOT NULL, "
                 "PRIMARY KEY(selection_id, relative_path))"
+            )
+            self._scratch_reservation.resize(
+                int(connection.execute("PRAGMA main.page_count").fetchone()[0])
+                * DATASET_INVENTORY_RESERVE_BYTES
             )
             self._lease.shrink_to(DATASET_INVENTORY_RESERVE_BYTES)
         except BaseException as primary:
@@ -215,15 +233,38 @@ class DatasetSessionInventory:
                 f"dataset inventory cleanup also failed: {type(cleanup_error).__name__}"
             )
 
+    @contextmanager
+    def _transaction(self):
+        connection = self._require_connection()
+        try:
+            with connection:
+                yield
+        finally:
+            primary = sys.exception()
+            try:
+                if not connection.in_transaction:
+                    self._scratch_reservation.resize(
+                        int(connection.execute("PRAGMA main.page_count").fetchone()[0])
+                        * DATASET_INVENTORY_RESERVE_BYTES
+                    )
+            except BaseException as cleanup_error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    f"scratch settlement also failed: {type(cleanup_error).__name__}"
+                )
+
     def close(self) -> None:
         primary = sys.exception()
         first_error: BaseException | None = None
         connection = self._connection
         self._connection = None
+        connection_closed = True
         if connection is not None:
             try:
                 connection.close()
             except BaseException as connection_error:
+                connection_closed = False
                 if primary is not None:
                     primary.add_note(
                         "dataset inventory connection close also failed: "
@@ -234,9 +275,11 @@ class DatasetSessionInventory:
 
         temporary = self._temporary_directory
         self._temporary_directory = None
+        removed = temporary is None
         if temporary is not None:
             try:
                 remove_owned_scratch(temporary)
+                removed = True
             except BaseException as temporary_error:
                 if primary is not None:
                     primary.add_note(
@@ -251,6 +294,19 @@ class DatasetSessionInventory:
                         f"{type(temporary_error).__name__}"
                     )
 
+        if self._scratch_reservation is not None:
+            if connection_closed and removed:
+                self._scratch_reservation.resize(0)
+            try:
+                self._scratch_reservation.close()
+            except BaseException as cleanup_error:
+                if primary is not None:
+                    primary.add_note(
+                        "inventory scratch reservation close also failed: "
+                        f"{type(cleanup_error).__name__}"
+                    )
+                elif first_error is None:
+                    first_error = cleanup_error
         try:
             self._lease.close()
         except BaseException as lease_error:
@@ -278,11 +334,12 @@ class DatasetSessionInventory:
     def discover(self, spec: Mapping[str, Any]) -> None:
         """Stream the physical tree into the sole exact inventory owner."""
 
-        self._scan_filesystem(
-            spec,
-            on_year=self._register_year,
-            on_path=self._register_candidate,
-        )
+        with self._transaction():
+            self._scan_filesystem(
+                spec,
+                on_year=self._register_year,
+                on_path=self._register_candidate,
+            )
 
     def verify_filesystem(self, spec: Mapping[str, Any]) -> None:
         """Stream-compare current paths and identities with frozen inventory."""
@@ -341,30 +398,48 @@ class DatasetSessionInventory:
             self._register_year(partition_year, Path(path).parent.name)
         relative = Path(path).relative_to(self.data_root).as_posix()
         identity = metadata.identity
-        values = (
-            relative,
-            partition_kind,
-            partition_year,
-            part_index,
-            int(selected),
-            *_identity_values(identity),
-            metadata.schema.serialize().to_pybytes(),
-            metadata.row_count,
-            metadata.file_size_bytes,
-            metadata.logical_dtype_payload,
-        )
-        self._gate_row_write(values)
         try:
-            with self._require_connection():
+            with self._transaction():
+                values = (
+                    relative,
+                    partition_kind,
+                    partition_year,
+                    part_index,
+                    int(selected),
+                    *_identity_values(identity),
+                    self._metadata_id(metadata),
+                    metadata.row_count,
+                    metadata.file_size_bytes,
+                )
+                self._gate_row_write(values)
                 self._require_connection().execute(
                     "INSERT INTO parts(relative_path, partition_kind, "
                     "partition_year, part_index, selected, device, inode, size, "
-                    "modified_ns, schema, row_count, file_size_bytes, "
-                    "logical_dtypes) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "modified_ns, metadata_id, row_count, file_size_bytes) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     values,
                 )
         except sqlite3.IntegrityError as exc:
             raise ValueError("invalid_dataset_part_files") from exc
+
+    def _metadata_id(self, metadata: DatasetPartMetadata) -> int:
+        values = (
+            metadata.schema.serialize().to_pybytes(),
+            metadata.logical_dtype_payload,
+        )
+        connection = self._require_connection()
+        existing = connection.execute(
+            "SELECT id FROM part_metadata WHERE schema = ? AND logical_dtypes = ?",
+            values,
+        ).fetchone()
+        if existing is not None:
+            return int(existing[0])
+        self._gate_row_write(values)
+        cursor = connection.execute(
+            "INSERT INTO part_metadata(schema, logical_dtypes) VALUES (?, ?)",
+            values,
+        )
+        return int(cursor.lastrowid)
 
     def observe(
         self,
@@ -390,32 +465,28 @@ class DatasetSessionInventory:
             raise ValueError("dataset_inventory_changed")
         if tuple(str(value) for value in row[3:]) != _identity_values(identity):
             raise ValueError("dataset_file_identity_changed")
-        schema_payload = metadata.schema.serialize().to_pybytes()
-        prospective_row = (
-            relative,
-            *row[:3],
-            int(selected),
-            *row[3:],
-            schema_payload,
-            metadata.row_count,
-            metadata.file_size_bytes,
-            metadata.logical_dtype_payload,
-        )
-        values = (
-            int(selected),
-            schema_payload,
-            metadata.row_count,
-            metadata.file_size_bytes,
-            metadata.logical_dtype_payload,
-            relative,
-        )
-        self._gate_row_write(prospective_row)
-        with self._require_connection():
+        with self._transaction():
+            metadata_id = self._metadata_id(metadata)
+            prospective_row = (
+                relative,
+                *row[:3],
+                int(selected),
+                *row[3:],
+                metadata_id,
+                metadata.row_count,
+                metadata.file_size_bytes,
+            )
+            self._gate_row_write(prospective_row)
             self._require_connection().execute(
-                "UPDATE parts SET selected = ?, schema = ?, row_count = ?, "
-                "file_size_bytes = ?, logical_dtypes = ? "
-                "WHERE relative_path = ?",
-                values,
+                "UPDATE parts SET selected = ?, metadata_id = ?, row_count = ?, "
+                "file_size_bytes = ? WHERE relative_path = ?",
+                (
+                    int(selected),
+                    metadata_id,
+                    metadata.row_count,
+                    metadata.file_size_bytes,
+                    relative,
+                ),
             )
 
     def new_path_selection(self) -> int:
@@ -429,7 +500,7 @@ class DatasetSessionInventory:
         connection = self._require_connection()
         before = connection.total_changes
         self._gate_row_write((selection_id, relative))
-        with connection:
+        with self._transaction():
             connection.execute(
                 "INSERT OR IGNORE INTO path_selections(selection_id, relative_path) "
                 "SELECT ?, relative_path FROM parts "
@@ -458,7 +529,7 @@ class DatasetSessionInventory:
             logical_bytes=int(reserve[0]),
             row_count=int(reserve[1]),
         )
-        with connection:
+        with self._transaction():
             connection.execute(
                 "DELETE FROM path_selections WHERE selection_id = ?",
                 (selection_id,),
@@ -476,7 +547,8 @@ class DatasetSessionInventory:
         )
         cursor = self._require_connection().execute(
             "SELECT parts.relative_path, device, inode, size, modified_ns, schema, "
-            "row_count, file_size_bytes, logical_dtypes FROM parts"
+            "row_count, file_size_bytes, logical_dtypes FROM parts "
+            "LEFT JOIN part_metadata ON metadata_id = part_metadata.id"
             f"{join}{where} ORDER BY partition_kind, partition_year, part_index",
             parameters,
         )
@@ -606,7 +678,8 @@ class DatasetSessionInventory:
             .execute(
                 "SELECT device, inode, size, modified_ns, schema, row_count, "
                 "file_size_bytes, logical_dtypes "
-                "FROM parts WHERE relative_path = ?",
+                "FROM parts LEFT JOIN part_metadata ON metadata_id = part_metadata.id "
+                "WHERE relative_path = ?",
                 (relative,),
             )
             .fetchone()
@@ -620,7 +693,9 @@ class DatasetSessionInventory:
         row = (
             self._require_connection()
             .execute(
-                "SELECT length(schema) FROM parts WHERE relative_path = ?",
+                "SELECT length(schema) FROM parts "
+                "LEFT JOIN part_metadata ON metadata_id = part_metadata.id "
+                "WHERE relative_path = ?",
                 (relative,),
             )
             .fetchone()
@@ -721,10 +796,9 @@ class DatasetSessionInventory:
         values = (year, label)
         self._gate_row_write(values)
         try:
-            with self._require_connection():
-                self._require_connection().execute(
-                    "INSERT INTO year_labels(year, label) VALUES (?, ?)", values
-                )
+            self._require_connection().execute(
+                "INSERT INTO year_labels(year, label) VALUES (?, ?)", values
+            )
         except sqlite3.IntegrityError as exc:
             raise ValueError("invalid_dataset_part_files") from exc
 
@@ -743,13 +817,12 @@ class DatasetSessionInventory:
         )
         self._gate_row_write(values)
         try:
-            with self._require_connection():
-                self._require_connection().execute(
-                    "INSERT INTO parts(relative_path, partition_kind, "
-                    "partition_year, part_index, selected, device, inode, size, "
-                    "modified_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    values,
-                )
+            self._require_connection().execute(
+                "INSERT INTO parts(relative_path, partition_kind, "
+                "partition_year, part_index, selected, device, inode, size, "
+                "modified_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                values,
+            )
         except sqlite3.IntegrityError as exc:
             raise ValueError("invalid_dataset_part_files") from exc
 
@@ -786,10 +859,17 @@ class DatasetSessionInventory:
         )
         connection = self._require_connection()
         current_pages = int(connection.execute("PRAGMA main.page_count").fetchone()[0])
-        growth_pages = (
-            reserve_bytes + DATASET_INVENTORY_RESERVE_BYTES - 1
-        ) // DATASET_INVENTORY_RESERVE_BYTES
-        connection.execute(f"PRAGMA main.max_page_count={current_pages + growth_pages}")
+        growth_pages = (reserve_bytes + 2 * DATASET_INVENTORY_RESERVE_BYTES - 1) // (
+            2 * DATASET_INVENTORY_RESERVE_BYTES
+        )
+        pages = current_pages + growth_pages
+        self._scratch_reservation.resize(
+            max(
+                self._scratch_reservation.reserved_bytes,
+                2 * pages * DATASET_INVENTORY_RESERVE_BYTES,
+            )
+        )
+        connection.execute(f"PRAGMA main.max_page_count={pages}")
 
     def _require_connection(self) -> sqlite3.Connection:
         if self._connection is None:

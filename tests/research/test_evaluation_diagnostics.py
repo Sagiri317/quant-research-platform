@@ -721,3 +721,98 @@ def test_ic_summary_nonzero_variance_survives_rounding_and_persistence(
             assert row[f"{prefix}ir"] == pytest.approx(
                 mean(values) / expected_std, rel=1e-15
             )
+
+
+def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path):
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        validate_output_bundle,
+    )
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+    from quant_research_platform.catalog.evaluations import EvaluationCatalog
+    from quant_research_platform.contracts.columns import ColumnRole
+    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.signals import SignalSpec
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.evaluations.runner import (
+        build_evaluation_result_from_research_dataset,
+    )
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.research_specs import make_demo_research_dataset_spec
+
+    layout = StorageLayout(tmp_path)
+    dataset = make_demo_research_dataset_spec(
+        data_id="maturity_fixture",
+        factor_columns=("signal",),
+        label_columns=("label", "available_at"),
+        filter_columns=("eligible",),
+        context_columns=(),
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": ["a", "b", "c", "d"],
+            "timestamp": pd.Timestamp("2023-01-02"),
+            "signal": [1.0, 2.0, 3.0, 100.0],
+            "label": [2.0, 4.0, 6.0, -100.0],
+            "available_at": pd.to_datetime(["2023-01-02"] * 3 + ["2023-01-04"]),
+            "eligible": [True, False, True, True],
+        }
+    )
+    with runtime_resource_policy_scope() as policy:
+        write_dataset(
+            layout.research_dataset_root(dataset.market_id, dataset.data_id),
+            frame,
+            spec=dataset,
+            resource_policy=policy,
+            borrowed_input=True,
+        )
+        for mode, expected_rows in (("unfiltered", 3), ("eligible", 2)):
+            spec = EvaluationSpec(
+                evaluation_id=mode,
+                market_id=dataset.market_id,
+                research_dataset_id=dataset.data_id,
+                signals=(
+                    SignalSpec(
+                        signal_id="signal", source_column="signal", source_kind="factor"
+                    ),
+                ),
+                label_columns=("label",),
+                label_availability_columns={"label": "available_at"},
+                filter_mode=mode,
+                n_groups=2,
+            )
+            with build_evaluation_result_from_research_dataset(
+                layout=layout,
+                dataset_catalog=ResearchDatasetCatalog((dataset,)),
+                evaluation_catalog=EvaluationCatalog((spec,)),
+                evaluation_id=mode,
+                time_window=TimeWindow("2023-01-02", "2023-01-03"),
+                resource_policy=policy,
+            ) as result:
+                output = write_evaluation_outputs_from_chunks(
+                    result.output_chunks,
+                    summary_factory=result.summaries,
+                    spec=spec,
+                    output_spec=OutputSpec(
+                        output_id=mode,
+                        output_definition_id="evaluation_outputs",
+                        run_id="test_run",
+                        market_id=dataset.market_id,
+                        run_type="evaluation",
+                        scope=OutputScope.LOCAL_ONLY,
+                    ),
+                    layout=layout,
+                    n_groups=2,
+                )
+            validate_output_bundle(
+                output, expected_output_id=mode, expected_run_id="test_run"
+            )
+            metrics = pd.read_parquet(output / "metrics.parquet")
+            assert metrics.n_obs.tolist() == [expected_rows]
+            assert metrics.ic.tolist() == pytest.approx([1.0])
+            assert policy.used_memory_bytes == 0

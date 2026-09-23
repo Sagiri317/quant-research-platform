@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import pickle
 import re
@@ -10,7 +9,7 @@ import stat
 import sys
 from collections.abc import Callable, Iterable
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -33,8 +32,14 @@ from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.models.fitting import validate_model_state
-from quant_research_platform.research.models.production import _refit_model_spec
+from quant_research_platform.research.models.production import (
+    _refit_model_spec,
+    _selection_model_specs,
+)
 from quant_research_platform.research.models.trial_selection import (
+    ModelSampleCoverage,
+    crypto_validation_coverage_scope,
+    model_validation_coverage_scope,
     select_best_validation_trial,
 )
 from quant_research_platform.research.protocols.a_share import quarter_id_for_fold
@@ -54,10 +59,11 @@ from quant_research_platform.storage.experiments import (
 from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
+    verified_file_handle,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
-    read_manifest,
+    read_bounded_qrp_json,
     write_internal_artifact_manifest,
 )
 from quant_research_platform.storage.parquet import (
@@ -67,7 +73,6 @@ from quant_research_platform.storage.parquet import (
     parquet_table_writer,
 )
 from quant_research_platform.storage.semantic_artifacts import (
-    read_semantic_artifact_operational_metadata,
     read_semantic_artifact_record,
     verify_semantic_artifact_member,
     write_semantic_artifact,
@@ -97,6 +102,7 @@ class PersistedQuarterlyModelArtifact:
     envelope: dict[str, object]
     member_records: tuple[dict[str, object], ...]
     trial_ledgers: tuple[dict[str, str], ...]
+    member_identities: dict
 
     def prediction_models(
         self, window: TimeWindow, *, access_window: str = "development"
@@ -172,7 +178,7 @@ def write_quarterly_model_artifact(
     *,
     model_id: str,
     envelope: BusinessManifestEnvelope,
-    quarterly_results: Iterable[OwnedValue],
+    quarterly_results: Callable[..., Iterable[OwnedValue]],
     trial_layout: StorageLayout | None = None,
     verify_source: Callable[[], None] | None = None,
 ) -> Path:
@@ -186,7 +192,30 @@ def write_quarterly_model_artifact(
         selections: dict[str, dict[str, object]] = {}
         models_root = staging / "models"
         os.mkdir(native_filesystem_path(models_root))
-        iterator = iter(quarterly_results)
+
+        def write_coverage(quarter, frames):
+            relative = (
+                f"models/{quarter_id_for_fold(quarter)}/validation-coverage.parquet"
+            )
+            path = staging / relative
+            Path(native_filesystem_path(path.parent)).mkdir(parents=True, exist_ok=True)
+            with (
+                handle_preserving_primary(open_filesystem_file(path, "xb")) as handle,
+                parquet_table_writer(
+                    handle, parent=path.parent, compression="zstd"
+                ) as write_keys,
+                closing_iterator(frames) as source,
+            ):
+                for frame in source:
+                    with _parquet_frame_reservation(frame, borrowed_input=True):
+                        table = pa.Table.from_pandas(frame, preserve_index=False)
+                        try:
+                            write_keys(table)
+                        finally:
+                            table = None
+            return relative
+
+        iterator = iter(quarterly_results(on_validation_coverage=write_coverage))
         try:
             for owned_quarterly in iterator:
                 owned_quarterly.lease.transfer("research.model.artifact")
@@ -320,6 +349,8 @@ def write_quarterly_model_artifact(
             operational["model_trial_ledgers"],
             trial_layout,
             envelope.payload(),
+            root=staging,
+            member_identities=None,
         )
         for quarter_id, selection in selections.items():
             write_internal_artifact_manifest(
@@ -366,10 +397,16 @@ def read_quarterly_model_artifact(
     *,
     expected_identity: str | None = None,
     trial_layout: StorageLayout | None = None,
+    expected_member_identities=None,
 ) -> PersistedQuarterlyModelArtifact:
+    member_identities = {}
+    operational = {}
     envelope, member_records = read_semantic_artifact_record(
         instance_root,
         expected_identity=expected_identity,
+        member_identities=member_identities,
+        expected_member_identities=expected_member_identities,
+        operational_metadata=operational,
     )
     manifest_member = next(
         (item for item in member_records if item["path"] == "model.json"),
@@ -377,17 +414,10 @@ def read_quarterly_model_artifact(
     )
     if manifest_member is None:
         raise ValueError("model_artifact_manifest_invalid")
-    verify_semantic_artifact_member(
-        instance_root,
-        relative_path="model.json",
-        expected=manifest_member,
-    )
-    payload = read_manifest(Path(instance_root) / "model.json")
-    verify_semantic_artifact_member(
-        instance_root,
-        relative_path="model.json",
-        expected=manifest_member,
-    )
+    payload = read_bounded_qrp_json(
+        Path(instance_root) / "model.json",
+        expected_identity=member_identities["model.json"],
+    )[1]
     if (
         set(payload) != {"schema_id", "model_id", "quarters"}
         or payload["schema_id"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
@@ -422,10 +452,9 @@ def read_quarterly_model_artifact(
         )
         if member is None:
             raise ValueError("model_artifact_quarterly_invalid")
-        verify_semantic_artifact_member(
-            instance_root, relative_path=relative, expected=member
-        )
-        quarter = read_manifest(instance_root / relative)
+        quarter = read_bounded_qrp_json(
+            instance_root / relative, expected_identity=member_identities[relative]
+        )[1]
         if (
             set(quarter) != {"schema_id", "quarter_id", "selection", "models"}
             or quarter["schema_id"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
@@ -436,11 +465,29 @@ def read_quarterly_model_artifact(
         quarterly_payload.extend(quarter["models"])
         selections[quarter_id] = quarter["selection"]
     quarterly_entries = _validated_quarterly_payload(quarterly_payload, selections)
-    references = read_semantic_artifact_operational_metadata(instance_root).get(
-        "model_trial_ledgers", []
+    required_members = {"model.json"}
+    for quarter_id in selections:
+        required_members.update(
+            (
+                f"models/{quarter_id}/metadata.json",
+                f"models/{quarter_id}/validation-coverage.parquet",
+            )
+        )
+    required_members.update(
+        f"models/{entry['quarter_id']}/{entry['family_id']}.pkl"
+        for entry in quarterly_entries
     )
+    if {member["path"] for member in member_records} != required_members:
+        raise ValueError("model_artifact_members_invalid")
+    references = operational.get("model_trial_ledgers", [])
     _validate_trial_references(
-        quarterly_entries, selections, references, trial_layout, envelope
+        quarterly_entries,
+        selections,
+        references,
+        trial_layout,
+        envelope,
+        root=Path(instance_root),
+        member_identities=member_identities,
     )
     for entry in quarterly_entries:
         predictor_path = (
@@ -466,7 +513,56 @@ def read_quarterly_model_artifact(
         envelope=envelope,
         member_records=member_records,
         trial_ledgers=tuple(references),
+        member_identities=member_identities,
     )
+
+
+def _validate_validation_coverage(root, quarter_id, metadata, scope, member_identities):
+    relative = f"models/{quarter_id}/validation-coverage.parquet"
+    if metadata["path"] != relative:
+        raise ValueError("model_validation_coverage_path_invalid")
+    path = root / relative
+    identity = (
+        dataset_file_identity(path)
+        if member_identities is None
+        else member_identities[relative]
+    )
+    with _opened_parquet(path, expected_identity=identity) as (
+        parquet,
+        _identity,
+        _handle,
+    ):
+        schema = parquet.schema_arrow.remove_metadata()
+        if (
+            schema.names != ["timestamp", "asset_id"]
+            or not pa.types.is_timestamp(schema.field("timestamp").type)
+            or not (
+                pa.types.is_string(schema.field("asset_id").type)
+                or pa.types.is_large_string(schema.field("asset_id").type)
+            )
+        ):
+            raise ValueError("model_validation_coverage_schema_invalid")
+    coverage = ModelSampleCoverage(scope)
+    chunks = iter_declared_parquet_member_batches(
+        path, target_chunk_bytes=256 * 1024, expected_identity=identity
+    )
+    with closing_iterator(chunks):
+        for frame in chunks:
+            if (
+                not frame["timestamp"]
+                .between(
+                    pd.Timestamp(scope["validation_start"]),
+                    pd.Timestamp(scope["validation_end"]),
+                )
+                .all()
+            ):
+                raise ValueError("model_validation_coverage_window_invalid")
+            coverage.add(frame)
+    if (
+        coverage.row_count != metadata["row_count"]
+        or coverage.semantic_identity != metadata["semantic_identity"]
+    ):
+        raise ValueError("model_validation_coverage_mismatch")
 
 
 def _validate_trial_references(
@@ -475,6 +571,9 @@ def _validate_trial_references(
     references,
     layout: StorageLayout | None,
     envelope: dict[str, object],
+    *,
+    root,
+    member_identities,
 ) -> None:
     if layout is None:
         raise ValueError("model_trial_layout_required")
@@ -484,14 +583,60 @@ def _validate_trial_references(
         for family in selections[entry["quarter_id"]]["families"]
         if family["family_id"] == entry["family_id"]
     ]
-    if len(expected) != len(references):
+    if 2 * len(expected) != len(references):
         raise ValueError("model_trial_references_missing")
     contract = envelope["semantic_metadata"]["target_contract"]
     protocol_identity = canonical_json_hash(contract["protocol"])
-    registered_families = {item["model_id"] for item in contract["model_specs"]}
+    registered_specs = {
+        value["model_id"]: ModelSpec(
+            **{
+                **value,
+                "input_factor_columns": tuple(value["input_factor_columns"]),
+                "input_feature_columns": tuple(value["input_feature_columns"]),
+            }
+        )
+        for value in contract["model_specs"]
+    }
+    for selection in selections.values():
+        if tuple(selection["candidate_family_ids"]) != tuple(registered_specs):
+            raise ValueError("model_trial_family_coverage_mismatch")
     family_metrics = {}
-    for (entry, family), reference in zip(expected, references, strict=True):
+    by_stage = {}
+    for reference in references:
         plan, records = read_model_trial_ledger_reference(layout, reference)
+        key = (quarter_id_for_fold(plan.folds[0]), plan.candidate_family_id, plan.stage)
+        if key in by_stage:
+            raise ValueError("model_trial_reference_semantics_invalid")
+        by_stage[key] = (plan, records, reference)
+    checked_coverage = set()
+    for entry, family in expected:
+        key = (entry["quarter_id"], family["family_id"])
+        if (*key, "selection") not in by_stage or (*key, "refit") not in by_stage:
+            raise ValueError("model_trial_references_missing")
+        plan, records, reference = by_stage[(*key, "selection")]
+        refit_plan, refit_records, _refit_reference = by_stage[(*key, "refit")]
+        coverage = selections[entry["quarter_id"]]["common_validation_coverage"]
+        if entry["quarter_id"] not in checked_coverage:
+            specs = tuple(registered_specs.values())
+            _validate_validation_coverage(
+                root,
+                entry["quarter_id"],
+                coverage,
+                model_validation_coverage_scope(
+                    plan.data_snapshot_id, plan.folds[0], specs
+                ),
+                member_identities,
+            )
+            checked_coverage.add(entry["quarter_id"])
+        if any(
+            record.common_coverage_id != coverage["semantic_identity"]
+            or (
+                record.status == "completed"
+                and record.metrics["validation_rows"] != coverage["row_count"]
+            )
+            for record in records
+        ):
+            raise ValueError("model_trial_common_coverage_mismatch")
         dataset_identity = envelope["upstream_identities"].get(plan.research_dataset_id)
         if (
             plan.target_id != envelope["logical_artifact_id"]
@@ -499,7 +644,7 @@ def _validate_trial_references(
             or plan.data_snapshot_id != dataset_identity
             or plan.input_lineage != (dataset_identity,)
             or plan.research_protocol_identity != protocol_identity
-            or plan.candidate_family_id not in registered_families
+            or plan.candidate_family_id not in registered_specs
             or len(plan.folds) != 1
             or _window_payload(plan.folds[0].train) != entry["training_window"]
             or _window_payload(plan.folds[0].validation) != entry["validation_window"]
@@ -519,7 +664,7 @@ def _validate_trial_references(
             raise ValueError("model_trial_reference_semantics_invalid")
         frame = pd.DataFrame(
             [
-                {"model_id": record.candidate_id, **dict(record.validation_metrics)}
+                {"model_id": record.candidate_id, **dict(record.metrics)}
                 for record in records
             ]
         )
@@ -572,6 +717,23 @@ def _validate_trial_references(
         )
         if len(candidates) != len(plan.candidate_ids):
             raise ValueError("model_trial_parameters_misaligned")
+        for record in records:
+            if record.status != "completed":
+                continue
+            expected_specs = _selection_model_specs(
+                registered_specs[plan.candidate_family_id],
+                candidates,
+                n_train=record.metrics["n_train"],
+                root_seed=plan.random_seed,
+                quarter_id=entry["quarter_id"],
+            )
+            expected_spec = expected_specs[
+                plan.candidate_ids.index(record.candidate_id)
+            ]
+            if record.payload()["normalized_parameters"] != model_spec_payload(
+                expected_spec
+            ):
+                raise ValueError("model_trial_parameters_misaligned")
         refit = _refit_model_spec(
             selected_spec,
             candidate_parameters=candidates[plan.candidate_ids.index(selected)],
@@ -585,8 +747,35 @@ def _validate_trial_references(
             != model_spec_payload(refit)["hyperparameters"]
         ):
             raise ValueError("model_trial_refit_misaligned")
+        if (
+            refit_plan.selection_ledger_semantic_identity
+            != reference["semantic_identity"]
+            or refit_plan.target_id != plan.target_id
+            or refit_plan.data_snapshot_id != plan.data_snapshot_id
+            or refit_plan.input_lineage != plan.input_lineage
+            or refit_plan.research_protocol_identity != plan.research_protocol_identity
+            or refit_plan.folds != plan.folds
+            or refit_plan.final_holdout != plan.final_holdout
+            or refit_plan.candidate_ids != (refit.model_id,)
+            or refit_plan.random_seed != refit.random_seed
+            or refit_plan.protocol_payload()["candidate_parameters"][refit.model_id]
+            != model_spec_payload(refit)
+            or len(refit_records) != 1
+        ):
+            raise ValueError("model_trial_refit_misaligned")
+        refit_record = refit_records[0]
+        if (
+            refit_record.status != "completed"
+            or refit_record.common_coverage_id != metadata["fit_coverage_id"]
+            or refit_record.random_seed != refit.random_seed
+            or refit_record.payload()["normalized_parameters"]
+            != model_spec_payload(refit)
+            or dict(refit_record.metrics)
+            != {"n_train": metadata["rows_after_input_label_dropna"]}
+        ):
+            raise ValueError("model_trial_refit_misaligned")
         family_metrics.setdefault(entry["quarter_id"], []).append(
-            {"model_id": family["family_id"], **dict(winning.validation_metrics)}
+            {"model_id": family["family_id"], **dict(winning.metrics)}
         )
     for quarter_id, selection in selections.items():
         metrics = pd.DataFrame(family_metrics[quarter_id])
@@ -630,6 +819,7 @@ def read_quarterly_predictor(
         artifact.instance_root,
         artifact.member_records,
         relative,
+        expected_identity=artifact.member_identities[relative],
         resource_policy=resource_policy,
     ) as owned:
         predictor = owned.value
@@ -651,7 +841,13 @@ def _write_model_member(path, value, *, state_bytes):
 
 @contextmanager
 def _read_model_member(
-    root, members, relative, *, resource_policy=None, workspace_factor=1
+    root,
+    members,
+    relative,
+    *,
+    resource_policy=None,
+    workspace_factor=1,
+    expected_identity=None,
 ):
     member = next((item for item in members if item["path"] == relative), None)
     if member is None:
@@ -665,14 +861,21 @@ def _read_model_member(
         value = None
         owned = None
         try:
-            verify_semantic_artifact_member(
-                root, relative_path=relative, expected=member
-            )
+            if expected_identity is None:
+                expected_identity = verify_semantic_artifact_member(
+                    root, relative_path=relative, expected=member
+                )
             try:
                 with handle_preserving_primary(open_filesystem_file(path)) as handle:
-                    value = pickle.load(handle)
-                    if handle.read(1):
-                        raise ValueError("model_artifact_model_invalid")
+                    with verified_file_handle(
+                        path,
+                        handle,
+                        expected_identity=expected_identity,
+                        error="model_artifact_model_invalid",
+                    ):
+                        value = pickle.load(handle)
+                        if handle.read(1):
+                            raise ValueError("model_artifact_model_invalid")
             except (
                 FileNotFoundError,
                 NotADirectoryError,
@@ -682,9 +885,6 @@ def _read_model_member(
                 ImportError,
             ) as error:
                 raise ValueError("model_artifact_model_invalid") from error
-            verify_semantic_artifact_member(
-                root, relative_path=relative, expected=member
-            )
             owned = OwnedValue(value, lease)
             value = None
             yield owned
@@ -830,6 +1030,7 @@ class PersistedCryptoModelArtifact:
     envelope: dict
     member_records: tuple
     models: tuple[dict, ...]
+    member_identities: dict
 
     def validation_chunks(self, *, fold_id, model_id):
         entry = next(
@@ -837,7 +1038,11 @@ class PersistedCryptoModelArtifact:
             for entry in self.models
             if entry["fold_id"] == fold_id and entry["model_id"] == model_id
         )
-        return _crypto_validation_chunks(self.instance_root, self.member_records, entry)
+        return _crypto_validation_chunks(
+            self.instance_root,
+            entry,
+            member_identities=self.member_identities,
+        )
 
     def prediction_models(self, window, *, access_window="development"):
         if access_window == "development":
@@ -871,9 +1076,7 @@ class PersistedCryptoModelArtifact:
             "model_artifact_schema": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
             "model_id": model_id,
             "asset_ids": sorted(
-                self.envelope["semantic_metadata"]["target_contract"]["protocol"][
-                    "research_plan"
-                ]["exposure_limits"]
+                {asset for entry in entries for asset in entry["evaluation_asset_ids"]}
             ),
             "fold_models": [
                 {
@@ -891,13 +1094,6 @@ class PersistedCryptoModelArtifact:
 
 
 def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_layout):
-    from quant_research_platform.research.protocols.crypto_hft import (
-        maker_model_ids,
-    )
-
-    _protocol, folds, model_ids = _crypto_model_scope(envelope.payload())
-    calibration_models = maker_model_ids(_protocol.configuration()["portfolios"])
-
     operational = {"model_trial_ledgers": []}
 
     def write(staging):
@@ -970,17 +1166,21 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
                         "model_metadata": validate_model_metadata_core(
                             member.result.metadata
                         ),
-                        "trial_semantic_identity": member.trial_reference[
+                        "trial_semantic_identity": member.selection_trial_reference[
                             "semantic_identity"
                         ],
+                        "refit_trial_semantic_identity": member.refit_trial_reference[
+                            "semantic_identity"
+                        ],
+                        "fit_coverage_id": member.fit_coverage_id,
                         "validation_prediction_path": (
                             f"models/{fold.fold_id}/validation/{member.spec.model_id}.parquet"
-                            if member.spec.model_id in calibration_models
-                            else None
                         ),
                     }
                     folders.setdefault(fold.fold_id, []).append(entry)
-                    operational["model_trial_ledgers"].append(member.trial_reference)
+                    operational["model_trial_ledgers"].extend(
+                        (member.selection_trial_reference, member.refit_trial_reference)
+                    )
                 finally:
                     member = None
                     if owned.lease.active:
@@ -1029,67 +1229,91 @@ def _intraday_window(window):
     }
 
 
-def read_crypto_model_artifact(root, *, expected_identity=None, trial_layout=None):
+def read_crypto_model_artifact(
+    root, *, expected_identity=None, trial_layout=None, expected_member_identities=None
+):
     root = Path(root)
+    member_identities = {}
+    operational = {}
     envelope, members = read_semantic_artifact_record(
-        root, expected_identity=expected_identity
+        root,
+        expected_identity=expected_identity,
+        member_identities=member_identities,
+        expected_member_identities=expected_member_identities,
+        operational_metadata=operational,
     )
-    refs = read_semantic_artifact_operational_metadata(root).get("model_trial_ledgers")
-    return _validate_crypto_model_payload(root, envelope, members, refs, trial_layout)
+    refs = operational.get("model_trial_ledgers")
+    return _validate_crypto_model_payload(
+        root,
+        envelope,
+        members,
+        refs,
+        trial_layout,
+        member_identities=member_identities,
+    )
 
 
 def _crypto_model_scope(envelope):
     from quant_research_platform.research.protocols.crypto_hft import (
-        protocol as crypto_protocol,
+        research_chronology,
     )
 
-    contract = envelope["semantic_metadata"]["target_contract"]
-    protocol = crypto_protocol(
-        contract["protocol"]["scenario_id"],
-        research_plan=contract["protocol"]["research_plan"],
-    )
-    protocol = replace(
-        protocol,
-        configuration_json=json.dumps(contract["protocol"]["research_configuration"]),
-    )
+    protocol = envelope["semantic_metadata"]["target_contract"]["protocol"]
+    chronology, _holdout = research_chronology(protocol["research_plan"])
     window = TimeWindow(
         envelope["research_window"]["start"], envelope["research_window"]["end"]
     )
     folds = [
         fold
-        for fold in protocol.research_plan.folds
+        for fold in chronology
         if fold.development_test.end >= window.start
         and fold.development_test.start <= window.end
     ]
-    model_ids = protocol.model_ids_for_target(envelope["logical_artifact_id"])
+    model_ids = tuple(
+        model["model_id"] for model in protocol["research_configuration"]["models"]
+    )
     return protocol, folds, model_ids
 
 
-def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
+def _validate_crypto_model_payload(
+    root, envelope, members, refs, trial_layout, *, member_identities=None
+):
     from quant_research_platform.research.protocols.crypto_hft import (
         build_hft_prediction_catalog,
         label_horizon_ms,
-        maker_model_ids,
     )
 
+    if member_identities is None:
+        member_identities = {
+            member["path"]: verify_semantic_artifact_member(
+                root, relative_path=member["path"], expected=member
+            )
+            for member in members
+        }
     contract = envelope["semantic_metadata"]["target_contract"]
     protocol, folds, model_ids = _crypto_model_scope(envelope)
-    calibration_models = maker_model_ids(protocol.configuration()["portfolios"])
 
-    payload = read_manifest(root / "model.json")
+    payload = read_bounded_qrp_json(
+        root / "model.json", expected_identity=member_identities["model.json"]
+    )[1]
     if payload != {
         "schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
         "folds": [fold.fold_id for fold in folds],
     }:
         raise ValueError("crypto_model_fold_coverage_invalid")
-    if type(refs) is not list or len(refs) != len(folds) * len(model_ids):
+    if type(refs) is not list or len(refs) != 2 * len(folds) * len(model_ids):
+        raise ValueError("crypto_model_trial_references_invalid")
+    references = {ref["semantic_identity"]: ref for ref in refs}
+    if len(references) != len(refs):
         raise ValueError("crypto_model_trial_references_invalid")
     models = []
     required = {"model.json"}
     for fold in folds:
         relative = f"models/{fold.fold_id}/metadata.json"
         required.add(relative)
-        record = read_manifest(root / relative)
+        record = read_bounded_qrp_json(
+            root / relative, expected_identity=member_identities[relative]
+        )[1]
         entries = record.get("models")
         if (
             record.get("schema_id") != CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID
@@ -1117,17 +1341,19 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
             ):
                 raise ValueError("crypto_model_fold_binding_invalid")
             validate_model_metadata_core(entry["model_metadata"])
-            ref = refs[len(models)]
-            if entry["trial_semantic_identity"] != ref["semantic_identity"]:
+            ref = references.pop(entry["trial_semantic_identity"], None)
+            refit_ref = references.pop(entry["refit_trial_semantic_identity"], None)
+            if ref is None or refit_ref is None:
                 raise ValueError("crypto_model_trial_references_invalid")
             if trial_layout is None:
                 raise ValueError("model_trial_layout_required")
             plan, records = read_model_trial_ledger_reference(trial_layout, ref)
             if (
-                plan.market_id != "crypto"
-                or plan.research_dataset_id != protocol.scenario_id
+                plan.stage != "selection"
+                or plan.market_id != "crypto"
+                or plan.research_dataset_id != protocol["scenario_id"]
                 or plan.data_snapshot_id
-                != envelope["upstream_identities"][protocol.scenario_id]
+                != envelope["upstream_identities"][protocol["scenario_id"]]
                 or plan.input_lineage != (plan.data_snapshot_id,)
                 or plan.candidate_family_id != entry["model_id"]
                 or plan.target_id != envelope["logical_artifact_id"]
@@ -1141,6 +1367,38 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
                 raise ValueError("crypto_model_trial_binding_invalid")
             parameters = records[0].payload()["normalized_parameters"]
             metadata = entry["model_metadata"]
+            refit_plan, refit_records = read_model_trial_ledger_reference(
+                trial_layout, refit_ref
+            )
+            if (
+                refit_plan.stage != "refit"
+                or refit_plan.selection_ledger_semantic_identity
+                != ref["semantic_identity"]
+                or refit_plan.market_id != plan.market_id
+                or refit_plan.research_dataset_id != plan.research_dataset_id
+                or refit_plan.data_snapshot_id != plan.data_snapshot_id
+                or refit_plan.input_lineage != plan.input_lineage
+                or refit_plan.research_protocol_identity
+                != plan.research_protocol_identity
+                or refit_plan.target_id != plan.target_id
+                or refit_plan.candidate_family_id != plan.candidate_family_id
+                or refit_plan.folds != plan.folds
+                or refit_plan.final_holdout != plan.final_holdout
+                or refit_plan.candidate_ids != plan.candidate_ids
+                or len(refit_records) != 1
+            ):
+                raise ValueError("crypto_model_refit_binding_invalid")
+            refit_record = refit_records[0]
+            if (
+                refit_record.status != "completed"
+                or refit_record.payload()["normalized_parameters"] != parameters
+                or refit_record.random_seed != metadata["random_seed"]
+                or refit_record.common_coverage_id != entry["fit_coverage_id"]
+                or re.fullmatch(r"[0-9a-f]{64}", entry["fit_coverage_id"]) is None
+                or dict(refit_record.metrics)
+                != {"n_train": metadata["rows_after_input_label_dropna"]}
+            ):
+                raise ValueError("crypto_model_refit_binding_invalid")
             for key in (
                 "model_algorithm",
                 "random_seed",
@@ -1182,33 +1440,46 @@ def _validate_crypto_model_payload(root, envelope, members, refs, trial_layout):
             path = entry["validation_prediction_path"]
             expected_path = (
                 f"models/{fold.fold_id}/validation/{entry['model_id']}.parquet"
-                if entry["model_id"] in calibration_models
-                else None
             )
-            if path != expected_path or (
-                path is not None and path not in {member["path"] for member in members}
-            ):
+            if path != expected_path or path not in {
+                member["path"] for member in members
+            }:
                 raise ValueError("crypto_model_validation_path_invalid")
-            if path is not None:
-                required.add(path)
-            count = 0
+            required.add(path)
+            spec = ModelSpec(
+                **{
+                    **parameters,
+                    "input_factor_columns": tuple(parameters["input_factor_columns"]),
+                    "input_feature_columns": tuple(parameters["input_feature_columns"]),
+                }
+            )
+            validation_coverage = ModelSampleCoverage(
+                crypto_validation_coverage_scope(
+                    plan, spec, prediction.training_asset_ids
+                )
+            )
             with closing_iterator(
-                _crypto_validation_chunks(root, members, entry)
+                _crypto_validation_chunks(
+                    root, entry, member_identities=member_identities
+                )
             ) as chunks:
                 for frame in chunks:
-                    count += len(frame)
+                    validation_coverage.add(frame)
             if (
-                path is not None
-                and count != records[0].validation_metrics["validation_rows"]
+                validation_coverage.row_count != records[0].metrics["validation_rows"]
+                or validation_coverage.semantic_identity
+                != records[0].common_coverage_id
             ):
                 raise ValueError("crypto_model_validation_count_invalid")
             models.append(entry)
     if {member["path"] for member in members} != required:
         raise ValueError("crypto_model_members_invalid")
-    return PersistedCryptoModelArtifact(root, envelope, tuple(members), tuple(models))
+    return PersistedCryptoModelArtifact(
+        root, envelope, tuple(members), tuple(models), member_identities
+    )
 
 
-def _crypto_validation_chunks(root, members, entry):
+def _crypto_validation_chunks(root, entry, *, member_identities):
     from quant_research_platform.research.protocols.crypto_hft import (
         label_horizon_ms,
     )
@@ -1219,12 +1490,8 @@ def _crypto_validation_chunks(root, members, entry):
         pd.Timestamp(entry["validation_window"][key]) for key in ("start", "end")
     )
     relative = entry["validation_prediction_path"]
-    if relative is None:
-        return
-    member = next(item for item in members if item["path"] == relative)
     path = root / relative
-    identity = dataset_file_identity(path)
-    verify_semantic_artifact_member(root, relative_path=relative, expected=member)
+    identity = member_identities[relative]
     with _opened_parquet(path, expected_identity=identity) as (
         parquet,
         _identity,
@@ -1287,6 +1554,7 @@ def read_crypto_model_member(artifact, entry, *, resource_policy):
         artifact.instance_root,
         artifact.member_records,
         relative,
+        expected_identity=artifact.member_identities[relative],
         resource_policy=resource_policy,
         workspace_factor=4,
     ) as owned:

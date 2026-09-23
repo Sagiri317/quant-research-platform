@@ -217,6 +217,7 @@ def _iter_joined_processed_chunks(
                 raise ValueError("research_joined_bound_invalid")
             lease.shrink_to(actual_bound)
             del chunk
+            lease.shrink_to(output_bytes + 256 * 1024)
             yield OwnedValue(output, lease)
             del output
             lease = None
@@ -463,7 +464,7 @@ def _iter_research_chunk_windows_from_base_input(
         with closing_iterator(
             iter_dataset_chunks(
                 session,
-                target_chunk_bytes=policy.operation_headroom_bytes,
+                target_chunk_bytes=policy.planning_headroom_bytes,
             )
         ) as chunks:
             for chunk in chunks:
@@ -585,7 +586,7 @@ def _read_processed_input(
     with session.filtered_view(time_window) as view:
         return materialize_dataset_session_owned(
             view,
-            target_chunk_bytes=policy.operation_headroom_bytes,
+            target_chunk_bytes=policy.planning_headroom_bytes,
         )
 
 

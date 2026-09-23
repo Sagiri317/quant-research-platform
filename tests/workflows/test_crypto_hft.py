@@ -77,10 +77,11 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
     )
     manifest = {
         "metadata": {
+            "model_metadata": {"model_id": "model"},
             "prediction_metadata": {
                 "input_columns": ["ofi_100ms"],
                 "sample_filter_mode": "eligible",
-            }
+            },
         }
     }
 
@@ -117,7 +118,10 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
                     asset_id="btc_usdt",
                     protocol_manifest={
                         "model_scopes": {
-                            "model": {"evaluation_asset_ids": ["btc_usdt"]}
+                            "model": {
+                                "evaluation_asset_ids": ["btc_usdt"],
+                                "model_algorithm": "linear_regression",
+                            }
                         }
                     },
                     resource_policy=policy,
@@ -334,7 +338,10 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     )
 
     calibration_target = makers[1].calibration_target_id
-    statistics_target = f"{HFT_RESEARCH_DATASET_ID}_portfolio_statistics"
+    execution_targets = {
+        target.candidate.candidate_id: target
+        for target in profile.protocol(HFT_RESEARCH_DATASET_ID).execution_targets()
+    }
     root = layout.instance_root(
         layout.semantic_artifact_root("crypto", model_id),
         targets[model_id]["instance_identity"],
@@ -346,9 +353,6 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     )
     import pyarrow.parquet as pq
 
-    from quant_research_platform.research.models.persisted import (
-        _crypto_validation_chunks,
-    )
     from quant_research_platform.storage.identity import native_filesystem_path
 
     with runtime_resource_policy_scope() as policy:
@@ -356,15 +360,16 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             key = (entry["fold_id"], entry["model_id"])
             relative = entry["validation_prediction_path"]
             assert "validation_prediction_parts" not in entry
-            if key not in validation_rows:
-                assert relative is None
-                continue
+            assert key in validation_rows
+            assert relative is not None
             expected_validation = pd.concat(validation_rows[key], ignore_index=True)
             expected_validation["label_available_at"] = expected_validation[
                 "label_available_at"
             ].astype("datetime64[ns]")
             actual_validation = pd.concat(
-                _crypto_validation_chunks(root, saved.member_records, entry),
+                saved.validation_chunks(
+                    fold_id=entry["fold_id"], model_id=entry["model_id"]
+                ),
                 ignore_index=True,
             )
             pd.testing.assert_frame_equal(
@@ -380,7 +385,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             assert (
                 sum(member["path"] == relative for member in saved.member_records) == 1
             )
-        assert len(validation_rows) == 4
+        assert len(validation_rows) == len(saved.models) == 18
         assert policy.used_memory_bytes == 0
     validation_rows.clear()
 
@@ -487,11 +492,117 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     assert observed[model_id]["status"] == observed[prediction_id]["status"] == "REUSED"
     assert all(observed[target]["status"] == "REUSED" for target in evaluation_ids)
     assert all(
-        observed[candidate.target_id]["status"] == "REUSED"
+        observed[execution_targets[candidate.candidate_id].target_id]["status"]
+        == "REUSED"
         for candidate in (*takers, *makers)
     )
     assert observed[calibration_target]["status"] == "REUSED"
-    assert observed[statistics_target]["status"] == "REUSED"
+    assert all(
+        observed[target.statistics_target_id]["status"] == "REUSED"
+        for target in execution_targets.values()
+    )
+    from quant_research_platform.artifacts.crypto_hft import (
+        read_crypto_episode_artifact,
+    )
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        summarize_portfolio_ledger,
+    )
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    mode_plan = {
+        **plan,
+        "execution": {
+            **plan["execution"],
+            "backtest_modes": ["continuous", "independent_segments"],
+            "taker_fee_bps": 2.0,
+        },
+    }
+    mode_configuration = research_configuration(
+        "crypto",
+        "baseline",
+        small_models=True,
+        development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+        plan=mode_plan,
+    )
+    selected_ids = {takers[0].candidate_id, makers[1].candidate_id}
+    mode_configuration["portfolios"] = [
+        item
+        for item in mode_configuration["portfolios"]
+        if item["candidate_id"] in selected_ids
+    ]
+    with monkeypatch.context() as patch:
+        patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
+        mode_run = research.research_run(
+            profile=profile,
+            layout=layout,
+            raw_root=raw,
+            research_plan=mode_configuration,
+        )
+    assert mode_run["status"] == "COMPLETE", mode_run
+    mode_results = {item["target_id"]: item for item in mode_run["target_results"]}
+    for target_id in (model_id, prediction_id, calibration_target):
+        assert mode_results[target_id]["status"] == "REUSED"
+        assert (
+            mode_results[target_id]["instance_identity"]
+            == targets[target_id]["instance_identity"]
+        )
+    assert (
+        tuple(
+            sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
+        )
+        == before
+    )
+
+    mode_profile = bind_research_configuration(
+        research_profile(CRYPTO_PROFILE_ID), mode_configuration
+    )
+    mode_targets = {
+        (target.candidate.candidate_id, target.execution_mode): target
+        for target in mode_profile.protocol(HFT_RESEARCH_DATASET_ID).execution_targets()
+    }
+    taker_continuous = mode_targets[takers[0].candidate_id, "continuous"]
+    taker_segmented = mode_targets[takers[0].candidate_id, "independent_segments"]
+    maker_continuous = mode_targets[makers[1].candidate_id, "continuous"]
+    maker_segmented = mode_targets[makers[1].candidate_id, "independent_segments"]
+    assert mode_results[taker_continuous.target_id]["status"] == "BUILT"
+    assert (
+        mode_results[taker_continuous.target_id]["instance_identity"]
+        != targets[taker_continuous.target_id]["instance_identity"]
+    )
+    assert mode_results[taker_segmented.target_id]["status"] == "BUILT"
+    assert mode_results[maker_continuous.target_id]["status"] == "REUSED"
+    assert mode_results[maker_segmented.target_id]["status"] == "BUILT"
+    with runtime_resource_policy_scope() as policy:
+        continuous_result = mode_results[taker_continuous.target_id]
+        continuous_root = layout.instance_root(
+            layout.semantic_artifact_root("crypto", taker_continuous.target_id),
+            continuous_result["instance_identity"],
+        )
+        continuous_ledger = read_portfolio_ledger_artifact(
+            continuous_root,
+            expected_identity=continuous_result["instance_identity"],
+        )
+        continuous_economics = summarize_portfolio_ledger(continuous_ledger)
+        segmented_result = mode_results[taker_segmented.target_id]
+        segmented_root = layout.instance_root(
+            layout.semantic_artifact_root("crypto", taker_segmented.target_id),
+            segmented_result["instance_identity"],
+        )
+        collection = read_crypto_episode_artifact(
+            segmented_root,
+            expected_identity=segmented_result["instance_identity"],
+        )
+        with closing_iterator(collection.iter_episodes()) as episodes:
+            segment_economics = [
+                (index, summarize_portfolio_ledger(ledger))
+                for index, ledger in episodes
+            ]
+        assert len(segment_economics) == 1
+        assert segment_economics[0][0]["termination"] == "PLANNED_END"
+        assert segment_economics[0][1]["initial_capital"] == 1000.0
+        assert segment_economics[0][1]["net_pnl"] == continuous_economics["net_pnl"]
+        assert policy.used_memory_bytes == 0
+
     from tests.interfaces.published_research_test_support import (
         check_published_evidence_views,
     )
@@ -504,29 +615,35 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         report_identity=report["target_result"]["instance_identity"],
         monkeypatch=monkeypatch,
     )
-    missing_execution = research.research_run(
-        profile=profile,
-        layout=layout,
-        raw_root=raw,
-        plan=True,
-        research_plan=research_configuration(
-            "crypto",
-            "baseline",
-            small_models=True,
-            development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
-            plan={key: value for key, value in plan.items() if key != "execution"},
-        ),
-    )
-    missing_targets = {row["target_id"]: row for row in missing_execution["targets"]}
-    assert all(
-        missing_targets[target]["decision"] != "BLOCKED"
-        for target in (model_id, prediction_id, *evaluation_ids)
-    )
-    assert all(
-        missing_targets[candidate.target_id]["blocker"]
-        == "crypto_execution_plan_missing"
-        for candidate in takers
-    )
+    from hashlib import sha256
+
+    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+
+    def persisted_files():
+        return {
+            path.relative_to(layout.project_root).as_posix(): sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for path in layout.project_root.rglob("*")
+            if path.is_file()
+        }
+
+    before_missing_execution = persisted_files()
+    with pytest.raises(PortfolioTargetBlocked, match="^crypto_execution_plan_missing$"):
+        research.research_run(
+            profile=profile,
+            layout=layout,
+            raw_root=raw,
+            plan=True,
+            research_plan=research_configuration(
+                "crypto",
+                "baseline",
+                small_models=True,
+                development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+                plan={key: value for key, value in plan.items() if key != "execution"},
+            ),
+        )
+    assert persisted_files() == before_missing_execution
     eth_metadata = raw.parent / "funding/ETHUSDT/response.metadata.json"
     saved_metadata = eth_metadata.read_bytes()
     eth_metadata.unlink()
@@ -553,9 +670,9 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             for target in (model_id, prediction_id, *evaluation_ids)
         )
         for candidate in takers:
-            assert missing_targets[candidate.target_id]["status"] == (
-                "BLOCKED" if candidate.asset_id == "eth_usdt" else "REUSED"
-            )
+            assert missing_targets[execution_targets[candidate.candidate_id].target_id][
+                "status"
+            ] == ("BLOCKED" if candidate.asset_id == "eth_usdt" else "REUSED")
     finally:
         eth_metadata.write_bytes(saved_metadata)
     btc_metadata = raw.parent / "funding/BTCUSDT/response.metadata.json"
@@ -564,10 +681,14 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     incomplete["metadata"]["coverage"]["end_ns"] = 8_000_000_000
     btc_metadata.write_text(json.dumps(incomplete), encoding="utf-8")
     old_good = {
-        candidate.target_id: (
+        execution_targets[candidate.candidate_id].target_id: (
             layout.instance_root(
-                layout.semantic_artifact_root("crypto", candidate.target_id),
-                targets[candidate.target_id]["instance_identity"],
+                layout.semantic_artifact_root(
+                    "crypto", execution_targets[candidate.candidate_id].target_id
+                ),
+                targets[execution_targets[candidate.candidate_id].target_id][
+                    "instance_identity"
+                ],
             )
             / "manifest.json"
         ).read_bytes()
@@ -597,7 +718,9 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         )
         with runtime_resource_policy_scope() as policy:
             for candidate in takers:
-                incomplete_result = incomplete_targets[candidate.target_id]
+                incomplete_result = incomplete_targets[
+                    execution_targets[candidate.candidate_id].target_id
+                ]
                 assert incomplete_result["status"] == (
                     "BLOCKED" if candidate.asset_id == "btc_usdt" else "REUSED"
                 )
@@ -606,13 +729,17 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
                         incomplete_result["reason"]
                         == "binance_funding_coverage_incomplete"
                     )
-                old_identity = targets[candidate.target_id]["instance_identity"]
+                old_identity = targets[
+                    execution_targets[candidate.candidate_id].target_id
+                ]["instance_identity"]
                 old_root = layout.instance_root(
-                    layout.semantic_artifact_root("crypto", candidate.target_id),
+                    layout.semantic_artifact_root(
+                        "crypto", execution_targets[candidate.candidate_id].target_id
+                    ),
                     old_identity,
                 )
                 assert (old_root / "manifest.json").read_bytes() == old_good[
-                    candidate.target_id
+                    execution_targets[candidate.candidate_id].target_id
                 ]
                 read_portfolio_ledger_artifact(old_root, expected_identity=old_identity)
             assert policy.used_memory_bytes == 0
@@ -688,6 +815,9 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             "maker": {**plan["execution"]["maker"], "min_calibration_samples": 100000},
         },
     }
+    before_insufficient_trials = tuple(
+        sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
+    )
     insufficient = research.research_run(
         profile=profile,
         layout=layout,
@@ -705,21 +835,40 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     }
     assert insufficient["status"] == "BLOCKED"
     assert insufficient_targets[calibration_target]["status"] == "BUILT"
-    assert insufficient_targets[makers[1].target_id]["reason"] == (
-        "maker_calibration_insufficient_samples"
+    assert insufficient_targets[execution_targets[makers[1].candidate_id].target_id][
+        "reason"
+    ] == ("maker_calibration_insufficient_samples")
+    assert (
+        insufficient_targets[
+            execution_targets[makers[1].candidate_id].statistics_target_id
+        ]["status"]
+        == "BLOCKED"
     )
-    assert insufficient_targets[statistics_target]["status"] == "BLOCKED"
     assert all(
-        insufficient_targets[candidate.target_id]["status"] in {"BUILT", "REUSED"}
+        insufficient_targets[
+            execution_targets[candidate.candidate_id].statistics_target_id
+        ]["status"]
+        in {"BUILT", "REUSED"}
         for candidate in (*takers, makers[0])
     )
     assert all(
-        insufficient_targets[target]["status"] == "BUILT"
-        for target in (model_id, prediction_id, *evaluation_ids)
+        insufficient_targets[execution_targets[candidate.candidate_id].target_id][
+            "status"
+        ]
+        in {"BUILT", "REUSED"}
+        for candidate in (*takers, makers[0])
     )
+    for target in (model_id, prediction_id, *evaluation_ids):
+        assert insufficient_targets[target]["status"] == "REUSED", target
+        assert (
+            insufficient_targets[target]["instance_identity"]
+            == targets[target]["instance_identity"]
+        ), target
     assert (
-        insufficient_targets[model_id]["instance_identity"]
-        != targets[model_id]["instance_identity"]
+        tuple(
+            sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
+        )
+        == before_insufficient_trials
     )
 
 
@@ -1024,3 +1173,13 @@ def test_crypto_plan_preserves_multi_day_windows_without_calendar_alignment():
     }
     parsed = protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan)
     assert parsed.research_plan.payload() == plan
+
+
+def test_crypto_single_model_refit_publishes_two_stages_and_preserves_selection(
+    tmp_path, monkeypatch
+):
+    from tests.research.crypto_model_test_support import (
+        check_crypto_single_refit_lifecycle,
+    )
+
+    check_crypto_single_refit_lifecycle(tmp_path, monkeypatch)

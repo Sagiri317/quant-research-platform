@@ -6,7 +6,6 @@ import hashlib
 import sys
 from collections import Counter
 from collections.abc import Mapping
-from contextlib import ExitStack
 from html import escape
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -44,7 +43,10 @@ from quant_research_platform.contracts.targets import (
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.reports import a_share, crypto_hft, diagnostic_status
 from quant_research_platform.reports.a_share import build_a_share_report
-from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
+)
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
@@ -60,10 +62,7 @@ from quant_research_platform.storage.manifests import (
     read_dataset_manifest_evidence,
 )
 from quant_research_platform.storage.semantic_artifacts import (
-    read_semantic_artifact,
-    read_semantic_artifact_operational_metadata,
     read_semantic_artifact_record,
-    verify_semantic_artifact_member,
     write_semantic_artifact,
 )
 
@@ -92,13 +91,9 @@ def report_payload_working_set(value):
     return json_record_working_set_bytes(encoded)
 
 
-def reserve_report_frames(lease, frames):
+def _reserve_report_frame(lease, frame):
     lease.grow(
-        sum(
-            4 * pandas_frame_payload_bytes(frame)
-            + len(frame) * len(frame.columns) * 192
-            for frame in frames
-        )
+        4 * pandas_frame_payload_bytes(frame) + len(frame) * len(frame.columns) * 192
     )
 
 
@@ -124,7 +119,7 @@ def read_research_run_record(
 
 
 def _report_rows(frame, report_lease):
-    reserve_report_frames(report_lease, (frame,))
+    _reserve_report_frame(report_lease, frame)
     return [
         {
             key: value.isoformat() if isinstance(value, pd.Timestamp) else value
@@ -141,6 +136,7 @@ def read_evaluation_report_evidence(
     evaluation_id,
     instance_identity,
     report_lease,
+    expected_member_identities=None,
 ):
     """Read validated aggregate evaluation evidence for both market reports."""
     tables = {}
@@ -165,6 +161,13 @@ def read_evaluation_report_evidence(
         root / "outputs" / evaluation_id,
         expected_output_id=evaluation_id,
         expected_run_id=f"run_{evaluation_id}",
+        expected_member_identities=None
+        if expected_member_identities is None
+        else {
+            key.removeprefix(f"outputs/{evaluation_id}/"): value
+            for key, value in expected_member_identities.items()
+            if key.startswith(f"outputs/{evaluation_id}/")
+        },
         observer=observe,
     )
     undefined = not any(tables.values()) or any(
@@ -189,6 +192,7 @@ def load_a_share_run_evidence(
     record: ResearchRunRecord,
     report_lease,
     quarterly_selections,
+    reference_member_identities=None,
 ) -> dict[str, object]:
     references = {result.target_id: result for result in record.target_results}
     issues: list[dict[str, str]] = [
@@ -199,8 +203,11 @@ def load_a_share_run_evidence(
         if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}
     ]
     loaded: dict[str, ResearchRunTargetResult] = {}
+    captured = {}
 
     def load(target_id: str) -> ResearchRunTargetResult | None:
+        if target_id in loaded:
+            return loaded[target_id]
         result = references.get(target_id)
         if result is None:
             issues.append(_issue(target_id, "BLOCKED", "run_target_result_missing"))
@@ -208,12 +215,26 @@ def load_a_share_run_evidence(
         if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}:
             return None
         try:
-            read_validated_reference(layout, result)
+            identities = {}
+            read_validated_reference(
+                layout,
+                result,
+                member_identities=identities,
+                expected_member_identities=None
+                if reference_member_identities is None
+                else reference_member_identities.get(target_id),
+            )
+            captured[target_id] = identities
         except (FileNotFoundError, OSError, ValueError):
             issues.append(_issue(target_id, "FAILED", "target_reference_invalid"))
             return None
         loaded[target_id] = result
         return result
+
+    def table_records(artifact, member):
+        with artifact.table(member) as frame:
+            _reserve_report_frame(report_lease, frame)
+            return frame.astype(object).where(frame.notna(), None).to_dict("records")
 
     scenario = record.scenario_id
     configuration = record.payload()["protocol"]["research_configuration"]
@@ -236,7 +257,10 @@ def load_a_share_run_evidence(
     coverage = _unavailable(issues, scenario)
     dataset_ref = loaded.get(scenario)
     if dataset_ref is not None:
-        manifest = read_dataset_manifest_evidence(_instance_root(layout, dataset_ref))
+        manifest = read_dataset_manifest_evidence(
+            _instance_root(layout, dataset_ref),
+            expected_member_identities=captured[dataset_ref.target_id],
+        )
         coverage = {
             "status": "DEFINED",
             "dataset_identity": dataset_ref.instance_identity,
@@ -277,7 +301,10 @@ def load_a_share_run_evidence(
                 {"target_id": target_id, **_unavailable(issues, target_id)}
             )
             continue
-        manifest = read_dataset_manifest_evidence(_instance_root(layout, reference))
+        manifest = read_dataset_manifest_evidence(
+            _instance_root(layout, reference),
+            expected_member_identities=captured[reference.target_id],
+        )
         pit_targets.append(
             {
                 "target_id": target_id,
@@ -301,6 +328,7 @@ def load_a_share_run_evidence(
             _instance_root(layout, evaluation_ref),
             evaluation_id=evaluation_ref.target_id,
             instance_identity=evaluation_ref.instance_identity,
+            expected_member_identities=captured[evaluation_ref.target_id],
             report_lease=report_lease,
         )
         coverage["evaluation"] = factor_evaluation["metadata"]["evaluation_diagnostics"]
@@ -310,8 +338,12 @@ def load_a_share_run_evidence(
         model_ref = loaded.get(target.target_id) or load(target.target_id)
         if model_ref is None:
             continue
-        operational = read_semantic_artifact_operational_metadata(
-            _instance_root(layout, model_ref)
+        operational = {}
+        read_semantic_artifact_record(
+            _instance_root(layout, model_ref),
+            expected_identity=model_ref.instance_identity,
+            expected_member_identities=captured[model_ref.target_id],
+            operational_metadata=operational,
         )
         for item in operational.get("model_trial_ledgers", []):
             trial_refs[(item["run_id"], item["experiment_id"])] = item
@@ -341,65 +373,31 @@ def load_a_share_run_evidence(
             artifact = read_statistics_artifact(
                 _instance_root(layout, statistics_ref),
                 expected_identity=str(statistics_ref.instance_identity),
+                expected_member_identities=captured[statistics_ref.target_id],
             )
-            with ExitStack() as table_reads:
-                factors = robustness = comparison = reality_checks = model_trials = None
-                try:
-                    factors = table_reads.enter_context(
-                        artifact.table("factor_diagnostics.parquet")
-                    )
-                    robustness = table_reads.enter_context(
-                        artifact.table("robustness.parquet")
-                    )
-                    comparison = table_reads.enter_context(
-                        artifact.table("model_comparison.parquet")
-                    )
-                    reality_checks = table_reads.enter_context(
-                        artifact.table("model_reality_checks.parquet")
-                    )
-                    model_trials = table_reads.enter_context(
-                        artifact.table("model_trials.parquet")
-                    )
-                    reserve_report_frames(
-                        report_lease,
-                        (factors, model_trials, comparison, reality_checks, robustness),
-                    )
-                    statistics = {
-                        "status": "DEFINED",
-                        "identity": statistics_ref.instance_identity,
-                        "factor_row_count": len(factors),
-                        "factor_defined_rows": int(
-                            factors["status"].eq("DEFINED").sum()
-                        ),
-                        "factor_undefined_rows": int(
-                            factors["status"].eq("UNDEFINED").sum()
-                        ),
-                        "factor_diagnostics": factors.astype(object)
-                        .where(factors.notna(), None)
-                        .to_dict("records"),
-                        "model_trials": model_trials.astype(object)
-                        .where(model_trials.notna(), None)
-                        .to_dict("records"),
-                        "model_comparison": comparison.astype(object)
-                        .where(comparison.notna(), None)
-                        .to_dict("records"),
-                        "model_reality_checks": reality_checks.astype(object)
-                        .where(reality_checks.notna(), None)
-                        .to_dict("records"),
-                        "robustness": [
-                            {
-                                "test_id": str(row.test_id),
-                                "status": str(row.status),
-                                "reason": str(row.reason),
-                                "observation_count": int(row.observation_count),
-                            }
-                            for row in robustness.itertuples(index=False)
-                        ],
-                    }
-                finally:
-                    factors = robustness = comparison = reality_checks = (
-                        model_trials
-                    ) = None
+            tables = {
+                name: table_records(artifact, name + ".parquet")
+                for name in (
+                    "factor_diagnostics",
+                    "model_trials",
+                    "model_comparison",
+                    "model_reality_checks",
+                    "robustness",
+                )
+            }
+            factors = tables["factor_diagnostics"]
+            statistics = {
+                "status": "DEFINED",
+                "identity": statistics_ref.instance_identity,
+                "factor_row_count": len(factors),
+                "factor_defined_rows": sum(
+                    row["status"] == "DEFINED" for row in factors
+                ),
+                "factor_undefined_rows": sum(
+                    row["status"] == "UNDEFINED" for row in factors
+                ),
+                **tables,
+            }
         except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
             issues.append(
                 _issue(statistics_target, "FAILED", "statistics_reference_invalid")
@@ -428,97 +426,95 @@ def load_a_share_run_evidence(
             artifact = read_statistics_artifact(
                 _instance_root(layout, portfolio_ref),
                 expected_identity=portfolio_ref.instance_identity,
+                expected_member_identities=captured[portfolio_ref.target_id],
             )
-            with ExitStack() as reads:
-                performance = capacity = robustness = attribution = daily = merged = (
-                    None
-                )
+            summaries = {
+                name: table_records(artifact, "portfolio_" + name + ".parquet")
+                for name in ("performance", "capacity_summary", "robustness")
+            }
+            with (
+                artifact.table("portfolio_attribution.parquet") as attribution,
+                artifact.table("portfolio_daily.parquet") as daily,
+            ):
+                merged = None
                 try:
-                    performance = reads.enter_context(
-                        artifact.table("portfolio_performance.parquet")
-                    )
-                    capacity = reads.enter_context(
-                        artifact.table("portfolio_capacity_summary.parquet")
-                    )
-                    robustness = reads.enter_context(
-                        artifact.table("portfolio_robustness.parquet")
-                    )
-                    attribution = reads.enter_context(
-                        artifact.table("portfolio_attribution.parquet")
-                    )
-                    daily = reads.enter_context(
-                        artifact.table("portfolio_daily.parquet")
-                    )
-                    reserve_report_frames(
-                        report_lease, (performance, capacity, robustness)
-                    )
-                    merged = attribution.merge(
-                        daily[["candidate_id", "entry_at", "end_at", "nav_before"]],
-                        on=["candidate_id", "entry_at", "end_at"],
-                        how="left",
-                        validate="many_to_one",
-                    )
-                    attribution_summary = []
-                    for (candidate, component, component_type), rows in merged.groupby(
-                        ["candidate_id", "component_id", "component_type"], sort=True
+                    with current_runtime_resource_policy().lease(
+                        "reports.portfolio.attribution",
+                        4
+                        * (
+                            pandas_frame_payload_bytes(attribution)
+                            + pandas_frame_payload_bytes(daily)
+                        ),
                     ):
-                        defined = rows.status.eq("DEFINED").all()
-                        attribution_summary.append(
-                            dict(
-                                candidate_id=candidate,
-                                component_id=component,
-                                component_type=component_type,
-                                pnl=float((rows.value * rows.nav_before).sum())
-                                if defined
-                                else None,
-                                status="DEFINED"
-                                if defined
-                                else "BLOCKED"
-                                if rows.status.eq("BLOCKED").any()
-                                else "UNDEFINED",
-                                reason=""
-                                if defined
-                                else str(
-                                    rows.loc[rows.status.ne("DEFINED"), "reason"].iloc[
-                                        0
-                                    ]
-                                ),
-                                observation_count=len(rows),
+                        merged = attribution.merge(
+                            daily[["candidate_id", "entry_at", "end_at", "nav_before"]],
+                            on=["candidate_id", "entry_at", "end_at"],
+                            how="left",
+                            validate="many_to_one",
+                        )
+                        attribution_summary = []
+                        for (
+                            candidate,
+                            component,
+                            component_type,
+                        ), rows in merged.groupby(
+                            ["candidate_id", "component_id", "component_type"],
+                            sort=True,
+                        ):
+                            defined = rows.status.eq("DEFINED").all()
+                            attribution_summary.append(
+                                dict(
+                                    candidate_id=candidate,
+                                    component_id=component,
+                                    component_type=component_type,
+                                    pnl=float((rows.value * rows.nav_before).sum())
+                                    if defined
+                                    else None,
+                                    status="DEFINED"
+                                    if defined
+                                    else "BLOCKED"
+                                    if rows.status.eq("BLOCKED").any()
+                                    else "UNDEFINED",
+                                    reason=""
+                                    if defined
+                                    else str(
+                                        rows.loc[
+                                            rows.status.ne("DEFINED"), "reason"
+                                        ].iloc[0]
+                                    ),
+                                    observation_count=len(rows),
+                                )
+                            )
+                        report_lease.grow(
+                            report_payload_working_set(
+                                {"attribution": attribution_summary}
                             )
                         )
-                    portfolio_statistics = {
-                        "status": diagnostic_status(
-                            [
-                                *performance.to_dict("records"),
-                                *capacity.to_dict("records"),
-                                *robustness.to_dict("records"),
-                                *attribution_summary,
-                            ]
-                        ),
-                        "artifact_status": "DEFINED",
-                        "identity": portfolio_ref.instance_identity,
-                        "performance": performance.astype(object)
-                        .where(performance.notna(), None)
-                        .to_dict("records"),
-                        "capacity": capacity.astype(object)
-                        .where(capacity.notna(), None)
-                        .to_dict("records"),
-                        "robustness": robustness.astype(object)
-                        .where(robustness.notna(), None)
-                        .to_dict("records"),
-                        "attribution": attribution_summary,
-                        "nav_path": {
-                            "table": "portfolio_daily.parquet",
-                            "post_nav": "nav_post",
-                            "post_timestamp": "entry_at",
-                            "terminal_nav": "nav_end",
-                            "terminal_timestamp": "end_at",
-                        },
-                    }
                 finally:
-                    performance = capacity = robustness = attribution = daily = (
-                        merged
-                    ) = None
+                    attribution = daily = merged = rows = None
+            portfolio_statistics = {
+                "status": diagnostic_status(
+                    [
+                        *summaries["performance"],
+                        *summaries["capacity_summary"],
+                        *summaries["robustness"],
+                        *attribution_summary,
+                    ]
+                ),
+                "artifact_status": "DEFINED",
+                "identity": portfolio_ref.instance_identity,
+                "performance": summaries["performance"],
+                "capacity": summaries["capacity_summary"],
+                "robustness": summaries["robustness"],
+                "attribution": attribution_summary,
+                "nav_path": {
+                    "table": "portfolio_daily.parquet",
+                    "post_nav": "nav_post",
+                    "post_timestamp": "entry_at",
+                    "terminal_nav": "nav_end",
+                    "terminal_timestamp": "end_at",
+                },
+            }
         except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
             issues.append(
                 _issue(
@@ -548,6 +544,7 @@ def load_a_share_run_evidence(
             ledger = read_portfolio_ledger_artifact(
                 _instance_root(layout, ledger_ref),
                 expected_identity=ledger_ref.instance_identity,
+                expected_member_identities=captured[ledger_ref.target_id],
             )
             portfolios.append(
                 {
@@ -588,6 +585,7 @@ def produce_a_share_report(
     record: ResearchRunRecord,
     report_lease,
     quarterly_selections,
+    reference_member_identities=None,
 ) -> dict[str, object]:
     return build_a_share_report(
         record=record,
@@ -596,11 +594,18 @@ def produce_a_share_report(
             record=record,
             report_lease=report_lease,
             quarterly_selections=quarterly_selections,
+            reference_member_identities=reference_member_identities,
         ),
     )
 
 
-def read_validated_reference(layout: StorageLayout, result: ResearchRunTargetResult):
+def read_validated_reference(
+    layout: StorageLayout,
+    result: ResearchRunTargetResult,
+    *,
+    member_identities=None,
+    expected_member_identities=None,
+):
     if result.instance_identity is None or result.schema_identity is None:
         raise ValueError("research_run_target_reference_invalid")
     root = _instance_root(layout, result)
@@ -610,11 +615,18 @@ def read_validated_reference(layout: StorageLayout, result: ResearchRunTargetRes
         ProducerKind.DATASET,
     }:
         envelope = validate_business_manifest_envelope(
-            read_dataset_manifest_evidence(root)[COMMON_MANIFEST_METADATA_KEY]
+            read_dataset_manifest_evidence(
+                root,
+                member_identities=member_identities,
+                expected_member_identities=expected_member_identities,
+            )[COMMON_MANIFEST_METADATA_KEY]
         )
     else:
-        envelope = read_semantic_artifact(
-            root, expected_identity=result.instance_identity
+        envelope, _members = read_semantic_artifact_record(
+            root,
+            expected_identity=result.instance_identity,
+            member_identities=member_identities,
+            expected_member_identities=expected_member_identities,
         )
     if (
         envelope["logical_artifact_id"] != result.target_id
@@ -678,12 +690,6 @@ def read_research_report_artifact(
         expected_identity=expected_identity,
     )
     by_path = _require_members(members, ("report.json", "report.md"))
-    for member in ("report.json", "report.md"):
-        verify_semantic_artifact_member(
-            Path(instance_root),
-            relative_path=member,
-            expected=dict(by_path[member]),
-        )
     contract = envelope["semantic_metadata"].get("target_contract")
     if type(contract) is not dict:
         raise ValueError("research_report_semantics_invalid")

@@ -37,6 +37,7 @@ def _fold(
 
 def _plan() -> ExperimentPlan:
     return ExperimentPlan(
+        stage="selection",
         experiment_id="unified-smoke-1",
         market_id=MarketId("a_share"),
         research_dataset_id="a-share-smoke",
@@ -147,3 +148,33 @@ def test_experiment_fold_json_object_is_not_a_pairs_array():
     payload["folds"][0] = list(payload["folds"][0].items())
     with pytest.raises(ValueError, match="experiment_plan_payload_invalid"):
         ExperimentPlan.from_payload(payload)
+
+
+def test_refit_stage_has_one_resolved_candidate_and_no_selection_score():
+    plan = _plan()
+    refit = replace(
+        plan,
+        stage="refit",
+        folds=plan.folds[:1],
+        candidate_ids=("ridge",),
+        candidate_parameters={"ridge": {"random_seed": 7}},
+        trial_budget=1,
+        selection_metric=None,
+        selection_direction=None,
+        tie_break_order=(),
+        selection_ledger_semantic_identity="a" * 64,
+    )
+    assert ExperimentPlan.from_payload(refit.protocol_payload()) == refit
+    assert refit.protocol_hash != plan.protocol_hash
+    for changes in (
+        {"selection_metric": "validation_rankic"},
+        {"trial_budget": 2},
+        {"candidate_parameters": {}},
+        {"candidate_parameters": {"ridge": {"random_seed": 8}}},
+        {"selection_ledger_semantic_identity": None},
+        {"tie_break_order": ("ridge",)},
+    ):
+        with pytest.raises(ValueError, match="experiment_refit_plan_invalid"):
+            replace(refit, **changes)
+    with pytest.raises(ValueError, match="experiment_selection_parent_invalid"):
+        replace(plan, selection_ledger_semantic_identity="a" * 64)

@@ -1084,7 +1084,8 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
                 batches.throw(primary)
             assert raised.value is primary
             assert any(
-                "parquet file close also failed" in note for note in primary.__notes__
+                "scratch handle close also failed: RuntimeError" in note
+                for note in primary.__notes__
             )
         else:
             batches.close()
@@ -2532,3 +2533,24 @@ def test_plain_compressed_page_is_admitted_before_decode(
             rows += batch.num_rows
             assert batch.column(0).to_pylist() == [b"x" * 4096] * batch.num_rows
     assert rows == 4096
+
+
+@pytest.mark.parametrize("offset", (-1, 0, 1))
+def test_real_reader_has_monotonic_admission_across_soft_target(tmp_path, offset):
+    path = tmp_path / "one.parquet"
+    pq.write_table(pa.table({"value": [42]}), path, use_dictionary=False)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("test.retained", policy.memory_budget_bytes + offset):
+            with closing_iterator(
+                dataset_physical.iter_dataset_part_batches(
+                    path,
+                    expected_identity=None,
+                    target_chunk_bytes=1,
+                    operation_headroom_bytes=policy.operation_headroom_bytes,
+                )
+            ) as batches:
+                assert [
+                    v for batch in batches for v in batch.column(0).to_pylist()
+                ] == [42]
+        assert policy.used_memory_bytes == 0
