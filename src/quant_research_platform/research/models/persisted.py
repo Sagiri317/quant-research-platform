@@ -57,7 +57,8 @@ from quant_research_platform.storage.experiments import (
     read_model_trial_ledger_reference,
 )
 from quant_research_platform.storage.identity import (
-    native_filesystem_path,
+    filesystem_mkdir,
+    filesystem_stat,
     open_filesystem_file,
     verified_file_handle,
 )
@@ -191,14 +192,14 @@ def write_quarterly_model_artifact(
     def write(staging: Path) -> None:
         selections: dict[str, dict[str, object]] = {}
         models_root = staging / "models"
-        os.mkdir(native_filesystem_path(models_root))
+        filesystem_mkdir(models_root)
 
         def write_coverage(quarter, frames):
             relative = (
                 f"models/{quarter_id_for_fold(quarter)}/validation-coverage.parquet"
             )
             path = staging / relative
-            Path(native_filesystem_path(path.parent)).mkdir(parents=True, exist_ok=True)
+            filesystem_mkdir(path.parent, parents=True, exist_ok=True)
             with (
                 handle_preserving_primary(open_filesystem_file(path, "xb")) as handle,
                 parquet_table_writer(
@@ -238,7 +239,7 @@ def write_quarterly_model_artifact(
                         raise ValueError("model_artifact_selection_conflict")
                     selections[quarter_id] = selection
                     quarter_root = models_root / quarter_id
-                    quarter_root.mkdir(exist_ok=True)
+                    filesystem_mkdir(quarter_root, exist_ok=True)
 
                     cutoff = time_value_isoformat(
                         quarter.validation.end, date_only=True
@@ -497,10 +498,7 @@ def read_quarterly_model_artifact(
             / f"{entry['family_id']}.pkl"
         )
         try:
-            predictor_stat = os.stat(
-                native_filesystem_path(predictor_path),
-                follow_symlinks=False,
-            )
+            predictor_stat = filesystem_stat(predictor_path, follow_symlinks=False)
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("model_artifact_quarterly_invalid") from exc
         if not stat.S_ISREG(predictor_stat.st_mode):
@@ -853,7 +851,7 @@ def _read_model_member(
     if member is None:
         raise ValueError("model_artifact_model_invalid")
     path = root / relative
-    size = os.stat(native_filesystem_path(path), follow_symlinks=False).st_size
+    size = filesystem_stat(path, follow_symlinks=False).st_size
     with runtime_resource_policy_scope(resource_policy) as policy:
         lease = policy.lease(
             "research.model.predictor", max(1, size * workspace_factor)
@@ -1108,9 +1106,7 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
                     staging
                     / f"models/{fold.fold_id}/validation/{spec.model_id}.parquet"
                 )
-                Path(native_filesystem_path(path.parent)).mkdir(
-                    parents=True, exist_ok=True
-                )
+                filesystem_mkdir(path.parent, parents=True, exist_ok=True)
                 handle = validation_owner.enter_context(
                     handle_preserving_primary(open_filesystem_file(path, "xb"))
                 )
@@ -1148,7 +1144,7 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
                     validation_writer = None
                     fold = member.fold
                     fold_root = staging / "models" / fold.fold_id
-                    fold_root.mkdir(parents=True, exist_ok=True)
+                    filesystem_mkdir(fold_root, parents=True, exist_ok=True)
                     _write_model_member(
                         fold_root / f"{member.spec.model_id}.pkl",
                         member.result.prediction_model,

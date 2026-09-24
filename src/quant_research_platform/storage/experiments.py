@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -26,7 +25,13 @@ from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
 )
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_scandir,
+    require_unaliased_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_bounded_qrp_json_directory,
@@ -42,11 +47,11 @@ def append_trial_record(
     if not isinstance(record, TrialRecord):
         raise TypeError("trial_record_required")
     validate_trial_record_against_plan(plan, record)
-    if not root.exists():
+    if not filesystem_exists(root):
 
         def write(staging: Path) -> None:
             atomic_write_json(staging / "plan.json", plan.protocol_payload())
-            (staging / "records").mkdir()
+            filesystem_mkdir(staging / "records")
 
         atomic_write_directory(root, write)
     existing = read_trial_ledger(root, plan)
@@ -72,7 +77,7 @@ def read_trial_ledger(
     plan: ExperimentPlan | None = None,
 ) -> tuple[TrialRecord, ...]:
     root = Path(root)
-    if not root.exists():
+    if not filesystem_exists(root):
         return ()
     saved = read_trial_plan(root)
     if plan is not None and saved.protocol_payload() != plan.protocol_payload():
@@ -127,7 +132,7 @@ def _validate_trial_completion(start: TrialRecord, terminal: TrialRecord) -> Non
 
 def read_trial_plan(root: Path) -> ExperimentPlan:
     root = require_unaliased_path(root, error="trial_ledger_path_invalid")
-    if {item.name for item in root.iterdir()} != {"plan.json", "records"}:
+    if {item.name for item in filesystem_iterdir(root)} != {"plan.json", "records"}:
         raise ValueError("dataset_metadata_directory_member_invalid")
     return ExperimentPlan.from_payload(read_manifest(root / "plan.json"))
 
@@ -155,12 +160,12 @@ def research_run_trial_references(
     root = require_unaliased_path(
         layout.trial_ledger_root(run_id), error="trial_ledger_path_invalid"
     )
-    if not root.exists():
+    if not filesystem_exists(root):
         return ()
     with runtime_resource_policy_scope() as policy:
         with policy.lease("storage.trial_run.references", 0) as lease:
             references = []
-            with os.scandir(root) as entries:
+            with filesystem_scandir(root) as entries:
                 for entry in entries:
                     if not entry.is_dir(follow_symlinks=False):
                         raise ValueError("trial_run_members_invalid")

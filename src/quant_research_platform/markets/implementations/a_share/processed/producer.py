@@ -63,6 +63,9 @@ from quant_research_platform.storage.datasets.reading import (
     materialize_dataset_session_owned,
     open_dataset_session,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 _OPTIONAL_SOURCE_IDS = frozenset(
@@ -104,7 +107,7 @@ def produce_a_share_processed_data(
                     data_id,
                     layout.interim_data_root(source_spec.source_id, data_id),
                 )
-                if not root.exists():
+                if not filesystem_exists(root):
                     if data_id in _OPTIONAL_SOURCE_IDS:
                         source[data_id] = pd.DataFrame(
                             columns=source_spec.required_columns
@@ -153,7 +156,7 @@ def produce_a_share_processed_data(
                         dependency.market_id, dependency.kind, data_id
                     ),
                 )
-                if not root.exists():
+                if not filesystem_exists(root):
                     raise ValueError(f"missing_processed_dependency: {data_id}")
                 columns = None
                 if spec.data_id == "fundamental_pit":

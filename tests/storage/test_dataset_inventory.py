@@ -1170,6 +1170,8 @@ def test_writer_releases_previous_publication_before_requesting_next(
 def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
     tmp_path, monkeypatch, kind, failure
 ):
+    from quant_research_platform.storage.identity import native_filesystem_path
+
     artifact = tmp_path / "artifact-volume"
     data = artifact / "data"
     data.mkdir(parents=True)
@@ -1191,13 +1193,15 @@ def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
     monkeypatch.setattr(owner.sqlite3, "connect", connect)
     blocked = failure == "startup"
     probed = []
+    native_temporary_root = Path(native_filesystem_path(temporary_root)).resolve()
+    native_artifact = Path(native_filesystem_path(artifact)).resolve()
 
     def disk_usage(path):
         current = Path(path).resolve()
         probed.append(current)
-        assert current in {temporary_root.resolve(), artifact.resolve()}
+        assert current in {native_temporary_root, native_artifact}
         return SimpleNamespace(
-            free=0 if current == artifact.resolve() or blocked else 1024**3
+            free=0 if current == native_artifact or blocked else 1024**3
         )
 
     monkeypatch.setattr(runtime_resources.shutil, "disk_usage", disk_usage)
@@ -1259,7 +1263,7 @@ def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
                     assert count == (0 if blocked else 1)
                 assert not scratch.exists()
         assert policy.used_memory_bytes == 0
-    assert probed and set(probed) == {temporary_root.resolve()}
+    assert probed and set(probed) == {native_temporary_root}
     assert sentinel.read_bytes() == b"old-good"
     assert list(temporary_root.iterdir()) == []
 

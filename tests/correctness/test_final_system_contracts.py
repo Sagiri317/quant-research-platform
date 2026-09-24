@@ -306,7 +306,7 @@ def test_selected_core_intersection_does_not_shrink_research(name, count):
         / "configs/research/a_share"
         / (name + ".json")
     )
-    configuration = json.loads(path.read_text())
+    configuration = json.loads(path.read_text(encoding="utf-8"))
     bound = bind_research_configuration(research_profile(), configuration)
     protocol = bound.protocol(configuration["scenario_id"])
     assert len(protocol.manifest()["statistics"]["fama_macbeth_core_factors"]) == count

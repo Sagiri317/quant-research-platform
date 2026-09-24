@@ -29,7 +29,11 @@ from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     open_dataset_session,
 )
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_walk,
+    require_unaliased_path,
+)
 
 _RUN_RESULT_DATASET_LAYERS = frozenset({"interim", "processed", "research"})
 
@@ -315,13 +319,14 @@ def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
     )
     for layer_root in allowed_roots:
         require_unaliased_path(layer_root, error="schema_inventory_dataset_invalid")
-        if not layer_root.exists():
+        if not filesystem_exists(layer_root):
             continue
 
         def fail_walk(error: OSError) -> None:
             raise ValueError("schema_inventory_dataset_invalid") from error
 
-        for parent, dirnames, filenames in layer_root.walk(
+        for parent, dirnames, filenames in filesystem_walk(
+            layer_root,
             follow_symlinks=False,
             on_error=fail_walk,
         ):

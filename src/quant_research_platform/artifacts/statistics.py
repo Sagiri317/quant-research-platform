@@ -31,7 +31,7 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
-    native_filesystem_path,
+    open_filesystem_file,
 )
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
@@ -618,7 +618,7 @@ def write_statistics_artifact(
                 if member not in writers:
                     handle = output.enter_context(
                         handle_preserving_primary(
-                            open(native_filesystem_path(staging / member), "xb")
+                            open_filesystem_file(staging / member, "xb")
                         )
                     )
                     writers[member] = output.enter_context(

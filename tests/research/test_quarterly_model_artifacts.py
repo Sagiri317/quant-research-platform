@@ -1842,7 +1842,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     destination.write_bytes(content)
                 metadata_path = staging / "models/2019Q1/metadata.json"
-                payload = json.loads(metadata_path.read_text())
+                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
                 entry = payload["models"][0]
                 altered = entry["model_metadata"]
                 if mutation == "none_start":
@@ -2287,6 +2287,7 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
         read_quarterly_predictor,
     )
     from quant_research_platform.runtime import resources
+    from quant_research_platform.storage.identity import native_filesystem_path
 
     layout = StorageLayout(tmp_path)
     template = _quarterly_result(
@@ -2433,7 +2434,9 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
                 trial_layout=layout,
             )
         assert calls == []
-        assert paths and all(path.is_relative_to(logical) for path in paths)
+        assert paths and all(
+            path.is_relative_to(native_filesystem_path(logical)) for path in paths
+        )
         assert set(root.parent.iterdir()) == previous
         assert {
             path.relative_to(root): path.read_bytes()

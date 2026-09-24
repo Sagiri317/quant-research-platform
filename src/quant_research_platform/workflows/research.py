@@ -126,6 +126,9 @@ from quant_research_platform.storage.datasets.schema import (
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.experiments import research_run_trial_references
 from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_stat,
     require_unaliased_path,
     validate_instance_identity,
 )
@@ -870,7 +873,7 @@ def status(
         root = layout.research_run_path("index").parent
         records = []
         with policy.lease("queries.run_records", 1) as retained:
-            for path in root.glob("*.json"):
+            for path in filesystem_glob(root, "*.json"):
                 record = read_research_run_record(path)
                 if record.profile_id != profile.profile_id:
                     continue
@@ -905,10 +908,10 @@ def inspect(
         "profile_id": profile.profile_id,
         "dataset_id": dataset_id,
         "required_columns": list(spec.required_columns),
-        "exists": root.exists(),
+        "exists": filesystem_exists(root),
         "instances": [],
     }
-    if not root.exists():
+    if not filesystem_exists(root):
         result.update(
             status=RunStatus.BLOCKED.value,
             blocker="dataset_instances_missing",
@@ -1247,7 +1250,7 @@ def _execute_action_with_policy(
                 elif candidate_workspace is not None and (
                     candidate_materialized
                     or output_root is not None
-                    and output_root.exists()
+                    and filesystem_exists(output_root)
                 ):
                     assert candidate_workspace is not None
                     candidate_workspace.preserve()
@@ -1418,9 +1421,10 @@ def _build_target(
                 instance_metadata=instance_metadata,
             )
         except ValueError as exc:
-            if (
-                str(exc) == "csmar_raw_export_identity_changed"
-                and not interim_raw_root.exists()
+            if str(
+                exc
+            ) == "csmar_raw_export_identity_changed" and not filesystem_exists(
+                interim_raw_root
             ):
                 raise PortfolioTargetBlocked("external_data_unavailable") from exc
             raise
@@ -2136,7 +2140,9 @@ def _holdout_evidence(
             ProducerKind.MODEL,
         }
     )
-    for path in sorted(layout.research_run_path("run_probe").parent.glob("*.json")):
+    for path in sorted(
+        filesystem_glob(layout.research_run_path("run_probe").parent, "*.json")
+    ):
         record = read_research_run_record(path)
         if (
             record.profile_id != profile.profile_id
@@ -2256,7 +2262,7 @@ def _build_report_from_run(
     )
     logical_root = layout.semantic_artifact_root(profile.market_id, report_target)
     instance_root = layout.instance_root(logical_root, envelope.instance_identity)
-    decision = "REUSE" if instance_root.exists() else "BUILD"
+    decision = "REUSE" if filesystem_exists(instance_root) else "BUILD"
     if plan:
         blocker = None
         if decision == "REUSE":
@@ -3093,7 +3099,7 @@ def _matching_instance(
             error="persisted_instance_invalid",
         )
         try:
-            instance_root.stat()
+            filesystem_stat(instance_root)
         except FileNotFoundError:
             return None, None
         if _catalog_data_spec(profile, target_id) is None:
@@ -3131,12 +3137,11 @@ def _instance_path_exists(
     instance_identity: str,
 ) -> bool:
     logical_root = _target_logical_root(profile, layout, target_id)
-    return (
-        logical_root is not None
-        and layout.instance_root(
+    return logical_root is not None and filesystem_exists(
+        layout.instance_root(
             logical_root,
             instance_identity,
-        ).exists()
+        )
     )
 
 

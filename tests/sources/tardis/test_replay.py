@@ -446,8 +446,8 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
     tmp_path, monkeypatch, boundary
 ):
     import errno
-    from pathlib import Path
 
+    import quant_research_platform.sources.binance.replay as binance_replay
     from quant_research_platform.sources import market_source_identity
     from tests.sources.tardis.test_raw import _snapshot
 
@@ -468,8 +468,11 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
             if boundary == "coverage_open"
             else manifest["files"][0]["path"]
         )
-        operation = "lstat" if boundary == "manifest_stat" else "open"
-        original = getattr(Path, operation)
+        owner = binance_replay
+        operation = (
+            "filesystem_stat" if boundary == "manifest_stat" else "open_filesystem_file"
+        )
+        original = getattr(owner, operation)
         primary = OSError(errno.EIO, "controlled_io_failure")
 
         def fail(path, *args, **kwargs):
@@ -478,7 +481,7 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
             return original(path, *args, **kwargs)
 
         with monkeypatch.context() as patch:
-            patch.setattr(Path, operation, fail)
+            patch.setattr(owner, operation, fail)
             with pytest.raises(OSError) as caught:
                 market_source_identity(root, "panel")
         assert caught.value is primary

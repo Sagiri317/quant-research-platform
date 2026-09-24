@@ -11,7 +11,9 @@ CONFIG_ROOT = Path(__file__).resolve().parents[2] / "configs" / "research"
 def research_configuration(
     market="a_share", name="core6", *, development=None, plan=None, small_models=False
 ):
-    config = json.loads((CONFIG_ROOT / market / (name + ".json")).read_text())
+    config = json.loads(
+        (CONFIG_ROOT / market / (name + ".json")).read_text(encoding="utf-8")
+    )
     if development is not None:
         config["windows"]["development"] = dict(
             zip(("start", "end"), development, strict=True)

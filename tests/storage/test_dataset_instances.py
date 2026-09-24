@@ -219,7 +219,7 @@ def test_exact_requested_instance_ignores_corrupt_history_but_discovery_rejects(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     good = _write_instance(root, spec, _envelope(spec, seed=1))
     bad = _write_instance(root, spec, _envelope(spec, seed=2))
-    (bad / "_manifest" / "manifest.json").write_text("invalid")
+    (bad / "_manifest" / "manifest.json").write_text("invalid", encoding="utf-8")
     assert research._matching_instance(
         profile=profile, layout=layout, target_id="demo", requested_identity=good.name
     ) == (good.name, None)
@@ -228,14 +228,14 @@ def test_exact_requested_instance_ignores_corrupt_history_but_discovery_rejects(
     ) == (None, "persisted_instance_invalid")
     with pytest.raises(ValueError):
         discover_dataset_instances(root)
-    real_stat = Path.stat
+    real_stat = research.filesystem_stat
 
     def denied(path, *args, **kwargs):
         if path == good:
             raise PermissionError("synthetic_permission_denied")
         return real_stat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", denied)
+    monkeypatch.setattr(research, "filesystem_stat", denied)
     with pytest.raises(PermissionError, match="synthetic_permission_denied"):
         research._matching_instance(
             profile=profile,

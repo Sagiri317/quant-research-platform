@@ -17,6 +17,7 @@ from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    filesystem_iterdir,
     open_filesystem_file,
     require_unaliased_path,
 )
@@ -158,7 +159,7 @@ def iter_csv_snapshot(
 ) -> Iterator[tuple[object, ...]]:
     """Consume fully before exposing results; borrowed rows verify at exhaustion."""
     root = require_unaliased_path(root, error="raw_csv_path_invalid")
-    if set(path.name for path in root.iterdir()) != {
+    if set(path.name for path in filesystem_iterdir(root)) != {
         "response.csv",
         "response.metadata.json",
     }:

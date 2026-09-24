@@ -38,7 +38,8 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
-    native_filesystem_path,
+    filesystem_scandir,
+    filesystem_stat,
     require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
@@ -509,7 +510,7 @@ def read_prediction_output_bundle(
 
 def _require_exact_member_set(root: Path, expected_names: tuple[str, ...]) -> None:
     try:
-        with os.scandir(native_filesystem_path(root)) as entries:
+        with filesystem_scandir(root) as entries:
             observed_names = tuple(entry.name for entry in entries)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("output_member_set_mismatch") from exc
@@ -523,13 +524,13 @@ def _require_exact_member_set(root: Path, expected_names: tuple[str, ...]) -> No
 
 def _validated_bundle_root(root: Path) -> tuple[Path, os.stat_result]:
     try:
-        identity = os.stat(native_filesystem_path(root), follow_symlinks=False)
+        identity = filesystem_stat(root, follow_symlinks=False)
         require_unaliased_path(root, error="output_bundle_root_invalid")
         if not stat.S_ISDIR(identity.st_mode):
             raise ValueError("output_bundle_root_invalid")
         if not os.path.samestat(
             identity,
-            os.stat(native_filesystem_path(root), follow_symlinks=False),
+            filesystem_stat(root, follow_symlinks=False),
         ):
             raise ValueError("output_bundle_root_invalid")
         return root, identity

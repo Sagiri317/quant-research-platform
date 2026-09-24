@@ -72,6 +72,9 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
     read_dataset,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 _CALENDAR_COLUMNS = ("calendar_date", "source_market_type", "is_trading_day")
@@ -1821,7 +1824,7 @@ def _required_target_root(
 ) -> Path:
     marker = Path("__missing_portfolio_target__")
     root = layout.target_root(target_id, marker)
-    if root == marker or not root.exists() or root.name != expected_identity:
+    if root == marker or not filesystem_exists(root) or root.name != expected_identity:
         raise ValueError(f"portfolio_input_missing: {target_id}")
     return root
 

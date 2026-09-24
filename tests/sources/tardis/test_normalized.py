@@ -104,6 +104,6 @@ def test_normalized_manifest_mutation_during_iteration(tmp_path, monkeypatch):
         rows = iter_records(root, resource_policy=policy)
         next(rows)
         manifest["coverage"] = "changed"
-        (root / "manifest.json").write_text(json.dumps(manifest))
+        (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
         with pytest.raises(ValueError, match="manifest_changed"):
             rows.close()

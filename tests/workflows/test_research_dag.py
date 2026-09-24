@@ -817,7 +817,14 @@ def test_declared_processed_dependencies_are_not_removed_from_the_plan(
     }.issubset(panel["upstream_target_ids"])
 
 
-def test_interim_binding_receives_one_requested_target(tmp_path: Path) -> None:
+@pytest.mark.parametrize("deep_root", (False, True))
+def test_interim_binding_receives_one_requested_target(
+    tmp_path: Path, deep_root: bool
+) -> None:
+    if deep_root:
+        while len(str(tmp_path)) <= 270:
+            tmp_path /= "segment_" + "a" * 32
+        assert len(str(tmp_path)) > 260
     calls: list[tuple[str, ...]] = []
     data_id = "market_bars_1d"
 
@@ -875,8 +882,22 @@ def test_interim_binding_receives_one_requested_target(tmp_path: Path) -> None:
         data_ids=(data_id,),
     )
 
+    reused = research.data_materialize(
+        profile=profile,
+        layout=StorageLayout(project_root=tmp_path),
+        raw_root=tmp_path / "raw",
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    assert result["status"] == reused["status"] == "COMPLETE"
+    assert result["target_results"][0]["status"] == "BUILT"
+    assert reused["target_results"][0]["status"] == "REUSED"
+    assert (
+        result["target_results"][0]["instance_identity"]
+        == reused["target_results"][0]["instance_identity"]
+    )
     assert calls == [(data_id,)]
-    assert result["status"] == "COMPLETE"
 
 
 def test_source_identity_mutation_builds_a_new_immutable_instance(

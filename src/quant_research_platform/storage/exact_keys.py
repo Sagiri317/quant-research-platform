@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 import sqlite3
 import struct
 import sys
@@ -33,6 +32,7 @@ from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
 )
 from quant_research_platform.storage.identity import (
+    filesystem_mkdir,
     native_filesystem_path,
     require_unaliased_path,
 )
@@ -104,9 +104,7 @@ class ExactPrimaryKeyIndex:
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
-        Path(native_filesystem_path(self._scratch_parent)).mkdir(
-            parents=True, exist_ok=True
-        )
+        filesystem_mkdir(self._scratch_parent, parents=True, exist_ok=True)
         require_unaliased_path(
             self._scratch_parent, error="invalid_storage_scratch_path"
         )
@@ -127,7 +125,7 @@ class ExactPrimaryKeyIndex:
             self._scratch_reservation.resize(
                 2 * _EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES
             )
-            os.mkdir(native_filesystem_path(temporary_directory), mode=0o700)
+            filesystem_mkdir(temporary_directory, mode=0o700)
             claimed_temporary = True
             self._temporary_directory = temporary_directory
             require_unaliased_path(
@@ -617,31 +615,22 @@ class ExactPrimaryKeyIndex:
             for (position,) in admitted:
                 position_state[keep_count] = int(position)
                 keep_count += 1
-            reserve = connection.execute(
-                "SELECT COALESCE(SUM(27 + length(CAST(namespace AS BLOB)) "
-                "+ length(payload) + length(value)), 0), COUNT(*) FROM ("
-                "SELECT incoming.namespace, incoming.payload, MIN(incoming.value) "
-                "AS value FROM comparison_rows AS incoming "
-                "LEFT JOIN exact_keys AS existing "
-                "ON existing.namespace = incoming.namespace "
-                "AND existing.payload = incoming.payload "
-                "WHERE existing.payload IS NULL "
-                "GROUP BY incoming.namespace, incoming.payload)"
-            ).fetchone()
-            assert reserve is not None
-            logical_bytes = int(reserve[0])
-            row_count = int(reserve[1])
-            if logical_bytes > 0:
-                # WITHOUT ROWID table, doubled for journal, with B-tree page slack.
-                reserve_bytes = 2 * (
-                    logical_bytes + 4 * EXACT_KEY_SQLITE_PAGE_BYTES * row_count
+            with handle_preserving_primary(
+                connection.execute(
+                    "SELECT incoming.namespace, incoming.payload, MIN(incoming.value) "
+                    "FROM comparison_rows AS incoming "
+                    "LEFT JOIN exact_keys AS existing "
+                    "ON existing.namespace = incoming.namespace "
+                    "AND existing.payload = incoming.payload "
+                    "WHERE existing.payload IS NULL "
+                    "GROUP BY incoming.namespace, incoming.payload"
                 )
-                self._admit_physical_write(reserve_bytes)
-            connection.execute(
-                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                "SELECT namespace, payload, MIN(value) FROM comparison_rows "
-                "GROUP BY namespace, payload"
-            )
+            ) as new_rows:
+                connection.executemany(
+                    "INSERT INTO exact_keys(namespace, payload, value) "
+                    "VALUES (?, ?, ?)",
+                    self._gated_rows(new_rows),
+                )
             connection.execute("DELETE FROM comparison_rows")
         return (
             CompactPositionState(position_state, keep_count),

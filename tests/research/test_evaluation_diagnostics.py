@@ -213,9 +213,9 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
                 n_groups=2,
             )
         validate_output_bundle(root)
-        diagnostics = json.loads((root / "manifest.json").read_text())["metadata"][
-            "evaluation_diagnostics"
-        ]
+        diagnostics = json.loads((root / "manifest.json").read_text(encoding="utf-8"))[
+            "metadata"
+        ]["evaluation_diagnostics"]
         assert diagnostics["min_timestamp"] == times[0].isoformat()
         assert diagnostics["max_timestamp"] == times[-1].isoformat()
         assert policy.used_memory_bytes == 0

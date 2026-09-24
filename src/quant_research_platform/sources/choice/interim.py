@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import math
-import os
 import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
@@ -60,6 +59,7 @@ from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     content_hash_for_files,
     dataset_file_identity,
+    filesystem_scandir,
     require_unaliased_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -143,7 +143,7 @@ def normalize_first_disclosure_frame(frame: pd.DataFrame) -> pd.DataFrame:
 def _raw_requests(raw_root: Path, *, financial: bool):
     root = require_unaliased_path(Path(raw_root), error="choice_raw_identity_changed")
     try:
-        entries = os.scandir(root / "css")
+        entries = filesystem_scandir(root / "css")
     except FileNotFoundError:
         return
     except NotADirectoryError as error:

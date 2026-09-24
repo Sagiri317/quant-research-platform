@@ -49,6 +49,9 @@ from quant_research_platform.storage.identity import (
     _DigestingReader,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    filesystem_gzip_open,
+    filesystem_stat,
+    open_filesystem_file,
     require_unaliased_path,
 )
 from quant_research_platform.storage.raw_snapshots import MAX_RECORD_BYTES
@@ -198,7 +201,7 @@ def _filename(date: str, offset: int, *, exchange=EXCHANGE) -> str:
 def _verified_file(path: Path, *, expected_sha256=None):
     require_unaliased_path(path, error="tardis_raw_identity_changed")
     identity = dataset_file_identity(path)
-    with handle_preserving_primary(path.open("rb")) as handle:
+    with handle_preserving_primary(open_filesystem_file(path, "rb")) as handle:
         if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity:
             raise ValueError("tardis_raw_identity_changed")
         reader = _DigestingReader(handle) if expected_sha256 is not None else handle
@@ -472,11 +475,13 @@ def _publish_slices(
         ):
             tracker = _ObservedStreams(exchange, observe_trade=observe_trade)
             gaps = streams.enter_context(
-                handle_preserving_primary(gzip.open(gap_path, "wt", encoding="utf-8"))
+                handle_preserving_primary(
+                    filesystem_gzip_open(gap_path, "wt", encoding="utf-8")
+                )
             )
             intervals = streams.enter_context(
                 handle_preserving_primary(
-                    gzip.open(interval_path, "wt", encoding="utf-8")
+                    filesystem_gzip_open(interval_path, "wt", encoding="utf-8")
                 )
             )
             for offset in range(
@@ -488,7 +493,10 @@ def _publish_slices(
                 digest = hashlib.sha256()
                 size = 0
                 with policy.lease("tardis.raw_copy", 2 * _COPY_BYTES):
-                    with open_slice(offset) as response, target.open("xb") as output:
+                    with (
+                        open_slice(offset) as response,
+                        open_filesystem_file(target, "xb") as output,
+                    ):
                         while block := response.read(min(_COPY_BYTES, remaining + 1)):
                             if len(block) > remaining:
                                 raise ValueError("tardis_download_budget_exceeded")
@@ -606,13 +614,13 @@ def _publish_slices(
             def descriptor(path, count):
                 with (
                     policy.lease("tardis.metadata_hash", 4 * _COPY_BYTES),
-                    path.open("rb") as handle,
+                    open_filesystem_file(path, "rb") as handle,
                 ):
                     digest = hashlib.file_digest(handle, "sha256").hexdigest()
                 return {
                     "path": path.name,
                     "sha256": digest,
-                    "compressed_bytes": path.stat().st_size,
+                    "compressed_bytes": filesystem_stat(path).st_size,
                     "record_count": count,
                 }
 

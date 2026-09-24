@@ -868,7 +868,7 @@ def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
     with choice_session(SDK(response())) as session:
         root, _ = _disclosure(session, layout)
     sidecar = root / "response.metadata.json"
-    payload = json.loads(sidecar.read_text())
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
     if mutation == "metadata_missing":
         del payload["metadata"]
     elif mutation == "metadata_type":
@@ -883,7 +883,9 @@ def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
         payload["metadata"]["request"]["cutoff"] = 1
     elif mutation == "csv_missing":
         (root / "response.csv").unlink()
-    sidecar.write_text("{" if mutation == "json_corrupt" else json.dumps(payload))
+    sidecar.write_text(
+        "{" if mutation == "json_corrupt" else json.dumps(payload), encoding="utf-8"
+    )
     with runtime_resource_policy_scope() as policy:
         with pytest.raises(ValueError):
             interim.source_content_identity(
@@ -902,9 +904,9 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
     with choice_session(SDK(response())) as session:
         root, _ = _disclosure(session, layout)
     sidecar = root / "response.metadata.json"
-    payload = json.loads(sidecar.read_text())
+    payload = json.loads(sidecar.read_text(encoding="utf-8"))
     del payload["metadata"]["request"]
-    sidecar.write_text(json.dumps(payload))
+    sidecar.write_text(json.dumps(payload), encoding="utf-8")
     profile = research_profile()
     result = research.research_run(
         profile=profile,
@@ -938,14 +940,14 @@ def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, bou
     if boundary == "metadata":
         monkeypatch.setattr(interim, "read_manifest", fail)
     else:
-        original = interim.os.scandir
+        original = interim.filesystem_scandir
 
         def scan(path):
             if str(path) == str(layout.raw_source_root("choice") / "css"):
                 raise error
             return original(path)
 
-        monkeypatch.setattr(interim.os, "scandir", scan)
+        monkeypatch.setattr(interim, "filesystem_scandir", scan)
     with pytest.raises(type(error)) as caught:
         research.data_materialize(
             profile=research_profile(),

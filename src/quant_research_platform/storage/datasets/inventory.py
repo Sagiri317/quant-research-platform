@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 import sqlite3
 import sys
@@ -32,6 +31,8 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     _hash_file_content,
     dataset_file_identity,
+    filesystem_mkdir,
+    filesystem_scandir,
     native_filesystem_path,
     path_is_filesystem_alias,
     require_unaliased_path,
@@ -47,7 +48,7 @@ _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES = 32 * DATASET_INVENTORY_RESERVE
 def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
     """Map vanished directories before yielding entries to business callbacks."""
     try:
-        entries = os.scandir(native_filesystem_path(directory))
+        entries = filesystem_scandir(directory)
     except (FileNotFoundError, NotADirectoryError) as error:
         raise ValueError("invalid_dataset_part_files") from error
     with handle_preserving_primary(entries):
@@ -127,9 +128,7 @@ class DatasetSessionInventory:
             require_unaliased_path(
                 self._scratch_parent, error="invalid_storage_scratch_path"
             )
-            Path(native_filesystem_path(self._scratch_parent)).mkdir(
-                parents=True, exist_ok=True
-            )
+            filesystem_mkdir(self._scratch_parent, parents=True, exist_ok=True)
             require_unaliased_path(
                 self._scratch_parent, error="invalid_storage_scratch_path"
             )
@@ -149,7 +148,7 @@ class DatasetSessionInventory:
             self._scratch_reservation.resize(
                 _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
             )
-            os.mkdir(native_filesystem_path(temporary_directory), mode=0o700)
+            filesystem_mkdir(temporary_directory, mode=0o700)
             claimed_temporary = True
             self._temporary_directory = temporary_directory
             require_unaliased_path(

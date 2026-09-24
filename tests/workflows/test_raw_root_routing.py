@@ -118,6 +118,7 @@ def test_crypto_plan_preserves_source_system_io_failure(tmp_path, monkeypatch):
         HFT_PANEL_DATA_ID,
     )
     from quant_research_platform.profiles.research import CRYPTO_PROFILE_ID
+    from quant_research_platform.sources.binance import replay as binance_replay
     from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
     from tests.sources.binance.test_replay import _agg_trade, _write_run
 
@@ -126,14 +127,14 @@ def test_crypto_plan_preserves_source_system_io_failure(tmp_path, monkeypatch):
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
     primary = OSError(errno.EIO, "controlled_io_failure")
-    original = Path.lstat
+    original = binance_replay.filesystem_stat
 
     def fail(path, *args, **kwargs):
         if path == root / "run.json":
             raise primary
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "lstat", fail)
+    monkeypatch.setattr(binance_replay, "filesystem_stat", fail)
     with pytest.raises(OSError) as caught:
         research.plan_targets(
             profile=research_profile(CRYPTO_PROFILE_ID),
@@ -182,14 +183,14 @@ def test_plan_preserves_persisted_instance_system_io_failure(tmp_path, monkeypat
         planned["targets"][0]["requested_identity"],
     )
     primary = OSError(5, "synthetic_storage_io")
-    original = Path.stat
+    original = research.filesystem_stat
 
     def stat(path, *args, **kwargs):
         if path == target:
             raise primary
         return original(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", stat)
+    monkeypatch.setattr(research, "filesystem_stat", stat)
     with pytest.raises(OSError) as caught:
         research.plan_targets(**arguments)
     assert caught.value is primary

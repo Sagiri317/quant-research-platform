@@ -69,7 +69,7 @@ def test_content_hash_close_preserves_primary_and_closes_file(
             raise OSError("close_secondary")
 
     monkeypatch.setattr(
-        identity, "open", lambda *_args, **_kwargs: Handle(), raising=False
+        identity, "open_filesystem_file", lambda *_args, **_kwargs: Handle()
     )
     try:
         with runtime_resource_policy_scope() as policy:
@@ -1124,7 +1124,7 @@ def test_opened_parquet_close_preserves_generator_exit(
         (),
         {"st_dev": 1, "st_ino": 2, "st_size": 3, "st_mtime_ns": 4},
     )()
-    monkeypatch.setattr(Path, "open", lambda *_a, **_k: Handle())
+    monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: Handle())
     monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
     monkeypatch.setattr(
         physical,
@@ -1191,7 +1191,7 @@ def test_opened_parquet_reserves_metadata_for_lifetime_and_scales_with_footer(
             st_size=handle.size,
             st_mtime_ns=4,
         )
-        monkeypatch.setattr(Path, "open", lambda *_a, **_k: handle)
+        monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: handle)
         monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
         monkeypatch.setattr(
             physical,
@@ -1271,7 +1271,7 @@ def test_opened_parquet_rejects_metadata_before_constructor_and_releases_lease(
         st_size=handle.size,
         st_mtime_ns=4,
     )
-    monkeypatch.setattr(Path, "open", lambda *_a, **_k: handle)
+    monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: handle)
     monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
     monkeypatch.setattr(
         physical,
@@ -1400,7 +1400,7 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
             pass
 
     metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
-    monkeypatch.setattr(Path, "open", lambda *_a, **_k: Handle())
+    monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: Handle())
     monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
     monkeypatch.setattr(
         physical,
@@ -1457,7 +1457,7 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
             pass
 
     metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
-    monkeypatch.setattr(Path, "open", lambda *_a, **_k: Handle())
+    monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: Handle())
     monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
     monkeypatch.setattr(
         physical,
@@ -1509,8 +1509,8 @@ def test_bounded_manifest_read_preserves_body_primary_over_handle_close(
     metadata = path.stat()
     primary = primary_type("body_primary")
     monkeypatch.setattr(
-        Path,
-        "open",
+        manifests,
+        "open_filesystem_file",
         lambda *_args, **_kwargs: _BodyAndCloseFailingHandle(primary),
     )
     monkeypatch.setattr(manifests.os, "fstat", lambda _fd: metadata)
@@ -1706,7 +1706,7 @@ def test_compare_rechecks_artifact_roots_before_each_exists_probe(
     right = Path("right")
     validations = {left: 0, right: 0}
     probes = {left: 0, right: 0}
-    original_exists = Path.exists
+    original_exists = comparison.filesystem_exists
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
@@ -1731,7 +1731,7 @@ def test_compare_rechecks_artifact_roots_before_each_exists_probe(
         require_root,
         raising=False,
     )
-    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(comparison, "filesystem_exists", exists)
     monkeypatch.setattr(
         comparison,
         "open_dataset_session",
@@ -1750,7 +1750,7 @@ def test_compare_maps_aliased_root_before_exists_probe(
 ) -> None:
     left = Path("left")
     right = Path("right")
-    original_exists = Path.exists
+    original_exists = comparison.filesystem_exists
 
     def reject_alias(path: Path) -> Path:
         if Path(path) == left:
@@ -1769,7 +1769,7 @@ def test_compare_maps_aliased_root_before_exists_probe(
             raise AssertionError("dataset_exists_before_artifact_root_alias_gate")
         return original_exists(path)
 
-    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(comparison, "filesystem_exists", exists)
 
     result = comparison.compare_datasets(left, right, resource_policy=None)
 
@@ -1791,7 +1791,7 @@ def test_compare_maps_ancestor_alias_before_public_exists_probe(
         "path_is_filesystem_alias",
         lambda candidate: candidate == aliased_parent,
     )
-    original_exists = Path.exists
+    original_exists = comparison.filesystem_exists
 
     def exists(path: Path) -> bool:
         candidate = Path(path)
@@ -1801,7 +1801,7 @@ def test_compare_maps_ancestor_alias_before_public_exists_probe(
             return True
         return original_exists(path)
 
-    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(comparison, "filesystem_exists", exists)
 
     result = comparison.compare_datasets(left, right, resource_policy=None)
 
@@ -1821,7 +1821,7 @@ def test_compare_internal_recheck_blocks_new_ancestor_alias_before_exists(
     gate_count = 0
     probe_count = {left: 0, right: 0}
     original_require = comparison.require_artifact_root
-    original_exists = Path.exists
+    original_exists = comparison.filesystem_exists
 
     def require_root(path: Path) -> Path:
         nonlocal gate_count
@@ -1843,7 +1843,7 @@ def test_compare_internal_recheck_blocks_new_ancestor_alias_before_exists(
 
     monkeypatch.setattr(comparison, "require_artifact_root", require_root)
     monkeypatch.setattr(identity, "path_is_filesystem_alias", is_alias)
-    monkeypatch.setattr(Path, "exists", exists)
+    monkeypatch.setattr(comparison, "filesystem_exists", exists)
 
     result = comparison.compare_datasets(
         left,
@@ -1942,7 +1942,7 @@ def test_content_identity_distinguishes_invalid_from_fatal(
         if boundary == "stat":
             patch.setattr(identity.os, "stat", fail)
         else:
-            patch.setattr(identity, "open", fail, raising=False)
+            patch.setattr(identity, "open_filesystem_file", fail)
         with pytest.raises(
             ValueError if failure == "missing" else type(primary)
         ) as caught:
@@ -1989,7 +1989,20 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
         path = next(root.rglob("*.csv"))
         owner = reference
     primary = OSError(errno.EIO, "primary")
-    original = os.stat if boundary == "stat" else Path.open
+    from quant_research_platform.sources.csmar import raw_schemas
+    from quant_research_platform.sources.reference import a_share_fees
+
+    target_owner = (
+        identity
+        if boundary == "stat"
+        else manifests
+        if source == "choice"
+        else raw_schemas
+        if source == "csmar"
+        else a_share_fees
+    )
+    operation = "filesystem_stat" if boundary == "stat" else "open_filesystem_file"
+    original = getattr(target_owner, operation)
 
     def fail(candidate, *args, **kwargs):
         if candidate == path or candidate == str(path):
@@ -1998,7 +2011,7 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
 
     with runtime_resource_policy_scope() as policy:
         with monkeypatch.context() as patch:
-            patch.setattr(os if boundary == "stat" else Path, boundary, fail)
+            patch.setattr(target_owner, operation, fail)
             with pytest.raises(OSError) as caught:
                 owner.source_content_identity(root, data_id)
             assert caught.value is primary
@@ -2051,18 +2064,16 @@ def test_persisted_storage_boundaries_preserve_serious_io(
         with monkeypatch.context() as patch:
             if boundary.endswith("instances_stat"):
                 owner = instances if boundary.startswith("dataset") else semantic
-                directory_identity = owner._directory_identity
+                original = owner.filesystem_stat
 
-                def checked_identity(path, *args):
+                def selected_stat(path, *args, **kwargs):
                     if path == logical / "instances":
-                        with monkeypatch.context() as stat_failure:
-                            stat_failure.setattr(os, "stat", fail)
-                            return directory_identity(path, *args)
-                    return directory_identity(path, *args)
+                        raise primary
+                    return original(path, *args, **kwargs)
 
-                patch.setattr(owner, "_directory_identity", checked_identity)
+                patch.setattr(owner, "filesystem_stat", selected_stat)
             elif boundary == "dataset_inventory_next":
-                original = os.scandir
+                original = inventory_owner.filesystem_scandir
 
                 class BrokenEntries:
                     def __init__(self, entries):
@@ -2076,36 +2087,51 @@ def test_persisted_storage_boundaries_preserve_serious_io(
 
                 def scan(path):
                     entries = original(path)
-                    return (
-                        BrokenEntries(entries)
-                        if str(path) == str(root / "data")
-                        else entries
-                    )
+                    return BrokenEntries(entries) if path == root / "data" else entries
 
-                patch.setattr(os, "scandir", scan)
-            elif boundary == "dataset_instances_manifest":
-                patch.setattr(instances, "read_dataset_manifest_evidence", fail)
-            elif boundary == "semantic_member_hash":
-                patch.setattr(semantic, "_hash_file_content", fail)
-            else:
-                attribute = "stat" if boundary.endswith("stat") else "scandir"
-                original = getattr(os, attribute)
+                patch.setattr(inventory_owner, "filesystem_scandir", scan)
+            elif boundary in {
+                "dataset_inventory",
+                "dataset_instances_scan",
+                "semantic_instances_scan",
+                "semantic_members_scan",
+            }:
+                owner = (
+                    inventory_owner
+                    if boundary == "dataset_inventory"
+                    else instances
+                    if boundary == "dataset_instances_scan"
+                    else semantic
+                )
+                original = owner.filesystem_scandir
                 target = (
                     root / "data"
-                    if boundary in {"dataset_inventory", "dataset_inventory_next"}
-                    else root / "model.pkl"
-                    if boundary == "semantic_member_stat"
+                    if boundary == "dataset_inventory"
                     else root
                     if boundary == "semantic_members_scan"
                     else logical / "instances"
                 )
 
+                def selected(path):
+                    if path == target:
+                        raise primary
+                    return original(path)
+
+                patch.setattr(owner, "filesystem_scandir", selected)
+            elif boundary == "dataset_instances_manifest":
+                patch.setattr(instances, "read_dataset_manifest_evidence", fail)
+            elif boundary == "semantic_member_hash":
+                patch.setattr(semantic, "_hash_file_content", fail)
+            else:
+                assert boundary == "semantic_member_stat"
+                original = semantic.filesystem_stat
+
                 def selected(path, *args, **kwargs):
-                    if str(path) == str(target):
+                    if path == root / "model.pkl":
                         raise primary
                     return original(path, *args, **kwargs)
 
-                patch.setattr(os, attribute, selected)
+                patch.setattr(semantic, "filesystem_stat", selected)
             with pytest.raises(type(primary)) as caught:
                 if boundary in {"dataset_inventory", "dataset_inventory_next"}:
                     read_dataset(root, resource_policy=policy)
@@ -2280,7 +2306,9 @@ def test_verified_file_handle_binds_decoder_and_preserves_primary(tmp_path, phas
             ) as caught:
                 with verified_file_handle(path, handle, expected_identity=expected):
                     assert handle.read() == b"trusted"
-                    replacement.replace(path)
+                    with path.open("r+b") as mutating:
+                        mutating.write(b"changed-content")
+                        mutating.truncate()
                     if phase == "primary":
                         raise primary
             if phase == "primary":

@@ -66,6 +66,10 @@ from quant_research_platform.storage.identity import (
     _DigestingReader,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    filesystem_read_bytes,
+    filesystem_scandir,
+    filesystem_stat,
+    open_filesystem_file,
     require_unaliased_path,
 )
 
@@ -238,7 +242,7 @@ class ObservationCoverageIndex:
         resource_policy: RuntimeResourcePolicy,
     ) -> None:
         try:
-            raw_handle = self._path.open("rb")
+            raw_handle = open_filesystem_file(self._path, "rb")
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("binance_replay_connection_intervals_invalid") from exc
         digesting_handle = _DigestingReader(raw_handle)
@@ -735,7 +739,7 @@ def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
     def read_root_identity() -> os.stat_result | None:
         require_unaliased_path(raw_root, error=_RAW_IDENTITY_ERROR)
         try:
-            metadata = raw_root.lstat()
+            metadata = filesystem_stat(raw_root, follow_symlinks=False)
         except FileNotFoundError:
             return None
         except NotADirectoryError as error:
@@ -783,7 +787,7 @@ def _capture_raw_file_identity(
 ) -> DatasetFileIdentity:
     raw_path = Path(path)
     try:
-        raw_path.lstat()
+        filesystem_stat(raw_path, follow_symlinks=False)
     except FileNotFoundError as error:
         if missing_is_file_not_found and expected_identity is None:
             raise FileNotFoundError(raw_path) from error
@@ -952,7 +956,7 @@ def _read_run_manifest(
         manifest: dict[str, Any] | None = None
         try:
             try:
-                raw = path.read_bytes()
+                raw = filesystem_read_bytes(path)
                 manifest = parse_qrp_json_object(raw)
             except (
                 FileNotFoundError,
@@ -1293,7 +1297,7 @@ def _verify_exact_run_tree(root: Path, declared_paths: set[str]) -> None:
         )
         require_unaliased_path(directory, error="binance_replay_file_path_invalid")
         try:
-            entries = os.scandir(directory)
+            entries = filesystem_scandir(directory)
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("binance_replay_file_manifest_mismatch") from exc
         with entries:
@@ -1303,7 +1307,7 @@ def _verify_exact_run_tree(root: Path, declared_paths: set[str]) -> None:
                     if relative_directory == Path(".")
                     else relative_directory / entry.name
                 )
-                path = Path(entry.path)
+                path = directory / entry.name
                 require_unaliased_path(path, error="binance_replay_file_path_invalid")
                 if relative in allowed_directories:
                     if not entry.is_dir(follow_symlinks=False):
@@ -1330,7 +1334,7 @@ def _sha256_file(
 ) -> str:
     with policy.lease("binance.replay.file_hash", _HASH_BUFFER_BYTES + 64 * 1024):
         try:
-            handle = path.open("rb")
+            handle = open_filesystem_file(path, "rb")
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("binance_replay_file_identity_mismatch") from exc
         try:
@@ -1387,7 +1391,7 @@ def _iter_raw_file(
     path = root / metadata["path"]
     bound = json_record_working_set_bytes(metadata["max_record_bytes"]) + 64 * 1024
     try:
-        raw_handle = path.open("rb")
+        raw_handle = open_filesystem_file(path, "rb")
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("binance_replay_raw_file_open_failed") from exc
     try:

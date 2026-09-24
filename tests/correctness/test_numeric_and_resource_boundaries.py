@@ -811,7 +811,9 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
                 expected
             ]
             assert (
-                (bundle / "summary.md").read_text().startswith("# Evaluation Summary")
+                (bundle / "summary.md")
+                .read_text(encoding="utf-8")
+                .startswith("# Evaluation Summary")
             )
         assert policy.used_memory_bytes == 0
 

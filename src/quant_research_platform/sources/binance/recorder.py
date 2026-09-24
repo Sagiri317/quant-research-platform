@@ -67,7 +67,13 @@ from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
 )
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_mkdir,
+    filesystem_stat,
+    open_filesystem_file,
+    require_unaliased_path,
+)
 
 SPOT_REST_BASE_URL = "https://data-api.binance.vision"
 FUTURES_REST_BASE_URL = "https://fapi.binance.com"
@@ -151,7 +157,7 @@ class RecorderConfig:
             _positive_number(value, error="binance_recorder_timeout_invalid")
         root = Path(self.output_root)
         require_unaliased_path(root, error="invalid_storage_write_path")
-        if root.exists():
+        if filesystem_exists(root):
             raise FileExistsError("binance_recorder_output_exists")
 
 
@@ -312,9 +318,9 @@ class _RunWriter:
         directory = (
             self.root / f"date={receive_time[:10]}" / f"hour={receive_time[11:13]}"
         )
-        directory.mkdir(parents=True, exist_ok=True)
+        filesystem_mkdir(directory, parents=True, exist_ok=True)
         path = directory / f"{symbol}_{market_type}_{data_kind}.jsonl.gz"
-        raw_handle = path.open("ab")
+        raw_handle = open_filesystem_file(path, "ab")
         try:
             gzip_handle = gzip.GzipFile(
                 fileobj=raw_handle,
@@ -369,7 +375,7 @@ class _RunWriter:
         if self._interval_gzip_handle is not None:
             return
         path = self.root / "connection_intervals.jsonl.gz"
-        raw_handle = path.open("wb")
+        raw_handle = open_filesystem_file(path, "wb")
         try:
             gzip_handle = gzip.GzipFile(
                 fileobj=raw_handle,
@@ -478,7 +484,7 @@ class _RunWriter:
             return {
                 "path": path.relative_to(self.root).as_posix(),
                 "record_count": self._interval_record_count,
-                "compressed_bytes": path.stat().st_size,
+                "compressed_bytes": filesystem_stat(path).st_size,
                 "sha256": digest,
             }
 
@@ -492,7 +498,7 @@ class _RunWriter:
             return [
                 {
                     **self._files[path],
-                    "compressed_bytes": path.stat().st_size,
+                    "compressed_bytes": filesystem_stat(path).st_size,
                     "sha256": _sha256_path(path, resource_policy),
                 }
                 for path in sorted(self._files)
@@ -511,7 +517,7 @@ def _sha256_path(path: Path, resource_policy: RuntimeResourcePolicy) -> str:
     with resource_policy.lease("binance.recorder.file_hash", 128 * 1024):
         digest = hashlib.sha256()
         buffer = bytearray(64 * 1024)
-        with path.open("rb") as handle:
+        with open_filesystem_file(path, "rb") as handle:
             while count := handle.readinto(buffer):
                 digest.update(memoryview(buffer)[:count])
         return digest.hexdigest()

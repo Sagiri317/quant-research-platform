@@ -52,7 +52,10 @@ from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
-from quant_research_platform.storage.identity import dataset_file_identity
+from quant_research_platform.storage.identity import (
+    dataset_file_identity,
+    filesystem_stat,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import iter_dataset_part_batches
@@ -91,7 +94,10 @@ def write_prediction_outputs(
                 require_free_disk_headroom(
                     temp_root,
                     reserve_bytes=2
-                    * sum(path.stat().st_size for _quarter, _family, path in paths),
+                    * sum(
+                        filesystem_stat(path).st_size
+                        for _quarter, _family, path in paths
+                    ),
                 )
                 active_frames = _merge_family_predictions(paths, required)
             write_summary = write_parquet_chunks(

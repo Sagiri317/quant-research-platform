@@ -3,7 +3,10 @@
 from contextlib import contextmanager
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    filesystem_is_file,
+    require_unaliased_path,
+)
 
 
 @contextmanager
@@ -13,8 +16,8 @@ def open_market_source(root, resource_policy=None):
     from quant_research_platform.sources.tardis.replay import open_tardis_archive
 
     root = require_unaliased_path(root, error="crypto_source_path_invalid")
-    official = (root / "run.json").is_file()
-    historical = (root / "manifest.json").is_file()
+    official = filesystem_is_file(root / "run.json")
+    historical = filesystem_is_file(root / "manifest.json")
     if official == historical:
         if official:
             raise ValueError("crypto_source_identity_ambiguous")

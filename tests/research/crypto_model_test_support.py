@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.business_manifest import canonical_json_hash
+from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.models import fitting, production
@@ -165,6 +166,42 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                     pd.Timestamp("1970-01-01T00:00:06"),
                 ),
             }
+            assert policy.used_memory_bytes == 0
+
+            def no_legal_validation(*args, **kwargs):
+                for selected in chunks(*args, **kwargs):
+                    if pd.Timestamp(kwargs["time_window"].start) == pd.Timestamp(
+                        "1970-01-01T00:00:04.300000"
+                    ):
+                        selected.loc[:, labels] = np.nan
+                    yield selected
+
+            with monkeypatch.context() as empty_patch:
+                empty_patch.setattr(
+                    production, "iter_research_dataset_chunks", no_legal_validation
+                )
+                empty_patch.setattr(
+                    production.fitting,
+                    "_fit_model_result_owned_from_frames",
+                    lambda *args, **kwargs: pytest.fail(
+                        "empty validation reached fitting"
+                    ),
+                )
+                empty_patch.setattr(
+                    production.TrialRecorder,
+                    "begin",
+                    lambda *args, **kwargs: pytest.fail(
+                        "empty validation wrote a trial"
+                    ),
+                )
+                with pytest.raises(
+                    PortfolioTargetBlocked,
+                    match="^crypto_model_validation_legal_rows_missing$",
+                ):
+                    with closing_iterator(
+                        results("run_crypto_empty_validation")
+                    ) as source:
+                        next(source)
             assert policy.used_memory_bytes == 0
 
             primary = KeyboardInterrupt("after refit")

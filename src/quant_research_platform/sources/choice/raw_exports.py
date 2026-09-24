@@ -23,6 +23,9 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.sources.choice.ids import SOURCE_ID
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_bounded_qrp_json,
@@ -196,7 +199,7 @@ class ChoiceRawSession:
             if bound > self.policy.working_set_headroom_bytes:
                 raise MemoryError("choice_request_exceeds_memory_plan")
             with self.policy.lease("choice.raw.request", bound):
-                if root.exists():
+                if filesystem_exists(root):
                     manifest = read_manifest(root / "response.metadata.json")
                     metadata = manifest["metadata"]
                     try:

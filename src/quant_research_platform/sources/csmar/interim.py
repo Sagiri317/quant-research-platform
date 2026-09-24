@@ -61,6 +61,8 @@ from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     content_hash_for_files,
+    filesystem_exists,
+    filesystem_stat,
     require_artifact_root,
     require_unaliased_path,
 )
@@ -404,7 +406,7 @@ def load_column_overrides(path: Path) -> Mapping[str, Mapping[str, object]]:
     candidate = require_unaliased_path(
         Path(path), error="csmar_column_overrides_identity_changed"
     )
-    if not candidate.exists():
+    if not filesystem_exists(candidate):
         return _validated_column_overrides(default_override_payload())
     try:
         _raw, payload = read_bounded_qrp_json(candidate)
@@ -599,7 +601,7 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
     policy = current_runtime_resource_policy()
     if policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    if not root.exists():
+    if not filesystem_exists(root):
         return None
     index = ExactPrimaryKeyIndex(
         primary_key=("dataset_path",),
@@ -1888,7 +1890,7 @@ def _iter_source_inputs(
             error="csmar_interim_source_parent_invalid",
         )
         try:
-            metadata = parent.lstat()
+            metadata = filesystem_stat(parent, follow_symlinks=False)
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("csmar_interim_source_parent_invalid") from exc
         if not stat.S_ISDIR(metadata.st_mode):

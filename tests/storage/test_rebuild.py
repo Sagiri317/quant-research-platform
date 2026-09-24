@@ -6,6 +6,11 @@ from pathlib import Path
 import pytest
 
 import quant_research_platform.storage.rebuild as rebuild
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -16,8 +21,11 @@ def test_rebuild_uses_canonical_unc_paths_without_network_access(monkeypatch) ->
     monkeypatch.setattr(
         rebuild, "require_unaliased_path", lambda path, **_kwargs: Path(path)
     )
-    monkeypatch.setattr(Path, "mkdir", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(rebuild.os, "mkdir", lambda path: created.append(str(path)))
+    monkeypatch.setattr(
+        rebuild,
+        "filesystem_mkdir",
+        lambda path, **_kwargs: created.append(str(native_filesystem_path(path))),
+    )
     monkeypatch.setattr(
         rebuild, "remove_owned_scratch", lambda path: cleaned.append(str(path))
     )
@@ -25,9 +33,10 @@ def test_rebuild_uses_canonical_unc_paths_without_network_access(monkeypatch) ->
         StorageLayout(Path(r"\\server\share\project"))
     ) as candidate:
         assert str(candidate.project_root).startswith(
-            "\\\\?\\UNC\\server\\share\\project\\.run\\.r-"
+            "\\\\server\\share\\project\\.run\\.r-"
         )
-    assert created == cleaned and len(created) == 1
+    assert created[-1] == str(native_filesystem_path(candidate.project_root))
+    assert cleaned == [str(candidate.project_root)]
 
 
 @pytest.mark.parametrize("long_path", (False, True))
@@ -43,9 +52,9 @@ def test_rebuild_candidate_success_cleans_owner_scratch(
         root = candidate.project_root
         assert root.name.startswith(".r-")
         assert root.parent.name == ".run"
-        (root / "evidence").write_text("candidate", encoding="utf-8")
+        filesystem_write_text(root / "evidence", "candidate", encoding="utf-8")
 
-    assert not root.exists()
+    assert not filesystem_exists(root)
 
 
 def test_rebuild_candidate_explicit_preserve_keeps_evidence(tmp_path: Path) -> None:

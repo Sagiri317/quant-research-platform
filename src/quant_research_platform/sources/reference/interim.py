@@ -32,6 +32,9 @@ from quant_research_platform.sources.reference.a_share_fees import (
 )
 from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.datasets.writing import write_dataset
+from quant_research_platform.storage.identity import (
+    filesystem_is_file,
+)
 from quant_research_platform.storage.layout import StorageLayout
 
 SOURCE_ID = SourceId("reference")
@@ -97,7 +100,7 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
     root = Path(raw_root)
     csv_path = root / "a_share_fee_schedule" / A_SHARE_FEE_CSV_NAME
     sidecar_path = root / "a_share_fee_schedule" / A_SHARE_FEE_SIDECAR_NAME
-    if not csv_path.is_file() or not sidecar_path.is_file():
+    if not filesystem_is_file(csv_path) or not filesystem_is_file(sidecar_path):
         return None
     return load_a_share_fee_source(reference_root=root).source_identity
 

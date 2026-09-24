@@ -32,6 +32,8 @@ from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     _file_identity_bytes,
+    filesystem_stat,
+    filesystem_walk,
     require_unaliased_path,
 )
 
@@ -346,7 +348,7 @@ def _raw_export_path_session(
 
     def read_root_identity() -> os.stat_result:
         try:
-            metadata = root.lstat()
+            metadata = filesystem_stat(root, follow_symlinks=False)
         except (FileNotFoundError, NotADirectoryError) as error:
             raise ValueError("csmar_raw_export_identity_changed") from error
         reparse_flag = getattr(metadata, "st_file_attributes", 0) & getattr(
@@ -370,7 +372,8 @@ def _raw_export_path_session(
 
     def iter_paths() -> Iterator[Path]:
         walker = iter(
-            root.walk(
+            filesystem_walk(
+                root,
                 follow_symlinks=False,
                 on_error=fail_walk,
             )

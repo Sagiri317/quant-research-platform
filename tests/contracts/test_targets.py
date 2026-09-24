@@ -314,6 +314,6 @@ def test_run_record_reader_rejects_wrong_json_container(tmp_path, field):
             if isinstance(value, dict)
             else {str(item): "discarded" for item in value}
         )
-        path.write_text(json.dumps(payload))
+        path.write_text(json.dumps(payload), encoding="utf-8")
         with pytest.raises(ValueError, match="research_run_record_invalid"):
             read_research_run_record(path)

@@ -32,7 +32,10 @@ from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
     ExactPrimaryKeyIndex,
 )
-from quant_research_platform.storage.identity import require_artifact_root
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    require_artifact_root,
+)
 
 
 def compare_datasets(
@@ -50,7 +53,7 @@ def compare_datasets(
             "INSPECTION_FAILED",
             summary={"error": "dataset_inspection_failed"},
         )
-    if not left_path.exists():
+    if not filesystem_exists(left_path):
         return _comparison("MISSING_LEFT")
     try:
         right_path = require_artifact_root(Path(right_root))
@@ -59,7 +62,7 @@ def compare_datasets(
             "INSPECTION_FAILED",
             summary={"error": "dataset_inspection_failed"},
         )
-    if not right_path.exists():
+    if not filesystem_exists(right_path):
         return _comparison("MISSING_RIGHT")
     requested_policy = resource_policy or current_runtime_resource_policy()
     with runtime_resource_policy_scope(requested_policy) as issued_policy:
@@ -82,10 +85,10 @@ def _compare_datasets_under_policy(
 ) -> DatasetComparison:
     try:
         left_path = require_artifact_root(Path(left_root))
-        if not left_path.exists():
+        if not filesystem_exists(left_path):
             return _comparison("MISSING_LEFT")
         right_path = require_artifact_root(Path(right_root))
-        if not right_path.exists():
+        if not filesystem_exists(right_path):
             return _comparison("MISSING_RIGHT")
         issued_policy = resource_policy
         with ExitStack() as retained:

@@ -80,6 +80,7 @@ from quant_research_platform.storage.exact_keys import (
 )
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
+    filesystem_mkdir,
     native_filesystem_path,
     require_artifact_root,
 )
@@ -1057,7 +1058,7 @@ def _bounded_persisted_tables(
 
 
 def write_parquet_file(table: pa.Table, path: Path) -> Path:
-    Path(native_filesystem_path(path.parent)).mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(path.parent, parents=True, exist_ok=True)
     persisted = table_with_decoded_row_bounds(table)
     policy = current_runtime_resource_policy()
     if policy is None:

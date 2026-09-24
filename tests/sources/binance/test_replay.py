@@ -96,16 +96,15 @@ def test_connection_coverage_gzip_constructor_failure_closes_raw(
     primary = KeyboardInterrupt("gzip_constructor_primary")
     raw_handle = io.BytesIO(b"not-consumed")
 
-    class FakePath:
-        def open(self, _mode: str):  # noqa: ANN202
-            return raw_handle
-
     def fail_gzip(*_args, **_kwargs):  # noqa: ANN202
         raise primary
 
     monkeypatch.setattr(replay.gzip, "GzipFile", fail_gzip)
+    monkeypatch.setattr(
+        replay, "open_filesystem_file", lambda *_args, **_kwargs: raw_handle
+    )
     index = object.__new__(replay.ObservationCoverageIndex)
-    index._path = FakePath()
+    index._path = Path("synthetic-coverage.gz")
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     try:
         with runtime_resource_policy_scope(policy):
@@ -127,13 +126,6 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
             self.close_calls += 1
             super().close()
 
-    class FakePath:
-        def __init__(self, handle: RawHandle) -> None:
-            self.handle = handle
-
-        def open(self, _mode: str) -> RawHandle:
-            return self.handle
-
     class FakeDatabase:
         def commit(self) -> None:
             return None
@@ -153,12 +145,15 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
     gzip_handle = FakeGzip()
     monkeypatch.setattr(replay.gzip, "GzipFile", lambda **_kwargs: gzip_handle)
     monkeypatch.setattr(
+        replay, "open_filesystem_file", lambda *_args, **_kwargs: raw_handle
+    )
+    monkeypatch.setattr(
         replay,
         "_verify_raw_file_handle",
         lambda *_args, **_kwargs: None,
     )
     index = object.__new__(replay.ObservationCoverageIndex)
-    index._path = FakePath(raw_handle)
+    index._path = Path("synthetic-coverage.gz")
     index.identity = object()
     index._descriptor = {
         "record_count": 0,
@@ -218,9 +213,9 @@ def test_replay_file_handle_cleanup_preserves_hash_primary(
         def close(self) -> None:
             raise OSError("handle_close")
 
-    class FakePath:
-        def open(self, _mode: str) -> FailingHandle:
-            return FailingHandle()
+    monkeypatch.setattr(
+        replay, "open_filesystem_file", lambda *_args, **_kwargs: FailingHandle()
+    )
 
     monkeypatch.setattr(
         replay,
@@ -236,7 +231,7 @@ def test_replay_file_handle_cleanup_preserves_hash_primary(
 
     with runtime_resource_policy_scope(policy):
         with pytest.raises(KeyboardInterrupt, match="hash_primary") as raised:
-            replay._sha256_file(FakePath(), object(), policy)
+            replay._sha256_file(Path("synthetic-member.gz"), object(), policy)
 
     assert raised.value.__notes__ == [
         "Binance replay file handle close also failed: OSError"
@@ -803,7 +798,7 @@ def test_replay_merge_closes_all_streams_without_collecting_retained_error(
         ],
     )
     handles = []
-    original_open = Path.open
+    original_open = replay.open_filesystem_file
 
     def observe_open(path: Path, *args, **kwargs):
         handle = original_open(path, *args, **kwargs)
@@ -818,7 +813,7 @@ def test_replay_merge_closes_all_streams_without_collecting_retained_error(
     with runtime_resource_policy_scope(policy):
         with open_recorder_run(root, policy) as run:
             baseline = policy.used_memory_bytes
-            monkeypatch.setattr(Path, "open", observe_open)
+            monkeypatch.setattr(replay, "open_filesystem_file", observe_open)
             records = run.iter_records(market_type=FUTURES_MARKET_TYPE)
             if invalid_record:
                 with pytest.raises(ValueError, match="monotonic") as retained:
@@ -1798,7 +1793,7 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
         compressed_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()
     )
     (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
-    real_open = Path.open
+    real_open = replay.open_filesystem_file
     handles = []
     high_water = 0
 
@@ -1810,7 +1805,7 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
             high_water = max(high_water, sum(not item.closed for item in handles))
         return handle
 
-    monkeypatch.setattr(Path, "open", tracked)
+    monkeypatch.setattr(replay, "open_filesystem_file", tracked)
     with runtime_resource_policy_scope() as policy:
         with replay.open_recorder_run(root, policy) as run:
             baseline = policy.used_memory_bytes
@@ -1920,25 +1915,26 @@ def test_recorder_run_rejects_member_replacement_between_capture_and_open(
     )
     member = root / manifest["files"][0]["path"]
     original = member.read_bytes()
-    replacement = tmp_path / "replacement.jsonl.gz"
-    replacement.write_bytes(original)
-    original_open = Path.open
-    replaced = []
+    original_open = replay.open_filesystem_file
+    mutated = []
 
-    def replace_before_open(path, *args, **kwargs):
-        if path == member and not replaced:
-            os.replace(replacement, member)
-            replaced.append(True)
+    def mutate_before_open(path, *args, **kwargs):
+        if path == member and not mutated:
+            before = member.stat()
+            os.utime(
+                member, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000)
+            )
+            mutated.append(True)
         return original_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", replace_before_open)
+    monkeypatch.setattr(replay, "open_filesystem_file", mutate_before_open)
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with runtime_resource_policy_scope(policy):
         with pytest.raises(ValueError, match="^binance_raw_export_identity_changed$"):
             with open_recorder_run(root, policy):
                 pytest.fail("replaced recorder member admitted")
         assert policy.used_memory_bytes == 0
-    assert replaced == [True]
+    assert mutated == [True]
     assert member.read_bytes() == original
 
 
@@ -2013,7 +2009,7 @@ def test_connection_queries_do_not_materialize_long_history(tmp_path):
     manifest["capture"]["connection_intervals"].update(
         record_count=2001, compressed_bytes=sidecar.stat().st_size, sha256=digest
     )
-    (root / "run.json").write_text(json.dumps(manifest))
+    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2, explicit_cap_bytes=16 * 1024**2
     )
@@ -2194,7 +2190,7 @@ def test_default_multisymbol_reader_merges_same_named_rest_streams(tmp_path):
         compressed_bytes=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),
     )
-    (root / "run.json").write_text(json.dumps(manifest))
+    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
     with runtime_resource_policy_scope() as policy:
         with open_recorder_run(root, policy) as run:
             assert [row["capture_seq"] for row in run.iter_records()] == list(
@@ -2278,7 +2274,7 @@ def test_native_connection_must_match_record_symbol_and_stream(
     member = manifest["capture"]["connection_intervals"]
     member["compressed_bytes"] = sidecar.stat().st_size
     member["sha256"] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
-    (root / "run.json").write_text(json.dumps(manifest))
+    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
     with runtime_resource_policy_scope() as policy:
         error = (
             "binance_replay_connection_coverage_invalid"
@@ -2321,7 +2317,7 @@ def test_native_file_stream_matches_symbol_and_kind(tmp_path, stream):
         ],
     )
     manifest["files"][0]["stream"] = stream
-    (root / "run.json").write_text(json.dumps(manifest))
+    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
     with runtime_resource_policy_scope() as policy:
         with (
             pytest.raises(ValueError, match="binance_replay_file_manifest_invalid"),
@@ -2361,15 +2357,17 @@ def test_recorder_file_boundaries_preserve_serious_io(tmp_path, monkeypatch, bou
         "coverage_open": root / "connection_intervals.jsonl.gz",
     }.get(boundary, member)
     primary = OSError(errno.EIO, "controlled_io_failure")
-    owner = os if boundary in ("member_fstat", "scandir") else Path
+    owner = os if boundary == "member_fstat" else replay
     operation = (
         "fstat"
         if boundary == "member_fstat"
-        else "scandir"
+        else "filesystem_scandir"
         if boundary == "scandir"
-        else "lstat"
+        else "filesystem_stat"
         if boundary.endswith("stat")
-        else "open"
+        else "filesystem_read_bytes"
+        if boundary == "manifest_open"
+        else "open_filesystem_file"
     )
     original = getattr(owner, operation)
 

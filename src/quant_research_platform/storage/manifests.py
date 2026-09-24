@@ -24,7 +24,10 @@ from quant_research_platform.storage.datasets.schema import (
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
-    native_filesystem_path,
+    filesystem_is_dir,
+    filesystem_is_file,
+    filesystem_scandir,
+    filesystem_stat,
     open_filesystem_file,
     require_artifact_root,
     require_unaliased_path,
@@ -84,13 +87,13 @@ def read_bounded_qrp_json_directory(
     candidate = require_unaliased_path(
         Path(root), error="dataset_metadata_directory_invalid"
     )
-    if not candidate.is_dir():
+    if not filesystem_is_dir(candidate):
         raise ValueError("dataset_metadata_directory_invalid")
 
     def member_names() -> tuple[str, ...]:
         names: list[str] = []
         try:
-            with os.scandir(native_filesystem_path(candidate)) as entries:
+            with filesystem_scandir(candidate) as entries:
                 for entry in entries:
                     if len(names) >= max_members:
                         raise ValueError("dataset_metadata_member_limit_exceeded")
@@ -101,7 +104,7 @@ def read_bounded_qrp_json_directory(
                     ):
                         raise ValueError("dataset_metadata_directory_member_invalid")
                     names.append(entry.name)
-            after = os.stat(native_filesystem_path(candidate), follow_symlinks=False)
+            after = filesystem_stat(candidate, follow_symlinks=False)
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("dataset_metadata_directory_invalid") from exc
         if _directory_identity(before) != _directory_identity(after):
@@ -109,7 +112,7 @@ def read_bounded_qrp_json_directory(
         return tuple(sorted(names))
 
     try:
-        before = os.stat(native_filesystem_path(candidate), follow_symlinks=False)
+        before = filesystem_stat(candidate, follow_symlinks=False)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_directory_invalid") from exc
     names = member_names()
@@ -151,9 +154,7 @@ def read_dataset_manifest_evidence(
     manifest_path = root / "_manifest" / "manifest.json"
     require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
     require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
-    if not os.path.isfile(native_filesystem_path(spec_path)) or not os.path.isfile(
-        native_filesystem_path(manifest_path)
-    ):
+    if not filesystem_is_file(spec_path) or not filesystem_is_file(manifest_path):
         raise FileNotFoundError("dataset_manifest_evidence_missing")
     paths = {"spec.json": spec_path, "_manifest/manifest.json": manifest_path}
     if expected_member_identities is not None and set(

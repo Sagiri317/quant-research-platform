@@ -910,7 +910,7 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tm
             descriptor = manifest["capture"]["connection_intervals"]
             descriptor["compressed_bytes"] = sidecar.stat().st_size
             descriptor["sha256"] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
-            (raw / "run.json").write_text(json.dumps(manifest))
+            (raw / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
         write_hft_funding_fixture(raw)
         profile = research_profile(CRYPTO_PROFILE_ID)
         plan = hft_research_plan()
@@ -1052,7 +1052,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
         raw, date="2026-09-01", offset_minutes=1430, slices=slices, byte_budget=1024**2
     )
     settlements = tmp_path / "settlements.json"
-    settlements.write_text("[]")
+    settlements.write_text("[]", encoding="utf-8")
     start_ms = pd.Timestamp("2026-09-01T23:50:00Z").value // 1_000_000
     with open_market_source(raw) as source:
         for symbol in ("BTCUSDT", "ETHUSDT"):

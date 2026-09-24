@@ -5,7 +5,6 @@ from __future__ import annotations
 import errno
 import os
 import re
-import shutil
 import stat
 import sys
 from collections.abc import Callable, Iterator
@@ -19,7 +18,13 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage.identity import (
+    filesystem_open_descriptor,
+    filesystem_remove_tree,
+    filesystem_rename,
+    filesystem_stat,
+    filesystem_unlink,
+)
 
 
 @contextmanager
@@ -46,7 +51,7 @@ def move_path_no_replace(source: Path, target: Path) -> None:
     source = Path(source)
     target = Path(target)
     if os.name == "nt":
-        os.rename(native_filesystem_path(source), native_filesystem_path(target))
+        filesystem_rename(source, target)
         return
     if not sys.platform.startswith("linux"):
         raise OSError(errno.ENOTSUP, "no-replace move is unsupported", target)
@@ -77,15 +82,14 @@ def remove_owned_scratch(
     | None = None,
 ) -> None:
     path = Path(path)
-    target = native_filesystem_path(path)
     try:
-        current = os.lstat(target)
+        current = filesystem_stat(path, follow_symlinks=False)
     except FileNotFoundError:
         return
     if stat.S_ISDIR(current.st_mode):
-        shutil.rmtree(target, onexc=onexc)
+        filesystem_remove_tree(path, onexc=onexc)
     else:
-        os.unlink(target)
+        filesystem_unlink(path)
 
 
 def open_owned_scratch_file(
@@ -96,9 +100,7 @@ def open_owned_scratch_file(
     """Create and claim one exclusive ordinary scratch file."""
 
     path = Path(path)
-    descriptor = os.open(
-        native_filesystem_path(path), os.O_RDWR | os.O_CREAT | os.O_EXCL
-    )
+    descriptor = filesystem_open_descriptor(path, os.O_RDWR | os.O_CREAT | os.O_EXCL)
     try:
         if encoding is None:
             handle = os.fdopen(descriptor, "w+b")

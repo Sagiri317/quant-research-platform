@@ -36,6 +36,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.schema import data_spec_payload
+from quant_research_platform.storage.identity import filesystem_read_text
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows.diagnostics import schema_inventory
 from tests.helpers.runtime_resources import capture_test_policy
@@ -53,7 +54,14 @@ def _collect_inventory(
         return {"schema_id": "qrp-schema-inventory", "datasets": list(items)}
 
 
-def test_schema_inventory_keeps_all_current_roots_and_instances(tmp_path: Path) -> None:
+@pytest.mark.parametrize("deep_root", (False, True))
+def test_schema_inventory_keeps_all_current_roots_and_instances(
+    tmp_path: Path, deep_root: bool
+) -> None:
+    if deep_root:
+        while len(str(tmp_path)) <= 270:
+            tmp_path /= "segment_" + "a" * 32
+        assert len(str(tmp_path)) > 260
     layout = StorageLayout(tmp_path)
     common = {
         "data_id": "inventory_current",
@@ -144,7 +152,7 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(tmp_path: Path) 
             resource_policy=policy,
         )
         assert policy.used_memory_bytes == 0
-    items = json.loads(output.read_text(encoding="utf-8"))["datasets"]
+    items = json.loads(filesystem_read_text(output, encoding="utf-8"))["datasets"]
     assert len(items) == 9
     assert sum(item["row_count"] for item in items) == 18
     assert [item["logical_relative_root"] for item in items] == sorted(expected)
@@ -169,7 +177,9 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(tmp_path: Path) 
         private_cli.app, ["--project-root", str(tmp_path), "--output", str(cli_output)]
     )
     assert result.exit_code == 0, result.output
-    cli_items = json.loads(cli_output.read_text(encoding="utf-8"))["datasets"]
+    cli_items = json.loads(filesystem_read_text(cli_output, encoding="utf-8"))[
+        "datasets"
+    ]
     assert [item["logical_relative_root"] for item in cli_items] == sorted(expected)
 
 
@@ -437,7 +447,7 @@ def test_schema_inventory_streams_accumulated_items_over_budget(
         resource_policy=policy,
     )
 
-    payload = json.loads(output.read_text(encoding="utf-8"))
+    payload = json.loads(filesystem_read_text(output, encoding="utf-8"))
     assert len(payload["datasets"]) == len(artifact_roots)
     assert output.stat().st_size > policy.memory_budget_bytes
     assert policy.used_memory_bytes == 0

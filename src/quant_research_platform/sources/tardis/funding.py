@@ -35,6 +35,8 @@ from quant_research_platform.sources.tardis.raw import SLICE_MINUTES, iter_nativ
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
+    filesystem_write_bytes,
+    open_filesystem_file,
     require_unaliased_path,
 )
 from quant_research_platform.storage.raw_snapshots import write_csv_snapshot
@@ -87,7 +89,7 @@ def import_funding_history(
     ):
         raw = payload = events = event = row = metadata = native = None
         try:
-            with path.open("rb") as handle:
+            with open_filesystem_file(path, "rb") as handle:
                 raw = handle.read(identity.size + 1)
             if identity != dataset_file_identity(path) or len(raw) != identity.size:
                 raise ValueError("tardis_funding_source_changed")
@@ -259,7 +261,7 @@ def import_funding_history(
                 checked = _manifest(root, symbol)
                 for _item in _records(root, checked):
                     pass
-                with path.open("rb") as handle:
+                with open_filesystem_file(path, "rb") as handle:
                     digest = hashlib.file_digest(handle, "sha256").hexdigest()
                 if (
                     identity != dataset_file_identity(path)
@@ -269,7 +271,7 @@ def import_funding_history(
 
             def publish(staging):
                 require_free_disk_headroom(staging, reserve_bytes=len(raw))
-                (staging / "settlements.json").write_bytes(raw)
+                filesystem_write_bytes(staging / "settlements.json", raw)
                 projected = rows()
                 with closing_iterator(projected):
                     write_csv_snapshot(

@@ -524,7 +524,7 @@ def test_run_ledger_references_have_no_arbitrary_member_limit(tmp_path):
     assert len(references) == 1026
     assert len({item["experiment_id"] for item in references}) == 1026
     root = layout.trial_ledger_root("run_test")
-    (root / "invalid").write_text("not a ledger")
+    (root / "invalid").write_text("not a ledger", encoding="utf-8")
     with pytest.raises(ValueError, match="trial_run_members_invalid"):
         research_run_trial_references(layout, "run_test")
 

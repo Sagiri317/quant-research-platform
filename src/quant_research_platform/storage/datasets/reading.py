@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import os
 import struct
 import sys
 from collections.abc import Callable, Iterator, Mapping
@@ -67,7 +66,8 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     _file_identity_bytes,
     dataset_file_identity,
-    native_filesystem_path,
+    filesystem_is_dir,
+    filesystem_is_file,
     require_artifact_root,
     require_unaliased_path,
 )
@@ -860,11 +860,11 @@ def open_dataset_session(
     require_unaliased_path(spec_path, error="dataset_metadata_file_invalid")
     require_unaliased_path(data_root, error="invalid_dataset_part_files")
     require_unaliased_path(manifest_path, error="dataset_metadata_file_invalid")
-    if not os.path.isfile(native_filesystem_path(spec_path)):
+    if not filesystem_is_file(spec_path):
         raise ValueError("dataset_spec_missing")
-    if not os.path.isdir(native_filesystem_path(data_root)):
+    if not filesystem_is_dir(data_root):
         raise ValueError("dataset_data_dir_missing")
-    if not os.path.isfile(native_filesystem_path(manifest_path)):
+    if not filesystem_is_file(manifest_path):
         raise ValueError("dataset_manifest_missing")
     try:
         spec_identity = dataset_file_identity(spec_path)

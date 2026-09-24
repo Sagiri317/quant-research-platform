@@ -40,7 +40,7 @@ from quant_research_platform.storage.exact_keys import (
     ExactPrimaryKeyIndex,
 )
 from quant_research_platform.storage.identity import (
-    native_filesystem_path,
+    filesystem_mkdir,
     require_unaliased_path,
 )
 from quant_research_platform.storage.parquet import (
@@ -88,7 +88,7 @@ def write_parquet_chunks(
     require_free_disk_headroom(
         final_path.parent, reserve_bytes=_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
     )
-    final_path.parent.mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(final_path.parent, parents=True, exist_ok=True)
     require_unaliased_path(final_path, error="invalid_output_write_path")
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])
@@ -265,7 +265,7 @@ def write_parquet(
             payload_bytes * 2,
         ),
     )
-    Path(native_filesystem_path(final_path.parent)).mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(final_path.parent, parents=True, exist_ok=True)
     require_unaliased_path(final_path, error="invalid_output_write_path")
     temp_path = final_path.with_name(
         scratch_owner.owned_scratch_name(".f-", uuid4().hex[:12])

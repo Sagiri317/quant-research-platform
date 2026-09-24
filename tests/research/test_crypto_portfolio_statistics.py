@@ -30,6 +30,10 @@ from quant_research_platform.profiles.research import (
 )
 from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.storage.identity import (
+    filesystem_glob,
+    open_filesystem_file,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.software_identity import (
     production_software_identity,
@@ -653,7 +657,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
                 Path(__file__).resolve().parents[2]
                 / "notebooks"
                 / "research-interview-demo.ipynb"
-            ).read_text()
+            ).read_text(encoding="utf-8")
         )
         plot = next(
             cell for cell in notebook["cells"] if cell["id"] == "research-cell-11"
@@ -735,9 +739,12 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
             nonlocal replaced
             reference = read_reference(*args, **kwargs)
             assert kwargs["member_identities"]
-            for source in replacement.rglob("*"):
-                if source.is_file():
-                    source.replace(execution_root / source.relative_to(replacement))
+            source = next(filesystem_glob(replacement, "**/valuations.parquet"))
+            target = execution_root / source.relative_to(replacement)
+            with open_filesystem_file(source, "rb") as member:
+                with open_filesystem_file(target, "r+b") as destination:
+                    destination.write(member.read())
+                    destination.truncate()
             replaced = True
             return reference
 

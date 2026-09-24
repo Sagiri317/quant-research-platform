@@ -327,7 +327,6 @@ def test_episode_publication_cancel_preserves_old_and_parent_capture_rejects_chi
     tmp_path, monkeypatch
 ):
     import hashlib
-    import os
 
     import pandas as pd
 
@@ -342,6 +341,7 @@ def test_episode_publication_cancel_preserves_old_and_parent_capture_rejects_chi
     from quant_research_platform.research.portfolios.accounting import (
         PortfolioEconomics,
     )
+    from quant_research_platform.storage.identity import open_filesystem_file
     from quant_research_platform.storage.semantic_artifacts import (
         read_semantic_artifact_record,
     )
@@ -465,8 +465,14 @@ def test_episode_publication_cancel_preserves_old_and_parent_capture_rejects_chi
                     envelope=BusinessManifestEnvelope(**child),
                     produce=economic_path(120.0),
                 )
-                for source in alternative.iterdir():
-                    os.replace(source, root / source.name)
+                with open_filesystem_file(
+                    alternative / "valuations.parquet", "rb"
+                ) as source:
+                    with open_filesystem_file(
+                        root / "valuations.parquet", "r+b"
+                    ) as target:
+                        target.write(source.read())
+                        target.truncate()
                 replaced = True
             consume = kwargs.pop("consume_batches")
 

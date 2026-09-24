@@ -218,7 +218,9 @@ def test_stream_gzip_constructor_failure_closes_raw_and_preserves_primary(
             raise OSError("raw_close_secondary")
 
     raw_handle = RawHandle()
-    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: raw_handle)
+    monkeypatch.setattr(
+        recorder, "open_filesystem_file", lambda *_args, **_kwargs: raw_handle
+    )
 
     def fail_gzip(*_args, **_kwargs):  # noqa: ANN202
         raise primary
@@ -248,7 +250,9 @@ def test_interval_gzip_constructor_failure_closes_raw(
 ) -> None:
     primary = KeyboardInterrupt("gzip_constructor_primary")
     raw_handle = (tmp_path / "tracked.bin").open("wb")
-    monkeypatch.setattr(Path, "open", lambda *_args, **_kwargs: raw_handle)
+    monkeypatch.setattr(
+        recorder, "open_filesystem_file", lambda *_args, **_kwargs: raw_handle
+    )
 
     def fail_gzip(*_args, **_kwargs):  # noqa: ANN202
         raise primary
@@ -823,7 +827,9 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
         assert not output_root.exists()
     elif join_completes:
         result = recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
-        assert result == json.loads((output_root / "run.json").read_text())
+        assert result == json.loads(
+            (output_root / "run.json").read_text(encoding="utf-8")
+        )
         assert result["status"] == "PARTIAL"
         descriptor = result["capture"]["connection_intervals"]
         sidecar = output_root / descriptor["path"]

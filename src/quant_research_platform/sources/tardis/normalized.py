@@ -28,7 +28,11 @@ from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
 )
-from quant_research_platform.storage.identity import require_unaliased_path
+from quant_research_platform.storage.identity import (
+    filesystem_stat,
+    open_filesystem_file,
+    require_unaliased_path,
+)
 from quant_research_platform.storage.manifests import read_manifest
 from quant_research_platform.storage.raw_snapshots import MAX_RECORD_BYTES
 
@@ -173,7 +177,7 @@ def download_dataset(
                     if error.code in {401, 403}:
                         raise PermissionError("tardis_access_not_authorized") from None
                     raise ValueError(f"tardis_http_status_{error.code}") from None
-                with response, path.open("xb") as output:
+                with response, open_filesystem_file(path, "xb") as output:
                     if response.status != 200:
                         raise ValueError("tardis_http_response_invalid")
                     while block := response.read(_COPY_BYTES):
@@ -269,7 +273,7 @@ def _archive_manifest(root):
     if manifest["path"] != "data.csv.gz" or manifest["request_url"] != url:
         raise ValueError("tardis_normalized_manifest_invalid")
     path = root / "data.csv.gz"
-    if path.stat().st_size != manifest["compressed_bytes"]:
+    if filesystem_stat(path).st_size != manifest["compressed_bytes"]:
         raise ValueError("tardis_raw_identity_changed")
     if (
         manifest["clock"] != "vendor_utc_microseconds"

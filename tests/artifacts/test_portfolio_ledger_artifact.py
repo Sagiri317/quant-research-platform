@@ -521,7 +521,15 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
     monkeypatch,
 ) -> None:
     if long_path:
-        tmp_path = tmp_path / ("long" * 25) / ("path" * 25)
+        while (
+            len(
+                str(
+                    tmp_path / "portfolio" / "instances" / ("f" * 64) / "trades.parquet"
+                )
+            )
+            <= 300
+        ):
+            tmp_path /= "segment_" + "a" * 32
     first = _session(
         "2019-01-01",
         "2019-01-02",
@@ -890,7 +898,15 @@ def test_portfolio_ledger_primary_error_survives_writer_close_failure(
     long_path: bool,
 ) -> None:
     if long_path:
-        tmp_path = tmp_path / ("long" * 25) / ("path" * 25)
+        while (
+            len(
+                str(
+                    tmp_path / "portfolio" / "instances" / ("f" * 64) / "trades.parquet"
+                )
+            )
+            <= 300
+        ):
+            tmp_path /= "segment_" + "a" * 32
     first = _session(
         "2019-01-01",
         "2019-01-02",
@@ -1406,10 +1422,9 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         saved["sections"]["portfolio"]["results"][0]["alpha_calibration"]
         == summary["alpha_calibration"]
     )
-    assert (
-        "alpha_calibration_zero_standard_error"
-        in (report_root / "report.md").read_text()
-    )
+    assert "alpha_calibration_zero_standard_error" in (
+        report_root / "report.md"
+    ).read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize("engine", ("taker", "maker"))

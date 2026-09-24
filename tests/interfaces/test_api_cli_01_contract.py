@@ -271,7 +271,9 @@ def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> Non
     from tests.helpers.research_configuration import research_configuration
 
     configuration_path = tmp_path / "research.json"
-    configuration_path.write_text(json.dumps(research_configuration()))
+    configuration_path.write_text(
+        json.dumps(research_configuration()), encoding="utf-8"
+    )
     for args in (
         ("catalog", "factors"),
         ("catalog", "labels"),
@@ -569,7 +571,7 @@ def test_research_cli_uses_only_the_configuration_for_scientific_selection(
     config = research_configuration()
     config["windows"]["development"] = {"start": "2022-01-01", "end": "2022-12-31"}
     path = tmp_path / "research.json"
-    path.write_text(json.dumps(config))
+    path.write_text(json.dumps(config), encoding="utf-8")
     calls = []
     monkeypatch.setattr(
         research,
@@ -599,7 +601,7 @@ def test_research_cli_rejects_invalid_configuration_profile_without_traceback(
     tmp_path, profile_id
 ):
     path = tmp_path / "invalid.json"
-    path.write_text(json.dumps({"profile_id": profile_id}))
+    path.write_text(json.dumps({"profile_id": profile_id}), encoding="utf-8")
     result = CliRunner().invoke(app, ["research", "run", "--research-plan", str(path)])
     assert result.exit_code == 2
     assert "research_configuration_profile_invalid" in result.output

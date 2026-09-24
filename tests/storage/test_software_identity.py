@@ -135,10 +135,10 @@ def test_identity_rejects_file_or_root_mutation_during_read(
     module_path = package_root / "module.py"
     module_path.write_bytes(b"module")
     complete = {distribution: "1.0" for distribution in NUMERICAL_MODEL_DISTRIBUTIONS}
-    real_open = Path.open
-    if fixed_directory_identity:
-        from quant_research_platform.storage import software_identity
+    from quant_research_platform.storage import software_identity
 
+    real_open = software_identity.open_filesystem_file
+    if fixed_directory_identity:
         stable = software_identity._directory_identity(package_root)
         monkeypatch.setattr(
             software_identity, "_directory_identity", lambda _path: stable
@@ -150,14 +150,14 @@ def test_identity_rejects_file_or_root_mutation_during_read(
                 handle.write(b"changed")
         return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", changing_open)
+    monkeypatch.setattr(software_identity, "open_filesystem_file", changing_open)
     with pytest.raises(ValueError, match="production_package_identity_changed"):
         production_software_identity(
             package_root=package_root,
             dependency_versions=complete,
         )
 
-    monkeypatch.setattr(Path, "open", real_open)
+    monkeypatch.setattr(software_identity, "open_filesystem_file", real_open)
 
     def changing_root_open(path: Path, *args: object, **kwargs: object):  # noqa: ANN202
         if path == module_path:
@@ -165,7 +165,7 @@ def test_identity_rejects_file_or_root_mutation_during_read(
                 handle.write(b"new")
         return real_open(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "open", changing_root_open)
+    monkeypatch.setattr(software_identity, "open_filesystem_file", changing_root_open)
     with pytest.raises(ValueError, match="production_package_identity_changed"):
         production_software_identity(
             package_root=package_root,
@@ -221,9 +221,9 @@ def test_software_identity_preserves_system_io(
     member.write_bytes(b"synthetic = 1\n")
     expected = _identity(package)
     primary = failure_type("synthetic_package_failure")
-    native_stat = owner.os.stat
+    native_stat = owner.filesystem_stat
     native_directory_identity = owner._directory_identity
-    native_scan = owner.os.scandir
+    native_scan = owner.filesystem_scandir
     native_open = owner.open_filesystem_file
     handles = []
 
@@ -264,14 +264,14 @@ def test_software_identity_preserves_system_io(
 
             def directory_identity(path):
                 with monkeypatch.context() as scoped:
-                    scoped.setattr(owner.os, "stat", stat)
+                    scoped.setattr(owner, "filesystem_stat", stat)
                     return native_directory_identity(path)
 
             patch.setattr(owner, "_directory_identity", directory_identity)
         elif boundary == "file_stat":
-            patch.setattr(owner.os, "stat", stat)
+            patch.setattr(owner, "filesystem_stat", stat)
         elif boundary == "inventory":
-            patch.setattr(owner.os, "scandir", scan)
+            patch.setattr(owner, "filesystem_scandir", scan)
         else:
             patch.setattr(owner, "open_filesystem_file", open_member)
         missing = failure_type in (FileNotFoundError, NotADirectoryError)

@@ -31,6 +31,8 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
+    filesystem_exists,
+    open_filesystem_file,
     require_unaliased_path,
 )
 
@@ -288,7 +290,7 @@ class _BoundedCsvRecords:
             raise ValueError("csmar_raw_export_identity_changed")
         handle = None
         try:
-            handle = path.open("rb")
+            handle = open_filesystem_file(path, "rb")
             identity = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
             if identity != path_identity:
                 raise ValueError("csmar_raw_export_identity_changed")
@@ -1086,7 +1088,9 @@ def _inspect_raw_export_file_under_policy(
         error="csmar_raw_export_identity_changed",
     )
     metadata_identity = (
-        raw_export_file_identity(metadata_path) if metadata_path.exists() else None
+        raw_export_file_identity(metadata_path)
+        if filesystem_exists(metadata_path)
+        else None
     )
     return RawExportInspection(
         path=export_path,

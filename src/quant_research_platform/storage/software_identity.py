@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -13,7 +12,8 @@ from types import MappingProxyType
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.storage.identity import (
-    native_filesystem_path,
+    filesystem_scandir,
+    filesystem_stat,
     open_filesystem_file,
     require_unaliased_path,
 )
@@ -123,7 +123,7 @@ def _package_inventory(root: Path):
     while pending:
         directory, relative_parent = pending.pop()
         try:
-            with os.scandir(native_filesystem_path(directory)) as entries:
+            with filesystem_scandir(directory) as entries:
                 for entry in entries:
                     entry_path = directory / entry.name
                     if entry.is_symlink():
@@ -162,7 +162,7 @@ def _package_inventory(root: Path):
 
 def _file_identity(path: Path) -> tuple[int, int, int, int]:
     try:
-        value = os.stat(native_filesystem_path(path), follow_symlinks=False)
+        value = filesystem_stat(path, follow_symlinks=False)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("production_package_file_unreadable") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
@@ -172,7 +172,7 @@ def _file_identity(path: Path) -> tuple[int, int, int, int]:
 
 def _directory_identity(path: Path) -> tuple[int, int, int, int]:
     try:
-        value = os.stat(native_filesystem_path(path), follow_symlinks=False)
+        value = filesystem_stat(path, follow_symlinks=False)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("production_package_root_invalid") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):

@@ -50,7 +50,10 @@ from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
-from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage.identity import (
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
 from quant_research_platform.storage.parquet import (
@@ -161,7 +164,8 @@ def write_evaluation_outputs_from_chunks(
         )
         if unsafe_summary is not None:
             raise ValueError(f"evaluation_summary_share_unsafe: {unsafe_summary}")
-        Path(native_filesystem_path(temp_root / "summary.md")).write_text(
+        filesystem_write_text(
+            temp_root / "summary.md",
             rendered_summary,
             encoding="utf-8",
         )

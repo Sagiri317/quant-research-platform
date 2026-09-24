@@ -22,6 +22,7 @@ from quant_research_platform.contracts.models import (
     _model_algorithm_facts,
     model_spec_payload,
 )
+from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -969,6 +970,10 @@ def build_crypto_fold_models(
                         )
                         validation_coverage.add(legal)
                         del legal
+            if validation_coverage.row_count == 0:
+                raise PortfolioTargetBlocked(
+                    "crypto_model_validation_legal_rows_missing"
+                )
             attempt = recorder.begin(
                 spec, common_coverage_id=validation_coverage.semantic_identity
             )

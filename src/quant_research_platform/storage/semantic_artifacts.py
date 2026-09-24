@@ -39,8 +39,12 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     _hash_file_content,
     dataset_file_identity_from_stat,
-    native_filesystem_path,
+    filesystem_exists,
+    filesystem_is_dir,
+    filesystem_scandir,
+    filesystem_stat,
     open_filesystem_file,
+    path_is_filesystem_alias,
     require_unaliased_path,
     validate_instance_identity,
 )
@@ -429,18 +433,18 @@ def discover_semantic_artifact_instances(
         Path(logical_root),
         error="semantic_artifact_root_invalid",
     )
-    if not root.exists():
+    if not filesystem_exists(root):
         return ()
     instances_root = root / "instances"
     require_unaliased_path(instances_root, error="semantic_artifact_root_invalid")
-    if not instances_root.exists():
+    if not filesystem_exists(instances_root):
         return ()
     before = _directory_identity(instances_root)
 
     def instance_names() -> tuple[str, ...]:
         names: list[str] = []
         try:
-            with os.scandir(native_filesystem_path(instances_root)) as entries:
+            with filesystem_scandir(instances_root) as entries:
                 for entry in entries:
                     if len(names) >= max_instances:
                         raise ValueError("semantic_artifact_instance_limit_exceeded")
@@ -460,7 +464,7 @@ def discover_semantic_artifact_instances(
         except ValueError as exc:
             raise ValueError("semantic_artifact_instance_child_invalid") from exc
         entry = instances_root / name
-        if entry.is_symlink() or not entry.is_dir():
+        if path_is_filesystem_alias(entry) or not filesystem_is_dir(entry):
             raise ValueError("semantic_artifact_instance_child_invalid")
         read_semantic_artifact(entry, expected_identity=name)
         result.append(entry)
@@ -471,7 +475,7 @@ def discover_semantic_artifact_instances(
 
 def _directory_identity(path: Path) -> tuple[int, int, int, int]:
     try:
-        value = os.stat(native_filesystem_path(path), follow_symlinks=False)
+        value = filesystem_stat(path, follow_symlinks=False)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
@@ -537,9 +541,7 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
     path_bytes = 0
     try:
         try:
-            pending.append(
-                (root, "", root_identity, os.scandir(native_filesystem_path(root)))
-            )
+            pending.append((root, "", root_identity, filesystem_scandir(root)))
             while pending:
                 directory, prefix, directory_identity, entries = pending[-1]
                 entry = next(entries, None)
@@ -568,7 +570,7 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
                             child,
                             relative,
                             _directory_identity(child),
-                            os.scandir(native_filesystem_path(child)),
+                            filesystem_scandir(child),
                         )
                     )
                 elif entry.is_file(follow_symlinks=False):
@@ -647,7 +649,7 @@ def _validate_member_payload(value: object) -> tuple[dict[str, object], ...]:
 
 def _member_identity(path: Path) -> DatasetFileIdentity:
     try:
-        value = os.stat(native_filesystem_path(path), follow_symlinks=False)
+        value = filesystem_stat(path, follow_symlinks=False)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("semantic_artifact_member_invalid") from exc
     if not stat.S_ISREG(value.st_mode) or int(value.st_ino) <= 0:

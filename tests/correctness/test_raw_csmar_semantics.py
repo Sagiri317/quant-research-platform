@@ -74,7 +74,9 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
         )
         root = result.artifact_roots["analyst_forecast"]
         saved = read_dataset(root, resource_policy=policy)
-        manifest = json.loads((root / "_manifest/manifest.json").read_text())
+        manifest = json.loads(
+            (root / "_manifest/manifest.json").read_text(encoding="utf-8")
+        )
         assert manifest["producer_diagnostics"]["source_row_counts"] == {
             "raw_rows": 8,
             "missing_declare_date_rows": 2,
@@ -164,7 +166,9 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
         root = result.artifact_roots["analyst_forecast"]
         empty = read_dataset(root, resource_policy=policy)
         assert empty.empty
-        manifest = json.loads((root / "_manifest/manifest.json").read_text())
+        manifest = json.loads(
+            (root / "_manifest/manifest.json").read_text(encoding="utf-8")
+        )
         counts = manifest["producer_diagnostics"]["source_row_counts"]
         assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 3
         assert counts["retained_after_date_filter_rows"] == 0
@@ -1815,8 +1819,10 @@ def test_csv_unicode_fast_heap_is_covered_by_live_leases(
             records.close()
             tracemalloc.stop()
         assert policy.used_memory_bytes == 0
-    assert descriptors() == fd_before
-    assert process.num_threads() == threads_before
+    # Earlier test workers can retire while this parser runs on Windows.
+    assert descriptors() <= fd_before
+    assert all(Path(item.path).name != path.name for item in process.open_files())
+    assert process.num_threads() <= threads_before
     assert list(scratch.iterdir()) == []
 
 
@@ -1905,7 +1911,7 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
         }
         primary = failure_type("parent_failure")
         native_check = interim.require_unaliased_path
-        native_stat = Path.lstat
+        native_stat = interim.filesystem_stat
         armed = False
         calls = []
 
@@ -1926,7 +1932,7 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
 
         with monkeypatch.context() as patch:
             patch.setattr(interim, "require_unaliased_path", checked)
-            patch.setattr(Path, "lstat", failed_stat)
+            patch.setattr(interim, "filesystem_stat", failed_stat)
             if failure_type in (FileNotFoundError, NotADirectoryError):
                 failed = research.data_materialize(layout=failed_layout, **arguments)
                 assert failed["status"] == "FAILED"

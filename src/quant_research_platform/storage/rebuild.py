@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -15,7 +14,7 @@ from quant_research_platform.storage._scratch_ownership import (
     remove_owned_scratch,
 )
 from quant_research_platform.storage.identity import (
-    native_filesystem_path,
+    filesystem_mkdir,
     require_unaliased_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -43,12 +42,12 @@ def rebuild_candidate_workspace(
         Path(layout.project_root) / ".run",
         error="invalid_rebuild_scratch_path",
     )
-    Path(native_filesystem_path(parent)).mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(parent, parents=True, exist_ok=True)
     require_unaliased_path(parent, error="invalid_rebuild_scratch_path")
     token = uuid4().hex
-    root = Path(native_filesystem_path(parent / owned_scratch_name(".r-", token)))
+    root = parent / owned_scratch_name(".r-", token)
     require_unaliased_path(root, error="invalid_rebuild_scratch_path")
-    os.mkdir(root)
+    filesystem_mkdir(root)
     workspace = RebuildCandidateWorkspace(project_root=root, token=token)
     try:
         yield workspace

@@ -23,6 +23,8 @@ from quant_research_platform.sources.binance.ids import (
 )
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
+    filesystem_is_file,
+    open_filesystem_file,
     require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_manifest
@@ -64,7 +66,8 @@ def settlement_endpoint(source_id, symbol):
 
 def _manifest(root, symbol):
     if not all(
-        (root / name).is_file() for name in ("response.csv", "response.metadata.json")
+        filesystem_is_file(root / name)
+        for name in ("response.csv", "response.metadata.json")
     ):
         raise PortfolioTargetBlocked("binance_funding_input_missing")
     manifest = read_manifest(root / "response.metadata.json")
@@ -140,7 +143,7 @@ def _manifest(root, symbol):
             error="binance_funding_settlement_source_invalid",
         )
         before = dataset_file_identity(path)
-        with path.open("rb") as handle:
+        with open_filesystem_file(path, "rb") as handle:
             digest = hashlib.file_digest(handle, "sha256").hexdigest()
         if (
             before != dataset_file_identity(path)

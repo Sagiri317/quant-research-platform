@@ -152,7 +152,7 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
         sidecar = root / "response.metadata.json"
-        metadata = json.loads(sidecar.read_text())
+        metadata = json.loads(sidecar.read_text(encoding="utf-8"))
         if corruption == "value":
             csv = root / "response.csv"
             csv.write_bytes(csv.read_bytes().replace(b"12", b"13"))

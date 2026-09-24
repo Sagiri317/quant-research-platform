@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import stat
 from pathlib import Path
 
@@ -13,7 +12,9 @@ from quant_research_platform.storage.datasets.schema import (
     COMMON_MANIFEST_METADATA_KEY,
 )
 from quant_research_platform.storage.identity import (
-    native_filesystem_path,
+    filesystem_exists,
+    filesystem_scandir,
+    filesystem_stat,
     require_unaliased_path,
     validate_instance_identity,
 )
@@ -35,12 +36,12 @@ def discover_dataset_instances(
         Path(logical_root),
         error="dataset_instance_root_invalid",
     )
-    if not root.exists():
+    if not filesystem_exists(root):
         return ()
     root_identity = _directory_identity(root, "dataset_instance_root_invalid")
     instances_root = root / "instances"
     require_unaliased_path(instances_root, error="dataset_instance_root_invalid")
-    if not instances_root.exists():
+    if not filesystem_exists(instances_root):
         return ()
     instances_identity = _directory_identity(
         instances_root,
@@ -95,7 +96,7 @@ def _instance_names(
 ) -> tuple[str, ...]:
     names: list[str] = []
     try:
-        with os.scandir(native_filesystem_path(instances_root)) as entries:
+        with filesystem_scandir(instances_root) as entries:
             for entry in entries:
                 if len(names) >= max_instances:
                     raise ValueError("dataset_instance_limit_exceeded")
@@ -112,7 +113,7 @@ def _instance_names(
 
 def _directory_identity(path: Path, error: str) -> tuple[int, int, int, int]:
     try:
-        value = os.stat(native_filesystem_path(path), follow_symlinks=False)
+        value = filesystem_stat(path, follow_symlinks=False)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError(error) from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):

@@ -379,10 +379,15 @@ def require_free_disk_headroom(path: Path, *, reserve_bytes: int) -> int:
         reserve_bytes,
         error="invalid_runtime_resource_disk_reserve",
     )
+    from quant_research_platform.storage.identity import (
+        filesystem_exists,
+        native_filesystem_path,
+    )
+
     candidate = Path(path)
-    while not candidate.exists() and candidate != candidate.parent:
+    while not filesystem_exists(candidate) and candidate != candidate.parent:
         candidate = candidate.parent
-    free = shutil.disk_usage(candidate.resolve()).free
+    free = shutil.disk_usage(native_filesystem_path(candidate)).free
     if free < reserve:
         raise RuntimeError("insufficient_free_disk")
     return free

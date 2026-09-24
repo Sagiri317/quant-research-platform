@@ -167,7 +167,7 @@ def test_configured_model_algorithms_use_the_single_capability_owner() -> None:
     configured = {
         model["model_algorithm"]
         for path in root.rglob("*.json")
-        for model in json.loads(path.read_text())["models"]
+        for model in json.loads(path.read_text(encoding="utf-8"))["models"]
     }
     assert configured == set(_MODEL_ALGORITHM_FACTS)
 

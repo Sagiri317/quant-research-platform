@@ -221,7 +221,7 @@ def test_member_limit_precedes_wide_directory_materialization_and_hashing(
         counts["hash"] += 1
         return {"path": relative, "size": 0, "sha256": "a" * 64}
 
-    monkeypatch.setattr(storage.os, "scandir", lambda _path: Entries())
+    monkeypatch.setattr(storage, "filesystem_scandir", lambda _path: Entries())
     monkeypatch.setattr(storage, "_member_record", record)
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         storage.read_semantic_artifact_record(root)
@@ -239,7 +239,7 @@ def test_nested_inventory_descends_before_reading_next_sibling(tmp_path, monkeyp
         (nested / "model.bin").write_bytes(b"nested")
         (staging / "a.bin").write_bytes(b"root")
 
-    actual_scandir = storage.os.scandir
+    actual_scandir = storage.filesystem_scandir
     opened = []
 
     class Entries:
@@ -260,7 +260,7 @@ def test_nested_inventory_descends_before_reading_next_sibling(tmp_path, monkeyp
 
     def inventory(root, **kwargs):
         with monkeypatch.context() as scoped:
-            scoped.setattr(storage.os, "scandir", Entries)
+            scoped.setattr(storage, "filesystem_scandir", Entries)
             return actual_inventory(root, **kwargs)
 
     monkeypatch.setattr(storage, "_member_inventory", inventory)
@@ -283,7 +283,7 @@ def test_inventory_closes_all_ancestors_without_replacing_primary(
 
     root = write_semantic_artifact(tmp_path / "model", _envelope(), writer)
     primary = KeyboardInterrupt("inventory primary")
-    actual_scandir = storage.os.scandir
+    actual_scandir = storage.filesystem_scandir
     closed = []
 
     class Entries:
@@ -306,14 +306,14 @@ def test_inventory_closes_all_ancestors_without_replacing_primary(
             raise primary
         return actual_record(relative, path, **kwargs)
 
-    monkeypatch.setattr(storage.os, "scandir", Entries)
+    monkeypatch.setattr(storage, "filesystem_scandir", Entries)
     monkeypatch.setattr(storage, "_member_record", record)
     with pytest.raises(KeyboardInterrupt) as caught:
         storage.read_semantic_artifact_record(root)
     assert caught.value is primary
     assert closed == [
-        Path(storage.native_filesystem_path(root / "nested")),
-        Path(storage.native_filesystem_path(root)),
+        root / "nested",
+        root,
     ]
     assert len(primary.__notes__) == 2
 
@@ -348,13 +348,13 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
         )
         if created.returncode != 0:
             pytest.skip("junction_not_available")
-    actual_scandir = storage.os.scandir
+    actual_scandir = storage.filesystem_scandir
 
     def scan(path):
-        assert Path(path) == Path(storage.native_filesystem_path(root))
+        assert Path(path) == root
         return actual_scandir(path)
 
-    monkeypatch.setattr(storage.os, "scandir", scan)
+    monkeypatch.setattr(storage, "filesystem_scandir", scan)
     with pytest.raises(ValueError, match="semantic_artifact_member_invalid"):
         storage.read_semantic_artifact_record(root)
     assert payload.read_bytes() == b"external synthetic content"

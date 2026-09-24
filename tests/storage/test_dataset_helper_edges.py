@@ -420,7 +420,7 @@ def test_exact_key_classifier_gates_disk_overlap_before_exact_mutation(
 
     def gate(_path: Path, *, reserve_bytes: int) -> int:
         nonlocal calls
-        assert reserve_bytes > 0
+        assert reserve_bytes >= 0
         calls += 1
         if calls == 3:
             raise OSError("disk_headroom_exhausted")

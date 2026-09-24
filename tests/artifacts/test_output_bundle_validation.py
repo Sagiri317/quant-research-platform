@@ -25,9 +25,14 @@ from tests.helpers.output_frames import (
 )
 
 
+@pytest.mark.parametrize("deep_root", (False, True))
 def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
-    tmp_path: Path,
+    tmp_path: Path, deep_root: bool
 ) -> None:
+    if deep_root:
+        while len(str(tmp_path)) <= 270:
+            tmp_path /= "segment_" + "a" * 32
+        assert len(str(tmp_path)) > 260
     from dataclasses import replace
 
     import pandas as pd
@@ -90,7 +95,9 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
                 assert list(found) == [0, 1, 0]
                 assert values[1] == 2.0
         path = root / "prediction.parquet"
-        with pq.ParquetFile(path) as parquet:
+        if deep_root:
+            assert len(str(path)) > 260
+        with pq.ParquetFile(native_filesystem_path(path)) as parquet:
             original = parquet.read()
         for position, delta in ((0, -1), (2, 1)):
             changed = list(times)
@@ -100,7 +107,7 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
                 original.schema.field("timestamp"),
                 pa.array(changed, type=pa.timestamp("ns")),
             )
-            pq.write_table(altered, path)
+            pq.write_table(altered, native_filesystem_path(path))
             with pytest.raises(
                 ValueError, match="persisted_prediction_window_mismatch"
             ):
@@ -759,11 +766,11 @@ def test_prediction_effective_end_matches_all_rows_before_filtering(
             resource_policy=policy,
         )
         path = root / "manifest.json"
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
         declared = stamp(times[-1] + end_shift * step)
         payload["metadata"]["prediction_metadata"]["effective_test_end"] = declared
         payload["metadata"]["model_metadata"]["oos_end"] = declared
-        path.write_text(json.dumps(payload))
+        path.write_text(json.dumps(payload), encoding="utf-8")
         original_batches = pq.ParquetFile.iter_batches
         scans = []
 

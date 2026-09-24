@@ -96,7 +96,9 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
                     ((start_ms + 10000) * 1_000_000, -5.0),
                 )
             metadata = json.loads(
-                (day.funding_root("BTCUSDT") / "response.metadata.json").read_text()
+                (day.funding_root("BTCUSDT") / "response.metadata.json").read_text(
+                    encoding="utf-8"
+                )
             )["metadata"]["settlement_source"]
             assert metadata["source_id"] == source_id
             assert ("xoomar.com" in metadata["endpoint"]) == (source_id == "xoomar")
